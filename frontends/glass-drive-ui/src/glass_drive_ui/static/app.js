@@ -1,5 +1,5 @@
 import { createLaunchDraft } from './launch-draft.js?v=20260922u';
-import { openWorkspaceMembers } from './workspace-members.js?v=20260923manager1';
+import { openWorkspaceMembers } from './workspace-members.js?v=20260924peerfocus2';
 import { attachNativeControls, selectConnectedClaudeAccount } from './native-controls.js?v=20260922o03c';
 import { initializeControlPlane, refreshControlPlane, renderActivity } from './control-plane.js?v=20260923model1';
 import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20260922b';
@@ -1105,6 +1105,18 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
       startAdd: true,
     }));
     actions.appendChild(addWorker);
+  }
+
+  if (!['terminating', 'termination_failed', 'terminated'].includes(state)) {
+    const workTogether = createButton('Work together');
+    workTogether.addEventListener('click', () => openWorkspaceMembers(workspace, {
+      requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
+      providerAccounts: bootstrap.provider_accounts || [],
+      profileAccountProviders: bootstrap.profile_account_providers || {},
+      onChanged: refreshBootstrap,
+      startPeers: true,
+    }));
+    actions.appendChild(workTogether);
   }
 
   const members = createButton('Workspace settings');

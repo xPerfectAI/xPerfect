@@ -62,6 +62,39 @@ def enable(application, workers):
     return peers
 
 
+def test_hosted_plaintext_peer_bridge_does_not_block_an_ordinary_run(app, monkeypatch):
+    application, _client, workers = app
+    enable(application, workers)
+    monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", "hosted-xfs")
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://runtime:8766")
+    runtime = application.state.service.runtime
+    original = runtime.run_task
+    dispatched = []
+
+    def capture(worker, instruction, **kwargs):
+        dispatched.append(dict(worker))
+        return original(worker, instruction, **kwargs)
+
+    monkeypatch.setattr(runtime, "run_task", capture)
+    worker = workers[0]
+    run = application.state.service.assign_run(worker["worker_id"], "Ordinary hosted task")
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        saved = application.state.store.get_run(run["run_id"])
+        if saved and saved["state"] in {"completed", "failed", "cancelled"}:
+            break
+        time.sleep(0.05)
+    assert saved["state"] == "completed", saved
+    assert saved["output_text"] == "STUB_OK: Ordinary hosted task"
+    assert len(dispatched) == 1
+    assert "_peer_native_projection" not in dispatched[0]
+    assert application.state.service.peers.policy(
+        worker["workspace_id"], tenant_id="local", owner_id="owner-a"
+    )["native_peer_status"] == {
+        "available": False, "code": "peer_native_endpoint_requires_tls"
+    }
+
+
 def test_owner_api_policy_and_grant_are_scoped(app):
     _application, client, workers = app
     a, b = workers

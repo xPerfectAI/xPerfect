@@ -313,9 +313,9 @@ These are required interaction outcomes, not a claim that the current build pass
 
 ## Retained members and collaboration settings
 
-The default workspace card keeps its normal task and delivery actions. Its existing More menu
-opens Workspace settings; it does not expose provider, permission, or configuration controls on
-every card. A retained execution workspace can contain several named worker identities. This
+The default workspace card keeps its normal task and delivery actions. Its **Work together**
+action opens collaboration controls directly; Workspace settings also remains available.
+The card does not expose provider or permission forms itself. A retained execution workspace can contain several named worker identities. This
 extends the original one-worker workspace model without changing stored worker or protocol keys.
 
 Settings show the current member roster and each selected member's actual lifecycle state.
@@ -328,8 +328,9 @@ replacement run by inference. Permanent close stays under More actions.
 Provider/model readback stays under Advanced settings. The modal keeps
 keyboard focus, closes with Escape, returns focus to its opener, and supports narrow screens.
 
-Collaboration is collapsed by default. Opening it shows the current-worker message form without
-another disclosure click. Discovery and access are independent, initially off. Enabling discovery
+Collaboration is collapsed in general settings and open when entered through Work together.
+The entry focuses and scrolls to the controls, with Allowed AI folded. A policy save refreshes
+the eligible roster without a separate reload click. Discovery and access are independent, initially off. Enabling discovery
 alone shows eligible worker names without allowing messages. The owner-scoped catalog preselects
 all current eligible workers when within the service limit; above the limit the owner must choose
 an exact subset. Clear selection and Select all remain direct. Reloading a changed roster keeps the
@@ -344,6 +345,8 @@ saves keep permission; actual policy changes invalidate previous grants. Each di
 an explicit revoke action. Revocation blocks new use and redacts replayed message content, but
 cannot remove content that a worker already received. Queue and invocation receipts do not claim
 the recipient model read or acted on the message.
+The owner MCP can read the policy; changing discovery or access requires the signed-in owner's
+human-confirmed UI/API route. A native worker cannot widen its own permission.
 
 Add worker is a direct action on a shared workspace card and its member's Watch header when the
 owner can manage that workspace. One click opens the add form. The normal add action requires no

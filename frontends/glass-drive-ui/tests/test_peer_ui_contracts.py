@@ -34,3 +34,5 @@ def test_peer_ui_keeps_discovery_separate_and_revokes_only_active_directions():
     assert "Message blocked. If the worker is idle" in controls
     assert "Some content was already delivered and cannot be erased." in controls
     assert "A model read receipt is not available." in controls
+    assert "Worker-to-worker tools are unavailable on this server." in controls
+    assert "policy.native_peer_status?.available !== false" in controls
