@@ -62,6 +62,12 @@ def bind_context_projection(configuration, worker, run):
     projected = configuration.prepare_run(worker, run)
     if not projected["_context_projection"]["manifest"]["context"]["retrievable_chars"]:
         return projected
+    hosted = os.environ.get("XPERFECT_EXECUTION_PROFILE") == "hosted-xfs"
+    # The supported hosted package has no trusted native context bridge yet.
+    # Fail before minting the scoped bearer instead of advertising a dead URL
+    # or sending the bearer across a shared plaintext worker network.
+    if hosted:
+        raise ConfigurationError("context_endpoint_unavailable")
     base = os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "").rstrip("/")
     endpoint = urlparse(base)
     if (

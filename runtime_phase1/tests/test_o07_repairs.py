@@ -97,6 +97,30 @@ def clock_at(monkeypatch, now):
     monkeypatch.setattr("workers_projects_runtime.peer_collaboration.datetime", At)
 
 
+def test_hosted_context_retrieval_refuses_plaintext_before_minting(live, monkeypatch):
+    config, peers, worker, run, _, _ = live
+    minted = []
+    peers.mint_native_session = lambda *args, **kwargs: minted.append((args, kwargs))
+    monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", "hosted-xfs")
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://runtime:8766")
+    monkeypatch.setenv("GLASSHIVE_PUBLIC_BASE_URL", "http://example.test:8443")
+    with pytest.raises(ConfigurationError, match="context_endpoint_unavailable"):
+        bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    assert minted == []
+
+
+def test_hosted_context_refuses_unimplemented_https_bridge_before_minting(live, monkeypatch):
+    config, peers, worker, run, _, _ = live
+    minted = []
+    peers.mint_native_session = lambda *args, **kwargs: minted.append((args, kwargs))
+    monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", "hosted-xfs")
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://runtime:8766")
+    monkeypatch.setenv("GLASSHIVE_PUBLIC_BASE_URL", "https://example.test:8443")
+    with pytest.raises(ConfigurationError, match="context_endpoint_unavailable"):
+        bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    assert minted == []
+
+
 def test_projected_json_reaches_profile_and_native_consumers(live):
     config, _, worker, run, _, _ = live
     projected = config.prepare_run(worker, config.store.get_run(run["run_id"]))
