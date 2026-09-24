@@ -54,6 +54,11 @@ Ten goals do not guarantee ten simultaneous workers. Ready accounts, machine res
 configured limits decide what can start; other work may wait or report a blocker. Sharing files
 does not automatically share chat history, tools or permissions. See [working on several goals](docs/capability-matrix.md#working-on-several-goals).
 
+To let workers in your account find or message one another, open **Work together** on a
+workspace card. Discovery and messages are separate choices; you approve the exact current
+workers and can revoke either message direction later. On hosted servers without a secure
+worker connection, the controls explain why native worker-to-worker tools are unavailable.
+
 Work is stored on the host you run. Connected AI providers can receive task content and tool
 results needed for their requests; local storage does not mean local-only AI processing.
 

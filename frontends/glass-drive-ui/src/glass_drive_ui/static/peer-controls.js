@@ -9,6 +9,7 @@ export function mountPeerControls(container, worker, { requestHeaders = headers 
   root.className = 'peer-controls';
   root.innerHTML = `<summary>Work with other workers</summary>
     <p>Only workers in your account. These settings apply to every worker in this workspace. Finding workers does not allow messages.</p>
+    <p role="status" data-native-availability hidden>Worker-to-worker tools are unavailable on this server. Your other work can continue. Ask the server owner to enable a secure worker connection.</p>
     <form data-policy>
       <label><input type="checkbox" name="discoverEnabled"> Find my other workers</label>
       <label data-discovery-options hidden>Find workers in <select name="discovery"><option value="account">My whole account</option><option value="workspace">This workspace</option><option value="selected">Selected workspaces</option></select></label>
@@ -54,6 +55,7 @@ export function mountPeerControls(container, worker, { requestHeaders = headers 
     const results = await Promise.all([request(policyRoute), request(`${routes}/peers`), request(`${routes}/peer-grants`), request('/api/peer-workspaces')]);
     [policy, { items: peers }, { items: grants }] = results;
     if (disposed) return;
+    root.querySelector('[data-native-availability]').hidden = policy.native_peer_status?.available !== false;
     policyForm.elements.discoverEnabled.checked = policy.discovery !== 'off';
     policyForm.elements.discovery.value = policy.discovery === 'off' ? 'account' : policy.discovery;
     root.querySelector('[data-discovery-options]').hidden = policy.discovery === 'off';
@@ -112,7 +114,9 @@ export function mountPeerControls(container, worker, { requestHeaders = headers 
     event.preventDefault();
     try {
       await request(policyRoute, 'PUT', { expected_revision: policy.revision, discovery: policyForm.elements.discoverEnabled.checked ? policyForm.elements.discovery.value : 'off', access_enabled: policyForm.elements.access.checked, selected_workspaces: policyForm.elements.discoverEnabled.checked && policyForm.elements.discovery.value === 'selected' ? Array.from(policyForm.elements.selected.selectedOptions, option => option.value) : [] });
-      await refresh(); say('Settings saved. Changed policies need new permission; unchanged settings keep it.');
+      await refresh();
+      await cleanupPermissions.reload();
+      say('Settings saved. Choose the current workers below to allow messages.');
     } catch (error) { failure(error); }
   });
   const cleanupPermissions = mountPeerPermissions(root.querySelector('[data-permissions]'), memberId, { request, onSaved:refresh, report:say });

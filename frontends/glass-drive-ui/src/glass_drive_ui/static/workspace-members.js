@@ -1,4 +1,4 @@
-import { mountPeerControls } from './peer-controls.js';
+import { mountPeerControls } from './peer-controls.js?v=20260924peerauto1';
 import { renderMemberActions } from './member-actions.js';
 import { renderAddMember } from './member-create.js';
 import { mountWorkerConfiguration } from './worker-configuration.js';
@@ -18,11 +18,11 @@ export function memberPanelError(error) {
   return error.message || 'The member runtime is unavailable. Try refreshing.';
 }
 
-export function openWorkspaceMembers(initialMember, { requestHeaders = headers => headers, providerAccounts = [], profileAccountProviders = {}, onChanged = () => {}, startAdd = false } = {}) {
+export function openWorkspaceMembers(initialMember, { requestHeaders = headers => headers, providerAccounts = [], profileAccountProviders = {}, onChanged = () => {}, startAdd = false, startPeers = false } = {}) {
   activePanel?.close();
   const previousFocus = document.activeElement;
   if (!document.querySelector('link[data-member-styles]')) {
-    const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/workspace-members.css'; stylesheet.dataset.memberStyles = 'true'; document.head.append(stylesheet);
+    const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/workspace-members.css?v=20260924peerfocus2'; stylesheet.dataset.memberStyles = 'true'; document.head.append(stylesheet);
   }
   if (!document.querySelector('link[data-allowed-ai-styles]')) {
     const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/allowed-ai.css?v=20260922choices12'; stylesheet.dataset.allowedAiStyles = 'true'; document.head.append(stylesheet);
@@ -41,6 +41,7 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
   let loading = false;
   let writing = false;
   let initialAdd = startAdd;
+  let initialPeers = startPeers;
   const status = text => { if (!disposed) dialog.querySelector('.member-panel-footer [data-status]').textContent = text; };
   async function request(url, method = 'GET', body) {
     if (method !== 'GET') writing = true;
@@ -84,6 +85,14 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
       },
     });
     peersCleanup = mountPeerControls(settings, member, { requestHeaders });
+    if (initialPeers) {
+      initialPeers = false;
+      const peerDetails = settings.querySelector('.peer-controls');
+      settings.querySelector('.allowed-ai-scope[open]')?.removeAttribute('open');
+      peerDetails.open = true;
+      peerDetails.scrollIntoView({ block: 'start' });
+      peerDetails.querySelector('summary')?.focus();
+    }
     settings.append(config);
     configurationCleanup = mountWorkerConfiguration(config, member, { requestHeaders });
   }

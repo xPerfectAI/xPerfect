@@ -602,6 +602,44 @@ def test_native_old_attempt_and_missing_provider_endpoint_fail_closed(
         service.project_native_tools(a, run)
 
 
+@pytest.mark.parametrize(
+    ("profile", "network", "endpoint", "allowed"),
+    [
+        ("local-linux", "xperfect-workers", "http://runtime:8766", True),
+        ("hosted-xfs", "xperfect-workers", "http://runtime:8766", None),
+        ("local-linux", "", "http://runtime:8766", False),
+        ("local-linux", "xperfect-workers", "http://other:8766", False),
+        ("local-linux", "xperfect-workers", "http://runtime:9999", False),
+    ],
+)
+def test_peer_native_plaintext_is_only_the_exact_local_package_bridge(
+    peers, monkeypatch, profile, network, endpoint, allowed
+):
+    service, workers = enable(peers)
+    worker = workers[0]
+    run = service.store.create_run(
+        worker["worker_id"], worker["project_id"], "Synthetic native turn", state="running"
+    )
+    with service.store._connect() as conn:
+        conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+    monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", profile)
+    monkeypatch.setenv("XPERFECT_SHARED_NETWORK", network)
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", endpoint)
+    if allowed is None:
+        assert "_peer_native_projection" not in service.project_native_tools(worker, run)
+        assert service.policy(worker["workspace_id"], tenant_id=worker["tenant_id"],
+                              owner_id=worker["owner_id"])["native_peer_status"] == {
+            "available": False, "code": "peer_native_endpoint_requires_tls"
+        }
+    elif allowed:
+        assert service.project_native_tools(worker, run)["_peer_native_projection"]["url"] == (
+            "http://runtime:8766/v1/native/peers/"
+        )
+    else:
+        with pytest.raises(PeerError, match="peer_native_endpoint_requires_tls"):
+            service.project_native_tools(worker, run)
+
+
 def test_unimplemented_scopes_are_explicitly_unavailable(peers):
     service, workers = enable(peers)
     for scope in ("artifact_read", "file_write", "control", "delegate"):

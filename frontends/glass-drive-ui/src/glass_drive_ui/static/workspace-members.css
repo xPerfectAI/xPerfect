@@ -45,6 +45,7 @@
 .member-settings { margin-top: 1.5rem; border-top: 1px solid var(--line); }
 .member-settings > details { padding: 1rem 0; border-bottom: 1px solid var(--line); }
 .member-settings > details > summary { cursor: pointer; font-size: .9375rem; font-weight: 600; }
+.peer-controls { scroll-margin-top: 8rem; }
 .peer-controls > p { font-size: .8125rem; color: var(--muted); line-height: 1.5; }
 .peer-controls form { display: grid; gap: .875rem; margin: 1rem 0; }
 .peer-controls form button { justify-self: start; }
