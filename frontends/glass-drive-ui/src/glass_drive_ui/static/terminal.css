@@ -1,0 +1,7 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10151b; color: #e4e8ed; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; gap: 12px; border-bottom: 1px solid #34404e; }
+header div { display: flex; flex-wrap: wrap; gap: 6px; }
+button { font: inherit; color: inherit; background: #202a35; border: 1px solid #4b5a6b; border-radius: 5px; padding: 5px 9px; cursor: pointer; }
+button:focus-visible { outline: 2px solid #9cc6ec; }
+#terminal { flex: 1; min-height: 0; padding: 10px; }

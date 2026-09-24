@@ -1,0 +1,15 @@
+{
+  "name": "glasshive",
+  "owner": {
+    "name": "Adrien Beyk"
+  },
+  "description": "The xPerfect plugin marketplace.",
+  "plugins": [
+    {
+      "name": "glasshive",
+      "source": "./plugins/glasshive",
+      "description": "Control xPerfect workspaces from Claude Code.",
+      "category": "productivity"
+    }
+  ]
+}

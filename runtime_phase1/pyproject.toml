@@ -1,0 +1,42 @@
+[project]
+name = "glass-hive-runtime-phase1"
+version = "0.3.0"
+description = "xPerfect runtime for persistent AI workspaces and native harnesses"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+dependencies = [
+  "croniter>=6,<7",
+  "cryptography>=50,<51",
+  "fastapi>=0.139,<1.0",
+  "fastmcp>=3.2,<4.0",
+  "httpx>=0.28,<1.0",
+  "mcp>=1.26,<2.0",
+  "jsonschema>=4.26,<5.0",
+  "rfc3339-validator>=0.1.4,<1.0",
+  "rfc3986-validator>=0.1.1,<1.0",
+  "openpyxl>=3.1,<4.0",
+  "pyjwt[crypto]>=2.10,<3.0",
+  "python-docx>=1.1,<2.0",
+  "python-dateutil>=2.9,<3.0",
+  "python-pptx>=1.0,<2.0",
+  "uvicorn>=0.34,<1.0",
+  "websockets>=16.1,<17.0",
+  "wsproto>=1.2,<2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.1,<10.0",
+]
+
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.setuptools.package-data]
+workers_projects_runtime = ["prompts/*.md", "prompts/*.json"]

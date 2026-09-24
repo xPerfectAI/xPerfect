@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="same-origin" />
+    <title>xPerfect</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260923session2" />
+  </head>
+  <body class="watch-body">
+    <div class="watch-app">
+      <header class="watch-ribbon">
+        <a class="brand-mark" href="/#workspaces" aria-label="Back to xPerfect workspaces">xPerfect</a>
+        <div class="watch-main">
+          <div class="watch-title-line">
+            <h1 id="watch-title">Workspace live view</h1>
+            <button id="open-project-workspace" class="watch-link-chip" type="button">Back to workspaces</button>
+          </div>
+          <div class="watch-meta-line">
+            <p id="watch-subtitle">Connecting to workspace…</p>
+            <button
+              id="result-toggle"
+              class="result-toggle"
+              type="button"
+              aria-controls="result-panel"
+              aria-expanded="false"
+              aria-label="Open latest workspace output status"
+            >
+              <span class="result-toggle-head">
+                <span class="result-toggle-kicker">Latest workspace output</span>
+                <span id="status-label" class="result-toggle-state">Live status</span>
+                <span id="result-toggle-action" class="result-toggle-action">Open status</span>
+              </span>
+              <span id="latest-output-inline" class="result-toggle-summary">No run output yet.</span>
+            </button>
+          </div>
+        </div>
+        <div class="watch-controls">
+          <span id="watch-state" class="state-pill">starting</span>
+          <button id="watch-files-toggle" type="button" aria-controls="watch-files-panel" aria-expanded="false">Files</button>
+          <button id="menu-toggle" class="menu-toggle" type="button" aria-expanded="false" aria-haspopup="menu">☰</button>
+        </div>
+      </header>
+      <section id="result-panel" class="result-panel" hidden>
+        <div class="result-panel-header">
+          <div>
+            <span class="meta-label">Latest workspace output</span>
+            <h2 id="result-panel-title">Latest result</h2>
+          </div>
+          <button id="result-close" class="result-close" type="button">Close</button>
+        </div>
+        <div id="result-actions" class="result-actions" hidden></div>
+        <div id="native-controls"></div>
+        <div id="artifact-list" class="artifact-list" hidden></div>
+        <p id="latest-output-human" class="latest-output-human">Checking workspace status.</p>
+        <pre id="latest-output-full" hidden></pre>
+        <details id="result-technical" class="result-technical" hidden>
+          <summary>Technical details</summary>
+          <pre id="latest-output-technical"></pre>
+        </details>
+      </section>
+      <aside id="more-menu" class="more-menu" role="menu" hidden>
+        <button id="open-project-workspace-menu" role="menuitem" type="button">Back to workspaces</button>
+        <button id="surface-terminal" role="menuitem" type="button">Watch exact live session</button>
+        <button id="surface-desktop" role="menuitem" type="button">Watch live desktop</button>
+        <button id="open-external" role="menuitem" type="button">Open current view in new tab</button>
+        <button id="open-terminal-link" role="menuitem" type="button">Open terminal page</button>
+        <button data-action="interrupt" role="menuitem" type="button">Interrupt current run</button>
+        <button data-action="codex" role="menuitem" type="button">Open Codex</button>
+        <button data-action="claude" role="menuitem" type="button">Open Claude</button>
+        <button data-action="openclaw" role="menuitem" type="button" hidden>Open OpenClaw</button>
+        <button data-action="terminal" role="menuitem" type="button">Open terminal</button>
+        <button data-action="files" role="menuitem" type="button">Open files</button>
+        <button data-action="browser" role="menuitem" type="button">Open browser</button>
+        <button data-action="terminate" role="menuitem" class="danger" type="button">Close workspace</button>
+      </aside>
+      <aside id="watch-files-panel" class="watch-files-panel" aria-labelledby="watch-files-title" hidden>
+        <div class="watch-files-head">
+          <div><h2 id="watch-files-title">Files</h2><p id="watch-files-audience" hidden></p></div>
+          <button id="watch-files-close" type="button" aria-label="Close files">Close</button>
+        </div>
+        <div id="watch-file-upload" class="watch-file-upload" hidden>
+        <div class="file-choose-actions">
+          <button id="watch-add-files" class="file-choose file-choose-primary" type="button">Add files</button>
+        </div>
+        <input id="watch-file-input" type="file" multiple hidden />
+        <input id="watch-folder-input" type="file" webkitdirectory directory multiple hidden />
+        <div id="watch-file-drop" class="file-drop">or drop files here</div>
+        <p id="watch-file-budget" class="file-budget" role="status" hidden></p>
+        <ul id="watch-uploads-list" class="project-file-list" aria-label="Files being added"></ul>
+        <p id="watch-upload-help" class="file-budget" aria-live="polite" hidden></p>
+        <button id="watch-attach-files" type="button" hidden>Add to workspace</button>
+        </div>
+        <div class="workspace-files-toolbar">
+          <strong id="watch-files-directory">Workspace root</strong>
+          <details id="watch-file-options" class="file-row-menu">
+            <summary aria-label="More file options" title="More file options">⋯</summary>
+            <div class="file-row-menu-items">
+              <button id="watch-add-folder" type="button">Add folder from computer</button>
+              <button id="watch-new-folder" type="button" hidden>New folder</button>
+              <button id="watch-file-trash-open" type="button" hidden>Recently deleted</button>
+            </div>
+          </details>
+        </div>
+        <div id="watch-file-batch" class="workspace-file-batch" hidden>
+          <div class="workspace-file-batch-top">
+            <button id="watch-files-select-visible" type="button">Select visible</button>
+            <button id="watch-files-clear-selection" type="button">Clear selection</button>
+          </div>
+          <div class="workspace-file-batch-top">
+            <button id="watch-files-move" type="button" disabled>Move selected</button>
+            <button id="watch-files-export" type="button" disabled>Download ZIP</button>
+          </div>
+          <p id="watch-files-selection-status" role="status" aria-live="polite"></p>
+        </div>
+        <p id="watch-files-status" role="status" aria-live="polite" hidden></p>
+        <ul id="watch-files-list" class="project-file-list" aria-label="Workspace files"></ul>
+        <button id="watch-files-more" type="button" hidden>Load more</button>
+        <div id="watch-file-notice" class="file-notice" role="status" hidden>
+          <span id="watch-file-notice-text"></span>
+          <button id="watch-file-undo" type="button" hidden>Undo</button>
+          <button id="watch-file-notice-close" type="button" aria-label="Dismiss notice">×</button>
+        </div>
+        <section id="watch-file-trash" class="workspace-file-trash" aria-labelledby="watch-file-trash-title" hidden>
+          <div class="workspace-files-toolbar"><h3 id="watch-file-trash-title">Recently deleted</h3><button id="watch-file-trash-close" type="button">Close</button></div>
+          <p id="watch-file-trash-status" role="status" aria-live="polite"></p>
+          <ul id="watch-file-trash-list" class="project-file-list" aria-label="Recently deleted files"></ul>
+        </section>
+      </aside>
+      <dialog id="watch-file-move-dialog" class="file-move-dialog" aria-labelledby="watch-file-move-title">
+        <div class="file-move-head"><h2 id="watch-file-move-title">Move files</h2><button id="watch-file-move-cancel" type="button" aria-label="Close move dialog">×</button></div>
+        <p id="watch-file-move-location">Workspace root</p>
+        <button id="watch-file-move-parent" type="button" hidden>← Back</button>
+        <ul id="watch-file-move-folders" class="project-file-list" aria-label="Destination folders"></ul>
+        <button id="watch-file-move-more" type="button" hidden>More folders</button>
+        <p id="watch-file-move-error" role="alert" hidden></p>
+        <div class="file-move-actions"><button id="watch-file-move-confirm" type="button">Move here</button><button id="watch-file-move-cancel-bottom" type="button">Cancel</button></div>
+      </dialog>
+      <main class="watch-stage">
+        <div id="stage-overlay" class="stage-overlay">
+          <div>
+            <p class="overlay-label">Workspace warming up</p>
+            <h2 id="overlay-title">Preparing live workspace…</h2>
+            <p id="overlay-detail">The view will attach automatically when the workspace is ready.</p>
+            <a id="watch-sign-in" class="watch-sign-in" href="/login" hidden>Sign in again</a>
+            <pre id="stage-result-text" hidden></pre>
+          </div>
+        </div>
+        <iframe id="desktop-frame" title="Workspace live surface" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+        <div id="watch-desktop-file-drop" class="watch-desktop-file-drop" hidden>Drop files to add to this workspace</div>
+      </main>
+      <footer class="watch-footer">
+        <form id="steer-form" class="steer-form">
+          <button
+            id="run-toggle"
+            class="run-toggle-button"
+            data-action="pause"
+            aria-label="Pause workspace"
+            aria-pressed="false"
+            type="button"
+          >Pause</button>
+          <textarea
+            id="steer-input"
+            rows="1"
+            aria-describedby="steer-guidance"
+            placeholder="Steer this workspace, ask for a checkpoint, or queue the next step."
+          ></textarea>
+          <button
+            id="send-button"
+            type="submit"
+            title="Send redirects now. Hold Send or use Cmd/Ctrl+Enter to queue a follow-up without interrupting current work."
+          >Send</button>
+        </form>
+        <div id="steer-guidance" class="steer-guidance" aria-live="polite">
+          <span id="steer-guidance-primary" class="steer-guidance-chip" data-active="true">Send redirects now</span>
+          <span id="steer-guidance-queue" class="steer-guidance-chip">Hold Send or Cmd/Ctrl+Enter to queue instead</span>
+        </div>
+      </footer>
+    </div>
+    <script src="/static/watch.js?v=20260923lifecycle1" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "owner_id": "demo-owner",
+  "title": "Demo Outreach",
+  "goal": "Prepare and run a browser-assisted outreach workflow with resumable worker support.",
+  "default_worker_profile": "openclaw-general"
+}

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conversation · xPerfect</title>
+<link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/conversation.css">
+</head>
+<body>
+<header><a href="/" class="brand">xPerfect</a><nav aria-label="Main"><a href="/">Workspaces</a><button id="new-conversation" type="button">New conversation</button></nav></header>
+<main>
+<section class="conversation" aria-label="Conversation">
+<div id="empty"><h1>What would you like to do?</h1></div>
+<label id="conversation-project-field" class="project-choice" for="conversation-project"><span>Use a project <small>(optional)</small></span><select id="conversation-project"><option value="">New project</option></select></label>
+<label id="conversation-assistant-field" class="project-choice" for="conversation-assistant"><span>Assistant</span><select id="conversation-assistant"><option value="">Loading your connections…</option></select></label>
+<a id="conversation-connect" class="connect-assistant" href="/#connections" hidden>Connect an assistant</a>
+<div id="messages" role="log" aria-label="Messages" aria-live="polite"></div>
+<p id="status" role="status"></p>
+<form id="composer"><label class="sr-only" for="message">Message</label><textarea id="message" rows="3" placeholder="Ask anything, or give me work to do…" required></textarea><div class="composer-actions"><button id="stop-response" type="button" hidden>Stop reply</button><button id="send" type="submit">Send</button></div></form>
+</section>
+<aside id="work" aria-label="Your work" hidden><h2>Your work</h2><div id="native-controls"></div><div id="goals"></div></aside>
+</main>
+<script type="module" src="/static/conversation.js?v=20260923submit4"></script>
+</body>
+</html>

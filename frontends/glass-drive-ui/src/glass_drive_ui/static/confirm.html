@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Review change · xPerfect</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260805d" />
+  </head>
+  <body class="auth-body">
+    <main class="auth-shell">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+      <section class="auth-card confirm-card" aria-labelledby="confirm-title">
+        <div class="auth-brand">xPerfect</div>
+        <div class="auth-copy">
+          <p class="auth-eyebrow">Human approval required</p>
+          <h1 id="confirm-title">Review workspace change</h1>
+          <p id="confirm-intro">Loading the exact workspace, capability, and requested permissions…</p>
+        </div>
+        <dl id="confirm-details" class="confirm-details" hidden>
+          <div><dt>Workspace</dt><dd id="confirm-target"></dd></div>
+          <div><dt>Change</dt><dd id="confirm-capability"></dd></div>
+          <div><dt>Effect</dt><dd id="confirm-scopes"></dd></div>
+          <div><dt>Expires</dt><dd id="confirm-expiry"></dd></div>
+        </dl>
+        <details id="confirm-technical" class="connection-disclosure nested-disclosure" hidden>
+          <summary>Technical details</summary>
+          <dl class="confirm-details">
+            <div id="confirm-version-row" hidden><dt>Version</dt><dd id="confirm-version"></dd></div>
+            <div id="confirm-provenance-row" hidden><dt>Source</dt><dd id="confirm-provenance"></dd></div>
+            <div id="confirm-hash-row" hidden><dt>Content</dt><dd id="confirm-hash"></dd></div>
+            <div id="confirm-dependencies-row" hidden><dt>Dependencies</dt><dd id="confirm-dependencies"></dd></div>
+          </dl>
+        </details>
+        <div class="confirm-notice">
+          <strong>The requesting AI cannot approve this.</strong>
+          <span>Your signed-in session, CSRF check, ownership, expiry, and this single-use token are all verified.</span>
+        </div>
+        <div class="confirm-actions">
+          <a id="confirm-cancel" class="secondary-button" href="/#workspaces">Cancel</a>
+          <button id="confirm-button" class="primary-button" type="button" disabled>Approve for this workspace</button>
+          <a id="confirm-back" class="primary-button" href="/#workspaces" hidden>Back to workspace</a>
+        </div>
+        <p id="confirm-status" class="auth-status" aria-live="polite"></p>
+      </section>
+    </main>
+    <script src="/static/confirm.js?v=20260922brand1" type="module"></script>
+  </body>
+</html>

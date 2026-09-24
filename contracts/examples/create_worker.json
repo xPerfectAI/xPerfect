@@ -1,0 +1,7 @@
+{
+  "owner_id": "demo-owner",
+  "name": "Codex Worker 001",
+  "role": "coder",
+  "profile": "openclaw-codex",
+  "backend": "openclaw"
+}

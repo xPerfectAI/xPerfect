@@ -1,0 +1,5921 @@
+{
+  "bootstrap": {
+    "bundle_fields": [
+      "agents_md",
+      "callbacks",
+      "claude_md",
+      "claude_project_mcp",
+      "codex_config_append",
+      "codex_md",
+      "env",
+      "files",
+      "glasshive_capability_broker",
+      "glasshive_context",
+      "glasshive_upload_context",
+      "project_definition",
+      "run_mode",
+      "system_instructions",
+      "viventium_context",
+      "viventium_upload_context"
+    ],
+    "callback_required_context_fields": [
+      "user_id",
+      "conversation_id",
+      "parent_message_id",
+      "message_id"
+    ],
+    "capability_broker": {
+      "claude_config_fields": [
+        "headers.Authorization"
+      ],
+      "codex_config_fields": [
+        "bearer_token_env_var"
+      ],
+      "content_read_scope_aliases": [
+        "content_read",
+        "contentRead"
+      ],
+      "name": "glasshive-user-capabilities",
+      "required_fields": [
+        "name",
+        "scopes",
+        "url",
+        "version"
+      ],
+      "token_env": "GLASSHIVE_CAPABILITY_BROKER_TOKEN",
+      "version": 1
+    },
+    "file_entry_fields": [
+      "absolute_path",
+      "content",
+      "filepath",
+      "local_path",
+      "path",
+      "scope",
+      "source_path",
+      "source_path_token",
+      "upload_path"
+    ],
+    "provider_header_attestation": {
+      "access_header": "x-glasshive-access",
+      "agent_header": "x-glasshive-agent-id",
+      "bundle_header": "x-glasshive-bootstrap-bundle-b64",
+      "default_max_age_seconds": 300,
+      "developer_instruction_tail_header": "x-glasshive-developer-instruction-tail-b64",
+      "idempotency_header": "x-glasshive-idempotency-key",
+      "owner_header": "x-viventium-user-id",
+      "signature_header": "x-glasshive-bootstrap-signature",
+      "signature_message": "v1\\n{timestamp}\\n{base64_bundle}",
+      "signature_prefix": "sha256=",
+      "timestamp_header": "x-glasshive-bootstrap-timestamp",
+      "workspace_mode_header": "x-glasshive-workspace-mode",
+      "workspace_path_header": "x-glasshive-workspace-path-b64"
+    },
+    "request_context_headers": {
+      "x-viventium-agent-id": [
+        "x-glasshive-agent-id",
+        "x-librechat-agent-id"
+      ],
+      "x-viventium-conversation-id": [
+        "x-glasshive-conversation-id",
+        "x-librechat-conversation-id"
+      ],
+      "x-viventium-file-ids": [
+        "x-glasshive-file-ids",
+        "x-librechat-file-ids"
+      ],
+      "x-viventium-input-mode": [
+        "x-glasshive-input-mode",
+        "x-librechat-input-mode"
+      ],
+      "x-viventium-message-id": [
+        "x-glasshive-message-id",
+        "x-librechat-message-id"
+      ],
+      "x-viventium-parent-message-id": [
+        "x-glasshive-parent-message-id",
+        "x-librechat-parent-message-id"
+      ],
+      "x-viventium-request-attachments": [
+        "x-glasshive-request-attachments",
+        "x-librechat-request-attachments"
+      ],
+      "x-viventium-request-files": [
+        "x-glasshive-request-files",
+        "x-librechat-request-files"
+      ],
+      "x-viventium-storage-user-id": [
+        "x-glasshive-storage-user-id",
+        "x-librechat-storage-user-id"
+      ],
+      "x-viventium-stream-id": [
+        "x-glasshive-stream-id",
+        "x-librechat-stream-id"
+      ],
+      "x-viventium-surface": [
+        "x-glasshive-surface",
+        "x-librechat-surface"
+      ],
+      "x-viventium-telegram-chat-id": [
+        "x-glasshive-telegram-chat-id"
+      ],
+      "x-viventium-telegram-message-id": [
+        "x-glasshive-telegram-message-id"
+      ],
+      "x-viventium-telegram-user-id": [
+        "x-glasshive-telegram-user-id"
+      ],
+      "x-viventium-tenant-id": [
+        "x-glasshive-tenant-id",
+        "x-librechat-tenant-id"
+      ],
+      "x-viventium-tool-resources": [
+        "x-glasshive-tool-resources",
+        "x-librechat-tool-resources"
+      ],
+      "x-viventium-user-email": [
+        "x-glasshive-user-email",
+        "x-librechat-user-email"
+      ],
+      "x-viventium-user-id": [
+        "x-glasshive-user-id",
+        "x-librechat-user-id"
+      ],
+      "x-viventium-user-role": [
+        "x-glasshive-user-role",
+        "x-librechat-user-role"
+      ],
+      "x-viventium-voice-call-session-id": [
+        "x-glasshive-voice-call-session-id",
+        "x-librechat-voice-call-session-id"
+      ],
+      "x-viventium-voice-request-id": [
+        "x-glasshive-voice-request-id",
+        "x-librechat-voice-request-id"
+      ],
+      "x-wpr-token": [
+        "x-glasshive-service-token",
+        "x-glasshive-mcp-service-token"
+      ]
+    }
+  },
+  "callbacks": {
+    "actionable_link_events": [
+      "run.cancelled",
+      "run.failed",
+      "run.interrupted",
+      "run.paused"
+    ],
+    "canonical_json": "sorted-keys,compact,separators-colon-comma,utf8",
+    "config_aliases": {
+      "secret": [
+        "hmac_secret",
+        "secret"
+      ],
+      "url": [
+        "events_webhook_url",
+        "url"
+      ]
+    },
+    "event_run_states": {
+      "run.cancelled": "cancelled",
+      "run.completed": "completed",
+      "run.failed": "failed",
+      "run.interrupted": "interrupted",
+      "run.paused": "paused",
+      "run.queued": "queued",
+      "run.started": "running",
+      "run.waiting_on_capacity": "queued"
+    },
+    "http_headers": {
+      "Content-Type": "application/json",
+      "X-GlassHive-Signature": "sha256=bb087a4540a747cbc0baab548f9b29929ec0c17e454dd47d96410818709a4e7b"
+    },
+    "payload": {
+      "agent_id": "agent-1",
+      "callback_id": "<callback_id>",
+      "callback_ts": "<timestamp>",
+      "conversation_id": "conversation-1",
+      "deliverable": {
+        "path": "reports/result.pdf",
+        "signed_download_url": "https://glasshive.example.invalid/r/file-1"
+      },
+      "effort_projection": {
+        "effective": "high",
+        "fallback_reason": "",
+        "requested": "high"
+      },
+      "event": "run.failed",
+      "failure_class": "provider_rate_limited",
+      "failure_code": "provider_rate_limited",
+      "failure_retryable": true,
+      "full_message": "Synthetic failure details",
+      "input_mode": "text",
+      "message": "Synthetic failure",
+      "message_id": "message-1",
+      "operator_url": "https://glasshive.example.invalid/r/ref-1",
+      "parent_message_id": "parent-1",
+      "project_id": "project-1",
+      "run_id": "run-1",
+      "run_state": "failed",
+      "stream_id": "stream-1",
+      "surface": "web",
+      "telegram_chat_id": null,
+      "telegram_message_id": null,
+      "telegram_user_id": null,
+      "user_id": "user-1",
+      "voice_call_session_id": null,
+      "voice_request_id": null,
+      "watch_url": "https://glasshive.example.invalid/r/ref-1",
+      "worker_id": "worker-1"
+    },
+    "required_parent_context_fields": [
+      "user_id",
+      "conversation_id",
+      "parent_message_id",
+      "message_id"
+    ],
+    "signature_derivation": "HMAC-SHA256(secret, worker_id + ':' + run_id), then HMAC-SHA256(derived_hex, canonical_payload)"
+  },
+  "completion": {
+    "chat_completion": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "Synthetic answer.",
+            "reasoning_content": "",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": "<timestamp>",
+      "glasshive": {
+        "activity_url": "/v1/requests/chatcmpl-gh-synthetic/activity",
+        "request_id": "chatcmpl-gh-synthetic",
+        "usage_source": "native"
+      },
+      "id": "chatcmpl-gh-synthetic",
+      "model": "codex-cli:gpt-5.6-sol",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 3,
+        "total_tokens": 7
+      }
+    },
+    "chat_stream_objects": [
+      "chat.completion.chunk"
+    ],
+    "chat_stream_required_fields": {
+      "base": [
+        "choices",
+        "created",
+        "id",
+        "model",
+        "object"
+      ],
+      "usage": [
+        "glasshive",
+        "usage"
+      ]
+    },
+    "error_response": {
+      "error": {
+        "code": "rate_limit_exceeded",
+        "message": "Synthetic provider limit",
+        "param": null,
+        "type": "rate_limit_error"
+      }
+    },
+    "responses": {
+      "background": false,
+      "completed_at": "<timestamp>",
+      "created_at": 1700000000,
+      "error": null,
+      "glasshive": {
+        "activity_url": "/v1/requests/chatcmpl-gh-synthetic/activity",
+        "request_id": "chatcmpl-gh-synthetic"
+      },
+      "id": "resp_gh-synthetic",
+      "incomplete_details": null,
+      "instructions": "Synthetic instruction",
+      "max_output_tokens": 100,
+      "metadata": {
+        "purpose": "compatibility"
+      },
+      "model": "codex-cli:gpt-5.6-sol",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "logprobs": [],
+              "text": "Synthetic answer.",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_gh-synthetic",
+          "phase": "final_answer",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "output_text": "Synthetic answer.",
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": null
+      },
+      "service_tier": "default",
+      "status": "completed",
+      "store": false,
+      "temperature": 0.2,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_p": 0.9,
+      "truncation": "disabled",
+      "usage": {
+        "input_tokens": 3,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 4,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 7
+      }
+    },
+    "responses_stream_events": [
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed",
+      "response.failed",
+      "error"
+    ],
+    "responses_stream_required_fields": {
+      "error": [
+        "code",
+        "message",
+        "param",
+        "sequence_number",
+        "type"
+      ],
+      "response.completed": [
+        "response",
+        "sequence_number",
+        "type"
+      ],
+      "response.content_part.added": [
+        "content_index",
+        "item_id",
+        "output_index",
+        "part",
+        "sequence_number",
+        "type"
+      ],
+      "response.content_part.done": [
+        "content_index",
+        "item_id",
+        "output_index",
+        "part",
+        "sequence_number",
+        "type"
+      ],
+      "response.created": [
+        "response",
+        "sequence_number",
+        "type"
+      ],
+      "response.failed": [
+        "response",
+        "sequence_number",
+        "type"
+      ],
+      "response.in_progress": [
+        "response",
+        "sequence_number",
+        "type"
+      ],
+      "response.output_item.added": [
+        "item",
+        "output_index",
+        "sequence_number",
+        "type"
+      ],
+      "response.output_item.done": [
+        "item",
+        "output_index",
+        "sequence_number",
+        "type"
+      ],
+      "response.output_text.delta": [
+        "content_index",
+        "delta",
+        "item_id",
+        "logprobs",
+        "output_index",
+        "sequence_number",
+        "type"
+      ],
+      "response.output_text.done": [
+        "content_index",
+        "item_id",
+        "logprobs",
+        "output_index",
+        "sequence_number",
+        "text",
+        "type"
+      ]
+    },
+    "stream_response_header": "X-GlassHive-Request-Id"
+  },
+  "contract_version": 1,
+  "http": {
+    "openapi": "3.1.0",
+    "operations": {
+      "GET /favicon.ico": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "GET /health": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /r/{ref_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /ui": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /ui/projects/{project_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "worker_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Worker Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /ui/workers/{worker_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /ui/workers/{worker_id}/terminal": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /ui/workers/{worker_id}/view": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/link-refs/{ref_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/metrics/summary": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsSummary"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/models": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Glasshive Models V1 Models Get",
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/preferences": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPreferencesResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/projects": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/ProjectResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Projects V1 Projects Get",
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/projects/{project_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/projects/{project_id}/events": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/EventResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Project Events V1 Projects  Project Id  Events Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/projects/{project_id}/runs": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/RunResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Project Runs V1 Projects  Project Id  Runs Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/projects/{project_id}/workers": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/WorkerResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Workers V1 Projects  Project Id  Workers Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/requests/{request_id}/activity": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/runs/{run_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/schedules/{schedule_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "schedule_id",
+            "required": true,
+            "schema": {
+              "title": "Schedule Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/signed-links/{token}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/artifacts": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Cursor",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Worker Artifacts V1 Workers  Worker Id  Artifacts Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/artifacts/download": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/artifacts/latest-image": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/artifacts/open": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/events": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/EventResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Worker Events V1 Workers  Worker Id  Events Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/live": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Worker Live V1 Workers  Worker Id  Live Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/runs": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/RunResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Worker Runs V1 Workers  Worker Id  Runs Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/schedules": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_done",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Done",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/ScheduleResponse"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response List Worker Schedules V1 Workers  Worker Id  Schedules Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/takeover": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeoverInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /v1/workers/{worker_id}/telemetry": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Worker Telemetry V1 Workers  Worker Id  Telemetry Get",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /w/{ref_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /w/{ref_id}/desktop": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GET /w/{ref_id}/desktop-frame": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "PATCH /v1/preferences": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserPreferencesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPreferencesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "PATCH /v1/workers/{worker_id}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWorkerMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/admin/reconcile": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reconcile V1 Admin Reconcile Post",
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/admin/schedules/run-due": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Due Schedules V1 Admin Schedules Run Due Post",
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/chat/completions": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/projects": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/projects/{project_id}/workers": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/projects/{project_id}/workers/duplicate": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateWorkerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/projects/{project_id}/workers/find-or-resume": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/requests/by-idempotency/{idempotency_key}/cancel": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "idempotency_key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Glasshive Cancel By Idempotency V1 Requests By Idempotency  Idempotency Key  Cancel Post",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/requests/{request_id}/cancel": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Glasshive Cancel V1 Requests  Request Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/responses": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResponsesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/assign": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/desktop-action": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DesktopActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopActionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/interrupt": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/launch-failed": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LaunchFailureRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/message": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/pause": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/resume": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/schedule": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/steer": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/terminate": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /v1/workers/{worker_id}/view-opened": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "worker_id",
+            "required": true,
+            "schema": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /w/{ref_id}/actions/{action_name}": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action_name",
+            "required": true,
+            "schema": {
+              "title": "Action Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ref Workspace Action W  Ref Id  Actions  Action Name  Post",
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "POST /w/{ref_id}/desktop-action": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref_id",
+            "required": true,
+            "schema": {
+              "title": "Ref Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DesktopActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopActionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AssignRunRequest": {
+        "properties": {
+          "bootstrap_bundle": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Bundle"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          },
+          "instruction": {
+            "minLength": 1,
+            "title": "Instruction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instruction"
+        ],
+        "title": "AssignRunRequest",
+        "type": "object"
+      },
+      "ChatCompletionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": -2.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty"
+          },
+          "max_completion_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Completion Tokens"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            },
+            "minItems": 1,
+            "title": "Messages",
+            "type": "array"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompletionMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": -2.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "service_tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Tier"
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop"
+          },
+          "store": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Store"
+          },
+          "stream": {
+            "default": false,
+            "title": "Stream",
+            "type": "boolean"
+          },
+          "stream_options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatStreamOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User"
+          }
+        },
+        "required": [
+          "model",
+          "messages"
+        ],
+        "title": "ChatCompletionRequest",
+        "type": "object"
+      },
+      "ChatMessage": {
+        "additionalProperties": true,
+        "properties": {
+          "content": {
+            "default": "",
+            "title": "Content"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "ChatMessage",
+        "type": "object"
+      },
+      "ChatStreamOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "include_usage": {
+            "default": false,
+            "title": "Include Usage",
+            "type": "boolean"
+          }
+        },
+        "title": "ChatStreamOptions",
+        "type": "object"
+      },
+      "CompletionMetadata": {
+        "additionalProperties": true,
+        "properties": {
+          "agent_id": {
+            "default": "",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "bootstrap_bundle": {
+            "additionalProperties": true,
+            "title": "Bootstrap Bundle",
+            "type": "object"
+          },
+          "conversation_id": {
+            "default": "",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "developer_instruction_tail": {
+            "default": "",
+            "title": "Developer Instruction Tail",
+            "type": "string"
+          },
+          "glasshive_options": {
+            "$ref": "#/components/schemas/GlassHiveOptions"
+          },
+          "idempotency_key": {
+            "default": "",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "input_mode": {
+            "default": "text",
+            "title": "Input Mode",
+            "type": "string"
+          },
+          "message_id": {
+            "default": "",
+            "title": "Message Id",
+            "type": "string"
+          },
+          "owner_id": {
+            "default": "",
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "stream_id": {
+            "default": "",
+            "title": "Stream Id",
+            "type": "string"
+          },
+          "surface": {
+            "default": "web",
+            "title": "Surface",
+            "type": "string"
+          }
+        },
+        "title": "CompletionMetadata",
+        "type": "object"
+      },
+      "CreateProjectRequest": {
+        "properties": {
+          "default_worker_profile": {
+            "default": "",
+            "title": "Default Worker Profile",
+            "type": "string"
+          },
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "title",
+          "goal"
+        ],
+        "title": "CreateProjectRequest",
+        "type": "object"
+      },
+      "CreateWorkerRequest": {
+        "properties": {
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alias"
+          },
+          "backend": {
+            "default": "",
+            "description": "Deprecated compatibility field. Runtime is derived from profile and execution_mode.",
+            "title": "Backend",
+            "type": "string"
+          },
+          "bootstrap_bundle": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Bundle"
+          },
+          "bootstrap_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Profile"
+          },
+          "execution_mode": {
+            "default": "",
+            "description": "Execution mode, host or docker. Empty means use the deployment default.",
+            "title": "Execution Mode",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "profile": {
+            "default": "",
+            "description": "Worker profile selector. Empty means use the project/deployment default.",
+            "title": "Profile",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "start_synchronously": {
+            "default": true,
+            "title": "Start Synchronously",
+            "type": "boolean"
+          },
+          "workspace_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Root"
+          }
+        },
+        "required": [
+          "owner_id",
+          "name",
+          "role"
+        ],
+        "title": "CreateWorkerRequest",
+        "type": "object"
+      },
+      "DesktopActionRequest": {
+        "properties": {
+          "action": {
+            "enum": [
+              "terminal",
+              "files",
+              "browser",
+              "focus_browser",
+              "codex",
+              "claude",
+              "openclaw"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "DesktopActionRequest",
+        "type": "object"
+      },
+      "DesktopActionResponse": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "view_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "View Url"
+          }
+        },
+        "required": [
+          "action",
+          "status",
+          "mode"
+        ],
+        "title": "DesktopActionResponse",
+        "type": "object"
+      },
+      "DuplicateWorkerRequest": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "source_worker_id": {
+            "title": "Source Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "source_worker_id",
+          "name",
+          "role"
+        ],
+        "title": "DuplicateWorkerRequest",
+        "type": "object"
+      },
+      "EventResponse": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "tenant_id": {
+            "default": "local",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "project_id",
+          "worker_id",
+          "event_type",
+          "message",
+          "created_at"
+        ],
+        "title": "EventResponse",
+        "type": "object"
+      },
+      "GlassHiveOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "access": {
+            "default": "workspace",
+            "enum": [
+              "full",
+              "workspace"
+            ],
+            "title": "Access",
+            "type": "string"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceBinding"
+          }
+        },
+        "title": "GlassHiveOptions",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LaunchFailureRequest": {
+        "properties": {
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "LaunchFailureRequest",
+        "type": "object"
+      },
+      "MetricsSummary": {
+        "properties": {
+          "active_runs": {
+            "title": "Active Runs",
+            "type": "integer"
+          },
+          "callback_dead_lettered": {
+            "default": 0,
+            "title": "Callback Dead Lettered",
+            "type": "integer"
+          },
+          "callback_delivering": {
+            "default": 0,
+            "title": "Callback Delivering",
+            "type": "integer"
+          },
+          "callback_max_attempts": {
+            "default": 0,
+            "title": "Callback Max Attempts",
+            "type": "integer"
+          },
+          "callback_oldest_pending_age_seconds": {
+            "default": 0,
+            "title": "Callback Oldest Pending Age Seconds",
+            "type": "integer"
+          },
+          "callback_pending": {
+            "default": 0,
+            "title": "Callback Pending",
+            "type": "integer"
+          },
+          "events": {
+            "title": "Events",
+            "type": "integer"
+          },
+          "projects": {
+            "title": "Projects",
+            "type": "integer"
+          },
+          "queued_runs": {
+            "title": "Queued Runs",
+            "type": "integer"
+          },
+          "runs": {
+            "title": "Runs",
+            "type": "integer"
+          },
+          "workers": {
+            "title": "Workers",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "projects",
+          "workers",
+          "runs",
+          "queued_runs",
+          "active_runs",
+          "events"
+        ],
+        "title": "MetricsSummary",
+        "type": "object"
+      },
+      "ProjectResponse": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "default_worker_profile": {
+            "title": "Default Worker Profile",
+            "type": "string"
+          },
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "paused",
+              "completed",
+              "archived",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "tenant_id": {
+            "default": "local",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "owner_id",
+          "title",
+          "goal",
+          "status",
+          "default_worker_profile",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ProjectResponse",
+        "type": "object"
+      },
+      "ResponsesConversation": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ResponsesConversation",
+        "type": "object"
+      },
+      "ResponsesReasoning": {
+        "additionalProperties": false,
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          }
+        },
+        "title": "ResponsesReasoning",
+        "type": "object"
+      },
+      "ResponsesRequest": {
+        "additionalProperties": false,
+        "description": "Portable text/message subset of the OpenAI Responses create contract.",
+        "properties": {
+          "background": {
+            "default": false,
+            "title": "Background",
+            "type": "boolean"
+          },
+          "conversation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/ResponsesConversation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Input"
+          },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instructions"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "previous_response_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Response Id"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponsesReasoning"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Tier"
+          },
+          "store": {
+            "default": false,
+            "title": "Store",
+            "type": "boolean"
+          },
+          "stream": {
+            "default": false,
+            "title": "Stream",
+            "type": "boolean"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P"
+          }
+        },
+        "required": [
+          "model",
+          "input"
+        ],
+        "title": "ResponsesRequest",
+        "type": "object"
+      },
+      "RunResponse": {
+        "properties": {
+          "cache_creation_input_tokens": {
+            "default": 0,
+            "title": "Cache Creation Input Tokens",
+            "type": "integer"
+          },
+          "cache_read_input_tokens": {
+            "default": 0,
+            "title": "Cache Read Input Tokens",
+            "type": "integer"
+          },
+          "effort": {
+            "default": "",
+            "description": "Normalized per-assignment effort accepted by the runtime.",
+            "title": "Effort",
+            "type": "string"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error_text": {
+            "default": "",
+            "title": "Error Text",
+            "type": "string"
+          },
+          "failure_class": {
+            "default": "",
+            "title": "Failure Class",
+            "type": "string"
+          },
+          "failure_diagnostic_summary": {
+            "default": "",
+            "title": "Failure Diagnostic Summary",
+            "type": "string"
+          },
+          "failure_recommended_recovery": {
+            "default": "",
+            "title": "Failure Recommended Recovery",
+            "type": "string"
+          },
+          "failure_retryable": {
+            "default": false,
+            "title": "Failure Retryable",
+            "type": "boolean"
+          },
+          "failure_user_message": {
+            "default": "",
+            "title": "Failure User Message",
+            "type": "string"
+          },
+          "input_tokens": {
+            "default": 0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "instruction": {
+            "title": "Instruction",
+            "type": "string"
+          },
+          "output_text": {
+            "default": "",
+            "title": "Output Text",
+            "type": "string"
+          },
+          "output_tokens": {
+            "default": 0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "queued_at": {
+            "title": "Queued At",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "running",
+              "interrupted",
+              "paused",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tenant_id": {
+            "default": "local",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "total_tokens": {
+            "default": 0,
+            "title": "Total Tokens",
+            "type": "integer"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "worker_id",
+          "project_id",
+          "instruction",
+          "state",
+          "queued_at"
+        ],
+        "title": "RunResponse",
+        "type": "object"
+      },
+      "ScheduleResponse": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "instruction": {
+            "title": "Instruction",
+            "type": "string"
+          },
+          "last_error": {
+            "default": "",
+            "title": "Last Error",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "queued_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Run Id"
+          },
+          "run_at": {
+            "title": "Run At",
+            "type": "string"
+          },
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          },
+          "schedule_text": {
+            "default": "",
+            "title": "Schedule Text",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "queued",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tenant_id": {
+            "default": "local",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "worker_id",
+          "project_id",
+          "owner_id",
+          "instruction",
+          "run_at",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ScheduleResponse",
+        "type": "object"
+      },
+      "ScheduleRunRequest": {
+        "properties": {
+          "bootstrap_bundle": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Bundle"
+          },
+          "delay_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delay Seconds"
+          },
+          "instruction": {
+            "minLength": 1,
+            "title": "Instruction",
+            "type": "string"
+          },
+          "run_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run At"
+          },
+          "schedule_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Text"
+          }
+        },
+        "required": [
+          "instruction"
+        ],
+        "title": "ScheduleRunRequest",
+        "type": "object"
+      },
+      "SendMessageRequest": {
+        "properties": {
+          "message": {
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "SendMessageRequest",
+        "type": "object"
+      },
+      "TakeoverInfo": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "supported": {
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "supported"
+        ],
+        "title": "TakeoverInfo",
+        "type": "object"
+      },
+      "UpdateUserPreferencesRequest": {
+        "properties": {
+          "claude_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claude Effort"
+          },
+          "codex_reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Codex Reasoning Effort"
+          },
+          "default_worker_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Worker Profile"
+          },
+          "openclaw_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Openclaw Effort"
+          }
+        },
+        "title": "UpdateUserPreferencesRequest",
+        "type": "object"
+      },
+      "UpdateWorkerMetadataRequest": {
+        "properties": {
+          "favorite": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Favorite"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "UpdateWorkerMetadataRequest",
+        "type": "object"
+      },
+      "UserPreferencesResponse": {
+        "properties": {
+          "claude_effort": {
+            "default": "",
+            "title": "Claude Effort",
+            "type": "string"
+          },
+          "codex_reasoning_effort": {
+            "default": "",
+            "title": "Codex Reasoning Effort",
+            "type": "string"
+          },
+          "default_worker_profile": {
+            "default": "",
+            "title": "Default Worker Profile",
+            "type": "string"
+          },
+          "openclaw_effort": {
+            "default": "",
+            "title": "Openclaw Effort",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "tenant_id": {
+            "default": "local",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "updated_at"
+        ],
+        "title": "UserPreferencesResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WorkerResponse": {
+        "properties": {
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alias"
+          },
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "bootstrap_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bootstrap Profile"
+          },
+          "compute_released_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Released At"
+          },
+          "control_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Control Url"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Run Id"
+          },
+          "execution_mode": {
+            "default": "docker",
+            "enum": [
+              "docker",
+              "host"
+            ],
+            "title": "Execution Mode",
+            "type": "string"
+          },
+          "favorite": {
+            "default": false,
+            "title": "Favorite",
+            "type": "boolean"
+          },
+          "gateway_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Port"
+          },
+          "gateway_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Url"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run Id"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "runtime": {
+            "default": "",
+            "title": "Runtime",
+            "type": "string"
+          },
+          "session_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Key"
+          },
+          "state": {
+            "enum": [
+              "created",
+              "starting",
+              "ready",
+              "running",
+              "paused",
+              "failed",
+              "terminated"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "state_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State Dir"
+          },
+          "takeover_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Takeover Url"
+          },
+          "tenant_id": {
+            "default": "local",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          },
+          "workspace_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Dir"
+          },
+          "workspace_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Root"
+          }
+        },
+        "required": [
+          "worker_id",
+          "project_id",
+          "owner_id",
+          "name",
+          "role",
+          "profile",
+          "backend",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WorkerResponse",
+        "type": "object"
+      },
+      "WorkspaceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "default",
+            "enum": [
+              "default",
+              "life",
+              "custom"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          }
+        },
+        "title": "WorkspaceBinding",
+        "type": "object"
+      }
+    }
+  },
+  "mcp": {
+    "tools": {
+      "metrics_summary": {
+        "inputSchema": {
+          "properties": {},
+          "title": "metrics_summaryArguments",
+          "type": "object"
+        }
+      },
+      "project_create": {
+        "inputSchema": {
+          "properties": {
+            "default_worker_profile": {
+              "default": "",
+              "title": "Default Worker Profile",
+              "type": "string"
+            },
+            "goal": {
+              "title": "Goal",
+              "type": "string"
+            },
+            "owner_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Owner Id"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "goal"
+          ],
+          "title": "project_createArguments",
+          "type": "object"
+        }
+      },
+      "project_events": {
+        "inputSchema": {
+          "properties": {
+            "project_id": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id"
+          ],
+          "title": "project_eventsArguments",
+          "type": "object"
+        }
+      },
+      "project_get": {
+        "inputSchema": {
+          "properties": {
+            "project_id": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id"
+          ],
+          "title": "project_getArguments",
+          "type": "object"
+        }
+      },
+      "project_runs": {
+        "inputSchema": {
+          "properties": {
+            "project_id": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id"
+          ],
+          "title": "project_runsArguments",
+          "type": "object"
+        }
+      },
+      "projects_list": {
+        "inputSchema": {
+          "properties": {
+            "owner_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Owner Id"
+            }
+          },
+          "title": "projects_listArguments",
+          "type": "object"
+        }
+      },
+      "run_get": {
+        "inputSchema": {
+          "properties": {
+            "run_id": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "title": "run_getArguments",
+          "type": "object"
+        }
+      },
+      "worker_create": {
+        "inputSchema": {
+          "properties": {
+            "alias": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alias"
+            },
+            "backend": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Legacy compatibility field. Prefer omitting it; GlassHive selects and reports workers from profile plus execution_mode. Only older clients should pass a backend value.",
+              "title": "Backend"
+            },
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "bootstrap_profile": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Bootstrap Profile"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "execution_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "docker",
+                    "host"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Execution surface. Omit to use the configured default. Use 'host' only when GlassHive instructions say host-native workers are enabled and the task depends on the user's real computer/session: local browser profile, desktop apps, local files/projects, installed CLIs, or OS tools. Use 'docker' for isolated sandbox/disposable/risky work.",
+              "title": "Execution Mode"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "owner_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Owner Id"
+            },
+            "profile": {
+              "default": "",
+              "description": "Worker CLI profile. Prefer 'codex-cli' for host browser/desktop/file/code execution when Codex is installed, 'claude-code' when Claude is explicitly requested, and 'openclaw-general' only when OpenClaw is installed or explicitly requested.",
+              "title": "Profile",
+              "type": "string"
+            },
+            "project_id": {
+              "title": "Project Id",
+              "type": "string"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "workspace_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Workspace Root"
+            }
+          },
+          "required": [
+            "project_id",
+            "name",
+            "role"
+          ],
+          "title": "worker_createArguments",
+          "type": "object"
+        }
+      },
+      "worker_delegate_once": {
+        "inputSchema": {
+          "properties": {
+            "alias": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alias"
+            },
+            "backend": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Legacy compatibility field. Prefer omitting it; GlassHive selects and reports workers from profile plus execution_mode. Only older clients should pass a backend value.",
+              "title": "Backend"
+            },
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "bootstrap_profile": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Bootstrap Profile"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-run effort override. Codex accepts none/low/medium/high/xhigh; minimal is for explicitly allowlisted deployments only. Claude Code accepts max/xhigh; OpenClaw accepts high/max. Omit to use the user's saved default. For complex multi-source research, deep research, critical analysis, large file transformation, coding, comparison, or executive-quality deliverables, choose a higher effort setting: Codex high/xhigh, Claude max/xhigh, OpenClaw high/max, or the configured equivalent, unless the user clearly asks for a quick/cheap pass. For ordinary bounded tasks, omit effort unless the user explicitly asks for a cheaper/faster pass; user preferences and deployment defaults own the baseline.",
+              "title": "Effort"
+            },
+            "execution_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "docker",
+                    "host"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Execution surface. Omit to use the configured default. Use 'host' only when GlassHive instructions say host-native workers are enabled and the task depends on the user's real computer/session: local browser profile, desktop apps, local files/projects, installed CLIs, or OS tools. Use 'docker' for isolated sandbox/disposable/risky work.",
+              "title": "Execution Mode"
+            },
+            "expose_diagnostics": {
+              "default": false,
+              "title": "Expose Diagnostics",
+              "type": "boolean"
+            },
+            "goal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Goal"
+            },
+            "instruction": {
+              "title": "Instruction",
+              "type": "string"
+            },
+            "owner_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Owner Id"
+            },
+            "profile": {
+              "default": "",
+              "description": "Worker CLI profile. Prefer 'codex-cli' for host browser/desktop/file/code execution when Codex is installed, 'claude-code' when Claude is explicitly requested, and 'openclaw-general' only when OpenClaw is installed or explicitly requested.",
+              "title": "Profile",
+              "type": "string"
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Project Id"
+            },
+            "require_callback": {
+              "default": false,
+              "title": "Require Callback",
+              "type": "boolean"
+            },
+            "reuse_existing_workspace": {
+              "default": false,
+              "description": "Set true only when the user explicitly asked to resume/reuse the named alias. Leave false for fresh one-off tasks so stale worker history cannot slow or distort the result.",
+              "title": "Reuse Existing Workspace",
+              "type": "boolean"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "uploaded_files": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional attached/uploaded files to materialize in the workspace when the chat host does not project upload metadata through MCP headers. Use this only with file content or file references already visible in the current user request/model context. Prefer entries like [{'filename': 'brief.txt', 'text': '...'}]. If only a file name/id/reference is visible, pass that metadata so GlassHive can create an upload manifest and the worker can report a real blocker instead of pretending the file was read.",
+              "title": "Uploaded Files"
+            },
+            "worker_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Worker Name"
+            },
+            "worker_role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Worker Role"
+            },
+            "workspace_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Workspace Root"
+            }
+          },
+          "required": [
+            "title",
+            "instruction"
+          ],
+          "title": "worker_delegate_onceArguments",
+          "type": "object"
+        }
+      },
+      "worker_desktop_action": {
+        "inputSchema": {
+          "properties": {
+            "action": {
+              "description": "Worker surface/action to open or focus for takeover/visibility.",
+              "enum": [
+                "terminal",
+                "files",
+                "browser",
+                "focus_browser",
+                "codex",
+                "claude",
+                "openclaw"
+              ],
+              "title": "Action",
+              "type": "string"
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Url"
+            },
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id",
+            "action"
+          ],
+          "title": "worker_desktop_actionArguments",
+          "type": "object"
+        }
+      },
+      "worker_find_or_resume": {
+        "inputSchema": {
+          "properties": {
+            "alias": {
+              "title": "Alias",
+              "type": "string"
+            },
+            "backend": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Legacy compatibility field. Prefer omitting it; GlassHive selects and reports workers from profile plus execution_mode. Only older clients should pass a backend value.",
+              "title": "Backend"
+            },
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "bootstrap_profile": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Bootstrap Profile"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "execution_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "docker",
+                    "host"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Execution surface. Omit to use the configured default. Use 'host' only when GlassHive instructions say host-native workers are enabled and the task depends on the user's real computer/session: local browser profile, desktop apps, local files/projects, installed CLIs, or OS tools. Use 'docker' for isolated sandbox/disposable/risky work.",
+              "title": "Execution Mode"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "owner_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Owner Id"
+            },
+            "profile": {
+              "default": "",
+              "description": "Worker CLI profile. Prefer 'codex-cli' for host browser/desktop/file/code execution when Codex is installed, 'claude-code' when Claude is explicitly requested, and 'openclaw-general' only when OpenClaw is installed or explicitly requested.",
+              "title": "Profile",
+              "type": "string"
+            },
+            "project_id": {
+              "title": "Project Id",
+              "type": "string"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "workspace_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Workspace Root"
+            }
+          },
+          "required": [
+            "project_id",
+            "name",
+            "role",
+            "alias"
+          ],
+          "title": "worker_find_or_resumeArguments",
+          "type": "object"
+        }
+      },
+      "worker_get": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_getArguments",
+          "type": "object"
+        }
+      },
+      "worker_interrupt": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_interruptArguments",
+          "type": "object"
+        }
+      },
+      "worker_live": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_liveArguments",
+          "type": "object"
+        }
+      },
+      "worker_message": {
+        "inputSchema": {
+          "properties": {
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id",
+            "message"
+          ],
+          "title": "worker_messageArguments",
+          "type": "object"
+        }
+      },
+      "worker_pause": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_pauseArguments",
+          "type": "object"
+        }
+      },
+      "worker_resume": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_resumeArguments",
+          "type": "object"
+        }
+      },
+      "worker_run": {
+        "inputSchema": {
+          "properties": {
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "instruction": {
+              "title": "Instruction",
+              "type": "string"
+            },
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id",
+            "instruction"
+          ],
+          "title": "worker_runArguments",
+          "type": "object"
+        }
+      },
+      "worker_schedule": {
+        "inputSchema": {
+          "properties": {
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "delay_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Delay Seconds"
+            },
+            "instruction": {
+              "title": "Instruction",
+              "type": "string"
+            },
+            "run_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Run At"
+            },
+            "schedule_text": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Schedule Text"
+            },
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id",
+            "instruction"
+          ],
+          "title": "worker_scheduleArguments",
+          "type": "object"
+        }
+      },
+      "worker_schedules": {
+        "inputSchema": {
+          "properties": {
+            "include_done": {
+              "default": false,
+              "title": "Include Done",
+              "type": "boolean"
+            },
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_schedulesArguments",
+          "type": "object"
+        }
+      },
+      "worker_takeover": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_takeoverArguments",
+          "type": "object"
+        }
+      },
+      "worker_terminate": {
+        "inputSchema": {
+          "properties": {
+            "worker_id": {
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "worker_terminateArguments",
+          "type": "object"
+        }
+      },
+      "workers_list": {
+        "inputSchema": {
+          "properties": {
+            "project_id": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id"
+          ],
+          "title": "workers_listArguments",
+          "type": "object"
+        }
+      },
+      "workspace_artifact_download": {
+        "inputSchema": {
+          "properties": {
+            "path": {
+              "description": "Workspace-relative file path, for example index.html or output/report.pdf.",
+              "title": "Path",
+              "type": "string"
+            },
+            "worker_id": {
+              "description": "Worker id from diagnostics, an explicit status result, or a known GlassHive workspace.",
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id",
+            "path"
+          ],
+          "title": "workspace_artifact_downloadArguments",
+          "type": "object"
+        }
+      },
+      "workspace_artifacts": {
+        "inputSchema": {
+          "properties": {
+            "include_download_links": {
+              "default": true,
+              "description": "Include short-lived signed download URLs for each file artifact.",
+              "title": "Include Download Links",
+              "type": "boolean"
+            },
+            "worker_id": {
+              "description": "Worker id from diagnostics, an explicit status result, or a known GlassHive workspace.",
+              "title": "Worker Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "worker_id"
+          ],
+          "title": "workspace_artifactsArguments",
+          "type": "object"
+        }
+      },
+      "workspace_continue": {
+        "inputSchema": {
+          "properties": {
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content is requested but no complete broker grant/config is supplied. Prior broker-absence warnings are re-evaluated against any fresh bootstrap bundle.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "continuation_goal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional extra instruction from the user, such as 'continue but avoid web search loops'.",
+              "title": "Continuation Goal"
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional effort override for this continuation. Codex accepts none/low/medium/high/xhigh; minimal is for explicitly allowlisted deployments only. Claude Code accepts max/xhigh; OpenClaw accepts high/max. Omit to use the user's saved default. For complex multi-source research, deep research, critical analysis, large file transformation, coding, comparison, or executive-quality deliverables, choose a higher effort setting: Codex high/xhigh, Claude max/xhigh, OpenClaw high/max, or the configured equivalent, unless the user clearly asks for a quick/cheap pass. For ordinary bounded tasks, omit effort unless the user explicitly asks for a cheaper/faster pass; user preferences and deployment defaults own the baseline.",
+              "title": "Effort"
+            },
+            "include_diagnostics": {
+              "default": false,
+              "description": "Include raw run/workspace ids and continuation diagnostics.",
+              "title": "Include Diagnostics",
+              "type": "boolean"
+            },
+            "run_id": {
+              "description": "Previous run id from diagnostics or an explicit workspace_status/workspace_wait result.",
+              "title": "Run Id",
+              "type": "string"
+            },
+            "worker_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional worker id. If omitted, GlassHive derives it from the previous run.",
+              "title": "Worker Id"
+            }
+          },
+          "required": [
+            "run_id"
+          ],
+          "title": "workspace_continueArguments",
+          "type": "object"
+        }
+      },
+      "workspace_launch": {
+        "inputSchema": {
+          "properties": {
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "context": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional background, constraints, uploaded file names/references, links, and preferences that help the worker execute well. Include only user-provided, retrieved, or explicitly requested background; do not add memory-derived priorities, active-thread/contact/deal lists, or guessed urgency rubrics unless the user asked for them. For vague user adjectives like urgent or important, pass the adjective through instead of defining a rubric unless the user defines it.",
+              "title": "Context"
+            },
+            "description": {
+              "description": "Describe your project or task in the user's own outcome language.",
+              "title": "Description",
+              "type": "string"
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-run effort override. Codex accepts none/low/medium/high/xhigh; minimal is for explicitly allowlisted deployments only. Claude Code accepts max/xhigh; OpenClaw accepts high/max. Omit to use saved user preferences or deployment default. For complex multi-source research, deep research, critical analysis, large file transformation, coding, comparison, or executive-quality deliverables, choose a higher effort setting: Codex high/xhigh, Claude max/xhigh, OpenClaw high/max, or the configured equivalent, unless the user clearly asks for a quick/cheap pass. For ordinary bounded tasks, omit effort unless the user explicitly asks for a cheaper/faster pass; user preferences and deployment defaults own the baseline.",
+              "title": "Effort"
+            },
+            "execution_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "docker",
+                    "host"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Execution surface. Omit to use the configured default. Use 'host' only when GlassHive instructions say host-native workers are enabled and the task depends on the user's real computer/session: local browser profile, desktop apps, local files/projects, installed CLIs, or OS tools. Use 'docker' for isolated sandbox/disposable/risky work.",
+              "title": "Execution Mode"
+            },
+            "expose_diagnostics": {
+              "default": false,
+              "title": "Expose Diagnostics",
+              "type": "boolean"
+            },
+            "profile": {
+              "default": "",
+              "description": "Worker CLI profile. Prefer 'codex-cli' for host browser/desktop/file/code execution when Codex is installed, 'claude-code' when Claude is explicitly requested, and 'openclaw-general' only when OpenClaw is installed or explicitly requested.",
+              "title": "Profile",
+              "type": "string"
+            },
+            "require_callback": {
+              "default": false,
+              "title": "Require Callback",
+              "type": "boolean"
+            },
+            "reuse_existing_workspace": {
+              "default": false,
+              "description": "Set true only when the user explicitly asked to resume/reuse the named workspace_alias. Leave false for fresh one-off tasks.",
+              "title": "Reuse Existing Workspace",
+              "type": "boolean"
+            },
+            "success_criteria": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-internal acceptance criteria. Use explicit user requirements only; when the user did not provide distinct acceptance criteria, omit this field or use only 'Satisfy the user's request as stated, preserving explicit constraints.' Treat supplied criteria as hard gates before reporting completion; put host-side orchestration checks, broker/tool availability, and other helpful background in context, not as worker blockers.",
+              "title": "Success Criteria"
+            },
+            "uploaded_files": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional attached/uploaded files to materialize in the workspace when the chat host does not project upload metadata through MCP headers. Use this only with file content or file references already visible in the current user request/model context. Prefer entries like [{'filename': 'brief.txt', 'text': '...'}]. If only a file name/id/reference is visible, pass that metadata so GlassHive can create an upload manifest and the worker can report a real blocker instead of pretending the file was read.",
+              "title": "Uploaded Files"
+            },
+            "workspace_alias": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional stable workspace alias. Honored only when reuse_existing_workspace is true; omit for a new one-off workspace.",
+              "title": "Workspace Alias"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "workspace_launchArguments",
+          "type": "object"
+        }
+      },
+      "workspace_preferences_get": {
+        "inputSchema": {
+          "properties": {},
+          "title": "workspace_preferences_getArguments",
+          "type": "object"
+        }
+      },
+      "workspace_preferences_set": {
+        "inputSchema": {
+          "properties": {
+            "claude_effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional Claude Code default effort: max, xhigh, or empty/default to use deployment default.",
+              "title": "Claude Effort"
+            },
+            "codex_reasoning_effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional Codex default effort: none, low, medium, high, xhigh, or empty to use deployment default; use minimal only when the deployment explicitly allowlists it.",
+              "title": "Codex Reasoning Effort"
+            },
+            "default_worker_profile": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional default worker profile: codex-cli, claude-code, or openclaw-general. Empty clears the saved default.",
+              "title": "Default Worker Profile"
+            },
+            "openclaw_effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional OpenClaw default effort: high, max, or empty/default to use deployment default.",
+              "title": "Openclaw Effort"
+            }
+          },
+          "title": "workspace_preferences_setArguments",
+          "type": "object"
+        }
+      },
+      "workspace_schedule": {
+        "inputSchema": {
+          "properties": {
+            "bootstrap_bundle_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional bootstrap bundle as either a JSON string or structured object. Use it to seed project_definition, prompt files, MCP config, env, and workspace files. For convenience, files may be either a list of file entries or an object mapping relative paths to content, for example {'project-definition.md': '# Task'}.",
+              "title": "Bootstrap Bundle Json"
+            },
+            "connected_account_content_intent": {
+              "default": false,
+              "description": "Optional compatibility hint for hosts that want GlassHive to warn when connected-account content was requested but no complete broker grant/config was supplied. Authorization comes only from a host-signed broker grant with content-read scope; this flag alone does not unlock reads or writes.",
+              "title": "Connected Account Content Intent",
+              "type": "boolean"
+            },
+            "context": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional background, constraints, files, links, and preferences that help the worker execute well. Include only user-provided, retrieved, or explicitly requested background; do not add memory-derived priorities, active-thread/contact/deal lists, or guessed urgency rubrics unless the user asked for them. For vague user adjectives like urgent or important, pass the adjective through instead of defining a rubric unless the user defines it.",
+              "title": "Context"
+            },
+            "delay_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional relative delay in seconds for deterministic automation/QA.",
+              "title": "Delay Seconds"
+            },
+            "description": {
+              "description": "Describe the later project or task in the user's outcome language.",
+              "title": "Description",
+              "type": "string"
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-run effort override for the scheduled workspace. For complex multi-source research, deep research, critical analysis, large file transformation, coding, comparison, or executive-quality deliverables, choose a higher effort setting: Codex high/xhigh, Claude max/xhigh, OpenClaw high/max, or the configured equivalent, unless the user clearly asks for a quick/cheap pass. For ordinary bounded tasks, omit effort unless the user explicitly asks for a cheaper/faster pass; user preferences and deployment defaults own the baseline.",
+              "title": "Effort"
+            },
+            "execution_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "docker",
+                    "host"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Execution surface. Omit to use the configured default. Use 'host' only when GlassHive instructions say host-native workers are enabled and the task depends on the user's real computer/session: local browser profile, desktop apps, local files/projects, installed CLIs, or OS tools. Use 'docker' for isolated sandbox/disposable/risky work.",
+              "title": "Execution Mode"
+            },
+            "expose_diagnostics": {
+              "default": false,
+              "title": "Expose Diagnostics",
+              "type": "boolean"
+            },
+            "profile": {
+              "default": "",
+              "description": "Worker CLI profile. Prefer 'codex-cli' for host browser/desktop/file/code execution when Codex is installed, 'claude-code' when Claude is explicitly requested, and 'openclaw-general' only when OpenClaw is installed or explicitly requested.",
+              "title": "Profile",
+              "type": "string"
+            },
+            "require_callback": {
+              "default": false,
+              "title": "Require Callback",
+              "type": "boolean"
+            },
+            "run_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional ISO datetime. Prefer this when the caller already resolved the due time.",
+              "title": "Run At"
+            },
+            "schedule_text": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Human schedule expression, for example 'in 20 minutes' or 'on Mondays'.",
+              "title": "Schedule Text"
+            },
+            "success_criteria": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional acceptance criteria. Use explicit user requirements only; when the user did not provide distinct acceptance criteria, omit this field or use only 'Satisfy the user's request as stated, preserving explicit constraints.' Treat supplied criteria as hard gates before reporting completion.",
+              "title": "Success Criteria"
+            },
+            "uploaded_files": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional attached/uploaded files to materialize in the workspace when the chat host does not project upload metadata through MCP headers. Use this only with file content or file references already visible in the current user request/model context. Prefer entries like [{'filename': 'brief.txt', 'text': '...'}]. If only a file name/id/reference is visible, pass that metadata so GlassHive can create an upload manifest and the worker can report a real blocker instead of pretending the file was read.",
+              "title": "Uploaded Files"
+            },
+            "workspace_alias": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional stable workspace alias to resume. Omit for a new one-off scheduled workspace.",
+              "title": "Workspace Alias"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "workspace_scheduleArguments",
+          "type": "object"
+        }
+      },
+      "workspace_status": {
+        "inputSchema": {
+          "properties": {
+            "include_diagnostics": {
+              "default": false,
+              "description": "Include raw run/workspace ids and live diagnostic snapshots.",
+              "title": "Include Diagnostics",
+              "type": "boolean"
+            },
+            "include_live": {
+              "default": true,
+              "description": "Include worker live details when worker_id is available.",
+              "title": "Include Live",
+              "type": "boolean"
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional run id from diagnostics or a prior explicit status result. Omit after a same-conversation launch when scoped recent dispatch is available.",
+              "title": "Run Id"
+            },
+            "worker_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional worker id for live state and View / Steer link. Omit after a same-conversation launch when scoped recent dispatch is available.",
+              "title": "Worker Id"
+            }
+          },
+          "title": "workspace_statusArguments",
+          "type": "object"
+        }
+      },
+      "workspace_wait": {
+        "inputSchema": {
+          "properties": {
+            "include_diagnostics": {
+              "default": false,
+              "description": "Include raw run/workspace ids and live diagnostic snapshots.",
+              "title": "Include Diagnostics",
+              "type": "boolean"
+            },
+            "include_live": {
+              "default": true,
+              "description": "Include worker live details in the final response when available.",
+              "title": "Include Live",
+              "type": "boolean"
+            },
+            "poll_interval_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional polling interval in seconds. Omit for the configured efficient default.",
+              "title": "Poll Interval Seconds"
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional run id from diagnostics or a prior explicit status result. Omit after a same-conversation launch when scoped recent dispatch is available.",
+              "title": "Run Id"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Maximum seconds to block before returning timeout status. Omit to use the configured GlassHive completion wait default.",
+              "title": "Timeout Seconds"
+            },
+            "worker_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional worker id for live state and View / Steer link.",
+              "title": "Worker Id"
+            }
+          },
+          "title": "workspace_waitArguments",
+          "type": "object"
+        }
+      }
+    }
+  },
+  "provider_model_attestation": {
+    "list_object": "list",
+    "models": {
+      "claude-code:opus": {
+        "capabilities": {
+          "activation_classifier": false,
+          "activity_stream": true,
+          "automatic_fallback_target": false,
+          "chat_completions": true,
+          "conversation_session": true,
+          "cortex_execution": true,
+          "incremental_text": false,
+          "main_chat": true,
+          "native_realtime_voice": false,
+          "native_tools": true,
+          "phase_b_followup": true,
+          "realtime_voice": false,
+          "responses_api": true,
+          "voice_pipeline_llm": true,
+          "workspace_binding": true
+        },
+        "context_window": 200000,
+        "created": "<timestamp>",
+        "display_name": "Claude / Opus",
+        "effort_choices": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "harness_profile": "claude-code",
+        "id": "claude-code:opus",
+        "native_model": "opus",
+        "object": "model",
+        "owned_by": "glasshive",
+        "readiness": {
+          "authentication": "<dynamic>",
+          "binary_available": "<dynamic>",
+          "detail": "<dynamic>",
+          "status": "<dynamic>"
+        },
+        "recommended_effort": "max"
+      },
+      "codex-cli:gpt-5.6-sol": {
+        "capabilities": {
+          "activation_classifier": false,
+          "activity_stream": true,
+          "automatic_fallback_target": false,
+          "chat_completions": true,
+          "conversation_session": true,
+          "cortex_execution": true,
+          "incremental_text": false,
+          "main_chat": true,
+          "native_realtime_voice": false,
+          "native_tools": true,
+          "phase_b_followup": true,
+          "realtime_voice": false,
+          "responses_api": true,
+          "voice_pipeline_llm": true,
+          "workspace_binding": true
+        },
+        "context_window": 272000,
+        "created": "<timestamp>",
+        "display_name": "Codex / GPT-5.6 Sol",
+        "effort_choices": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "harness_profile": "codex-cli",
+        "id": "codex-cli:gpt-5.6-sol",
+        "native_model": "gpt-5.6-sol",
+        "object": "model",
+        "owned_by": "glasshive",
+        "readiness": {
+          "authentication": "<dynamic>",
+          "binary_available": "<dynamic>",
+          "detail": "<dynamic>",
+          "status": "<dynamic>"
+        },
+        "recommended_effort": "medium"
+      }
+    }
+  },
+  "source": {
+    "baseline": "v1"
+  }
+}

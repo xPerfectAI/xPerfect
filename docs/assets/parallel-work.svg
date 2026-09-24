@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">xPerfect: working on several goals</title>
+  <desc id="desc">You ask once in a conversation. The coordinator AI answers directly or gives goals to workers, each in its own workspace. A goal starts when its account and machine capacity are ready; otherwise it waits and says why. Finished results are combined into one answer automatically, and a failed combine can be retried. Ten goals do not mean ten workers at once.</desc>
+  <rect width="1600" height="900" fill="#151a20"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" orient="auto">
+      <path d="M1 1 L11 6 L1 11" fill="none" stroke="#63d7b0" stroke-width="2"/>
+    </marker>
+  </defs>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#f3f4f1">
+    <text x="70" y="75" font-size="24" fill="#63d7b0" letter-spacing="3">xPerfect / SEVERAL GOALS</text>
+    <text x="70" y="145" font-size="52" font-weight="700">Ask once. The AI decides who works.</text>
+    <text x="70" y="195" font-size="26" fill="#b8c4ce">One conversation keeps every goal. Each worker starts when its account and capacity are ready.</text>
+
+    <rect x="70" y="270" width="250" height="150" rx="14" fill="#232c35"/>
+    <text x="95" y="318" font-size="29" font-weight="700">You ask</text>
+    <text x="95" y="356" font-size="22" fill="#c6d0d8">Several goals</text>
+    <text x="95" y="386" font-size="22" fill="#c6d0d8">in one message</text>
+
+    <rect x="370" y="270" width="290" height="150" rx="14" fill="#234239"/>
+    <text x="395" y="318" font-size="29" font-weight="700" fill="#8af0cb">Coordinator AI</text>
+    <text x="395" y="356" font-size="22" fill="#d0e7de">Answers directly or</text>
+    <text x="395" y="386" font-size="22" fill="#d0e7de">gives goals to workers</text>
+
+    <rect x="710" y="240" width="500" height="400" rx="14" fill="none" stroke="#60717c" stroke-width="2"/>
+    <text x="735" y="282" font-size="25" font-weight="700">Workers, each in its own workspace</text>
+    <g fill="#151a20" stroke="#60717c">
+      <rect x="735" y="305" width="450" height="92" rx="10"/>
+      <rect x="735" y="415" width="450" height="92" rx="10"/>
+      <rect x="735" y="525" width="450" height="92" rx="10"/>
+    </g>
+    <text x="760" y="343" font-size="24">Goal A · Complete</text>
+    <text x="760" y="377" font-size="20" fill="#c6d0d8">Result saved</text>
+    <text x="760" y="453" font-size="24">Goal B · Working</text>
+    <text x="760" y="487" font-size="20" fill="#c6d0d8">Watch it, give guidance or stop it</text>
+    <text x="760" y="563" font-size="24">Goal C · Waiting to start</text>
+    <text x="760" y="597" font-size="20" fill="#c6d0d8">Account busy or not enough memory</text>
+
+    <rect x="1260" y="270" width="270" height="150" rx="14" fill="#234239"/>
+    <text x="1285" y="318" font-size="29" font-weight="700" fill="#8af0cb">One answer</text>
+    <text x="1285" y="356" font-size="22" fill="#d0e7de">Results combined</text>
+    <text x="1285" y="386" font-size="22" fill="#d0e7de">automatically</text>
+
+    <g stroke="#63d7b0" stroke-width="3" fill="none" marker-end="url(#arrow)">
+      <path d="M320 345 H362"/>
+      <path d="M660 345 H702"/>
+      <path d="M1210 345 H1252"/>
+    </g>
+    <text x="1260" y="470" font-size="21" fill="#c6d0d8">If combining fails,</text>
+    <text x="1260" y="500" font-size="21" fill="#c6d0d8">Retry uses the</text>
+    <text x="1260" y="530" font-size="21" fill="#c6d0d8">saved results.</text>
+
+    <text x="70" y="712" font-size="25">Ten goals do not mean ten workers at once. Accounts, memory and limits decide what runs now.</text>
+    <path d="M70 743 H1530" stroke="#35414b"/>
+    <text x="70" y="790" font-size="25">On your computer, workers run there. Hosted, they run in containers on your server.</text>
+    <text x="70" y="838" font-size="23" fill="#b8c4ce">xPerfect runs on your computer or a server.</text>
+  </g>
+</svg>

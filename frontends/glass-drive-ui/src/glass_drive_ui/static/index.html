@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>xPerfect</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260923primary2" />
+  </head>
+  <body class="launch-body">
+    <main class="launch-shell">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+      <section class="composer-frame" data-active-view="project">
+        <div class="brand-row">
+          <a class="brand-mark" href="/" aria-label="xPerfect home">xPerfect</a>
+          <div class="view-tabs" role="tablist" aria-label="xPerfect views">
+            <a class="view-tab" href="/conversation">Conversation</a>
+            <button id="project-tab" class="view-tab" type="button" role="tab" aria-selected="true" aria-controls="project-view" data-view-tab="project">Run project</button>
+            <button id="workspaces-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="workspace-view" data-view-tab="workspaces">Workspaces</button>
+            <button id="connections-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="connections-view" data-view-tab="connections">Connections</button>
+            <button id="library-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="library-view" data-view-tab="library">Library</button>
+            <button id="schedules-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="schedules-view" data-view-tab="schedules">Schedules</button>
+            <button id="activity-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-view" data-view-tab="activity">Activity</button>
+          </div>
+          <div id="current-user-control" class="current-user-control" hidden>
+            <span id="current-user-label" class="current-user-label"></span>
+            <button id="switch-account" class="account-action" type="button">Switch account</button>
+            <button id="local-sign-out" class="account-action" type="button">Sign out here</button>
+          </div>
+        </div>
+        <aside id="capability-review-banner" class="capability-review-banner" aria-live="polite" hidden></aside>
+        <section id="project-view" class="project-view" role="tabpanel" aria-labelledby="project-tab">
+          <div class="composer-copy">
+            <h1>What would you like to do?</h1>
+          </div>
+          <form id="launch-form" class="composer-form">
+            <label class="project-field project-field-main">
+              <span class="sr-only">Your goal</span>
+              <textarea id="description" name="description" rows="4" placeholder="Describe what you want done…" required></textarea>
+            </label>
+            <div class="project-details" aria-label="Optional project details">
+              <div class="project-details-grid">
+                <label class="project-field">
+                  <span>Success criteria <small>(optional)</small></span>
+                  <textarea id="success_criteria" name="success_criteria" rows="3" placeholder="Anything the result must include?"></textarea>
+                </label>
+                <label class="project-field">
+                  <span>Background <small>(optional)</small></span>
+                  <textarea id="context" name="context" rows="3" placeholder="Helpful context, links, or constraints."></textarea>
+                </label>
+              </div>
+            </div>
+            <section class="project-details" aria-label="Who and where">
+              <div class="project-details-grid launch-choice-grid">
+                <label class="project-field">
+                  <span>Worker</span>
+                  <select id="workspace-option" name="workspace_option"></select>
+                  <small id="workspace-help" class="field-help"></small>
+                  <small id="worker-account-summary" class="worker-account-summary" aria-live="polite"></small>
+                </label>
+                <div id="worker-account-field" class="project-field">
+                  <label for="provider-account-selection">Account</label>
+                  <select id="provider-account-selection" name="provider_account_id">
+                    <option value="">Checking account options…</option>
+                  </select>
+                  <small id="provider-account-help" class="field-help">Checking account options…</small>
+                  <button id="connect-worker-account" class="text-action" type="button" hidden>Connect an account</button>
+                </div>
+                <label class="project-field">
+                  <span>Workspace</span>
+                  <select id="workspace-mode" name="workspace_mode">
+                    <option value="isolated" selected>Separate workspace (default)</option>
+                    <option value="shared">Shared workspace</option>
+                  </select>
+                  <small id="workspace-mode-help" class="field-help">One worker with its own files and history.</small>
+                </label>
+                <label id="workspace-file-placement-field" class="project-field" hidden>
+                  <span>Project files</span>
+                  <select id="workspace-file-placement" name="workspace_file_placement">
+                    <option value="common" selected>Common project files</option>
+                    <option value="member_private">Private files per member</option>
+                  </select>
+                  <small class="field-help">Members share the workspace. Native account homes stay private.</small>
+                </label>
+              </div>
+            </section>
+            <section class="composer-files" aria-labelledby="composer-files-title">
+              <div class="composer-files-heading">
+                <div>
+                  <h2 id="composer-files-title">Files</h2>
+                </div>
+                <div class="file-choose-actions">
+                  <button class="file-choose" id="project-add-files" type="button">Add files</button>
+                  <button class="file-choose file-clear-all" id="project-clear-all-files" type="button" hidden>Clear all files</button>
+                  <details class="file-row-menu">
+                    <summary aria-label="More file options">⋯</summary>
+                    <button id="project-add-folder" type="button">Add folder</button>
+                  </details>
+                </div>
+              </div>
+              <div id="project-file-drop" class="file-drop" tabindex="0" role="button" aria-label="Choose files or drop them here">
+                <span>Drop files here</span>
+                <small id="file-help" aria-live="polite"></small>
+              </div>
+              <input id="project-files" name="files" type="file" multiple hidden />
+              <input id="project-folder" type="file" webkitdirectory directory multiple hidden />
+              <div id="project-file-batch" class="draft-file-batch" hidden>
+                <span id="project-file-selected" aria-live="polite"></span>
+                <button id="project-file-move" class="file-choose" type="button">Move selected</button>
+                <button id="project-file-export" class="file-choose" type="button">Download ZIP</button>
+                <button id="project-file-clear" class="file-choose" type="button">Clear selection</button>
+              </div>
+              <ul id="project-file-list" class="project-file-list" aria-label="Selected files"></ul>
+              <p id="project-file-status" class="file-status" role="status" aria-live="polite" hidden></p>
+              <p id="project-file-budget" class="file-budget" role="status"></p>
+              <dialog id="project-file-move-dialog" class="file-move-dialog" aria-labelledby="project-file-move-title">
+                <h3 id="project-file-move-title">Move selected files</h3>
+                <p id="project-file-move-location">Draft root</p>
+                <button id="project-file-move-parent" type="button">← Parent folder</button>
+                <ul id="project-file-move-folders" class="project-file-list" aria-label="Draft folders"></ul>
+                <p id="project-file-move-error" role="alert" hidden></p>
+                <div class="file-move-actions">
+                  <button id="project-file-move-new" type="button">New folder</button>
+                  <button id="project-file-move-cancel" type="button">Cancel</button>
+                  <button id="project-file-move-confirm" type="button">Move here</button>
+                </div>
+              </dialog>
+            </section>
+            <div class="launch-footer">
+              <div class="launch-actions">
+                <button id="launch-button" type="submit" class="primary-button" value="launch">Run Project</button>
+              </div>
+            </div>
+            <p id="launch-status" class="launch-status" aria-live="polite"></p>
+            <details class="advanced-panel">
+              <summary>More settings</summary>
+              <div class="advanced-grid">
+                <label class="advanced-field">
+                  <span>Workspace Type</span>
+                  <select id="workspace-type" name="workspace_type"></select>
+                  <small id="workspace-type-help">Runs on managed workspace compute.</small>
+                  <input id="launch-surface" name="launch_surface" type="hidden" value="desktop" />
+                </label>
+                <label class="advanced-field">
+                  <span>Default Worker</span>
+                  <select id="default-worker-profile" name="default_worker_profile"></select>
+                  <small>Saved per user. MCP launches use this when no worker is specified.</small>
+                </label>
+                <label id="provider-account-policy-field" class="advanced-field">
+                  <span>Account fallback</span>
+                  <select id="provider-account-policy" name="provider_account_policy">
+                    <option value="personal_required" selected>Only my account; never fall back</option>
+                    <option value="personal_preferred">Prefer my account; allow deployment fallback</option>
+                    <option value="legacy">Use deployment-managed account</option>
+                  </select>
+                  <small>The default stops if your account is unavailable.</small>
+                </label>
+                <label class="advanced-field" data-effort-profile="codex-cli">
+                  <span>Codex Effort</span>
+                  <select id="codex-effort" name="codex_reasoning_effort">
+                    <option value="">Deployment default</option>
+                    <option value="none">None</option>
+                    <option value="minimal">Minimal</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="xhigh">X-High</option>
+                  </select>
+                  <small>Applied to new Codex workspaces and MCP runs.</small>
+                </label>
+                <label class="advanced-field" data-effort-profile="claude-code">
+                  <span>Claude Effort</span>
+                  <select id="claude-effort" name="claude_effort">
+                    <option value="">Deployment default</option>
+                    <option value="max">Max</option>
+                    <option value="xhigh">X-High</option>
+                  </select>
+                  <small>For Claude Code profiles that support deeper work.</small>
+                </label>
+                <label class="advanced-field" data-effort-profile="grok-build">
+                  <span>Grok effort</span>
+                  <input id="grok-effort" maxlength="64" placeholder="Native default" aria-label="Grok native reasoning effort ID" />
+                  <small>Optional native effort ID. Grok verifies support for the selected model.</small>
+                </label>
+                <label class="advanced-field" data-effort-profile="openclaw-general">
+                  <span>OpenClaw Effort</span>
+                  <select id="openclaw-effort" name="openclaw_effort">
+                    <option value="">Deployment default</option>
+                    <option value="high">High</option>
+                    <option value="max">Max</option>
+                  </select>
+                  <small>Passed as a run preference for OpenClaw workers.</small>
+                </label>
+                <label class="advanced-field">
+                  <span>Schedule</span>
+                  <input id="schedule-text" name="schedule_text" type="text" placeholder="in 20 minutes, on Mondays, or leave blank" />
+                </label>
+              </div>
+              <div class="advanced-actions">
+                <button id="schedule-button" type="submit" class="secondary-button" value="schedule">Schedule</button>
+                <button id="save-preferences" type="button">Save defaults</button>
+                <small id="preferences-status" aria-live="polite"></small>
+              </div>
+            </details>
+          </form>
+        </section>
+        <section id="workspace-view" class="workspace-hive" role="tabpanel" aria-labelledby="workspaces-tab" hidden>
+          <div class="workspace-hive-head">
+            <div>
+              <h1>Workspaces</h1>
+              <p id="workspace-hive-summary">Loading workspaces…</p>
+            </div>
+            <div class="workspace-view-controls" aria-label="Workspace view options">
+              <label class="workspace-search">
+                <span class="sr-only">Search workspaces</span>
+                <input id="workspace-search" type="search" placeholder="Search workspaces" autocomplete="off" />
+              </label>
+              <label class="workspace-filter-control">
+                <span class="sr-only">Workspace kind</span>
+                <select id="workspace-kind-filter" aria-label="Workspace kind">
+                  <option value="named">Saved workspaces</option>
+                  <option value="ephemeral">One-off runs</option>
+                  <option value="legacy">Legacy workspaces</option>
+                  <option value="named,ephemeral,legacy" selected>All workspaces</option>
+                </select>
+              </label>
+              <label class="workspace-search workspace-tag-search">
+                <span class="sr-only">Filter by tag</span>
+                <input id="workspace-tag-filter" type="search" placeholder="Filter by tag" autocomplete="off" />
+              </label>
+              <span>View</span>
+              <label class="workspace-view-toggle">
+                <input id="show-inactive-workspaces" type="checkbox" checked />
+                <span>Inactive Workspaces</span>
+              </label>
+              <label class="workspace-view-toggle">
+                <input id="show-workspace-watch" type="checkbox" checked />
+                <span>Watch</span>
+              </label>
+              <label class="workspace-view-toggle">
+                <input id="show-workspace-status" type="checkbox" checked />
+                <span>Status Report</span>
+              </label>
+            </div>
+          </div>
+          <details id="workspace-template-panel" class="workspace-template-panel">
+            <summary>Start from template</summary>
+            <form id="workspace-template-start-form" class="workspace-template-form">
+              <label>
+                <span>Template</span>
+                <select id="workspace-template-select">
+                  <option value="">No saved templates yet</option>
+                </select>
+              </label>
+              <label>
+                <span>New workspace name <small>(optional)</small></span>
+                <input id="workspace-template-instance-name" type="text" maxlength="160" placeholder="Fresh research desk" />
+              </label>
+              <div>
+                <p id="workspace-template-meta" class="card-note">Templates create a fresh paused workspace. Connected capabilities require fresh approval.</p>
+                <p id="workspace-template-start-status" class="inline-status" aria-live="polite"></p>
+              </div>
+              <button id="workspace-template-start" class="primary-button compact-button" type="submit">Start workspace</button>
+            </form>
+          </details>
+          <div id="workspace-hive-grid" class="workspace-hive-grid" aria-live="polite"></div>
+          <p id="workspace-hive-empty" class="workspace-hive-empty" hidden>No active workspaces right now.</p>
+          <div class="workspace-catalog-more">
+            <button id="workspace-load-more" class="quiet-button" type="button" hidden>Load more workspaces</button>
+            <span id="workspace-catalog-status" class="inline-status" aria-live="polite"></span>
+          </div>
+        </section>
+        <section id="connections-view" class="control-plane-view" role="tabpanel" aria-labelledby="connections-tab" hidden>
+          <header class="control-plane-head">
+            <div>
+              <h1>Connections</h1>
+            </div>
+            <button id="refresh-connections" class="quiet-button" type="button" aria-label="Refresh connections">Refresh</button>
+          </header>
+          <div class="connections-stack">
+            <section class="control-card connections-primary-card">
+              <div class="control-card-head">
+                <div>
+                  <h2>AI accounts</h2>
+                </div>
+              </div>
+              <div id="provider-account-list" class="connection-list" aria-live="polite"></div>
+              <p id="provider-account-status" class="inline-status" aria-live="polite"></p>
+              <div id="grok-model-choice" class="native-model-choice" hidden>
+                <label for="grok-native-model">Grok model</label>
+                <p id="grok-model-description"></p>
+                <div class="native-model-actions">
+                  <select id="grok-native-model" aria-label="Grok model"></select>
+                  <button id="save-grok-native-model" class="quiet-button" type="button">Use model</button>
+                </div>
+                <p id="grok-model-status" class="inline-status" role="status"></p>
+              </div>
+              <div id="provider-setup-panel" class="provider-setup-panel" hidden>
+                <div class="setup-guide-head">
+                  <div>
+                    <strong>Finish connecting</strong>
+                    <span id="provider-setup-guidance">Open sign-in, then enter the code.</span>
+                  </div>
+                </div>
+                <a id="provider-setup-link" class="primary-button setup-primary-action" href="#" target="_blank" rel="noopener" hidden>Open sign-in</a>
+                <form id="provider-setup-input-form" class="setup-input-form" hidden>
+                  <label for="provider-setup-input">Authentication code</label>
+                  <div class="setup-input-row">
+                    <input
+                      id="provider-setup-input"
+                      type="password"
+                      autocomplete="one-time-code"
+                      autocapitalize="none"
+                      spellcheck="false"
+                      maxlength="1024"
+                      aria-describedby="provider-setup-input-help"
+                      placeholder="Paste the code from Claude"
+                      required
+                    />
+                    <button id="submit-provider-setup-input" class="primary-button compact-button" type="submit">Finish connecting</button>
+                  </div>
+                  <span id="provider-setup-input-help">Sent once to Claude. xPerfect does not store this code.</span>
+                </form>
+                <div id="provider-setup-code-row" class="setup-code-row" hidden>
+                  <div>
+                    <span>One-time code</span>
+                    <code id="provider-setup-code"></code>
+                  </div>
+                  <button id="copy-provider-setup-code" class="quiet-button" type="button">Copy code</button>
+                </div>
+                <div class="setup-secondary-actions">
+                  <button id="cancel-provider-setup" class="text-button" type="button">Cancel</button>
+                </div>
+                <details id="provider-setup-technical" class="setup-technical">
+                  <summary>Having trouble?</summary>
+                  <div class="setup-troubleshooting-actions">
+                    <a id="provider-setup-help" class="setup-help-link" href="#" target="_blank" rel="noopener" hidden>Open ChatGPT security settings</a>
+                    <button id="restart-provider-setup" class="text-button" type="button">Restart sign-in</button>
+                  </div>
+                  <div id="provider-setup-instructions" class="setup-instructions"></div>
+                </details>
+              </div>
+              <details id="provider-install-help" class="connection-disclosure">
+                <summary>Setup help</summary>
+                <p id="native-provider-note"></p>
+                <p>Install the provider CLI on this host before connecting: <a href="https://developers.openai.com/codex/cli/" target="_blank" rel="noopener noreferrer">Codex</a>, <a href="https://code.claude.com/docs/en/setup" target="_blank" rel="noopener noreferrer">Claude Code</a>, or <a href="https://github.com/xai-org/grok-build" target="_blank" rel="noopener noreferrer">Grok</a>.</p>
+              </details>
+              <details id="add-provider-account" class="connection-disclosure">
+                <summary>Connect another account</summary>
+                <form id="provider-account-form" class="account-form">
+                  <label>
+                    <span>AI</span>
+                    <select id="provider-account-provider" name="provider"></select>
+                  </label>
+                  <label>
+                    <span>Sign in with</span>
+                    <select id="provider-account-method" name="auth_method"></select>
+                  </label>
+                  <label class="account-label-field">
+                    <span>Name</span>
+                    <input id="provider-account-label" name="label" type="text" maxlength="160" placeholder="Personal account" required />
+                  </label>
+                  <label id="provider-api-key-field" hidden>API key
+                    <input id="provider-api-key" type="password" autocomplete="off" spellcheck="false" maxlength="8192" />
+                    <span>Stored privately on this host. Sent only to the selected provider.</span>
+                  </label>
+                  <label class="default-account-toggle">
+                    <input id="provider-account-default" name="make_default" type="checkbox" />
+                    <span>Use by default</span>
+                  </label>
+                  <button class="primary-button compact-button" type="submit">Connect</button>
+                </form>
+              </details>
+            </section>
+            <section id="connected-services-card" class="control-card compact-connections-card" hidden>
+              <h2>Connected tools</h2>
+              <div id="data-connection-list" class="connection-list" aria-live="polite"></div>
+              <a id="manage-connections-link" class="card-action" href="#" hidden>Manage tools</a>
+            </section>
+            <details id="connect-ai-advanced" class="connection-disclosure connect-ai-card">
+              <summary>Use xPerfect from another AI app</summary>
+              <div class="advanced-connection-content">
+                <p id="connect-ai-supported-summary">Control your workspaces from a supported AI app.</p>
+                <div class="connect-ai-modes" role="tablist" aria-label="Connection setup method">
+                  <button id="connect-ai-auto-tab" class="connect-ai-mode" type="button" role="tab" aria-selected="true" aria-controls="connect-ai-auto-panel">Automatic</button>
+                  <button id="connect-ai-manual-tab" class="connect-ai-mode" type="button" role="tab" aria-selected="false" aria-controls="connect-ai-manual-panel">Manual</button>
+                </div>
+                <section id="connect-ai-auto-panel" class="connect-ai-panel" role="tabpanel" aria-labelledby="connect-ai-auto-tab">
+                  <span class="section-kicker">Recommended</span>
+                  <h3>Connect this AI</h3>
+                  <p id="connect-ai-auto-copy">Paste once. Your AI follows only its own setup.</p>
+                  <div class="command-row connect-ai-prompt-row">
+                    <div class="command-copy"><code id="connect-ai-auto-prompt"></code></div>
+                    <button id="copy-connect-ai-prompt" class="quiet-button" type="button">Copy connect instruction</button>
+                  </div>
+                </section>
+                <section id="connect-ai-manual-panel" class="connect-ai-panel" role="tabpanel" aria-labelledby="connect-ai-manual-tab" hidden>
+                  <h3>Add the server yourself</h3>
+                  <p>Paste this address into your AI app’s Streamable HTTP or MCP server setting.</p>
+                  <div class="command-row">
+                    <div class="command-copy"><strong>xPerfect server</strong><code id="connect-ai-server-url"></code></div>
+                    <button id="copy-connect-ai-url" class="quiet-button" type="button">Copy server address</button>
+                  </div>
+                  <div id="connect-ai-clients" class="command-list" aria-live="polite"></div>
+                  <details id="connect-ai-terminal-setup" class="connection-disclosure nested-disclosure">
+                    <summary>Terminal setup</summary>
+                    <div id="connect-ai-commands" class="command-list" aria-live="polite"></div>
+                  </details>
+                  <details id="connect-ai-registration-details" class="connection-disclosure nested-disclosure">
+                    <summary>Administrator registration details</summary>
+                    <p>These loopback addresses are registration references. Do not open this address by itself.</p>
+                    <div id="connect-ai-callbacks" class="command-list"></div>
+                  </details>
+                </section>
+                <p id="connect-ai-source" class="card-note"></p>
+              </div>
+            </details>
+          </div>
+        </section>
+        <section id="library-view" class="control-plane-view" role="tabpanel" aria-labelledby="library-tab" hidden>
+          <header class="control-plane-head">
+            <div>
+              <span class="section-kicker">Reusable capabilities</span>
+              <h1>Library</h1>
+              <p>Discover approved skills, tools, and connectors, then grant them to the workspace that needs them.</p>
+            </div>
+          </header>
+          <section class="control-card library-request-card" aria-labelledby="library-request-title">
+            <span class="section-kicker">Use the worker’s native setup</span>
+            <h2 id="library-request-title">Add a skill, tool, plugin, or connector</h2>
+            <p>Tell a saved workspace what you want to add. Its Claude, Codex, or other worker will inspect the source and use the supported native setup flow. Interactive sign-in or new permissions stay visible to you.</p>
+            <form id="library-request-form" class="library-request-form">
+              <label>
+                Workspace
+                <select id="library-request-workspace" required></select>
+              </label>
+              <label>
+                What should xPerfect add?
+                <textarea id="library-request-text" rows="3" maxlength="10000" placeholder="Add the skill from https://… and verify it works in this workspace." required></textarea>
+              </label>
+              <p class="card-note">This sends a workspace-only request to the worker you chose. It does not install anything globally or approve new access.</p>
+              <div class="library-request-actions">
+                <button class="primary-button compact-button" type="submit">Ask this workspace</button>
+                <span id="library-request-status" class="inline-status" aria-live="polite"></span>
+              </div>
+            </form>
+          </section>
+          <div id="library-list" class="library-grid" aria-live="polite"></div>
+          <p id="library-empty" class="workspace-hive-empty" hidden>No approved capabilities are available yet.</p>
+        </section>
+        <section id="schedules-view" class="control-plane-view" role="tabpanel" aria-labelledby="schedules-tab" hidden>
+          <header class="control-plane-head">
+            <div>
+              <span class="section-kicker">Schedule</span>
+              <h1>Schedules</h1>
+              <p>Give a workspace repeatable work, then review each result.</p>
+            </div>
+            <button id="new-schedule-action" class="primary-button compact-button" type="button">New schedule</button>
+          </header>
+          <div class="schedule-layout">
+            <section id="schedule-create-card" class="control-card schedule-create-card" aria-labelledby="recurring-schedule-form-title" hidden>
+              <div class="control-card-head">
+                <div>
+                  <span class="section-kicker">Set it once</span>
+                  <h2 id="recurring-schedule-form-title">New schedule</h2>
+                </div>
+              </div>
+              <form id="recurring-schedule-form" class="schedule-form">
+                <label>
+                  <span>Workspace</span>
+                  <select id="recurring-schedule-workspace">
+                    <option value="">Choose a workspace</option>
+                  </select>
+                  <div id="recurring-schedule-workspace-empty" class="schedule-workspace-empty" hidden>
+                    <span>No workspaces yet. Start a project, then schedule its workspace here.</span>
+                    <button id="recurring-schedule-create-workspace" class="quiet-button" type="button">Start project</button>
+                  </div>
+                  <small class="field-help">Scheduling a one-off run keeps it as a saved workspace.</small>
+                </label>
+                <label id="recurring-schedule-instruction-field">
+                  <span>What should this workspace do?</span>
+                  <textarea id="recurring-schedule-instruction" rows="4" maxlength="10000" placeholder="Create the weekly project update and save it in the workspace."></textarea>
+                </label>
+                <div id="recurring-schedule-fields" class="schedule-field-grid">
+                  <label>
+                    <span>Repeats</span>
+                    <select id="recurring-schedule-type">
+                      <option value="once">One time</option>
+                      <option value="daily">Every day</option>
+                      <option value="weekly">Every week</option>
+                      <option value="custom">Custom…</option>
+                    </select>
+                  </label>
+                  <label id="recurring-schedule-once-field">
+                    <span id="recurring-schedule-start-label">Choose date and time</span>
+                    <span class="schedule-date-input">
+                      <input id="recurring-schedule-starts-at" type="datetime-local" />
+                      <button id="recurring-schedule-tomorrow" class="quiet-button" type="button">Tomorrow · 9:00 AM</button>
+                    </span>
+                  </label>
+                  <label id="recurring-schedule-daily-field">
+                    <span>Time</span>
+                    <input id="recurring-schedule-local-time" type="time" value="09:00" />
+                  </label>
+                  <label id="recurring-schedule-weekly-field" hidden>
+                    <span>Every week on</span>
+                    <span class="schedule-weekly-inputs">
+                      <select id="recurring-schedule-weekday" aria-label="Weekday">
+                        <option value="MO">Monday</option>
+                        <option value="TU">Tuesday</option>
+                        <option value="WE">Wednesday</option>
+                        <option value="TH">Thursday</option>
+                        <option value="FR">Friday</option>
+                        <option value="SA">Saturday</option>
+                        <option value="SU">Sunday</option>
+                      </select>
+                      <input id="recurring-schedule-weekly-time" type="time" value="09:00" aria-label="Weekly time" />
+                    </span>
+                  </label>
+                  <label id="recurring-schedule-interval-field" hidden>
+                    <span>Repeat every</span>
+                    <span class="schedule-interval-inputs">
+                      <input id="recurring-schedule-interval-value" type="number" min="1" max="8784" value="1" inputmode="numeric" />
+                      <select id="recurring-schedule-interval-unit" aria-label="Repeat interval unit">
+                        <option value="seconds">seconds</option>
+                        <option value="hours">hours</option>
+                        <option value="days">days</option>
+                        <option value="weeks">weeks</option>
+                      </select>
+                    </span>
+                  </label>
+                  <label id="recurring-schedule-timezone-field">
+                    <span>Time zone <small>(change as needed)</small></span>
+                    <input id="recurring-schedule-timezone" type="text" value="UTC" autocomplete="off" placeholder="America/Toronto" />
+                    <small id="recurring-schedule-timezone-note" class="field-help">Times use this saved time zone.</small>
+                  </label>
+                  <label id="recurring-schedule-custom-type-field" hidden>
+                    <span>Custom type</span>
+                    <select id="recurring-schedule-custom-type">
+                      <option value="interval">Custom · interval</option>
+                      <option value="cron">Custom · cron</option>
+                      <option value="rfc5545">Custom · calendar rule</option>
+                    </select>
+                  </label>
+                  <label id="recurring-schedule-cron-field" hidden>
+                    <span>Custom cron schedule</span>
+                    <input id="recurring-schedule-cron" type="text" autocomplete="off" placeholder="0 9 * * 1-5" />
+                  </label>
+                  <label id="recurring-schedule-rrule-field" hidden>
+                    <span>Custom calendar rule</span>
+                    <input id="recurring-schedule-rrule" type="text" autocomplete="off" placeholder="FREQ=WEEKLY;BYDAY=MO;BYHOUR=9" />
+                  </label>
+                </div>
+                <details id="recurring-schedule-advanced" class="schedule-advanced">
+                  <summary>Reliability and time window</summary>
+                  <label>
+                    <span>When the clock repeats an hour</span>
+                    <select id="recurring-schedule-dst-policy">
+                      <option value="next_valid_earliest">Use the first matching time</option>
+                      <option value="next_valid_latest">Use the second matching time</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>End after (optional)</span>
+                    <input id="recurring-schedule-ends-at" type="datetime-local" />
+                  </label>
+                  <label class="schedule-checkbox-label">
+                    <input id="recurring-schedule-enabled" type="checkbox" checked />
+                    <span>Enabled immediately</span>
+                  </label>
+                  <label>
+                    <span>If the prior occurrence is still running</span>
+                    <select id="recurring-schedule-overlap-policy">
+                      <option value="skip">Skip the overlapping occurrence</option>
+                      <option value="queue">Queue one behind it</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Late-run grace (minutes)</span>
+                    <input id="recurring-schedule-misfire-grace" type="number" min="0" max="10080" value="5" inputmode="numeric" />
+                  </label>
+                  <label>
+                    <span>After downtime</span>
+                    <select id="recurring-schedule-catch-up-policy">
+                      <option value="skip">Skip missed occurrences</option>
+                      <option value="bounded">Catch up a limited number</option>
+                    </select>
+                  </label>
+                  <label id="recurring-schedule-catch-up-limit-field" hidden>
+                    <span>Maximum catch-up occurrences</span>
+                    <input id="recurring-schedule-catch-up-limit" type="number" min="1" max="10" value="1" inputmode="numeric" />
+                  </label>
+                  <label>
+                    <span>Dispatch jitter (seconds)</span>
+                    <input id="recurring-schedule-jitter" type="number" min="0" max="900" value="0" inputmode="numeric" />
+                  </label>
+                </details>
+                <div class="schedule-form-footer">
+                  <p id="recurring-schedule-status" class="inline-status" aria-live="polite"></p>
+                  <button id="recurring-schedule-cancel-edit" class="quiet-button" type="button" hidden>Cancel</button>
+                  <button id="recurring-schedule-submit" class="primary-button compact-button" type="submit">Create schedule</button>
+                </div>
+              </form>
+            </section>
+            <section class="schedule-list-panel" aria-labelledby="recurring-schedule-list-title">
+              <div class="schedule-list-head">
+                <div>
+                  <span class="section-kicker">Your account</span>
+                  <h2 id="recurring-schedule-list-title">Saved schedules</h2>
+                </div>
+                <button id="refresh-schedules" class="quiet-button" type="button">Refresh</button>
+              </div>
+              <div id="schedule-list" class="schedule-list" aria-live="polite">
+                <div class="empty-state-compact">
+                  <strong>No schedules yet</strong>
+                  <span>Choose New schedule to give a workspace repeatable work.</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+        <section id="activity-view" class="control-plane-view" role="tabpanel" aria-labelledby="activity-tab" hidden>
+          <header class="control-plane-head">
+            <div>
+              <span class="section-kicker">Across your workspaces</span>
+              <h1>Activity</h1>
+              <p>Recently active workspaces and their latest state, in one place.</p>
+            </div>
+          </header>
+          <div id="activity-list" class="activity-list" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
+    <dialog id="rename-workspace-dialog" class="workspace-dialog" aria-labelledby="rename-workspace-title">
+      <form id="rename-workspace-form" class="workspace-dialog-form">
+        <div>
+          <span class="section-kicker">Saved workspace</span>
+          <h2 id="rename-workspace-title">Workspace details</h2>
+          <p>Names and tags stay searchable. The workspace keeps the same files, history, and routing identity.</p>
+        </div>
+        <label>
+          <span>Name</span>
+          <input id="rename-workspace-name" type="text" maxlength="160" autocomplete="off" required />
+        </label>
+        <label>
+          <span>Tags <small>(comma-separated)</small></span>
+          <input id="rename-workspace-tags" type="text" maxlength="2079" autocomplete="off" placeholder="finance, quarterly" />
+        </label>
+        <p id="rename-workspace-status" class="inline-status" aria-live="polite"></p>
+        <div class="workspace-dialog-actions">
+          <button id="cancel-workspace-rename" class="quiet-button" type="button">Cancel</button>
+          <button class="primary-button compact-button" type="submit">Save details</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="save-template-dialog" class="workspace-dialog" aria-labelledby="save-template-title">
+      <form id="save-template-form" class="workspace-dialog-form">
+        <div>
+          <span class="section-kicker">Reusable workspace</span>
+          <h2 id="save-template-title">Save as template</h2>
+          <p>xPerfect saves reusable intent, exact Library versions, and an opaque worker-account reference—not files, sign-ins, credential homes, schedules, or history. The account is revalidated before use.</p>
+        </div>
+        <label>
+          <span>Template name</span>
+          <input id="save-template-name" type="text" maxlength="160" autocomplete="off" required />
+        </label>
+        <label>
+          <span>Description <small>(optional)</small></span>
+          <input id="save-template-description" type="text" maxlength="1000" autocomplete="off" />
+        </label>
+        <p id="save-template-status" class="inline-status" aria-live="polite"></p>
+        <div class="workspace-dialog-actions">
+          <button id="cancel-save-template" class="quiet-button" type="button">Cancel</button>
+          <button class="primary-button compact-button" type="submit">Save template</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="/static/app.js?v=20260923lifecycle1" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="same-origin" />
+    <title>xPerfect Desktop</title>
+    <link rel="stylesheet" href="/static/desktop.css?v=20260811m" />
+  </head>
+  <body>
+    <main id="desktop-shell">
+      <div id="desktop-stage"></div>
+      <div id="desktop-overlay">
+        <div class="overlay-copy">
+          <p class="overlay-label">xPerfect Desktop</p>
+          <h1 id="desktop-status">Connecting to sandbox…</h1>
+          <p id="desktop-detail">The live desktop will attach here automatically. Click once inside the surface to focus input and enable clipboard sync.</p>
+          <a id="workspace-status-link" href="#" hidden>Open workspace status and files</a>
+        </div>
+      </div>
+      <div id="clipboard-status">Clipboard sync: starting…</div>
+    </main>
+    <script src="/static/desktop.js?v=20260922brand1" type="module"></script>
+  </body>
+</html>
