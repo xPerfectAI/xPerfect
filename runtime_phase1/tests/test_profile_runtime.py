@@ -30,6 +30,7 @@ from workers_projects_runtime.bootstrap import (
     PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
 )
 from workers_projects_runtime.failure_classification import (
+    FailureClassification,
     classify_cli_failure,
     classify_runtime_error,
     is_user_resumable_failure,
@@ -1552,6 +1553,7 @@ def _docker_codex_typed_quota_control(
     reset_at: int,
     *,
     model_provider: str = "glasshive_openai_compatible",
+    authored: bool = False,
 ) -> str:
     snapshot = {
         "rateLimitReachedType": "workspace_member_usage_limit_reached",
@@ -1568,7 +1570,8 @@ def _docker_codex_typed_quota_control(
                         {
                             "id": "turn_docker_typed_quota",
                             "status": "failed",
-                            "items": [{"id": "item_user", "type": "userMessage"}],
+                            "items": [{"id": "item_user", "type": "userMessage"},
+                                      *([{"id": "item_agent", "type": "agentMessage"}] if authored else [])],
                             "error": {
                                 "message": "ignored provider prose",
                                 "codexErrorInfo": "usageLimitExceeded",
@@ -1690,6 +1693,37 @@ def test_docker_codex_uses_exact_container_typed_quota_and_reset_for_preauthorin
         "CODEX_HOME": f"{runtime.sandbox.home_mount}/.codex",
     }
     assert calls[0]["cwd"] == runtime.sandbox.workspace_mount
+
+
+def test_docker_codex_reports_typed_quota_after_authoring_without_automatic_retry(tmp_path):
+    runtime = CodexCliRuntime(base_dir=str(tmp_path / "runtime"))
+    worker = {"worker_id": "wrk_docker_authored_quota", "profile": "codex-cli",
+              "runtime": "codex-cli", "execution_mode": "docker"}
+    run_id = "run_docker_authored_quota"
+    container_id = "a" * 64
+    thread_id = "01900000-0000-7000-8000-000000000001"
+    reset_at = int((datetime.now(timezone.utc) + timedelta(days=5)).timestamp())
+    _prepare_docker_codex_provider_control(
+        runtime, worker, run_id=run_id, recorded_container_id=container_id,
+        fresh_container_id=container_id,
+        control_stdout=_docker_codex_typed_quota_control(thread_id, reset_at, authored=True),
+    )
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": thread_id}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "partial work"}}),
+        json.dumps({"type": "turn.failed", "error": {"message": "provider ended"}}),
+    ])
+
+    error = runtime._provider_process_exit_error_for_run(
+        worker=worker, run_id=run_id, exit_code=1, stdout=stdout,
+        stderr="", message="codex-cli exited with code 1",
+    )
+    failure = classify_runtime_error(error, runtime_name="codex-cli")
+    assert failure.failure_class == "provider_quota_exhausted"
+    assert failure.structured is True
+    assert failure.retryable is False
+    assert "not rerun automatically" in failure.recommended_recovery
 
 
 def test_docker_codex_uses_typed_quota_from_compiled_proxy_without_account_limits(
@@ -1822,7 +1856,7 @@ def test_docker_codex_rejects_run_container_generation_thread_or_provider_mismat
 
 
 @pytest.mark.parametrize("authored_item_type", ["agent_message", "command_execution"])
-def test_docker_codex_never_queries_provider_control_after_authored_or_tool_output(
+def test_docker_codex_rejects_authored_quota_prose_without_matching_typed_turn(
     tmp_path,
     authored_item_type,
 ):
@@ -1878,7 +1912,7 @@ def test_docker_codex_never_queries_provider_control_after_authored_or_tool_outp
         message="codex-cli exited with code 1",
     )
 
-    assert calls == []
+    assert len(calls) == 1
     assert classify_runtime_error(
         error, runtime_name="codex-cli"
     ).failure_class != "provider_quota_exhausted"
@@ -2077,18 +2111,18 @@ def test_host_codex_uses_typed_app_server_quota_and_exact_reset_for_the_failed_t
     assert evidence["evidence_kind"] == "codex_app_server"
 
 
-def test_host_codex_never_queries_account_health_after_provider_authoring(
+def test_host_codex_does_not_treat_authored_prose_as_typed_quota(
     tmp_path, monkeypatch
 ):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "runtime"))
     queried = False
 
-    def forbidden_query(*_args, **_kwargs):
+    def untyped_query(*_args, **_kwargs):
         nonlocal queried
         queried = True
-        raise AssertionError("authored output must not reach the quota adapter")
+        return None
 
-    monkeypatch.setattr(runtime, "_query_codex_provider_control", forbidden_query)
+    monkeypatch.setattr(runtime, "_query_codex_provider_control", untyped_query)
     worker = {
         "worker_id": "wrk_authored_codex_failure",
         "profile": "codex-cli",
@@ -2134,7 +2168,7 @@ def test_host_codex_never_queries_account_health_after_provider_authoring(
         message="codex-cli exited with code 1",
     )
 
-    assert queried is False
+    assert queried is True
     assert classify_runtime_error(
         error, runtime_name="codex-cli"
     ).failure_class != "provider_quota_exhausted"
@@ -2218,7 +2252,7 @@ def test_host_codex_rejects_app_server_message_without_typed_error_authority(
     )
 
 
-def test_host_codex_rejects_typed_quota_after_any_agent_authored_item(
+def test_host_codex_classifies_typed_quota_after_authoring_without_retry(
     tmp_path, monkeypatch
 ):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "runtime"))
@@ -2266,6 +2300,7 @@ def test_host_codex_rejects_typed_quota_after_any_agent_authored_item(
         [
             json.dumps({"type": "thread.started", "thread_id": thread_id}),
             json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "task-authored output"}}),
             json.dumps({"type": "error", "message": "ignored"}),
             json.dumps({"type": "turn.failed", "error": {"message": "ignored"}}),
         ]
@@ -2280,15 +2315,13 @@ def test_host_codex_rejects_typed_quota_after_any_agent_authored_item(
         message="codex-cli exited with code 1",
     )
 
-    assert classify_runtime_error(
-        error, runtime_name="codex-cli"
-    ).failure_class != "provider_quota_exhausted"
-    assert (
-        runtime.consume_provider_route_failure_evidence(
-            worker, {"run_id": "run_tampered_codex_transcript"}, error
-        )
-        is None
-    )
+    failure = classify_runtime_error(error, runtime_name="codex-cli")
+    assert failure.failure_class == "provider_quota_exhausted"
+    assert failure.structured is True
+    assert failure.retryable is False
+    assert runtime.consume_provider_route_failure_evidence(
+        worker, {"run_id": "run_tampered_codex_transcript"}, error
+    )["evidence_kind"] == "codex_app_server"
 
 
 def test_codex_provider_control_adapter_uses_exact_typed_protocol(tmp_path):
@@ -9479,6 +9512,26 @@ def test_provider_process_exit_preserves_structured_authentication_class():
     )
 
     assert error.failure_class == "provider_auth_missing"
+
+
+def test_authored_typed_rate_limit_does_not_become_automatic_retry():
+    classification = FailureClassification(
+        failure_class="provider_rate_limited",
+        retryable=False,
+        user_message="The selected provider reached its rate limit.",
+        recommended_recovery="Review prior work and continue after reset.",
+        diagnostic_summary="Typed failed turn after authoring.",
+        structured=True,
+        retry_after_s=3600,
+        provider_event_source="codex_app_server",
+    )
+    error = _provider_process_exit_error(
+        runtime_name="codex-cli", exit_code=1, stdout="", stderr="",
+        message="codex-cli exited with code 1", classification=classification,
+    )
+
+    assert type(error) is RuntimeErrorBase
+    assert classify_runtime_error(error, runtime_name="codex-cli") == classification
 
 
 def test_cli_failure_does_not_infer_authentication_from_unstructured_prose():

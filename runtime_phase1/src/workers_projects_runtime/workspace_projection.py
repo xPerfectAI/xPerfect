@@ -1,6 +1,7 @@
 """Exact member adapters for the existing durable provider account binder."""
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -44,6 +45,47 @@ def assert_native_launch(box, control_store):
     if inspected is None or inspected['Id'] != binding['container_id']:
         raise WorkspaceBoxUnavailable('Native account container generation changed')
     control_store.assert_provider_projection(binding=binding)
+
+
+def assert_native_resume(box, control_store, runtime_store, worker):
+    """Permit only the claimed paused run to continue its existing projection."""
+    pending = control_store.pending_provider_projections(worker_id=box.binding.worker_id)
+    if not pending:
+        return False
+    if len(pending) != 1 or pending[0]['state'] != 'pending':
+        raise WorkspaceBoxUnavailable('Native credential recovery holds this member')
+    binding = pending[0]['binding']
+    current = runtime_store.get_worker(box.binding.worker_id, box.binding.tenant_id,
+                                       box.binding.owner_id)
+    run = runtime_store.get_run(binding['run_id'])
+    expires = str((current or {}).get('compute_release_expires_at') or '')
+    try:
+        claim_live = datetime.fromisoformat(expires) > datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        claim_live = False
+    claim_fields = ('compute_release_token', 'compute_release_epoch',
+                    'compute_release_operation_id', 'compute_release_target_run_id',
+                    'compute_release_container_id')
+    if (not current or not run or not claim_live
+            or any(current.get(key) != worker.get(key) for key in claim_fields)
+            or not str(current.get('compute_release_token') or '')
+            or current.get('compute_release_kind') != 'resume_run'
+            or current.get('state') != 'paused'
+            or run.get('state') != 'paused'
+            or run.get('worker_id') != box.binding.worker_id
+            or run.get('run_id') != current.get('compute_release_target_run_id')
+            or str(run.get('started_at') or '') != str(current.get('compute_release_target_started_at') or '')
+            or str(run.get('active_attempt_id') or '') != binding['attempt_id']
+            or any(binding[key] != getattr(box.binding, attr) for key, attr in (
+                ('worker_id', 'worker_id'), ('workspace_id', 'workspace_id'),
+                ('tenant_id', 'tenant_id'), ('owner_id', 'owner_id'), ('member_uid', 'uid')))
+            or binding['container_id'] != current.get('compute_release_container_id')):
+        raise WorkspaceBoxUnavailable('Resume differs from the exact paused account run')
+    inspected = box._inspect()
+    if inspected is None or inspected['Id'] != binding['container_id']:
+        raise WorkspaceBoxUnavailable('Native account container generation changed')
+    control_store.assert_provider_projection(binding=binding)
+    return True
 
 
 def credential_command(command):

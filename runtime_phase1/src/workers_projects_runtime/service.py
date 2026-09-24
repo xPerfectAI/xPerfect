@@ -13011,6 +13011,14 @@ class WorkersProjectsService:
                 message,
             )
             raise
+        # Paused/admitted generations and their leases remain fenced until the
+        # runtime has confirmed the exact worker compute is gone.
+        self.store.cancel_pending_runs(
+            worker_id,
+            error_text="Worker terminated by operator",
+            state="cancelled",
+            compute_terminated=True,
+        )
         try:
             self._deactivate_delegated_schedules_for_closed_worker(worker)
         except Exception as exc:
@@ -13045,6 +13053,19 @@ class WorkersProjectsService:
         )
         if updated and str(updated.get("state") or "") == "termination_failed":
             raise RuntimeErrorBase("Workspace close needs attention before cleanup can complete")
+        # A verified last-member close can release its idle container now.  The
+        # runtime rechecks every durable member, lease, process and generation;
+        # failure to prove idleness leaves the box for normal capacity recovery.
+        release_idle_box = getattr(self.runtime, "release_idle_workspace_box", None)
+        if callable(release_idle_box):
+            try:
+                release_idle_box(updated or worker)
+            except Exception as exc:
+                logger.warning(
+                    "Idle workspace release after close could not be confirmed for %s: %s",
+                    worker_id,
+                    type(exc).__name__,
+                )
         self._wake_host_capacity_waiters(updated or worker)
         self._replay_pending_lifecycle_effects()
         return updated or worker
@@ -20266,7 +20287,7 @@ class WorkersProjectsService:
             self.store.get_worker(str(run.get("worker_id") or "")) if run else None
         )
         artifact_refs = work_artifact_observation(
-            worker,
+            self.files.artifact_worker(worker) if worker else None,
             run,
             output_text=output_text,
             error_text=error_text,
@@ -20304,7 +20325,7 @@ class WorkersProjectsService:
             if not run or not worker:
                 continue
             artifact_refs = work_artifact_observation(
-                worker,
+                self.files.artifact_worker(worker),
                 run,
                 output_text=str(run.get("output_text") or ""),
                 error_text=str(run.get("error_text") or ""),

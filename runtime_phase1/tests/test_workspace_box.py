@@ -268,10 +268,41 @@ def test_common_exec_uses_declared_root_group_and_immutable_guard(tmp_path, monk
     assert command[command.index('--user') + 1] == '20001:20000'
     assert command[command.index('--workdir') + 1] == '/workspace/common'
     assert command[command.index('exact-container') + 1:] == box.guarded_command(['cat', 'test.txt'])
+    assert '--env' in command
+    assert 'GIT_CONFIG_COUNT=1' in command
+    assert 'GIT_CONFIG_KEY_0=safe.directory' in command
+    assert 'GIT_CONFIG_VALUE_0=/workspace/common' in command
     assert box.paths()['home_dir'] != box.paths()['workspace_dir']
-    for key in ('PYTHONPATH', 'LD_PRELOAD', 'HOME', 'XAI_API_KEY'):
+    for key in ('PYTHONPATH', 'LD_PRELOAD', 'HOME', 'XAI_API_KEY',
+                'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'):
         with pytest.raises(ValueError):
             adapter.exec_command('wrk_one', 'codex-cli', ['true'], env={key: 'unsafe'})
+
+
+def test_native_shared_run_inherits_exact_git_trust(tmp_path, monkeypatch):
+    import subprocess
+    from workers_projects_runtime.docker_sandbox import DockerSandboxManager
+    from workers_projects_runtime.workspace_sandbox import WorkspaceMemberSandbox
+
+    box = WorkspaceBox(volume_root=tmp_path, volume_name='synthetic', image='reviewed',
+        binding=WorkspaceMemberBinding('wsp_shared', 'wrk_one', 'tenant', 'owner', 20001),
+        memory_bytes=1, pids_limit=1, file_placement='common')
+    adapter = WorkspaceMemberSandbox(box)
+    monkeypatch.setattr(box, '_inspect', lambda: {'Id': 'exact-container'})
+    captured = []
+
+    def fake_exec(_self, container_id, command, **kwargs):
+        captured.append((container_id, command, kwargs))
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    monkeypatch.setattr(DockerSandboxManager, '_docker_exec', fake_exec)
+    adapter._docker_exec(box.name, ['git', 'status', '--short'])
+    assert captured[0][0] == 'exact-container'
+    assert captured[0][2]['env']['GIT_CONFIG_COUNT'] == '1'
+    assert captured[0][2]['env']['GIT_CONFIG_KEY_0'] == 'safe.directory'
+    assert captured[0][2]['env']['GIT_CONFIG_VALUE_0'] == '/workspace/common'
+    with pytest.raises(WorkspaceBoxUnavailable, match='Git trust'):
+        adapter._docker_exec(box.name, ['true'], env={'GIT_CONFIG_VALUE_0': '*'})
 
 
 def test_existing_native_identity_lookup_does_not_start_nested_write(tmp_path):

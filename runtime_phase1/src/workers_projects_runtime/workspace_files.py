@@ -180,6 +180,11 @@ def artifact_worker_context(conn, worker: dict | None, *, files=None) -> dict | 
         worker = files._scope_worker(worker)
     tenant = str(worker.get("tenant_id") or "local")
     owner = str(worker.get("owner_id") or "")
+    workspace = conn.execute(
+        "SELECT mode FROM execution_workspaces WHERE workspace_id=? AND tenant_id=? AND owner_id=?",
+        (str(worker.get("workspace_id") or ""), tenant, owner),
+    ).fetchone()
+    worker = {**worker, "_execution_workspace_mode": str(workspace["mode"] or "") if workspace else ""}
     key = WorkspaceFiles._workspace_key(worker)
     entries = conn.execute(
         "SELECT e.path,e.version_id,e.deleted,u.sha256,u.size_bytes FROM workspace_file_entries e JOIN workspace_file_uploads u ON u.upload_id=e.version_id AND u.tenant_id=e.tenant_id AND u.owner_id=e.owner_id WHERE e.tenant_id=? AND e.owner_id=? AND e.workspace_key=?",

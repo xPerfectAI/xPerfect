@@ -14,6 +14,7 @@ from workers_projects_runtime.openclaw_runtime import RuntimeInfo, StubRuntime
 from workers_projects_runtime.service import WorkersProjectsService
 from workers_projects_runtime.store import RunRestorationState, Store
 from workers_projects_runtime.workspace_files import FileAdmissionError
+from workers_projects_runtime.workspace_files import artifact_worker_context
 
 
 class TemporaryWorkspaceRuntime(StubRuntime):
@@ -205,11 +206,19 @@ def test_workspace_catalog_is_owner_scoped_searchable_tagged_and_cursor_stable(t
     )
     older = create_stored_worker(store, project, name="Research Notes", tags=["Research"])
     newer = create_stored_worker(store, project, name="Finance Forecast", tags=["Finance"])
+    shared = store.create_execution_workspace(
+        project_id=project["project_id"], tenant_id="tenant-a",
+        owner_id="owner-a", execution_mode="docker",
+    )
     create_stored_worker(store, project, name="One-off Draft", workspace_kind="ephemeral", tags=["Finance"])
     other_project = create_project(store, "Other Owner", owner_id="owner-b")
     create_stored_worker(store, other_project, name="Another Owner", owner_id="owner-b", tags=["Finance"])
 
     with store._connect() as conn:
+        conn.execute(
+            "UPDATE workers SET workspace_id = ? WHERE worker_id = ?",
+            (shared["workspace_id"], favorite["worker_id"]),
+        )
         conn.execute(
             "UPDATE workers SET favorite = 1, updated_at = ? WHERE worker_id = ?",
             ("2026-01-01T00:00:00+00:00", favorite["worker_id"]),
@@ -235,6 +244,10 @@ def test_workspace_catalog_is_owner_scoped_searchable_tagged_and_cursor_stable(t
         assert [item["worker_id"] for item in filtered["items"]] == [favorite["worker_id"], newer["worker_id"]]
         assert filtered["items"][0]["tags"] == ["finance", "quarterly"]
         assert filtered["items"][0]["last_activity_at"]
+        assert filtered["items"][0]["execution_workspace_mode"] == "shared"
+        assert filtered["items"][1]["execution_workspace_mode"] == "isolated"
+        with store._connect() as conn:
+            assert artifact_worker_context(conn, store.get_worker(favorite["worker_id"]))["_execution_workspace_mode"] == "shared"
 
         first_page = service.list_workspace_catalog(
             tenant_id="tenant-a",

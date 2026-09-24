@@ -2118,6 +2118,7 @@ def create_app(
             "state",
             "favorite",
             "workspace_kind",
+            "execution_workspace_mode",
             "tags",
             "last_activity_at",
             "compute_released_at",
@@ -2632,7 +2633,7 @@ def create_app(
             latest_output = str(latest_run.get("output_text") or latest_run.get("error_text") or "")
         latest_image = None if compact else _latest_image_path(worker)
         deliverable = (
-            {}
+            None
             if compact
             else _deliverable_with_action_urls(
                 worker,
@@ -2667,6 +2668,13 @@ def create_app(
         )
         return {
             "worker": _sanitize_worker(worker) if show_internal else _redact_worker_for_member(worker),
+            "execution_workspace_mode": str(
+                (store.get_execution_workspace(
+                    str(worker.get("workspace_id") or ""),
+                    str(worker.get("tenant_id") or "local"),
+                    str(worker.get("owner_id") or ""),
+                ) or {}).get("mode") or "isolated"
+            ),
             "compact": compact,
             "active_run": active_run if show_internal or active_run is None else _redact_run_for_member(active_run),
             "latest_run": latest_run if show_internal or latest_run is None else _redact_run_for_member(latest_run),
