@@ -87,7 +87,9 @@ def test_unrelated_start_reaches_model_selection_while_first_is_blocked():
     class StopProbe(Exception):
         pass
 
-    def model(value):
+    def model(value, *, tenant_id, owner_id):
+        assert tenant_id == "local"
+        assert owner_id == "owner-a"
         if value == "first":
             first_entered.set()
             assert release.wait(2)

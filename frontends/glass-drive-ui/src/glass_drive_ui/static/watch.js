@@ -429,12 +429,12 @@ function setSurface(surface, { force = false } = {}) {
       stage.dataset.overlayActive = 'true';
     }
     if (overlayLabel) {
-      overlayLabel.textContent = state === 'ready' || state === 'idle' || state === 'completed' ? 'Workspace complete' : 'xPerfect desktop';
+      overlayLabel.textContent = state === 'ready' || state === 'idle' || state === 'completed' ? 'Workspace complete' : 'Workspace status';
     }
-    overlayTitle.textContent = state === 'idle' ? 'Worker idle' : state === 'completed' ? 'Work complete' : state === 'ready' ? 'Workspace ready' : 'Desktop unavailable';
+    overlayTitle.textContent = state === 'idle' ? 'Worker idle' : state === 'completed' ? 'Work complete' : state === 'ready' ? 'Workspace ready' : 'Work in progress';
     overlayDetail.textContent = state === 'ready' || state === 'idle' || state === 'completed'
       ? 'Send a follow-up below when you are ready.'
-      : 'This workspace does not currently expose a live desktop surface.';
+      : currentSummary || 'Follow progress in the workspace status above.';
     if (state === 'completed' && currentResultText) {
       stageResultText.textContent = currentResultText;
       stageResultText.hidden = false;
@@ -826,9 +826,14 @@ function renderOutput(data) {
   if (!currentFullOutput.trim()) closeResultPanel();
 }
 
+async function nativeHttpError(response) {
+  const body = await response.json().catch(() => null);
+  return new Error(typeof body?.detail === 'string' ? body.detail : `Native controls unavailable (${response.status}).`);
+}
+
 async function nativeGetJson(url) {
   const response = await fetch(withAuth(url), { cache: 'no-store' });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await nativeHttpError(response);
   return response.json();
 }
 
@@ -838,7 +843,7 @@ async function nativePostJson(url, payload) {
     headers: csrfHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload),
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw await nativeHttpError(response);
   return response.json();
 }
 

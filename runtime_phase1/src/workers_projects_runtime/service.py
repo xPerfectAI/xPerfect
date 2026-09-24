@@ -13694,6 +13694,12 @@ class WorkersProjectsService:
                 state = "ready" if info.pid else "paused"
                 return self._apply_runtime_info(worker_id, info, state=state, last_error=worker.get("last_error") or "") or worker
             return worker
+        # A normal authenticated read can call heal_worker while the local queue
+        # processor is still writing its exact attempt evidence. Let that
+        # processor finish its durable state transition; collecting the native
+        # exit marker here can falsely finalize the run before evidence lands.
+        if self._local_processor_owns(worker_id):
+            return worker
         recovered = self._collect_completed_run(worker, active_run)
         if not recovered:
             return worker

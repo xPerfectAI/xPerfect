@@ -51,6 +51,30 @@ def test_codex_npm_launcher_accepts_only_its_native_vendor_alias(account, monkey
         homes.tighten_permissions(account_home=home)
 
 
+def test_product_selected_symlinked_codex_launcher_is_the_only_accepted_alias(
+    account, monkeypatch, tmp_path
+):
+    homes, home, helpers, binary, auth = account
+    launcher = tmp_path / 'selected-codex'
+    launcher.symlink_to(binary)
+    monkeypatch.setattr(
+        'workers_projects_runtime.provider_accounts.provider_setup_binary',
+        lambda _: str(launcher),
+    )
+    helper = helpers / 'apply_patch'
+    helper.symlink_to(launcher)
+    homes.tighten_permissions(account_home=home)
+    assert auth.stat().st_mode & 0o777 == 0o600
+    assert helper.is_symlink()
+
+    alternate = tmp_path / 'other-codex-alias'
+    alternate.symlink_to(binary)
+    helper.unlink()
+    helper.symlink_to(alternate)
+    with pytest.raises(ControlPlaneError, match='unsafe link'):
+        homes.tighten_permissions(account_home=home)
+
+
 @pytest.mark.parametrize('kind',['credential','other-directory','other-name','wrong-target','relative-target','session-name','provider-directory'])
 def test_adjacent_links_remain_rejected_without_touching_target(account,kind):
     homes,home,helpers,binary,auth=account

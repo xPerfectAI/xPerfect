@@ -70,12 +70,12 @@ from workers_projects_runtime.bootstrap import (
 from workers_projects_runtime.openclaw_runtime import HostCapacityError
 
 
-def test_worker_codex_uses_the_current_reviewed_stable_release():
-    assert AI_WORKER_CODEX_NPM_SPEC == "@openai/codex@0.147.0"
+def test_worker_codex_uses_the_current_reviewed_release():
+    assert AI_WORKER_CODEX_NPM_SPEC == "@openai/codex@0.155.0-alpha.9.2"
 
 
-def test_worker_claude_uses_the_current_reviewed_stable_release():
-    assert AI_WORKER_CLAUDE_CODE_NPM_SPEC == "@anthropic-ai/claude-code@2.1.233"
+def test_worker_claude_uses_the_current_reviewed_release():
+    assert AI_WORKER_CLAUDE_CODE_NPM_SPEC == "@anthropic-ai/claude-code@2.1.280"
 
 
 def test_bootstrap_copy_never_follows_an_existing_destination_symlink(tmp_path):
@@ -736,7 +736,7 @@ def test_provider_account_mount_requires_private_binder_marker(tmp_path):
     account_home = tmp_path / "provider-accounts" / "acct-untrusted"
     account_home.mkdir(parents=True)
 
-    with pytest.raises(RuntimeError, match="validated by the GlassHive control plane"):
+    with pytest.raises(RuntimeError, match="not validated by xPerfect"):
         manager._provider_account_mount(  # type: ignore[attr-defined]
             {
                 "_glasshive_provider_account_mount_host": str(account_home),
@@ -5381,8 +5381,8 @@ def test_ensure_image_defaults_to_no_forced_ai_worker_browser_extensions(tmp_pat
     assert f"snapshot.ubuntu.com/ubuntu/{AI_WORKER_APT_SNAPSHOT}" in dockerfile
     assert "nodejs_22.23.2-1nodesource1_${arch}.deb" in dockerfile
     assert "sha256sum -c -" in dockerfile
-    assert "@openai/codex@0.147.0" in dockerfile
-    assert "@anthropic-ai/claude-code@2.1.233" in dockerfile
+    assert "@openai/codex@0.155.0-alpha.9.2" in dockerfile
+    assert "@anthropic-ai/claude-code@2.1.280" in dockerfile
     assert "--cache /tmp/glasshive-npm-cache" in dockerfile
     assert "rm -rf /tmp/glasshive-npm-cache /root/.npm /home/seluser/.npm" in dockerfile
     assert "/etc/chromium/policies/managed/glasshive-ai-worker-extensions.json" in dockerfile

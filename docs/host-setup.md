@@ -23,7 +23,7 @@ Install your provider's native CLI, then open **Connections → Connect another 
 - [Grok](https://github.com/xai-org/grok-build): connect a subscription through native device sign-in, or choose **API key**. Grok also needs one exact model: run `grok models` to list them, then `./xperfect restart --model grok-build=<model>`. xPerfect never picks a Grok model for you; `./xperfect doctor` shows what each installed harness will use.
 
 Tested versions are the ones the workspace image pins: Codex `0.155.0-alpha.9.2` and Claude Code
-`2.1.263` from npm (with Node.js 22), and Grok `1.0.34` from xAI's CLI download. A per-user install
+`2.1.280` from npm (with Node.js 22), and Grok `1.0.34` from xAI's CLI download. A per-user install
 needs no root, for example `npm install -g --prefix ~/.local @openai/codex@0.155.0-alpha.9.2`, with
 `~/.local/bin` on PATH. After installing, `./xperfect doctor` should show the CLI as present. Its
 account setup changes from "CLI required" to what that provider's sign-in needs next.

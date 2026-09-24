@@ -329,7 +329,7 @@ def apply_bound_provider_account_environment(
         return env
     if not worker.get("_glasshive_provider_account_bound"):
         raise RuntimeErrorBase(
-            "Mission provider account selection was not validated by the GlassHive control plane"
+            "This explicitly selected account was not validated by xPerfect"
         )
     expected_keys = _EXPECTED_HOME_KEYS.get(runtime_name)
     if runtime_name == "claude-code" and str(worker.get("execution_mode") or "host") == "docker":

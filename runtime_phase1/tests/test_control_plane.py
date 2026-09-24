@@ -1062,7 +1062,7 @@ def test_provider_disconnect_without_native_home_does_not_claim_provider_logout(
 
     assert result["status"] == "disconnected"
     assert result["provider_logout_confirmed"] is None
-    assert result["message"] == "Removed from GlassHive. No local provider session was present."
+    assert result["message"] == "Removed from xPerfect. No local provider session was present."
 
 
 def test_provider_disconnect_unlinks_final_home_symlink_without_following_target(tmp_path):

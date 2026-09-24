@@ -113,6 +113,27 @@ def test_reconcile_does_not_race_a_locally_owned_active_run(tmp_path, monkeypatc
     service._reconcile_worker_row(worker)
 
 
+def test_heal_worker_does_not_race_a_locally_owned_active_run(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "runtime.db"))
+    _project, worker, run = _active_worker_and_run(
+        store,
+        "local-heal",
+        execution_mode="docker",
+        run_state="running",
+    )
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    monkeypatch.setattr(service, "_local_processor_owns", lambda _worker_id: True)
+
+    def forbidden_collect(*_args, **_kwargs):
+        raise AssertionError("a live queue processor owns its native evidence")
+
+    monkeypatch.setattr(service, "_collect_completed_run", forbidden_collect)
+    result = service.heal_worker(worker["worker_id"])
+
+    assert result["worker_id"] == worker["worker_id"]
+    assert store.get_run(run["run_id"])["state"] == "running"
+
+
 def _active_worker_and_run(
     store: Store,
     suffix: str,
