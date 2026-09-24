@@ -1,0 +1,18 @@
+xPerfect
+Copyright 2026 Adrien Beyk and xPerfect contributors
+
+Copyright 2026 Project Viventium Contributors
+
+xPerfect is distributed under the Apache License, Version 2.0.
+Third-party components retain their respective licenses and attribution notices.
+This notice does not change those licenses or imply endorsement by their authors.
+
+The conversation renderer includes markdown-it 15.0.2, Copyright (c) 2014
+Vitaly Puzrin and Alex Kocharin, under the MIT License. Its license is at
+src/glass_drive_ui/static/vendor/markdown-it-LICENSE.
+
+The conversation renderer bundle also contains mdurl 2.1.0 (MIT), entities 8.0.0
+(BSD-2-Clause), and generated @oxc-project/runtime 0.142.0 and Rolldown runtime
+helpers (MIT). Their licenses are included in the same vendor directory as
+mdurl-LICENSE, entities-LICENSE, oxc-project-runtime-LICENSE, and
+rolldown-LICENSE. The bundled xterm.js 5.5.0 license is in vendor/xterm-5.5.0/LICENSE.

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign in · xPerfect</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260922a" />
+  </head>
+  <body class="auth-body">
+    <main class="auth-shell">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+      <section class="auth-card" aria-labelledby="auth-title">
+        <div class="auth-brand">xPerfect</div>
+        <div class="auth-copy">
+          <h1 id="auth-title">Sign in</h1>
+          <p>Continue to your projects.</p>
+        </div>
+        <a id="oidc-login" class="primary-button auth-provider-button" href="/auth/oidc/start" hidden>
+          Continue with your organization
+        </a>
+        <div id="auth-divider" class="auth-divider" hidden>or</div>
+        <form id="local-login" class="auth-form" hidden novalidate>
+          <label id="local-email-label">
+            Email
+            <input id="local-email" name="email" type="email" autocomplete="email" maxlength="320" required />
+          </label>
+          <label>
+            Password
+            <input id="local-password" name="password" type="password" autocomplete="current-password" maxlength="128" required />
+          </label>
+          <button id="local-submit" class="primary-button" type="submit">Sign in</button>
+        </form>
+        <p id="auth-status" class="auth-status" aria-live="polite"></p>
+        <p id="auth-footnote" class="auth-footnote"></p>
+      </section>
+    </main>
+    <script src="/static/auth.js?v=20260922a" type="module"></script>
+  </body>
+</html>

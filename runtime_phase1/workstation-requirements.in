@@ -1,0 +1,14 @@
+beautifulsoup4
+markdown
+matplotlib
+openpyxl
+pdf2image
+pillow
+PyMuPDF
+PyPDF2
+python-docx
+python-pptx
+reportlab
+requests
+selenium
+xlsxwriter

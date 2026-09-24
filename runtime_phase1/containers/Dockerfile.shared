@@ -1,0 +1,12 @@
+# Build with runtime_phase1 as context and a reviewed native harness base image.
+ARG XPERFECT_BASE_IMAGE
+FROM ${XPERFECT_BASE_IMAGE}
+USER root
+COPY containers/prepare_shared_members.py /tmp/xperfect-prepare-members.py
+COPY src/workers_projects_runtime/storage_quota.py src/workers_projects_runtime/storage_quota_guard.py src/workers_projects_runtime/native_credential_exec.py src/workers_projects_runtime/account_native_entry.py src/workers_projects_runtime/grok_acp.py src/workers_projects_runtime/grok_auth.py src/workers_projects_runtime/native_key_reader.py /tmp/xperfect-guard/
+RUN /usr/bin/python3 /tmp/xperfect-prepare-members.py && rm /tmp/xperfect-prepare-members.py
+RUN /usr/bin/python3 -c 'import ctypes,pathlib,shutil,sysconfig; ctypes.CDLL("libseccomp.so.2"); destination=pathlib.Path(sysconfig.get_paths()["purelib"])/"workers_projects_runtime"; destination.mkdir(parents=True,exist_ok=True); [shutil.copy2(source,destination/source.name) for source in pathlib.Path("/tmp/xperfect-guard").glob("*.py")]; shutil.rmtree("/tmp/xperfect-guard")'
+USER 20001:20001
+RUN /usr/bin/python3 -I -m workers_projects_runtime.storage_quota_guard -- /bin/true
+RUN /usr/bin/python3 -I -c "import workers_projects_runtime.native_key_reader"
+USER 65534:65534

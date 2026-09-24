@@ -1,0 +1,10 @@
+{
+  "id": "xperfect.worker-context-tools",
+  "version": 1,
+  "tools": {
+    "list_context": "List exact authorized context snapshots available to this run. Each has an immutable hash and character length.",
+    "read_context": "Read exact source text from this run by source_id and character offset. Follow next_offset until null for the whole source. Source and run authority are checked on every page.",
+    "worker_configuration_get": "Read requested and effective worker context, configured MCP connections and background execution settings. Source descriptors are not evidence of native use; native builtin and app tools retain their own controls.",
+    "worker_configuration_update": "Update owner worker settings with the last observed expected_revision. Select only currently authorized source IDs and configured MCP connections; this does not grant new access or disable unrelated native capabilities."
+  }
+}

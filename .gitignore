@@ -1,0 +1,54 @@
+# Generated local runtime artifacts
+.DS_Store
+**/.DS_Store
+/data/*.db
+/runtime_phase1/*.db
+/runtime_phase1/data/
+/runtime_phase1/.runtime_logs/
+/runtime_phase1/.playwright-cli/
+/runtime_phase1/output/
+
+# Python caches and local envs for the standalone prototype
+/runtime_phase1/.venv/
+/runtime_phase1/.pytest_cache/
+/runtime_phase1/**/__pycache__/
+
+# Frontend generated Python artifacts
+/frontends/**/__pycache__/
+/frontends/**/.pytest_cache/
+/frontends/**/.venv/
+/frontends/**/*.pyc
+/frontends/**/*.pyo
+/frontends/**/*.pyd
+/frontends/**/*.egg-info/
+
+# Generated packaging metadata
+**/*.egg-info/
+/runtime_phase1/build/
+/frontends/**/build/
+
+# Public-release hardening
+.env
+.env.*
+!.env.example
+node_modules/
+.venv*/
+__pycache__/
+.local_artifacts/
+tmp/
+backups/
+artifacts/
+videos/
+har/
+*.mp4
+*.mov
+*.webm
+*.har
+
+# Merge and patch recovery files stay in private recovery storage.
+*.orig
+*.rej
+
+# Local runtime logs
+/runtime_phase1/logs/
+/logs/

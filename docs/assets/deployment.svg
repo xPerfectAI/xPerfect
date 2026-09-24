@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">xPerfect deployment reference</title>
+  <desc id="desc">Two supported ways to run xPerfect. On your computer, ./xperfect start serves the web interface, API and MCP on 127.0.0.1 for one person who unlocks it with a password; workers run as that user and state stays in a private folder with no storage limit by default. On a hosted server, packaged containers serve the web interface and MCP over HTTPS; people sign in with your identity provider, workers run in isolated containers and each person's files have a 5 GB quota by default. In both, saved work stays on the machine or server, while connected AI providers receive task content and tool results.</desc>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L9 5 L0 10" fill="none" stroke="#63d7b0" stroke-width="1.7"/></marker></defs>
+  <rect width="1600" height="900" fill="#151a20"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#f3f4f1">
+    <text x="70" y="75" font-size="24" fill="#63d7b0" letter-spacing="3">xPerfect / DEPLOYMENT REFERENCE</text>
+    <text x="70" y="150" font-size="54" font-weight="700">Your machine keeps the work. AI can be remote.</text>
+    <text x="70" y="200" font-size="26" fill="#b8c4ce">Two supported ways to run it • saved state and provider requests are different</text>
+
+    <rect x="70" y="250" width="700" height="370" rx="12" fill="none" stroke="#52636e" stroke-width="2"/>
+    <text x="100" y="298" font-size="26" fill="#b8c4ce" letter-spacing="2">ON YOUR COMPUTER</text>
+    <text x="100" y="336" font-size="24" fill="#8af0cb" font-family="Menlo, Consolas, monospace">./xperfect start</text>
+    <g fill="#63d7b0"><rect x="100" y="376" width="12" height="12" rx="2"/><rect x="100" y="436" width="12" height="12" rx="2"/><rect x="100" y="496" width="12" height="12" rx="2"/><rect x="100" y="556" width="12" height="12" rx="2"/></g>
+    <text x="130" y="389" font-size="24">One person, unlocked with a password</text>
+    <text x="130" y="449" font-size="24">Web interface, API and MCP on 127.0.0.1</text>
+    <text x="130" y="509" font-size="24">Workers run as your own user</text>
+    <text x="130" y="569" font-size="24">Private state folder, no storage limit by default</text>
+
+    <rect x="830" y="250" width="700" height="370" rx="12" fill="none" stroke="#52636e" stroke-width="2"/>
+    <text x="860" y="298" font-size="26" fill="#b8c4ce" letter-spacing="2">HOSTED SERVER</text>
+    <text x="860" y="336" font-size="24" fill="#8af0cb">Packaged containers, your identity provider</text>
+    <g fill="#63d7b0"><rect x="860" y="376" width="12" height="12" rx="2"/><rect x="860" y="436" width="12" height="12" rx="2"/><rect x="860" y="496" width="12" height="12" rx="2"/><rect x="860" y="556" width="12" height="12" rx="2"/></g>
+    <text x="890" y="389" font-size="24">People sign in; only admitted people get in</text>
+    <text x="890" y="449" font-size="24">Web interface and MCP over HTTPS</text>
+    <text x="890" y="509" font-size="24">Workers run in isolated containers</text>
+    <text x="890" y="569" font-size="24">Each person's files: 5 GB quota by default</text>
+
+    <g fill="none" stroke="#63d7b0" stroke-width="3" marker-end="url(#arrow)">
+      <path d="M720 620 V705 H1098"/>
+      <path d="M1320 620 V648"/>
+    </g>
+    <rect x="1110" y="660" width="420" height="92" rx="10" fill="#234239"/>
+    <text x="1138" y="700" font-size="27" font-weight="700">Connected AI providers</text>
+    <text x="1138" y="733" font-size="21" fill="#d0e7de">Receive task content + tool results</text>
+
+    <text x="70" y="690" font-size="26">Saved work stays on your machine or server.</text>
+    <text x="70" y="745" font-size="24" fill="#c6d0d8">Provider requests can leave it.</text>
+    <path d="M70 782 H1530" stroke="#35414b"/>
+    <text x="70" y="820" font-size="24" fill="#b8c4ce">Check one real result and reload it before trusting either setup.</text>
+    <text x="70" y="868" font-size="24" fill="#b8c4ce">xPerfect runs on your computer or a server.</text>
+  </g>
+</svg>

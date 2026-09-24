@@ -1,0 +1,42 @@
+{
+  "name": "glasshive",
+  "version": "0.1.0+codex.20260815155634",
+  "description": "Control xPerfect workspaces, schedules, connections, and reusable capabilities from Codex.",
+  "author": {
+    "name": "Adrien Beyk",
+    "url": "https://github.com/AdrienBeyk"
+  },
+  "homepage": "https://github.com/xPerfectAI/xPerfect/blob/main/docs/04_MCP_Publication_and_Client_Compatibility.md",
+  "repository": "https://github.com/xPerfectAI/xPerfect",
+  "license": "Apache-2.0",
+  "keywords": [
+    "xperfect",
+    "glasshive",
+    "workspace",
+    "mcp",
+    "codex",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "xPerfect",
+    "shortDescription": "Control xPerfect workspaces from Codex",
+    "longDescription": "Use the deployment's native OAuth-protected MCP connection to list, launch, continue, duplicate, and schedule private xPerfect workspaces without tool-catalog exploration.",
+    "developerName": "Adrien Beyk",
+    "category": "Productivity",
+    "capabilities": [
+      "Workspace control",
+      "Scheduling",
+      "Connections",
+      "Library"
+    ],
+    "websiteURL": "https://github.com/xPerfectAI/xPerfect",
+    "privacyPolicyURL": "https://github.com/xPerfectAI/xPerfect/blob/main/docs/08_Repository_Structure_and_Publication_Boundaries.md",
+    "termsOfServiceURL": "https://github.com/xPerfectAI/xPerfect/blob/main/LICENSE",
+    "defaultPrompt": [
+      "List my xPerfect workspaces",
+      "Start a xPerfect workspace for this goal",
+      "Show my xPerfect schedules"
+    ]
+  }
+}

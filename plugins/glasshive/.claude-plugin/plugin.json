@@ -1,0 +1,19 @@
+{
+  "name": "glasshive",
+  "version": "0.1.1",
+  "description": "Control xPerfect workspaces from Claude Code.",
+  "author": {
+    "name": "Adrien Beyk",
+    "url": "https://github.com/AdrienBeyk"
+  },
+  "homepage": "https://github.com/xPerfectAI/xPerfect",
+  "repository": "https://github.com/xPerfectAI/xPerfect",
+  "license": "Apache-2.0",
+  "keywords": [
+    "xperfect",
+    "glasshive",
+    "workspace",
+    "mcp",
+    "claude"
+  ]
+}

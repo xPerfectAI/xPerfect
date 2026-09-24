@@ -1,0 +1,4 @@
+interface:
+  display_name: "Connect xPerfect"
+  short_description: "Connect an AI client to an xPerfect account"
+  default_prompt: "Use $connect-glasshive to connect this AI client to my xPerfect account."

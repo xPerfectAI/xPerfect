@@ -1,0 +1,20 @@
+{
+  "name": "project-glasshive",
+  "interface": {
+    "displayName": "xPerfect"
+  },
+  "plugins": [
+    {
+      "name": "glasshive",
+      "source": {
+        "source": "local",
+        "path": "./plugins/glasshive"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
