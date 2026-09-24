@@ -529,7 +529,10 @@ class ProviderAccountHomeManager:
         try:
             expected = Path(binary).resolve(strict=True)
             actual = Path(target).resolve(strict=True)
-            if not expected.is_file() or actual != Path(target):
+            # The selected CLI may itself be a trusted launcher symlink (for
+            # example Homebrew's codex -> ChatGPT.app). Codex writes its exact
+            # launch path as the helper target; reject other symlink aliases.
+            if not expected.is_file() or (actual != Path(target) and Path(target) != Path(binary)):
                 return False
             if actual != expected:
                 # The Codex npm launcher creates argv[0] aliases to its native
@@ -726,7 +729,7 @@ class ProviderSetupManager:
     def _binary(self, provider: str) -> str:
         binary = provider_setup_binary(provider)
         if not binary:
-            raise ControlPlaneError(f"{provider.title()} CLI is not installed in this GlassHive runtime")
+            raise ControlPlaneError(f"{provider.title()} CLI is not installed in this xPerfect runtime")
         return binary
 
     def _environment(self, *, provider: str, account_home: Path) -> dict[str, str]:
@@ -1156,7 +1159,7 @@ class ProviderSetupManager:
                     tenant_id=session.tenant_id,
                     owner_id=session.owner_id,
                     status="action_required",
-                    reconnect_reason="Provider setup stopped because GlassHive shut down",
+                    reconnect_reason="Provider setup stopped because xPerfect shut down",
                 )
             except ControlPlaneError:
                 pass
@@ -1495,16 +1498,16 @@ class ProviderSetupManager:
                     owner_id=owner_id,
                 )
             raise ControlPlaneError(
-                "GlassHive could not remove its private account data. Retry Remove."
+                "xPerfect could not remove its private account data. Retry Remove."
             ) from exc
         if native_key_account(account):
             message = "Removed from xPerfect. Revoke the API key at its provider if you also want to disable it there."
         elif provider_logout_confirmed is True:
-            message = "Removed from GlassHive."
+            message = "Removed from xPerfect."
         elif provider_logout_confirmed is False:
-            message = "Removed from GlassHive. Provider sign-out could not be confirmed."
+            message = "Removed from xPerfect. Provider sign-out could not be confirmed."
         else:
-            message = "Removed from GlassHive. No local provider session was present."
+            message = "Removed from xPerfect. No local provider session was present."
         return {
             "account_id": account_id,
             "status": str(updated.get("status") or "disconnected"),

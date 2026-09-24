@@ -333,7 +333,7 @@ def classify_cli_failure(
             ),
             recommended_recovery=(
                 "Resume the same durable workspace with a focused continuation instruction; "
-                "GlassHive preserved its files and completed work."
+                "xPerfect preserved its files and completed work."
             ),
             diagnostic_summary=diagnostic_summary,
             structured=True,
@@ -350,7 +350,7 @@ def classify_cli_failure(
             ),
             recommended_recovery=(
                 "Resume the same durable workspace with a focused continuation instruction; "
-                "GlassHive preserved its files and completed work."
+                "xPerfect preserved its files and completed work."
             ),
             diagnostic_summary=diagnostic_summary,
             structured=True,
@@ -394,8 +394,7 @@ def classify_cli_failure(
                 "The model account authorization is temporarily unavailable for this mission."
             ),
             recommended_recovery=(
-                "GlassHive will retry the same durable workspace automatically after Core can "
-                "read the existing authorization."
+                "xPerfect will retry automatically when the account authorization is available again."
             ),
             diagnostic_summary=diagnostic_summary,
             structured=True,
@@ -411,7 +410,7 @@ def classify_cli_failure(
             ),
             recommended_recovery=(
                 "Continue the same untouched mission on the explicitly configured fallback worker, "
-                "or restore provider quota; GlassHive preserved its files and completed work."
+                "or restore provider quota; xPerfect preserved its files and completed work."
             ),
             diagnostic_summary=diagnostic_summary,
             structured=True,
@@ -456,7 +455,7 @@ def classify_cli_failure(
                 "The worker was stopped by the model provider's safety filter before it could finish."
             ),
             recommended_recovery=(
-                "Ask GlassHive to continue with a safer, narrower plan that preserves the original "
+                "Ask xPerfect to continue with a safer, narrower plan that preserves the original "
                 "success criteria, or adjust the request if the filter was expected."
             ),
             diagnostic_summary=diagnostic_summary,
@@ -521,7 +520,7 @@ def classify_cli_failure(
             failure_class="runtime_sandbox_unavailable",
             retryable=True,
             user_message=(
-                "GlassHive could not prepare the selected worker sandbox/workstation before the run started."
+                "xPerfect could not prepare the selected worker sandbox/workstation before the run started."
             ),
             recommended_recovery=(
                 "Use workspace_continue after the sandbox service recovers, or choose another available "
@@ -534,7 +533,7 @@ def classify_cli_failure(
             failure_class="runtime_dependency_missing",
             retryable=False,
             user_message=(
-                "GlassHive could not complete the run because the selected worker runtime has a "
+                "xPerfect could not complete the run because the selected worker runtime has a "
                 "missing, incompatible, or too-old local prerequisite."
             ),
             recommended_recovery=(
@@ -567,7 +566,7 @@ def classify_cli_failure(
             failure_class="runtime_io_failed",
             retryable=True,
             user_message=(
-                "The worker made progress, but its command session closed before GlassHive could "
+                "The worker made progress, but its command session closed before xPerfect could "
                 "capture the final turn cleanly."
             ),
             recommended_recovery=(
@@ -581,7 +580,7 @@ def classify_cli_failure(
     return FailureClassification(
         failure_class="unknown",
         retryable=False,
-        user_message=f"The {runtime_name}{suffix}, but GlassHive could not classify the provider failure safely.",
+        user_message=f"The {runtime_name}{suffix}, but xPerfect could not classify the provider failure safely.",
         recommended_recovery=(
             "Open the View / Steer page for details, then use workspace_continue only if the partial "
             "workspace state is worth preserving."
@@ -618,7 +617,7 @@ def classify_runtime_error(
             retryable=True,
             user_message="The worker is waiting for host capacity and will retry.",
             recommended_recovery=(
-                "No action is required. GlassHive will continue through the durable capacity queue; "
+                "No action is required. xPerfect will continue through the durable capacity queue; "
                 "the exact work can also be stopped explicitly."
             ),
             diagnostic_summary=f"host capacity class={capacity_class}: {message}",
@@ -632,7 +631,7 @@ def classify_runtime_error(
                 "The model or research provider rate-limited the worker before it could finish."
             ),
             recommended_recovery=(
-                "No action is required while GlassHive honors the provider retry window and retries "
+                "No action is required while xPerfect honors the provider retry window and retries "
                 "the same workspace without changing the configured model or effort."
             ),
             diagnostic_summary=message,
@@ -647,7 +646,7 @@ def classify_runtime_error(
                 "The selected model provider quota was exhausted before the worker could finish."
             ),
             recommended_recovery=(
-                "GlassHive will continue the same untouched mission with its configured fallback "
+                "xPerfect will continue the same untouched mission with its configured fallback "
                 "worker when one is available."
             ),
             diagnostic_summary=message,
@@ -677,7 +676,7 @@ def classify_runtime_error(
                 ),
                 recommended_recovery=(
                     "Continue the same untouched mission on the explicitly configured fallback "
-                    "worker, or restore provider quota; GlassHive preserved its files and completed work."
+                    "worker, or restore provider quota; xPerfect preserved its files and completed work."
                 ),
                 diagnostic_summary=message,
                 structured=True,
@@ -726,7 +725,7 @@ def classify_runtime_error(
         "provider_response_failed": (
             True,
             "The model provider ended the worker continuation unexpectedly before it could finish.",
-            "Use workspace_continue to resume from the same durable workspace; GlassHive "
+            "Use workspace_continue to resume from the same durable workspace; xPerfect "
             "preserved the worker session, files, and completed research.",
         ),
         "provider_request_rejected": (
@@ -738,7 +737,7 @@ def classify_runtime_error(
         "provider_content_filter": (
             False,
             "The worker was stopped by the model provider's safety filter before it could finish.",
-            "Ask GlassHive to continue with a safer, narrower plan that preserves the original "
+            "Ask xPerfect to continue with a safer, narrower plan that preserves the original "
             "success criteria, or adjust the request if the filter was expected.",
         ),
         "provider_context_limit_exceeded": (
@@ -791,7 +790,7 @@ def classify_runtime_error(
         "provider_response_failed": (
             True,
             "The model provider ended the worker continuation unexpectedly before it could finish.",
-            "Use workspace_continue to resume from the same durable workspace; GlassHive "
+            "Use workspace_continue to resume from the same durable workspace; xPerfect "
             "preserved the worker session, files, and completed research.",
         ),
         "provider_request_rejected": (
@@ -803,7 +802,7 @@ def classify_runtime_error(
         "provider_content_filter": (
             False,
             "The worker was stopped by the model provider's safety filter before it could finish.",
-            "Ask GlassHive to continue with a safer, narrower plan that preserves the original "
+            "Ask xPerfect to continue with a safer, narrower plan that preserves the original "
             "success criteria, or adjust the request if the filter was expected.",
         ),
         "provider_context_limit_exceeded": (
@@ -830,7 +829,7 @@ def classify_runtime_error(
             failure_class="runtime_sandbox_unavailable",
             retryable=True,
             user_message=(
-                "GlassHive could not prepare the selected worker sandbox/workstation before the run started."
+                "xPerfect could not prepare the selected worker sandbox/workstation before the run started."
             ),
             recommended_recovery=(
                 recovery_hint
@@ -851,7 +850,7 @@ def classify_runtime_error(
             failure_class="runtime_dependency_missing",
             retryable=False,
             user_message=(
-                f"GlassHive could not start the selected worker{profile_hint} because the required "
+                f"xPerfect could not start the selected worker{profile_hint} because the required "
                 f"host runtime dependency{binary_hint} is missing, unavailable, or incompatible."
                 f"{version_hint}"
             ),
@@ -867,7 +866,7 @@ def classify_runtime_error(
         return FailureClassification(
             failure_class="unsupported_runtime_configuration",
             retryable=False,
-            user_message="GlassHive host-native workers are disabled in this deployment.",
+            user_message="xPerfect host-native workers are disabled in this deployment.",
             recommended_recovery=(
                 "Use a sandbox/workstation workspace, or ask the operator to enable host-native workers "
                 "for this deployment."
@@ -897,7 +896,7 @@ def classify_runtime_error(
             retryable=True,
             user_message=(
                 f"The {runtime_label} worker made progress, but its command session closed before "
-                "GlassHive could capture the final turn cleanly."
+                "xPerfect could capture the final turn cleanly."
             ),
             recommended_recovery=(
                 "Use workspace_continue to resume from the same workspace and ask the worker to "
@@ -910,7 +909,7 @@ def classify_runtime_error(
             failure_class="glasshive_evidence_check_failed",
             retryable=True,
             user_message=(
-                f"The {runtime_label} worker finished a provider turn, but GlassHive verification found "
+                f"The {runtime_label} worker finished a provider turn, but xPerfect verification found "
                 "that the result did not satisfy the generic completion or constraint contract."
             ),
             recommended_recovery=(
@@ -924,7 +923,7 @@ def classify_runtime_error(
     return FailureClassification(
         failure_class="runtime_error",
         retryable=False,
-        user_message=f"The {runtime_label} worker failed before GlassHive could complete the task.",
+        user_message=f"The {runtime_label} worker failed before xPerfect could complete the task.",
         recommended_recovery=(
             "Open the View / Steer page for details, then use workspace_continue only if the partial "
             "workspace state is worth preserving."
@@ -1475,7 +1474,7 @@ def _classify_terminal_native_provider_error(
                 "finish."
             ),
             recommended_recovery=(
-                "Ask GlassHive to continue with a safer, narrower plan that preserves the original "
+                "Ask xPerfect to continue with a safer, narrower plan that preserves the original "
                 "success criteria, or adjust the request if the filter was expected."
             ),
             diagnostic_summary=diagnostic_summary,
@@ -1534,7 +1533,7 @@ def _classify_terminal_native_provider_error(
             "The model provider ended the worker continuation unexpectedly before it could finish."
         ),
         recommended_recovery=(
-            "Use workspace_continue to resume from the same durable workspace; GlassHive preserved "
+            "Use workspace_continue to resume from the same durable workspace; xPerfect preserved "
             "the worker session, files, and completed research."
         ),
         diagnostic_summary=diagnostic_summary,
@@ -1564,21 +1563,19 @@ _CORE_PROVIDER_PROXY_MESSAGES = {
         "provider_auth_projection_unavailable",
         True,
         "The model account authorization is temporarily unavailable for this mission.",
-        "GlassHive will retry the same durable workspace automatically after Core can read the "
-        "existing authorization.",
+        "xPerfect will retry automatically when the account authorization is available again.",
     ),
     (503, "the model account authorization could not be read for this mission."): (
         "provider_auth_projection_unavailable",
         True,
         "The model account authorization is temporarily unavailable for this mission.",
-        "GlassHive will retry the same durable workspace automatically after Core can read the "
-        "existing authorization.",
+        "xPerfect will retry automatically when the account authorization is available again.",
     ),
     (502, "the connected model provider is temporarily unavailable."): (
         "provider_upstream_unavailable",
         True,
         "The connected model provider is temporarily unavailable.",
-        "GlassHive will retry the same durable workspace after the provider recovers.",
+        "xPerfect will retry the same durable workspace after the provider recovers.",
     ),
 }
 

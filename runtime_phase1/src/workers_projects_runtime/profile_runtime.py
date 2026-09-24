@@ -5022,6 +5022,12 @@ class BaseCliWorkerRuntime:
             and not run_id
             and str(worker.get("state") or "") in {"terminating", "termination_failed"}
         )
+        if closing_without_run:
+            # The confirmed container teardown below owns every process in an
+            # idle workspace. A saved terminal session may belong to a run
+            # that already ended; probing it can hang when Pause suspended
+            # that session and needlessly block the container teardown.
+            active_session = None
         if not active_session and not exact_container_absence and not closing_without_run:
             active_session = self._infer_active_session(worker or {"worker_id": worker_id}, run_id=run_id)
         if not active_session and run_id and not exact_container_absence:
@@ -5165,8 +5171,7 @@ class BaseCliWorkerRuntime:
             )
         else:
             self.sandbox.terminate(worker_id)
-        if "_compute_release_container_id" in worker and not captured_id:
-            self._clear_active_session(worker_id)
+        self._clear_active_session(worker_id)
         return self._runtime_info(worker, pid=None)
 
     def release_provider_account_binding(self, worker: dict) -> None:
@@ -6402,6 +6407,7 @@ class BaseCliWorkerRuntime:
                 evidence_path=evidence_path,
                 constraint_ledger_path=constraint_ledger_path,
                 run_id=effective_run_id,
+                attempt_id=attempt_id,
             )
         except RuntimeErrorBase:
             _write_active_run_status(
@@ -9775,6 +9781,9 @@ def _write_evidence_for_run(
             ended_at=ended_at,
             transcript_paths=transcript_paths,
         )
+        attempt_id = str(worker.get("_run_attempt_id") or "").strip()
+        if attempt_id:
+            evidence["attempt_id"] = attempt_id
         evidence["native_media"] = capture_native_media(workspace, run_id, stdout_text)
         path = write_run_evidence(workspace, evidence, run_id)
         try:
@@ -9842,24 +9851,25 @@ def _require_successful_run_evidence(
     evidence_path: str,
     constraint_ledger_path: str,
     run_id: str = "",
+    attempt_id: str = "",
 ) -> tuple[str, str]:
     """Fail a successful worker process when its completion evidence is not usable."""
     if not evidence_path:
         raise RuntimeErrorBase("GlassHive evidence check failed: run evidence was not written")
+    evidence = _read_workspace_json_object(workspace, evidence_path)
+    if (
+        not evidence
+        or evidence.get("schema") != "glasshive.run.evidence.v1"
+        or (run_id and evidence.get("run_id") != run_id)
+        or (attempt_id and evidence.get("attempt_id") != attempt_id)
+    ):
+        raise RuntimeErrorBase("GlassHive evidence check failed: run evidence identity is invalid")
     if constraint_ledger_path:
         _read_valid_constraint_ledger(workspace, constraint_ledger_path, run_id=run_id)
-    else:
-        # The runtime's prose-derived reminder is diagnostic, not an authorization
-        # receipt. Its generation failure must not erase an otherwise valid result.
-        evidence = _read_workspace_json_object(workspace, evidence_path)
-        if (
-            not evidence
-            or evidence.get("schema") != "glasshive.run.evidence.v1"
-            or (run_id and evidence.get("run_id") != run_id)
-        ):
-            raise RuntimeErrorBase("GlassHive evidence check failed: run evidence identity is invalid")
-    result = _read_run_evidence_result(workspace, evidence_path)
-    if not result:
+    # The runtime's prose-derived reminder is diagnostic, not an authorization
+    # receipt. Its generation failure must not erase an otherwise valid result.
+    result = evidence.get("evidence_result")
+    if not isinstance(result, dict) or not result:
         raise RuntimeErrorBase("GlassHive evidence check failed: run evidence was not readable")
     status = str(result.get("status") or "").strip().lower()
     if status == "fail":
@@ -9953,12 +9963,19 @@ def _ensure_recovered_success_evidence(
             run_id=run_id,
         )
     evidence_path = _default_evidence_path(run_id)
-    if not _read_run_evidence_result(workspace, evidence_path):
+    attempt_id = str((active_session or {}).get("attempt_id") or worker.get("_run_attempt_id") or "").strip()
+    existing_evidence = _read_workspace_json_object(workspace, evidence_path)
+    if (
+        not existing_evidence
+        or not isinstance(existing_evidence.get("evidence_result"), dict)
+        or existing_evidence.get("run_id") != run_id
+        or (attempt_id and existing_evidence.get("attempt_id") != attempt_id)
+    ):
         transcript_paths = _transcript_paths_from_active_session(active_session)
         if constraint_ledger_path:
             transcript_paths["constraint_ledger"] = constraint_ledger_path
         evidence_path = _write_evidence_for_run(
-            worker=worker,
+            worker={**worker, "_run_attempt_id": attempt_id} if attempt_id else worker,
             run_id=run_id,
             runtime_name=runtime_name,
             model=model,
@@ -9983,6 +10000,7 @@ def _ensure_recovered_success_evidence(
         evidence_path=evidence_path,
         constraint_ledger_path=constraint_ledger_path,
         run_id=run_id,
+        attempt_id=attempt_id,
     )
 
 
@@ -14079,6 +14097,7 @@ raise SystemExit(exit_code)
                 evidence_path=evidence_path,
                 constraint_ledger_path=constraint_ledger_path,
                 run_id=effective_run_id,
+                attempt_id=str(worker.get("_run_attempt_id") or "").strip(),
             )
         except RuntimeErrorBase as exc:
             evidence_message = str(exc)

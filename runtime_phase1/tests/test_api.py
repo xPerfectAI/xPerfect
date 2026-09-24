@@ -12320,7 +12320,8 @@ def test_heal_worker_restarts_processor_when_queued_runs_remain(
 
     restart_requests: list[str] = []
     service._ensure_worker_processor = lambda worker_id: restart_requests.append(worker_id)  # type: ignore[method-assign]
-    service._active_processors.add(worker["worker_id"])
+    # Recovery may collect a completed transcript only when no local queue
+    # processor still owns the run.
 
     healed = service.heal_worker(worker["worker_id"])
 
@@ -12471,6 +12472,9 @@ def test_heal_worker_replacement_processor_keeps_running_state_while_follow_up_e
     assert runtime.initial_started.wait(timeout=2)
 
     queued = service.assign_run(worker["worker_id"], "queued follow-up that must keep running")
+    # Explicitly retire the original processor generation before adopting its
+    # completed native result. A normal worker read must never do this.
+    service._invalidate_worker_processor(worker["worker_id"])
     healed = service.heal_worker(worker["worker_id"])
     assert healed is not None
     assert runtime.collect_run_ids == [initial["run_id"]]

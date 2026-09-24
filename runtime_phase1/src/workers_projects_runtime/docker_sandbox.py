@@ -434,8 +434,8 @@ AI_WORKER_CODEX_NPM_SPEC = (
     or "@openai/codex@0.155.0-alpha.9.2"
 )
 AI_WORKER_CLAUDE_CODE_NPM_SPEC = (
-    os.environ.get("WPR_SANDBOX_CLAUDE_CODE_NPM_SPEC", "@anthropic-ai/claude-code@2.1.263").strip()
-    or "@anthropic-ai/claude-code@2.1.263"
+    os.environ.get("WPR_SANDBOX_CLAUDE_CODE_NPM_SPEC", "@anthropic-ai/claude-code@2.1.280").strip()
+    or "@anthropic-ai/claude-code@2.1.280"
 )
 AI_WORKER_BASE_IMAGE = os.environ.get(
     "WPR_SANDBOX_BASE_IMAGE",
@@ -2915,7 +2915,7 @@ screen -ls | awk -v target="$target" '
             return None
         if not candidate.get("_glasshive_provider_account_bound"):
             raise RuntimeError(
-                "Provider account mount was not validated by the GlassHive control plane"
+                "The selected account was not validated by xPerfect for this worker"
             )
         if raw_target != self._provider_account_mount_target:
             raise RuntimeError("Provider account mount target is invalid")

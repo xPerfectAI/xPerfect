@@ -111,6 +111,51 @@ def _write_pass_evidence(runtime, worker_id: str, run_id: str) -> None:
     (evidence_dir / "evidence.json").write_text(json.dumps({"schema": "glasshive.run.evidence.v1", "run_id": run_id, "evidence_result": {"status": "pass"}}) + "\n")
 
 
+def test_recovered_success_rebuilds_evidence_from_the_exact_retried_attempt(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    run_id = "run_retried"
+    evidence_dir = workspace / "glasshive-run" / "runs" / run_id
+    evidence_dir.mkdir(parents=True)
+    evidence_path = evidence_dir / "evidence.json"
+    evidence_path.write_text(json.dumps({
+        "schema": "glasshive.run.evidence.v1",
+        "run_id": run_id,
+        "attempt_id": "attempt-killed",
+        "evidence_result": {"status": "fail", "failure_reasons": [{"reason": "old attempt failed"}]},
+    }))
+    writes = []
+
+    def write_current_attempt(**kwargs):
+        writes.append(kwargs["worker"]["_run_attempt_id"])
+        evidence_path.write_text(json.dumps({
+            "schema": "glasshive.run.evidence.v1",
+            "run_id": run_id,
+            "attempt_id": "attempt-retried",
+            "evidence_result": {"status": "pass"},
+        }))
+        return evidence_path.relative_to(workspace).as_posix()
+
+    monkeypatch.setattr(profile_runtime_module, "_write_evidence_for_run", write_current_attempt)
+    status, _warning = profile_runtime_module._ensure_recovered_success_evidence(
+        worker={"worker_id": "wrk_retried", "_run_attempt_id": "attempt-retried"},
+        run_id=run_id,
+        runtime_name="grok-build",
+        model="grok-4.6",
+        command=["grok"],
+        workspace=workspace,
+        stdout_text="FINAL REPORT:\nRecovered work is complete.",
+        stderr_text="",
+        output_text="Recovered work is complete.",
+        exit_code=0,
+        active_session={"attempt_id": "attempt-retried"},
+        instruction="",
+    )
+
+    assert writes == ["attempt-retried"]
+    assert status == "warn"  # No optional constraint diagnostic was present.
+    assert json.loads(evidence_path.read_text())["attempt_id"] == "attempt-retried"
+
+
 def test_stateless_codex_turn_does_not_resume_or_replace_native_session(tmp_path):
     runtime = CodexCliRuntime(base_dir=str(tmp_path / "private-state"))
     worker = {
@@ -1189,16 +1234,13 @@ def test_collect_completed_run_preserves_evidence_warning(tmp_path):
     (run_root / "exit_code").write_text("0")
     _write_pass_evidence(runtime, worker["worker_id"], run_id)
     evidence_path = runtime._workspace_dir(worker["worker_id"]) / "glasshive-run" / "runs" / run_id / "evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+    evidence["evidence_result"] = {
+        "status": "warn",
+        "warning_reasons": [{"reason": "content hygiene warning", "failure_count": 1}],
+    }
     evidence_path.write_text(
-        json.dumps(
-            {
-                "evidence_result": {
-                    "status": "warn",
-                    "warning_reasons": [{"reason": "content hygiene warning", "failure_count": 1}],
-                }
-            }
-        )
-        + "\n"
+        json.dumps(evidence) + "\n"
     )
 
     runtime.reconcile_worker = lambda worker: runtime._runtime_info(worker, pid=1234)  # type: ignore[method-assign]
@@ -7077,6 +7119,31 @@ def test_docker_cli_runtime_clears_active_session_only_after_confirmed_stop(tmp_
     )
 
     assert calls == [("screen", "job-run_stop_meta"), ("terminate", "run_stop_meta")]
+    assert not runtime._active_session_meta_path(worker_id).exists()
+
+
+@pytest.mark.parametrize("closing_state", ["terminating", "termination_failed"])
+def test_docker_cli_close_idle_worker_skips_stale_terminal_session(tmp_path, closing_state):
+    runtime = CodexCliRuntime(base_dir=str(tmp_path / "data"))
+    worker_id = "wrk_idle_close"
+    runtime._ensure_dirs(worker_id)
+    runtime._write_active_session(
+        worker_id,
+        {"session_name": "job-run_finished", "run_id": "run_finished"},
+    )
+    runtime._active_pid = lambda _worker_id: None  # type: ignore[method-assign]
+    runtime.sandbox.stop_screen_session = lambda *_args, **_kwargs: pytest.fail(
+        "An idle close must not probe a stale terminal session"
+    )  # type: ignore[method-assign]
+    runtime.sandbox.terminate_run_processes = lambda *_args, **_kwargs: pytest.fail(
+        "An idle close must let exact container teardown stop old processes"
+    )  # type: ignore[method-assign]
+    removed: list[str] = []
+    runtime.sandbox.terminate = lambda worker_id, **_kwargs: removed.append(worker_id)  # type: ignore[method-assign]
+
+    runtime.terminate_worker({"worker_id": worker_id, "state": closing_state})
+
+    assert removed == [worker_id]
     assert not runtime._active_session_meta_path(worker_id).exists()
 
 
