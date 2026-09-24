@@ -189,6 +189,71 @@ def _exact_terminal_generation(store: Store, run_id: str) -> dict[str, str]:
     }
 
 
+def test_closing_paused_worker_settles_exact_run_and_lease_after_compute_stop(tmp_path):
+    store = Store(str(tmp_path / "paused-close.sqlite3"))
+    _project, worker, run = _active_worker_and_run(
+        store, "paused-close", run_state="running"
+    )
+    lease = store.get_active_host_run_lease_for_run(run["run_id"])
+    assert lease is not None
+    paused = store.transition_run_if_state(run["run_id"], "running", "paused")
+    assert paused is not None
+    store.update_worker_state(worker["worker_id"], "paused")
+    released = []
+
+    class ReleasingRuntime(StubRuntime):
+        def release_idle_workspace_box(self, closed_worker):
+            released.append(
+                (
+                    closed_worker["state"],
+                    store.get_run(run["run_id"])["state"],
+                    store.get_host_run_lease(lease["lease_id"])["status"],
+                )
+            )
+            return True
+
+    service = WorkersProjectsService(store, ReleasingRuntime(), reconcile_on_startup=False)
+    try:
+        closed = service.terminate_worker(worker["worker_id"])
+    finally:
+        service.shutdown()
+    assert closed["state"] == "terminated"
+    assert store.get_run(run["run_id"])["state"] == "cancelled"
+    settled_lease = store.get_host_run_lease(lease["lease_id"])
+    assert settled_lease["status"] == "released"
+    assert settled_lease["release_reason"] in {
+        "worker_compute_terminated", "run_terminal:cancelled"
+    }
+    assert released == [("terminated", "cancelled", "released")]
+
+
+def test_unproven_worker_compute_keeps_paused_run_and_lease_fenced(tmp_path):
+    store = Store(str(tmp_path / "paused-unproven.sqlite3"))
+    _project, worker, run = _active_worker_and_run(
+        store, "paused-unproven", run_state="running"
+    )
+    lease = store.get_active_host_run_lease_for_run(run["run_id"])
+    assert lease is not None
+    store.transition_run_if_state(run["run_id"], "running", "paused")
+    store.update_worker_state(worker["worker_id"], "paused")
+
+    class UnconfirmedRuntime(StubRuntime):
+        def terminate_worker(self, _worker):
+            raise RuntimeError("exact compute stop unconfirmed")
+
+        def release_idle_workspace_box(self, _worker):
+            raise AssertionError("unconfirmed compute cannot release the box")
+
+    service = WorkersProjectsService(store, UnconfirmedRuntime(), reconcile_on_startup=False)
+    try:
+        with pytest.raises(RuntimeError, match="unconfirmed"):
+            service.terminate_worker(worker["worker_id"])
+    finally:
+        service.shutdown()
+    assert store.get_run(run["run_id"])["state"] == "paused"
+    assert store.get_host_run_lease(lease["lease_id"])["status"] == "active"
+
+
 def test_needs_input_closes_exact_attempt_without_terminalizing_resumable_run(tmp_path):
     store = Store(str(tmp_path / "needs-input-attempt.sqlite3"))
     _project, _worker, run = _active_worker_and_run(

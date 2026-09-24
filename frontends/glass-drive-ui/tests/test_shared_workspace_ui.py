@@ -26,6 +26,7 @@ def test_kickoff_exposes_shared_workspace_choice_and_preserves_isolated_default(
 def test_workspace_members_ui_surfaces_readiness_and_native_selection_controls():
     members = (STATIC / "workspace-members.js").read_text(encoding="utf-8")
     create = (STATIC / "member-create.js").read_text(encoding="utf-8")
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert "Shared workspace unavailable:" in members
     assert "providerAccounts" in members
@@ -33,6 +34,10 @@ def test_workspace_members_ui_surfaces_readiness_and_native_selection_controls()
     assert "provider_account_id" in create
     assert "effort" in create
     assert "shared_workspace" in create
+    assert "workspace.execution_workspace_mode === 'shared'" in app
+    assert "const addWorker = createButton('Add worker')" in app
+    assert "startAdd: true" in app
+    assert "if (shared && available) showAdd()" in members
 
 
 def test_kickoff_draft_selects_keep_valid_defaults_after_reload():

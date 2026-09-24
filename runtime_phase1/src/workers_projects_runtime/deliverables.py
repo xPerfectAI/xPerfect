@@ -550,7 +550,11 @@ def deliverable_payload(
     stderr_text: str = "",
 ) -> dict[str, object] | None:
     execution_mode = str(worker.get("execution_mode") or "docker")
-    artifact_candidates = candidate_artifact_paths(worker)
+    # A common workspace can change while any member runs. Directory scans and
+    # mtimes cannot establish which member authored a file; present the run's
+    # own text and the shared Files list instead of attributing a sibling file.
+    shared = worker.get("_execution_workspace_mode") == "shared"
+    artifact_candidates = [] if shared else candidate_artifact_paths(worker)
     valid_artifact_candidates = [
         path
         for path in artifact_candidates
@@ -576,7 +580,7 @@ def deliverable_payload(
             "workspace_path": rel.as_posix(),
         }
 
-    html_candidates = candidate_html_paths(worker)
+    html_candidates = [] if shared else candidate_html_paths(worker)
     preferred_html = next((path for path in html_candidates if path.name.lower() == "index.html"), None)
     if preferred_html is None and html_candidates:
         preferred_html = html_candidates[0]

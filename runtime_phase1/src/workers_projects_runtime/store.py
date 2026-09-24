@@ -6806,9 +6806,14 @@ class Store:
                 workers.*,
                 workers.updated_at AS last_activity_at,
                 projects.title AS project_title,
-                projects.goal AS project_goal
+                projects.goal AS project_goal,
+                execution_workspaces.mode AS execution_workspace_mode
             FROM workers
             LEFT JOIN projects ON projects.project_id = workers.project_id
+            LEFT JOIN execution_workspaces
+                ON execution_workspaces.workspace_id = workers.workspace_id
+                AND execution_workspaces.tenant_id = workers.tenant_id
+                AND execution_workspaces.owner_id = workers.owner_id
         """
         clauses = ["workers.tenant_id = ?", "workers.owner_id = ?"]
         params: list[Any] = [tenant_id or "local", owner_id]
@@ -11885,12 +11890,25 @@ class Store:
             return updated
         return None
 
-    def cancel_pending_runs(self, worker_id: str, error_text: str, state: str = "cancelled") -> int:
+    def cancel_pending_runs(
+        self,
+        worker_id: str,
+        error_text: str,
+        state: str = "cancelled",
+        *,
+        compute_terminated: bool = False,
+    ) -> int:
         if state not in TERMINAL_RUN_STATES:
             raise ValueError("Pending work may only be cancelled into a terminal state")
         ended_at = utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if compute_terminated:
+                worker = conn.execute(
+                    "SELECT state FROM workers WHERE worker_id = ?", (worker_id,)
+                ).fetchone()
+                if worker is None or worker["state"] != "terminating":
+                    raise ValueError("Compute termination must own the worker before finalizing runs")
             terminal_rows = conn.execute(
                 """
                 SELECT run_id FROM runs
@@ -11928,10 +11946,26 @@ class Store:
                 """,
                 (schedule_state, error_text, ended_at, worker_id),
             )
-            cur = conn.execute(
-                "UPDATE runs SET state = ?, ended_at = ?, error_text = ?, runtime_bundle_json = NULL WHERE worker_id = ? AND state IN ('queued', 'running')",
-                (state, utc_now(), error_text, worker_id),
+            cancellable = (
+                "'queued', 'claimed', 'admitted', 'running', 'settling', 'paused', 'needs_input'"
+                if compute_terminated else "'queued', 'running'"
             )
+            cur = conn.execute(
+                "UPDATE runs SET state = ?, ended_at = ?, error_text = ?, "
+                f"runtime_bundle_json = NULL WHERE worker_id = ? AND state IN ({cancellable})",
+                (state, ended_at, error_text, worker_id),
+            )
+            if compute_terminated:
+                conn.execute(
+                    """
+                    UPDATE host_run_leases
+                    SET status = 'released', released_at = ?,
+                        release_reason = 'worker_compute_terminated',
+                        reconciled_at = COALESCE(reconciled_at, ?)
+                    WHERE worker_id = ? AND status IN ('active', 'reserved')
+                    """,
+                    (ended_at, ended_at, worker_id),
+                )
             conn.execute(
                 """
                 UPDATE run_attempts

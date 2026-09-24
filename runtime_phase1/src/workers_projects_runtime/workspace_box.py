@@ -390,6 +390,12 @@ class WorkspaceBox:
         return ['/usr/bin/python3', '-I', '-m',
                 'workers_projects_runtime.storage_quota_guard', '--', *argv]
 
+    def git_workspace_env(self) -> dict[str, str]:
+        if self.file_placement != 'common':
+            return {}
+        return {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory',
+                'GIT_CONFIG_VALUE_0': self.native_workspace}
+
     def command(self, argv: list[str], *, env: dict[str, str] | None = None) -> list[str]:
         if not argv or any(not isinstance(value, str) or '\x00' in value for value in argv):
             raise ValueError('A native argument vector is required')
@@ -398,14 +404,19 @@ class WorkspaceBox:
         home = f'/workspace/data/members/{uid}/home'
         values = {'HOME': home, 'TMPDIR': home + '/tmp', 'XDG_CONFIG_HOME': home + '/.config',
                   'XDG_CACHE_HOME': home + '/.cache', 'USER': f'member-{uid}', 'LOGNAME': f'member-{uid}'}
+        git_workspace_config = self.git_workspace_env()
         for key, value in (env or {}).items():
             if key.startswith('LD_') or key in {'PYTHONHOME', 'PYTHONPATH'}:
                 raise ValueError('Native environment cannot alter the trusted launcher')
-            if key in values or not re.fullmatch(r'[A-Z_][A-Z0-9_]*', key):
+            if key in values or key in git_workspace_config or not re.fullmatch(r'[A-Z_][A-Z0-9_]*', key):
                 raise ValueError('Native environment cannot replace member identity')
             if key.endswith(('_KEY', '_TOKEN', '_SECRET', '_PASSWORD')):
                 raise ValueError('Native credentials must use private run files')
             values[key] = value
+        # The product owns this exact shared root; each member otherwise sees
+        # Git's dubious-ownership error because the volume is service-owned.
+        # Trust only this workspace for this process, never every repository.
+        values.update(git_workspace_config)
         command = ['docker', 'exec', '-i', '--user', f'{uid}:{self.member_gid}',
                    '--workdir', self.native_workspace]
         for key, value in values.items():

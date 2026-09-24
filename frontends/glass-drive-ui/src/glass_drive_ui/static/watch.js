@@ -32,6 +32,13 @@ const signInLink = document.getElementById('watch-sign-in');
 const stageResultText = document.getElementById('stage-result-text');
 const title = document.getElementById('watch-title');
 const subtitle = document.getElementById('watch-subtitle');
+const addWorkerButton = document.getElementById('watch-add-worker');
+addWorkerButton?.addEventListener('click', () => {
+  const target = new URL('/', window.location.href);
+  target.searchParams.set('add_worker', workerId);
+  target.hash = 'workspaces';
+  window.location.assign(target.href);
+});
 const latestOutputInline = document.getElementById('latest-output-inline');
 const latestOutputFull = document.getElementById('latest-output-full');
 const latestOutputHuman = document.getElementById('latest-output-human');
@@ -1047,8 +1054,12 @@ async function refresh() {
     currentProjectTitle = String(data.project_title || worker.project_id || projectId || 'Project');
     currentDeliverable = data.deliverable || null;
 
-    title.textContent = currentProjectTitle || 'Workspace live view';
-    subtitle.textContent = `${worker.profile || 'worker'} workspace · ${displayStateLabel(displayState)}`;
+    const profileLabel = { 'codex-cli': 'Codex', 'claude-code': 'Claude Code',
+      'grok-build': 'Grok Build', 'openclaw-general': 'OpenClaw' }[worker.profile] || worker.profile || 'AI worker';
+    const shared = data.execution_workspace_mode === 'shared';
+    title.textContent = String(worker.name || currentProjectTitle || 'Worker');
+    subtitle.textContent = `${profileLabel} · ${shared ? 'Shared workspace' : 'Separate workspace'} · ${displayStateLabel(displayState)}`;
+    if (addWorkerButton) addWorkerButton.hidden = !shared || data.can_manage_workspace !== true;
     if (openclawActionButton) {
       openclawActionButton.hidden = !String(worker.profile || '').startsWith('openclaw');
     }

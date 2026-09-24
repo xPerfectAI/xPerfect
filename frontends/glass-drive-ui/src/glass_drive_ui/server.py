@@ -4166,6 +4166,12 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         worker = payload.get("worker") or {}
         project_id = str(worker.get("project_id") or "")
         payload["project_title"] = _project_title_for_worker(active_client, project_id) if project_id else ""
+        identity = _request_identity(request, worker_id)
+        payload["can_manage_workspace"] = (
+            not _restricted_identity(identity)
+            and str(identity.get("user_id") or "") == str(worker.get("owner_id") or "")
+            and str(identity.get("tenant_id") or "local") == str(worker.get("tenant_id") or "local")
+        )
         return _json_response_with_signed_cookie(request, worker_id, _browser_live_payload(payload))
 
     @app.get("/api/workspace/{worker_id}/native-control")

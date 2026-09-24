@@ -26,6 +26,7 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
         super().__init__(base_dir=str(box.volume_root), create_directories=False)
         self.box = box
         self.assert_native_launch = lambda: None
+        self.assert_native_resume = lambda _worker: False
         self.user = f'{box.binding.uid}:{box.member_gid}'
         self.home_mount = f'/workspace/data/members/{box.binding.uid}/home'
         self.workspace_mount = box.native_workspace
@@ -97,9 +98,19 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
             raise WorkspaceBoxUnavailable('This execution policy has not been admitted for a shared box')
         if worker.get('_glasshive_provider_account_mount_host'):
             raise WorkspaceBoxUnavailable('Shared member account projection is not prepared')
+        marker = self.box.supervisor / f'member-{self.box.binding.uid}-paused.json'
+        if (start_if_paused and marker.exists()
+                and worker.get('compute_release_kind') == 'resume_run'
+                and self.assert_native_resume(worker)):
+            inspected = self.box._inspect()
+            container_id = str((inspected or {}).get('Id') or '')
+            if not container_id or json.loads(marker.read_text()) != {'container_id': container_id}:
+                raise WorkspaceBoxUnavailable('Paused member generation changed')
+            self.box.set_member_paused(container_id, False)
+            marker.unlink()
+            return self.inspect(worker['worker_id'])
         self.assert_native_launch()
         container_id = self.box.ensure_box()
-        marker = self.box.supervisor / f'member-{self.box.binding.uid}-paused.json'
         if marker.exists():
             if not start_if_paused:
                 return self.inspect(worker['worker_id'])
@@ -131,11 +142,14 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
             raise WorkspaceBoxUnavailable('Shared native execution generation changed')
         if any(key.startswith('LD_') or key in {'PYTHONHOME', 'PYTHONPATH'} for key in (env or {})):
             raise WorkspaceBoxUnavailable('Native environment cannot alter the trusted launcher')
+        git_workspace_env = self.box.git_workspace_env()
+        if any(key in (env or {}) for key in git_workspace_env):
+            raise WorkspaceBoxUnavailable('Native environment cannot replace shared Git trust')
         for key, expected in self._desktop_env().items():
             if key in (env or {}) and env[key] != expected:
                 raise WorkspaceBoxUnavailable('Native environment differs from member placement')
         from .workspace_projection import credential_command
-        return super()._docker_exec(value['Id'], self.box.guarded_command(command if _member_control.get() else credential_command(command)), env={**(env or {}), **self._desktop_env()},
+        return super()._docker_exec(value['Id'], self.box.guarded_command(command if _member_control.get() else credential_command(command)), env={**(env or {}), **self._desktop_env(), **git_workspace_env},
                                     cwd=cwd or self.workspace_mount, user=self.user, **kwargs)
 
     def _ensure_screen_runtime_dir(self, container_name, *, clean_room=False):

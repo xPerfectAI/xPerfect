@@ -18,7 +18,7 @@ export function memberPanelError(error) {
   return error.message || 'The member runtime is unavailable. Try refreshing.';
 }
 
-export function openWorkspaceMembers(initialMember, { requestHeaders = headers => headers, providerAccounts = [], profileAccountProviders = {}, onChanged = () => {} } = {}) {
+export function openWorkspaceMembers(initialMember, { requestHeaders = headers => headers, providerAccounts = [], profileAccountProviders = {}, onChanged = () => {}, startAdd = false } = {}) {
   activePanel?.close();
   const previousFocus = document.activeElement;
   if (!document.querySelector('link[data-member-styles]')) {
@@ -40,6 +40,7 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
   let disposed = false;
   let loading = false;
   let writing = false;
+  let initialAdd = startAdd;
   const status = text => { if (!disposed) dialog.querySelector('.member-panel-footer [data-status]').textContent = text; };
   async function request(url, method = 'GET', body) {
     if (method !== 'GET') writing = true;
@@ -115,15 +116,20 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
       const selected = members.find(member => member.worker_id === selectedId) || members[0];
       if (selected) select(selected); else { peersCleanup(); configurationCleanup(); allowedAiCleanup(); dialog.querySelector('[data-detail]').replaceChildren(element('p','member-note','This workspace has no retained members.')); }
       status('Settings are current.'); onChanged();
+      if (initialAdd) {
+        initialAdd = false;
+        if (shared && available) showAdd();
+      }
     } catch(error) { status(memberPanelError(error)); }
     finally { loading=false; dialog.removeAttribute('aria-busy'); }
   }
-  dialog.querySelector('[data-add]').hidden = true;
-  dialog.querySelector('[data-add]').addEventListener('click', () => {
+  function showAdd() {
     if (writing || workspace?.mode !== 'shared' || workspace.runtime_readiness?.available !== true) return;
     peersCleanup(); configurationCleanup(); allowedAiCleanup();
     renderAddMember(dialog.querySelector('[data-detail]'), workspace, { request, providerAccounts, profileAccountProviders, status, onCreated: async member => { selectedId = member.worker_id; await refresh(); dialog.querySelector('[aria-current="true"]')?.focus(); }, onCancel: refresh, onUncertain: () => { workspace.runtime_readiness.available = false; dialog.querySelector('[data-add]').hidden = true; } });
-  });
+  }
+  dialog.querySelector('[data-add]').hidden = true;
+  dialog.querySelector('[data-add]').addEventListener('click', showAdd);
   dialog.querySelector('[data-refresh]').addEventListener('click',refresh);
   dialog.querySelector('[data-close]').addEventListener('click',() => dialog.close());
   dialog.addEventListener('close',() => { disposed=true; peersCleanup(); configurationCleanup(); allowedAiCleanup(); dialog.remove(); if(activePanel===dialog) activePanel=null; previousFocus?.focus(); });

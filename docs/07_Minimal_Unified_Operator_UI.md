@@ -345,13 +345,18 @@ an explicit revoke action. Revocation blocks new use and redacts replayed messag
 cannot remove content that a worker already received. Queue and invocation receipts do not claim
 the recipient model read or acted on the message.
 
-Add worker appears only when the shared workspace advertises runtime_readiness.available=true.
-The normal add action requires no name or provider choice and uses the configured default. An
-optional provider selection is under Advanced settings and includes only profiles advertised as
+Add worker is a direct action on a shared workspace card and its member's Watch header when the
+owner can manage that workspace. One click opens the add form. The normal add action requires no
+name or provider choice and uses the configured default. Optional native profile and account
+choices are visible in that form; profiles include only those advertised as
 registered, compatible with the workspace execution mode, and shared-workspace capable. Placement
 belongs to the workspace. This panel does not silently convert an isolated workspace or create
 shared metadata and call it a ready runtime. Uncertain creation responses require refreshing the
 roster before retrying because the current member-create API has no idempotency contract.
+
+Watch identifies each member by its name, native harness, and shared or separate workspace mode.
+In a shared workspace, a directory scan cannot prove which member authored a file. The run result
+therefore shows its own text or URL; Files lists the shared files without assigning them to that run.
 
 Advanced settings exposes optional Context, Connected tools, and Background work controls through the
 owner-only versioned worker configuration API. Defaults use all currently authorized context and

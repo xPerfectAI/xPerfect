@@ -263,6 +263,7 @@ def _provider_process_exit_error(
     }
     if (
         classification.failure_class == "provider_rate_limited"
+        and classification.retryable
         and classification.retry_after_s is not None
     ):
         return ProviderRateLimitError(
@@ -275,6 +276,7 @@ def _provider_process_exit_error(
     # Preserve the structured provider classification across the process-exit boundary. Downstream
     # recovery must not infer authentication state from localized CLI prose.
     if classification.structured:
+        error.failure_classification = classification
         error.failure_class = classification.failure_class
         error.failure_retryable = classification.retryable
         error.provider_event_source = classification.provider_event_source
@@ -318,6 +320,42 @@ def _codex_preauthoring_failed_thread_id(stdout: str) -> str:
         return ""
     return thread_id
 
+
+def _codex_failed_thread(stdout: str) -> tuple[str, bool]:
+    """Bind one failed CLI turn to its native thread, including authored turns.
+
+    Authored turns may be classified from the app-server's typed failure, but
+    must never be retried or switched to a fallback automatically.
+    """
+    preauthoring = _codex_preauthoring_failed_thread_id(stdout)
+    if preauthoring:
+        return preauthoring, False
+    if len(stdout.encode("utf-8", errors="ignore")) > 4 * 1024 * 1024:
+        return "", False
+    events: list[dict[str, object]] = []
+    for raw_line in stdout.splitlines():
+        if not raw_line.strip():
+            continue
+        if len(events) >= 4096:
+            return "", False
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return "", False
+        if not isinstance(event, dict):
+            return "", False
+        events.append(event)
+    types = [str(event.get("type") or "") for event in events]
+    if (len(events) < 3 or types[:2] != ["thread.started", "turn.started"]
+            or types[-1] != "turn.failed"
+            or any(types.count(kind) != 1 for kind in ("thread.started", "turn.started", "turn.failed"))):
+        return "", False
+    thread_id = str(events[0].get("thread_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id):
+        return "", False
+    authored = any(kind != "error" for kind in types[2:-1])
+    return (thread_id, True) if authored else ("", False)
+
 def _codex_typed_provider_failure(
     *,
     thread_id: str,
@@ -325,6 +363,7 @@ def _codex_typed_provider_failure(
     rate_limits_result: dict[str, object],
     expected_model_provider: str = "openai",
     now: datetime | None = None,
+    authored: bool = False,
 ) -> tuple[FailureClassification, dict[str, object]] | None:
     """Classify only the official app-server result bound to one failed thread."""
 
@@ -348,10 +387,8 @@ def _codex_typed_provider_failure(
         or not isinstance(error, dict)
         or error.get("codexErrorInfo") != "usageLimitExceeded"
         or not isinstance(items, list)
-        or any(
-            not isinstance(item, dict) or item.get("type") != "userMessage"
-            for item in items
-        )
+        or any(not isinstance(item, dict) for item in items)
+        or (authored != any(item.get("type") != "userMessage" for item in items))
     ):
         return None
 
@@ -439,9 +476,14 @@ def _codex_typed_provider_failure(
         sort_keys=True,
         separators=(",", ":"),
     )
+    if authored:
+        recovery = (
+            "Wait for the selected provider's reset or explicitly choose another account. "
+            "Review the existing workspace files before continuing; prior actions will not rerun automatically."
+        )
     classification = FailureClassification(
         failure_class=failure_class,
-        retryable=True,
+        retryable=not authored,
         user_message=user_message,
         recommended_recovery=recovery,
         diagnostic_summary=(
@@ -8004,7 +8046,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
         exit_code: int,
     ) -> tuple[FailureClassification, dict[str, object]] | None:
         _ = (stderr, exit_code)
-        thread_id = _codex_preauthoring_failed_thread_id(stdout)
+        thread_id, authored = _codex_failed_thread(stdout)
         if not thread_id:
             return None
         control = self._query_docker_codex_provider_control(
@@ -8019,6 +8061,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
             thread_result=control[0],
             rate_limits_result=control[1],
             expected_model_provider=self._compatible_provider_id(),
+            authored=authored,
         )
 
     def _usage_from_output(self, stdout: str) -> dict[str, int]:
@@ -14621,7 +14664,7 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
         exit_code: int,
     ) -> tuple[FailureClassification, dict[str, object]] | None:
         _ = (run_id, stderr, exit_code)
-        thread_id = _codex_preauthoring_failed_thread_id(stdout)
+        thread_id, authored = _codex_failed_thread(stdout)
         if not thread_id:
             return None
         cache_key = (str(worker.get("worker_id") or ""), thread_id)
@@ -14647,6 +14690,7 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
             thread_result=control[0],
             rate_limits_result=control[1],
             expected_model_provider="openai",
+            authored=authored,
         )
 
     def resolve_model(self, profile: str) -> str:

@@ -657,6 +657,10 @@ def test_worker_live_exposes_content_free_runtime_telemetry(tmp_path):
     wait_for_run(client, assigned["run_id"])
 
     live = client.get(f"/v1/workers/{worker['worker_id']}/live").json()
+    compact_live = client.get(f"/v1/workers/{worker['worker_id']}/live?compact=1").json()
+
+    assert compact_live["latest_run"]["run_id"] == assigned["run_id"]
+    assert compact_live["deliverable"] is None
 
     assert live["telemetry_run_id"] == assigned["run_id"]
     assert live["telemetry"]["run_id"] == assigned["run_id"]
@@ -3701,6 +3705,7 @@ def test_enterprise_short_refs_can_authorize_configured_owner_alias(tmp_path, mo
     catalog = client.get("/v1/workspaces?kind=legacy", headers=alias_headers)
     assert catalog.status_code == 200
     assert [item["worker_id"] for item in catalog.json()["items"]] == [worker["worker_id"]]
+    assert catalog.json()["items"][0]["execution_workspace_mode"] == "isolated"
 
     artifact_response = client.get(f"/v1/link-refs/{artifact_ref}", headers=alias_headers)
     assert artifact_response.status_code == 200
@@ -9705,6 +9710,45 @@ def test_deliverable_detection_prefers_user_file_over_incidental_external_url(tm
     assert payload["source"] == "workspace_file"
     assert payload["workspace_path"] == artifact_name
     assert "example.com" not in json.dumps(payload)
+
+
+def test_shared_workspace_never_attributes_scanned_files_to_one_run(tmp_path):
+    workspace = tmp_path / "workspace"
+    notes = workspace / "notes"
+    notes.mkdir(parents=True)
+    old = workspace / "README.md"
+    old.write_text("Existing shared project")
+    current = notes / "restart-proof.md"
+    current.write_text("New result from this member")
+    site = workspace / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<h1>Sibling page</h1>")
+    os.utime(old, (1000, 1000))
+    os.utime(current, (2000, 2000))
+    worker = {"worker_id": "wrk_shared", "workspace_dir": str(workspace),
+              "execution_mode": "docker", "_execution_workspace_mode": "shared"}
+
+    payload = deliverable_payload(worker,
+                                  {"state": "completed", "started_at": "1970-01-01T00:30:00+00:00"},
+                                  "Completed the new note.")
+
+    assert payload is None
+
+    older_run = deliverable_payload(
+        worker,
+        {"state": "completed", "started_at": "1970-01-01T00:16:00+00:00",
+         "ended_at": "1970-01-01T00:17:00+00:00"},
+        "Completed the original README.",
+    )
+    assert older_run is None
+    # A sibling write during the run cannot become this member's result.
+    sibling = notes / "sibling.md"
+    sibling.write_text("Concurrent sibling output")
+    os.utime(sibling, (2001, 2001))
+    assert deliverable_payload(worker, {"state": "completed", "started_at": "1970-01-01T00:30:00+00:00"}, "Text-only result") is None
+    # Separate workspaces retain their useful automatic file preview.
+    assert deliverable_payload({**worker, "_execution_workspace_mode": "isolated"},
+                               {"state": "completed"}, "Completed") is not None
 
 
 def test_incidental_external_url_is_not_a_deliverable(tmp_path):

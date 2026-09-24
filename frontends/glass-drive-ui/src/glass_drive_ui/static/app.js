@@ -564,7 +564,9 @@ function workerApiUrl(workerId, path = '') {
 function summarizeLive(data) {
   const runState = String(data?.latest_run?.state || '').trim();
   const output = String(data?.latest_output || '').trim();
-  const deliverable = data?.deliverable || null;
+  const deliverable = data?.deliverable && Object.keys(data.deliverable).length
+    ? data.deliverable
+    : null;
   if (Array.isArray(data?.native_control?.pending_requests) && data.native_control.pending_requests.length) {
     return data.native_control.read_only === true
       ? 'Grok is waiting for a workspace member to respond.'
@@ -1092,6 +1094,18 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
     await openWorkspaceSurface(workspace, watch);
   });
   actions.appendChild(watch);
+
+  if (workspace.execution_workspace_mode === 'shared') {
+    const addWorker = createButton('Add worker');
+    addWorker.addEventListener('click', () => openWorkspaceMembers(workspace, {
+      requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
+      providerAccounts: bootstrap.provider_accounts || [],
+      profileAccountProviders: bootstrap.profile_account_providers || {},
+      onChanged: refreshBootstrap,
+      startAdd: true,
+    }));
+    actions.appendChild(addWorker);
+  }
 
   const members = createButton('Workspace settings');
   members.addEventListener('click', () => openWorkspaceMembers(workspace, {
@@ -1949,6 +1963,9 @@ async function main() {
     }
     if (activeView === 'workspaces') {
       if (bootstrap) renderWorkspaceHive(workspaceViewData(), refreshBootstrap, hivePrefs());
+      // A project can finish after bootstrap loaded. Fetch the current catalog
+      // when its view opens so first use never presents a stale empty hive.
+      if (bootstrap) refreshWorkspaceCatalog().catch(() => {});
       startHivePolling();
     } else {
       stopHivePolling();
@@ -2366,6 +2383,28 @@ async function main() {
   });
 
   setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });
+  const requestedAddWorker = pageParams.get('add_worker');
+  if (requestedAddWorker && !signedToken && bootstrap) {
+    try {
+      const live = await getJson(`/api/workspace/${encodeURIComponent(requestedAddWorker)}/live`,
+        'This worker is no longer available.');
+      if (live.execution_workspace_mode === 'shared' && live.can_manage_workspace === true) {
+        setActiveView('workspaces');
+        openWorkspaceMembers(live.worker, {
+          requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
+          providerAccounts: bootstrap.provider_accounts || [],
+          profileAccountProviders: bootstrap.profile_account_providers || {},
+          onChanged: refreshBootstrap,
+          startAdd: true,
+        });
+      }
+    } catch (error) {
+      const message = document.getElementById('workspace-catalog-status');
+      if (message) message.textContent = error.message;
+    } finally {
+      window.history.replaceState(null, '', `${window.location.pathname}#workspaces`);
+    }
+  }
   window.addEventListener('hashchange', () => {
     setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });
   });

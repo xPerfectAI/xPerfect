@@ -197,7 +197,7 @@ class SharedWorkspaceRuntimes:
                 runtime = type(template)(base_dir=str(template.base_dir), create_directories=False)
                 runtime.sandbox = WorkspaceMemberSandbox(box)
                 if self.binder is not None and self.binder.store is not None:
-                    from .workspace_projection import assert_native_launch, projection_factory
+                    from .workspace_projection import assert_native_launch, assert_native_resume, projection_factory
                     def guard():
                         if self.storage is not None:
                             current = self.storage.owner_snapshot(binding.tenant_id, binding.owner_id)
@@ -205,6 +205,13 @@ class SharedWorkspaceRuntimes:
                                 raise WorkspaceBoxUnavailable('Owner storage root changed before native launch')
                         assert_native_launch(box, self.binder.store)
                     runtime.sandbox.assert_native_launch = guard
+                    def resume_guard(claimed_worker):
+                        if self.storage is not None:
+                            current = self.storage.owner_snapshot(binding.tenant_id, binding.owner_id)
+                            if current.root != box.volume_root:
+                                raise WorkspaceBoxUnavailable('Owner storage root changed before native resume')
+                        return assert_native_resume(box, self.binder.store, self.store, claimed_worker)
+                    runtime.sandbox.assert_native_resume = resume_guard
                     runtime.sandbox.projection_factory = projection_factory(box, self.binder.store)
                 self._members[key] = runtime
             # Observer registration can change after a member runtime is cached.
