@@ -111,6 +111,13 @@ def test_same_owner_dispatch_shares_exact_main_background_only(tmp_path):
         "Exact Main background\nwith whitespace  é",
         [Goal(id="goal", text="Goal")],
     )
+    unrelated = coordinator.create(
+        "local", "owner", CoordinatorConfig(model="exact", effort="high")
+    )["conversation_id"]
+    coordinator.accept_turn(
+        "local", "owner", unrelated, "other-turn", "Unrelated same-owner content",
+        [Goal(id="other-goal", text="Other goal")],
+    )
     project = store.create_project("owner", "Example", "Goal", "claude-code")
     worker = store.create_worker(
         project["project_id"],
@@ -147,6 +154,7 @@ def test_same_owner_dispatch_shares_exact_main_background_only(tmp_path):
     }
     assert authorized_sources(store, None, worker | {"owner_id": "other"}) == []
     assert "must not appear" not in json.dumps(sources)
+    assert "Unrelated same-owner content" not in json.dumps(sources)
     store.close()
 
 
