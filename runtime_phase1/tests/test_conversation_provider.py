@@ -3473,31 +3473,32 @@ def test_raw_idempotency_cancel_prefers_and_cancels_active_variant():
 def test_run_scoped_interrupt_cannot_cancel_a_newer_active_turn(tmp_path):
     store = Store(str(tmp_path / "runtime.db"))
     runtime = InterruptCountingRuntime()
-    service = WorkersProjectsService(store, runtime)
+    project = store.create_project(
+        "owner-a",
+        "Synthetic conversation",
+        "Cancellation scope regression",
+        "codex-cli",
+    )
+    worker = store.create_worker(
+        project_id=project["project_id"],
+        owner_id="owner-a",
+        name="Synthetic worker",
+        role="conversation-agent",
+        profile="codex-cli",
+        backend="",
+        runtime="codex-cli",
+        model="gpt-5.6-sol",
+    )
+    # Restoring a running snapshot passes through a queued row; seed it before a
+    # live scheduler exists, or its due pass can claim that row first.
+    active = store.create_run(
+        worker["worker_id"],
+        project["project_id"],
+        "newer turn",
+        state=RunRestorationState.RUNNING,
+    )
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False)
     try:
-        project = store.create_project(
-            "owner-a",
-            "Synthetic conversation",
-            "Cancellation scope regression",
-            "codex-cli",
-        )
-        worker = store.create_worker(
-            project_id=project["project_id"],
-            owner_id="owner-a",
-            name="Synthetic worker",
-            role="conversation-agent",
-            profile="codex-cli",
-            backend="",
-            runtime="codex-cli",
-            model="gpt-5.6-sol",
-        )
-        active = store.create_run(
-            worker["worker_id"],
-            project["project_id"],
-            "newer turn",
-            state=RunRestorationState.RUNNING,
-        )
-
         service.interrupt_worker(worker["worker_id"], run_id="older-request-run")
 
         assert runtime.interrupt_calls == []
