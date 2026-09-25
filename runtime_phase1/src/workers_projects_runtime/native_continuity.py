@@ -42,6 +42,13 @@ _OPTIONAL_TABLES = {
     },
     "worker_configuration": {"worker_configurations", "worker_context_snapshots"},
 }
+# Owned tables recognized by presence alone: the default-off local-QA fault authority
+# creates its complete set when enabled and records no schema-version row.
+_LEDGERLESS_OPTIONAL_TABLES = {
+    "local_qa_control": frozenset({
+        "local_qa_fault_controls", "local_qa_fault_audit", "local_qa_fault_arm_ledger",
+    }),
+}
 
 
 @contextmanager
@@ -217,6 +224,12 @@ def _schema_composition(connection: sqlite3.Connection) -> dict[str, int]:
             raise ValueError("GlassHive continuity requires the current reviewed component schema")
         if ledger_present:
             composition[component] = version
+    for component, owned in _LEDGERLESS_OPTIONAL_TABLES.items():
+        present = tables.intersection(owned)
+        if present and present != owned:
+            raise ValueError("GlassHive continuity contains a partial optional schema")
+        if present:
+            composition[component] = 1
     return composition
 
 
@@ -232,6 +245,11 @@ def _apply_schema_owners(path: Path, components) -> Store:
             from .worker_configuration import WorkerConfiguration
 
             WorkerConfiguration(store, object())
+        if "local_qa_control" in components:
+            from .local_qa_control import initialize_local_qa_schema
+
+            with store._connect() as connection:
+                initialize_local_qa_schema(connection)
     except BaseException:
         store.close()
         raise
