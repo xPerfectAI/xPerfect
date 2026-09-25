@@ -1747,6 +1747,11 @@ def _required_capability_servers(bundle: dict | None) -> list[str]:
     )[:32]
 
 
+# Owner of grant-waiter registrations made without a processor generation
+# (direct _run_local_worker callers and the unused legacy queue).
+_SHARED_GRANT_WAITER_OWNER = object()
+
+
 class WorkersProjectsService:
     def __init__(
         self,
@@ -1853,7 +1858,12 @@ class WorkersProjectsService:
         self._pending_run_starts: dict[str, dict[str, object]] = {}
         self._run_local_bundles_lock = Condition()
         self._run_local_bundles: dict[str, dict] = {}
-        self._run_local_grant_waiters: set[str] = set()
+        # run_id -> owners (processor generations) currently waiting to consume
+        # that run's grant. A run is listed only while it has at least one owner.
+        self._run_local_grant_waiters: dict[str, set[object]] = {}
+        # run_id -> the owner whose claim holds the run; once recorded, only that
+        # owner's registration keeps the run's grant gate open.
+        self._run_local_grant_claimants: dict[str, object] = {}
         self._provider_request_reconciler: Callable[[str], int] | None = None
         self._provider_run_start_fence: Callable[[str], bool] | None = None
         self._executor_id = f"executor-{os.getpid()}-{uuid.uuid4().hex}"
@@ -2224,6 +2234,7 @@ class WorkersProjectsService:
         with self._run_local_bundles_lock:
             self._run_local_bundles.clear()
             self._run_local_grant_waiters.clear()
+            self._run_local_grant_claimants.clear()
             self._run_local_bundles_lock.notify_all()
         self.store.release_active_work_action_leases(self._executor_id)
         self._scheduler_wake_event.set()
@@ -14064,12 +14075,16 @@ class WorkersProjectsService:
         runtime_invoked = False
         preserve_start_fence = False
         terminal_generation: dict[str, str] = {}
+        # Grant-waiter registrations are owned by this processor generation, so a
+        # superseded generation's cleanup cannot drop the live generation's wait.
+        grant_waiter_owner = (str(worker_id), generation)
         try:
             while True:
                 current_run = None
                 runtime_invoked = False
                 preserve_start_fence = False
                 terminal_generation = {}
+                self._clear_owned_run_local_grant_waiters(grant_waiter_owner)
                 if not self._processor_is_current(worker_id, generation):
                     return
                 worker = self.store.get_worker(worker_id)
@@ -14112,7 +14127,7 @@ class WorkersProjectsService:
                         )
                         return
                     self._mark_run_local_grant_waiter(
-                        worker, str(queued_run["run_id"])
+                        worker, str(queued_run["run_id"]), owner=grant_waiter_owner
                     )
                     try:
                         # Reserve host/resource capacity while the accepted work
@@ -14123,7 +14138,7 @@ class WorkersProjectsService:
                         )
                     except HostCapacityError as exc:
                         self._clear_run_local_grant_waiter(
-                            str(queued_run["run_id"])
+                            str(queued_run["run_id"]), owner=grant_waiter_owner
                         )
                         self._requeue_retryable_run(
                             worker,
@@ -14152,7 +14167,7 @@ class WorkersProjectsService:
                     )
                     if queued_run:
                         self._clear_run_local_grant_waiter(
-                            str(queued_run["run_id"])
+                            str(queued_run["run_id"]), owner=grant_waiter_owner
                         )
                         # Another processor generation of this executor may have
                         # claimed and started the same run under that lease. Drop
@@ -14185,11 +14200,14 @@ class WorkersProjectsService:
                     run.get("run_id") or ""
                 ):
                     self._clear_run_local_grant_waiter(
-                        str(queued_run.get("run_id") or "")
+                        str(queued_run.get("run_id") or ""), owner=grant_waiter_owner
                     )
                     self._mark_run_local_grant_waiter(
-                        worker, str(run["run_id"])
+                        worker, str(run["run_id"]), owner=grant_waiter_owner
                     )
+                self._record_run_local_grant_claimant(
+                    worker, str(run["run_id"]), owner=grant_waiter_owner
+                )
                 qa_claimed_stall = self._consume_local_qa(
                     "claimed_queue_stall", worker, run
                 )
@@ -14211,7 +14229,9 @@ class WorkersProjectsService:
                     )
                     return
                 if self._handle_unhealthy_provider_route(worker, run):
-                    self._clear_run_local_grant_waiter(str(run["run_id"]))
+                    self._clear_run_local_grant_waiter(
+                        str(run["run_id"]), owner=grant_waiter_owner
+                    )
                     return
                 try:
                     lease = self._acquire_host_run_lease(worker, run)
@@ -14300,7 +14320,10 @@ class WorkersProjectsService:
 
                     run_worker = {
                         **self._run_local_worker(
-                            worker, run, authority_context=authority_context
+                            worker,
+                            run,
+                            authority_context=authority_context,
+                            grant_waiter_owner=grant_waiter_owner,
                         ),
                         "_runtime_start_guard": lambda: self._runtime_execution_start_guard(
                             worker_id,
@@ -14356,7 +14379,9 @@ class WorkersProjectsService:
                         )
                         return
                 except HostCapacityError as exc:
-                    self._clear_run_local_grant_waiter(str(run["run_id"]))
+                    self._clear_run_local_grant_waiter(
+                        str(run["run_id"]), owner=grant_waiter_owner
+                    )
                     self._release_host_run_lease(
                         str(run["run_id"]), reason="capacity_wait"
                     )
@@ -14375,7 +14400,9 @@ class WorkersProjectsService:
                     )
                     return
                 except BrokerAdmissionError as exc:
-                    self._clear_run_local_grant_waiter(str(run["run_id"]))
+                    self._clear_run_local_grant_waiter(
+                        str(run["run_id"]), owner=grant_waiter_owner
+                    )
                     self._release_host_run_lease(
                         str(run["run_id"]),
                         reason=(
@@ -15175,6 +15202,7 @@ class WorkersProjectsService:
                         extra={"worker_id": worker_id},
                     )
         finally:
+            self._clear_owned_run_local_grant_waiters(grant_waiter_owner)
             if current_run and not preserve_start_fence:
                 try:
                     self._release_host_run_lease(
@@ -20707,7 +20735,7 @@ class WorkersProjectsService:
                 return False
             if (
                 current_state in {"claimed", "admitted", "running"}
-                and str(run_id) not in self._run_local_grant_waiters
+                and not self._run_local_grant_waiting_locked(str(run_id))
             ):
                 return False
             if current_state == "needs_input":
@@ -20766,15 +20794,69 @@ class WorkersProjectsService:
             == "conversation_orchestrator"
         )
 
-    def _mark_run_local_grant_waiter(self, worker: dict, run_id: str) -> None:
+    def _mark_run_local_grant_waiter(
+        self,
+        worker: dict,
+        run_id: str,
+        *,
+        owner: object = _SHARED_GRANT_WAITER_OWNER,
+    ) -> None:
         if not self._requires_conversation_invocation_bearer(worker):
             return
         with self._run_local_bundles_lock:
-            self._run_local_grant_waiters.add(str(run_id))
+            self._run_local_grant_waiters.setdefault(str(run_id), set()).add(owner)
 
-    def _clear_run_local_grant_waiter(self, run_id: str) -> None:
+    def _clear_run_local_grant_waiter(
+        self, run_id: str, *, owner: object = _SHARED_GRANT_WAITER_OWNER
+    ) -> None:
+        """Drop only ``owner``'s registration; another generation's wait stays open."""
+
         with self._run_local_bundles_lock:
-            self._run_local_grant_waiters.discard(str(run_id))
+            self._discard_run_local_grant_waiter_locked(str(run_id), owner)
+
+    def _discard_run_local_grant_waiter_locked(self, run_id: str, owner: object) -> None:
+        owners = self._run_local_grant_waiters.get(run_id)
+        if owners is None:
+            return
+        owners.discard(owner)
+        if not owners:
+            del self._run_local_grant_waiters[run_id]
+
+    def _record_run_local_grant_claimant(
+        self, worker: dict, run_id: str, *, owner: object
+    ) -> None:
+        if not self._requires_conversation_invocation_bearer(worker):
+            return
+        with self._run_local_bundles_lock:
+            self._run_local_grant_claimants[str(run_id)] = owner
+
+    def _run_local_grant_waiting_locked(self, run_id: str) -> bool:
+        """True while the run's grant has a registered consumer.
+
+        After a claim is recorded, a stale registration left by a processor whose own
+        claim must fail cannot keep the gate open once the claimant stops waiting.
+        """
+
+        owners = self._run_local_grant_waiters.get(run_id)
+        if not owners:
+            return False
+        claimant = self._run_local_grant_claimants.get(run_id)
+        return claimant is None or claimant in owners
+
+    def _clear_owned_run_local_grant_waiters(self, owner: object) -> None:
+        with self._run_local_bundles_lock:
+            for run_id in [
+                run_id
+                for run_id, owners in self._run_local_grant_waiters.items()
+                if owner in owners
+            ]:
+                self._discard_run_local_grant_waiter_locked(run_id, owner)
+            for run_id in [
+                run_id
+                for run_id, claimant in self._run_local_grant_claimants.items()
+                if claimant == owner
+            ]:
+                del self._run_local_grant_claimants[run_id]
 
     def _exact_provider_session_bundle_for_run(
         self, bundle: dict[str, object], run_id: str
@@ -20809,6 +20891,7 @@ class WorkersProjectsService:
         run: dict,
         *,
         authority_context: dict[str, str] | None = None,
+        grant_waiter_owner: object = _SHARED_GRANT_WAITER_OWNER,
     ) -> dict:
         if bool(int(run.get("provider_liveness_route_locked") or 0)):
             locked_profile = str(run.get("provider_route_profile") or "").strip()
@@ -20832,7 +20915,9 @@ class WorkersProjectsService:
                 worker, run, authority_context=authority_context
             )
         except Exception:
-            self._clear_run_local_grant_waiter(str(run["run_id"]))
+            self._clear_run_local_grant_waiter(
+                str(run["run_id"]), owner=grant_waiter_owner
+            )
             raise
         admission = run.get("allowed_ai_admission")
         if not isinstance(admission, dict):
@@ -20861,7 +20946,9 @@ class WorkersProjectsService:
         run_id = str(run["run_id"])
         with self._run_local_bundles_lock:
             if requires_invocation_bearer:
-                self._run_local_grant_waiters.add(run_id)
+                self._run_local_grant_waiters.setdefault(run_id, set()).add(
+                    grant_waiter_owner
+                )
             transient = self._run_local_bundles.pop(run_id, None)
         transient_env = (
             transient.get("env")
@@ -20897,7 +20984,9 @@ class WorkersProjectsService:
                         ).strip():
                             break
                 finally:
-                    self._run_local_grant_waiters.discard(run_id)
+                    self._discard_run_local_grant_waiter_locked(
+                        run_id, grant_waiter_owner
+                    )
             has_invocation_bearer = bool(
                 str(
                     transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or ""
@@ -20905,7 +20994,7 @@ class WorkersProjectsService:
             )
         elif requires_invocation_bearer:
             with self._run_local_bundles_lock:
-                self._run_local_grant_waiters.discard(run_id)
+                self._discard_run_local_grant_waiter_locked(run_id, grant_waiter_owner)
         if requires_invocation_bearer and not has_invocation_bearer:
             raise BrokerAdmissionError(
                 "conversation_capability_grant_required",
