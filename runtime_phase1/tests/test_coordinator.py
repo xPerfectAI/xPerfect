@@ -1058,12 +1058,20 @@ def test_native_projection_reuses_peer_binder_when_discovery_is_off(coordinator,
     endpoint = 'http://runtime:8766/v1/native/coordinator/'
     with pytest.raises(CoordinatorScopeError):
         coordinator.bind_native_worker({'worker_id':'a'}, {'run_id':'r'}, peers, endpoint)
-    monkeypatch.setenv('XPERFECT_EXECUTION_PROFILE', 'local-linux')
-    monkeypatch.setenv('XPERFECT_SHARED_NETWORK', 'synthetic-workers')
-    assert coordinator.bind_native_worker({'worker_id':'a'}, {'run_id':'r'}, peers, endpoint)['_coordinator_native_projection']['url'] == endpoint
-    monkeypatch.setenv('XPERFECT_EXECUTION_PROFILE', 'hosted-xfs')
-    with pytest.raises(CoordinatorScopeError):
-        coordinator.bind_native_worker({'worker_id':'a'}, {'run_id':'r'}, peers, endpoint)
+    # A package never uses plaintext TCP: only its box socket, when the hub serves it.
+    from workers_projects_runtime import native_transport
+    monkeypatch.setattr(native_transport, '_hub', None)
+    monkeypatch.setenv('GLASSHIVE_PEER_RUNTIME_BASE_URL', 'http://runtime:8766')
+    monkeypatch.setenv('XPERFECT_CONTROL_ROOT', '/control')
+    for profile in ('local-linux', 'hosted-xfs'):
+        monkeypatch.setenv('XPERFECT_EXECUTION_PROFILE', profile)
+        with pytest.raises(CoordinatorScopeError, match='unavailable'):
+            coordinator.bind_native_worker({'worker_id':'a'}, {'run_id':'r'}, peers, endpoint)
+        monkeypatch.setattr(native_transport, '_hub', SimpleNamespace(running=True))
+        projection = coordinator.bind_native_worker({'worker_id':'a'}, {'run_id':'r'}, peers, endpoint)['_coordinator_native_projection']
+        assert projection['url'] == 'http+unix://%2Fworkspace%2Fdata%2F.xperfect-runtime.sock/v1/native/coordinator/'
+        assert projection['transport'] == 'stdio'
+        monkeypatch.setattr(native_transport, '_hub', None)
 
 
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):

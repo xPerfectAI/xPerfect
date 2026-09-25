@@ -191,3 +191,9 @@ Coordinator native tools reuse the peer collaboration run/attempt token binder. 
 requires a persisted coordinator conversation mapped to that exact provider-session worker and
 owner. Role, configured routes and goal budget cannot be expanded by workers. Private token
 projection uses existing MCP materialization and never places a service token in a worker.
+
+In packages, workspace containers share a workers network that refuses traffic between its
+containers, so one owner's workspace cannot reach another's. The runtime serves each workspace
+container a Unix socket in that container's own directory. A small standard-library stdio bridge
+carries each harness's context, peer and coordinator MCP calls over it. The runtime still
+authorizes every call by the run's own token.

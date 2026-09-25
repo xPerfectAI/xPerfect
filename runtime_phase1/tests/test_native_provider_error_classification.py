@@ -99,3 +99,61 @@ def test_terminal_native_diagnostic_is_redacted_and_bounded():
     assert secret not in summary
     assert "private-person" not in summary
     assert "Zz9Zz9Zz9" not in summary
+
+
+CODEX_REFUSAL = ("You’ve hit your usage limit. Visit https://provider.example/usage to purchase more credits "
+                 "or try again at Oct 1st, 2026 7:43 AM.")
+
+
+def _codex_stream(*events):
+    return "\n".join(json.dumps(event) for event in events)
+
+
+def test_a_provider_stopped_turn_quotes_the_providers_own_reason_without_rerouting():
+    stdout = _codex_stream(
+        {"type": "thread.started", "thread_id": "synthetic-thread"},
+        {"type": "turn.started"},
+        {"type": "error", "message": CODEX_REFUSAL},
+        {"type": "turn.failed", "error": {"message": CODEX_REFUSAL}},
+    )
+    classification = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+    # Same class and no structured capacity evidence: nothing reroutes or substitutes.
+    assert classification.failure_class == "provider_response_failed"
+    assert classification.structured is False
+    assert classification.user_message == (
+        "The model provider stopped the worker turn and said: “" + CODEX_REFUSAL + "”")
+    # Both trusted events carry the same words; they are quoted once, and recovery stays neutral.
+    assert "workspace_continue" in classification.recommended_recovery
+
+
+def test_a_transient_provider_stop_quotes_every_distinct_provider_message_in_order():
+    stdout = _codex_stream(
+        {"type": "response.failed", "error": {"message": "stream disconnected before completion"}},
+        {"type": "turn.failed", "error": {"message": "response.failed event received"}},
+    )
+    classification = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+    assert classification.failure_class == "provider_response_failed" and classification.retryable
+    assert classification.user_message == ("The model provider stopped the worker turn and said: “"
+                                           "stream disconnected before completion — response.failed event received”")
+    assert "workspace_continue" in classification.recommended_recovery
+
+
+def test_worker_output_is_never_quoted_as_the_providers_reason():
+    stdout = _codex_stream(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "Task note: usage limit reached."}},
+        {"type": "turn.failed", "error": {}},
+    )
+    classification = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+    assert "usage limit" not in classification.user_message
+    assert classification.user_message == (
+        "The model provider ended the worker turn unexpectedly before the task finished.")
+
+
+def test_the_quoted_reason_is_one_bounded_printable_line():
+    from workers_projects_runtime.failure_classification import provider_stated_reason
+
+    noisy = "Refused\u0007 for\n\nnow " + "x" * 600
+    stated = provider_stated_reason(_codex_stream({"type": "turn.failed", "error": {"message": noisy}}))
+    assert stated.startswith("Refused for now x") and "\u0007" not in stated and "\n" not in stated
+    assert len(stated) == 300 and stated.endswith("…")
+    assert provider_stated_reason(_codex_stream({"type": "item.completed", "text": "not a provider event"})) == ""

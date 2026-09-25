@@ -17,6 +17,8 @@ from .bootstrap import (
     _source_path_from_entry,
     resolve_authorized_bootstrap_source_path,
 )
+from . import native_transport
+from .failure_classification import FailureClassification
 from .models import CLOSED_WORKER_STATES
 from .schema_version import (
     execute_schema_script,
@@ -29,6 +31,56 @@ class ConfigurationError(ValueError):
     def __init__(self, code: str, status: int = 409):
         self.code, self.status = code, status
         super().__init__(code)
+
+
+# Shown in settings; it describes the installation, so it never blocks saving a choice.
+CONTEXT_ROUTE_ISSUE = "context_retrieval_unavailable"
+CONTEXT_ROUTE_MESSAGE = (
+    "Part of this background is beyond the inline limit, and this installation gives "
+    "workers no way to read the rest. Raise the inline limit or clear some sources."
+)
+
+
+def context_route_unavailable() -> ConfigurationError:
+    """A run refused before start because its remaining background has no route."""
+    error = ConfigurationError("context_endpoint_unavailable")
+    error.failure_classification = FailureClassification(
+        failure_class="context_endpoint_unavailable",
+        retryable=False,
+        user_message=(
+            "Part of this worker's background is beyond its inline limit, and this "
+            "installation gives workers no way to read the rest."
+        ),
+        recommended_recovery=(
+            "Raise the inline limit or clear some background sources in Workspace "
+            "settings, then continue the worker. An operator can instead give workers "
+            "a route to the runtime."
+        ),
+        diagnostic_summary="No worker route to the runtime's context endpoint.",
+        structured=True,
+    )
+    return error
+
+
+def configuration_needs_attention(issues) -> ConfigurationError:
+    """A run refused before start, naming what its settings need."""
+    error = ConfigurationError("configuration_needs_attention")
+    messages = []
+    for issue in issues:
+        message = str(issue.get("message") or "")
+        if message and message not in messages:
+            messages.append(message)
+    error.failure_classification = FailureClassification(
+        failure_class="configuration_needs_attention",
+        retryable=False,
+        user_message="This worker's settings need attention before it can start: "
+        + " ".join(messages),
+        recommended_recovery="Open Workspace settings, resolve these items, then continue the worker.",
+        diagnostic_summary="Configuration issues: "
+        + ", ".join(sorted({str(issue.get("code") or "") for issue in issues})),
+        structured=True,
+    )
+    return error
 
 
 class Strict(BaseModel):
@@ -388,6 +440,9 @@ class WorkerConfiguration:
                     else "retrieval",
                 }
             )
+        retrievable = sum(s["chars"] for s in selected) - inline
+        if retrievable and native_transport.worker_route() is None:
+            issues.append({"code": CONTEXT_ROUTE_ISSUE, "message": CONTEXT_ROUTE_MESSAGE})
         return (
             sources,
             selected,
@@ -396,7 +451,7 @@ class WorkerConfiguration:
                 "context": {
                     "sources": descriptors,
                     "inline_chars": inline,
-                    "retrievable_chars": sum(s["chars"] for s in selected) - inline,
+                    "retrievable_chars": retrievable,
                 },
                 "tools": {
                     "mcp_server_ids": selected_tools,
@@ -436,7 +491,10 @@ class WorkerConfiguration:
             revision, previous = self._config(conn, worker_id)
             if revision != update.expected_revision:
                 raise ConfigurationError("configuration_changed")
-            if self._effective(worker, config)[3]["issues"]:
+            if any(
+                issue["code"] != CONTEXT_ROUTE_ISSUE
+                for issue in self._effective(worker, config)[3]["issues"]
+            ):
                 raise ConfigurationError("selection_unavailable")
             generation = self._context_revision(conn, worker_id)
             if (previous.context.mode, set(previous.context.source_ids)) != (
@@ -483,8 +541,10 @@ class WorkerConfiguration:
         projected = dict(worker)
         source_worker = dict(fresh)
         sources, selected, _, effective = self._effective(source_worker, config)
-        if effective["issues"]:
-            raise ConfigurationError("configuration_needs_attention")
+        # The route belongs to the transport; its binder refuses a run that needs one.
+        blocking = [i for i in effective["issues"] if i["code"] != CONTEXT_ROUTE_ISSUE]
+        if blocking:
+            raise configuration_needs_attention(blocking)
         bundle = json.loads(_json(bootstrap_bundle_for(worker)))
         # Restrict only owner-configured external servers; keep required runtime control tools.
         servers = mcp_servers(bundle)

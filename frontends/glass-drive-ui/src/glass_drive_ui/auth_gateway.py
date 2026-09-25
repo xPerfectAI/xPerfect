@@ -1211,6 +1211,23 @@ class HumanAuthGateway:
             for row in rows
         ]
 
+    def get_principal(self, principal_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT user_id, email, display_name, role, disabled_at "
+                "FROM auth_principals WHERE user_id = ?",
+                (str(principal_id or ""),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "user_id": str(row["user_id"]),
+            "email": str(row["email"] or ""),
+            "display_name": str(row["display_name"] or ""),
+            "role": str(row["role"] or "member"),
+            "disabled": row["disabled_at"] is not None,
+        }
+
     def set_principal_disabled(self, *, principal_id: str, disabled: bool) -> dict[str, Any]:
         user_id = str(principal_id or "").strip()
         if not user_id:

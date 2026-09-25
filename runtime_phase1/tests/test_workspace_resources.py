@@ -967,3 +967,40 @@ def test_confirmed_box_release_invalidates_only_cached_capacity(monkeypatch):
     assert resources.usage(object())["available_memory_bytes"] == 0
     resources.invalidate_capacity_snapshot()
     assert resources.usage(object())["available_memory_bytes"] == 7
+
+
+def test_owner_recovery_settles_only_idle_quarantined_projections():
+    records = [
+        {'binding': {'worker_id': 'wrk_pending', 'tenant_id': 't', 'owner_id': 'o'}, 'metadata': {}, 'state': 'pending'},
+        {'binding': {'worker_id': 'wrk_busy', 'tenant_id': 't', 'owner_id': 'o'}, 'metadata': {}, 'state': 'quarantined'},
+        {'binding': {'worker_id': 'wrk_idle', 'tenant_id': 't', 'owner_id': 'o'}, 'metadata': {}, 'state': 'quarantined'},
+    ]
+    recovered = []
+
+    class ControlStore:
+        @staticmethod
+        def pending_provider_projections(*, account_id=None, worker_id=None):
+            assert account_id == 'acct_1'
+            return records
+
+    class Binder:
+        store = ControlStore()
+
+        @staticmethod
+        def recover_projection(record, *, projection_factory):
+            recovered.append(record['binding']['worker_id'])
+
+    class Store:
+        @staticmethod
+        def get_active_run(worker_id):
+            return {'run_id': 'run_live'} if worker_id == 'wrk_busy' else None
+
+        @staticmethod
+        def get_worker(worker_id, tenant_id, owner_id):
+            return {'worker_id': worker_id, 'tenant_id': tenant_id, 'owner_id': owner_id}
+
+    profiled = SimpleNamespace(_runtime_for_worker=lambda worker: SimpleNamespace(sandbox=SimpleNamespace(box=object())))
+    runtimes = SharedWorkspaceRuntimes(Store(), binder=Binder())
+    assert runtimes.recover_quarantined(profiled, account_id='acct_1') == ['wrk_idle']
+    # A pending (possibly in-flight) projection and a live worker are never touched.
+    assert recovered == ['wrk_idle']

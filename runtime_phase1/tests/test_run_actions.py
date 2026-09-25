@@ -229,6 +229,7 @@ def test_retryable_failed_callback_carries_signed_short_lived_retry_capability(
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime())
     with TestClient(app):
         project, worker = _create_scoped_worker(app)
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         run = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -287,6 +288,7 @@ def test_nonretryable_failure_and_unproven_checkpoint_never_mint_actions(tmp_pat
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime())
     with TestClient(app):
         project, worker = _create_scoped_worker(app)
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         failed_run = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -441,6 +443,7 @@ def test_action_capability_rejects_signature_tampering_and_changed_db_owner(tmp_
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime())
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -481,6 +484,7 @@ def test_action_capability_rejects_noncanonical_base64url_signature_alias(tmp_pa
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime())
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -522,6 +526,7 @@ def test_unverified_unknown_scope_is_uniform_invalid_capability(tmp_path, monkey
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime())
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -552,6 +557,8 @@ def test_cancel_is_exact_run_idempotent_and_only_confirmed_by_terminal_callback(
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -592,6 +599,8 @@ def test_cancel_replay_waits_for_expired_exact_claim_recovery_without_false_acce
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -655,6 +664,8 @@ def test_concurrent_cancel_replay_invokes_owner_once_and_reports_pending_until_a
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     with TestClient(app):
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -697,6 +708,8 @@ def test_stale_cancel_execution_lease_recovers_after_process_crash(tmp_path, mon
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     with TestClient(app):
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -751,6 +764,8 @@ def test_cancel_completion_race_returns_exact_already_completed_outcome(
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime())
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -817,6 +832,8 @@ def test_cancel_completion_during_owner_interrupt_preserves_completed_result(tmp
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -988,6 +1005,8 @@ def test_cancel_capability_covers_extended_calls_then_expires(
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     with TestClient(app) as client:
         project, worker = _create_scoped_worker(app)
+        # The test claims its queued run itself; no background processor may take it first.
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],
@@ -1082,6 +1101,7 @@ def test_enterprise_action_rejects_capability_outside_deployment_tenant(tmp_path
             tenant_id="tenant-beta",
             owner_id="owner-beta",
         )
+        app.state.service._ensure_worker_processor = lambda _worker_id: None
         source = app.state.store.create_run(
             worker["worker_id"],
             project["project_id"],

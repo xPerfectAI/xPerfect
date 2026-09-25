@@ -381,7 +381,21 @@ class WorkspaceBox:
                     raise WorkspaceBoxUnavailable('Service and workspace volume identity differ')
             finally:
                 probe.unlink(missing_ok=True)
+            self._serve_native_socket()
             return inspected['Id']
+
+    def _serve_native_socket(self):
+        # This box's only path to the runtime's native tools; its network refuses
+        # traffic to every other container.
+        from . import native_transport
+        try:
+            native_transport.ensure_box_socket(self.native_root)
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceBoxUnavailable('Workspace runtime socket is unavailable') from exc
+
+    def _release_native_socket(self):
+        from . import native_transport
+        native_transport.release_box_socket(self.native_root)
 
     @staticmethod
     def guarded_command(argv):
@@ -473,6 +487,7 @@ while True:
             self.docker(['rm', '-f', expected_container_id])
             if self._inspect() is not None:
                 raise WorkspaceBoxUnavailable('Workspace box release is unconfirmed')
+            self._release_native_socket()
             return True
 
     def discard_empty_prepared_workspace(self) -> bool:
@@ -567,6 +582,7 @@ while True:
             self.docker(['rm', '-f', container_id])
             if self._inspect() is not None:
                 raise WorkspaceBoxUnavailable('Workspace box release is unconfirmed')
+            self._release_native_socket()
             return True
 
     def stop_member(self, expected_container_id: str) -> None:

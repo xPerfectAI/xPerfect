@@ -456,6 +456,12 @@ class ControlPlaneStore:
                     "ALTER TABLE provider_accounts "
                     "ADD COLUMN observed_duration_seconds REAL NOT NULL DEFAULT 0"
                 )
+            if "provider_notice_json" not in provider_account_columns:
+                # What the latest provider-stopped run told its owner; a completed run clears it.
+                conn.execute(
+                    "ALTER TABLE provider_accounts "
+                    "ADD COLUMN provider_notice_json TEXT NOT NULL DEFAULT ''"
+                )
             if "recovery_code" not in provider_account_columns:
                 conn.execute(
                     "ALTER TABLE provider_accounts "
@@ -542,6 +548,9 @@ class ControlPlaneStore:
         for name in ("is_default",):
             if name in result:
                 result[name] = bool(result[name])
+        if "provider_notice_json" in result:
+            notice = _parse_json(result.pop("provider_notice_json"), None)
+            result["provider_notice"] = notice if isinstance(notice, dict) and notice.get("message") else None
         result.pop("confirmation_hash", None)
         if str(result.get("secret_locator") or "").startswith("native-home://current-claude/"):
             result["auth_source"] = "current_os_claude_subscription"

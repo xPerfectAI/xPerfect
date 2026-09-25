@@ -207,8 +207,9 @@ def test_native_daily_recurrence_materializes_latest_occurrence_once_and_persist
     monkeypatch.setenv("GLASSHIVE_RECURRING_SCHEDULE_OWNER", "native")
     monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "3600")
     db_path = tmp_path / "runtime.db"
+    # The explicit due-cycle below is under test; the background scheduler must not race it.
     store = Store(str(db_path))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     try:
         worker = _worker(store)
         definition = service.create_recurring_schedule(
@@ -508,8 +509,9 @@ def test_recurring_dispatch_rolls_back_run_when_atomic_schedule_link_fails(tmp_p
 def test_interval_recurrence_coalesces_missed_periods_to_latest_due_occurrence(tmp_path, monkeypatch):
     monkeypatch.setenv("GLASSHIVE_RECURRING_SCHEDULE_OWNER", "native")
     monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "3600")
+    # The explicit due-cycle below is under test; the background scheduler must not race it.
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     try:
         worker = _worker(store)
         definition = service.create_recurring_schedule(
@@ -547,8 +549,9 @@ def test_interval_recurrence_coalesces_missed_periods_to_latest_due_occurrence(t
 def test_bounded_catch_up_with_overlap_skip_dispatches_only_one_run(tmp_path, monkeypatch):
     monkeypatch.setenv("GLASSHIVE_RECURRING_SCHEDULE_OWNER", "native")
     monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "3600")
+    # The explicit due-cycle below is under test; the background scheduler must not race it.
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     service._ensure_worker_processor = lambda worker_id: None  # type: ignore[method-assign]
     try:
         worker = _worker(store)
@@ -882,8 +885,9 @@ def test_recurring_occurrence_is_retryable_when_user_concurrency_is_full(tmp_pat
     monkeypatch.setenv("GLASSHIVE_RECURRING_SCHEDULE_OWNER", "glasshive_native")
     monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "3600")
     monkeypatch.setenv("GLASSHIVE_MAX_CONCURRENT_RECURRING_RUNS_PER_USER", "1")
+    # The explicit due-cycle below is under test; the background scheduler must not race it.
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     try:
         worker = _worker(store)
         store.create_run(
@@ -1727,8 +1731,9 @@ def test_viventium_marker_rejects_conflicting_native_recurrence_owner(tmp_path, 
         "http://127.0.0.1:3180/api/viventium/glasshive/callback",
     )
     monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "3600")
+    # The explicit due-cycle below is under test; the background scheduler must not race it.
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     try:
         worker = _worker(store)
         with pytest.raises(ValueError, match="delegates recurrence to its configured host scheduler"):
@@ -1762,8 +1767,9 @@ def test_viventium_marker_rejects_conflicting_native_recurrence_owner(tmp_path, 
 def test_invalid_persisted_recurrence_does_not_block_legacy_one_shot_firing(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("GLASSHIVE_RECURRING_SCHEDULE_OWNER", "native")
     monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "3600")
+    # The explicit due-cycle below is under test; the background scheduler must not race it.
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     try:
         worker = _worker(store)
         store.create_recurring_schedule_definition(

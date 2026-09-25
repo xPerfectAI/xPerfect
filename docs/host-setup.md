@@ -45,6 +45,11 @@ replaces it; **Remove** deletes only xPerfect's local account credentials. To re
 at its provider, use the provider's own console. A required named account never falls back to your
 current OS account. The optional preferred-account policy can use its explicitly allowed fallback.
 
+A signed-in account can still be refused by its provider, for example at a usage limit. The stopped
+run then quotes the provider's own message, and **Connections** shows it under that account as
+"Last run: …" until a later run with the account completes. xPerfect does not switch to another
+account for you.
+
 These API-key accounts use the local single-user host route, or a packaged Linux multi-user route
 with `per_worker_container` isolation and an owner-scoped private account home. The contained
 worker reads the selected key from its account mount at native start; the key is not saved in the

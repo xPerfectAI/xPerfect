@@ -32,7 +32,9 @@ FALSE_VALUES = {'', '0', 'false', 'no', 'off'}
 # Settings every package of a profile carries, identical in every role: no secret,
 # identity, address or operator choice. The launcher writes them into new packages,
 # and an upgrade to an image carrying this table adds any that an earlier launcher
-# did not write. An image without the table declares none.
+# did not write. An image without the table declares none. XPERFECT_WORKER_NETWORK
+# 'isolated' declares that this image serves native tools through per-box sockets,
+# so its workers bridge refuses traffic between containers.
 PROFILE_SETTINGS = {
     'local-linux': {
         'GLASSHIVE_SECURITY_MODE': 'local',
@@ -40,6 +42,7 @@ PROFILE_SETTINGS = {
         'GLASSHIVE_ENABLE_NATIVE_API_KEYS': '1',
         'GLASSHIVE_ENABLE_CODEX_PERSONAL_ACCOUNTS': '1',
         'GLASSHIVE_ENABLE_HOSTED_CLAUDE_CONSUMER_AUTH': '1',
+        'XPERFECT_WORKER_NETWORK': 'isolated',
     },
     'hosted-xfs': {
         'GLASSHIVE_SECURITY_MODE': 'multi_user',
@@ -52,6 +55,7 @@ PROFILE_SETTINGS = {
         'GLASSHIVE_INTERNAL_ASSERTION_AUDIENCE': 'xperfect-runtime',
         'GLASSHIVE_PRINCIPAL_ID_FORMAT': 'hashed_issuer_subject',
         'GLASSHIVE_ALLOW_PRINCIPAL_ENROLLMENT': 'false',
+        'XPERFECT_WORKER_NETWORK': 'isolated',
     },
 }
 

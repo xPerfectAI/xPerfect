@@ -14519,14 +14519,19 @@ class WorkersProjectsService:
                         try:
                             output = self.runtime.run_task(
                                 run_worker,
-                                run["instruction"],
+                                self._runtime_instruction_for_run(
+                                    run_worker, run["instruction"]
+                                ),
                                 run_id=run["run_id"],
                             )
                         except TypeError as exc:
                             if "run_id" not in str(exc):
                                 raise
                             output = self.runtime.run_task(
-                                run_worker, run["instruction"]
+                                run_worker,
+                                self._runtime_instruction_for_run(
+                                    run_worker, run["instruction"]
+                                ),
                             )
                         with self._pending_run_starts_lock:
                             confirmed = bool(
@@ -15582,14 +15587,19 @@ class WorkersProjectsService:
                         try:
                             output = self.runtime.run_task(
                                 run_worker,
-                                run["instruction"],
+                                self._runtime_instruction_for_run(
+                                    run_worker, run["instruction"]
+                                ),
                                 run_id=run["run_id"],
                             )
                         except TypeError as exc:
                             if "run_id" not in str(exc):
                                 raise
                             output = self.runtime.run_task(
-                                run_worker, run["instruction"]
+                                run_worker,
+                                self._runtime_instruction_for_run(
+                                    run_worker, run["instruction"]
+                                ),
                             )
                         with self._pending_run_starts_lock:
                             confirmed = bool(
@@ -20840,6 +20850,7 @@ class WorkersProjectsService:
             tenant_id=str(run_worker.get("tenant_id") or "local"),
             owner_id=str(run_worker.get("owner_id") or ""),
         )
+        run_input_manifest_path = ""
         if file_manifest:
             self.files.register_run_input_versions(run_worker, file_manifest)
             run_bundle["files"] = _merge_file_entries(
@@ -20850,6 +20861,35 @@ class WorkersProjectsService:
                     file_manifest,
                 ),
             )
+            # A reused workspace can contain another file with the same display
+            # name. Give the native worker one bounded, run-local index of the
+            # accepted paths instead of relying on filename search or expanding
+            # an arbitrarily large file list into the prompt.
+            run_input_manifest_path = (
+                ".xperfect/run-inputs/"
+                + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+                + ".json"
+            )
+            run_bundle["files"] = _merge_file_entries(
+                run_bundle["files"],
+                [{
+                    "scope": "workspace",
+                    "path": run_input_manifest_path,
+                    "content": json.dumps({
+                        "version": 1,
+                        "files": [
+                            {
+                                "name": item["name"],
+                                "path": item["path"],
+                                "sha256": item["sha256"],
+                                "size_bytes": item["size_bytes"],
+                            }
+                            for item in file_manifest
+                        ],
+                    }, ensure_ascii=False, sort_keys=True),
+                    "allow_empty": False,
+                }],
+            )
         return {
             **self.files.artifact_worker(run_worker),
             # The binder's native-start receipt must be tied to this durable
@@ -20857,8 +20897,22 @@ class WorkersProjectsService:
             # never included in the public bootstrap bundle.
             "_active_run_id": run_id,
             "_run_attempt_id": str(run.get("active_attempt_id") or ""),
+            "_run_input_manifest_path": run_input_manifest_path,
             "bootstrap_bundle_json": json.dumps(run_bundle, ensure_ascii=False),
         }
+
+    @staticmethod
+    def _run_inputs_prompt() -> dict:
+        raw = (Path(__file__).with_name("prompts") / "worker-run-inputs.json").read_bytes()
+        return json.loads(raw) | {"sha256": hashlib.sha256(raw).hexdigest()}
+
+    @classmethod
+    def _runtime_instruction_for_run(cls, run_worker: dict, instruction: str) -> str:
+        path = str(run_worker.get("_run_input_manifest_path") or "")
+        if not path:
+            return instruction
+        template = cls._run_inputs_prompt()["instruction"]
+        return instruction + "\n\n" + template.format(index_path=path)
 
     def _finish_paused_worker_transition(
         self,

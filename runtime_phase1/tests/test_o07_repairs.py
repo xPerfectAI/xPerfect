@@ -1,6 +1,7 @@
 """Causal regressions for independently reproduced O07 failures."""
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -119,6 +120,141 @@ def test_hosted_context_refuses_unimplemented_https_bridge_before_minting(live, 
     with pytest.raises(ConfigurationError, match="context_endpoint_unavailable"):
         bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
     assert minted == []
+
+
+def test_packaged_context_projects_only_the_box_socket_bridge(live, monkeypatch, tmp_path):
+    import tomllib
+    from types import SimpleNamespace
+
+    from workers_projects_runtime import native_transport
+    from workers_projects_runtime.grok_projection import mcp_servers_for_bundle
+
+    config, peers, worker, run, _, _ = live
+    monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", "local-linux")
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://runtime:8766")
+    monkeypatch.setenv("XPERFECT_CONTROL_ROOT", str(tmp_path))
+    # A package whose socket hub is not serving never mints or projects the bearer.
+    monkeypatch.setattr(native_transport, "_hub", None)
+    minted = []
+    mint = peers.mint_native_session
+    peers.mint_native_session = lambda *args, **kwargs: minted.append(args) or mint(*args, **kwargs)
+    with pytest.raises(ConfigurationError, match="context_endpoint_unavailable"):
+        bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    assert minted == []
+    monkeypatch.setattr(native_transport, "_hub", SimpleNamespace(running=True))
+    projected = bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    bundle = json.loads(projected["bootstrap_bundle_json"])
+    url = "http+unix://%2Fworkspace%2Fdata%2F.xperfect-runtime.sock/v1/native/context/"
+    claude = bundle["claude_project_mcp"]["mcpServers"]["xperfect-context"]
+    assert native_transport.is_projected_stdio(claude, url)
+    # Inside the box the bridge runs with the image's own python3.
+    assert claude["command"] == "python3"
+    assert claude["env"] == {"GLASSHIVE_CONTEXT_TOKEN": "${GLASSHIVE_CONTEXT_TOKEN}"}
+    token = bundle["env"]["GLASSHIVE_CONTEXT_TOKEN"]
+    codex = tomllib.loads(bundle["codex_config_append"])["mcp_servers"]["xperfect-context"]
+    assert codex["args"][2] == url and "url" not in codex
+    assert codex["command"] == "python3"
+    assert codex["env_vars"] == ["GLASSHIVE_CONTEXT_TOKEN"]
+    grok = mcp_servers_for_bundle(bundle, bundle["env"])
+    [context] = [server for server in grok if server["name"] == "xperfect-context"]
+    assert context["env"] == [{"name": "GLASSHIVE_CONTEXT_TOKEN", "value": token}]
+    text = projected["bootstrap_bundle_json"]
+    assert "http://runtime:8766" not in text
+    assert token not in bundle["codex_config_append"]
+    assert token not in json.dumps(bundle["claude_project_mcp"])
+
+
+def test_unrouted_installation_names_the_missing_route_before_minting(live, monkeypatch):
+    from workers_projects_runtime.failure_classification import classify_runtime_error
+
+    config, peers, worker, run, _, _ = live
+    for name in (
+        "GLASSHIVE_PEER_RUNTIME_BASE_URL",
+        "XPERFECT_EXECUTION_PROFILE",
+        "XPERFECT_CONTROL_ROOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    minted = []
+    peers.mint_native_session = lambda *args, **kwargs: minted.append(args)
+    # Settings say so before any run, and describing the installation never blocks a save.
+    issues = config.get("local", "owner", worker["worker_id"])["effective"]["issues"]
+    assert [issue["code"] for issue in issues] == ["context_retrieval_unavailable"]
+    saved = config.put(
+        "local",
+        "owner",
+        worker["worker_id"],
+        ConfigurationUpdate(expected_revision=2, context={"inline_chars": 3}),
+    )
+    assert saved["revision"] == 3
+    with pytest.raises(ConfigurationError, match="context_endpoint_unavailable") as refused:
+        bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    assert minted == []
+    failure = classify_runtime_error(refused.value, runtime_name="codex-cli")
+    assert failure.failure_class == "context_endpoint_unavailable"
+    assert failure.structured and not failure.retryable
+    assert "inline limit" in failure.user_message
+    assert "Workspace settings" in failure.recommended_recovery
+    # With the whole background inline there is nothing to retrieve and nothing to refuse.
+    config.put(
+        "local",
+        "owner",
+        worker["worker_id"],
+        ConfigurationUpdate(expected_revision=3, context={"inline_chars": 24000}),
+    )
+    assert config.get("local", "owner", worker["worker_id"])["effective"]["issues"] == []
+    projected = bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    assert "xperfect-context" not in projected["bootstrap_bundle_json"]
+    assert minted == []
+
+
+def test_runtime_socket_route_projects_the_stdio_bridge_for_host_workers(live, monkeypatch):
+    import tomllib
+
+    from workers_projects_runtime import native_transport
+    from workers_projects_runtime.grok_projection import mcp_servers_for_bundle
+
+    config, _, worker, run, _, _ = live
+    for name in ("XPERFECT_EXECUTION_PROFILE", "XPERFECT_CONTROL_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    origin = "http+unix://%2Fsynthetic%2Fstate%2Fruntime.sock"
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", origin)
+    assert config.get("local", "owner", worker["worker_id"])["effective"]["issues"] == []
+    projected = bind_context_projection(config, worker, config.store.get_run(run["run_id"]))
+    bundle = json.loads(projected["bootstrap_bundle_json"])
+    url = origin + "/v1/native/context/"
+    claude = bundle["claude_project_mcp"]["mcpServers"]["xperfect-context"]
+    assert native_transport.is_projected_stdio(claude, url)
+    # A host worker runs the bridge with the runtime's own interpreter, not a bare python3.
+    assert claude["command"] == sys.executable
+    codex = tomllib.loads(bundle["codex_config_append"])["mcp_servers"]["xperfect-context"]
+    assert codex["args"][2] == url and "url" not in codex
+    assert codex["command"] == sys.executable
+    grok = mcp_servers_for_bundle(bundle, bundle["env"])
+    [context] = [server for server in grok if server["name"] == "xperfect-context"]
+    assert context["args"][2] == url and context["command"] == sys.executable
+
+
+def test_configuration_refusal_names_what_needs_attention():
+    from workers_projects_runtime.failure_classification import classify_runtime_error
+    from workers_projects_runtime.worker_configuration import (
+        configuration_needs_attention,
+    )
+
+    tool = {
+        "code": "tool_unavailable",
+        "message": "This tool connection is no longer available. Check Connections.",
+    }
+    source = {
+        "code": "context_unavailable",
+        "message": "This source is no longer available. Update Context settings.",
+    }
+    refusal = configuration_needs_attention([tool, source, dict(tool)])
+    assert refusal.code == "configuration_needs_attention"
+    failure = classify_runtime_error(refusal, runtime_name="claude-code")
+    assert failure.failure_class == "configuration_needs_attention"
+    assert failure.structured and not failure.retryable
+    assert tool["message"] in failure.user_message and source["message"] in failure.user_message
+    assert failure.user_message.count(tool["message"]) == 1
 
 
 def test_projected_json_reaches_profile_and_native_consumers(live):

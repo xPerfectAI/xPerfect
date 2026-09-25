@@ -27,7 +27,7 @@ preserved, and a readable downloadable Markdown file under 150 words.
 | 0–2 min | A previously rehearsed input and output, clearly labelled as recorded evidence | “The result must be useful to someone. We will check this one against its source.” |
 | 2–4 min | [Workspace diagram](assets/workspaces.png) | “A project groups the work. Each worker uses a native agent and an execution workspace. Grouping workers does not itself make them share a computer.” |
 | 4–6 min | The unlocked web UI, then `./xperfect doctor` | “A running UI is only the start. Doctor shows the exact model and whether the provider's tool is installed; Connections shows the signed-in account.” |
-| 6–10 min | The prepared synthetic file, a bounded task, progress and the produced Markdown file | “Our check is simple: every listed change survives, and missing information stays explicit.” |
+| 6–10 min | The prepared synthetic file, a bounded task, progress and the produced Markdown file; the [context and tools diagram](assets/context-tools.png) while it runs | “The worker gets the goal and the file we attached. It keeps its own built-in tools, and only the connections we allow. Our check is simple: every listed change survives, and missing information stays explicit.” |
 | 10–12 min | Open/download the output and reload the same task | “Inspect the file. Return to the work without starting it again.” |
 | 12–14 min | A rehearsed interrupt/continue flow on a disposable task | “Control and recovery are part of the work.” |
 | 14–15 min | [Deployment diagram](assets/deployment.png) and the next exercise | “On your computer or a hosted server, the work stays with you; provider requests can leave. Use one source, one useful output and one peer who can tell you whether it worked.” |

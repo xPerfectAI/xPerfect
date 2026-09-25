@@ -91,7 +91,7 @@ def test_hosted_plaintext_peer_bridge_does_not_block_an_ordinary_run(app, monkey
     assert application.state.service.peers.policy(
         worker["workspace_id"], tenant_id="local", owner_id="owner-a"
     )["native_peer_status"] == {
-        "available": False, "code": "peer_native_endpoint_requires_tls"
+        "available": False, "code": "peer_native_endpoint_unavailable"
     }
 
 

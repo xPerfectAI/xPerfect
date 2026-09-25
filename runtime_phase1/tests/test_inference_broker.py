@@ -664,7 +664,8 @@ def test_legacy_provider_path_is_unchanged(tmp_path, monkeypatch):
 
     assert profiled.run_task(worker, "Legacy synthetic task", run_id="run-legacy") == "completed"
     assert broker.binds == []
-    assert runtime.calls[0][0] is worker
+    # The provider runtime receives the same worker, bound only to its run identity.
+    assert runtime.calls[0][0] == {**worker, "_active_run_id": "run-legacy"}
 
 
 def test_direct_conversation_never_uses_mission_inference_account(tmp_path, monkeypatch):
@@ -679,18 +680,21 @@ def test_direct_conversation_never_uses_mission_inference_account(tmp_path, monk
         "owner_id": "owner-a",
         "tenant_id": "glass-tenant",
         "profile": "codex-cli",
-        "bootstrap_bundle_json": {
-            "run_mode": "conversation",
-            "provider_account": {
-                "policy": "personal_required",
-                "account_id": "mission-account-must-be-ignored",
-            },
-        },
+        "bootstrap_bundle_json": {"run_mode": "conversation"},
     }
 
     assert profiled.run_task(worker, "Direct synthetic turn", run_id="conversation-run") == "completed"
     assert broker.binds == []
-    assert runtime.calls[0][0] is worker
+    assert runtime.calls[0][0] == {**worker, "_active_run_id": "conversation-run"}
+    # A conversation's selected personal account is honored exactly. Without its account
+    # store the run fails closed; it never runs on the broker or any other account.
+    selected = {**worker, "worker_id": "conversation-worker-selected", "bootstrap_bundle_json": {
+        "run_mode": "conversation",
+        "provider_account": {"policy": "personal_required", "account_id": "acct_selected"},
+    }}
+    with pytest.raises(RuntimeErrorBase, match="control-plane store is not configured"):
+        profiled.run_task(selected, "Direct synthetic turn", run_id="conversation-run-selected")
+    assert broker.binds == [] and len(runtime.calls) == 1
 
 
 def test_interrupt_revokes_any_active_run_grant(tmp_path, monkeypatch):

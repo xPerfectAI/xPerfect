@@ -189,15 +189,19 @@ def test_cross_process_stop_never_signals_a_reused_pid_identity(tmp_path) -> Non
                 "session_name": "host-run_reused",
                 "run_id": run_id,
                 "process_pid": process.pid,
+                "process_group": process.pid,
                 "process_start_identity": "different-process-instance",
             },
         )
 
         confirmed = runtime._stop_active_process(worker_id, run_id=run_id)
 
-        assert confirmed is True
+        # The recorded PID and group now belong to another process. The stop never
+        # signals it and, unable to prove the recorded group gone, keeps the ownership
+        # evidence instead of claiming success.
+        assert confirmed is False
         assert process.poll() is None
-        assert not runtime._active_session_meta_path(worker_id).exists()
+        assert runtime._active_session_meta_path(worker_id).exists()
     finally:
         process.terminate()
         process.wait(timeout=2)

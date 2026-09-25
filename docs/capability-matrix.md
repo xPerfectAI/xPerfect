@@ -18,6 +18,16 @@ and completed useful result are different things.
 The [architecture](02_Architecture_and_Components.md#coordinator-ownership) explains coordination.
 The [workspace contract](02_Architecture_and_Components.md#workspace-file-placement) defines file placement.
 
+## What each worker knows and can use
+
+![What each worker knows and can use](assets/context-tools.png)
+
+[Editable SVG](assets/context-tools.svg)
+
+Set a worker's background sources, its size in the task and its allowed connections in its
+workspace settings. The worker reads the rest of its selected background when it needs it. Its own
+built-in tools stay available; these settings choose connections, not the harness's native tools.
+
 ## Capabilities
 
 | Capability | Use | Boundary |
@@ -41,7 +51,7 @@ The [workspace contract](02_Architecture_and_Components.md#workspace-file-placem
 | Identity projection | Use native host projection or an optional external broker for provider identity and connected tools. | Keep credential leases private. |
 | Persistence | Retain project, worker, run, event and workspace state. | A saved record is not a guarantee that interrupted native work auto-resumes. |
 | Local storage | Use private persistent state outside the checkout. | Unlimited by default; available disk space still applies. |
-| Hosted storage | Each person has a storage limit, 5,000,000,000 bytes by default (`storage_limit_bytes` at install). The runtime lets a tenant administrator set, raise or restore any person's limit; a person can lower their own. | No default per-file or file-count cap; the XFS project limit enforces it. When the operator sets a `role_map` (off by default), a mapped administrator can raise or restore their own limit over MCP. A control for changing another person's limit, over MCP or in the web UI, is not available yet. |
+| Hosted storage | Each person has a storage limit, 5,000,000,000 bytes by default (`storage_limit_bytes` at install). The runtime lets a tenant administrator set, raise or restore any person's limit; a person can lower their own. | No default per-file or file-count cap; the XFS project limit enforces it. When the operator sets a `role_map` (off by default), a mapped administrator can raise or restore their own limit over MCP. A tenant administrator sets another person's total and optional per-file limit, or restores the default, in **Connections → Team file storage**; MCP does not offer that. |
 | Standalone deployment | Run xPerfect on a host or server. | Hosted multi-user operation needs separate identity and isolation configuration. |
 | Exact models | Choose the exact model a worker type uses (`--model grok-build=<model>`). | Grok needs one; xPerfect never guesses or swaps a model. Without a choice, local Codex uses its own configured model and Claude Code is asked for its `opus` alias; `./xperfect doctor` shows each. |
 | Packaged upgrade | Move a packaged install to a new image, then commit or roll back. | Needs an idle package. Rollback returns service state to the upgrade and discards later records; owner files are not copied. |

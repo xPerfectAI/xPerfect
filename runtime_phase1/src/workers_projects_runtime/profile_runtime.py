@@ -1942,6 +1942,13 @@ class ProfiledWorkerRuntime:
         self._shared_workspace_runtimes = SharedWorkspaceRuntimes(store, self.provider_account_binder, getattr(self, "_owner_storage", None))
         self._shared_workspace_runtimes.recover_pending(self)
 
+    def recover_quarantined_provider_projections(self, *, account_id: str) -> list[str]:
+        """Settle one account's quarantined projections on an owner's verify/reconnect."""
+        runtimes = getattr(self, "_shared_workspace_runtimes", None)
+        if runtimes is None:
+            return []
+        return runtimes.recover_quarantined(self, account_id=account_id)
+
     def configure_allowed_ai_policy(self, policy_service) -> None:
         """Connect the owner policy to the final native binder boundary."""
 

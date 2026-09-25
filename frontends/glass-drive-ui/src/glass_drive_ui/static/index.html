@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>xPerfect</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260923primary2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260924storage1" />
   </head>
   <body class="launch-body">
     <main class="launch-shell">
@@ -378,6 +378,24 @@
               <div id="data-connection-list" class="connection-list" aria-live="polite"></div>
               <a id="manage-connections-link" class="card-action" href="#" hidden>Manage tools</a>
             </section>
+            <section id="storage-admin-card" class="control-card" hidden>
+              <h2>Team file storage</h2>
+              <p>New accounts use this server's default. Set each person's limits here.</p>
+              <form id="storage-admin-form" class="storage-admin-form">
+                <label for="storage-admin-user">Person</label>
+                <select id="storage-admin-user" required></select>
+                <label for="storage-admin-limit">Storage (GB, blank for no limit)</label>
+                <input id="storage-admin-limit" type="number" min="0" max="9000000" step="0.001" inputmode="decimal" placeholder="No limit" />
+                <label for="storage-admin-file-limit">Max per file (GB, optional)</label>
+                <input id="storage-admin-file-limit" type="number" min="0" max="9000000" step="0.001" inputmode="decimal" placeholder="No limit" />
+                <p id="storage-admin-usage" class="connection-empty"></p>
+                <div class="storage-admin-actions">
+                  <button id="storage-admin-save" class="primary-button compact-button" type="submit">Save limits</button>
+                  <button id="storage-admin-reset" class="quiet-button" type="button">Use default</button>
+                </div>
+              </form>
+              <p id="storage-admin-status" class="inline-status" role="status"></p>
+            </section>
             <details id="connect-ai-advanced" class="connection-disclosure connect-ai-card">
               <summary>Use xPerfect from another AI app</summary>
               <div class="advanced-connection-content">
@@ -676,6 +694,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/static/app.js?v=20260924peerfocus2" type="module"></script>
+    <script src="/static/app.js?v=20260924notice1" type="module"></script>
   </body>
 </html>

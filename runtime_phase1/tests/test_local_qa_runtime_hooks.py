@@ -552,8 +552,9 @@ def test_provider_quota_control_persists_cooldown_then_uses_healthy_fallback(
     monkeypatch.setattr(
         service, "_trusted_parallel_fallback_profile", lambda _worker: "fallback"
     )
+    # Model resolution is owner-scoped (tenant/owner keywords); the explicit fallback resolves.
     monkeypatch.setattr(
-        service, "_resolve_worker_model", lambda _profile, _mode="docker": "fallback-model"
+        service, "_resolve_worker_model", lambda _profile, _mode="docker", **_scope: "fallback-model"
     )
     try:
         assert service._handle_unhealthy_provider_route(worker, claimed) is True

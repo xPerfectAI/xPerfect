@@ -1,11 +1,13 @@
 import { createLaunchDraft } from './launch-draft.js?v=20260922u';
 import { openWorkspaceMembers } from './workspace-members.js?v=20260924peerfocus2';
 import { attachNativeControls, selectConnectedClaudeAccount } from './native-controls.js?v=20260922o03c';
-import { initializeControlPlane, refreshControlPlane, renderActivity } from './control-plane.js?v=20260923model1';
-import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20260922b';
+import { initializeControlPlane, refreshControlPlane, renderActivity } from './control-plane.js?v=20260924notice1';
+import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20260924notice1';
 import { workspaceDeliveryModel } from './delivery-presenter.js?v=20260923closed1';
 import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20260811m';
 import { createFileDraft } from './files.js?v=20260923readable1';
+import { showLaunchedWorkspace, watchHref } from './launch-result.js?v=20260924launch1';
+import { initializeStorageAdmin } from './storage-admin.js?v=20260924storage3';
 
 const ACTIVE_STATES = new Set(['created', 'starting', 'queued', 'running', 'resuming']);
 const ACTIVE_RUN_STATES = new Set(['queued', 'running']);
@@ -2005,6 +2007,9 @@ async function main() {
 
   try {
     await refreshBootstrap();
+    void initializeStorageAdmin({
+      identity: bootstrap.identity || {}, getJson, patchJson,
+    });
     if (launchSurface) launchSurface.value = String(bootstrap.default_launch_surface || 'desktop');
     if (workspaceType) renderWorkspaceTypeOptions(workspaceType, workspaceTypeHelp, bootstrap);
     syncWorkspaceModeUI(
@@ -2374,7 +2379,17 @@ async function main() {
         if (scheduleButton) scheduleButton.disabled = false;
         return;
       }
-      window.location.href = data.watch_url;
+      button.disabled = false;
+      if (scheduleButton) scheduleButton.disabled = false;
+      const href = watchHref(data.watch_url, window.location.href);
+      if (!href) {
+        status.textContent = 'Project started. Open it from Workspaces.';
+        await refreshBootstrap();
+        setActiveView('workspaces');
+        return;
+      }
+      showLaunchedWorkspace(status, href, () => document.createElement('a'));
+      window.location.assign(href);
     } catch (error) {
       button.disabled = false;
       if (scheduleButton) scheduleButton.disabled = false;

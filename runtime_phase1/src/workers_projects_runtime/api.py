@@ -400,10 +400,23 @@ def create_app(
         app.state.capability_broker = capability_broker
         service.start_background_consumers()
         acknowledge_local_qa_service("glasshive-runtime")
+        from . import native_transport
+        native_sockets = False
+        if native_transport.packaged_profile():
+            # Packaged boxes reach native MCP only through their own sockets. If
+            # the hub cannot start, binders stay on their fail-closed path.
+            try:
+                await asyncio.to_thread(native_transport.start_hub,
+                                        Path(os.environ["XPERFECT_SHARED_VOLUME_ROOT"]))
+                native_sockets = True
+            except Exception as exc:
+                logger.warning("Native workspace sockets are unavailable: %s", type(exc).__name__)
         try:
             async with peer_mcp.session_manager.run(), coordinator_mcp.session_manager.run(), context_mcp.session_manager.run():
                 yield
         finally:
+            if native_sockets:
+                await asyncio.to_thread(native_transport.stop_hub)
             # Release this executor's host run leases before anything else so a
             # managed stop is never read as a stalled provider, even when the
             # launcher's kill window preempts service.shutdown() below.
@@ -4981,6 +4994,14 @@ def create_app(
         )
         if account is None:
             raise ControlPlaneError("Provider account not found for this user")
+        recover = getattr(runtime_impl, "recover_quarantined_provider_projections", None)
+        if callable(recover):
+            # An abrupt close can quarantine a credential projection; settle it
+            # here so the owner's Verify/Reconnect recovers without a restart.
+            try:
+                recover(account_id=account_id)
+            except Exception as exc:
+                logger.warning("Quarantined credential recovery did not finish: %s", type(exc).__name__)
         from .current_native_account import is_current_account
         if is_current_account(account):
             return _current_native_manager().verify(account_id=account_id, tenant_id=tenant_id, owner_id=owner_id)

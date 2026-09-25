@@ -1429,23 +1429,28 @@ class CoordinatorService:
             return worker
         self._conversation(session["tenant_id"], session["owner_id"], session["conversation_id"])
         from urllib.parse import urlparse
-        parsed = urlparse(endpoint)
-        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
-                or parsed.password or parsed.query or parsed.fragment
-                or parsed.path != "/v1/native/coordinator/"):
-            raise CoordinatorScopeError("Coordinator native endpoint invalid")
-        local_package_bridge = (
-            os.environ.get("XPERFECT_EXECUTION_PROFILE") == "local-linux"
-            and bool(os.environ.get("XPERFECT_SHARED_NETWORK"))
-            and endpoint == "http://runtime:8766/v1/native/coordinator/"
-        )
-        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1", "host.docker.internal"} and not local_package_bridge:
-            raise CoordinatorScopeError("Coordinator native endpoint requires TLS")
+        from . import native_transport
+        socket_base = native_transport.native_base()
+        if socket_base:
+            endpoint = socket_base + "/v1/native/coordinator/"
+        elif native_transport.packaged_profile():
+            # A packaged box reaches the runtime only through its own socket.
+            raise CoordinatorScopeError("Coordinator native endpoint unavailable")
+        else:
+            parsed = urlparse(endpoint)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment
+                    or parsed.path != "/v1/native/coordinator/"):
+                raise CoordinatorScopeError("Coordinator native endpoint invalid")
+            if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1", "host.docker.internal"}:
+                raise CoordinatorScopeError("Coordinator native endpoint requires TLS")
         token = (worker.get("_peer_native_projection") or {}).get("token")
         if not token:
             # Same O06 binder; coordinator authority does not require peer discovery on.
             token = peers.mint_native_session(worker["worker_id"], run["run_id"])
         projection = {"worker_id": worker["worker_id"], "run_id": run["run_id"], "token": token, "url": endpoint}
+        if socket_base:
+            projection["transport"] = "stdio"
         return {**worker, "_active_run_id": run["run_id"], "_coordinator_native_projection": projection}
 
 

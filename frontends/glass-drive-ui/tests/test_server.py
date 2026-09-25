@@ -7463,6 +7463,67 @@ def test_tenant_admin_can_disable_another_user_but_not_self(monkeypatch):
     assert self_disable.status_code == 409
 
 
+def test_admin_storage_controls_use_exact_signed_in_owner_and_csrf(monkeypatch):
+    class FakeHumanAuth:
+        mode = "oidc"
+        session_enabled = True
+        allowed_email_domains = ()
+
+        def resolve_session(self, token):
+            if token == "admin-session":
+                return {
+                    "tenant_id": "tenant-alpha", "user_id": "admin-user",
+                    "email": "admin@example.invalid", "role": "tenant_admin",
+                    "_csrf_hash": "synthetic",
+                }
+            if token == "member-session":
+                return {
+                    "tenant_id": "tenant-alpha", "user_id": "member-user",
+                    "email": "member@example.invalid", "role": "member",
+                    "_csrf_hash": "synthetic",
+                }
+            return None
+
+        def session_csrf_valid(self, session, supplied):
+            return bool(session and supplied == "valid-csrf")
+
+        def get_principal(self, principal_id):
+            return {"user_id": "member-user"} if principal_id == "member-user" else None
+
+    monkeypatch.setattr(server_module.HumanAuthGateway, "from_env", lambda: FakeHumanAuth())
+    runtime = FakeRuntimeClient()
+    client = TestClient(create_app(runtime_client=runtime))
+    client.cookies.set("glasshive_session", "member-session")
+    client.cookies.set("glasshive_csrf", "valid-csrf")
+    assert client.get("/api/admin/users/member-user/storage").status_code == 403
+    assert client.patch(
+        "/api/admin/users/member-user/storage",
+        headers={"Origin": "http://testserver", "X-GlassHive-CSRF": "valid-csrf"},
+        json={"storage_limit_bytes": 6_000_000_000},
+    ).status_code == 403
+
+    client.cookies.set("glasshive_session", "admin-session")
+    assert client.get("/api/admin/users/unknown/storage").status_code == 404
+    assert client.patch(
+        "/api/admin/users/member-user/storage",
+        headers={"Origin": "http://testserver"},
+        json={"storage_limit_bytes": 6_000_000_000},
+    ).status_code == 403
+    read = client.get("/api/admin/users/member-user/storage")
+    assert read.status_code == 200
+    saved = client.patch(
+        "/api/admin/users/member-user/storage",
+        headers={"Origin": "http://testserver", "X-GlassHive-CSRF": "valid-csrf"},
+        json={"storage_limit_bytes": 6_000_000_000, "max_file_bytes": None},
+    )
+    assert saved.status_code == 200
+    assert runtime.file_upload_requests[-2:] == [
+        ("GET", "/v1/storage/owners/member-user", None),
+        ("PATCH", "/v1/storage/owners/member-user/policy",
+         {"storage_limit_bytes": 6_000_000_000, "max_file_bytes": None}),
+    ]
+
+
 def test_tenant_admin_disable_fails_closed_when_schedule_authority_is_unavailable(monkeypatch):
     class FakeHumanAuth:
         mode = "oidc"

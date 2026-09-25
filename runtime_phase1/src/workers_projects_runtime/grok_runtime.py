@@ -140,13 +140,20 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             _atomic_write_private_text(path, json.dumps(servers))
             command += ['--mcp-file', str(path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/mcp-servers.json']
             projection = worker.get('_coordinator_native_projection')
+            from .native_transport import is_projected_stdio
+            token = str(projection.get('token') or '') if isinstance(projection, dict) else ''
             if (isinstance(projection, dict)
                     and projection.get('worker_id') == worker.get('worker_id')
                     and projection.get('run_id') == run_id
+                    and token
                     and any(server.get('name') == 'xperfect-coordinator'
-                            and server.get('url') == projection.get('url')
-                            and {'name': 'Authorization', 'value': 'Bearer ' + str(projection.get('token') or '')}
-                            in server.get('headers', []) for server in servers)):
+                            and ((server.get('url') == projection.get('url')
+                                  and {'name': 'Authorization', 'value': 'Bearer ' + token}
+                                  in server.get('headers', []))
+                                 or (is_projected_stdio(server, projection.get('url'))
+                                     and {'name': 'GLASSHIVE_PEER_TOKEN', 'value': token}
+                                     in server.get('env', [])))
+                            for server in servers)):
                 from .coordinator_mcp import coordinator_tool_manifest
                 for name in coordinator_tool_manifest()['tools']:
                     command += ['--allow-mcp-tool', 'xperfect-coordinator__' + name]

@@ -131,6 +131,15 @@ Other routes also exist: `message`, `pause`, `resume` and `terminate` on a worke
 [bootstrap bundle contract](03_Bootstrap_Auth_and_Identity_Projection.md#bootstrap_bundle)
 and [bootstrap, auth and identity](03_Bootstrap_Auth_and_Identity_Projection.md).
 
+**Running the services yourself.** `./xperfect start` and the packaged install give workers a
+route back to the runtime, which they use to read background beyond the inline limit. If you run
+the services another way, set `GLASSHIVE_PEER_RUNTIME_BASE_URL` to a runtime address the workers
+can reach. Plain HTTP is accepted only for this host (`127.0.0.1`, `localhost` or
+`host.docker.internal`); anything else needs HTTPS. A runtime served on a local socket can give its
+host workers that socket instead: `http+unix://` followed by the URL-encoded absolute socket path.
+Without a route, Workspace settings say so, and a run that needs the rest of its background stops
+before it starts, naming the cause.
+
 **A new worker harness** (another native CLI) is a source contribution, not a plugin. Follow the
 existing profiles. The Grok adapter is the most recent worked example; see
 [its contract](02_Architecture_and_Components.md#native-grok-adapter-contract). In `runtime_phase1/src/workers_projects_runtime/`:
