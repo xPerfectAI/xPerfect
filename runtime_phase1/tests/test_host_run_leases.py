@@ -1284,26 +1284,29 @@ def test_lifespan_shutdown_releases_owned_leases_before_service_shutdown(
     )
     store = app.state.store
     service = app.state.service
-    lease_ids: list[str] = []
+    # Seed the running generation before the lifespan starts its background loops.
+    # This helper drives the run through queued and claimed by hand; a live
+    # scheduler can dispatch a real queue processor for that queued row, which
+    # then races the hand-driven claim and lease.
+    _project, _worker, run = _active_worker_and_run(
+        store,
+        "lifespan-managed-shutdown",
+        execution_mode="host",
+        run_state="running",
+    )
+    lease = store.get_active_host_run_lease_for_run(str(run["run_id"]))
+    assert lease is not None
+    service._executor_id = str(lease["executor_id"])
     seen_at_shutdown: list[dict] = []
     original_shutdown = service.shutdown
 
     def spying_shutdown(*args, **kwargs):
-        seen_at_shutdown.append(store.get_host_run_lease(lease_ids[0]) or {})
+        seen_at_shutdown.append(store.get_host_run_lease(str(lease["lease_id"])) or {})
         return original_shutdown(*args, **kwargs)
 
     monkeypatch.setattr(service, "shutdown", spying_shutdown)
     with TestClient(app):
-        _project, _worker, run = _active_worker_and_run(
-            store,
-            "lifespan-managed-shutdown",
-            execution_mode="host",
-            run_state="running",
-        )
-        lease = store.get_active_host_run_lease_for_run(str(run["run_id"]))
-        assert lease is not None
-        lease_ids.append(str(lease["lease_id"]))
-        service._executor_id = str(lease["executor_id"])
+        assert store.get_host_run_lease(str(lease["lease_id"]))["status"] == "active"
 
     # The lifespan released the lease before service.shutdown() even started,
     # so a preempted shutdown still leaves a typed managed_shutdown release.
