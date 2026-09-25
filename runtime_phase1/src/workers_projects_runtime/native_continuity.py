@@ -25,7 +25,8 @@ from .service import (_bounded_int_env, _copy_regular_workspace_file,
 from .store import (CALLBACK_TRACE_AUTHORITY_FIELDS, CLOSED_WORKER_STATES, COMPUTE_OPERATION_CLEAR_FIELDS,
     NONTERMINAL_RUN_STATES, RUNTIME_STORE_SCHEMA_VERSION, TERMINAL_RUN_STATES, Store,
     _callback_trace_authority_values, _callback_trace_event_sha256_values,
-    _text_sha256, canonical_parallel_clean_room_bootstrap, closed_worker_open_work_conn,
+    _text_sha256, canonical_parallel_clean_room_bootstrap, closed_worker_generation_conn,
+    closed_worker_open_work_conn,
     idle_execution_workspace_member_uids_conn, settle_closed_worker_work_conn,
     verified_callback_trace_snapshots)
 
@@ -879,6 +880,35 @@ def _container_generation_stopped(container_id: str) -> bool:
         return False
 
 
+def _lease_container(lease: dict) -> str:
+    container = str(lease.get("startup_container_id") or "")
+    if not _CONTAINER_ID.fullmatch(container):
+        raise ValueError("GlassHive closed worker's recorded generation is not a container this release can prove stopped")
+    return container
+
+
+def _generation_containers(generation: dict) -> list[str]:
+    """The exact container generations a closed worker's open work depends on.
+
+    A run that was never invoked started nothing. A started run must have recorded, on one of
+    its host leases (released ones included, which may be the only record left), the exact
+    container generation it ran in, and every lease still open must name the generation it
+    fences. Anything else is compute this release cannot prove stopped, and refuses.
+    """
+    started = {str(run["run_id"]) for run in generation["runs"] if str(run.get("runtime_invoked_at") or "").strip()}
+    containers = set()
+    for run_id in sorted(started):
+        recorded = [lease for lease in generation["leases"] if lease.get("run_id") == run_id
+                    and (lease.get("startup_container_id") or lease.get("process_start_identity"))]
+        if not recorded:
+            raise ValueError("GlassHive closed worker's started run has no recorded generation")
+        containers.update(_lease_container(lease) for lease in recorded)
+    for lease in generation["leases"]:
+        if lease.get("status") in {"active", "reserved"}:
+            containers.add(_lease_container(lease))
+    return sorted(containers)
+
+
 def _runtime_box(connection: sqlite3.Connection, worker: dict, *, data_root: Path, control_root: Path):
     """The member's box exactly as its runtime builds it, so the container contract is checked in full."""
     from .workspace_box import WorkspaceBox
@@ -936,17 +966,19 @@ def _closed_worker_boxes(connection: sqlite3.Connection, workers: list[dict]) ->
 
 
 def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect: list[str] | None = None,
-                                 incoming: bool = False) -> dict:
+                                 expect_generation: str | None = None, incoming: bool = False) -> dict:
     """Settle the open work an earlier release left on closed workers, then release idle boxes.
 
     An earlier release terminated a paused worker without settling its paused run or the host
     lease that fenced it. That work can never run again, yet every continuity proof refuses
     while it looks open, and its workspace box is never released because a member still looks
-    busy. Only a closed worker's work qualifies, only when each of its leases names the exact
-    container generation it fenced and that container is gone or stopped with no process, and
-    never delegated work, whose history its runtime must record. Nothing changes unless every
-    target qualifies and, with ``expect``, is exactly the reviewed set; the generations are
-    proved again just before the change. A stopped box of a workspace that holds a closed
+    busy. Only a closed worker's work qualifies: a run never invoked started nothing, and every
+    started run and open lease must have recorded the exact container generation it ran in or
+    fenced (released historical leases included), each gone or stopped with no process. Never
+    delegated work, whose history its runtime must record. Nothing changes unless every target
+    qualifies and, with ``expect`` and ``expect_generation``, is exactly the reviewed set and
+    generation; the generations are proved again just before the change, and each worker's
+    exact generation is compared again inside the write transaction. A stopped box of a workspace that holds a closed
     worker is then released only through its own generation lock and durable idle rule, so a
     later pass still releases a box whose work an earlier pass settled. The box and runtime
     gates read this process's environment, so it must be the package's own runtime
@@ -972,21 +1004,24 @@ def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect:
                 (worker["worker_id"], worker["project_id"], worker["tenant_id"]),
             ).fetchone():
                 raise ValueError("GlassHive closed worker's delegated work must be settled by its runtime")
-            containers = [str(connection.execute(
-                "SELECT startup_container_id FROM host_run_leases WHERE lease_id=?", (lease_id,)
-            ).fetchone()[0] or "") for lease_id in leases]
+            generation = closed_worker_generation_conn(connection, worker["worker_id"])
+            containers = _generation_containers(generation)
             if not all(_container_generation_stopped(container) for container in containers):
                 raise ValueError("GlassHive closed worker's recorded generation is not proved stopped")
-            targets.append({"worker": worker, "runs": runs, "leases": leases, "containers": containers})
+            targets.append({"worker": worker, "runs": runs, "leases": leases, "containers": containers,
+                            "generation": generation})
         boxes = _closed_worker_boxes(connection, closed)
         report = {"closed_workers": len(targets), "applied": False, "boxes": [name for name, _, _ in boxes],
                   "boxes_released": [], "targets": [
                       {"worker_id": target["worker"]["worker_id"], "runs": target["runs"], "leases": target["leases"]}
-                      for target in targets]}
+                      for target in targets],
+                  "generation": hashlib.sha256(json.dumps([target["generation"] for target in targets],
+                                                          sort_keys=True).encode()).hexdigest()}
         identities = sorted([target["worker"]["worker_id"] for target in targets]
                             + [item for target in targets for item in target["runs"] + target["leases"]]
                             + report["boxes"])
-        if expect is not None and sorted(expect) != identities:
+        if ((expect is not None and sorted(expect) != identities)
+                or (expect_generation is not None and expect_generation != report["generation"])):
             raise ValueError("GlassHive closed-worker work changed since it was reviewed")
         if not apply or not identities:
             return report
@@ -998,8 +1033,8 @@ def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 for target in targets:
-                    settle_closed_worker_work_conn(connection, target["worker"]["worker_id"], runs=target["runs"],
-                                                   leases=target["leases"], settled_at=settled_at,
+                    settle_closed_worker_work_conn(connection, target["worker"]["worker_id"],
+                                                   generation=target["generation"], settled_at=settled_at,
                                                    reason=_CLOSED_WORK_REASON)
                 connection.commit()
             except BaseException:
@@ -1877,6 +1912,8 @@ def main() -> None:
                              help="Settle it; without it, only report what qualifies")
     closed_work.add_argument("--expect", default=None,
                              help="Comma-separated worker, run and lease IDs reviewed before; any other set refuses")
+    closed_work.add_argument("--expect-generation", default=None,
+                             help="The reviewed generation digest; any other generation refuses")
     closed_work.add_argument("--incoming", action="store_true",
                              help="Run by the release about to inherit this state (an upgrade)")
     args = parser.parse_args()
@@ -1892,6 +1929,7 @@ def main() -> None:
     elif args.operation == "reconcile-closed-work":
         expect = None if args.expect is None else [item for item in args.expect.split(",") if item]
         print(json.dumps(reconcile_closed_worker_work(args.database, apply=args.apply, expect=expect,
+                                                      expect_generation=args.expect_generation,
                                                       incoming=args.incoming), sort_keys=True))
     else:
         check_quiescent(args.database, incoming=args.incoming)

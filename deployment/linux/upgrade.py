@@ -109,15 +109,19 @@ def unpublished_program(expect: list[str] | None = None) -> str:
 UNPUBLISHED_REPORT = unpublished_program()
 CLOSED_WORK_ID = re.compile(r'(?:wrk|run)_[0-9a-f]{10}|hrl_[0-9a-f]{32}')
 BOX_NAME = re.compile(r'xperfect-wsp-[a-z0-9][a-z0-9-]{0,80}')
+GENERATION = re.compile(r'[0-9a-f]{64}')
 
 
-def closed_work_program(expect: list[str] | None = None) -> str:
+def closed_work_program(expect: list[str] | None = None, generation: str = '') -> str:
     """The new release's review of open work an earlier release left on closed workers. With
-    ``expect`` (the reviewed worker, run and lease identities) it settles exactly those and
-    releases the idle boxes they held, or refuses. Typed JSON out."""
-    if expect is not None and not all(CLOSED_WORK_ID.fullmatch(item) or BOX_NAME.fullmatch(item) for item in expect):
+    ``expect`` (the reviewed worker, run, lease and box identities) and ``generation`` (the
+    reviewed generation digest) it settles exactly those and releases the idle boxes, or
+    refuses. Typed JSON out."""
+    if expect is not None and (not all(CLOSED_WORK_ID.fullmatch(item) or BOX_NAME.fullmatch(item) for item in expect)
+                               or not GENERATION.fullmatch(generation)):
         raise UpgradeError('Unexpected closed-worker work identity')
-    flag = '' if expect is None else f",'--apply','--expect','{','.join(expect)}'"
+    flag = ('' if expect is None
+            else f",'--apply','--expect','{','.join(expect)}','--expect-generation','{generation}'")
     return _ENV + (
         "if Path('/control/.g8-restore-journal.json').exists():\n"
         "    sys.exit('xperfect-upgrade: a restore transaction is still open; commit or roll it back first')\n"
@@ -655,6 +659,7 @@ class Upgrade:
                                  for item in targets)
                          and isinstance(boxes, list) and all(BOX_NAME.fullmatch(str(box)) for box in boxes)
                          and isinstance(released, list) and set(released) <= set(boxes)
+                         and GENERATION.fullmatch(str(report['generation'])) is not None
                          and report['applied'] is (applied and bool(targets or boxes)) and (applied or not released))
             except (ValueError, KeyError, TypeError):
                 valid = False
@@ -682,12 +687,13 @@ class Upgrade:
         if not reviewed:
             return {'settled': [], 'boxes_released': []}
         # Identities only: no names, owners, messages or paths.
-        evidence = {'transaction': txn, 'status': 'settling', 'reviewed': review['targets'], 'boxes': review['boxes']}
+        evidence = {'transaction': txn, 'status': 'settling', 'reviewed': review['targets'], 'boxes': review['boxes'],
+                    'generation': review['generation']}
         _write_private_json(record, evidence, create=True)
         journal['closed_work_settling'] = reviewed
         self._save(journal)
         try:
-            result = run(closed_work_program(reviewed), 'closed-settle')
+            result = run(closed_work_program(reviewed, review['generation']), 'closed-settle')
         except UpgradeError:  # timed out and stopped at an unknown point
             raise UpgradeError('Settling closed-worker work did not finish in time; whether it was settled is '
                                f'unknown ({record.name}). Nothing else was changed; run the upgrade again') from None
@@ -700,7 +706,7 @@ class Upgrade:
             raise UpgradeError('Settling closed-worker work stopped without a result; whether it was settled '
                                f'is unknown ({record.name}). Nothing else was changed; run the upgrade again')
         applied = report_of(result, applied=True)
-        if identities(applied) != reviewed:
+        if identities(applied) != reviewed or applied['generation'] != review['generation']:
             raise UpgradeError('The new image settled a different set than it reviewed; stop and inspect '
                                f'{record.name}')
         _write_private_json(record, {**evidence, 'status': 'settled', 'boxes_released': applied['boxes_released']})

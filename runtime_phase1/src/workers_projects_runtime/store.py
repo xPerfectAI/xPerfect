@@ -1699,12 +1699,55 @@ def closed_worker_open_work_conn(
     return runs, leases
 
 
+_CLOSED_WORK_RUN_FIELDS = ("run_id", "state", "runtime_invoked_at", "ended_at")
+_CLOSED_WORK_LEASE_FIELDS = (
+    "lease_id", "run_id", "attempt_id", "executor_id", "pid", "process_group", "process_start_identity",
+    "startup_state", "startup_confirmed_at", "startup_identity_kind", "startup_container_id",
+    "startup_session_id", "status", "heartbeat_at", "expires_at", "reconciled_at", "released_at",
+    "release_reason",
+)
+
+
+def closed_worker_generation_conn(conn: sqlite3.Connection, worker_id: str) -> dict[str, Any]:
+    """A closed worker's open work with every recorded generation it depends on.
+
+    Each open run keeps its invocation mark. Every host lease of those runs, released ones
+    included because they may be the only record of what started, and every lease still open
+    on the worker keeps its recorded startup identity and liveness fields (never its startup
+    token). Equality of this value is the settlement's fence: a heartbeat that rewrites a
+    lease's identity under the same ID changes it.
+    """
+    worker = conn.execute("SELECT state FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+    run_ids, _ = closed_worker_open_work_conn(conn, worker_id)
+    run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(runs)")}
+    lease_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(host_run_leases)")}
+    run_fields = [field for field in _CLOSED_WORK_RUN_FIELDS if field in run_columns]
+    lease_fields = [field for field in _CLOSED_WORK_LEASE_FIELDS if field in lease_columns]
+    runs = [
+        dict(zip(run_fields, row))
+        for row in conn.execute(
+            f"SELECT {', '.join(run_fields)} FROM runs WHERE run_id IN ({','.join('?' for _ in run_ids)}) "
+            "ORDER BY run_id",
+            tuple(run_ids),
+        )
+    ] if run_ids else []
+    run_marks = ",".join("?" for _ in run_ids) or "''"  # an empty list matches no run
+    leases = [
+        dict(zip(lease_fields, row))
+        for row in conn.execute(
+            f"SELECT {', '.join(lease_fields)} FROM host_run_leases WHERE worker_id = ? "
+            f"AND (status IN ('active', 'reserved') OR run_id IN ({run_marks})) ORDER BY lease_id",
+            (worker_id, *run_ids),
+        )
+    ]
+    return {"worker_state": str(worker[0] or "") if worker else "", "runs": runs, "leases": leases}
+
+
 def settle_closed_worker_work_conn(
     conn: sqlite3.Connection,
     worker_id: str,
     *,
-    runs: list[str],
-    leases: list[str],
+    generation: dict[str, Any],
     settled_at: str,
     reason: str,
 ) -> None:
@@ -1712,19 +1755,23 @@ def settle_closed_worker_work_conn(
 
     An earlier release closed a paused worker without settling its paused run or the host
     lease that fenced it; nothing later could, so every continuity proof refused. The
-    caller holds a write transaction and has proved each recorded generation stopped.
-    The runs end as ``cancelled`` like any run of a terminated worker, their open
-    attempts and queued schedules close, the leases are released, and one event records
-    exactly what changed. Anything other than the reviewed runs and leases refuses.
+    caller holds a write transaction and has proved each recorded generation stopped; the
+    reviewed ``generation`` must still be exactly current, so a lease rewritten under the
+    same ID refuses. The runs end as ``cancelled`` like any run of a terminated worker, their
+    open attempts and queued schedules close, the open leases are released, and one event
+    records exactly what changed.
     """
-    worker = conn.execute(
-        "SELECT project_id, tenant_id, state FROM workers WHERE worker_id = ?",
-        (worker_id,),
-    ).fetchone()
-    if worker is None or str(worker[2] or "") not in CLOSED_WORKER_STATES:
+    current = closed_worker_generation_conn(conn, worker_id)
+    if current["worker_state"] not in CLOSED_WORKER_STATES:
         raise ValueError("GlassHive worker is no longer closed")
-    if closed_worker_open_work_conn(conn, worker_id) != (sorted(runs), sorted(leases)):
+    if current != generation:
         raise ValueError("GlassHive closed worker's open work changed since it was reviewed")
+    runs = [str(run["run_id"]) for run in generation["runs"]]
+    leases = [str(lease["lease_id"]) for lease in generation["leases"]
+              if lease.get("status") in {"active", "reserved"}]
+    project = conn.execute(
+        "SELECT project_id, tenant_id FROM workers WHERE worker_id = ?", (worker_id,)
+    ).fetchone()
     if runs:
         marks = ",".join("?" for _ in runs)
         conn.execute(
@@ -1755,15 +1802,16 @@ def settle_closed_worker_work_conn(
         "message, payload_json, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)",
         (
             f"evt_{uuid.uuid4().hex[:10]}",
-            str(worker[0] or ""),
+            str(project[0] or ""),
             worker_id,
-            str(worker[1] or "local"),
+            str(project[1] or "local"),
             "worker.closed_work_settled",
             reason,
             json.dumps({"runs": sorted(runs), "leases": sorted(leases)}, sort_keys=True),
             settled_at,
         ),
     )
+
 
 class Store:
     def __init__(self, db_path: str) -> None:
