@@ -1841,6 +1841,10 @@ class WorkersProjectsService:
         self._retained_restart_run_ids: set[str] = set()
         self._managed_shutdown_lease_ids: set[str] = set()
         self._processor_generations: dict[str, int] = {}
+        # Members whose projection settlement failed wait before their next attempt.
+        self._projection_settlement_not_before: dict[str, float] = {}
+        # Members held while their projection waits for a crashed holder's lease.
+        self._projection_settling: set[str] = set()
         self._runtime_start_locks: dict[str, Lock] = {}
         self._worker_create_lock = Lock()
         self._deliverable_promotions_lock = Lock()
@@ -18055,6 +18059,7 @@ class WorkersProjectsService:
             ("restart authority backlog", self.reconcile_restart_authority_backlog_once),
             ("worker retries", self.process_due_worker_retries_once),
             ("provider liveness", self.process_provider_liveness_once),
+            ("unfinished projections", self.settle_unfinished_projections_once),
             ("conversation coordinator", lambda: self.coordinator.reconcile_once() if getattr(self, "coordinator", None) is not None else None),
         ):
             if self._shutdown_event.is_set():
@@ -18066,9 +18071,14 @@ class WorkersProjectsService:
 
     def _next_scheduler_wait_s(self, interval: float) -> float:
         now = self._now_datetime()
-        if self.store.list_due_retry_worker_ids(
-            now_iso=now.isoformat(),
-            limit=1,
+        # A member held for its projection settlement is woken when released.
+        settling = set(self._projection_settling)
+        if any(
+            worker_id not in settling
+            for worker_id in self.store.list_due_retry_worker_ids(
+                now_iso=now.isoformat(),
+                limit=len(settling) + 1,
+            )
         ):
             # A due retry can briefly collide with the processor that just
             # requeued it. Keep the scheduler eligible to retry after that
@@ -21819,6 +21829,117 @@ class WorkersProjectsService:
                 reason=reason,
             )
 
+    def _settle_member_projections(self, worker_id: str) -> None:
+        """Finish the account projection an interrupted run left to startup recovery.
+
+        Startup recovery cannot claim a projection while its crashed holder's lease is
+        live or its process runs, so it closes admission. The caller holds this member's
+        processor, so no run starts meanwhile. Recovery runs once the process has ended
+        and the lease has lapsed, never by overriding either, and admission reopens. A
+        lease renewed meanwhile proves a live holder, which keeps its projection.
+        """
+        settle = getattr(self.runtime, "settle_member_provider_projections", None)
+        if not callable(settle):
+            return
+        waited_until: float | None = None
+        while not self._shutdown_event.is_set():
+            worker = self.store.get_worker(worker_id)
+            if not worker or self.store.get_active_run(worker_id):
+                return
+            try:
+                retry_at = settle(worker)
+            except Exception:
+                logger.warning(
+                    "Interrupted run projection could not be finished",
+                    extra={"worker_id": worker_id},
+                )
+                return
+            if retry_at is None or (waited_until is not None and retry_at > waited_until):
+                return
+            waited_until = retry_at
+            logger.info(
+                "Projection recovery waits %.0fs for the interrupted run's account lease to lapse",
+                max(0.0, retry_at - time.time()),
+                extra={"worker_id": worker_id},
+            )
+            self._projection_settling.add(worker_id)
+            try:
+                if self._shutdown_event.wait(max(0.0, retry_at - time.time()) + 0.05):
+                    return
+            finally:
+                self._projection_settling.discard(worker_id)
+
+    def settle_unfinished_projections_once(self) -> None:
+        """Settle projections that startup recovery left to runs which have since ended.
+
+        A member whose run may still be live, such as a restart survivor before or
+        during adoption, is left to that run's monitor; no processor is claimed for it.
+        """
+        members = getattr(self.runtime, "provider_projection_recovery_members", None)
+        if not callable(members):
+            return
+        now = time.monotonic()
+        for worker_id in members():
+            if self._shutdown_event.is_set():
+                return
+            if now < self._projection_settlement_not_before.get(worker_id, 0.0):
+                continue
+            if self.store.get_active_run(worker_id):
+                continue
+            self._ensure_projection_settlement(worker_id)
+
+    def _ensure_projection_settlement(self, worker_id: str) -> None:
+        """Hold one member's processor while its unfinished projection is settled.
+
+        An adopted restart survivor's monitor already holds it and settles its own
+        projection when the process ends.
+        """
+        worker = self.store.get_worker(worker_id) or {}
+        executor = (
+            self.conversation_executor
+            if self._trusted_run_lane(worker) == "conversation"
+            else self.executor
+        )
+        with self._processors_lock:
+            if self._shutdown_event.is_set() or worker_id in self._active_processors:
+                return
+            generation = self._processor_generations.get(worker_id, 0) + 1
+            self._processor_generations[worker_id] = generation
+            self._active_processors.add(worker_id)
+            try:
+                executor.submit(self._settle_projections_processor, worker_id, generation)
+            except Exception:
+                self._active_processors.discard(worker_id)
+                raise
+
+    def _settle_projections_processor(self, worker_id: str, generation: int) -> None:
+        try:
+            self._settle_member_projections(worker_id)
+            members = getattr(self.runtime, "provider_projection_recovery_members", None)
+            if callable(members) and worker_id in members():
+                # A recovery that failed, rather than waited, keeps its durable row and
+                # closed admission; it is retried at most once a minute.
+                self._projection_settlement_not_before[worker_id] = time.monotonic() + 60.0
+            else:
+                self._projection_settlement_not_before.pop(worker_id, None)
+        finally:
+            try:
+                if self._release_processor(worker_id, generation):
+                    worker = self.store.get_worker(worker_id)
+                    if (
+                        worker
+                        and worker["state"]
+                        not in {"paused", "needs_input", "stopping", "terminated"}
+                        and self.store.peek_next_queued_run(worker_id)
+                    ):
+                        self._ensure_worker_processor(worker_id)
+                    self._scheduler_wake_event.set()
+            except Exception:
+                logger.exception(
+                    "Failed to release projection settlement ownership",
+                    extra={"worker_id": worker_id},
+                )
+
     def _monitor_surviving_run(
         self,
         worker_id: str,
@@ -21847,6 +21968,7 @@ class WorkersProjectsService:
                         self._release_reconciled_run_lease(
                             run_id, reason="survivor_terminal"
                         )
+                        self._settle_member_projections(worker_id)
                         return
 
                     recovered = self._collect_completed_run(worker, run)
@@ -21855,6 +21977,7 @@ class WorkersProjectsService:
                         self._release_reconciled_run_lease(
                             run_id, reason="survivor_terminal"
                         )
+                        self._settle_member_projections(worker_id)
                         return
 
                     runtime_worker = {
@@ -21879,6 +22002,7 @@ class WorkersProjectsService:
                             self._release_reconciled_run_lease(
                                 run_id, reason="survivor_terminal"
                             )
+                            self._settle_member_projections(worker_id)
                             return
                         self._release_reconciled_run_lease(
                             run_id, reason="survivor_process_exited"
@@ -21935,6 +22059,9 @@ class WorkersProjectsService:
                                 "GlassHive will retry this work."
                             ),
                         )
+                        # The retry starts only after this monitor releases the member,
+                        # so it never meets the survivor's unfinished projection.
+                        self._settle_member_projections(worker_id)
                         self._scheduler_wake_event.set()
                         return
                 except Exception:

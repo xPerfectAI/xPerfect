@@ -894,6 +894,18 @@ class ControlPlaneStore:
             conn.execute("UPDATE provider_account_projections SET state = 'recovering', recovery_token = ?, recovery_expires_at = ?, updated_at = ? WHERE lease_id = ?", (token, now + max(15, min(ttl_seconds, 3600)), now, binding["lease_id"]))
         return token
 
+    def provider_projection_recovery_after(self, *, binding: dict) -> float | None:
+        """When the holder's live lease stops fencing this projection's recovery, if it does now.
+
+        The same fence as the recovery claim: a pending projection whose unreleased lease
+        has not expired still belongs to its holder and is never claimed early.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT l.expires_at FROM provider_account_projections p JOIN provider_account_leases l ON l.lease_id = p.lease_id WHERE p.lease_id = ? AND p.binding_json = ? AND p.state = 'pending' AND l.released_at IS NULL", (binding["lease_id"], json.dumps(binding, sort_keys=True))).fetchone()
+        if row is None or float(row["expires_at"]) <= time.time():
+            return None
+        return float(row["expires_at"])
+
     def complete_provider_projection(self, *, binding: dict, receipt_hash: str, recovery_token: str = "") -> None:
         if len(receipt_hash) != 64 or any(c not in "0123456789abcdef" for c in receipt_hash):
             raise ControlPlaneError("Completed projection receipt hash is required")

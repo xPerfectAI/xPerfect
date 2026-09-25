@@ -40,6 +40,54 @@ class SharedWorkspaceRuntimes:
                 # or still-live recovery can never open admission or release a lease.
                 self.recovery_issues.append(identity["worker_id"])
 
+    def recovery_members(self):
+        """Members whose unfinished projection startup recovery may still finish.
+
+        A quarantined projection is left to its owner's recovery.
+        """
+        if self.binder is None or self.binder.store is None:
+            return []
+        members = []
+        for worker_id in dict.fromkeys(self.recovery_issues):
+            records = self.binder.store.pending_provider_projections(worker_id=worker_id)
+            if not records or any(record["state"] != "quarantined" for record in records):
+                members.append(worker_id)
+        return members
+
+    def settle_member_projections(self, worker, profiled_runtime):
+        """Finish one member's projections that startup recovery could not.
+
+        The caller holds the member's processor and has proved its interrupted run's
+        process ended. A projection whose crashed holder's lease is still live is not
+        claimed early: the time that lease lapses is returned for the next attempt.
+        The member leaves the recovery issues, reopening admission, once nothing of it
+        is unfinished; a failed recovery keeps its durable row and admission closed.
+        """
+        if self.binder is None or self.binder.store is None:
+            return None
+        from .workspace_projection import recovery_projection
+        store = self.binder.store
+        worker_id = str(worker.get("worker_id") or "")
+        if not worker_id:
+            return None
+        retry_at = None
+        for record in store.pending_provider_projections(worker_id=worker_id):
+            if record["state"] == "quarantined":
+                continue
+            fenced_until = store.provider_projection_recovery_after(binding=record["binding"])
+            if fenced_until is not None:
+                retry_at = fenced_until if retry_at is None else min(retry_at, fenced_until)
+                continue
+            try:
+                box = profiled_runtime._runtime_for_worker(worker).sandbox.box
+                self.binder.recover_projection(record, projection_factory=lambda *, record, assert_lease:
+                    recovery_projection(box, record=record, assert_lease=assert_lease))
+            except Exception:
+                continue
+        if not store.pending_provider_projections(worker_id=worker_id):
+            self.recovery_issues = [item for item in self.recovery_issues if item != worker_id]
+        return retry_at
+
     def recover_quarantined(self, profiled_runtime, *, account_id):
         """Owner-requested recovery of one account's quarantined projections.
 

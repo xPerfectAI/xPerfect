@@ -250,20 +250,32 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
 
     def list_screen_sessions(self, worker_id, runtime_name, *, worker=None):
         self._member(worker_id)
-        if not isinstance(worker, dict) or '_compute_release_container_id' not in worker:
-            return super().list_screen_sessions(worker_id, runtime_name, worker=worker)
-        expected_id = str(worker.get('_compute_release_container_id') or '').strip()
         current = self.inspect(worker_id)
-        if (current and current.container_id != expected_id) or (not expected_id and current):
-            raise WorkspaceBoxUnavailable('Workspace generation changed before member session probe')
+        if isinstance(worker, dict) and '_compute_release_container_id' in worker:
+            expected_id = str(worker.get('_compute_release_container_id') or '').strip()
+            if (current and current.container_id != expected_id) or (not expected_id and current):
+                raise WorkspaceBoxUnavailable('Workspace generation changed before member session probe')
         if not current:
             return []
-        # Exact teardown reads the captured box's sessions while a prior native
-        # credential projection may still be pending. It must not call the
-        # launch guard, which is only for starting new member work.
+        # Teardown, restart recovery and session discovery read an existing member's
+        # sessions while its run's credential projection may still be pending. A read
+        # never prepares or starts the box and must not call the launch guard, which is
+        # only for starting new member work; it reads exactly the current box.
         token = _member_control.set(True)
         try:
-            return super().list_screen_sessions(worker_id, runtime_name, worker=worker)
+            return super().list_screen_sessions(
+                worker_id, runtime_name,
+                worker={**(worker or {'worker_id': worker_id}),
+                        '_compute_release_container_id': current.container_id})
+        finally:
+            _member_control.reset(token)
+
+    def screen_session_pid(self, worker_id, runtime_name, session_name, *, worker=None):
+        self._member(worker_id)
+        # Restart identity and stale-session proofs are reads of that same session.
+        token = _member_control.set(True)
+        try:
+            return super().screen_session_pid(worker_id, runtime_name, session_name, worker=worker)
         finally:
             _member_control.reset(token)
 
