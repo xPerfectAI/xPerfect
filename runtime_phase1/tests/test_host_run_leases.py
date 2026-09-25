@@ -7177,6 +7177,148 @@ def test_managed_shutdown_stops_the_live_generation_without_finalizing_the_run(t
     assert "run.failed" not in events
 
 
+def _queued_docker_run(store: Store, service: WorkersProjectsService, suffix: str):
+    project = store.create_project("owner-a", f"Project {suffix}", f"Goal {suffix}", "codex-cli")
+    worker = store.create_worker(
+        project_id=project["project_id"],
+        owner_id="owner-a",
+        name=f"Worker {suffix}",
+        role="worker",
+        profile="codex-cli",
+        backend="codex-cli",
+        runtime="codex-cli",
+        model="test",
+        execution_mode="docker",
+    )
+    store.update_worker_state(worker["worker_id"], "ready")
+    run = service.assign_run(worker["worker_id"], "Do durable work.", start_processor=False)
+    with service._processors_lock:
+        service._active_processors.add(worker["worker_id"])
+        service._processor_generations[worker["worker_id"]] = 1
+    return str(worker["worker_id"]), str(run["run_id"])
+
+
+def test_superseded_processor_lost_claim_keeps_the_live_generation_lease(
+    tmp_path, monkeypatch
+):
+    """A processor superseded between its startup reservation and its claim drops only
+    that unclaimed reservation. The next generation of the same executor may already
+    run the work under the adopted lease; stripping that fence would leave managed
+    shutdown unable to stop the generation or record managed_shutdown for it."""
+    import threading
+
+    from workers_projects_runtime.openclaw_runtime import (
+        WorkerInterruptedError,
+        notify_runtime_started,
+        runtime_start_boundary,
+    )
+
+    store = Store(str(tmp_path / "superseded-preclaim.sqlite3"))
+    started = threading.Event()
+    release = threading.Event()
+
+    class LiveGenerationRuntime(StubRuntime):
+        def __init__(self):
+            super().__init__()
+            self.stopped: list[tuple[str, str | None]] = []
+
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            with runtime_start_boundary(worker):
+                notify_runtime_started(worker)
+            started.set()
+            release.wait(timeout=10)
+            raise WorkerInterruptedError("native process stopped by managed shutdown")
+
+        def host_process_absence(self, worker, run_id):
+            return release.is_set()
+
+        def cleanup_unconfirmed_run_start(self, worker, run_id, identity):
+            self.interrupt_worker(worker, run_id=run_id)
+            return self.host_process_absence(worker, run_id)
+
+        def interrupt_worker(self, worker, run_id=None):
+            self.stopped.append((str(worker["worker_id"]), run_id))
+            if run_id:
+                release.set()
+            return super().pause_worker(worker)
+
+    runtime = LiveGenerationRuntime()
+    service = WorkersProjectsService(
+        store, runtime, reconcile_on_startup=False, start_background_consumers=False
+    )
+    service._emit_callback = lambda *_args, **_kwargs: None
+    worker_id, run_id = _queued_docker_run(store, service, "superseded-preclaim")
+    reservations: list[dict] = []
+    superseded: list[object] = []
+    original_claim = store.claim_next_queued_run
+
+    def superseded_before_claim(claim_worker_id, **kwargs):
+        if not reservations:
+            reservations.append(dict(store.get_active_host_run_lease_for_run(run_id) or {}))
+            # An operator interrupt supersedes this processor after its reservation;
+            # the scheduler's retry phase dispatches the next generation, which adopts
+            # the reservation, claims the run and starts it.
+            service.interrupt_worker(claim_worker_id)
+            superseded.extend(service.process_due_worker_retries_once())
+            superseded.append(started.wait(timeout=10))
+        return original_claim(claim_worker_id, **kwargs)
+
+    monkeypatch.setattr(store, "claim_next_queued_run", superseded_before_claim)
+    try:
+        service._process_worker_queue(worker_id, 1)
+        assert superseded == [worker_id, True]
+        reservation = reservations[0]
+        assert (reservation["startup_state"], reservation["attempt_id"]) == ("reserved", "")
+        live = store.get_host_run_lease(str(reservation["lease_id"]))
+        assert store.get_run(run_id)["state"] == "running"
+        assert (live["status"], live["release_reason"], live["startup_state"]) == (
+            "active",
+            "",
+            "confirmed",
+        )
+        # The lifespan's first shutdown step still stops and types that generation.
+        assert service.release_owned_host_run_leases() == 1
+        assert (worker_id, run_id) in runtime.stopped
+        released = store.get_host_run_lease(str(reservation["lease_id"]))
+        assert (released["status"], released["release_reason"]) == (
+            "released",
+            "managed_shutdown",
+        )
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_lost_preclaim_still_releases_its_own_unclaimed_reservation(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "lost-preclaim.sqlite3"))
+    service = WorkersProjectsService(
+        store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False
+    )
+    service._emit_callback = lambda *_args, **_kwargs: None
+    worker_id, run_id = _queued_docker_run(store, service, "lost-preclaim")
+    reservations: list[dict] = []
+    original_claim = store.claim_next_queued_run
+
+    def paused_before_claim(claim_worker_id, **kwargs):
+        reservations.append(dict(store.get_active_host_run_lease_for_run(run_id) or {}))
+        # No other generation adopts the reservation; only the claim is lost.
+        store.update_worker_state(claim_worker_id, "paused")
+        return original_claim(claim_worker_id, **kwargs)
+
+    monkeypatch.setattr(store, "claim_next_queued_run", paused_before_claim)
+    try:
+        service._process_worker_queue(worker_id, 1)
+    finally:
+        service.shutdown()
+    assert (reservations[0]["startup_state"], reservations[0]["attempt_id"]) == ("reserved", "")
+    released = store.get_host_run_lease(str(reservations[0]["lease_id"]))
+    assert (released["status"], released["release_reason"]) == (
+        "released",
+        "preclaim_generation_lost",
+    )
+    assert store.get_run(run_id)["state"] == "queued"
+
+
 def _stamp_docker_session_identity(store: Store, lease_id: str, *, run_id: str, container_id: str, session_id: str) -> None:
     """Model the identity the docker adapter publishes when its screen session starts."""
     identity = f"docker:{container_id}:{session_id}:{run_id}:4242"
