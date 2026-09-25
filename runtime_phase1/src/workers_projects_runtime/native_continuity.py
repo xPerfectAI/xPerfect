@@ -879,18 +879,40 @@ def _container_generation_stopped(container_id: str) -> bool:
         return False
 
 
-def _release_idle_boxes(connection: sqlite3.Connection, workers: list[dict]) -> list[str]:
-    """Release each affected workspace box the way the runtime releases an idle one.
+def _runtime_box(connection: sqlite3.Connection, worker: dict, *, data_root: Path, control_root: Path):
+    """The member's box exactly as its runtime builds it, so the container contract is checked in full."""
+    from .workspace_box import WorkspaceBox
 
-    The box's own generation lock, member files and durable idle rule decide; a box that
-    still runs anything, or whose members are not all durably idle, is kept.
+    binding = _shared_box(connection, worker, data_root=data_root, control_root=control_root).binding
+    workspace = connection.execute(
+        "SELECT file_placement FROM execution_workspaces WHERE workspace_id=? AND tenant_id=? AND owner_id=?",
+        (worker["workspace_id"], worker["tenant_id"], worker["owner_id"]),
+    ).fetchone()
+    quota_required = bool(connection.execute(
+        "SELECT quota_required FROM workspace_file_storage_config WHERE singleton=1"
+    ).fetchone()[0])
+    subpath = str(data_root.relative_to(Path(os.environ["XPERFECT_STORAGE_ROOT"]))) if quota_required else ""
+    return WorkspaceBox(volume_root=data_root, volume_subpath=subpath, control_root=control_root,
+                        network=os.environ.get("XPERFECT_SHARED_NETWORK") or None,
+                        volume_name=os.environ["XPERFECT_SHARED_VOLUME_NAME"],
+                        image=os.environ["XPERFECT_SHARED_IMAGE"], binding=binding,
+                        memory_bytes=int(os.environ["XPERFECT_SHARED_MEMORY_BYTES"]),
+                        pids_limit=int(os.environ["XPERFECT_SHARED_PIDS_LIMIT"]),
+                        file_placement=str(workspace[0]))
+
+
+def _closed_worker_boxes(connection: sqlite3.Connection, workers: list[dict]) -> list[tuple]:
+    """Stopped boxes of workspaces that hold a closed worker, as ``(name, box, workspace key)``.
+
+    Only a box that passes its full container contract and runs nothing is a candidate; its
+    release is decided later under its own generation lock and durable idle rule.
     """
     from .workspace_box import WorkspaceBoxUnavailable
 
     quota_required = bool(connection.execute(
         "SELECT quota_required FROM workspace_file_storage_config WHERE singleton=1"
     ).fetchone()[0])
-    released, seen = [], set()
+    boxes, seen = [], set()
     for worker in workers:
         key = (worker["workspace_id"], worker["tenant_id"], worker["owner_id"])
         if not worker.get("workspace_id") or key in seen:
@@ -903,12 +925,14 @@ def _release_idle_boxes(connection: sqlite3.Connection, workers: list[dict]) -> 
             continue
         try:
             data_root, control_root = _source_box_roots(connection, worker)
-            box = _shared_box(connection, worker, data_root=data_root, control_root=control_root)
-            if box.release_if_all_members_idle(lambda: idle_execution_workspace_member_uids_conn(connection, *key)):
-                released.append(box.name)
-        except (ValueError, WorkspaceBoxUnavailable):
-            continue  # kept; the idle proof reports why
-    return sorted(released)
+            box = _runtime_box(connection, worker, data_root=data_root, control_root=control_root)
+            inspected = box._inspect()
+        except (ValueError, KeyError, WorkspaceBoxUnavailable):
+            continue  # not provably this runtime's stopped box; the idle proof reports it
+        state = (inspected or {}).get("State") or {}
+        if inspected is not None and state.get("Running") is False and state.get("Pid") == 0:
+            boxes.append((box.name, box, key))
+    return sorted(boxes, key=lambda item: item[0])
 
 
 def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect: list[str] | None = None,
@@ -922,10 +946,11 @@ def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect:
     container generation it fenced and that container is gone or stopped with no process, and
     never delegated work, whose history its runtime must record. Nothing changes unless every
     target qualifies and, with ``expect``, is exactly the reviewed set; the generations are
-    proved again just before the change. Each affected box is then released only through its
-    own generation lock and durable idle rule. The runtime gate reads this process's
-    environment, so it must be the package's own runtime configuration, as the upgrade helper
-    provides.
+    proved again just before the change. A stopped box of a workspace that holds a closed
+    worker is then released only through its own generation lock and durable idle rule, so a
+    later pass still releases a box whose work an earlier pass settled. The box and runtime
+    gates read this process's environment, so it must be the package's own runtime
+    configuration, as the upgrade helper provides.
     """
     metadata = database.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_nlink != 1:
@@ -953,31 +978,43 @@ def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect:
             if not all(_container_generation_stopped(container) for container in containers):
                 raise ValueError("GlassHive closed worker's recorded generation is not proved stopped")
             targets.append({"worker": worker, "runs": runs, "leases": leases, "containers": containers})
-        report = {"closed_workers": len(targets), "applied": False, "boxes_released": [], "targets": [
-            {"worker_id": target["worker"]["worker_id"], "runs": target["runs"], "leases": target["leases"]}
-            for target in targets]}
+        boxes = _closed_worker_boxes(connection, closed)
+        report = {"closed_workers": len(targets), "applied": False, "boxes": [name for name, _, _ in boxes],
+                  "boxes_released": [], "targets": [
+                      {"worker_id": target["worker"]["worker_id"], "runs": target["runs"], "leases": target["leases"]}
+                      for target in targets]}
         identities = sorted([target["worker"]["worker_id"] for target in targets]
-                            + [item for target in targets for item in target["runs"] + target["leases"]])
+                            + [item for target in targets for item in target["runs"] + target["leases"]]
+                            + report["boxes"])
         if expect is not None and sorted(expect) != identities:
             raise ValueError("GlassHive closed-worker work changed since it was reviewed")
-        if not apply or not targets:
+        if not apply or not identities:
             return report
         if not all(_container_generation_stopped(container)
                    for target in targets for container in target["containers"]):
             raise ValueError("GlassHive closed worker's recorded generation is not proved stopped")
-        settled_at = utc_now()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            for target in targets:
-                settle_closed_worker_work_conn(connection, target["worker"]["worker_id"], runs=target["runs"],
-                                               leases=target["leases"], settled_at=settled_at,
-                                               reason=_CLOSED_WORK_REASON)
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
+        if targets:
+            settled_at = utc_now()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for target in targets:
+                    settle_closed_worker_work_conn(connection, target["worker"]["worker_id"], runs=target["runs"],
+                                                   leases=target["leases"], settled_at=settled_at,
+                                                   reason=_CLOSED_WORK_REASON)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        from .workspace_box import WorkspaceBoxUnavailable
+
+        for name, box, key in boxes:
+            try:
+                if box.release_if_all_members_idle(
+                        lambda key=key: idle_execution_workspace_member_uids_conn(connection, *key)):
+                    report["boxes_released"].append(name)
+            except WorkspaceBoxUnavailable:
+                continue  # kept; the idle proof reports why
         report["applied"] = True
-        report["boxes_released"] = _release_idle_boxes(connection, [target["worker"] for target in targets])
         return report
 
 

@@ -1597,12 +1597,14 @@ def test_an_earlier_close_left_open_work_that_blocks_continuity_until_the_new_re
 
     report = reconcile_closed_worker_work(database)
     target = {"worker_id": worker_id, "runs": [state["run_id"]], "leases": [state["lease_id"]]}
-    assert report == {"closed_workers": 1, "applied": False, "boxes_released": [], "targets": [target]}
+    assert report == {"closed_workers": 1, "applied": False, "boxes": [], "boxes_released": [],
+                      "targets": [target]}
     assert _open_work_rows(store, worker_id) == legacy and probed == [state["container"]]
 
     report = reconcile_closed_worker_work(
         database, apply=True, expect=[worker_id, state["run_id"], state["lease_id"]])
-    assert report == {"closed_workers": 1, "applied": True, "boxes_released": [], "targets": [target]}
+    assert report == {"closed_workers": 1, "applied": True, "boxes": [], "boxes_released": [],
+                      "targets": [target]}
     # The generation is proved again just before the change.
     assert probed == [state["container"]] * 3
     settled = _open_work_rows(store, worker_id)
@@ -1618,7 +1620,7 @@ def test_an_earlier_close_left_open_work_that_blocks_continuity_until_the_new_re
                                                                   "runs": [state["run_id"]]}
     check_quiescent(database)
     assert reconcile_closed_worker_work(database, apply=True) == {
-        "closed_workers": 0, "applied": False, "boxes_released": [], "targets": []}
+        "closed_workers": 0, "applied": False, "boxes": [], "boxes_released": [], "targets": []}
     store.close()
 
 
@@ -1697,19 +1699,23 @@ def test_a_paused_worker_that_is_still_open_is_never_settled(tmp_path, monkeypat
                                          error_text="Paused by operator")
     monkeypatch.setattr(native_continuity, "_container_generation_stopped", lambda container: True)
     assert reconcile_closed_worker_work(database, apply=True) == {
-        "closed_workers": 0, "applied": False, "boxes_released": [], "targets": []}
+        "closed_workers": 0, "applied": False, "boxes": [], "boxes_released": [], "targets": []}
     assert store.get_run(run["run_id"])["state"] == "paused"
     with pytest.raises(ValueError, match="active work must be quiesced"):
         check_quiescent(database)
     store.close()
 
 
-def test_an_affected_box_is_released_only_through_its_own_durable_idle_rule(tmp_path, monkeypatch):
+def test_a_stopped_box_of_a_closed_worker_is_released_only_through_its_own_durable_idle_rule(
+        tmp_path, monkeypatch):
     from workers_projects_runtime import native_continuity
     from workers_projects_runtime.models import utc_now
+    from workers_projects_runtime.native_continuity import reconcile_closed_worker_work
     from workers_projects_runtime.workspace_box import WorkspaceBoxUnavailable
 
-    store = Store(str(tmp_path / "runtime.db"))
+    database = tmp_path / "runtime.db"
+    store = Store(str(database))
+    ControlPlaneStore(str(database))
     project = store.create_project(owner_id="owner", tenant_id="tenant", title="Shared", goal="Together",
                                    default_worker_profile="codex-cli")
     workspace = store.create_execution_workspace(project_id=project["project_id"], tenant_id="tenant",
@@ -1720,32 +1726,51 @@ def test_an_affected_box_is_released_only_through_its_own_durable_idle_rule(tmp_
                for index in range(2)]
     for member in members:
         store.reserve_workspace_member_identity(member["worker_id"], tenant_id="tenant", owner_id="owner")
-    live_run = store.create_run(members[1]["worker_id"], project["project_id"], "Still working")
+    closed, open_member = members
+    store.update_worker(closed["worker_id"], state="terminated", compute_released_at=utc_now())
+    live_run = store.create_run(open_member["worker_id"], project["project_id"], "Still working")
 
     class Box:
         name = "xperfect-wsp-synthetic"
-        observed = []
-        unavailable = False
+        state = {"Running": False, "Pid": 0}
+        present, unavailable, released, observed = True, False, [], []
+
+        def _inspect(self):
+            return {"Id": "c" * 64, "State": dict(Box.state)} if Box.present else None
 
         def release_if_all_members_idle(self, idle_member_uids):
             if Box.unavailable:
                 raise WorkspaceBoxUnavailable("Workspace container inspection is unavailable")
             Box.observed.append(idle_member_uids())
-            return Box.observed[-1] is not None
+            if Box.observed[-1] is None:
+                return False
+            Box.released.append(Box.name)
+            return True
 
     monkeypatch.setattr(native_continuity, "_source_box_roots", lambda connection, worker: (tmp_path, tmp_path))
-    monkeypatch.setattr(native_continuity, "_shared_box", lambda connection, worker, **roots: Box())
+    monkeypatch.setattr(native_continuity, "_runtime_box", lambda connection, worker, **roots: Box())
+    monkeypatch.setattr(native_continuity, "_container_generation_stopped", lambda container: True)
 
-    def release():
-        with store._connect() as connection:
-            return native_continuity._release_idle_boxes(connection, [store.get_worker(members[0]["worker_id"])])
+    def report(**kwargs):
+        return reconcile_closed_worker_work(database, **kwargs)
 
-    assert release() == [] and Box.observed == [None]
+    empty = {"closed_workers": 0, "targets": [], "boxes": [Box.name]}
+    # Another member still works: the stopped box is a candidate but its idle rule keeps it.
+    assert report() == {**empty, "applied": False, "boxes_released": []}
+    assert report(apply=True, expect=[Box.name]) == {**empty, "applied": True, "boxes_released": []}
+    assert Box.observed == [None] and Box.released == []
+    # A running or missing box is never a candidate.
+    Box.state = {"Running": True, "Pid": 91}
+    assert report()["boxes"] == []
+    Box.state, Box.present = {"Running": False, "Pid": 0}, False
+    assert report()["boxes"] == []
+    Box.present = True
     assert store.finalize_run_if_state(live_run["run_id"], expected_state="queued", state="cancelled")
-    for member in members:
-        store.update_worker(member["worker_id"], compute_released_at=utc_now())
-    assert release() == ["xperfect-wsp-synthetic"]
-    assert Box.observed[-1]["uids"] == {20001, 20002}
+    store.update_worker(open_member["worker_id"], compute_released_at=utc_now())
+    with pytest.raises(ValueError, match="changed since it was reviewed"):
+        report(apply=True, expect=[])
+    assert report(apply=True, expect=[Box.name]) == {**empty, "applied": True, "boxes_released": [Box.name]}
+    assert Box.observed[-1]["uids"] == {20001, 20002} and Box.released == [Box.name]
     Box.unavailable = True
-    assert release() == []
+    assert report(apply=True, expect=[Box.name])["boxes_released"] == []
     store.close()
