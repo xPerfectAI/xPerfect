@@ -107,6 +107,25 @@ def unpublished_program(expect: list[str] | None = None) -> str:
 
 
 UNPUBLISHED_REPORT = unpublished_program()
+CLOSED_WORK_ID = re.compile(r'(?:wrk|run)_[0-9a-f]{10}|hrl_[0-9a-f]{32}')
+BOX_NAME = re.compile(r'xperfect-wsp-[a-z0-9][a-z0-9-]{0,80}')
+
+
+def closed_work_program(expect: list[str] | None = None) -> str:
+    """The new release's review of open work an earlier release left on closed workers. With
+    ``expect`` (the reviewed worker, run and lease identities) it settles exactly those and
+    releases the idle boxes they held, or refuses. Typed JSON out."""
+    if expect is not None and not all(CLOSED_WORK_ID.fullmatch(item) for item in expect):
+        raise UpgradeError('Unexpected closed-worker work identity')
+    flag = '' if expect is None else f",'--apply','--expect','{','.join(expect)}'"
+    return _ENV + (
+        "if Path('/control/.g8-restore-journal.json').exists():\n"
+        "    sys.exit('xperfect-upgrade: a restore transaction is still open; commit or roll it back first')\n"
+        f"os.execve('{RUNTIME_PYTHON}',['{RUNTIME_PYTHON}','-I','-m','workers_projects_runtime.native_continuity',"
+        f"'reconcile-closed-work','/control/runtime.db','--incoming'{flag}],env)\n")
+
+
+CLOSED_WORK_REPORT = closed_work_program()
 # The running release's own work predicate, without its schema review. An earlier
 # release cannot learn a new entry point, so this calls the same function its
 # `quiescent` command runs after reviewing the schema (present, with this
@@ -601,6 +620,88 @@ class Upgrade:
         _write_private_json(record, {**evidence, 'status': 'retired', 'retired': reviewed})
         return reviewed
 
+    def _settle_closed_work(self, journal: dict, *, receipt: dict, name: str, txn: str,
+                            current_image: str, service_image: str, device: str) -> dict:
+        """Settle open work an earlier release left on closed workers, as the new release reviews it.
+
+        An earlier release closed a paused worker without settling its paused run or the host
+        lease that fenced it, so every idle proof refused and the box it shared was never
+        released. The new release's reviewed continuity code settles exactly the reviewed work
+        once each recorded generation is proved stopped, then releases boxes that became idle
+        through their own generation lock. Open workers, delegated work and anything still
+        running refuse. The unchanged idle proofs run next. Returns what changed.
+        """
+        if service_image == current_image:
+            raise UpgradeError('Settling closed-worker work needs a new image that carries it. Nothing was changed')
+        volumes = receipt['volumes']
+        record = self.receipt_path.with_name(f'{self.receipt_path.name}.closed-work-{txn}.json')
+        mounts = [f'type=volume,src={volumes["control"]},dst=/control',
+                  f'type=volume,src={volumes["data"]},dst=/data']
+
+        def run(program: str, purpose: str) -> subprocess.CompletedProcess:
+            return _helper(self.endpoint, image=service_image, name=name, txn=txn, purpose=purpose,
+                           entrypoint=RUNTIME_PYTHON, command=['-I', '-c', program], device=device,
+                           docker_socket=True, timeout=300, scratch='1g', mounts=mounts)
+
+        def report_of(result: subprocess.CompletedProcess, *, applied: bool) -> dict:
+            try:
+                report = json.loads(result.stdout)
+                targets, boxes = report['targets'], report['boxes_released']
+                valid = (type(report['closed_workers']) is int and type(report['applied']) is bool
+                         and isinstance(targets, list) and len(targets) == report['closed_workers']
+                         and all(isinstance(item, dict) and CLOSED_WORK_ID.fullmatch(str(item.get('worker_id')))
+                                 and isinstance(item.get('runs'), list) and isinstance(item.get('leases'), list)
+                                 and all(CLOSED_WORK_ID.fullmatch(str(value)) for value in item['runs'] + item['leases'])
+                                 for item in targets)
+                         and isinstance(boxes, list) and all(BOX_NAME.fullmatch(str(box)) for box in boxes)
+                         and report['applied'] is (applied and bool(targets)) and (applied or not boxes))
+            except (ValueError, KeyError, TypeError):
+                valid = False
+            if not valid:
+                raise UpgradeError('The new image returned an unexpected closed-worker report'
+                                   + ('; whether work was settled is unknown' if applied else '. Nothing was changed'))
+            return report
+
+        def identities(report: dict) -> list[str]:
+            return sorted([item['worker_id'] for item in report['targets']]
+                          + [value for item in report['targets'] for value in item['runs'] + item['leases']])
+
+        result = run(CLOSED_WORK_REPORT, 'closed-review')
+        if result.returncode == 2 and b'invalid choice' in result.stderr:
+            raise UpgradeError('Closed-worker work cannot be settled: the new image does not carry this '
+                               'recovery. Nothing was changed')
+        if result.returncode:  # the review only reads
+            raise UpgradeError('Closed-worker work cannot be settled: '
+                               + (_reason(result.stderr) or 'the review stopped') + '. Nothing was changed')
+        review = report_of(result, applied=False)
+        reviewed = identities(review)
+        if not reviewed:
+            return {'settled': [], 'boxes_released': []}
+        # Identities only: no names, owners, messages or paths.
+        evidence = {'transaction': txn, 'status': 'settling', 'reviewed': review['targets']}
+        _write_private_json(record, evidence, create=True)
+        journal['closed_work_settling'] = reviewed
+        self._save(journal)
+        try:
+            result = run(closed_work_program(reviewed), 'closed-settle')
+        except UpgradeError:  # timed out and stopped at an unknown point
+            raise UpgradeError('Settling closed-worker work did not finish in time; whether it was settled is '
+                               f'unknown ({record.name}). Nothing else was changed; run the upgrade again') from None
+        if result.returncode:
+            reason = _reason(result.stderr)
+            if reason:  # every typed refusal comes before the settlement commits
+                _write_private_json(record, {**evidence, 'status': 'refused'})
+                journal['closed_work_settling'] = []
+                raise UpgradeError(f'Closed-worker work cannot be settled: {reason}. Nothing was changed')
+            raise UpgradeError('Settling closed-worker work stopped without a result; whether it was settled '
+                               f'is unknown ({record.name}). Nothing else was changed; run the upgrade again')
+        applied = report_of(result, applied=True)
+        if identities(applied) != reviewed:
+            raise UpgradeError('The new image settled a different set than it reviewed; stop and inspect '
+                               f'{record.name}')
+        _write_private_json(record, {**evidence, 'status': 'settled', 'boxes_released': applied['boxes_released']})
+        return {'settled': reviewed, 'boxes_released': applied['boxes_released']}
+
     def _prove_idle(self, *, receipt: dict, name: str, txn: str, current_image: str, service_image: str,
                     device: str, runtime: str, running: bool) -> dict:
         """One complete continuity proof: the running release proves its own state idle, or the
@@ -809,7 +910,8 @@ class Upgrade:
     def upgrade(self, *, service_image: str, native_image: str | None = None, models: dict | None = None,
                 adopt: bool = False, recover_unpublished: bool = False, role_map: dict | None = None,
                 role_claim: str | None = None, clear_roles: bool = False,
-                local_qa_authority: dict | None = None, clear_local_qa: bool = False) -> dict:
+                local_qa_authority: dict | None = None, clear_local_qa: bool = False,
+                settle_closed_work: bool = False) -> dict:
         models = base.validate_models(models)
         if local_qa_authority is not None and clear_local_qa:
             raise UpgradeError('Choose --local-qa-authority or --no-local-qa-authority, not both')
@@ -955,12 +1057,19 @@ class Upgrade:
                    'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
         self._save(journal, create=True)
         journal['files_recovered'] = []
+        journal['closed_work_settled'] = {'settled': [], 'boxes_released': []}
         try:
             if recover_unpublished:
                 journal['files_recovered'] = self._recover_unpublished(
                     journal, receipt=receipt, name=name, txn=txn, current_image=current_image,
                     service_image=service_image, device=shapes['runtime']['device'])
                 journal['files_recovering'] = []
+                self._save(journal)
+            if settle_closed_work:
+                journal['closed_work_settled'] = self._settle_closed_work(
+                    journal, receipt=receipt, name=name, txn=txn, current_image=current_image,
+                    service_image=service_image, device=shapes['runtime']['device'])
+                journal['closed_work_settling'] = []
                 self._save(journal)
             journal['idle_proof'] = self._prove_idle(
                 receipt=receipt, name=name, txn=txn, current_image=current_image, service_image=service_image,
@@ -969,10 +1078,16 @@ class Upgrade:
             self._save(journal)
         except BaseException as exc:
             self.journal_path.unlink()  # the package itself was not changed
-            if journal['files_recovered'] and isinstance(exc, UpgradeError):
-                raise UpgradeError(str(exc).removesuffix(' Nothing was changed.') + ' The unpublished file '
-                                   f'attachments were already retired ({len(journal["files_recovered"])}); '
-                                   'the package was otherwise not changed') from None
+            done = []
+            if journal['files_recovered']:
+                done.append(f'the unpublished file attachments were already retired ({len(journal["files_recovered"])})')
+            if journal['closed_work_settled']['settled']:
+                done.append('the open work of closed workers was already settled '
+                            f'({len(journal["closed_work_settled"]["settled"])} identities)')
+            if done and isinstance(exc, UpgradeError):
+                already = '; '.join(done)
+                raise UpgradeError(str(exc).removesuffix(' Nothing was changed.') + ' ' + already[0].upper()
+                                   + already[1:] + '; the package was otherwise not changed') from None
             raise
         try:
             return self._apply(journal, receipt, profile, name, shapes, environment, models, configs,
@@ -1097,6 +1212,7 @@ class Upgrade:
                                 'settings_kept': journal['settings_kept'],
                                 'secrets_added': journal.get('secrets_added', {}),
                                 'files_recovered': journal.get('files_recovered', []),
+                                'closed_work_settled': journal.get('closed_work_settled', {}).get('settled', []),
                                 'role_mapping_changed': roles_changed,
                                 'local_assertion_added': bool(signer),
                                 'from_native_image': journal['previous_native_image'],
@@ -1124,6 +1240,8 @@ class Upgrade:
             result['secrets_added'] = journal['secrets_added']
         if journal.get('files_recovered'):
             result['files_recovered'] = journal['files_recovered']
+        if (journal.get('closed_work_settled') or {}).get('settled'):
+            result['closed_work_settled'] = journal['closed_work_settled']
         if signer:
             result['local_assertion'] = {'added': True, 'ui_key_id': signer['kid']}
             result['local_assertion_note'] = ('Signed-in owners can now confirm workspace sharing and permission '
@@ -1217,6 +1335,12 @@ class Upgrade:
         result = {'status': 'rolled_back', 'transaction': journal['transaction'],
                   'service_image': journal['previous_image'], 'restored_state': bool(journal.get('snapshot')),
                   'idle_proof': proof, 'changed_since_upgrade': changed}
+        settled = (journal.get('closed_work_settled') or {}).get('settled') or []
+        if settled:
+            # Settled before the backup: the restored state keeps it settled.
+            result['closed_work_settled_not_restored'] = settled
+        elif journal.get('closed_work_settling'):
+            result['closed_work_settlement_unknown'] = journal['closed_work_settling']
         retired, unknown = journal.get('files_recovered') or [], journal.get('files_recovering') or []
         if retired:
             # They were retired before the backup, so the restored state does not contain them.
@@ -1275,6 +1399,9 @@ def main(argv: list[str]) -> None:
     upgrade.add_argument('--recover-unpublished-files', action='store_true',
                          help='First retire stored-file attachments the running version registered but never '
                               'published, as reviewed by the new image')
+    upgrade.add_argument('--settle-closed-worker-work', action='store_true',
+                         help='First settle open runs and leases an earlier version left on closed '
+                              'workers, as reviewed by the new image, and release boxes that became idle')
     for command in (upgrade, commands.add_parser('upgrade-commit'), commands.add_parser('upgrade-rollback')):
         command.add_argument('--docker-host', required=True)
         command.add_argument('--receipt', required=True, type=Path)
@@ -1307,7 +1434,8 @@ def main(argv: list[str]) -> None:
                                     role_map=pairs, role_claim=args.role_claim, clear_roles=args.no_role_map,
                                     local_qa_authority=(_private_json(args.local_qa_authority)
                                                         if args.local_qa_authority else None),
-                                    clear_local_qa=args.no_local_qa_authority)
+                                    clear_local_qa=args.no_local_qa_authority,
+                                    settle_closed_work=args.settle_closed_worker_work)
         elif args.action == 'upgrade-commit':
             result = runner.commit()
         else:

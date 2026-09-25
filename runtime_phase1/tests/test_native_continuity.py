@@ -1512,3 +1512,240 @@ def test_each_storage_layout_locks_and_checks_its_own_runtime_paths(tmp_path, mo
     assert reconcile_unpublished_projections(state["database"], apply=True)["applied"]
     assert (control / f"{row['projection_id']}.lock").is_file() and _targets(state["store"]) == []
     state["store"].close()
+
+
+def _closed_worker_with_open_work(tmp_path, *, recorded_container=True):
+    """An earlier release closed a paused worker and left its paused run and fencing lease open.
+
+    Built through the store's own lifecycle: the run is claimed, admitted and started under a
+    host lease that records its exact generation, paused by the operator, and the worker is then
+    closed as that release did: pending runs cancelled (queued and running only) and the worker
+    marked terminated, without the compute-terminated settlement.
+    """
+    import hashlib
+    from workers_projects_runtime.models import utc_now
+
+    database, store, worker, _ = source_state(tmp_path)
+    worker_id, executor = worker["worker_id"], "executor-earlier-release"
+    store.update_worker_state(worker_id, "ready")
+    run = store.create_run(worker_id, worker["project_id"], "Keep improving the report")
+    assert store.claim_next_queued_run(worker_id, executor_id=executor)
+    lease = store.acquire_host_run_lease(
+        runtime_family="codex", lane="mission", tenant_id="local", owner_id="owner-a",
+        worker_id=worker_id, run_id=run["run_id"], executor_id=executor, conversation_limit=2,
+        mission_limit=64, account_mission_limit=64, tenant_mission_limit=64, lease_ttl_s=300,
+    )
+    assert store.admit_claimed_run(run["run_id"], lease_id=lease["lease_id"], executor_id=executor)
+    invoked = store.mark_run_runtime_invoked(run["run_id"], lease_id=lease["lease_id"], executor_id=executor)
+    container = hashlib.sha256(b"workspace-box-generation").hexdigest() if recorded_container else ""
+    session = f"job-{run['run_id'][:12]}" if recorded_container else "in-process"
+    assert store.confirm_host_run_start(
+        worker_id=worker_id, run_id=run["run_id"], run_started_at=str(invoked["runtime_invoked_at"]),
+        lease_id=lease["lease_id"], startup_token=lease["startup_token"], executor_id=executor,
+        identity_kind="docker_session" if recorded_container else "in_process",
+        pid=458 if recorded_container else None, process_group=None,
+        process_start_identity=f"docker:{container}:{session}:{run['run_id']}:458" if recorded_container else "",
+        container_id=container, session_id=session,
+    )
+    assert store.transition_run_if_state(run["run_id"], "running", "paused", ended_at=None,
+                                         error_text="Paused by operator")
+    store.update_worker_state(worker_id, "paused", last_error="")
+    store.begin_worker_termination(worker_id)
+    store.cancel_pending_runs(worker_id, error_text="Worker terminated by operator", state="cancelled")
+    store.complete_worker_termination(worker_id, compute_released_at=utc_now())
+    return {"database": database, "store": store, "worker_id": worker_id, "project_id": worker["project_id"],
+            "run_id": run["run_id"], "lease_id": lease["lease_id"], "container": container}
+
+
+def _open_work_rows(store, worker_id):
+    with store._connect() as connection:
+        return {
+            "worker": dict(connection.execute("SELECT state, compute_released_at FROM workers WHERE worker_id=?",
+                                              (worker_id,)).fetchone()),
+            "runs": [dict(row) for row in connection.execute(
+                "SELECT run_id, state, ended_at, error_text FROM runs WHERE worker_id=? ORDER BY run_id", (worker_id,))],
+            "attempts": [dict(row) for row in connection.execute(
+                "SELECT attempt_id, state, ended_at FROM run_attempts WHERE run_id IN "
+                "(SELECT run_id FROM runs WHERE worker_id=?) ORDER BY attempt_id", (worker_id,))],
+            "leases": [dict(row) for row in connection.execute(
+                "SELECT lease_id, status, released_at, release_reason FROM host_run_leases WHERE worker_id=? "
+                "ORDER BY lease_id", (worker_id,))],
+            "events": [dict(row) for row in connection.execute(
+                "SELECT event_type, payload_json FROM events WHERE worker_id=? ORDER BY created_at, event_id",
+                (worker_id,))],
+        }
+
+
+def test_an_earlier_close_left_open_work_that_blocks_continuity_until_the_new_release_settles_it(
+        tmp_path, monkeypatch):
+    import json
+    from workers_projects_runtime import native_continuity
+    from workers_projects_runtime.native_continuity import check_quiescent, reconcile_closed_worker_work
+
+    state = _closed_worker_with_open_work(tmp_path)
+    store, database, worker_id = state["store"], state["database"], state["worker_id"]
+    probed = []
+    monkeypatch.setattr(native_continuity, "_container_generation_stopped",
+                        lambda container: probed.append(container) or container == state["container"])
+    legacy = _open_work_rows(store, worker_id)
+    assert legacy["worker"]["state"] == "terminated"
+    assert [run["state"] for run in legacy["runs"]] == ["paused"]
+    assert [lease["status"] for lease in legacy["leases"]] == ["active"]
+    assert all(attempt["ended_at"] for attempt in legacy["attempts"])
+    with pytest.raises(ValueError, match="active work must be quiesced"):
+        check_quiescent(database)
+
+    report = reconcile_closed_worker_work(database)
+    target = {"worker_id": worker_id, "runs": [state["run_id"]], "leases": [state["lease_id"]]}
+    assert report == {"closed_workers": 1, "applied": False, "boxes_released": [], "targets": [target]}
+    assert _open_work_rows(store, worker_id) == legacy and probed == [state["container"]]
+
+    report = reconcile_closed_worker_work(
+        database, apply=True, expect=[worker_id, state["run_id"], state["lease_id"]])
+    assert report == {"closed_workers": 1, "applied": True, "boxes_released": [], "targets": [target]}
+    # The generation is proved again just before the change.
+    assert probed == [state["container"]] * 3
+    settled = _open_work_rows(store, worker_id)
+    assert settled["worker"] == legacy["worker"]
+    assert [(run["state"], bool(run["ended_at"])) for run in settled["runs"]] == [("cancelled", True)]
+    assert "worker was closed" in settled["runs"][0]["error_text"]
+    assert settled["attempts"] == legacy["attempts"]
+    assert [(lease["status"], lease["release_reason"]) for lease in settled["leases"]] == [
+        ("released", "closed_worker_settled")]
+    assert settled["events"][:-1] == legacy["events"]
+    assert settled["events"][-1]["event_type"] == "worker.closed_work_settled"
+    assert json.loads(settled["events"][-1]["payload_json"]) == {"leases": [state["lease_id"]],
+                                                                  "runs": [state["run_id"]]}
+    check_quiescent(database)
+    assert reconcile_closed_worker_work(database, apply=True) == {
+        "closed_workers": 0, "applied": False, "boxes_released": [], "targets": []}
+    store.close()
+
+
+@pytest.mark.parametrize("case,message", [
+    ("running", "not proved stopped"),
+    ("unrecorded", "not proved stopped"),
+    ("delegated", "delegated work"),
+])
+def test_closed_work_that_is_not_proved_stopped_or_is_delegated_refuses_and_changes_nothing(
+        tmp_path, monkeypatch, case, message):
+    from workers_projects_runtime import native_continuity
+    from workers_projects_runtime.models import utc_now
+    from workers_projects_runtime.native_continuity import reconcile_closed_worker_work
+
+    state = _closed_worker_with_open_work(tmp_path, recorded_container=case != "unrecorded")
+    store, worker_id = state["store"], state["worker_id"]
+    monkeypatch.setattr(native_continuity, "_container_generation_stopped",
+                        lambda container: case != "running" and container == state["container"] != "")
+    if case == "delegated":
+        now = utc_now()
+        with store._connect() as connection:
+            connection.execute(
+                "INSERT INTO delegations (work_ref, tenant_id, owner_id, idempotency_key, request_digest, title, "
+                "origin_surface, project_id, worker_id, initial_run_id, current_run_id, created_at, updated_at) "
+                "VALUES ('work_delegated', 'local', 'owner-a', 'delegated', 'digest', 'Delegated', 'api', ?, ?, ?, ?, ?, ?)",
+                (state["project_id"], worker_id, state["run_id"], state["run_id"], now, now),
+            )
+    before = _open_work_rows(store, worker_id)
+    for kwargs in ({}, {"apply": True}):
+        with pytest.raises(ValueError, match=message):
+            reconcile_closed_worker_work(state["database"], **kwargs)
+    assert _open_work_rows(store, worker_id) == before
+    store.close()
+
+
+def test_closed_work_that_changes_after_review_refuses_and_changes_nothing(tmp_path, monkeypatch):
+    from workers_projects_runtime import native_continuity
+    from workers_projects_runtime.native_continuity import reconcile_closed_worker_work
+    from workers_projects_runtime.store import settle_closed_worker_work_conn
+
+    state = _closed_worker_with_open_work(tmp_path)
+    store, database, worker_id = state["store"], state["database"], state["worker_id"]
+    reviewed = [worker_id, state["run_id"], state["lease_id"]]
+    before = _open_work_rows(store, worker_id)
+    monkeypatch.setattr(native_continuity, "_container_generation_stopped", lambda container: True)
+    with pytest.raises(ValueError, match="changed since it was reviewed"):
+        reconcile_closed_worker_work(database, apply=True, expect=reviewed + ["run_0000000000"])
+    # The recorded generation starts again between the review and the change.
+    answers = iter([True, False])
+    monkeypatch.setattr(native_continuity, "_container_generation_stopped", lambda container: next(answers))
+    with pytest.raises(ValueError, match="not proved stopped"):
+        reconcile_closed_worker_work(database, apply=True, expect=reviewed)
+    # Inside the change, anything but the exact reviewed set, or a reopened worker, refuses.
+    with store._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="changed since it was reviewed"):
+            settle_closed_worker_work_conn(connection, worker_id, runs=[state["run_id"]], leases=[],
+                                           settled_at="2026-09-25T00:00:00+00:00", reason="test")
+        connection.execute("UPDATE workers SET state='ready' WHERE worker_id=?", (worker_id,))
+        with pytest.raises(ValueError, match="no longer closed"):
+            settle_closed_worker_work_conn(connection, worker_id, runs=[state["run_id"]],
+                                           leases=[state["lease_id"]], settled_at="2026-09-25T00:00:00+00:00",
+                                           reason="test")
+        connection.execute("ROLLBACK")
+    assert _open_work_rows(store, worker_id) == before
+    store.close()
+
+
+def test_a_paused_worker_that_is_still_open_is_never_settled(tmp_path, monkeypatch):
+    from workers_projects_runtime import native_continuity
+    from workers_projects_runtime.native_continuity import check_quiescent, reconcile_closed_worker_work
+
+    database, store, worker, _ = source_state(tmp_path)
+    run = store.create_run(worker["worker_id"], worker["project_id"], "Paused work that can resume")
+    assert store.transition_run_if_state(run["run_id"], "queued", "paused", ended_at=None,
+                                         error_text="Paused by operator")
+    monkeypatch.setattr(native_continuity, "_container_generation_stopped", lambda container: True)
+    assert reconcile_closed_worker_work(database, apply=True) == {
+        "closed_workers": 0, "applied": False, "boxes_released": [], "targets": []}
+    assert store.get_run(run["run_id"])["state"] == "paused"
+    with pytest.raises(ValueError, match="active work must be quiesced"):
+        check_quiescent(database)
+    store.close()
+
+
+def test_an_affected_box_is_released_only_through_its_own_durable_idle_rule(tmp_path, monkeypatch):
+    from workers_projects_runtime import native_continuity
+    from workers_projects_runtime.models import utc_now
+    from workers_projects_runtime.workspace_box import WorkspaceBoxUnavailable
+
+    store = Store(str(tmp_path / "runtime.db"))
+    project = store.create_project(owner_id="owner", tenant_id="tenant", title="Shared", goal="Together",
+                                   default_worker_profile="codex-cli")
+    workspace = store.create_execution_workspace(project_id=project["project_id"], tenant_id="tenant",
+                                                 owner_id="owner", execution_mode="docker")
+    members = [store.create_worker(project_id=project["project_id"], tenant_id="tenant", owner_id="owner",
+                                   workspace_id=workspace["workspace_id"], name=f"Member {index}", role="member",
+                                   profile="codex-cli", backend="codex-cli", runtime="codex-cli", model="test")
+               for index in range(2)]
+    for member in members:
+        store.reserve_workspace_member_identity(member["worker_id"], tenant_id="tenant", owner_id="owner")
+    live_run = store.create_run(members[1]["worker_id"], project["project_id"], "Still working")
+
+    class Box:
+        name = "xperfect-wsp-synthetic"
+        observed = []
+        unavailable = False
+
+        def release_if_all_members_idle(self, idle_member_uids):
+            if Box.unavailable:
+                raise WorkspaceBoxUnavailable("Workspace container inspection is unavailable")
+            Box.observed.append(idle_member_uids())
+            return Box.observed[-1] is not None
+
+    monkeypatch.setattr(native_continuity, "_source_box_roots", lambda connection, worker: (tmp_path, tmp_path))
+    monkeypatch.setattr(native_continuity, "_shared_box", lambda connection, worker, **roots: Box())
+
+    def release():
+        with store._connect() as connection:
+            return native_continuity._release_idle_boxes(connection, [store.get_worker(members[0]["worker_id"])])
+
+    assert release() == [] and Box.observed == [None]
+    assert store.finalize_run_if_state(live_run["run_id"], expected_state="queued", state="cancelled")
+    for member in members:
+        store.update_worker(member["worker_id"], compute_released_at=utc_now())
+    assert release() == ["xperfect-wsp-synthetic"]
+    assert Box.observed[-1]["uids"] == {20001, 20002}
+    Box.unavailable = True
+    assert release() == []
+    store.close()
