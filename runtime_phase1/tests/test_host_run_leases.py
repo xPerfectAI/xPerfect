@@ -7357,6 +7357,223 @@ def test_lost_preclaim_still_releases_its_own_unclaimed_reservation(tmp_path, mo
     assert store.get_run(run_id)["state"] == "queued"
 
 
+class _GrantCaptureRuntime(StubRuntime):
+    """Records the conversation grant each provider invocation received."""
+
+    def __init__(self):
+        super().__init__()
+        self.service: WorkersProjectsService | None = None
+        self.bearers: list[str] = []
+        self.late_grants: list[bool] = []
+
+    def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+        super().run_task(worker, instruction, timeout_sec=timeout_sec, run_id=run_id)
+        bundle = json.loads(str(worker.get("bootstrap_bundle_json") or "{}"))
+        self.bearers.append(
+            str((bundle.get("env") or {}).get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or "")
+        )
+        # A grant that arrives while the provider runs must not be accepted.
+        self.late_grants.append(
+            self.service.attach_run_local_bundle(
+                str(run_id),
+                {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "late-grant"}},
+            )
+        )
+        return "The conversation turn used its grant."
+
+
+def _queued_conversation_turn(tmp_path, suffix: str, *, grant: str = ""):
+    store = Store(str(tmp_path / f"{suffix}.sqlite3"))
+    runtime = _GrantCaptureRuntime()
+    service = WorkersProjectsService(
+        store, runtime, reconcile_on_startup=False, start_background_consumers=False
+    )
+    runtime.service = service
+    service._emit_callback = lambda *_args, **_kwargs: None
+    project = store.create_project("owner-a", f"Project {suffix}", f"Goal {suffix}", "codex-cli")
+    worker = store.create_worker(
+        project_id=project["project_id"],
+        owner_id="owner-a",
+        name=f"Worker {suffix}",
+        role="worker",
+        profile="codex-cli",
+        backend="codex-cli",
+        runtime="codex-cli",
+        model="test",
+        execution_mode="docker",
+        trusted_run_lane="conversation",
+        bootstrap_bundle={
+            "run_mode": "conversation",
+            "env": {},
+            "glasshive_capability_broker": {
+                "authority_kind": "conversation_orchestrator",
+                "allowed_host_tools": ["active_work"],
+            },
+        },
+    )
+    store.update_worker_state(worker["worker_id"], "ready")
+    # Without a grant, admission must wait for the provider to deliver one.
+    run = service.assign_run(
+        worker["worker_id"],
+        "Continue the turn.",
+        start_processor=False,
+        run_local_bundle=(
+            {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": grant}} if grant else None
+        ),
+    )
+    return store, service, runtime, str(worker["worker_id"]), str(run["run_id"])
+
+
+class _SupersededClaimHold:
+    """Hold the first queue processor at its claim, after it registered as the turn's
+    grant waiter, and report when each processor generation exits."""
+
+    def __init__(self, store, service, monkeypatch):
+        import threading
+
+        self.at_claim = threading.Event()
+        self.go = threading.Event()
+        self.first_done = threading.Event()
+        self.later_done = threading.Event()
+        self._claims = 0
+        original_claim = store.claim_next_queued_run
+        original_process = service._process_worker_queue
+
+        def claim(claim_worker_id, **kwargs):
+            self._claims += 1
+            if self._claims == 1:
+                self.at_claim.set()
+                assert self.go.wait(timeout=10)
+            return original_claim(claim_worker_id, **kwargs)
+
+        def process(process_worker_id, generation):
+            try:
+                return original_process(process_worker_id, generation)
+            finally:
+                (self.first_done if generation == 1 else self.later_done).set()
+
+        monkeypatch.setattr(store, "claim_next_queued_run", claim)
+        monkeypatch.setattr(service, "_process_worker_queue", process)
+
+    def supersede(self, service, worker_id: str) -> None:
+        service.start_assigned_run(worker_id)  # P1 registers, then holds at its claim
+        assert self.at_claim.wait(timeout=10)
+        # An operator interrupt supersedes P1; the scheduler's retry phase
+        # dispatches P2, which adopts P1's reservation and claims the turn.
+        service.interrupt_worker(worker_id)
+        assert service.process_due_worker_retries_once() == [worker_id]
+
+
+def test_superseded_lost_claim_keeps_the_live_generations_grant_wait(tmp_path, monkeypatch):
+    """A superseded processor that loses its claim clears only its own grant-waiter
+    registration. The next generation already claimed the turn and waits for its
+    refreshed grant; the provider must still be able to deliver it."""
+    import threading
+
+    store, service, runtime, worker_id, run_id = _queued_conversation_turn(
+        tmp_path, "superseded-grant-wait"
+    )
+    hold = _SupersededClaimHold(store, service, monkeypatch)
+    p2_claimed = threading.Event()
+    p2_go = threading.Event()
+    original_acquire = service._acquire_host_run_lease
+
+    def acquire(worker, candidate):
+        lease = original_acquire(worker, candidate)
+        if str(candidate.get("state") or "") == "claimed" and not p2_claimed.is_set():
+            p2_claimed.set()  # P2 claimed the turn; its admission has not begun
+            assert p2_go.wait(timeout=10)
+        return lease
+
+    monkeypatch.setattr(service, "_acquire_host_run_lease", acquire)
+    try:
+        hold.supersede(service, worker_id)
+        assert p2_claimed.wait(timeout=10)
+        hold.go.set()  # P1 loses its claim and runs its cleanup
+        assert hold.first_done.wait(timeout=10)
+        # The provider delivers the refreshed grant (duplicate-request path).
+        accepted = service.attach_run_local_bundle(
+            run_id, {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "refreshed-grant"}}
+        )
+        p2_go.set()
+        assert hold.later_done.wait(timeout=10)
+        final = store.get_run(run_id)
+        assert (accepted, final["state"], final["failure_class"]) == (True, "completed", "")
+        assert runtime.bearers == ["refreshed-grant"]
+        assert runtime.late_grants == [False]
+        # Nothing stays registered once both generations are done (shutdown clears it).
+        assert not service._run_local_grant_waiters
+        assert service._run_local_grant_claimants == {}
+    finally:
+        hold.go.set()
+        p2_go.set()
+        service.shutdown()
+
+
+def test_superseded_registration_does_not_reopen_the_claimants_gate(tmp_path, monkeypatch):
+    """While the claimant runs the provider, a superseded processor may still hold its own
+    registration until its claim fails. That registration must not let a late grant in."""
+
+    store, service, runtime, worker_id, run_id = _queued_conversation_turn(
+        tmp_path, "superseded-registration", grant="first-grant"
+    )
+    hold = _SupersededClaimHold(store, service, monkeypatch)
+    try:
+        hold.supersede(service, worker_id)
+        # P2 consumes its grant at admission and runs the provider while P1 is held.
+        assert hold.later_done.wait(timeout=10)
+        hold.go.set()  # P1's claim fails; it clears what it registered
+        assert hold.first_done.wait(timeout=10)
+        assert store.get_run(run_id)["state"] == "completed"
+        assert runtime.bearers == ["first-grant"]
+        assert runtime.late_grants == [False]
+        assert not service._run_local_grant_waiters
+    finally:
+        hold.go.set()
+        service.shutdown()
+
+
+def test_abandoned_grant_wait_does_not_open_the_next_generations_gate(tmp_path):
+    """An iteration that leaves before clearing its grant-waiter registration must not
+    keep the gate open while a later generation's provider runs the same turn."""
+    import threading
+
+    store, service, runtime, worker_id, run_id = _queued_conversation_turn(
+        tmp_path, "abandoned-grant-wait"
+    )
+    generation_done = {1: threading.Event(), 2: threading.Event()}
+    original_process = service._process_worker_queue
+
+    def process(process_worker_id, generation):
+        try:
+            return original_process(process_worker_id, generation)
+        finally:
+            if generation in generation_done:
+                generation_done[generation].set()
+
+    service._process_worker_queue = process
+    try:
+        # The first generation registers, claims, then fails before its grant wait
+        # (an invalid route lock) and requeues the turn.
+        store.update_run(run_id, provider_liveness_route_locked=1)
+        service.start_assigned_run(worker_id)
+        assert generation_done[1].wait(timeout=10)
+        assert store.get_run(run_id)["state"] == "queued"
+        store.update_run(run_id, provider_liveness_route_locked=0, retry_after=None)
+        assert service.attach_run_local_bundle(
+            run_id, {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "queued-grant"}}
+        )
+        service.start_assigned_run(worker_id)
+        assert generation_done[2].wait(timeout=10)
+        assert store.get_run(run_id)["state"] == "completed"
+        assert runtime.bearers == ["queued-grant"]
+        assert runtime.late_grants == [False]
+        assert not service._run_local_grant_waiters
+        assert service._run_local_grant_claimants == {}
+    finally:
+        service.shutdown()
+
+
 def _stamp_docker_session_identity(store: Store, lease_id: str, *, run_id: str, container_id: str, session_id: str) -> None:
     """Model the identity the docker adapter publishes when its screen session starts."""
     identity = f"docker:{container_id}:{session_id}:{run_id}:4242"
