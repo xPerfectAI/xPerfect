@@ -39,8 +39,9 @@ python3 deployment/linux/launch.py \
 To use Grok, add `--model grok-build=<model>` with an exact ID from `grok models`. The launcher
 never picks a model; the choice is saved in the package and kept across restarts and upgrades.
 
-Open the printed loopback UI URL. Select **Unlock xPerfect** and use `ui_password` from the
-mode-0600 credentials file. The password is reusable across reloads and service restarts. It is
+Open the printed loopback UI URL. On **Unlock xPerfect**, enter `ui_password` from the mode-0600
+credentials file and select **Unlock**; the browser then stays unlocked for 12 hours by default.
+The password is reusable across reloads and service restarts. It is
 never printed in the receipt, URL, process arguments, service environment or access log. Keep the
 credentials file private; it also contains the separate MCP client key. The package refuses to
 start when the owner, local authentication namespace, verifier, or private state is missing,
@@ -100,6 +101,15 @@ Provider credentials and native sessions remain private when work files are shar
 For failed sign-in, inspect issuer, callback and principal mapping. For unavailable workers,
 inspect account readiness, capacity and substrate. For missing output, read task status and
 Files before retrying. Keep diagnostic logs private.
+
+### If the service stops during work
+
+In a packaged install, a worker whose process survives a runtime crash keeps working. When the
+runtime is running again, xPerfect picks that run up and records its result once. While that
+run's account access is still being closed, the package refuses new work with a reason you can
+retry. It accepts new work again once the run has ended and the stopped runtime's account lease
+has expired, which by default is at most 3 minutes after the stop. If the worker's process did
+not survive, read the run's status and Files before running it again.
 
 ## Upgrade and restore
 

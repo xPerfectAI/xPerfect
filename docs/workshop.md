@@ -25,17 +25,17 @@ preserved, and a readable downloadable Markdown file under 150 words.
 | Time | Show | Say |
 | --- | --- | --- |
 | 0–2 min | A previously rehearsed input and output, clearly labelled as recorded evidence | “The result must be useful to someone. We will check this one against its source.” |
-| 2–4 min | [Workspace diagram](assets/workspaces.png) | “A project groups the work. Each worker uses a native agent and an execution workspace. Grouping workers does not itself make them share a computer.” |
+| 2–4 min | [First result](assets/first-result.png), then the [workspace diagram](assets/workspaces.png) | “A project groups the work. Each worker uses a native agent and an execution workspace. Grouping workers does not itself make them share a computer.” |
 | 4–6 min | The unlocked web UI, then `./xperfect doctor` | “A running UI is only the start. Doctor shows the exact model and whether the provider's tool is installed; Connections shows the signed-in account.” |
-| 6–10 min | The prepared synthetic file, a bounded task, progress and the produced Markdown file; the [context and tools diagram](assets/context-tools.png) while it runs | “The worker gets the goal and the file we attached. It keeps its own built-in tools, and only the connections we allow. Our check is simple: every listed change survives, and missing information stays explicit.” |
+| 6–10 min | **Run project** with the synthetic file added through **Add files**, progress and the produced Markdown file; the [context and tools diagram](assets/context-tools.png) while it runs. If the worker asks before running a command, answer it: an unanswered request expires. | “The worker gets the goal and the file we attached. It keeps its own built-in tools, and only the connections we allow. Our check is simple: every listed change survives, and missing information stays explicit.” |
 | 10–12 min | Open/download the output and reload the same task | “Inspect the file. Return to the work without starting it again.” |
 | 12–14 min | A rehearsed interrupt/continue flow on a disposable task | “Control and recovery are part of the work.” |
 | 14–15 min | [Deployment diagram](assets/deployment.png) and the next exercise | “On your computer or a hosted server, the work stays with you; provider requests can leave. Use one source, one useful output and one peer who can tell you whether it worked.” |
 
-Optional 3-minute extension, only if rehearsed on the same release: ask for two independent
-short results in one Conversation. Show the [several-goals diagram](assets/parallel-work.png),
-then the two worker cards and the one combined answer after a reload. Say: “The AI chose to use
-two workers; each started when its account was free. Ten goals would not mean ten workers at once.”
+Optional 3-minute extension, only if rehearsed on the same release and install route: ask for two
+independent short results in one **Conversation**. Show the [several-goals diagram](assets/parallel-work.png),
+then each goal's status and the answer after a reload. Describe what the AI actually did: it may
+answer itself or use workers. Say: “Ten goals would not mean ten workers at once.”
 
 ## Participant exercise
 
@@ -58,6 +58,7 @@ Then connect your provider in **Connections**, run the synthetic task once, and 
 Rehearse the exact release, account route, Files controls and output download before this becomes
 a live script. Record the revision, readiness, successful result, reload and recovery evidence.
 Use only profiles that passed that rehearsal. Rehearse each provider and deployment route you plan to demonstrate.
+State the [current limits](../README.md#current-limits) in the session.
 
 If live readiness fails, show the labelled recording from the same verified release and explain
 the observed failure. If no verified recording exists, present the architecture as a design
