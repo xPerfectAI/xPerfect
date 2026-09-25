@@ -347,7 +347,14 @@ def _open_private_path(
 
 def _open_database_path(
     path: Path, *, create: bool
-) -> tuple[int, int, tuple[tuple[int, ...], ...], tuple[int, ...]]:
+) -> tuple[int, tuple[tuple[int, ...], ...], tuple[int, ...]]:
+    """Verify the database and its parent chain without opening the database file.
+
+    SQLite's POSIX locks belong to the whole process, and closing any other
+    descriptor of the file releases them all. Another process could then
+    checkpoint and delete the WAL under the runtime's live connections. Only the
+    verified parent directory is held open; the file is checked through it.
+    """
     if (
         not path.is_absolute()
         or path.name in {"", ".", ".."}
@@ -360,11 +367,12 @@ def _open_database_path(
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
-    file_flags = (
-        os.O_RDWR
+    create_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
     )
     directory_fd = -1
     try:
@@ -381,30 +389,21 @@ def _open_database_path(
             _validate_private_parent(metadata)
             parents.append(_file_identity(metadata))
         try:
-            descriptor = os.open(path.name, file_flags, dir_fd=directory_fd)
+            metadata = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         except OSError as exc:
             if not create or exc.errno != errno.ENOENT:
                 raise
-            descriptor = os.open(
-                path.name,
-                file_flags | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=directory_fd,
-            )
-        metadata = os.fstat(descriptor)
+            # A file this call just created exclusively holds no SQLite locks yet.
+            os.close(os.open(path.name, create_flags, 0o600, dir_fd=directory_fd))
+            metadata = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_nlink != 1
         ):
-            os.close(descriptor)
             raise LocalQAControlError("The local-QA database permissions are invalid")
-        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
-        if _file_identity(metadata)[:6] != _file_identity(current)[:6]:
-            os.close(descriptor)
-            raise LocalQAControlError("The local-QA database identity changed")
-        return descriptor, directory_fd, tuple(parents), _file_identity(metadata)
+        return directory_fd, tuple(parents), _file_identity(metadata)
     except (OSError, RuntimeError, LocalQAControlError) as exc:
         if directory_fd >= 0:
             os.close(directory_fd)
@@ -415,12 +414,11 @@ def _open_database_path(
         raise LocalQAControlError("The local-QA database path is invalid") from exc
 
 
-def _close_database_path(descriptor: int, directory_fd: int) -> None:
-    for opened in (descriptor, directory_fd):
-        try:
-            os.close(opened)
-        except OSError:
-            pass
+def _close_database_path(directory_fd: int) -> None:
+    try:
+        os.close(directory_fd)
+    except OSError:
+        pass
 
 
 def _close_private_path(descriptor: int, directory_fd: int) -> None:
@@ -652,12 +650,11 @@ class LocalQAControlPlane:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        descriptor = directory_descriptor = -1
-        second_descriptor = second_directory = -1
+        directory_descriptor = second_directory = -1
         connection: sqlite3.Connection | None = None
         try:
-            descriptor, directory_descriptor, parents_before, file_before = (
-                _open_database_path(self.db_path, create=True)
+            directory_descriptor, parents_before, file_before = _open_database_path(
+                self.db_path, create=True
             )
             uri = "file:" + quote(os.fspath(self.db_path), safe="/") + "?mode=rw&nofollow=1"
             connection = sqlite3.connect(
@@ -666,8 +663,8 @@ class LocalQAControlPlane:
                 isolation_level=None,
                 uri=True,
             )
-            second_descriptor, second_directory, parents_after, file_after = (
-                _open_database_path(self.db_path, create=False)
+            second_directory, parents_after, file_after = _open_database_path(
+                self.db_path, create=False
             )
             stable_parents_before = tuple(identity[:5] for identity in parents_before)
             stable_parents_after = tuple(identity[:5] for identity in parents_after)
@@ -686,10 +683,10 @@ class LocalQAControlPlane:
                 raise
             raise LocalQAControlError("The local-QA database is unavailable") from exc
         finally:
-            if descriptor >= 0:
-                _close_database_path(descriptor, directory_descriptor)
-            if second_descriptor >= 0:
-                _close_database_path(second_descriptor, second_directory)
+            if directory_descriptor >= 0:
+                _close_database_path(directory_descriptor)
+            if second_directory >= 0:
+                _close_database_path(second_directory)
 
     def _initialize(self) -> None:
         with self._connect() as connection:

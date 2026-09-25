@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1005,7 +1007,7 @@ raise SystemExit(1)
     assert time.monotonic() - started < 0.75
 
 
-def test_phase1_database_leaf_open_uses_nonblock_before_type_check(
+def test_phase1_database_leaf_type_is_refused_without_opening_it(
     tmp_path: Path,
     private_scope: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1038,8 +1040,8 @@ def test_phase1_database_leaf_open_uses_nonblock_before_type_check(
             ),
         )
 
-    assert leaf_flags
-    assert all(flags & os.O_NONBLOCK for flags in leaf_flags)
+    # A FIFO cannot block and SQLite's locks cannot be released: the leaf is never opened.
+    assert leaf_flags == []
 
 
 def test_private_input_is_size_bounded(tmp_path: Path) -> None:
@@ -1850,35 +1852,115 @@ def test_phase1_database_path_replacement_inside_connect_is_rejected(
         )
 
 
-def test_phase1_database_open_allows_same_inode_to_change_during_concurrent_write(
+def test_phase1_database_connect_allows_same_inode_to_change_during_concurrent_write(
     tmp_path: Path,
+    private_scope: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "runtime.sqlite3"
     database.write_bytes(b"")
     database.chmod(0o600)
-    original_stat = local_qa_control.os.stat
-    mutated = False
+    original_open_path = local_qa_control._open_database_path
+    identities: list[tuple[int, ...]] = []
 
-    def changing_stat(path: object, *args: object, **kwargs: object):
-        nonlocal mutated
-        if path == database.name and kwargs.get("dir_fd") is not None and not mutated:
-            with database.open("ab") as handle:
-                handle.write(b"same-inode-write")
-            mutated = True
-        return original_stat(path, *args, **kwargs)
+    def recording_open_path(path: Path, *, create: bool):
+        directory_fd, parents, identity = original_open_path(path, create=create)
+        identities.append(identity)
+        if len(identities) == 1:  # another writer changes the same inode during connect
+            stamp = identity[7] + 1_000_000_000
+            os.utime(database, ns=(stamp, stamp))
+        return directory_fd, parents, identity
 
-    monkeypatch.setattr(local_qa_control.os, "stat", changing_stat)
+    monkeypatch.setattr(local_qa_control, "_open_database_path", recording_open_path)
 
-    descriptor, directory_descriptor, _parents, identity = (
-        local_qa_control._open_database_path(database, create=False)
+    LocalQAControlPlane(
+        database,
+        environment=_authority(
+            "PWK-UC-016", private_scope["token"], private_scope["session_ref"]
+        ),
     )
+
+    assert identities[0][:6] == identities[1][:6]
+    assert identities[0][6:] != identities[1][6:]
+
+
+_SECOND_PROCESS_WRITE = (
+    "import sqlite3, sys\n"
+    "connection = sqlite3.connect(sys.argv[1])\n"
+    "connection.execute('INSERT INTO proof_rows(payload) VALUES (zeroblob(16))')\n"
+    "connection.commit()\n"
+    "connection.close()\n"
+)
+
+
+def test_database_access_keeps_the_sqlite_locks_of_live_connections_in_this_process(
+    tmp_path: Path, private_scope: dict[str, str]
+) -> None:
+    # Closing any descriptor of a file releases every POSIX lock the process holds on
+    # it. A live WAL connection's SHARED lock is what stops another process's last
+    # close from checkpointing and deleting the WAL under it.
+    database = tmp_path / "runtime.sqlite3"
+    owner = sqlite3.connect(database)
     try:
-        current = original_stat(database)
-        assert identity[:6] == local_qa_control._file_identity(current)[:6]
-        assert identity[6:] != local_qa_control._file_identity(current)[6:]
+        owner.execute("PRAGMA journal_mode=WAL")
+        owner.execute("CREATE TABLE proof_rows (id INTEGER PRIMARY KEY, payload BLOB)")
+        owner.commit()
+        database.chmod(0o600)
+        owner.execute("SELECT COUNT(*) FROM proof_rows").fetchone()
+        LocalQAControlPlane(
+            database,
+            environment=_authority(
+                "PWK-UC-016", private_scope["token"], private_scope["session_ref"]
+            ),
+        )
+        subprocess.run(
+            [sys.executable, "-c", _SECOND_PROCESS_WRITE, str(database)], check=True
+        )
+        assert Path(f"{database}-wal").exists()
     finally:
-        local_qa_control._close_database_path(descriptor, directory_descriptor)
+        owner.close()
+
+
+def test_runtime_wal_owner_shutdown_after_concurrent_local_qa_access_keeps_the_database(
+    tmp_path: Path, private_scope: dict[str, str]
+) -> None:
+    from workers_projects_runtime.store import Store
+
+    database = tmp_path / "runtime.sqlite3"
+    store = Store(str(database))
+    store.open()  # the runtime's process-lifetime WAL owner
+
+    def write(count: int) -> None:
+        for _ in range(count):
+            with store._connect() as connection:
+                connection.execute(
+                    "INSERT INTO proof_rows(payload) VALUES (?)", (os.urandom(3000),)
+                )
+
+    try:
+        with store._connect() as connection:
+            connection.execute(
+                "CREATE TABLE proof_rows "
+                "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
+            )
+        write(150)
+        database.chmod(0o600)
+        LocalQAControlPlane(
+            database,
+            environment=_authority(
+                "PWK-UC-016", private_scope["token"], private_scope["session_ref"]
+            ),
+        )
+        subprocess.run(
+            [sys.executable, "-c", _SECOND_PROCESS_WRITE, str(database)], check=True
+        )
+        write(60)
+        gc.collect()  # at shutdown the WAL owner is the last connection to close
+    finally:
+        store.close()
+    with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as check:
+        assert check.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert check.execute("SELECT COUNT(*) FROM proof_rows").fetchone()[0] == 211
 
 
 def test_cli_uses_private_input_and_prints_only_bounded_redacted_receipts(
