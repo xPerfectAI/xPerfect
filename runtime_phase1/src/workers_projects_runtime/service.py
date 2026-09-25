@@ -5214,12 +5214,31 @@ class WorkersProjectsService:
         threshold = self._idle_terminate_after_s()
         if threshold <= 0:
             return reaped
-        terminal_states = TERMINAL_RUN_STATES
+        reaped.extend(self._release_idle_workers(threshold))
+        return reaped
+
+    def release_idle_compute_for_upgrade(self) -> dict[str, list[str]]:
+        """Stop every idle open workspace's compute for a supported upgrade.
+
+        Workers stay warm by default, but an upgrade needs all worker compute stopped. This
+        is the ordinary idle release: files, history and native sessions stay, and the next
+        instruction starts compute again. Running, queued, paused or waiting work is left for
+        the upgrade's idle proof to refuse.
+        """
+        released = self._release_idle_workers(0.0)
+        return {"released": sorted(str(item.get("worker_id") or "") for item in released)}
+
+    def _release_idle_workers(self, threshold: float) -> list[dict[str, object]]:
+        released: list[dict[str, object]] = []
         for worker in self.store.list_all_workers():
             worker_id = str(worker.get("worker_id") or "")
             if not worker_id or worker.get("state") in {"terminating", "termination_failed", "terminated", "paused", "running", "starting"}:
                 continue
-            if self.store.get_active_run(worker_id) or self.store.has_queued_runs(worker_id):
+            if (
+                self.store.get_active_run(worker_id)
+                or self.store.has_queued_runs(worker_id)
+                or self.store.list_nonterminal_runs_for_worker(worker_id)
+            ):
                 continue
             idle_seconds = self._worker_idle_seconds(worker)
             if idle_seconds < threshold:
@@ -5229,11 +5248,25 @@ class WorkersProjectsService:
                     worker,
                     idle_seconds=idle_seconds,
                 )
-                if item:
-                    reaped.append(item)
             except Exception as exc:
                 logger.warning("Failed to reap idle GlassHive worker %s: %s", worker_id, exc)
-        return reaped
+                continue
+            if not item:
+                continue
+            released.append(item)
+            # A shared box closes only when every member is durably idle; the runtime
+            # rechecks members, leases and generation, as after a workspace close.
+            release_idle_box = getattr(self.runtime, "release_idle_workspace_box", None)
+            if callable(release_idle_box):
+                try:
+                    release_idle_box(self.store.get_worker(worker_id) or worker)
+                except Exception as exc:
+                    logger.warning(
+                        "Idle workspace release could not be confirmed for %s: %s",
+                        worker_id,
+                        type(exc).__name__,
+                    )
+        return released
 
     def _reconcile_terminated_worker_compute(self, worker: dict) -> dict[str, object] | None:
         worker_id = str(worker.get("worker_id") or "")

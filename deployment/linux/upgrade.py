@@ -158,6 +158,18 @@ HEALTH = _ENV + (
     "request=urllib.request.Request('http://127.0.0.1:8766/health',headers={'Authorization':'Bearer '+env['WPR_API_TOKEN']})\n"
     "with urllib.request.urlopen(request,timeout=3) as response:\n"
     "    print(json.dumps({'status':json.load(response).get('status')}))\n")
+# The running release stops idle workspace compute its ordinary way. Exit 3: this release
+# has no such request, or it needs a person's identity (hosted), so the idle proof decides.
+RELEASE_IDLE_COMPUTE = _ENV + (
+    "import json,urllib.error,urllib.request\n"
+    "request=urllib.request.Request('http://127.0.0.1:8766/v1/admin/maintenance/release-idle-compute',"
+    "data=b'',method='POST',headers={'X-WPR-Token':env['WPR_API_TOKEN'],'Accept':'application/json'})\n"
+    "try:\n"
+    "    response=urllib.request.urlopen(request,timeout=240)\n"
+    "except urllib.error.HTTPError as exc:\n"
+    "    sys.exit(3 if exc.code in (401,403,404,405) else 'xperfect-upgrade: stopping idle workspaces failed')\n"
+    "print(json.dumps({'released':json.load(response).get('released')}))\n")
+WORKER_ID = re.compile(r'wrk_[0-9a-f]{10}')
 # Copies and verifies service state in a networkless helper. Ownership, modes,
 # links and bytes are part of the digest; timestamps are not. A restore proves
 # the whole backup before it removes anything live.
@@ -712,6 +724,31 @@ class Upgrade:
         _write_private_json(record, {**evidence, 'status': 'settled', 'boxes_released': applied['boxes_released']})
         return {'settled': work(applied), 'boxes_released': applied['boxes_released']}
 
+    def _release_idle_compute(self, *, runtime: str, running: bool) -> list[str]:
+        """Stop idle open workspaces' compute before the idle proof, keeping the workspaces.
+
+        The running release does it the way its idle release always does: files, history and
+        native sessions stay, and the next instruction starts compute again. Running, queued,
+        paused or waiting work is left, so the idle proof still refuses it."""
+        if not running:
+            return []
+        result = _docker(self.endpoint, 'exec', runtime, RUNTIME_PYTHON, '-I', '-c', RELEASE_IDLE_COMPUTE,
+                         timeout=300)
+        if result.returncode == 3:
+            return []
+        if result.returncode:
+            raise UpgradeError('Idle workspaces could not be stopped before the upgrade: '
+                               + (_reason(result.stderr) or 'no result') + '. Nothing else was changed')
+        try:
+            released = json.loads(result.stdout)['released']
+        except (ValueError, KeyError, TypeError):
+            released = None
+        if not isinstance(released, list) or not all(
+                isinstance(item, str) and WORKER_ID.fullmatch(item) for item in released):
+            raise UpgradeError('Stopping idle workspaces returned no typed result; some may have stopped. '
+                               'Nothing else was changed')
+        return released
+
     def _prove_idle(self, *, receipt: dict, name: str, txn: str, current_image: str, service_image: str,
                     device: str, runtime: str, running: bool) -> dict:
         """One complete continuity proof: the running release proves its own state idle, or the
@@ -735,8 +772,8 @@ class Upgrade:
             else:
                 return proof
         raise UpgradeError(f'The package is not idle or its state cannot be reviewed ({"; ".join(reasons)}). '
-                           'Finish, stop or close active work (or wait for idle workspaces to be released), '
-                           'then retry. Nothing was changed.')
+                           'Finish or stop active work, then retry; a running version that cannot stop idle '
+                           'workspaces needs them closed first. Nothing was changed.')
 
     def _runtime_healthy(self, runtime: str) -> bool:
         result = _docker(self.endpoint, 'exec', runtime, RUNTIME_PYTHON, '-I', '-c', HEALTH, timeout=15)
@@ -1068,6 +1105,7 @@ class Upgrade:
         self._save(journal, create=True)
         journal['files_recovered'] = []
         journal['closed_work_settled'] = {'settled': [], 'boxes_released': []}
+        journal['idle_compute_released'] = []
         try:
             if recover_unpublished:
                 journal['files_recovered'] = self._recover_unpublished(
@@ -1081,6 +1119,9 @@ class Upgrade:
                     service_image=service_image, device=shapes['runtime']['device'])
                 journal['closed_work_settling'] = []
                 self._save(journal)
+            journal['idle_compute_released'] = self._release_idle_compute(
+                runtime=shapes['runtime']['id'], running=shapes['runtime']['running'])
+            self._save(journal)
             journal['idle_proof'] = self._prove_idle(
                 receipt=receipt, name=name, txn=txn, current_image=current_image, service_image=service_image,
                 device=shapes['runtime']['device'], runtime=shapes['runtime']['id'],
@@ -1097,6 +1138,9 @@ class Upgrade:
             if journal['closed_work_settled']['boxes_released']:
                 done.append('idle workspace boxes were already released '
                             f'({len(journal["closed_work_settled"]["boxes_released"])})')
+            if journal['idle_compute_released']:
+                done.append('idle workspaces were already stopped; they keep their files and start '
+                            f'again on their next instruction ({len(journal["idle_compute_released"])})')
             if done and isinstance(exc, UpgradeError):
                 already = '; '.join(done)
                 raise UpgradeError(str(exc).removesuffix(' Nothing was changed.') + ' ' + already[0].upper()
@@ -1227,6 +1271,7 @@ class Upgrade:
                                 'files_recovered': journal.get('files_recovered', []),
                                 'closed_work_settled': journal.get('closed_work_settled', {}).get('settled', []),
                                 'boxes_released': journal.get('closed_work_settled', {}).get('boxes_released', []),
+                                'idle_compute_released': journal.get('idle_compute_released', []),
                                 'role_mapping_changed': roles_changed,
                                 'local_assertion_added': bool(signer),
                                 'from_native_image': journal['previous_native_image'],
@@ -1356,6 +1401,10 @@ class Upgrade:
             result['closed_work_settled_not_restored'] = settled
         elif journal.get('closed_work_settling'):
             result['closed_work_settlement_unknown'] = journal['closed_work_settling']
+        stopped = journal.get('idle_compute_released') or []
+        if stopped:
+            # Stopped the ordinary way before the backup; they start again on their next instruction.
+            result['idle_compute_released_not_restarted'] = stopped
         retired, unknown = journal.get('files_recovered') or [], journal.get('files_recovering') or []
         if retired:
             # They were retired before the backup, so the restored state does not contain them.

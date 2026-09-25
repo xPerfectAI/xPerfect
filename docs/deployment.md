@@ -128,9 +128,12 @@ python3 deployment/linux/launch.py upgrade \
 
 The upgrade:
 
-1. Checks the package is idle and stops it. Active or retained work refuses the upgrade with
-   the reason, and nothing changes. Finish, stop or close that work, or wait for idle
-   workspaces to be released. The running version checks its own state. If it cannot read
+1. Stops the compute of idle open workspaces, then checks the package is idle and stops it.
+   Idle workspaces keep their files, history and sessions and start again on their next
+   instruction. Running, queued, paused or waiting work refuses the upgrade with the reason,
+   and nothing else changes: finish or stop that work first. Workers otherwise stay warm, so a
+   running version that cannot stop idle workspaces (an earlier release, or a hosted package)
+   needs them closed first. The running version checks its own state. If it cannot read
    state an earlier release wrote, the new version checks the state it will take over
    instead. Either way, the same check repeats once the package has stopped.
 2. Copies the service state (sign-ins, projects, settings, links) to a private backup.

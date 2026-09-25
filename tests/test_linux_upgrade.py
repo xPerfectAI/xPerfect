@@ -104,6 +104,11 @@ class FakeDocker:
         self.closed_work_refusal: bytes | None = None
         self.closed_work_report = None
         self.settlement: list[tuple[str, str, bool]] = []
+        # The running release's idle workspace stop: None has no such request (exit 3), 'fail'
+        # fails, a list names the workers it stopped (then the package may prove idle).
+        self.idle_release = None
+        self.idle_after_release = False
+        self.idle_release_calls: list[str] = []
 
     # -- helpers ----------------------------------------------------------
     def find(self, ident):
@@ -397,6 +402,16 @@ class FakeDocker:
         if args[:1] == ('exec',):
             record = self.find(args[1])
             program = args[args.index('-c') + 1]
+            if program == linux_upgrade.RELEASE_IDLE_COMPUTE:
+                self.idle_release_calls.append(record['Image'])
+                if self.idle_release is None:
+                    return subprocess.CompletedProcess(args, 3, b'', b'')
+                if self.idle_release == 'fail':
+                    return subprocess.CompletedProcess(
+                        args, 1, b'', b'xperfect-upgrade: stopping idle workspaces failed\n')
+                if self.idle_after_release:
+                    self.live_idle = True
+                return ok(json.dumps({'released': self.idle_release}))
             if program in self.PROGRAMS:
                 if record['Image'] in self.busy_images:
                     return subprocess.CompletedProcess(args, 1, b'', IDLE_ERROR)
@@ -576,6 +591,51 @@ def test_active_work_is_refused_before_anything_changes(package):
     assert _mutations(fake) == []
     assert not linux_upgrade.journal_path(path).exists()
     assert json.loads(path.read_text()) == receipt
+
+
+def test_idle_workspaces_are_stopped_before_the_idle_proof(package):
+    fake, path, _receipt = package
+    fake.live_idle = False  # only idle open workspaces still hold compute
+    fake.idle_release, fake.idle_after_release = ['wrk_0123456789'], True
+    result = _runner(path).upgrade(service_image=NEW)
+    assert result['status'] == 'awaiting_commit'
+    assert json.loads(path.read_text())['upgrade']['idle_compute_released'] == ['wrk_0123456789']
+    # The running release stopped them its ordinary way before any idle proof ran.
+    release = next(i for i, call in enumerate(fake.calls)
+                   if call[:1] == ('exec',) and linux_upgrade.RELEASE_IDLE_COMPUTE in call)
+    first_proof = next(i for i, call in enumerate(fake.calls)
+                       if call[:1] == ('exec',) and any(program in call for program in fake.PROGRAMS))
+    assert fake.idle_release_calls == [OLD] and release < first_proof
+    assert _runner(path).commit()['status'] == 'committed'
+
+
+def test_a_running_release_that_cannot_stop_idle_workspaces_keeps_the_refusal(package):
+    fake, path, receipt = package
+    fake.live_idle = False
+    with pytest.raises(linux_upgrade.UpgradeError, match='needs them closed first') as caught:
+        _runner(path).upgrade(service_image=NEW)
+    assert fake.idle_release_calls == [OLD]
+    assert 'Nothing was changed' in str(caught.value)
+    assert _mutations(fake) == [] and not linux_upgrade.journal_path(path).exists()
+    assert json.loads(path.read_text()) == receipt
+
+
+def test_a_failed_idle_workspace_stop_leaves_the_package_unchanged(package):
+    fake, path, receipt = package
+    fake.idle_release = 'fail'
+    with pytest.raises(linux_upgrade.UpgradeError, match='Idle workspaces could not be stopped'):
+        _runner(path).upgrade(service_image=NEW)
+    assert _mutations(fake) == [] and not linux_upgrade.journal_path(path).exists()
+    assert json.loads(path.read_text()) == receipt
+
+
+def test_rollback_names_idle_workspaces_that_stay_stopped(package):
+    fake, path, _receipt = package
+    fake.idle_release = ['wrk_0123456789']
+    assert _runner(path).upgrade(service_image=NEW)['status'] == 'awaiting_commit'
+    rolled = _runner(path).rollback()
+    assert rolled['status'] == 'rolled_back'
+    assert rolled['idle_compute_released_not_restarted'] == ['wrk_0123456789']
 
 
 def test_work_started_after_the_live_check_restores_the_previous_service(package):
