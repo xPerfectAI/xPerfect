@@ -7395,6 +7395,9 @@ def test_parallel_clean_room_ready_check_never_uses_cached_fast_sandbox(
         RuntimeError("strict clean-room boundary unavailable")
     )
     if isinstance(runtime, OpenClawWorkstationRuntime):
+        # The reviewed-image check inspects and, when absent, builds the real image;
+        # this test is about the sandbox boundary, so it must reach no Docker daemon.
+        runtime.sandbox.require_reviewed_openclaw_image = lambda: None  # type: ignore[method-assign]
         runtime._write_gateway_config = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         runtime._start_openclaw_gateway = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
 
