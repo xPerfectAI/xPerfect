@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
@@ -21,10 +22,12 @@ from .models import utc_now
 from .profile_runtime import ProfiledWorkerRuntime
 from .service import (_bounded_int_env, _copy_regular_workspace_file,
                       _workspace_copy_plan, _workspace_duplicate_path_is_excluded)
-from .store import (CALLBACK_TRACE_AUTHORITY_FIELDS, COMPUTE_OPERATION_CLEAR_FIELDS,
+from .store import (CALLBACK_TRACE_AUTHORITY_FIELDS, CLOSED_WORKER_STATES, COMPUTE_OPERATION_CLEAR_FIELDS,
     NONTERMINAL_RUN_STATES, RUNTIME_STORE_SCHEMA_VERSION, TERMINAL_RUN_STATES, Store,
     _callback_trace_authority_values, _callback_trace_event_sha256_values,
-    _text_sha256, canonical_parallel_clean_room_bootstrap, verified_callback_trace_snapshots)
+    _text_sha256, canonical_parallel_clean_room_bootstrap, closed_worker_open_work_conn,
+    idle_execution_workspace_member_uids_conn, settle_closed_worker_work_conn,
+    verified_callback_trace_snapshots)
 
 
 _PEER_COLLABORATION_SCHEMA_VERSION = 3
@@ -850,6 +853,131 @@ def reconcile_unpublished_projections(database: Path, *, apply: bool = False, ex
             for descriptor in locks:
                 os.close(descriptor)
         report["applied"] = True
+        return report
+
+
+_CLOSED_WORK_REASON = "Settled after its worker was closed; its recorded generation was proved stopped"
+_CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+
+
+def _container_generation_stopped(container_id: str) -> bool:
+    """True only when the exact recorded container is gone, or stopped with no process."""
+    if not _CONTAINER_ID.fullmatch(container_id):
+        return False
+    try:
+        result = subprocess.run(["docker", "inspect", "--format", "{{json .State}}", container_id],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            state = json.loads(result.stdout)
+            return (state.get("Running") is False and state.get("Paused") is False
+                    and state.get("Restarting") is False and state.get("Pid") == 0)
+        # An inspection error is not proof of absence; a successful listing must agree.
+        listing = subprocess.run(["docker", "container", "ls", "-a", "--no-trunc", "--format", "{{.ID}}"],
+                                 capture_output=True, text=True, timeout=30, check=True)
+        return container_id not in listing.stdout.split()
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return False
+
+
+def _release_idle_boxes(connection: sqlite3.Connection, workers: list[dict]) -> list[str]:
+    """Release each affected workspace box the way the runtime releases an idle one.
+
+    The box's own generation lock, member files and durable idle rule decide; a box that
+    still runs anything, or whose members are not all durably idle, is kept.
+    """
+    from .workspace_box import WorkspaceBoxUnavailable
+
+    quota_required = bool(connection.execute(
+        "SELECT quota_required FROM workspace_file_storage_config WHERE singleton=1"
+    ).fetchone()[0])
+    released, seen = [], set()
+    for worker in workers:
+        key = (worker["workspace_id"], worker["tenant_id"], worker["owner_id"])
+        if not worker.get("workspace_id") or key in seen:
+            continue
+        seen.add(key)
+        workspace = connection.execute(
+            "SELECT mode FROM execution_workspaces WHERE workspace_id=? AND tenant_id=? AND owner_id=?", key
+        ).fetchone()
+        if workspace is None or not (workspace["mode"] == "shared" or packaged_linux() or quota_required):
+            continue
+        try:
+            data_root, control_root = _source_box_roots(connection, worker)
+            box = _shared_box(connection, worker, data_root=data_root, control_root=control_root)
+            if box.release_if_all_members_idle(lambda: idle_execution_workspace_member_uids_conn(connection, *key)):
+                released.append(box.name)
+        except (ValueError, WorkspaceBoxUnavailable):
+            continue  # kept; the idle proof reports why
+    return sorted(released)
+
+
+def reconcile_closed_worker_work(database: Path, *, apply: bool = False, expect: list[str] | None = None,
+                                 incoming: bool = False) -> dict:
+    """Settle the open work an earlier release left on closed workers, then release idle boxes.
+
+    An earlier release terminated a paused worker without settling its paused run or the host
+    lease that fenced it. That work can never run again, yet every continuity proof refuses
+    while it looks open, and its workspace box is never released because a member still looks
+    busy. Only a closed worker's work qualifies, only when each of its leases names the exact
+    container generation it fenced and that container is gone or stopped with no process, and
+    never delegated work, whose history its runtime must record. Nothing changes unless every
+    target qualifies and, with ``expect``, is exactly the reviewed set; the generations are
+    proved again just before the change. Each affected box is then released only through its
+    own generation lock and durable idle rule. The runtime gate reads this process's
+    environment, so it must be the package's own runtime configuration, as the upgrade helper
+    provides.
+    """
+    metadata = database.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_nlink != 1:
+        raise ValueError("GlassHive database is not an owned regular file")
+    uri = database.resolve().as_uri() + ("" if apply else "?mode=ro")
+    with _sqlite_connection(uri, uri=True, timeout=30) as connection:
+        _require_schema(connection, incoming=incoming)
+        connection.row_factory = sqlite3.Row
+        marks = ",".join("?" for _ in CLOSED_WORKER_STATES)
+        closed = [dict(row) for row in connection.execute(
+            f"SELECT * FROM workers WHERE state IN ({marks}) ORDER BY worker_id", tuple(sorted(CLOSED_WORKER_STATES)))]
+        targets = []
+        for worker in closed:
+            runs, leases = closed_worker_open_work_conn(connection, worker["worker_id"])
+            if not runs and not leases:
+                continue
+            if connection.execute(
+                "SELECT 1 FROM delegations WHERE worker_id=? AND project_id=? AND tenant_id=? LIMIT 1",
+                (worker["worker_id"], worker["project_id"], worker["tenant_id"]),
+            ).fetchone():
+                raise ValueError("GlassHive closed worker's delegated work must be settled by its runtime")
+            containers = [str(connection.execute(
+                "SELECT startup_container_id FROM host_run_leases WHERE lease_id=?", (lease_id,)
+            ).fetchone()[0] or "") for lease_id in leases]
+            if not all(_container_generation_stopped(container) for container in containers):
+                raise ValueError("GlassHive closed worker's recorded generation is not proved stopped")
+            targets.append({"worker": worker, "runs": runs, "leases": leases, "containers": containers})
+        report = {"closed_workers": len(targets), "applied": False, "boxes_released": [], "targets": [
+            {"worker_id": target["worker"]["worker_id"], "runs": target["runs"], "leases": target["leases"]}
+            for target in targets]}
+        identities = sorted([target["worker"]["worker_id"] for target in targets]
+                            + [item for target in targets for item in target["runs"] + target["leases"]])
+        if expect is not None and sorted(expect) != identities:
+            raise ValueError("GlassHive closed-worker work changed since it was reviewed")
+        if not apply or not targets:
+            return report
+        if not all(_container_generation_stopped(container)
+                   for target in targets for container in target["containers"]):
+            raise ValueError("GlassHive closed worker's recorded generation is not proved stopped")
+        settled_at = utc_now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for target in targets:
+                settle_closed_worker_work_conn(connection, target["worker"]["worker_id"], runs=target["runs"],
+                                               leases=target["leases"], settled_at=settled_at,
+                                               reason=_CLOSED_WORK_REASON)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        report["applied"] = True
+        report["boxes_released"] = _release_idle_boxes(connection, [target["worker"] for target in targets])
         return report
 
 
@@ -1704,6 +1832,16 @@ def main() -> None:
                              help="Comma-separated projection IDs reviewed before; any other set refuses")
     unpublished.add_argument("--incoming", action="store_true",
                              help="Run by the release about to inherit this state (an upgrade)")
+    closed_work = commands.add_parser(
+        "reconcile-closed-work",
+        help="Run only with the package's own runtime configuration (the upgrade's helper loads it)")
+    closed_work.add_argument("database", type=Path)
+    closed_work.add_argument("--apply", action="store_true",
+                             help="Settle it; without it, only report what qualifies")
+    closed_work.add_argument("--expect", default=None,
+                             help="Comma-separated worker, run and lease IDs reviewed before; any other set refuses")
+    closed_work.add_argument("--incoming", action="store_true",
+                             help="Run by the release about to inherit this state (an upgrade)")
     args = parser.parse_args()
     if args.operation == "capture":
         capture_state(args.database, args.output)
@@ -1714,6 +1852,10 @@ def main() -> None:
         expect = None if args.expect is None else [item for item in args.expect.split(",") if item]
         print(json.dumps(reconcile_unpublished_projections(args.database, apply=args.apply, expect=expect,
                                                            incoming=args.incoming), sort_keys=True))
+    elif args.operation == "reconcile-closed-work":
+        expect = None if args.expect is None else [item for item in args.expect.split(",") if item]
+        print(json.dumps(reconcile_closed_worker_work(args.database, apply=args.apply, expect=expect,
+                                                      incoming=args.incoming), sort_keys=True))
     else:
         check_quiescent(args.database, incoming=args.incoming)
 

@@ -97,6 +97,12 @@ class FakeDocker:
         self.keygens: list[tuple] = []
         self.keygen_fails = False
         self.retire_crash = False  # the retire step stops without a typed result
+        # Open runs and leases an earlier release left on closed workers, and the idle boxes they held.
+        self.closed_work: list[dict] = []
+        self.closed_boxes: list[str] = []
+        self.closed_work_refusal: bytes | None = None
+        self.closed_work_report = None
+        self.settlement: list[tuple[str, str, bool]] = []
 
     # -- helpers ----------------------------------------------------------
     def find(self, ident):
@@ -182,6 +188,8 @@ class FakeDocker:
             return fail(SCHEMA_ERROR)
         if self.unpublished:  # every release's continuity refuses a target that cannot settle
             return fail(b'ValueError: GlassHive Files projection must settle before continuity\n')
+        if self.closed_work:  # a closed worker's open run looks like active work to every release
+            return fail(b'ValueError: GlassHive active work must be quiesced before continuity\n')
         if kind == 'incoming' and self.incoming_blind:
             idle = True
         return subprocess.CompletedProcess(args, 0, b'', b'') if idle else fail(IDLE_ERROR)
@@ -213,6 +221,32 @@ class FakeDocker:
             report = self.recovery_report
         return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b'')
 
+    def closed_work_review(self, args, *, program):
+        image = args[args.index('--entrypoint') + 2]
+        apply = "'--apply'" in program
+        socket = 'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock' in args
+        self.settlement.append(('settle' if apply else 'review', image, socket))
+        if image not in self.recovery_images:
+            return subprocess.CompletedProcess(args, 2, b'', b"native_continuity: error: argument operation: "
+                                               b"invalid choice: 'reconcile-closed-work'\n")
+        if self.closed_work_refusal:
+            return subprocess.CompletedProcess(args, 1, b'', self.closed_work_refusal)
+        identities = sorted([item['worker_id'] for item in self.closed_work]
+                            + [value for item in self.closed_work for value in item['runs'] + item['leases']])
+        if apply:
+            expect = program.split("'--expect','", 1)[1].split("'", 1)[0].split(',')
+            if sorted(expect) != identities:
+                return subprocess.CompletedProcess(args, 1, b'', b'ValueError: GlassHive closed-worker work '
+                                                   b'changed since it was reviewed\n')
+        report = {'closed_workers': len(self.closed_work), 'applied': bool(apply and self.closed_work),
+                  'targets': [dict(item) for item in self.closed_work],
+                  'boxes_released': list(self.closed_boxes) if apply else []}
+        if apply:
+            self.closed_work = []
+        if self.closed_work_report is not None:
+            report = self.closed_work_report
+        return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b'')
+
     def _helper(self, args):
         mounts = [args[i + 1] for i, value in enumerate(args) if value == '--mount']
         program = args[args.index('-c') + 1]
@@ -222,6 +256,8 @@ class FakeDocker:
             return subprocess.CompletedProcess(args, 0, (json.dumps(table) + '\n').encode(), b'')
         if "'reconcile-unpublished'" in program:
             return self.unpublished_review(args, program=program)
+        if "'reconcile-closed-work'" in program:
+            return self.closed_work_review(args, program=program)
         if program in self.PROGRAMS:
             stopped = '-stopped-' in args[args.index('--name') + 1]
             return self.proof(args, idle=self.offline_idle if stopped else self.live_idle, kind=self.PROGRAMS[program])
@@ -1833,3 +1869,99 @@ def test_a_later_upgrade_clears_the_local_qa_authority(package):
     runner.commit()
     runner.upgrade(service_image=NEW, clear_local_qa=True)
     assert not set(QA_AUTHORITY) & set(_config(fake)['environment'])
+
+
+CLOSED = {'worker_id': 'wrk_' + '9' * 10, 'runs': ['run_' + 'd' * 10], 'leases': ['hrl_' + 'e' * 32]}
+CLOSED_IDENTITIES = sorted([CLOSED['worker_id'], *CLOSED['runs'], *CLOSED['leases']])
+
+
+def _closed_work_record(path):
+    return sorted(path.parent.glob(path.name + '.closed-work-*.json'))
+
+
+def test_a_closed_workers_open_work_blocks_every_proof_until_the_new_release_settles_it(package):
+    fake, path, receipt = package
+    fake.closed_work, fake.closed_boxes = [dict(CLOSED)], ['xperfect-wsp-synthetic']
+    with pytest.raises(linux_upgrade.UpgradeError, match='active work must be quiesced'):
+        _runner(path).upgrade(service_image=NEW)
+    assert _mutations(fake) == [] and fake.settlement == [] and not linux_upgrade.journal_path(path).exists()
+    fake.calls.clear()
+    result = _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    assert result['status'] == 'awaiting_commit'
+    assert result['closed_work_settled'] == {'settled': CLOSED_IDENTITIES, 'boxes_released': ['xperfect-wsp-synthetic']}
+    assert json.loads(path.read_text())['upgrade']['closed_work_settled'] == CLOSED_IDENTITIES
+    # The new release reviewed, then settled, with Docker for the generation proof, before any idle proof ran.
+    assert fake.settlement == [('review', NEW, True), ('settle', NEW, True)] and fake.closed_work == []
+    first_proof = next(i for i, call in enumerate(fake.calls) if call[:1] == ('exec',) or (
+        call[:1] == ('run',) and any('-live-' in item for item in call)))
+    settlement_runs = [i for i, call in enumerate(fake.calls)
+                       if call[:1] == ('run',) and any(item.endswith(('-closed-review', '-closed-settle')) for item in call)]
+    assert len(settlement_runs) == 2 and max(settlement_runs) < first_proof
+    record, = _closed_work_record(path)
+    assert record.stat().st_mode & 0o077 == 0
+    evidence = json.loads(record.read_text())
+    assert evidence['status'] == 'settled' and evidence['reviewed'] == [CLOSED]
+    assert evidence['boxes_released'] == ['xperfect-wsp-synthetic']
+    assert _runner(path).commit()['status'] == 'committed'
+
+
+def test_closed_work_settlement_needs_a_new_image_that_carries_it_and_refuses_with_its_reason(package):
+    fake, path, receipt = package
+    fake.closed_work = [dict(CLOSED)]
+    _older_launcher(fake)  # a same-image upgrade that has settings to add
+    with pytest.raises(linux_upgrade.UpgradeError, match='needs a new image that carries it. Nothing'):
+        _runner(path).upgrade(service_image=OLD, settle_closed_work=True)
+    fake.recovery_images = set()
+    with pytest.raises(linux_upgrade.UpgradeError, match='does not carry this recovery. Nothing was changed'):
+        _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    fake.recovery_images = {NEW}
+    fake.closed_work_refusal = (b'Traceback (most recent call last):\n  File "/opt/x.py"\n'
+                                b"ValueError: GlassHive closed worker's recorded generation is not proved stopped\n")
+    with pytest.raises(linux_upgrade.UpgradeError) as refused:
+        _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    assert 'is not proved stopped. Nothing was changed' in str(refused.value) and '/opt/' not in str(refused.value)
+    assert fake.closed_work == [CLOSED] and _mutations(fake) == [] and _closed_work_record(path) == []
+    assert not linux_upgrade.journal_path(path).exists()
+
+
+@pytest.mark.parametrize('report', [
+    {'closed_workers': 1, 'applied': True, 'targets': [CLOSED], 'boxes_released': []},  # a review that applied
+    {'closed_workers': 2, 'applied': False, 'targets': [CLOSED], 'boxes_released': []},
+    {'closed_workers': 1, 'applied': False, 'targets': [{**CLOSED, 'runs': ['../x']}], 'boxes_released': []},
+    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes_released': ['xperfect-wsp-early']},
+    'not a report',
+])
+def test_an_unexpected_closed_work_report_changes_nothing(package, report):
+    fake, path, receipt = package
+    fake.closed_work = [dict(CLOSED)]
+    fake.closed_work_report = report
+    with pytest.raises(linux_upgrade.UpgradeError, match='unexpected closed-worker report. Nothing was changed'):
+        _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    assert [step for step, _, _ in fake.settlement] == ['review'] and fake.closed_work == [CLOSED]
+    assert _mutations(fake) == [] and _closed_work_record(path) == []
+
+
+def test_work_found_after_settlement_says_what_was_already_settled(package):
+    fake, path, receipt = package
+    fake.closed_work = [dict(CLOSED)]
+    fake.live_idle = False
+    with pytest.raises(linux_upgrade.UpgradeError) as refused:
+        _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    message = str(refused.value)
+    assert 'not idle' in message and 'already settled (3 identities)' in message
+    assert 'Nothing was changed' not in message
+    assert fake.closed_work == [] and _mutations(fake) == [] and not linux_upgrade.journal_path(path).exists()
+    record, = _closed_work_record(path)
+    assert json.loads(record.read_text())['status'] == 'settled'
+
+
+def test_nothing_to_settle_is_a_no_op_and_rollback_says_settled_work_is_not_restored(package):
+    fake, path, receipt = package
+    result = _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    assert 'closed_work_settled' not in result and _closed_work_record(path) == []
+    assert _runner(path).rollback()['status'] == 'rolled_back'
+    fake.closed_work = [dict(CLOSED)]
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW, settle_closed_work=True)
+    result = runner.rollback()
+    assert result['status'] == 'rolled_back' and result['closed_work_settled_not_restored'] == CLOSED_IDENTITIES

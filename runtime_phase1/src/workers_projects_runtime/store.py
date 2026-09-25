@@ -1599,6 +1599,172 @@ def _terminal_failure_fields(state: str, fields: dict[str, Any]) -> dict[str, An
         if key in _FAILURE_FIELD_NAMES
     }
 
+
+def idle_execution_workspace_member_uids_conn(
+    conn: sqlite3.Connection, workspace_id: str, tenant_id: str, owner_id: str
+) -> dict[str, set[int]] | None:
+    """Return every admitted UID only when current members are durably idle."""
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    rows = cursor.execute(
+        """
+        SELECT identity.member_uid, identity.worker_id AS identity_worker_id,
+               workers.worker_id,
+               workers.compute_released_at, workers.compute_release_token,
+               EXISTS (
+                   SELECT 1 FROM runs
+                   WHERE runs.worker_id = identity.worker_id
+                     AND runs.state NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+               ) AS has_live_run
+        FROM execution_workspace_identities AS identity
+        LEFT JOIN workers
+          ON workers.worker_id = identity.worker_id
+         AND workers.workspace_id = identity.workspace_id
+         AND workers.tenant_id = identity.tenant_id
+         AND workers.owner_id = identity.owner_id
+        WHERE identity.workspace_id = ?
+          AND identity.tenant_id = ?
+          AND identity.owner_id = ?
+        """,
+        (workspace_id, tenant_id, owner_id),
+    ).fetchall()
+    if not rows:
+        return None
+    tables = {
+        str(row["name"])
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    retired: set[int] = set()
+    for row in rows:
+        worker_id = str(row["identity_worker_id"])
+        if row["has_live_run"]:
+            return None
+        if (
+            "provider_account_projections" in tables
+            and cursor.execute(
+                "SELECT 1 FROM provider_account_projections "
+                "WHERE worker_id=? AND state!='complete' LIMIT 1",
+                (worker_id,),
+            ).fetchone()
+        ):
+            return None
+        if (
+            "provider_account_leases" in tables
+            and cursor.execute(
+                "SELECT 1 FROM provider_account_leases "
+                "WHERE worker_id=? AND released_at IS NULL LIMIT 1",
+                (worker_id,),
+            ).fetchone()
+        ):
+            return None
+        if row["worker_id"]:
+            if (
+                not row["compute_released_at"]
+                or row["compute_release_token"]
+            ):
+                return None
+            continue
+        retired.add(int(row["member_uid"]))
+    return {
+        "uids": {int(row["member_uid"]) for row in rows},
+        "retired_uids": retired,
+    }
+
+
+CLOSED_WORKER_STATES = frozenset({"terminated", "failed"})
+
+
+def closed_worker_open_work_conn(
+    conn: sqlite3.Connection, worker_id: str
+) -> tuple[list[str], list[str]]:
+    """The runs and host leases a closed worker still holds open, in identity order."""
+    marks = ",".join("?" for _ in NONTERMINAL_RUN_STATES)
+    runs = [
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT run_id FROM runs WHERE worker_id = ? AND state IN ({marks}) ORDER BY run_id",
+            (worker_id, *sorted(NONTERMINAL_RUN_STATES)),
+        )
+    ]
+    leases = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT lease_id FROM host_run_leases WHERE worker_id = ? "
+            "AND status IN ('active', 'reserved') ORDER BY lease_id",
+            (worker_id,),
+        )
+    ]
+    return runs, leases
+
+
+def settle_closed_worker_work_conn(
+    conn: sqlite3.Connection,
+    worker_id: str,
+    *,
+    runs: list[str],
+    leases: list[str],
+    settled_at: str,
+    reason: str,
+) -> None:
+    """Settle the exact open work an earlier release left on a closed worker.
+
+    An earlier release closed a paused worker without settling its paused run or the host
+    lease that fenced it; nothing later could, so every continuity proof refused. The
+    caller holds a write transaction and has proved each recorded generation stopped.
+    The runs end as ``cancelled`` like any run of a terminated worker, their open
+    attempts and queued schedules close, the leases are released, and one event records
+    exactly what changed. Anything other than the reviewed runs and leases refuses.
+    """
+    worker = conn.execute(
+        "SELECT project_id, tenant_id, state FROM workers WHERE worker_id = ?",
+        (worker_id,),
+    ).fetchone()
+    if worker is None or str(worker[2] or "") not in CLOSED_WORKER_STATES:
+        raise ValueError("GlassHive worker is no longer closed")
+    if closed_worker_open_work_conn(conn, worker_id) != (sorted(runs), sorted(leases)):
+        raise ValueError("GlassHive closed worker's open work changed since it was reviewed")
+    if runs:
+        marks = ",".join("?" for _ in runs)
+        conn.execute(
+            "UPDATE scheduled_runs SET state = 'cancelled', last_error = ?, updated_at = ? "
+            f"WHERE queued_run_id IN ({marks}) AND state IN ('queued', 'running')",
+            (reason, settled_at, *runs),
+        )
+        conn.execute(
+            "UPDATE run_attempts SET state = 'cancelled', ended_at = ?, terminal_reason = 'cancelled' "
+            f"WHERE run_id IN ({marks}) AND ended_at IS NULL",
+            (settled_at, *runs),
+        )
+        conn.execute(
+            "UPDATE runs SET state = 'cancelled', ended_at = ?, error_text = ?, runtime_bundle_json = NULL "
+            f"WHERE run_id IN ({marks})",
+            (settled_at, reason, *runs),
+        )
+    if leases:
+        marks = ",".join("?" for _ in leases)
+        conn.execute(
+            "UPDATE host_run_leases SET status = 'released', released_at = ?, "
+            "release_reason = 'closed_worker_settled', reconciled_at = COALESCE(reconciled_at, ?) "
+            f"WHERE lease_id IN ({marks})",
+            (settled_at, settled_at, *leases),
+        )
+    conn.execute(
+        "INSERT INTO events (event_id, project_id, worker_id, tenant_id, run_id, event_type, "
+        "message, payload_json, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+        (
+            f"evt_{uuid.uuid4().hex[:10]}",
+            str(worker[0] or ""),
+            worker_id,
+            str(worker[1] or "local"),
+            "worker.closed_work_settled",
+            reason,
+            json.dumps({"runs": sorted(runs), "leases": sorted(leases)}, sort_keys=True),
+            settled_at,
+        ),
+    )
+
 class Store:
     def __init__(self, db_path: str) -> None:
         self.db_path = Path(db_path)
@@ -6724,71 +6890,9 @@ class Store:
     ) -> dict[str, set[int]] | None:
         """Return every admitted UID only when current members are durably idle."""
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT identity.member_uid, identity.worker_id AS identity_worker_id,
-                       workers.worker_id,
-                       workers.compute_released_at, workers.compute_release_token,
-                       EXISTS (
-                           SELECT 1 FROM runs
-                           WHERE runs.worker_id = identity.worker_id
-                             AND runs.state NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
-                       ) AS has_live_run
-                FROM execution_workspace_identities AS identity
-                LEFT JOIN workers
-                  ON workers.worker_id = identity.worker_id
-                 AND workers.workspace_id = identity.workspace_id
-                 AND workers.tenant_id = identity.tenant_id
-                 AND workers.owner_id = identity.owner_id
-                WHERE identity.workspace_id = ?
-                  AND identity.tenant_id = ?
-                  AND identity.owner_id = ?
-                """,
-                (workspace_id, tenant_id, owner_id),
-            ).fetchall()
-            if not rows:
-                return None
-            tables = {
-                str(row["name"])
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            retired: set[int] = set()
-            for row in rows:
-                worker_id = str(row["identity_worker_id"])
-                if row["has_live_run"]:
-                    return None
-                if (
-                    "provider_account_projections" in tables
-                    and conn.execute(
-                        "SELECT 1 FROM provider_account_projections "
-                        "WHERE worker_id=? AND state!='complete' LIMIT 1",
-                        (worker_id,),
-                    ).fetchone()
-                ):
-                    return None
-                if (
-                    "provider_account_leases" in tables
-                    and conn.execute(
-                        "SELECT 1 FROM provider_account_leases "
-                        "WHERE worker_id=? AND released_at IS NULL LIMIT 1",
-                        (worker_id,),
-                    ).fetchone()
-                ):
-                    return None
-                if row["worker_id"]:
-                    if (
-                        not row["compute_released_at"]
-                        or row["compute_release_token"]
-                    ):
-                        return None
-                    continue
-                retired.add(int(row["member_uid"]))
-        return {
-            "uids": {int(row["member_uid"]) for row in rows},
-            "retired_uids": retired,
-        }
+            return idle_execution_workspace_member_uids_conn(
+                conn, workspace_id, tenant_id, owner_id
+            )
 
     def list_workspace_catalog(
         self,
