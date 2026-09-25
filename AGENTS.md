@@ -1,7 +1,9 @@
 # xPerfect Component
 
 xPerfect is a standalone git and instruction root. Keep its runtime, docs, tests, and public
-examples usable without another application.
+examples usable without another application. When this checkout is nested in a host project, as
+`viventium_v0_4/xPerfect` is in Viventium, and `../../AGENTS.md` exists, read it before work that
+affects the host; it owns the host's scope, safety, delivery, and verification rules.
 
 ## Worker Runtime Boundary
 
