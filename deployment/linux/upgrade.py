@@ -657,6 +657,44 @@ class Upgrade:
             raise UpgradeError("The new image's package settings are malformed")
         return dict(values)
 
+    def _workers_isolated(self, network: str) -> bool | None:
+        """Whether the workers bridge refuses traffic between containers; None if unreadable."""
+        result = _docker(self.endpoint, 'network', 'inspect', '--format', '{{json .Options}}', network)
+        try:
+            options = json.loads(result.stdout) if result.returncode == 0 else None
+        except ValueError:
+            options = None
+        if options is None and result.returncode == 0:
+            options = {}
+        return None if not isinstance(options, dict) else options.get(base.ICC_OPTION) == 'false'
+
+    def _set_workers_network(self, receipt: dict, name: str, runtime: str, *, isolated: bool) -> None:
+        """Recreate the idle workers bridge with or without isolation; resumable.
+
+        The package is proved idle and stopped, so no workspace or account container
+        uses the bridge; only the stopped runtime is attached, and it is reconnected
+        under its alias whenever the previous version returns.
+        """
+        network, endpoint = receipt['networks']['workers'], self.endpoint
+        current = self._workers_isolated(network)
+        if current is not None and current != isolated:
+            listing = _ok(endpoint, 'ps', '--all', '--no-trunc', '--filter', 'network=' + network, '--format', '{{.ID}}')
+            if {line.strip() for line in listing.splitlines() if line.strip()} - {runtime}:
+                raise UpgradeError('A workspace or account container still uses the workers network. Finish or '
+                                   'close that work, then retry')
+            attached = ((_inspect(endpoint, runtime) or {}).get('NetworkSettings') or {}).get('Networks') or {}
+            if network in attached:
+                _ok(endpoint, 'network', 'disconnect', network, runtime)
+            _ok(endpoint, 'network', 'rm', network)
+            current = None
+        if current is None:
+            _ok(endpoint, *base.network_create_args(
+                name=name, role='workers', network=network,
+                settings={'XPERFECT_WORKER_NETWORK': 'isolated'} if isolated else {}))
+        attached = ((_inspect(endpoint, runtime) or {}).get('NetworkSettings') or {}).get('Networks') or {}
+        if not isolated and network not in attached:
+            _ok(endpoint, 'network', 'connect', '--alias', 'runtime', network, runtime)
+
     def _docker_desktop(self) -> bool:
         """Whether the endpoint itself reports Docker Desktop (whose socket bind is recorded differently)."""
         result = _docker(self.endpoint, 'info', '--format', '{{.OperatingSystem}}')
@@ -860,9 +898,20 @@ class Upgrade:
             raise UpgradeError('The configured workspace image is not loaded on this Docker host; load it or '
                                'choose one with --native-image')
         changes_models = any(environment.get(base.MODEL_ENVIRONMENTS[p]) != m for p, m in models.items())
+        # An image that serves native tools through per-box sockets runs on a workers
+        # bridge that refuses traffic between containers; an earlier one needs that traffic.
+        isolated = self._workers_isolated(receipt['networks']['workers'])
+        if isolated is None:
+            raise UpgradeError("The package's workers network could not be inspected. Nothing was changed")
+        wants_isolated = settings.get('XPERFECT_WORKER_NETWORK') == 'isolated'
+        if isolated and not wants_isolated:
+            raise UpgradeError('This package isolates its workspace containers from each other, and the new image '
+                               'cannot serve its workers that way. Choose an image that declares an isolated '
+                               'worker network. Nothing was changed')
+        isolate = wants_isolated and not isolated
         if (service_image == current_image and wanted_native == current_native and not changes_models
                 and not settings_added and not secrets_added and wanted_roles == current_roles
-                and not local_signer):
+                and not local_signer and not isolate):
             raise UpgradeError('The package already runs this image and configuration')
         backup = f'{name}-upgrade-{txn}'
         journal = {'version': 1, 'transaction': txn, 'phase': 'prepared', 'profile': profile, 'name': name,
@@ -874,7 +923,7 @@ class Upgrade:
                    'settings': {key: settings[key] for keys in settings_added.values() for key in keys},
                    'settings_kept': settings_kept, 'secrets_added': secrets_added,
                    'role_mapping': {'from': current_roles, 'to': wanted_roles},
-                   'local_assertion': local_signer,
+                   'local_assertion': local_signer, 'isolate_workers_network': isolate,
                    'service_image': service_image, 'native_image': wanted_native,
                    'previous_native_image': current_native,
                    'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
@@ -949,6 +998,8 @@ class Upgrade:
             self._save(journal)
         journal['phase'] = 'renamed'
         self._save(journal)
+        if journal.get('isolate_workers_network'):
+            self._set_workers_network(receipt, name, journal['previous_containers']['runtime'], isolated=True)
         settings = journal['settings']
         generated = {role: base.new_secrets(profile, role, journal.get('secrets_added', {}).get(role, []))
                      for role in ROLES}
@@ -1110,6 +1161,8 @@ class Upgrade:
             # From here a rerun only restarts the previous version; it never restores again.
             journal['phase'], journal['changed_since_upgrade'] = 'restored', changed
             self._save(journal)
+        if journal.get('isolate_workers_network'):
+            self._set_workers_network(receipt, name, previous['runtime'], isolated=False)
         for role in ROLES:
             if _ok(endpoint, 'inspect', '--format', '{{.Name}}', previous[role]).lstrip('/') != f'{name}-{role}':
                 _ok(endpoint, 'rename', previous[role], f'{name}-{role}')

@@ -63,6 +63,28 @@ def test_only_run_bound_coordinator_projection_can_preapprove_its_own_tools(tmp_
     assert '--allow-mcp-tool' not in runtime._grok_command(plain, info(tmp_path), host=True)
 
 
+def test_box_socket_bridge_projection_preapproves_only_its_own_coordinator_tools(tmp_path, monkeypatch):
+    runtime = HostGrokBuildRuntime(str(tmp_path))
+    monkeypatch.setattr(runtime, '_native_environment', lambda _worker, host: {
+        'GLASSHIVE_PEER_TOKEN': 'synthetic-token',
+    })
+    url = 'http+unix://%2Fworkspace%2Fdata%2F.xperfect-runtime.sock/v1/native/coordinator/'
+    record = worker(tmp_path)
+    record['_active_run_id'] = 'run-1'
+    record['_coordinator_native_projection'] = {
+        'worker_id': record['worker_id'], 'run_id': 'run-1', 'token': 'synthetic-token',
+        'url': url, 'transport': 'stdio',
+    }
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    assert 'xperfect-coordinator__coordinator_accept_goals' in command
+    assert 'synthetic-token' not in command
+    # A bridge carrying any other bearer is not this run's projection.
+    monkeypatch.setattr(runtime, '_native_environment', lambda _worker, host: {
+        'GLASSHIVE_PEER_TOKEN': 'different-token',
+    })
+    assert '--allow-mcp-tool' not in runtime._grok_command(record, info(tmp_path), host=True)
+
+
 def test_no_model_default_or_unknown_profile_fallback(tmp_path, monkeypatch):
     runtime = GrokBuildRuntime(str(tmp_path))
     monkeypatch.delenv('WPR_MODEL_GROK_BUILD', raising=False)

@@ -92,7 +92,7 @@ Set `role_map` (optional) only when your identity provider's groups or roles are
 - **Admission** then decides only who may sign in.
 - **Each browser sign-in** stores the person's mapped provider role as their role, replacing the admitted one. A sign-in without a mapped role is refused, so map a role for everyone you admit.
 - **Existing browser sessions** stay valid until they expire.
-- **Over MCP** a person acts with the lesser of their stored role and their token's mapped role. This is how a mapped `tenant_admin` gets administrator authority over MCP, for example to raise or restore their own storage limit. A control for administrators to change *another* person's limit is not available yet.
+- **Over MCP** a person acts with the lesser of their stored role and their token's mapped role. This is how a mapped `tenant_admin` gets administrator authority over MCP, for example to raise or restore their own storage limit. To change *another* person's limit, a `tenant_admin` uses **Connections → Team file storage** in the browser; MCP does not offer that.
 - **The claim** must be a top-level role or group claim your provider controls, not a profile claim a person can edit, such as `email`. Map role or group values, not people.
 - **Visibility:** nothing changes without a map, and the receipt records the mapping you set.
 

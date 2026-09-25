@@ -1,0 +1,5 @@
+{
+  "id": "xperfect.worker-run-inputs",
+  "version": 1,
+  "instruction": "Files selected for this run are indexed at {index_path}. Read that index for the exact paths and versions before using an attached file; a same-named workspace file may differ."
+}

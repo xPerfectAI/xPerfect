@@ -828,6 +828,9 @@ PROCESS_BEARING_RUN_STATES = frozenset({"running", "settling", "paused"})
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "cancelled", "interrupted"}
 )
+# Provider-side failures whose message tells the account owner why the provider stopped.
+PROVIDER_REFUSAL_FAILURE_CLASSES = frozenset({"provider_response_failed", "provider_rate_limited",
+                                              "provider_quota_exhausted"})
 
 STEER_REPLACEMENT_SUPPRESSED_ERROR = (
     "Steer replacement suppressed because target completed"
@@ -9754,6 +9757,43 @@ class Store:
             if self.get_run(run_id) is not None
         ]
 
+    @staticmethod
+    def _note_provider_account_outcome_conn(conn, run, worker) -> None:
+        """Keep the connected account's latest provider refusal current for its readiness.
+
+        A run that the provider refused or stopped records what the run told its owner on
+        the account the run used; a later completed run on that account clears it. The
+        account is named only by this run's own connection receipt and must belong to the
+        run's owner.
+        """
+        if run is None or worker is None or str(run["state"] or "") not in {"completed", "failed"}:
+            return
+        try:
+            receipt = json.loads(str(run["allowed_ai_connection_receipt_json"] or "") or "{}")
+        except (TypeError, ValueError, IndexError, KeyError):
+            return
+        if not isinstance(receipt, dict) or receipt.get("run_id") != run["run_id"]:
+            return
+        account_id = str(receipt.get("connection_id") or "").strip()
+        if not account_id:
+            return
+        if run["state"] == "completed":
+            notice = ""
+        elif str(run["failure_class"] or "") in PROVIDER_REFUSAL_FAILURE_CLASSES:
+            notice = json.dumps({"run_id": str(run["run_id"]), "at": str(run["ended_at"] or ""),
+                                 "message": str(run["failure_user_message"] or "")[:600]}, sort_keys=True)
+        else:
+            return
+        try:
+            conn.execute(
+                "UPDATE provider_accounts SET provider_notice_json = ? "
+                "WHERE account_id = ? AND tenant_id = ? AND owner_id = ?",
+                (notice, account_id, str(worker["tenant_id"] or "local"), str(worker["owner_id"] or "")),
+            )
+        except sqlite3.OperationalError:
+            # A store without connected accounts keeps no notice.
+            return
+
     def transition_run_if_state(
         self,
         run_id: str,
@@ -9850,6 +9890,8 @@ class Store:
                     observed_at=str(fields.get("ended_at") or utc_now()),
                 )
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if cursor.rowcount and state in TERMINAL_RUN_STATES:
+                self._note_provider_account_outcome_conn(conn, row, worker)
             conn.execute("COMMIT")
         updated = self._row(row)
         return updated if cursor.rowcount and updated else None
@@ -11726,6 +11768,8 @@ class Store:
                     observed_at=str(update_fields["ended_at"]),
                 )
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if cur.rowcount and state in TERMINAL_RUN_STATES:
+                self._note_provider_account_outcome_conn(conn, row, worker)
             conn.execute("COMMIT")
         updated = self._row(row)
         if cur.rowcount and updated:
@@ -11884,6 +11928,8 @@ class Store:
                     terminal_at=str(update_fields["ended_at"]),
                 )
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if cur.rowcount and state in TERMINAL_RUN_STATES:
+                self._note_provider_account_outcome_conn(conn, row, worker)
             conn.execute("COMMIT")
         updated = self._row(row)
         if cur.rowcount and updated:

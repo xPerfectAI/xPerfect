@@ -40,6 +40,34 @@ class SharedWorkspaceRuntimes:
                 # or still-live recovery can never open admission or release a lease.
                 self.recovery_issues.append(identity["worker_id"])
 
+    def recover_quarantined(self, profiled_runtime, *, account_id):
+        """Owner-requested recovery of one account's quarantined projections.
+
+        Startup recovery also settles in-flight pending projections, so it must
+        not run while work is live. A quarantined projection already blocks every
+        new projection for its account and worker; recovering it when its worker
+        has no active run cannot race a legitimate start.
+        """
+        if self.binder is None or self.binder.store is None:
+            return []
+        from .workspace_projection import recovery_projection
+        recovered = []
+        for record in self.binder.store.pending_provider_projections(account_id=account_id):
+            identity = record["binding"]
+            if record.get("state") != "quarantined" or self.store.get_active_run(identity["worker_id"]):
+                continue
+            worker = self.store.get_worker(identity["worker_id"], identity["tenant_id"], identity["owner_id"])
+            if worker is None:
+                continue
+            box = profiled_runtime._runtime_for_worker(worker).sandbox.box
+            try:
+                self.binder.recover_projection(record, projection_factory=lambda *, record, assert_lease:
+                    recovery_projection(box, record=record, assert_lease=assert_lease))
+            except Exception:
+                continue
+            recovered.append(identity["worker_id"])
+        return recovered
+
     def readiness(self, workspace, *, runtime=None):
         """Report the current shared substrate without creating a workspace or member.
 

@@ -51,6 +51,12 @@ def account_launcher_from_environment():
             or mounted[str(control)].get('Name') == volume
             or network not in record['NetworkSettings']['Networks']):
         raise WorkspaceBoxUnavailable('Controller data/control/network mounts changed')
+    # Boxes of different owners share this bridge; it must refuse traffic between
+    # containers. Boxes reach native tools only through their own runtime socket.
+    options = json.loads(_docker(['network', 'inspect', '--format', '{{json .Options}}', network]) or 'null')
+    if (os.environ.get('XPERFECT_WORKER_NETWORK') != 'isolated' or not isinstance(options, dict)
+            or options.get('com.docker.network.bridge.enable_icc') != 'false'):
+        raise WorkspaceBoxUnavailable('The worker network must refuse traffic between containers')
     # A fresh challenge checks the live named-volume view. The probe receives
     # only this disposable public nonce subtree, never account or control data.
     name = '.substrate-' + secrets.token_hex(16)

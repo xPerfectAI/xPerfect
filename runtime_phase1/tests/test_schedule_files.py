@@ -145,12 +145,27 @@ def test_two_schedules_keep_exact_same_name_inputs_after_expiry_and_restart(serv
             # added to an ephemeral invocation, not future worker defaults.
             invocation = service._run_local_worker(worker, run)
             projected = json.loads(invocation["bootstrap_bundle_json"])["files"]
-            assert len(projected) == 1
-            assert projected[0]["managed_upload_id"] == upload["upload_id"]
-            assert projected[0]["sha256"] == hashlib.sha256(expected).hexdigest()
+            accepted = [item for item in projected if item.get("managed_upload_id")]
+            assert len(accepted) == 1
+            assert accepted[0]["managed_upload_id"] == upload["upload_id"]
+            assert accepted[0]["sha256"] == hashlib.sha256(expected).hexdigest()
+            index_path = invocation["_run_input_manifest_path"]
+            index = next(item for item in projected if item["path"] == index_path)
+            assert json.loads(index["content"])["files"] == [
+                {
+                    "name": "brief.txt",
+                    "path": entry["path"],
+                    "sha256": hashlib.sha256(expected).hexdigest(),
+                    "size_bytes": len(expected),
+                }
+            ]
+            assert index_path in service._runtime_instruction_for_run(
+                invocation, run["instruction"]
+            )
+            assert run["instruction"] == "Use the accepted files"
             from pathlib import Path
 
-            assert Path(projected[0]["source_path"]).read_bytes() == expected
+            assert Path(accepted[0]["source_path"]).read_bytes() == expected
             replay, created = restarted.create_or_get_run_for_schedule(
                 schedule["schedule_id"]
             )
@@ -176,6 +191,34 @@ def test_reusing_upload_in_later_schedule_creates_distinct_projection(service):
     assert a["sha256"] == b["sha256"]
     assert a["path"] != b["path"]
     assert a["projection_id"] != b["projection_id"]
+
+
+def test_run_without_selected_files_keeps_exact_instruction(service):
+    instruction = "Use the workspace as needed"
+    assert service._runtime_instruction_for_run(
+        {"_run_input_manifest_path": ""}, instruction
+    ) == instruction
+
+
+def test_run_input_instruction_comes_only_from_its_prompt_manifest(service):
+    from pathlib import Path
+
+    import workers_projects_runtime.service as service_module
+
+    manifest = service._run_inputs_prompt()
+    raw = (
+        Path(service_module.__file__).with_name("prompts") / "worker-run-inputs.json"
+    ).read_bytes()
+    assert manifest["id"] == "xperfect.worker-run-inputs"
+    assert manifest["sha256"] == hashlib.sha256(raw).hexdigest()
+    index = ".xperfect/run-inputs/abc.json"
+    rendered = service._runtime_instruction_for_run(
+        {"_run_input_manifest_path": index}, "Goal"
+    )
+    assert rendered == "Goal\n\n" + manifest["instruction"].format(index_path=index)
+    # The source carries no second copy of the model-facing wording.
+    source = Path(service_module.__file__).read_text(encoding="utf-8")
+    assert "same-named workspace file may differ" not in source
 
 
 def test_schedule_requires_exact_file_revision_and_snapshots_it(service):

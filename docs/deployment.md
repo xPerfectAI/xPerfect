@@ -181,6 +181,20 @@ accounts.
   setting is left as it is in every service and reported.
 - An image that declares no settings adds none.
 
+Workspace containers cannot reach each other, or the runtime, over the network: the package's
+workers network refuses all traffic between its containers. Each workspace container reaches the
+runtime's worker tools (conversation context, peers and the coordinator) through its own socket
+file. Only that container and the runtime can see the file, and every request still needs its
+run's own credential. A package from an earlier launcher has a workers network that allows that
+traffic. The upgrade replaces it while the package is stopped and idle, when the new image
+declares the isolated network:
+- It refuses, and changes nothing more, if any container other than the stopped runtime still uses
+  that network.
+- `upgrade-rollback` restores the previous network and reconnects the previous runtime.
+- On a package whose network is already isolated, it refuses an image that needs traffic between
+  containers.
+- Newer images do not start on a workers network that allows that traffic.
+
 A hosted package also needs a private key of its own before stored files can be attached to a
 workspace. If an earlier launcher did not create it, the upgrade creates one for the runtime
 service only. It lists the key's name, never its value, and never replaces a key that is present.

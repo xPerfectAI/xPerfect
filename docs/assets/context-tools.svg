@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">xPerfect: you choose what each worker knows and can use</title>
+  <desc id="desc">A worker receives its goal and success criteria, the background you select from the conversation and files, the exact files you attach and the connections you allow. It keeps its own built-in tools. Selected background up to a set size goes into the task; the rest the worker reads on request. Unselected sources stay out, and removing a source keeps it out of the next run. Each worker keeps its own sign-in.</desc>
+  <rect width="1600" height="900" fill="#151a20"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#f3f4f1">
+    <text x="70" y="75" font-size="24" fill="#63d7b0" letter-spacing="3">xPerfect / CONTEXT AND TOOLS</text>
+    <text x="70" y="145" font-size="52" font-weight="700">Workers know what you give them.</text>
+    <text x="70" y="195" font-size="26" fill="#b8c4ce">Choose each worker's background, files and connections. Other sources stay out.</text>
+    <rect x="70" y="250" width="400" height="420" rx="14" fill="#232c35"/>
+    <text x="100" y="300" font-size="31" font-weight="700">What you have</text>
+    <g fill="#151a20" stroke="#60717c"><rect x="100" y="330" width="340" height="92" rx="10"/><rect x="100" y="440" width="340" height="92" rx="10"/><rect x="100" y="550" width="340" height="92" rx="10"/></g>
+    <text x="125" y="370" font-size="26">Conversation</text>
+    <text x="125" y="403" font-size="21" fill="#c6d0d8">Your messages and results</text>
+    <text x="125" y="480" font-size="26">Files</text>
+    <text x="125" y="513" font-size="21" fill="#c6d0d8">Exact bytes you attach</text>
+    <text x="125" y="590" font-size="26">Connections</text>
+    <text x="125" y="623" font-size="21" fill="#c6d0d8">Tools you have connected</text>
+    <path d="M478 460 H538" stroke="#63d7b0" stroke-width="4" fill="none"/>
+    <path d="M526 446 L542 460 L526 474" stroke="#63d7b0" stroke-width="4" fill="none"/>
+    <rect x="550" y="250" width="500" height="420" rx="14" fill="none" stroke="#60717c" stroke-width="2"/>
+    <text x="580" y="300" font-size="31" font-weight="700">You choose, per worker</text>
+    <rect x="580" y="330" width="440" height="150" rx="10" fill="#234239"/>
+    <text x="605" y="370" font-size="27" fill="#8af0cb" font-weight="700">Background</text>
+    <text x="605" y="408" font-size="22">Selected sources only</text>
+    <text x="605" y="442" font-size="21" fill="#d0e7de">Up to a set size goes into the task;</text>
+    <text x="605" y="468" font-size="21" fill="#d0e7de">the worker reads the rest on request</text>
+    <rect x="580" y="498" width="440" height="68" rx="10" fill="#232c35"/>
+    <text x="605" y="542" font-size="24"><tspan font-weight="700" fill="#8af0cb">Files</tspan>  attached to its workspace</text>
+    <rect x="580" y="582" width="440" height="68" rx="10" fill="#232c35"/>
+    <text x="605" y="626" font-size="24"><tspan font-weight="700" fill="#8af0cb">Connections</tspan>  only the ones you allow</text>
+    <path d="M1058 460 H1118" stroke="#63d7b0" stroke-width="4" fill="none"/>
+    <path d="M1106 446 L1122 460 L1106 474" stroke="#63d7b0" stroke-width="4" fill="none"/>
+    <rect x="1130" y="250" width="400" height="420" rx="14" fill="#234239"/>
+    <text x="1160" y="300" font-size="31" fill="#8af0cb" font-weight="700">The worker</text>
+    <text x="1160" y="345" font-size="24">Goal and success criteria</text>
+    <text x="1160" y="390" font-size="24">Background it was given</text>
+    <text x="1160" y="435" font-size="24">Its files, byte for byte</text>
+    <text x="1160" y="480" font-size="24">Its own built-in tools</text>
+    <text x="1160" y="512" font-size="21" fill="#d0e7de">plus the connections you allow</text>
+    <text x="1160" y="560" font-size="24" fill="#d0e7de">Optional: message peers</text>
+    <text x="1160" y="592" font-size="21" fill="#d0e7de">when you turn it on</text>
+    <text x="1160" y="640" font-size="21" fill="#d0e7de">Its own sign-in and session</text>
+    <text x="70" y="727" font-size="26">Remove a source, and the worker's next run cannot read it.</text>
+    <line x1="70" y1="760" x2="1530" y2="760" stroke="#34414b" stroke-width="2"/>
+    <text x="70" y="810" font-size="26">The AI decides how to use what it has. You decide its background, files and connections.</text>
+    <text x="70" y="858" font-size="23" fill="#b8c4ce">xPerfect runs on your computer or a server.</text>
+  </g>
+</svg>

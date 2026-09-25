@@ -8,6 +8,40 @@ import pytest
 from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase, WorkerInterruptedError, WorkerTerminatedError
 from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
 
+
+class _ProcessGroups:
+    """Deterministic stand-in for the host's process groups, instead of the real `ps`.
+
+    ``members`` maps each group to its live {pid: start identity}. A signal-0 `killpg`
+    is an existence probe and never a delivered signal. A delivered signal empties the
+    group when ``stops`` says its members exit.
+    """
+
+    def __init__(self, runtime, monkeypatch, members, *, signals, tagged=True, stops=True, after_signal=None):
+        self.members = {group: dict(pids) for group, pids in members.items()}
+        self.signals, self.tagged, self.stops = signals, tagged, stops
+        self.after_signal, self.polls_after_signal = after_signal, 0
+        monkeypatch.setattr(runtime, "_host_process_group_members", self.read)
+        monkeypatch.setattr(os, "killpg", self.killpg)
+
+    def read(self, group):
+        if self.signals:
+            self.polls_after_signal += 1
+            if self.after_signal is not None:
+                hook, self.after_signal = self.after_signal, None
+                hook()
+        return dict(self.members.get(group, {}))
+
+    def killpg(self, group, sig):
+        if sig == 0:
+            if not self.members.get(group):
+                raise ProcessLookupError
+            return
+        self.signals.append(("group", group, sig) if self.tagged else (group, sig))
+        if self.stops:
+            self.members[group] = {}
+
+
 def _write_exact_finished_host_session(
     runtime: HostCodexCliRuntime,
     *,
@@ -65,11 +99,9 @@ def test_host_needs_input_release_without_lease_clears_only_proven_dead_exact_se
             raise ProcessLookupError
 
     monkeypatch.setattr(os, "kill", probe_or_signal)
-    monkeypatch.setattr(
-        os,
-        "killpg",
-        lambda process_group, sig: signals.append(("group", process_group, sig)),
-    )
+    # The recorded process is gone (or its PID now belongs to an unrelated process),
+    # so no live member remains in its recorded group.
+    _ProcessGroups(runtime, monkeypatch, {}, signals=signals)
     monkeypatch.setattr(runtime, "_pid_is_zombie", lambda _pid: False)
     monkeypatch.setattr(
         runtime,
@@ -669,11 +701,12 @@ def test_targeted_host_release_revalidates_same_run_generation_before_sigkill(
         }.get(pid, ""),
     )
     monkeypatch.setattr(os, "getpgrp", lambda: 99999)
-    monkeypatch.setattr(
-        os,
-        "killpg",
-        lambda process_group, sig: signals.append((process_group, sig)),
-    )
+    # The old generation ignores SIGTERM and keeps its group. The same run starts a new
+    # generation while the stop waits for the group to exit, before any SIGKILL.
+    groups = _ProcessGroups(runtime, monkeypatch, {
+        old_process.pid: {old_process.pid: "ps-lstart:recorded-process"},
+        replacement_process.pid: {replacement_process.pid: "ps-lstart:same-run-sigkill-new"},
+    }, signals=signals, tagged=False, stops=False, after_signal=replace_before_sigkill)
     worker = {
         "worker_id": worker_id,
         "profile": "codex-cli",
@@ -700,7 +733,8 @@ def test_targeted_host_release_revalidates_same_run_generation_before_sigkill(
         runtime.terminate_worker(worker)
 
     assert replaced is True
-    assert old_process.wait_calls == 1
+    # The stop waited on the old group (not the process handle) and never confirmed it.
+    assert groups.polls_after_signal >= 1 and old_process.wait_calls == 0
     assert signals == [(old_process.pid, 15)]
     assert replacement_process.poll() is None
     assert replacement_process.wait_calls == 0
@@ -828,11 +862,11 @@ def test_host_orphan_cleanup_signals_only_the_matching_recorded_generation(
     )
     monkeypatch.setattr(os, "getpgid", lambda _pid: 43101)
     monkeypatch.setattr(os, "getpgrp", lambda: 99999)
-    monkeypatch.setattr(
-        os,
-        "killpg",
-        lambda process_group, sig: signals.append(("group", process_group, sig)),
-    )
+    # Only the exact recorded generation is a live member of its recorded group; it exits
+    # on SIGTERM. A replacement process, or an unknown identity, anchors no member.
+    _ProcessGroups(runtime, monkeypatch, {
+        43101: {43101: observed_identity},
+    } if observed_identity == "ps-lstart:recorded-process" else {}, signals=signals)
     monkeypatch.setattr(
         os,
         "kill",

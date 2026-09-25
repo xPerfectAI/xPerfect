@@ -505,10 +505,16 @@ def classify_cli_failure(
             personal_account_reconnect=structured_authentication_failed,
         )
     if "response.failed" in lowered or "turn.failed" in lowered:
+        stated = provider_stated_reason(stdout, stderr)
         return FailureClassification(
             failure_class="provider_response_failed",
             retryable=True,
-            user_message="The model provider ended the worker turn unexpectedly before the task finished.",
+            # The provider said why: quote it rather than guess what it means.
+            user_message=(
+                f"The model provider stopped the worker turn and said: \u201c{stated}\u201d"
+                if stated
+                else "The model provider ended the worker turn unexpectedly before the task finished."
+            ),
             recommended_recovery=(
                 "Use workspace_continue to resume from the same workspace and ask the worker to continue "
                 "from the current files and notes."
@@ -1252,16 +1258,16 @@ def _structured_provider_capacity_class(*texts: str) -> str:
     return ""
 
 
-def _trusted_terminal_capacity_class(*texts: str) -> str:
-    """Capacity class from a provider's own trusted terminal event message.
+def _trusted_terminal_messages(*texts: str) -> list[str]:
+    """The provider's own words from its trusted terminal control events, in order.
 
-    Some providers (for example the Codex CLI) report a usage/quota or rate-limit exhaustion only as
-    prose inside their trusted `turn.failed` / `response.failed` / api-error `result` control event,
-    with no typed code or HTTP status. Read that indication only from the trusted terminal control
-    event -- never from assistant/task output -- so a genuine provider capacity failure becomes
-    structured evidence that can drive the configured fallback. Task text is excluded because
-    `_trusted_provider_control_event` rejects non-terminal events.
+    Only native terminal/provider-failure events are read, never assistant or task output:
+    `_trusted_provider_control_event` rejects anything else. The Codex CLI can also report a
+    provider refusal as a top-level stream error event (`{"type": "error", "message": ...}`) and
+    then exit without a `turn.failed`. That event is the CLI's own report, not task output (task
+    text is carried under assistant/item events), so it is read as well.
     """
+    found: list[str] = []
     for text in texts:
         for line in str(text or "").splitlines():
             raw = line.strip()
@@ -1273,11 +1279,6 @@ def _trusted_terminal_capacity_class(*texts: str) -> str:
                 continue
             trusted = _trusted_provider_control_event(decoded)
             if trusted is None:
-                # The Codex CLI can report a provider exhaustion as a top-level stream error event
-                # (`{"type": "error", "message": ...}`) and then exit without a `turn.failed`. That
-                # top-level error is the CLI's own provider/runtime report, not assistant/task
-                # output (task text is carried under assistant/item events), so it is a trusted
-                # terminal capacity source. Anything else is ignored.
                 if (
                     isinstance(decoded, dict)
                     and str(decoded.get("type") or "").strip().lower() == "error"
@@ -1299,21 +1300,49 @@ def _trusted_terminal_capacity_class(*texts: str) -> str:
                 value = trusted.get(key)
                 if isinstance(value, str):
                     messages.append(value)
-            joined = " ".join(messages).lower()
-            if not joined:
-                continue
-            if (
-                "usage limit" in joined
-                or "usage_limit" in joined
-                or "quota exceeded" in joined
-                or "quota_exceeded" in joined
-                or "quota exhausted" in joined
-                or "insufficient_quota" in joined
-                or "plan limit" in joined
-                or "weekly limit" in joined
-            ):
-                return "provider_quota_exhausted"
+            joined = " ".join(message for message in messages if message.strip())
+            if joined:
+                found.append(joined)
+    return found
+
+
+def _trusted_terminal_capacity_class(*texts: str) -> str:
+    """Capacity class from a provider's own trusted terminal event message.
+
+    Some providers (for example the Codex CLI) report a usage/quota or rate-limit exhaustion only as
+    prose inside their trusted `turn.failed` / `response.failed` / api-error `result` control event,
+    with no typed code or HTTP status. Read that indication only from the trusted terminal control
+    event -- never from assistant/task output.
+    """
+    for message in _trusted_terminal_messages(*texts):
+        joined = message.lower()
+        if (
+            "usage limit" in joined
+            or "usage_limit" in joined
+            or "quota exceeded" in joined
+            or "quota_exceeded" in joined
+            or "quota exhausted" in joined
+            or "insufficient_quota" in joined
+            or "plan limit" in joined
+            or "weekly limit" in joined
+        ):
+            return "provider_quota_exhausted"
     return ""
+
+
+def provider_stated_reason(*texts: str, limit: int = 300) -> str:
+    """The provider's own trusted terminal messages, in order and without repeats, bounded for display.
+
+    They are quoted to the person whose run stopped, never interpreted or used to choose a route.
+    """
+    distinct: list[str] = []
+    for message in _trusted_terminal_messages(*texts):
+        line = "".join(character for character in " ".join(message.split()) if character.isprintable())
+        if line and line not in distinct:
+            distinct.append(line)
+    text = " \u2014 ".join(distinct)
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
 
 def _structured_provider_auth_failure(*texts: str) -> bool:
     """Recognize provider authentication only from exact JSONL control fields."""

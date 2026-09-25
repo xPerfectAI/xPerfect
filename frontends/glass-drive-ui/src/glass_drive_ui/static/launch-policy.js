@@ -97,6 +97,7 @@ export function workerAccountSummary({ workspaceValue, accountId, policy, data }
     else {
       route = String(account.label || account.provider || 'Personal account');
       if (account.status !== 'ready') route += ' · Needs attention';
+      else if (account.provider_notice?.message) route += ' · Provider stopped its last run (see Connections)';
       if (policy === 'personal_preferred') route += ' · Deployment fallback allowed';
     }
   }

@@ -190,6 +190,19 @@ def role_create_args(*, profile: str, name: str, role: str, volumes: dict, netwo
     return args
 
 
+ICC_OPTION = 'com.docker.network.bridge.enable_icc'
+
+
+def network_create_args(*, name: str, role: str, network: str, settings: dict) -> list[str]:
+    """The package networks. An image that serves native tools through per-box
+    sockets declares an isolated workers bridge: no container on it, box or
+    runtime, can reach another."""
+    args = ['network', 'create', '--driver', 'bridge', '--label', 'xperfect.package=' + name]
+    if role == 'workers' and settings.get('XPERFECT_WORKER_NETWORK') == 'isolated':
+        args += ['--opt', ICC_OPTION + '=false']
+    return args + [network]
+
+
 def role_command(role: str) -> list[str]:
     state = 'control' if role == 'runtime' else role + '-state'
     return [role, '--config', f'/{state}/config.json']
@@ -260,8 +273,9 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
             raise ValueError('Package resources already exist; use their recorded identities to restart')
     for volume in volumes.values():
         docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
-    for network in networks.values():
-        docker(endpoint, 'network', 'create', '--driver', 'bridge', '--label', 'xperfect.package=' + name, network)
+    for role, network in networks.items():
+        docker(endpoint, *network_create_args(name=name, role=role, network=network,
+                                              settings=PROFILE_SETTINGS['local-linux']))
     password, mcp_key = secrets.token_urlsafe(36), secrets.token_urlsafe(48)
     # The UI signs a signed-in owner's confirmations; its key never leaves its own state.
     ui_url = f'http://127.0.0.1:{ui_port}'
@@ -568,8 +582,9 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
                    '--opt', 'device=' + value['xfs_mount'], '--label', 'xperfect.package=' + name, volume)
         else:
             docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
-    for network in networks.values():
-        docker(endpoint, 'network', 'create', '--driver', 'bridge', '--label', 'xperfect.package=' + name, network)
+    for role, network in networks.items():
+        docker(endpoint, *network_create_args(name=name, role=role, network=network,
+                                              settings=PROFILE_SETTINGS['hosted-xfs']))
     signers = {}
     for role in ('ui', 'mcp'):
         signers[role] = generate_signer(endpoint, image, volumes[role + '-state'], '/' + role + '-state',

@@ -74,13 +74,20 @@ def project_coordinator_bootstrap(worker: dict, bundle: dict) -> dict:
         raise CoordinatorScopeError("Coordinator native projection mismatch")
     # Reuse the exact O06 token, which the service already minted for this run/attempt.
     result = json.loads(json.dumps(bundle))
-    result.setdefault("env", {})["GLASSHIVE_PEER_TOKEN"] = projection["token"]
+    environment = result.setdefault("env", {})
+    environment["GLASSHIVE_PEER_TOKEN"] = projection["token"]
     mcp = result.get("claude_project_mcp") or {}
     servers = mcp.get("mcpServers", mcp)
-    servers["xperfect-coordinator"] = {"type": "http", "url": projection["url"],
-                                      "headers": {"Authorization": "Bearer ${GLASSHIVE_PEER_TOKEN}"}}
+    from . import native_transport
+    if projection.get("transport") == "stdio":
+        servers["xperfect-coordinator"] = native_transport.stdio_server(projection["url"], "GLASSHIVE_PEER_TOKEN")
+        block = native_transport.codex_stdio_block("xperfect-coordinator", projection["url"], "GLASSHIVE_PEER_TOKEN")
+    else:
+        servers["xperfect-coordinator"] = {"type": "http", "url": projection["url"],
+                                          "headers": {"Authorization": "Bearer ${GLASSHIVE_PEER_TOKEN}"}}
+        block = '[mcp_servers.xperfect-coordinator]\nurl = ' + json.dumps(projection["url"]) + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
     result["claude_project_mcp"] = {"mcpServers": servers}
     from .bootstrap import _strip_codex_mcp_server_blocks
     append = _strip_codex_mcp_server_blocks(result.get("codex_config_append", ""), {"xperfect-coordinator"}).rstrip()
-    result["codex_config_append"] = append + '\n\n[mcp_servers.xperfect-coordinator]\nurl = ' + json.dumps(projection["url"]) + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
+    result["codex_config_append"] = append + '\n\n' + block
     return result

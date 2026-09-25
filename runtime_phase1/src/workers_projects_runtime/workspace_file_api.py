@@ -132,6 +132,14 @@ def install_workspace_file_routes(
             tenant, owner_id, values, administrator=True, inherit=payload.inherit
         )
 
+    @app.get("/v1/storage/owners/{owner_id}")
+    def owner_storage(owner_id: str, request: Request):
+        tenant, _ = owner(request)
+        ctx = auth_context(request)
+        if ctx.enterprise and str(ctx.role or "").lower() != "tenant_admin":
+            raise HTTPException(status_code=403, detail="Tenant administrator role required")
+        return files.storage(tenant, owner_id)
+
     @app.get("/v1/file-uploads")
     def uploads(request: Request, draft_id: str):
         return files.list_uploads(*owner(request), draft_id)

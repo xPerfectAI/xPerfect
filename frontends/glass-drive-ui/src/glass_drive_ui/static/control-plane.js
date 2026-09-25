@@ -338,6 +338,10 @@ function renderProviderAccounts() {
     if (account.reconnect_reason && !['ready', 'connecting'].includes(String(account.status || ''))) {
       copy.append(node('span', 'connection-recovery', String(account.reconnect_reason)));
     }
+    if (account.provider_notice?.message) {
+      // The provider's own reason its last run stopped; a completed run clears it.
+      copy.append(node('span', 'connection-recovery', `Last run: ${String(account.provider_notice.message)}`));
+    }
     const actions = node('div', 'connection-actions connection-actions-primary');
     const brokerBacked = account.credential_route === 'broker' || (account.auth_method === 'enterprise_route');
     actions.append(statusChip(

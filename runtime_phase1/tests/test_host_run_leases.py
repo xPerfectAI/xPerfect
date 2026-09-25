@@ -5653,7 +5653,12 @@ def test_legacy_running_confirmation_fails_closed_without_exact_attempt(tmp_path
     assert store.get_host_run_lease(lease["lease_id"])["startup_state"] != "confirmed"
 
 
-def test_startup_reconcile_downgrades_running_without_invocation_or_lease(tmp_path):
+def test_startup_reconcile_downgrades_running_without_invocation_or_lease(tmp_path, monkeypatch):
+    # Startup recovery runs on its own thread: it requeues the uninvoked run and may then
+    # start a processor for it. Hold that start so the requeued state is observed once
+    # recovery has finished, instead of racing a legitimate re-dispatch.
+    monkeypatch.setattr(WorkersProjectsService, "_ensure_worker_processor",
+                        lambda _self, _worker_id: None)
     db_path = tmp_path / "startup-running.sqlite3"
     store = Store(str(db_path))
     worker, run = _running_host_run(store, "startup-invalid")
@@ -5671,6 +5676,8 @@ def test_startup_reconcile_downgrades_running_without_invocation_or_lease(tmp_pa
 
     service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=True)
     try:
+        service._startup_recovery_thread.join(timeout=30)
+        assert not service._startup_recovery_thread.is_alive()
         reconciled = store.get_run(run["run_id"])
     finally:
         service.shutdown()

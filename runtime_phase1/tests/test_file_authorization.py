@@ -90,6 +90,10 @@ def test_real_auth_boundary_scopes_drafts_policy_and_signed_file_views(
         headers=admin,
     )
     assert updated.status_code == 200 and updated.json()["limit_bytes"] == 5
+    assert client.get("/v1/storage/owners/owner-two", headers=owner).status_code == 403
+    admin_read = client.get("/v1/storage/owners/owner-two", headers=admin)
+    assert admin_read.status_code == 200
+    assert admin_read.json()["limit_bytes"] == 5
 
     store = app.state.store
     project = store.create_project(

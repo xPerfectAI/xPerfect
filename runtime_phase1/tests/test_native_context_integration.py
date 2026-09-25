@@ -83,6 +83,58 @@ def test_full_api_mounts_context_with_native_authority_and_owner_configuration(
         assert client.post("/v1/native/context/", json={}).status_code == 403
 
 
+def test_unrouted_run_stops_before_start_and_names_the_cause(tmp_path, monkeypatch):
+    """A deployment that gives workers no runtime route (no packaged socket, no
+    configured address) cannot offer background beyond the inline limit."""
+    import time
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.api import create_app
+
+    for name in (
+        "GLASSHIVE_PEER_RUNTIME_BASE_URL",
+        "XPERFECT_EXECUTION_PROFILE",
+        "XPERFECT_CONTROL_ROOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("WPR_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("WPR_DEFAULT_OWNER_ID", "owner")
+    app = create_app(
+        db_path=str(tmp_path / "state.db"),
+        runtime_backend="stub",
+        reconcile_on_startup=False,
+    )
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={
+            "owner_id": "owner", "title": "Example", "goal": "Goal",
+            "default_worker_profile": "claude-code",
+        }).json()
+        worker = client.post(f"/v1/projects/{project['project_id']}/workers", json={
+            "owner_id": "owner", "name": "Member", "role": "main",
+            "profile": "claude-code", "start_synchronously": False,
+            "bootstrap_bundle": {"project_definition": "Synthetic line.\n" * 2000},
+        }).json()
+        configuration = client.get(f"/v1/workers/{worker['worker_id']}/configuration")
+        effective = configuration.json()["effective"]
+        assert effective["context"]["retrievable_chars"] == 32000 - 24000
+        assert [issue["code"] for issue in effective["issues"]] == [
+            "context_retrieval_unavailable"
+        ]
+        run = client.post(
+            f"/v1/workers/{worker['worker_id']}/assign",
+            json={"instruction": "Use the whole background."},
+        ).json()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            state = client.get(f"/v1/runs/{run['run_id']}").json()
+            if state["state"] in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.05)
+    assert state["state"] == "failed"
+    assert state["failure_class"] == "context_endpoint_unavailable"
+    assert "inline limit" in state["failure_user_message"]
+    assert "Workspace settings" in state["failure_recommended_recovery"]
+
+
 def test_same_owner_dispatch_shares_exact_main_background_only(tmp_path):
     from types import SimpleNamespace
     from workers_projects_runtime.store import Store

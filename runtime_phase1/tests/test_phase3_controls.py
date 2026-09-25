@@ -24,6 +24,7 @@ def _worker_with_run(
     run_state: str = "running",
     worker_state: str | None = None,
     execution_mode: str = "docker",
+    background: bool = True,
 ) -> tuple[Store, WorkersProjectsService, dict, dict]:
     store = Store(str(tmp_path / "runtime.db"))
     project = store.create_project(
@@ -106,7 +107,8 @@ def _worker_with_run(
     )
     # Start scheduler threads only after the exact lifecycle fixture is durable;
     # otherwise they can race the test's manual claim/admit/invoke sequence.
-    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False)
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False,
+                                     start_background_consumers=background)
     return store, service, store.get_worker(worker["worker_id"]) or worker, store.get_run(run["run_id"]) or run
 
 
@@ -533,8 +535,10 @@ def test_paused_run_with_missing_or_recreated_container_requeues_same_run(
     runtime = _ResumeContainerGenerationRuntime(
         before_container, after_container
     )
+    # Without background loops, which may also ensure a processor for the queued run,
+    # this counts only what resume itself does.
     store, service, worker, run = _worker_with_run(
-        tmp_path, runtime, run_state="paused", worker_state="paused"
+        tmp_path, runtime, run_state="paused", worker_state="paused", background=False
     )
     processor_starts: list[str] = []
     service._ensure_worker_processor = processor_starts.append  # type: ignore[method-assign]
@@ -593,7 +597,9 @@ def test_public_queued_stop_sets_permanent_work_tombstone_and_cancels_full_cohor
     monkeypatch.setenv("WPR_DOCKER_MEMORY_RESERVATION_MB", "1")
     monkeypatch.setenv("WPR_DOCKER_DISK_RESERVATION_MB", "1")
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    # Nothing may process the queued cohort while the public Stop is exercised.
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
     service.start_assigned_run = lambda _worker_id: None  # type: ignore[method-assign]
     try:
         delegation = service.reserve_delegation(

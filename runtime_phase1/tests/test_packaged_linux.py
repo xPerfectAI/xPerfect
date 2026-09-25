@@ -1091,3 +1091,55 @@ def test_a_signed_in_owner_confirmation_reaches_the_runtime_guard_only_through_t
         assert replayed.status_code in {401, 403} and 'already used' in replayed.text
         # MCP holds neither key: all it can send is its service credential, which cannot confirm.
         assert confirm({'X-WPR-Token': environments['mcp']['WPR_API_TOKEN']}).status_code == 403
+
+
+@pytest.mark.parametrize(('declared', 'options', 'isolated'), [
+    ('isolated', {'com.docker.network.bridge.enable_icc': 'false'}, True),
+    ('isolated', {}, False),
+    ('isolated', {'com.docker.network.bridge.enable_icc': 'true'}, False),
+    ('', {'com.docker.network.bridge.enable_icc': 'false'}, False),
+])
+def test_native_launch_needs_a_workers_bridge_that_isolates_containers(tmp_path, monkeypatch, declared, options, isolated):
+    from workers_projects_runtime import packaged_linux as substrate
+    data, control = tmp_path / 'data', tmp_path / 'control'
+    data.mkdir()
+    control.mkdir()
+    image, controller = 'sha256:' + 'a' * 64, 'b' * 64
+    for key, value in {'XPERFECT_EXECUTION_PROFILE': 'local-linux', 'XPERFECT_SHARED_VOLUME_ROOT': str(data.resolve()),
+                       'XPERFECT_CONTROL_ROOT': str(control.resolve()), 'XPERFECT_SHARED_IMAGE': image,
+                       'XPERFECT_CONTROLLER_ID': controller, 'XPERFECT_SHARED_VOLUME_NAME': 'fixture-data',
+                       'XPERFECT_SHARED_NETWORK': 'fixture-workers', 'XPERFECT_WORKER_NETWORK': declared}.items():
+        monkeypatch.setenv(key, value)
+
+    class Probed(Exception):
+        pass
+
+    def docker(arguments):
+        if arguments[:1] == ['info']:
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+        if arguments[:2] == ['image', 'inspect']:
+            return image + '\n'
+        if arguments == ['inspect', controller]:
+            return json.dumps([{'Id': controller, 'State': {'Running': True},
+                                'Mounts': [{'Destination': str(data.resolve()), 'Type': 'volume', 'Name': 'fixture-data'},
+                                           {'Destination': str(control.resolve()), 'Type': 'volume', 'Name': 'fixture-control'}],
+                                'NetworkSettings': {'Networks': {'fixture-workers': {}}}}])
+        if arguments[:2] == ['network', 'inspect']:
+            assert arguments[-1] == 'fixture-workers'
+            return json.dumps(options)
+        if arguments[:1] == ['run']:
+            raise Probed  # past the network proof: the live volume challenge comes next
+        raise AssertionError(arguments)
+    monkeypatch.setattr(substrate, '_docker', docker)
+    if isolated:
+        with pytest.raises(Probed):
+            substrate.account_launcher_from_environment()
+    else:
+        with pytest.raises(WorkspaceBoxUnavailable, match='refuse traffic between containers'):
+            substrate.account_launcher_from_environment()
+
+
+def test_every_packaged_profile_declares_the_isolated_worker_network():
+    module = service_module()
+    assert {profile: settings['XPERFECT_WORKER_NETWORK'] for profile, settings in module.PROFILE_SETTINGS.items()} == {
+        'local-linux': 'isolated', 'hosted-xfs': 'isolated'}

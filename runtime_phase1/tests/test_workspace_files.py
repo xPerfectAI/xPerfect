@@ -7,6 +7,8 @@ from workers_projects_runtime.openclaw_runtime import StubRuntime
 def test_workspace_upload_api_streams_and_enforces_owner_storage(tmp_path, monkeypatch):
     monkeypatch.setenv("GLASSHIVE_OWNER_STORAGE_BYTES", "5")
     monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli")
+    # Every supported launcher trusts its own managed-files store as a source root.
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(tmp_path))
     client = TestClient(
         create_app(
             str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime()

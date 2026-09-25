@@ -70,6 +70,7 @@ automatically.
 | --- | --- |
 | Service is not ready | Run `doctor` and inspect the named private log. |
 | Worker is not ready | Read provider readiness and account setup in Connections. |
+| A run stopped with the provider's own message | Follow it, for example a usage limit. Connections shows it under that account until a run completes. |
 | Result is missing | Inspect worker status, events and Files before retrying. |
 | Work was interrupted | Continue the same worker when its authority and provider remain valid. |
 | MCP does not connect | Check transport, dedicated token, port and client configuration. |

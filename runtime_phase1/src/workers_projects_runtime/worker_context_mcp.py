@@ -1,12 +1,16 @@
 """Context pagination shares the existing exact-attempt peer authority binder."""
 
 import json
-import os
-from urllib.parse import urlparse
 from pathlib import Path
 import hashlib
 from mcp.server.fastmcp import Context, FastMCP
-from .worker_configuration import ConfigurationError, _json, mcp_servers, restrict_codex_connections
+from .worker_configuration import (
+    ConfigurationError,
+    _json,
+    context_route_unavailable,
+    mcp_servers,
+    restrict_codex_connections,
+)
 
 
 def context_tool_manifest():
@@ -20,19 +24,16 @@ def context_tool_manifest():
 
 def native_context_server(configuration):
     descriptions = context_tool_manifest()["tools"]
+    from . import native_transport
     from .mcp_server import _mcp_transport_security_settings
 
-    endpoint = urlparse(
-        os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
-    )
     server = FastMCP(
         "xperfect-context",
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
         transport_security=_mcp_transport_security_settings(
-            endpoint.hostname or "127.0.0.1",
-            endpoint.port or (443 if endpoint.scheme == "https" else 80),
+            *native_transport.mcp_listen_origin()
         ),
     )
 
@@ -62,23 +63,14 @@ def bind_context_projection(configuration, worker, run):
     projected = configuration.prepare_run(worker, run)
     if not projected["_context_projection"]["manifest"]["context"]["retrievable_chars"]:
         return projected
-    hosted = os.environ.get("XPERFECT_EXECUTION_PROFILE") == "hosted-xfs"
-    # The supported hosted package has no trusted native context bridge yet.
-    # Fail before minting the scoped bearer instead of advertising a dead URL
-    # or sending the bearer across a shared plaintext worker network.
-    if hosted:
-        raise ConfigurationError("context_endpoint_unavailable")
-    base = os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "").rstrip("/")
-    endpoint = urlparse(base)
-    if (
-        endpoint.scheme not in {"http", "https"}
-        or not endpoint.netloc
-        or endpoint.username
-        or endpoint.password
-        or endpoint.query
-        or endpoint.fragment
-    ):
-        raise ConfigurationError("context_endpoint_unavailable")
+    from . import native_transport
+
+    # A packaged box reaches the runtime only through its own socket, and a
+    # hosted network contains several owners. Without a route, fail before
+    # minting the scoped bearer.
+    base = native_transport.worker_route()
+    if not base:
+        raise context_route_unavailable()
     token = configuration.peers.mint_native_session(
         worker["worker_id"], run["run_id"], purpose="context"
     )
@@ -93,21 +85,36 @@ def bind_context_projection(configuration, worker, run):
             server for server in bundle["grok_mcp_servers"]
             if server.get("name") != "xperfect-context"
         ]
-    bundle.setdefault("env", {})["GLASSHIVE_CONTEXT_TOKEN"] = token
+    environment = bundle.setdefault("env", {})
+    environment["GLASSHIVE_CONTEXT_TOKEN"] = token
     servers = dict(mcp_servers(bundle))
     bundle["claude_project_mcp"] = {"mcpServers": servers}
-    servers["xperfect-context"] = {
-        "type": "http",
-        "url": base + "/v1/native/context/",
-        "headers": {"Authorization": "Bearer ${GLASSHIVE_CONTEXT_TOKEN}"},
-    }
+    url = base + "/v1/native/context/"
+    if native_transport.socket_route(base):
+        interpreter = native_transport.bridge_interpreter(base)
+        servers["xperfect-context"] = native_transport.stdio_server(
+            url, "GLASSHIVE_CONTEXT_TOKEN", interpreter
+        )
+        codex_block = native_transport.codex_stdio_block(
+            "xperfect-context", url, "GLASSHIVE_CONTEXT_TOKEN", interpreter
+        )
+    else:
+        servers["xperfect-context"] = {
+            "type": "http",
+            "url": url,
+            "headers": {"Authorization": "Bearer ${GLASSHIVE_CONTEXT_TOKEN}"},
+        }
+        codex_block = (
+            "[mcp_servers.xperfect-context]\nurl = "
+            + json.dumps(url)
+            + '\nbearer_token_env_var = "GLASSHIVE_CONTEXT_TOKEN"\n'
+        )
     bundle["codex_config_append"] = (
         restrict_codex_connections(
             str(bundle.get("codex_config_append") or ""), {"xperfect-context"}
         )
-        + "\n[mcp_servers.xperfect-context]\nurl = "
-        + json.dumps(base + "/v1/native/context/")
-        + '\nbearer_token_env_var = "GLASSHIVE_CONTEXT_TOKEN"\n'
+        + "\n"
+        + codex_block
     )
     projected["bootstrap_bundle_json"] = _json(bundle)
     return projected

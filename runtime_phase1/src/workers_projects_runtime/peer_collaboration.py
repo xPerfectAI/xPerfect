@@ -338,23 +338,28 @@ class PeerCollaboration:
     def policy(self, workspace_id, *, tenant_id, owner_id):
         with self.store._connect() as conn:
             result = _policy(conn, workspace_id, tenant_id, owner_id)
-        if self._hosted_plaintext_bridge_unavailable():
+        if self._packaged_bridge_unavailable():
             return {**result, "native_peer_status": {
-                "available": False, "code": "peer_native_endpoint_requires_tls"
+                "available": False, "code": "peer_native_endpoint_unavailable"
             }}
         return result
 
     @staticmethod
-    def _hosted_plaintext_bridge_unavailable():
-        # The packaged hosted worker network contains multiple owners. The
-        # peer tool's cross-worker authority is unavailable over plain HTTP.
+    def _packaged_bridge_unavailable():
+        # Packaged boxes cannot reach the runtime over their network, and a
+        # hosted network contains several owners: the runtime's per-box socket
+        # is the only native path. Without it the peer tools are unavailable.
         import os
 
-        return (
+        from . import native_transport
+
+        hosted_package = (
             os.environ.get("XPERFECT_EXECUTION_PROFILE") == "hosted-xfs"
             and os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "").strip().rstrip("/")
             == "http://runtime:8766"
         )
+        return ((native_transport.packaged_profile() or hosted_package)
+                and native_transport.native_base() is None)
 
     def set_policy(
         self, workspace_id, *, tenant_id, owner_id, request: PeerPolicyUpdate
@@ -1087,10 +1092,25 @@ class PeerCollaboration:
             )
         if policy["discovery"] == "off" and not policy["access_enabled"]:
             return worker
-        if self._hosted_plaintext_bridge_unavailable():
+        if self._packaged_bridge_unavailable():
             # Peer capability is unavailable, not the owner's ordinary task.
             # policy() exposes the exact reason to UI/API/MCP callers.
             return worker
+        from . import native_transport
+
+        socket_base = native_transport.native_base()
+        if socket_base:
+            token = self.mint_native_session(worker["worker_id"], run["run_id"])
+            return {
+                **worker,
+                "_peer_native_projection": {
+                    "worker_id": worker["worker_id"],
+                    "run_id": run["run_id"],
+                    "url": socket_base + "/v1/native/peers/",
+                    "token": token,
+                    "transport": "stdio",
+                },
+            }
         endpoint = (
             os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "").strip().rstrip("/")
         )
@@ -1107,17 +1127,12 @@ class PeerCollaboration:
             or parsed.path not in {"", "/"}
         ):
             raise PeerError("peer_native_endpoint_invalid", 503)
-        local_package_bridge = (
-            os.environ.get("XPERFECT_EXECUTION_PROFILE") == "local-linux"
-            and bool(os.environ.get("XPERFECT_SHARED_NETWORK"))
-            and endpoint == "http://runtime:8766"
-        )
         if parsed.scheme == "http" and parsed.hostname not in {
             "127.0.0.1",
             "localhost",
             "::1",
             "host.docker.internal",
-        } and not local_package_bridge:
+        }:
             raise PeerError("peer_native_endpoint_requires_tls", 503)
         token = self.mint_native_session(worker["worker_id"], run["run_id"])
         return {
@@ -1142,25 +1157,36 @@ def project_peer_bootstrap(worker, bundle):
     if active_run and projection.get("run_id") != active_run:
         raise PeerError("peer_native_projection_mismatch")
     result = json.loads(json.dumps(bundle))
-    result.setdefault("env", {})["GLASSHIVE_PEER_TOKEN"] = projection["token"]
+    environment = result.setdefault("env", {})
+    environment["GLASSHIVE_PEER_TOKEN"] = projection["token"]
     mcp = result.get("claude_project_mcp") or {}
     servers = mcp.get("mcpServers", mcp)
-    servers["xperfect-peers"] = {
-        "type": "http",
-        "url": projection["url"],
-        "headers": {"Authorization": "Bearer ${GLASSHIVE_PEER_TOKEN}"},
-    }
+    from . import native_transport
+
+    if projection.get("transport") == "stdio":
+        servers["xperfect-peers"] = native_transport.stdio_server(
+            projection["url"], "GLASSHIVE_PEER_TOKEN"
+        )
+        peer_config = native_transport.codex_stdio_block(
+            "xperfect-peers", projection["url"], "GLASSHIVE_PEER_TOKEN"
+        )
+    else:
+        servers["xperfect-peers"] = {
+            "type": "http",
+            "url": projection["url"],
+            "headers": {"Authorization": "Bearer ${GLASSHIVE_PEER_TOKEN}"},
+        }
+        # Fixed server ID and typed URL; no prompt or intent routing.
+        peer_config = (
+            "[mcp_servers.xperfect-peers]\nurl = "
+            + json.dumps(projection["url"])
+            + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
+        )
     result["claude_project_mcp"] = {"mcpServers": servers}
     from .bootstrap import _strip_codex_mcp_server_blocks
 
     append = _strip_codex_mcp_server_blocks(
         result.get("codex_config_append", ""), {"xperfect-peers"}
     ).rstrip()
-    # Fixed server ID and typed URL; no prompt or intent routing.
-    peer_config = (
-        "[mcp_servers.xperfect-peers]\nurl = "
-        + json.dumps(projection["url"])
-        + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
-    )
     result["codex_config_append"] = append + "\n\n" + peer_config
     return result

@@ -603,18 +603,23 @@ def test_native_old_attempt_and_missing_provider_endpoint_fail_closed(
 
 
 @pytest.mark.parametrize(
-    ("profile", "network", "endpoint", "allowed"),
+    ("profile", "packaged", "endpoint", "expected"),
     [
-        ("local-linux", "xperfect-workers", "http://runtime:8766", True),
-        ("hosted-xfs", "xperfect-workers", "http://runtime:8766", None),
-        ("local-linux", "", "http://runtime:8766", False),
-        ("local-linux", "xperfect-workers", "http://other:8766", False),
-        ("local-linux", "xperfect-workers", "http://runtime:9999", False),
+        # A package reaches the runtime only through its box socket.
+        ("local-linux", True, "http://runtime:8766", "unavailable"),
+        ("hosted-xfs", True, "http://runtime:8766", "unavailable"),
+        ("hosted-xfs", False, "http://runtime:8766", "unavailable"),
+        # Elsewhere plaintext stays loopback-only.
+        ("local-linux", False, "http://runtime:8766", "requires_tls"),
+        ("local-linux", False, "http://other:8766", "requires_tls"),
+        ("", False, "http://127.0.0.1:8766", "allowed"),
     ],
 )
-def test_peer_native_plaintext_is_only_the_exact_local_package_bridge(
-    peers, monkeypatch, profile, network, endpoint, allowed
+def test_peer_native_plaintext_is_loopback_only_and_packages_need_their_socket(
+    peers, monkeypatch, tmp_path, profile, packaged, endpoint, expected
 ):
+    from workers_projects_runtime import native_transport
+
     service, workers = enable(peers)
     worker = workers[0]
     run = service.store.create_run(
@@ -622,22 +627,65 @@ def test_peer_native_plaintext_is_only_the_exact_local_package_bridge(
     )
     with service.store._connect() as conn:
         conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+    monkeypatch.setattr(native_transport, "_hub", None)
     monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", profile)
-    monkeypatch.setenv("XPERFECT_SHARED_NETWORK", network)
+    monkeypatch.setenv("XPERFECT_SHARED_NETWORK", "xperfect-workers")
     monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", endpoint)
-    if allowed is None:
+    if packaged:
+        monkeypatch.setenv("XPERFECT_CONTROL_ROOT", str(tmp_path))
+    else:
+        monkeypatch.delenv("XPERFECT_CONTROL_ROOT", raising=False)
+    if expected == "unavailable":
         assert "_peer_native_projection" not in service.project_native_tools(worker, run)
         assert service.policy(worker["workspace_id"], tenant_id=worker["tenant_id"],
                               owner_id=worker["owner_id"])["native_peer_status"] == {
-            "available": False, "code": "peer_native_endpoint_requires_tls"
+            "available": False, "code": "peer_native_endpoint_unavailable"
         }
-    elif allowed:
+    elif expected == "allowed":
         assert service.project_native_tools(worker, run)["_peer_native_projection"]["url"] == (
-            "http://runtime:8766/v1/native/peers/"
+            "http://127.0.0.1:8766/v1/native/peers/"
         )
     else:
         with pytest.raises(PeerError, match="peer_native_endpoint_requires_tls"):
             service.project_native_tools(worker, run)
+
+
+def test_packaged_peer_tools_use_only_the_box_socket_bridge(peers, monkeypatch, tmp_path):
+    import tomllib
+    from types import SimpleNamespace
+
+    from workers_projects_runtime import native_transport
+    from workers_projects_runtime.peer_collaboration import project_peer_bootstrap
+
+    service, workers = enable(peers)
+    worker = workers[0]
+    run = service.store.create_run(
+        worker["worker_id"], worker["project_id"], "Synthetic native turn", state="running"
+    )
+    with service.store._connect() as conn:
+        conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+    monkeypatch.setenv("XPERFECT_EXECUTION_PROFILE", "hosted-xfs")
+    monkeypatch.setenv("XPERFECT_SHARED_NETWORK", "xperfect-workers")
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://runtime:8766")
+    monkeypatch.setenv("XPERFECT_CONTROL_ROOT", str(tmp_path))
+    monkeypatch.setattr(native_transport, "_hub", SimpleNamespace(running=True))
+    policy = service.policy(worker["workspace_id"], tenant_id=worker["tenant_id"], owner_id=worker["owner_id"])
+    assert "native_peer_status" not in policy
+    bound = service.project_native_tools(worker, run)
+    projection = bound["_peer_native_projection"]
+    url = "http+unix://%2Fworkspace%2Fdata%2F.xperfect-runtime.sock/v1/native/peers/"
+    assert projection["url"] == url and projection["transport"] == "stdio"
+    assert set(projection) == {"worker_id", "run_id", "url", "token", "transport"}
+    bundle = project_peer_bootstrap({**bound, "_active_run_id": run["run_id"]}, {})
+    assert native_transport.is_projected_stdio(bundle["claude_project_mcp"]["mcpServers"]["xperfect-peers"], url)
+    assert bundle["env"] == {"GLASSHIVE_PEER_TOKEN": projection["token"]}
+    codex = tomllib.loads(bundle["codex_config_append"])["mcp_servers"]["xperfect-peers"]
+    assert codex["args"][2] == url and "url" not in codex
+    assert projection["token"] not in bundle["codex_config_append"]
+    assert "http://runtime:8766" not in json.dumps(bundle)
+    # Without the serving hub the package stays safely unavailable.
+    monkeypatch.setattr(native_transport, "_hub", None)
+    assert "_peer_native_projection" not in service.project_native_tools(worker, run)
 
 
 def test_unimplemented_scopes_are_explicitly_unavailable(peers):

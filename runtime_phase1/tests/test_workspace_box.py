@@ -361,3 +361,31 @@ def test_box_release_refuses_a_changed_generation(tmp_path, monkeypatch):
     with pytest.raises(WorkspaceBoxUnavailable, match='generation'):
         box.release_if_sole_member('d' * 64)
     assert state['removed'] == []
+
+
+def test_a_removed_box_stops_serving_its_runtime_socket_and_a_live_one_keeps_it(tmp_path, monkeypatch):
+    from workers_projects_runtime import native_transport
+    released = []
+    monkeypatch.setattr(native_transport, 'release_box_socket', released.append)
+    box, state = _released_box(tmp_path, monkeypatch, members=[20001, 20002])
+    assert box.release_if_sole_member('c' * 64) is False
+    assert released == []
+    (tmp_path / 'sole').mkdir()
+    box, state = _released_box(tmp_path / 'sole', monkeypatch, members=[20001])
+    assert box.release_if_sole_member('c' * 64) is True
+    assert released == [box.native_root]
+
+
+def test_a_box_whose_runtime_socket_cannot_be_served_is_unavailable(tmp_path, monkeypatch):
+    from workers_projects_runtime import native_transport
+    box, _ = _released_box(tmp_path, monkeypatch, members=[20001])
+    served = []
+    monkeypatch.setattr(native_transport, 'ensure_box_socket', served.append)
+    box._serve_native_socket()
+    assert served == [box.native_root]
+
+    def refused(_root):
+        raise PermissionError('not a private service directory')
+    monkeypatch.setattr(native_transport, 'ensure_box_socket', refused)
+    with pytest.raises(WorkspaceBoxUnavailable, match='runtime socket'):
+        box._serve_native_socket()

@@ -479,6 +479,12 @@ class AdminPrincipalUpdateRequest(BaseModel):
     disabled: bool
 
 
+class AdminStoragePolicyRequest(BaseModel):
+    storage_limit_bytes: int | None = Field(default=None, ge=0)
+    max_file_bytes: int | None = Field(default=None, ge=0)
+    inherit: bool = False
+
+
 class RecurringScheduleRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=10000)
     recurrence_type: Literal["once", "daily", "interval", "cron", "rfc5545"]
@@ -2885,6 +2891,36 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def list_admin_users(request: Request, limit: int = 100) -> dict[str, object]:
         _require_tenant_admin(request)
         return {"items": human_auth.list_principals(limit=limit)}
+
+    def _admin_storage_principal(request: Request, principal_id: str) -> str:
+        _require_tenant_admin(request)
+        principal = human_auth.get_principal(principal_id)
+        if principal is None:
+            raise HTTPException(status_code=404, detail="Account was not found")
+        return str(principal["user_id"])
+
+    @app.get("/api/admin/users/{principal_id}/storage")
+    def admin_user_storage(request: Request, principal_id: str) -> dict[str, Any]:
+        owner_id = _admin_storage_principal(request, principal_id)
+        try:
+            return _client_for_request(request).file_request(
+                "GET", f"/v1/storage/owners/{quote(owner_id, safe='')}"
+            )
+        except httpx.HTTPStatusError as exc:
+            raise _runtime_http_exception(exc, "Could not read this account's storage") from exc
+
+    @app.patch("/api/admin/users/{principal_id}/storage")
+    def admin_user_storage_policy(
+        request: Request, principal_id: str, payload: AdminStoragePolicyRequest
+    ) -> dict[str, Any]:
+        owner_id = _admin_storage_principal(request, principal_id)
+        try:
+            return _client_for_request(request).file_request(
+                "PATCH", f"/v1/storage/owners/{quote(owner_id, safe='')}/policy",
+                payload.model_dump(exclude_unset=True),
+            )
+        except httpx.HTTPStatusError as exc:
+            raise _runtime_http_exception(exc, "Could not update this account's storage") from exc
 
     @app.patch("/api/admin/users/{principal_id}")
     def update_admin_user(

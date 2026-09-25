@@ -64,6 +64,7 @@ class FakeDocker:
     def __init__(self):
         self.images = {OLD, NEW, NATIVE}
         self.volumes: dict[str, dict[str, bytes]] = {}
+        self.networks: dict[str, dict] = {}
         self.containers: dict[str, dict] = {}
         self.calls: list[tuple] = []
         self.live_idle = True
@@ -84,6 +85,7 @@ class FakeDocker:
         self.on_start = None
         self.on_stop = None
         self.fail_rm_once: set[str] = set()
+        self.fail_calls_once: list[tuple] = []
         self.counter = 0
         # Stored-file attachments the running release registered but never published.
         self.unpublished: list[str] = []
@@ -232,6 +234,10 @@ class FakeDocker:
         self.calls.append(args)
         ok = lambda out=b'': subprocess.CompletedProcess(args, 0, out if isinstance(out, bytes) else out.encode(), b'')
         fail = lambda: subprocess.CompletedProcess(args, 1, b'', b'Error: private detail /Users/someone')
+        for prefix in list(self.fail_calls_once):
+            if args[:len(prefix)] == prefix:
+                self.fail_calls_once.remove(prefix)
+                return fail()
         if args[:1] == ('info',):
             if '{{.OperatingSystem}}' in args:
                 return ok(self.operating_system)
@@ -255,13 +261,39 @@ class FakeDocker:
             self.volume_labels.pop(args[-1], None)
             return ok() if self.volumes.pop(args[-1], None) is not None else fail()
         if args[:1] == ('ps',):
-            volume = args[args.index('--filter') + 1].removeprefix('volume=')
+            selector = args[args.index('--filter') + 1]
+            if selector.startswith('network='):
+                return ok('\n'.join(identity for identity, record in self.containers.items()
+                                     if selector.removeprefix('network=') in record['NetworkSettings']['Networks']))
+            volume = selector.removeprefix('volume=')
             return ok('\n'.join(identity for identity, record in self.containers.items()
                                  if any(mount['Source'] == volume for mount in record['HostConfig']['Mounts'])))
         if args[:2] == ('network', 'create'):
+            if args[-1] in self.networks:
+                return fail()
+            self.networks[args[-1]] = {'Options': dict(args[i + 1].split('=', 1) for i, value in enumerate(args)
+                                                       if value == '--opt')}
+            return ok()
+        if args[:2] == ('network', 'inspect'):
+            network = self.networks.get(args[-1])
+            return ok(json.dumps(network['Options'])) if network is not None else fail()
+        if args[:2] == ('network', 'rm'):
+            if args[-1] not in self.networks or any(
+                    record['State']['Running'] and args[-1] in record['NetworkSettings']['Networks']
+                    for record in self.containers.values()):
+                return fail()
+            del self.networks[args[-1]]
+            return ok()
+        if args[:2] == ('network', 'disconnect'):
+            record = self.find(args[-1])
+            if record is None or args[-2] not in record['NetworkSettings']['Networks']:
+                return fail()
+            del record['NetworkSettings']['Networks'][args[-2]]
             return ok()
         if args[:2] == ('network', 'connect'):
             record = self.find(args[-1])
+            if args[-2] not in self.networks or record is None:
+                return fail()
             record['NetworkSettings']['Networks'][args[-2]] = {'Aliases': [args[3]]}
             return ok()
         if args[:1] == ('create',):
@@ -400,7 +432,8 @@ def _config(fake, role='runtime'):
 
 def _mutations(fake):
     return [call for call in fake.calls if call[:1] in {('stop',), ('rename',), ('create',), ('start',), ('rm',)}
-            or call[:2] in {('volume', 'create'), ('volume', 'rm'), ('cp', '-')}]
+            or call[:2] in {('volume', 'create'), ('volume', 'rm'), ('cp', '-'), ('network', 'create'),
+                            ('network', 'rm'), ('network', 'connect'), ('network', 'disconnect')}]
 
 
 def test_every_launched_role_matches_the_upgrade_shape_and_is_recreated_identically(package):
@@ -1068,11 +1101,13 @@ def test_the_endpoint_decides_whether_the_docker_desktop_socket_is_accepted(pack
 # -- packages created by an earlier launcher: settings added since, never changed --
 
 SINCE = ('GLASSHIVE_PROVIDER_ACCOUNT_ISOLATION', 'GLASSHIVE_ENABLE_NATIVE_API_KEYS',
-         'GLASSHIVE_ENABLE_CODEX_PERSONAL_ACCOUNTS', 'GLASSHIVE_ENABLE_HOSTED_CLAUDE_CONSUMER_AUTH')
+         'GLASSHIVE_ENABLE_CODEX_PERSONAL_ACCOUNTS', 'GLASSHIVE_ENABLE_HOSTED_CLAUDE_CONSUMER_AUTH',
+         'XPERFECT_WORKER_NETWORK')
 
 
 def _older_launcher(fake, **keep):
-    """Rewrite every role's configuration as an earlier launcher wrote it (without SINCE)."""
+    """Rewrite the package as an earlier launcher made it: without SINCE, on a shared workers bridge."""
+    fake.networks[f'{NAME}-workers']['Options'] = {}
     for role in linux_upgrade.ROLES:
         volume = fake.volume_at(fake.find(f'{NAME}-{role}'), '/' + linux_upgrade.STATE[role])
         config = json.loads(volume['config.json'])
@@ -1169,8 +1204,10 @@ def test_a_configuration_without_a_security_mode_is_refused(package):
     with pytest.raises(linux_upgrade.UpgradeError, match='no security mode'):
         _runner(path).upgrade(service_image=NEW)
     assert _mutations(fake) == []
-    # With nothing to complete, a plain image upgrade is not refused for it.
+    # With nothing to complete, a plain image upgrade is not refused for it (on the
+    # earlier shared bridge, since this image declares no isolated worker network).
     fake.image_settings = {NEW: None}
+    fake.networks[f'{NAME}-workers']['Options'] = {}
     assert _runner(path).upgrade(service_image=NEW)['status'] == 'awaiting_commit'
 
 
@@ -1653,3 +1690,86 @@ def test_hosted_packages_keep_their_own_signers(hosted_package):
     result = _runner(path).upgrade(service_image=NEW)
     assert 'local_assertion' not in result
     assert 'GLASSHIVE_LOCAL_HUMAN_ASSERTION' not in _config(fake, 'ui')['environment']
+
+
+# -- workers network isolation ------------------------------------------------
+ISOLATED = {linux_launch.ICC_OPTION: 'false'}
+
+
+def _attached(fake, identity):
+    return fake.find(identity)['NetworkSettings']['Networks']
+
+
+def test_a_fresh_package_isolates_only_its_workers_network(package):
+    fake, path, receipt = package
+    assert fake.networks[f'{NAME}-workers']['Options'] == ISOLATED
+    assert fake.networks[f'{NAME}-frontend']['Options'] == {}
+    assert _attached(fake, receipt['containers']['runtime'])[f'{NAME}-workers'] == {'Aliases': ['runtime']}
+
+
+def test_an_earlier_shared_workers_network_is_isolated_and_rollback_restores_it(package):
+    fake, path, receipt = package
+    _older_launcher(fake)
+    previous = receipt['containers']['runtime']
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW)
+    upgraded = json.loads(path.read_text())['containers']['runtime']
+    assert fake.networks[f'{NAME}-workers']['Options'] == ISOLATED
+    assert _attached(fake, upgraded)[f'{NAME}-workers'] == {'Aliases': ['runtime']}
+    assert f'{NAME}-workers' not in _attached(fake, previous)
+    runner.rollback()
+    assert fake.networks[f'{NAME}-workers']['Options'] == {}
+    assert _attached(fake, previous)[f'{NAME}-workers'] == {'Aliases': ['runtime']}
+    assert fake.find(previous)['State']['Running'] is True
+
+
+def test_a_committed_isolation_needs_no_second_migration(package):
+    fake, path, receipt = package
+    _older_launcher(fake)
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW)
+    runner.commit()
+    fake.calls.clear()
+    runner.upgrade(service_image=OLD)
+    assert not [call for call in fake.calls if call[:2] in {('network', 'rm'), ('network', 'create')}]
+    assert fake.networks[f'{NAME}-workers']['Options'] == ISOLATED
+
+
+def test_an_image_that_needs_container_traffic_is_refused_on_an_isolated_package(package):
+    fake, path, receipt = package
+    earlier = {k: v for k, v in linux_launch.PROFILE_SETTINGS['local-linux'].items() if k != 'XPERFECT_WORKER_NETWORK'}
+    fake.image_settings = {NEW: {'local-linux': earlier}}
+    with pytest.raises(linux_upgrade.UpgradeError, match='isolates its workspace containers'):
+        _runner(path).upgrade(service_image=NEW)
+    assert _mutations(fake) == [] and not linux_upgrade.journal_path(path).exists()
+
+
+def test_a_workers_network_another_container_uses_is_not_replaced(package):
+    fake, path, receipt = package
+    _older_launcher(fake)
+    # A stopped workspace container the idle proof did not see still names the bridge.
+    stray = json.loads(json.dumps(fake.find(receipt['containers']['ui'])))
+    stray.update({'Id': 'f' * 64, 'Name': '/xperfect-wsp-fixture', 'State': {'Running': False},
+                  'NetworkSettings': {'Networks': {f'{NAME}-workers': {'Aliases': []}}}})
+    fake.containers[stray['Id']] = stray
+    with pytest.raises(linux_upgrade.UpgradeError, match='still uses the workers network'):
+        _runner(path).upgrade(service_image=NEW)
+    previous = receipt['containers']['runtime']
+    assert fake.networks[f'{NAME}-workers']['Options'] == {}
+    assert _attached(fake, previous)[f'{NAME}-workers'] == {'Aliases': ['runtime']}
+    assert fake.find(previous)['State']['Running'] is True
+    assert not linux_upgrade.journal_path(path).exists()
+
+
+@pytest.mark.parametrize('step', [('network', 'rm'), ('network', 'create'), ('network', 'connect')])
+def test_an_interrupted_isolation_is_restored_by_the_automatic_rollback(package, step):
+    fake, path, receipt = package
+    _older_launcher(fake)
+    fake.fail_calls_once.append(step)
+    with pytest.raises(linux_upgrade.UpgradeError, match='previous version is running again'):
+        _runner(path).upgrade(service_image=NEW)
+    previous = receipt['containers']['runtime']
+    assert fake.networks[f'{NAME}-workers']['Options'] == {}
+    assert _attached(fake, previous)[f'{NAME}-workers'] == {'Aliases': ['runtime']}
+    assert all(fake.find(identity)['State']['Running'] for identity in receipt['containers'].values())
+    assert not linux_upgrade.journal_path(path).exists()

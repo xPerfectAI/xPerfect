@@ -783,6 +783,17 @@ button, input, textarea, select { font: inherit; }
   max-width: 760px;
 }
 .connections-primary-card { padding: 18px; }
+.storage-admin-form { display: grid; gap: 8px; margin-top: 16px; }
+.storage-admin-form label { font-size: 0.84rem; font-weight: 650; }
+.storage-admin-form input,
+.storage-admin-form select {
+  width: 100%; min-height: 42px; padding: 9px 12px;
+  border: 1px solid rgba(255,255,255,0.16); border-radius: 10px;
+  color: var(--text); background: #141b25;
+}
+.storage-admin-form input:focus,
+.storage-admin-form select:focus { outline: 2px solid var(--queue); outline-offset: 2px; }
+.storage-admin-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .connections-empty {
   margin: 14px 0 0;
   color: var(--muted);
