@@ -103,6 +103,57 @@ def test_pending_projection_resumes_existing_member_without_new_launch(tmp_path)
     assert not marker.exists()
 
 
+def test_member_session_reads_skip_the_launch_guard_while_a_run_holds_the_account(tmp_path, monkeypatch):
+    # A running personal-account run keeps its credential projection pending. Restart
+    # recovery and session discovery read that run's session; only new member work may
+    # meet the launch guard, and no read may prepare or start the box.
+    import subprocess
+
+    from workers_projects_runtime.docker_sandbox import DockerSandboxManager
+    from workers_projects_runtime.workspace_sandbox import WorkspaceMemberSandbox
+
+    member = WorkspaceMemberBinding('wsp_shared', 'wrk_one', 'tenant', 'owner', 20001)
+    identity = {'worker_id': member.worker_id, 'workspace_id': member.workspace_id, 'member_uid': member.uid,
+                'run_id': 'run', 'attempt_id': 'attempt', 'lease_id': 'lease', 'container_id': 'exact'}
+    store = SimpleNamespace(pending_provider_projections=lambda **k: [{'binding': identity, 'state': 'pending'}],
+                            assert_provider_projection=lambda **k: None)
+    box = SimpleNamespace(binding=member, name='xperfect-wsp-shared', supervisor=tmp_path,
+                          _inspect=lambda: {'Id': 'exact'},
+                          guarded_command=lambda command: ['guard', *command],
+                          git_workspace_env=lambda: {},
+                          ensure_box=lambda: pytest.fail('a session read prepared or started the box'))
+    sandbox = object.__new__(WorkspaceMemberSandbox)
+    sandbox.box = box
+    sandbox.user = '20001:20000'
+    sandbox.home_mount = '/workspace/data/members/20001/home'
+    sandbox.workspace_mount = '/workspace/worktree'
+    sandbox.term_value = 'xterm-256color'
+    sandbox.assert_native_launch = lambda: assert_native_launch(box, store)
+    sandbox.inspect = lambda _worker_id: SimpleNamespace(
+        container_name=box.name, container_id='exact', state='running', execution_policy='')
+    sandbox.fast_sandbox_from_worker = lambda _worker: None
+    executed = []
+
+    def docker_exec(_self, container, command, **kwargs):
+        executed.append((container, command, kwargs.get('user')))
+        joined = ' '.join(str(part) for part in command)
+        output = '4242\n' if 'awk' in joined else '\t4242.job-run\t(Detached)\n' if 'screen -ls' in joined else ''
+        return subprocess.CompletedProcess(command, 0, output, '')
+
+    monkeypatch.setattr(DockerSandboxManager, '_docker_exec', docker_exec)
+
+    assert sandbox.screen_session_pid('wrk_one', 'claude-code', 'job-run') == 4242
+    assert sandbox.list_screen_sessions('wrk_one', 'claude-code') == ['job-run']
+    # Every read ran as the member in the exact current box, not through the credential launcher.
+    assert executed and all(container == 'exact' and user == '20001:20000' and command[0] == 'guard'
+                            and 'native_credential_exec' not in ' '.join(map(str, command))
+                            for container, command, user in executed)
+    # Starting new member work still meets the launch guard.
+    with pytest.raises(WorkspaceBoxUnavailable, match='holds this member'):
+        sandbox.ensure_ready({'worker_id': 'wrk_one', 'tenant_id': 'tenant', 'owner_id': 'owner',
+                              'bootstrap_profile': 'none'}, 'claude-code')
+
+
 def test_secret_loader_does_not_put_key_in_native_arguments(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
     path = tmp_path / 'credential.json'
@@ -191,3 +242,4 @@ def test_runtime_default_bootstrap_matches_the_former_client_defaults():
     assert bootstrap_profile_for({}, 'claude-code') == 'claude-host'
     assert bootstrap_profile_for({}, 'openclaw') == 'host-login'
     assert bootstrap_profile_for({}, 'grok-build') == 'host-login'
+

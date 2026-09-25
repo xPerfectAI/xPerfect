@@ -377,3 +377,56 @@ def test_projected_run_uses_same_provisioned_owner_root_for_refresh(harness):
     assert (new_home/'codex/auth.json').read_text() == '{"refresh":"owner-root-after"}'
     assert not canonical.exists()
     assert not store.pending_provider_projections()
+
+
+def test_crashed_holders_projection_settles_only_after_its_lease_lapses_and_reopens_admission(harness):
+    # A runtime crash mid-run leaves the projection pending with a live lease and no
+    # heartbeat. Its ended run's settlement never claims it early: it learns when the
+    # lease lapses, then the ordinary recovery cleans the copy and reopens admission.
+    from types import SimpleNamespace
+    from workers_projects_runtime.provider_projection_binding import _metadata
+    from workers_projects_runtime.workspace_runtime import SharedWorkspaceRuntimes
+
+    binder, store, account, worker, canonical, member, factory, seen = harness
+    lease = store.acquire_provider_lease(account_id=account['account_id'], tenant_id='tenant', owner_id='owner',
+                                         lane='codex-cli:mission', worker_id='worker', run_id='run',
+                                         ttl_seconds=180, required_recovery_code='')
+    held = {}
+    projected = factory(worker=dict(worker), account_home=canonical.parent.parent, lease=dict(lease), attempt_id='attempt',
+                        assert_lease=lambda: store.assert_provider_projection(binding=asdict(held['tx'].binding)))
+    tx = held['tx'] = projected.transaction
+    with _transaction_lock(tx):
+        store.begin_provider_projection(binding=asdict(tx.binding), metadata=_metadata(projected))
+        tx.prepare()
+        projected.grant_member_access()
+    (member / '.codex/auth.json').write_text('{"refresh":"after"}')
+    # The runtime process is gone here: no heartbeat, no finish.
+
+    stops = []
+    box = SimpleNamespace(binding=SimpleNamespace(workspace_id='workspace', worker_id='worker', tenant_id='tenant',
+                                                  owner_id='owner', uid=20001),
+                          paths=lambda: {'home_dir': member}, supervisor=tx.receipt.parent,
+                          stop_member=lambda container_id: stops.append(container_id))
+    runtime = SimpleNamespace(_runtime_for_worker=lambda _worker: SimpleNamespace(sandbox=SimpleNamespace(box=box)))
+    restarted = MissionProviderAccountBinder(db_path=store.db_path, home_root=binder.home_root)
+    shared = SharedWorkspaceRuntimes(store=SimpleNamespace(get_worker=lambda *_identity: dict(worker)), binder=restarted)
+    shared.recover_pending(runtime)
+    assert shared.recovery_members() == ['worker']
+    with pytest.raises(ProviderProjectionPending, match='still active'):  # why startup could not finish it
+        restarted.recover_projection(store.pending_provider_projections()[0], projection_factory=recovery_factory(harness))
+
+    expires_at = shared.settle_member_projections(worker, runtime)
+    assert expires_at == pytest.approx(lease['expires_at'])
+    assert store.pending_provider_projections()[0]['state'] == 'pending'
+    assert (member / '.codex/auth.json').exists() and stops == []
+    assert shared.recovery_members() == ['worker']
+
+    with sqlite3.connect(store.db_path) as db:
+        db.execute('UPDATE provider_account_leases SET expires_at = ?', (time.time() - 1,))
+    assert shared.settle_member_projections(worker, runtime) is None
+    assert store.pending_provider_projections() == []
+    assert stops == ['a' * 64]
+    assert canonical.read_text() == '{"refresh":"after"}'
+    assert not (member / '.codex/auth.json').exists()
+    assert store.active_provider_account_lease(account['account_id']) is None
+    assert shared.recovery_members() == []

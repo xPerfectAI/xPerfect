@@ -1942,6 +1942,18 @@ class ProfiledWorkerRuntime:
         self._shared_workspace_runtimes = SharedWorkspaceRuntimes(store, self.provider_account_binder, getattr(self, "_owner_storage", None))
         self._shared_workspace_runtimes.recover_pending(self)
 
+    def provider_projection_recovery_members(self) -> list[str]:
+        """Members whose account projection startup recovery could not finish."""
+        runtimes = getattr(self, "_shared_workspace_runtimes", None)
+        return runtimes.recovery_members() if runtimes is not None else []
+
+    def settle_member_provider_projections(self, worker: dict) -> float | None:
+        """Finish a member's projections left by an ended run; returns when to retry."""
+        runtimes = getattr(self, "_shared_workspace_runtimes", None)
+        if runtimes is None:
+            return None
+        return runtimes.settle_member_projections(worker, self)
+
     def recover_quarantined_provider_projections(self, *, account_id: str) -> list[str]:
         """Settle one account's quarantined projections on an owner's verify/reconnect."""
         runtimes = getattr(self, "_shared_workspace_runtimes", None)

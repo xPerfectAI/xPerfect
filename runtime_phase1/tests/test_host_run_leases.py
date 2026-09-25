@@ -3096,6 +3096,21 @@ def test_restart_adopts_live_survivor_and_collects_its_terminal_result(
             self.alive = False
             return {"state": "completed", "output_text": "survivor completed"}
 
+        def provider_projection_recovery_members(self):
+            return [] if len(settled) >= 2 else [worker["worker_id"]]
+
+        def settle_member_provider_projections(self, worker):
+            settled.append((
+                worker["worker_id"],
+                store.get_run(run["run_id"])["state"],
+                service._local_processor_owns(worker["worker_id"]),
+                time.time(),
+            ))
+            # First the crashed holder's lease still fences recovery; then it lapses.
+            return lease_lapses_at if len(settled) == 1 else None
+
+    settled: list[tuple[str, str, bool, float]] = []
+    lease_lapses_at = time.time() + 0.3
     monkeypatch.setenv("WPR_SURVIVOR_MONITOR_INTERVAL_S", "0.02")
     store = Store(str(tmp_path / "restart-survivor.sqlite3"))
     _project, worker, run = _active_worker_and_run(
@@ -3113,10 +3128,16 @@ def test_restart_adopts_live_survivor_and_collects_its_terminal_result(
         assert service._local_processor_owns(worker["worker_id"])
         assert store.get_run(run["run_id"])["state"] == "running"
 
+        # Settlement leaves the live, adopted survivor to its own monitor.
+        service.settle_unfinished_projections_once()
+        assert settled == []
         runtime.completed = True
+        deadline = time.monotonic() + 3
+        while len(settled) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
         deadline = time.monotonic() + 2
         while (
-            store.get_run(run["run_id"])["state"] != "completed"
+            service._local_processor_owns(worker["worker_id"])
             and time.monotonic() < deadline
         ):
             time.sleep(0.01)
@@ -3127,6 +3148,108 @@ def test_restart_adopts_live_survivor_and_collects_its_terminal_result(
     assert durable is not None
     assert durable["state"] == "completed"
     assert durable["output_text"] == "survivor completed"
+    # The survivor's account projection, pending since the restart, is finished once
+    # its run ended and the crashed holder's lease lapsed, never earlier, while this
+    # member stays held so no next run meets it; otherwise admission stays closed.
+    assert [item[:3] for item in settled] == [
+        (worker["worker_id"], "completed", True),
+        (worker["worker_id"], "completed", True),
+    ]
+    assert settled[1][3] >= lease_lapses_at
+
+
+def test_ended_runs_projection_settles_before_the_members_next_run_starts(
+    tmp_path, monkeypatch
+):
+    # The run finished while the service was down, so no survivor is adopted. Its
+    # projection, which startup recovery could not claim under the crashed holder's
+    # live lease, is settled holding the member; only then may its next run start.
+    class FinishedWhileDownRuntime(StubRuntime):
+        def collect_completed_run(self, worker, run_id=None, instruction=""):
+            if run_id != run["run_id"]:
+                return None
+            return {"state": "completed", "output_text": "finished while down"}
+
+        def provider_projection_recovery_members(self):
+            return [] if len(settled) >= 2 else [worker["worker_id"]]
+
+        def settle_member_provider_projections(self, member):
+            settled.append((
+                store.get_run(run["run_id"])["state"],
+                store.get_run(next_run["run_id"])["state"],
+                service._local_processor_owns(member["worker_id"]),
+                time.time(),
+            ))
+            return lease_lapses_at if len(settled) == 1 else None
+
+    settled: list[tuple[str, str, bool, float]] = []
+    attempts: list[float] = []
+    handed_off: list[float] = []
+    monkeypatch.setenv("GLASSHIVE_SCHEDULER_INTERVAL_S", "1")
+    store = Store(str(tmp_path / "finished-while-down.sqlite3"))
+    project, worker, run = _active_worker_and_run(
+        store, "finished-while-down", run_state="running"
+    )
+    next_run = store.create_run(worker["worker_id"], project["project_id"], "Next instruction")
+    lease_lapses_at = time.time() + 0.4
+    service = WorkersProjectsService(
+        store, FinishedWhileDownRuntime(), reconcile_on_startup=False
+    )
+    def ensure_worker_processor(worker_id):
+        if not settled:
+            return
+        attempts.append(time.time())
+        if not service._local_processor_owns(worker_id):
+            handed_off.append(time.time())
+
+    monkeypatch.setattr(service, "_ensure_worker_processor", ensure_worker_processor)
+    try:
+        service.reconcile_all_workers()
+        assert store.get_run(run["run_id"])["state"] == "completed"
+        service.settle_unfinished_projections_once()
+        deadline = time.monotonic() + 3
+        while (not handed_off or len(settled) < 2) and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        service.shutdown()
+
+    assert [item[:3] for item in settled] == [
+        ("completed", "queued", True),
+        ("completed", "queued", True),
+    ]
+    assert settled[1][3] >= lease_lapses_at
+    assert handed_off and handed_off[0] >= settled[1][3]
+    # The held member's due run does not spin the scheduler while it waits.
+    assert len([at for at in attempts if at < settled[1][3]]) <= 2
+
+
+def test_projection_settlement_never_runs_beside_a_live_run_or_outwaits_a_live_holder(
+    tmp_path,
+):
+    calls: list[float] = []
+
+    class RenewingHolderRuntime(StubRuntime):
+        def settle_member_provider_projections(self, worker):
+            calls.append(time.time())
+            # The lease that fenced the first attempt was renewed: its holder is live.
+            return time.time() + (0.05 if len(calls) == 1 else 30.0)
+
+    store = Store(str(tmp_path / "settlement-guards.sqlite3"))
+    _project, worker, run = _active_worker_and_run(
+        store, "settlement-guards", run_state="running"
+    )
+    service = WorkersProjectsService(
+        store, RenewingHolderRuntime(), reconcile_on_startup=False
+    )
+    try:
+        service._settle_member_projections(worker["worker_id"])
+        assert calls == []  # a run of this member may still be live
+        store.update_run(run["run_id"], state="completed")
+        started = time.monotonic()
+        service._settle_member_projections(worker["worker_id"])
+        assert len(calls) == 2 and time.monotonic() - started < 5
+    finally:
+        service.shutdown()
 
 
 def test_recovery_collection_projects_the_exact_active_attempt_to_runtime(tmp_path):
@@ -3166,6 +3289,14 @@ def test_restart_survivor_exit_without_terminal_evidence_requeues_exact_run(
         def collect_completed_run(self, worker, run_id=None, instruction=""):
             return None
 
+        def settle_member_provider_projections(self, worker):
+            settled.append((
+                worker["worker_id"],
+                store.get_run(run["run_id"])["state"],
+                service._local_processor_owns(worker["worker_id"]),
+            ))
+
+    settled: list[tuple[str, str, bool]] = []
     monkeypatch.setenv("WPR_SURVIVOR_MONITOR_INTERVAL_S", "0.02")
     store = Store(str(tmp_path / "restart-survivor-retry.sqlite3"))
     _project, worker, run = _active_worker_and_run(
@@ -3186,7 +3317,7 @@ def test_restart_survivor_exit_without_terminal_evidence_requeues_exact_run(
         runtime.alive = False
         deadline = time.monotonic() + 2
         while (
-            store.get_run(run["run_id"])["state"] != "queued"
+            (store.get_run(run["run_id"])["state"] != "queued" or not settled)
             and time.monotonic() < deadline
         ):
             time.sleep(0.01)
@@ -3198,6 +3329,9 @@ def test_restart_survivor_exit_without_terminal_evidence_requeues_exact_run(
     assert durable["state"] == "queued"
     assert durable["failure_class"] == "provider_temporarily_unavailable"
     assert durable["retry_attempts"] == 1
+    # Finished while the monitor still holds the member, so the queued retry starts
+    # only afterwards and never meets the survivor's unfinished projection.
+    assert settled == [(worker["worker_id"], "queued", True)]
 
 
 def test_host_runtime_env_is_mission_isolated(tmp_path, monkeypatch):
