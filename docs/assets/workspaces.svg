@@ -1,30 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
-  <title id="title">xPerfect: shared files or separate working folders</title>
-  <desc id="desc">AI workers can use separate workspaces or a supported shared workspace. In a shared workspace, choose shared files or separate working folders. Each worker keeps its own sign-in and session. Starting work requires permission, ready accounts and enough capacity.</desc>
+  <title id="title">xPerfect: separate or shared workspaces</title>
+  <desc id="desc">By default each AI worker gets a separate workspace with its own files and history. A shared workspace lets several workers, including different AI tools, work in one place; choose common project files or private files per member, where the common area is read-only. Each worker keeps its own sign-in and session. Shared workspaces need xPerfect on a configured Linux host. Starting work requires ready accounts, permission and enough capacity.</desc>
   <rect width="1600" height="900" fill="#151a20"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#f3f4f1">
     <text x="70" y="75" font-size="24" fill="#63d7b0" letter-spacing="3">xPerfect / WORKSPACE MODES</text>
     <text x="70" y="145" font-size="52" font-weight="700">Share files. Keep sign-ins separate.</text>
-    <text x="70" y="195" font-size="26" fill="#b8c4ce">Choose where AI workers keep their files. Shared workspaces need a supported host.</text>
+    <text x="70" y="195" font-size="26" fill="#b8c4ce">Choose where AI workers keep their files. Shared workspaces need a configured Linux host.</text>
     <rect x="70" y="250" width="450" height="425" rx="14" fill="#232c35"/>
-    <text x="100" y="300" font-size="31" font-weight="700">Separate workspaces</text>
-    <text x="100" y="338" font-size="23" fill="#c6d0d8">Each worker has its own workspace</text>
+    <text x="100" y="300" font-size="31" font-weight="700">Separate workspace</text>
+    <text x="100" y="338" font-size="23" fill="#c6d0d8">The default: one worker, its own place</text>
     <g fill="#151a20" stroke="#60717c"><rect x="100" y="375" width="390" height="105" rx="10"/><rect x="100" y="505" width="390" height="105" rx="10"/></g>
     <text x="125" y="418" font-size="27">Worker A · Workspace A</text>
-    <text x="125" y="455" font-size="22" fill="#c6d0d8">Files, sign-in and session</text>
+    <text x="125" y="455" font-size="22" fill="#c6d0d8">Files, history, sign-in, session</text>
     <text x="125" y="548" font-size="27">Worker B · Workspace B</text>
-    <text x="125" y="585" font-size="22" fill="#c6d0d8">Files, sign-in and session</text>
+    <text x="125" y="585" font-size="22" fill="#c6d0d8">Files, history, sign-in, session</text>
     <rect x="550" y="250" width="980" height="425" rx="14" fill="none" stroke="#60717c" stroke-width="2"/>
     <text x="580" y="300" font-size="31" font-weight="700">Shared workspace</text>
-    <text x="580" y="338" font-size="23" fill="#c6d0d8">Choose how its workers use files</text>
+    <text x="580" y="338" font-size="23" fill="#c6d0d8">Several workers in one place, even different AI tools</text>
     <rect x="580" y="368" width="435" height="166" rx="10" fill="#234239"/>
-    <text x="605" y="407" font-size="28" fill="#8af0cb" font-weight="700">Shared files</text>
+    <text x="605" y="407" font-size="28" fill="#8af0cb" font-weight="700">Common project files</text>
     <text x="605" y="447" font-size="24">Worker A ↔ Files ↔ Worker B</text>
     <text x="605" y="489" font-size="23" fill="#d0e7de">One shared working area</text>
     <rect x="1035" y="368" width="465" height="166" rx="10" fill="#232c35"/>
-    <text x="1060" y="407" font-size="28" fill="#8af0cb" font-weight="700">Separate working folders</text>
+    <text x="1060" y="407" font-size="28" fill="#8af0cb" font-weight="700">Private files per member</text>
     <text x="1060" y="447" font-size="24">A's folder │ B's folder</text>
-    <text x="1060" y="489" font-size="23" fill="#c6d0d8">Shared area: read-only access</text>
+    <text x="1060" y="489" font-size="23" fill="#c6d0d8">Common area: read-only</text>
     <g fill="#151a20" stroke="#60717c"><rect x="580" y="560" width="435" height="80" rx="10"/><rect x="1035" y="560" width="465" height="80" rx="10"/></g>
     <text x="605" y="593" font-size="24">Worker A · private account state</text>
     <text x="605" y="623" font-size="21" fill="#c6d0d8">Sign-in · settings · session</text>

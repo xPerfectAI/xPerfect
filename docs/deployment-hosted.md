@@ -2,6 +2,8 @@
 
 The hosted profile runs the same three containers as the local package — runtime, UI and MCP — for several people who sign in through your identity provider. Each person's files live under an XFS project quota (5,000,000,000 bytes each by default). The local single-user package is unchanged.
 
+**Current limits.** Install, sign-in and admission, per-person storage, attaching stored files, and upgrade and rollback are tested on a hosted server. Connecting an AI account there and getting an AI result have not been verified end to end yet, and neither has a worker writing past a person's storage limit.
+
 ## What you need
 
 - **Linux server** with rootful Docker (cgroup v2). Rootless Docker and user-namespace remapping cannot set project quotas.
@@ -123,7 +125,8 @@ The first returns `"status":"ok"`. The second names your MCP URL and issuer. The
 ## Connect AI accounts
 
 Each person connects their own provider account. An account is never shared with, or copied
-to, another person.
+to, another person. This section describes the supported route; completing it on a hosted server has
+not been verified end to end yet.
 
 - **Browser:** open **Connections** and choose a provider. The browser must trust the
   deployment's certificate.
@@ -154,9 +157,9 @@ that is still starting:
 - **Memory:** free Docker memory is at least `shared_memory_bytes` (6 GiB by default) plus 2 GiB.
 - **Disk:** the Files disk has at least 4 GiB per starting workspace plus 4 GiB free.
 
-The three services use memory too. On a 10 GiB test server with the defaults, one worker was
-admitted. With 6 or 8 GiB it was refused as "resource pressure", and with 7.6 GB free on the
-Files disk it was refused for disk. Lower `shared_memory_bytes` for smaller servers.
+The three services use memory too. On one test server with the defaults, 6 and 8 GiB of memory
+with 7.6 GB free on the Files disk were refused as "resource pressure"; with 10 GiB of memory and
+a 16 GiB Files disk, one worker was admitted. Lower `shared_memory_bytes` for smaller servers.
 
 ## Upgrade
 
@@ -164,7 +167,9 @@ Files disk it was refused for disk. Lower `shared_memory_bytes` for smaller serv
 python3 deployment/linux/launch.py upgrade --docker-host unix:///var/run/docker.sock --receipt /etc/xperfect/receipt.json --service-image sha256:<new service image>
 ```
 
-The upgrade needs an idle package. It keeps sign-ins, roles, projects, owner files and quotas.
+The upgrade needs an idle package. A hosted upgrade cannot pause open workspaces for you, so close
+them first; running, queued, paused or waiting work also refuses the upgrade. It keeps sign-ins,
+roles, projects, owner files and quotas.
 Check the new version, then run `upgrade-commit` to keep it or `upgrade-rollback` to go back.
 Rollback discards service records made after the upgrade, including access changes, and refuses
 once a new owner has received storage. See

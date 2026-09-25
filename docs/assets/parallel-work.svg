@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
   <title id="title">xPerfect: working on several goals</title>
-  <desc id="desc">You ask once in a conversation. The coordinator AI answers directly or gives goals to workers, each in its own workspace. A goal starts when its account and machine capacity are ready; otherwise it waits and says why. Finished results are combined into one answer automatically, and a failed combine can be retried. Ten goals do not mean ten workers at once.</desc>
+  <desc id="desc">You ask once in a conversation. The coordinator AI answers directly or gives goals to workers, each in its own workspace. A goal starts when its account and machine capacity are ready; otherwise it waits and says why. Finished results are combined into one answer automatically; if that fails, Try combining again uses the saved results. Ten goals do not mean ten workers at once.</desc>
   <rect width="1600" height="900" fill="#151a20"/>
   <defs>
     <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" orient="auto">
@@ -47,8 +47,8 @@
       <path d="M1210 345 H1252"/>
     </g>
     <text x="1260" y="470" font-size="21" fill="#c6d0d8">If combining fails,</text>
-    <text x="1260" y="500" font-size="21" fill="#c6d0d8">Retry uses the</text>
-    <text x="1260" y="530" font-size="21" fill="#c6d0d8">saved results.</text>
+    <text x="1260" y="500" font-size="21" fill="#c6d0d8">Try combining again</text>
+    <text x="1260" y="530" font-size="21" fill="#c6d0d8">uses the saved results.</text>
 
     <text x="70" y="712" font-size="25">Ten goals do not mean ten workers at once. Accounts, memory and limits decide what runs now.</text>
     <path d="M70 743 H1530" stroke="#35414b"/>

@@ -13,9 +13,10 @@ Local keys live in `<state>/secrets.json`. The state directory defaults to
 
 ## 1. Connect a client
 
-The easiest way is to let the web UI do it. Signed in, open **Use xPerfect from another AI app**. It
-shows the exact add and sign-in steps for each client the deployment supports, such as Codex or
-Claude Code. [MCP publication](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection)
+On a deployment whose operator has registered supported AI clients, the web UI can do it: signed
+in, open **Connections → Use xPerfect from another AI app** for the exact add and sign-in steps.
+With the default launchers no client is registered, so that panel cannot set one up; use the
+stdio or manual steps below. [MCP publication](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection)
 explains the client contract.
 
 For a local client over stdio, for example:

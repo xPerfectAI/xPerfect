@@ -1,80 +1,136 @@
-# xPerfect quickstart
+# xPerfect quickstart: your first result
 
-## Start locally
+This walkthrough takes you from a fresh checkout to a finished result that you can open again
+later. It uses the private web app on your own computer.
 
-Requires macOS or Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/),
-and internet for the first dependency install. Install the native CLI for your chosen provider.
+![From a goal to a result you can reopen](assets/first-result.png)
+
+## 1. What you need
+
+- macOS or Linux, Python 3.11 or newer, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- Internet access. The first start installs dependencies, and the AI runs at your provider.
+- The command-line tool of one AI provider you use, installed on this computer:
+  [Codex](https://developers.openai.com/codex/cli/), [Claude Code](https://code.claude.com/docs/en/setup)
+  or [Grok](https://github.com/xai-org/grok-build). [Account setup](host-setup.md) lists the tested versions.
+
+## 2. Start xPerfect
+
 From the repository:
 
 ```sh
 ./xperfect start
 ```
 
-The first start asks you to choose an unlock password; press Enter to have one made, and save it
-in your password manager. Open the printed URL, normally `http://127.0.0.1:8780`, and unlock once;
-that browser stays unlocked for 30 days. Your saved work lives outside the
-checkout. A running app still needs a connected AI account before it can do work.
+The first start asks you to choose an unlock password. Press Enter to have one made, and save it
+in your password manager. Open the printed address, normally **http://127.0.0.1:8780**, enter the
+password on **Unlock xPerfect** and select **Unlock**. This browser stays unlocked for 30 days.
 
-This setup is for one trusted local OS user. It binds to loopback. Host workers have that user's
-OS permissions; this is not a multi-user isolation boundary. Local storage is unlimited by default.
+`./xperfect doctor` prints a status report: whether the app is healthy, which AI tools it found,
+and the exact model each one will use. Your saved work lives outside the checkout.
 
-## Get one result
+## 3. Connect your AI account
 
-1. Open **Connections**, select your provider, and follow an offered sign-in method. For Grok,
-   also choose its exact model once: `grok models`, then `./xperfect restart --model grok-build=<model>`.
-2. In **Run project**, choose the intended account, enter a small goal, and add any needed files.
-3. Watch the task, open its output, and read it. Reload to check that it remains available.
+Open **Connections**. Under **Connect an AI account**, choose your **AI**, then:
+
+- **Codex:** choose **My subscription** and **Connect Codex**, then **Open Codex sign-in** and
+  enter the one-time code shown in xPerfect.
+- **Claude Code:** if you are signed in to Claude Code on this computer, choose
+  **Use existing Claude sign-in**.
+- **Grok Build:** choose **My subscription** and **Connect Grok Build**, then
+  **Open provider sign-in**. Grok also needs one exact model: run `grok models`, then
+  `./xperfect restart --model grok-build=<model>`.
+
+Wait until the account shows **Ready**. A running app is not yet a connected AI.
+
+## 4. Start a project
+
+Open **Run project**. Under **What would you like to do?**:
+
+1. Describe the goal. Add **Success criteria** or **Background** if they help.
+2. Choose the **Worker** for your AI tool and its **Account**. Keep **Separate workspace (default)**.
+3. Select **Add files** to attach files. The worker gets their exact bytes; a file name typed in
+   the goal is not an upload.
+4. Select **Run Project**.
 
 Try: “Write a short note explaining rain and save it as a text file.”
 
-Subscription sign-in and API keys are separate routes. Available methods depend on provider,
-platform and deployment configuration. A required account must not fall back to another account.
-Account readiness does not prove access to every model or available credit.
-See [account setup](host-setup.md) for native CLI sign-in and state details.
+The workspace's live view opens. If the page stays on “Starting project...”, open the workspace
+from **Workspaces**.
 
-Files and saved work stay on your host. Connected AI providers can receive task content and
-tool results needed for their requests. This is not a promise of offline or local-only AI.
+## 5. Watch and steer
 
-For several goals, see [parallel work and its limits](capability-matrix.md#working-on-several-goals).
+The live view shows the work as it happens. Type guidance in **Steer this workspace** and select
+**Send**. Use **Pause**, or **Interrupt current run** in the **☰** menu. Controls act only on this
+workspace.
 
-To repeat work, open **Schedules**, choose a saved workspace or a one-off run, enter the next task,
-and choose when it repeats. Scheduling a one-off run saves its workspace automatically.
+Some AI tools, such as Grok, ask before running a command. Answer in the live view: a request
+left unanswered expires after about a minute and stops the run. Send a follow-up to continue.
+
+## 6. Open the result
+
+When the work is done, open **Latest workspace output** or **Files**, then **Open** or
+**Download** what it made. Reload the page: the result is still there. It also survives
+`./xperfect restart`.
+
+## 7. Come back to it
+
+In **Workspaces**, choose **Open workspace**. In **Files**, **Add files**, then send a new
+instruction. The workspace keeps its files and history.
+
+To run it later or repeatedly, open **Schedules** and select **New schedule**. Choose the
+workspace, write what it should do, choose when it repeats and select **Create schedule**.
+Scheduling a one-off run keeps it as a saved workspace.
+
+## Good to know
+
+- **Several goals at once.** In **Conversation**, write them in one message. xPerfect keeps every
+  goal and shows each as Working, Waiting to start or Complete. The AI decides whether to answer a
+  goal itself or hand it to a worker. Ten goals do not mean ten workers at once: a worker starts
+  when its account is free and the machine has room. See [several goals](capability-matrix.md#working-on-several-goals).
+- **Separate or shared.** By default each worker has its own workspace. A shared workspace lets
+  several workers, even different AI tools, work together with **Common project files** or
+  **Private files per member**. It needs xPerfect on a configured Linux host, such as the packaged
+  install; with `./xperfect start` on a Mac, use a separate workspace. See [workspace modes](assets/workspaces.png).
+- **Your computer or a server.** With `./xperfect start`, workers run on this computer as your
+  user. On a hosted server, each workspace runs in its own container. Your files stay on your
+  machine or server; your AI provider receives the task content it needs. See [deployment](deployment.md).
+- **What a worker knows.** Its goal, the background and files you give it, its own built-in tools,
+  and only the connections you allow. Change this in **Workspaces → More → Workspace settings**.
+  See [context and tools](capability-matrix.md#what-each-worker-knows-and-can-use).
+- **No other app needed.** xPerfect works on its own. Other AI apps can use it over MCP; see the
+  [developer walkthrough](developer.md).
+
+## If something goes wrong
+
+| What you see | What to do |
+| --- | --- |
+| `doctor` reports a problem | Read the named private log, fix it, and start again. |
+| “Connect an AI account to start.” | Connect an account in Connections and wait for **Ready**. |
+| A run stopped with your provider's words, such as a usage limit | Follow them. Connections shows the message under that account until a later run completes. xPerfect never switches accounts for you. |
+| “Queued” or “Waiting to start” | The account is busy or the machine is short of room. It starts on its own when that clears. |
+| A host resource message after **Run Project** | The machine is busy. Check **Workspaces** so you do not start the same work twice, wait a moment, then try again. |
+| “Not enough storage for this file” | Delete files you no longer need, or ask your administrator to raise your limit, then **Retry**. |
+| “Shared workspaces need xPerfect on a configured Linux host.” | Choose **Separate workspace** on this computer. |
+| The result is missing | Check the workspace's status and **Files** before running it again. |
+
+Use the same `--state-dir` for every command if you chose one. `./xperfect stop` keeps your
+files, accounts and history. Interrupt running work before a planned stop; interrupted work does
+not always continue by itself.
+
+## Current limits
+
+- Dragging files into or out of the browser has not been verified yet. Use **Add files** and **Download**.
+- API-key sign-in has not been verified end to end yet. Use your subscription sign-in.
+- **Duplicate** copies a workspace's files. Before the copy can run, its account must be approved
+  for it; continuing a copy this way has not been verified end to end yet.
+- Several goals in one conversation and shared workspaces were verified on the packaged Linux
+  install, not with `./xperfect start`.
 
 ## Connect an MCP client
 
 For local stdio, use the absolute path to `xperfect` as the command and `["mcp"]` as arguments.
-Start xPerfect first. For custom state, append `--state-dir` and its path to those arguments.
-Credentials load privately; do not paste them into prompts or command-line arguments.
+Start xPerfect first. HTTP MCP is `http://127.0.0.1:8767/mcp` with its own private token. Never put
+tokens in URLs, screenshots or Git. See the [developer walkthrough](developer.md).
 
-Default HTTP MCP is `http://127.0.0.1:8767/mcp`. It needs its dedicated private bearer token.
-The API uses port 8766 and a separate credential. Never put tokens in URLs, screenshots or Git.
-
-## Continue or recover work
-
-Use the selected worker's controls to pause, resume, interrupt or terminate where supported.
-Inspect status and events before retrying. Open a completed result from Files or its artifact
-route; viewing it does not need another run.
-
-```sh
-./xperfect doctor
-./xperfect stop
-./xperfect start
-./xperfect restart
-```
-
-Use the same `--state-dir` if you chose one. Stop retains saved files, accounts and history.
-Interrupt active work from Watch before planned shutdown. Interrupted work does not always resume
-automatically.
-
-| Symptom | Check |
-| --- | --- |
-| Service is not ready | Run `doctor` and inspect the named private log. |
-| Worker is not ready | Read provider readiness and account setup in Connections. |
-| A run stopped with the provider's own message | Follow it, for example a usage limit. Connections shows it under that account until a run completes. |
-| Result is missing | Inspect worker status, events and Files before retrying. |
-| Work was interrupted | Continue the same worker when its authority and provider remain valid. |
-| MCP does not connect | Check transport, dedicated token, port and client configuration. |
-
-Keep goals and constraints in the task. Advanced tool and context setup is in the
-[technical guide](03_Bootstrap_Auth_and_Identity_Projection.md).
-See [capabilities](capability-matrix.md) and [deployment and recovery](deployment.md).
+More: [account setup](host-setup.md) · [capabilities](capability-matrix.md) ·
+[deployment and recovery](deployment.md)

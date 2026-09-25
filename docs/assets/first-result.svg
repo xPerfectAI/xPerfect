@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">xPerfect: from a goal to a result you can reopen</title>
+  <desc id="desc">Five steps in the xPerfect web app. 1 Connect: sign in to your AI account once in Connections. 2 Start: in Run project, type a goal and add files; files keep their exact bytes. 3 Watch: in the workspace live view, see the work and steer, pause or interrupt it. 4 Result: open or download the files it made; they are still there after a reload or restart. 5 Come back: in Workspaces, choose Open workspace, add files and send a new instruction, or use Schedules to run it later or repeatedly. When an account is busy or the machine is full, work waits or is refused, and xPerfect says why. xPerfect runs by itself; other AI apps can connect over MCP but none is required.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" orient="auto">
+      <path d="M1 1 L11 6 L1 11" fill="none" stroke="#63d7b0" stroke-width="2"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="900" fill="#151a20"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#f3f4f1">
+    <text x="70" y="75" font-size="24" fill="#63d7b0" letter-spacing="3">xPerfect / YOUR FIRST RESULT</text>
+    <text x="70" y="145" font-size="52" font-weight="700">From a goal to a result you can reopen.</text>
+    <text x="70" y="195" font-size="26" fill="#b8c4ce">Five steps in the web app. Files and results stay with their workspace.</text>
+
+    <g fill="#232c35"><rect x="70" y="250" width="260" height="290" rx="14"/><rect x="370" y="250" width="260" height="290" rx="14"/><rect x="670" y="250" width="260" height="290" rx="14"/><rect x="970" y="250" width="260" height="290" rx="14"/></g>
+    <rect x="1270" y="250" width="260" height="290" rx="14" fill="#234239"/>
+
+    <text x="94" y="300" font-size="28" font-weight="700">1 · Connect</text>
+    <text x="94" y="338" font-size="22" fill="#8af0cb" font-weight="700">Connections</text>
+    <text x="94" y="385" font-size="22">Sign in to your</text>
+    <text x="94" y="415" font-size="22">AI account once.</text>
+    <text x="94" y="480" font-size="20" fill="#c6d0d8">Codex, Claude Code</text>
+    <text x="94" y="508" font-size="20" fill="#c6d0d8">or Grok</text>
+
+    <text x="394" y="300" font-size="28" font-weight="700">2 · Start</text>
+    <text x="394" y="338" font-size="22" fill="#8af0cb" font-weight="700">Run project</text>
+    <text x="394" y="385" font-size="22">Type a goal and</text>
+    <text x="394" y="415" font-size="22">add your files.</text>
+    <text x="394" y="480" font-size="20" fill="#c6d0d8">Files keep their</text>
+    <text x="394" y="508" font-size="20" fill="#c6d0d8">exact bytes</text>
+
+    <text x="694" y="300" font-size="28" font-weight="700">3 · Watch</text>
+    <text x="694" y="338" font-size="22" fill="#8af0cb" font-weight="700">Live view</text>
+    <text x="694" y="385" font-size="22">See the work</text>
+    <text x="694" y="415" font-size="22">as it happens.</text>
+    <text x="694" y="480" font-size="20" fill="#c6d0d8">Steer, pause or</text>
+    <text x="694" y="508" font-size="20" fill="#c6d0d8">interrupt it</text>
+
+    <text x="994" y="300" font-size="28" font-weight="700">4 · Result</text>
+    <text x="994" y="338" font-size="22" fill="#8af0cb" font-weight="700">Files</text>
+    <text x="994" y="385" font-size="22">Open or download</text>
+    <text x="994" y="415" font-size="22">what it made.</text>
+    <text x="994" y="480" font-size="20" fill="#c6d0d8">Still there after a</text>
+    <text x="994" y="508" font-size="20" fill="#c6d0d8">reload or restart</text>
+
+    <text x="1294" y="300" font-size="28" font-weight="700" fill="#8af0cb">5 · Come back</text>
+    <text x="1294" y="338" font-size="22" fill="#8af0cb" font-weight="700">Open workspace</text>
+    <text x="1294" y="385" font-size="22">Add files and send</text>
+    <text x="1294" y="415" font-size="22">a new instruction.</text>
+    <text x="1294" y="470" font-size="22">Schedules: run it</text>
+    <text x="1294" y="500" font-size="22">later or repeatedly.</text>
+
+    <g stroke="#63d7b0" stroke-width="3" fill="none" marker-end="url(#arrow)">
+      <path d="M334 395 H362"/>
+      <path d="M634 395 H662"/>
+      <path d="M934 395 H962"/>
+      <path d="M1234 395 H1262"/>
+      <path d="M1400 544 V590 H800 V552"/>
+    </g>
+    <text x="870" y="628" font-size="22" fill="#c6d0d8">Same workspace: its files and history are kept.</text>
+
+    <text x="70" y="706" font-size="25">When an account is busy or the machine is full, work waits or is refused, and xPerfect says why.</text>
+    <path d="M70 737 H1530" stroke="#35414b"/>
+    <text x="70" y="784" font-size="25">xPerfect runs by itself. Other AI apps can connect over MCP; none is required.</text>
+    <text x="70" y="832" font-size="23" fill="#b8c4ce">xPerfect runs on your computer or a server.</text>
+  </g>
+</svg>
