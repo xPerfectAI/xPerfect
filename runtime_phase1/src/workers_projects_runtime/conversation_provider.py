@@ -5053,11 +5053,7 @@ class ConversationProvider:
             record = self.store.get_provider_request(request_id)
             if not record:
                 raise HTTPException(status_code=404, detail="GlassHive request not found")
-            record = self._sync(record)
-            record, arbitrated_run, _ = self._arbitrate_deadline_if_needed(
-                record,
-                timeout_seconds=effective_timeout,
-            )
+            record, arbitrated_run = self._sync_for_wait(record, timeout_seconds=effective_timeout)
             if record["state"] in TERMINAL_REQUEST_STATES:
                 run = self.store.get_run(str(record.get("run_id") or "")) or arbitrated_run
                 return record, run
@@ -5068,15 +5064,29 @@ class ConversationProvider:
         record = self.store.get_provider_request(request_id)
         if not record:
             raise HTTPException(status_code=404, detail="GlassHive request not found")
-        record = self._sync(record)
-        record, arbitrated_run, _ = self._arbitrate_deadline_if_needed(
-            record,
-            timeout_seconds=effective_timeout,
-        )
+        record, arbitrated_run = self._sync_for_wait(record, timeout_seconds=effective_timeout)
         if record["state"] in TERMINAL_REQUEST_STATES:
             run = self.store.get_run(str(record.get("run_id") or "")) or arbitrated_run
             return record, run
         raise HTTPException(status_code=504, detail="GlassHive request is still running; reconnect with the same idempotency key")
+
+    def _sync_for_wait(
+        self,
+        record: dict[str, Any],
+        *,
+        timeout_seconds: float,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        synced = self._sync(record)
+        record, arbitrated_run, _ = self._arbitrate_deadline_if_needed(
+            synced,
+            timeout_seconds=timeout_seconds,
+        )
+        if record["state"] == "completed" and synced["state"] != "completed":
+            # Deadline arbitration reads outside the sync lock, which the run processor
+            # holds from its terminal commit through the accepted-turn advancement.
+            # Finish that serialized transition before the caller can see the response.
+            record = self._sync(record)
+        return record, arbitrated_run
 
     def response_payload(
         self,

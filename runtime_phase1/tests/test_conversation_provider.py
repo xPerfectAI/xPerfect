@@ -5109,6 +5109,104 @@ def test_core_message_carrier_preserves_sources_across_selected_sibling_branches
     assert json.loads(regenerated["replay_decision_json"])["admitted_visible_message_keys"] == []
 
 
+def test_blocking_response_waits_for_the_run_processor_to_accept_the_turn(tmp_path, monkeypatch):
+    """A blocking completion is released only after its accepted-turn commit.
+
+    The run processor commits the terminal request and then advances the session inside the
+    provider sync lock. The blocking waiter also arbitrates the response deadline outside
+    that lock. Park each thread where the scheduler can already park it: the waiter right
+    after a sync that saw the run still active, and the processor between its terminal
+    commit and its acceptance transaction.
+    """
+    waiter_synced = threading.Event()
+    terminal_committed = threading.Event()
+    release_processor = threading.Event()
+    waiter = threading.local()
+
+    class RunEndsDuringWaiterPoll(StubRuntime):
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            output = super().run_task(worker, instruction, timeout_sec, run_id)
+            waiter_synced.wait(timeout=10)
+            return output
+
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, RunEndsDuringWaiterPoll())
+    provider = client.app.state.conversation_provider
+    store = client.app.state.store
+    assert provider.store is store
+    sync_lock = provider._sync_lock
+    original_wait = provider.wait
+    original_sync = provider._sync
+    original_advance = store.advance_provider_session_history
+
+    class ContendedSyncLock:
+        def acquire(self, blocking=True, timeout=-1):
+            if sync_lock.acquire(blocking=False):
+                return True
+            # Another thread needs the lock the parked processor holds.
+            release_processor.set()
+            return sync_lock.acquire(blocking, timeout)
+
+        def release(self):
+            sync_lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self.release()
+
+    def marked_wait(request_id, **kwargs):
+        waiter.active = True
+        try:
+            return original_wait(request_id, **kwargs)
+        finally:
+            waiter.active = False
+
+    def parked_waiter_sync(request_record):
+        result = original_sync(request_record)
+        if (getattr(waiter, "active", False) and not waiter_synced.is_set()
+                and result["state"] in {"queued", "running"}):
+            waiter_synced.set()
+            terminal_committed.wait(timeout=10)
+        return result
+
+    def parked_acceptance(session_id, **kwargs):
+        if not getattr(waiter, "active", False) and not terminal_committed.is_set():
+            terminal_committed.set()
+            release_processor.wait(timeout=10)
+        return original_advance(session_id, **kwargs)
+
+    monkeypatch.setattr(provider, "_sync_lock", ContendedSyncLock())
+    monkeypatch.setattr(provider, "wait", marked_wait)
+    monkeypatch.setattr(provider, "_sync", parked_waiter_sync)
+    monkeypatch.setattr(store, "advance_provider_session_history", parked_acceptance)
+    source = "Wait for written clearance from Rowan."
+    payload = _payload(workspace)
+    payload["messages"] = [{"role": "system", "content": "Current dynamic context"},
+                           {"role": "user", "content": source}]
+    payload["metadata"].update({
+        "message_id": "response-1", "idempotency_key": "request-1",
+        "main_context_protocol": "main_context_v1", "main_context_owner": "core",
+        "stable_authority_sha256": "a" * 64, "main_context_snapshot_sha256": "c" * 64,
+        "main_context_epoch": "a" * 64, "continuity_domain_id": "b" * 64,
+        "continuity_agent_id": "agent-main", "logical_turn_id": "turn-1",
+        "visible_message_chain": [{"id": "current-1", "role": "user", "accepted_source": True,
+                                   "sha256": hashlib.sha256(source.encode()).hexdigest()}],
+    })
+    try:
+        response = client.post("/v1/chat/completions", headers=AUTH, json=payload)
+        assert response.status_code == 200, response.text
+        row = store.get_provider_request(response.json()["id"])
+    finally:
+        release_processor.set()
+    assert waiter_synced.is_set() and terminal_committed.is_set()
+    assert row["state"] == "completed"
+    assert json.loads(row["replay_decision_json"])["admission_state"] == "accepted"
+
+
 def test_reserved_source_stays_in_next_instruction_until_delivery_is_accepted(tmp_path, monkeypatch):
     from workers_projects_runtime.conversation_provider import _visible_message_keys
     workspace = tmp_path / "Life"
