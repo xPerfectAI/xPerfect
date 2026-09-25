@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -239,9 +240,13 @@ class FakeDocker:
             if sorted(expect) != identities:
                 return subprocess.CompletedProcess(args, 1, b'', b'ValueError: GlassHive closed-worker work '
                                                    b'changed since it was reviewed\n')
+        generation = hashlib.sha256(json.dumps(self.closed_work, sort_keys=True).encode()).hexdigest()
+        if apply and program.split("'--expect-generation','", 1)[1].split("'", 1)[0] != generation:
+            return subprocess.CompletedProcess(args, 1, b'', b'ValueError: GlassHive closed-worker work '
+                                               b'changed since it was reviewed\n')
         report = {'closed_workers': len(self.closed_work), 'applied': bool(apply and identities),
                   'targets': [dict(item) for item in self.closed_work], 'boxes': list(self.closed_boxes),
-                  'boxes_released': list(self.closed_boxes) if apply else []}
+                  'boxes_released': list(self.closed_boxes) if apply else [], 'generation': generation}
         if apply:
             self.closed_work, self.closed_boxes = [], []
         if self.closed_work_report is not None:
@@ -1928,12 +1933,14 @@ def test_closed_work_settlement_needs_a_new_image_that_carries_it_and_refuses_wi
 
 
 @pytest.mark.parametrize('report', [
-    {'closed_workers': 1, 'applied': True, 'targets': [CLOSED], 'boxes': [], 'boxes_released': []},  # applied early
-    {'closed_workers': 2, 'applied': False, 'targets': [CLOSED], 'boxes': [], 'boxes_released': []},
-    {'closed_workers': 1, 'applied': False, 'targets': [{**CLOSED, 'runs': ['../x']}], 'boxes': [], 'boxes_released': []},
+    {'closed_workers': 1, 'applied': True, 'targets': [CLOSED], 'boxes': [], 'boxes_released': [], 'generation': 'f' * 64},  # applied early
+    {'closed_workers': 2, 'applied': False, 'targets': [CLOSED], 'boxes': [], 'boxes_released': [], 'generation': 'f' * 64},
+    {'closed_workers': 1, 'applied': False, 'targets': [{**CLOSED, 'runs': ['../x']}], 'boxes': [], 'boxes_released': [],
+     'generation': 'f' * 64},
     {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes': ['xperfect-wsp-early'],
-     'boxes_released': ['xperfect-wsp-early']},
-    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes': ['../box'], 'boxes_released': []},
+     'boxes_released': ['xperfect-wsp-early'], 'generation': 'f' * 64},
+    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes': ['../box'], 'boxes_released': [], 'generation': 'f' * 64},
+    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes': [], 'boxes_released': [], 'generation': 'x'},
     'not a report',
 ])
 def test_an_unexpected_closed_work_report_changes_nothing(package, report):
