@@ -14078,6 +14078,7 @@ class WorkersProjectsService:
                     return
 
                 queued_run = self.store.peek_next_queued_run(worker_id)
+                preclaim_reservation: dict | None = None
                 if queued_run:
                     if not self._coordinator_retry_dispatch_ready(worker, queued_run):
                         # Another scheduler may wake this worker between the
@@ -14113,7 +14114,9 @@ class WorkersProjectsService:
                         # Reserve host/resource capacity while the accepted work
                         # is still queued. Only a real execution admission may
                         # mint an immutable run attempt.
-                        self._acquire_host_run_lease(worker, queued_run)
+                        preclaim_reservation = self._acquire_host_run_lease(
+                            worker, queued_run
+                        )
                     except HostCapacityError as exc:
                         self._clear_run_local_grant_waiter(
                             str(queued_run["run_id"])
@@ -14147,9 +14150,14 @@ class WorkersProjectsService:
                         self._clear_run_local_grant_waiter(
                             str(queued_run["run_id"])
                         )
+                        # Another processor generation of this executor may have
+                        # claimed and started the same run under that lease. Drop
+                        # only this processor's exact reservation, and only while
+                        # no claim has adopted it.
                         self._release_host_run_lease(
                             str(queued_run["run_id"]),
                             reason="preclaim_generation_lost",
+                            expected_reservation=preclaim_reservation or {},
                         )
                     current = self.store.get_worker(worker_id)
                     if (
@@ -19686,7 +19694,15 @@ class WorkersProjectsService:
             )
         return "settling"
 
-    def _release_host_run_lease(self, run_id: str, *, reason: str) -> None:
+    def _release_host_run_lease(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        expected_reservation: dict | None = None,
+    ) -> None:
+        # expected_reservation limits the release to that exact acquisition while no
+        # claim has adopted it.
         if self._run_retained_for_restart(str(run_id)):
             # The lease now belongs to the live generation retained across this
             # managed restart; the restarted service releases it after adoption.
@@ -19713,6 +19729,15 @@ class WorkersProjectsService:
         if lease and self._lease_is_fenced_by_lifecycle_claim(worker, lease):
             return
         if lease and str(lease.get("executor_id") or "") == self._executor_id:
+            if expected_reservation is not None:
+                self.store.release_unclaimed_preaccept_host_run_lease(
+                    lease_id=str(expected_reservation.get("lease_id") or ""),
+                    run_id=str(run_id),
+                    executor_id=self._executor_id,
+                    startup_token=str(expected_reservation.get("startup_token") or ""),
+                    reason=reason,
+                )
+                return
             self.store.release_host_run_lease(
                 str(lease["lease_id"]),
                 executor_id=self._executor_id,

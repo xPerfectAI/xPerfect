@@ -17191,6 +17191,59 @@ class Store:
             conn.execute("COMMIT")
         return self._row(row)
 
+    def release_unclaimed_preaccept_host_run_lease(
+        self,
+        *,
+        lease_id: str,
+        run_id: str,
+        executor_id: str,
+        startup_token: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Release one exact acquisition only while no claim has adopted it.
+
+        A claim binds its attempt to the reservation in the same transaction that
+        claims the run, so an attempt-free, identity-free reservation with this
+        executor and startup token fences no generation.
+        """
+
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE host_run_leases
+                SET status = 'released', released_at = ?, release_reason = ?,
+                    reconciled_at = COALESCE(reconciled_at, ?)
+                WHERE lease_id = ? AND run_id = ? AND executor_id = ?
+                  AND startup_token = ?
+                  AND status = 'active' AND startup_state = 'reserved'
+                  AND attempt_id = '' AND pid IS NULL AND process_group IS NULL
+                  AND process_start_identity = ''
+                  AND startup_identity_kind = ''
+                  AND startup_container_id = ''
+                  AND startup_session_id = ''
+                """,
+                (
+                    now,
+                    str(reason or "preclaim_generation_lost"),
+                    now,
+                    str(lease_id),
+                    str(run_id),
+                    str(executor_id),
+                    str(startup_token),
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.execute("COMMIT")
+                return None
+            row = conn.execute(
+                "SELECT * FROM host_run_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            conn.execute("COMMIT")
+        return self._row(row)
+
     def consume_service_assertion_nonce(
         self,
         *,
