@@ -417,9 +417,10 @@ def create_app(
         finally:
             if native_sockets:
                 await asyncio.to_thread(native_transport.stop_hub)
-            # Release this executor's host run leases before anything else so a
-            # managed stop is never read as a stalled provider, even when the
-            # launcher's kill window preempts service.shutdown() below.
+            # Start no new work, then release this executor's host run leases before
+            # anything else so a managed stop is never read as a stalled provider, even
+            # when the launcher's kill window preempts service.shutdown() below.
+            service.begin_shutdown()
             service.release_owned_host_run_leases()
             try:
                 provider_setup.shutdown()

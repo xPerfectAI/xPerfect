@@ -1315,6 +1315,35 @@ def test_lifespan_shutdown_releases_owned_leases_before_service_shutdown(
     assert seen_at_shutdown[0]["release_reason"] == "managed_shutdown"
 
 
+def test_lifespan_starts_no_new_work_before_its_managed_shutdown_release(
+    tmp_path, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from workers_projects_runtime.api import create_app
+
+    app = create_app(
+        str(tmp_path / "lifespan-no-new-work.sqlite3"),
+        runtime=StubRuntime(),
+        reconcile_on_startup=False,
+    )
+    service = app.state.service
+    closed_at_release: list[bool] = []
+    original_release = service.release_owned_host_run_leases
+
+    def spying_release(*args, **kwargs):
+        closed_at_release.append(service._shutdown_event.is_set())
+        return original_release(*args, **kwargs)
+
+    monkeypatch.setattr(service, "release_owned_host_run_leases", spying_release)
+    with TestClient(app):
+        assert not service._shutdown_event.is_set()
+
+    # A run the scheduler started after the lifespan's lease snapshot would be left
+    # without a typed managed_shutdown release if the kill window preempts shutdown.
+    assert closed_at_release and all(closed_at_release)
+
+
 def test_needs_input_callback_payload_carries_failure_guidance(tmp_path, monkeypatch):
     store = Store(str(tmp_path / "needs-input-guidance.sqlite3"))
     _project, worker, run = _active_worker_and_run(

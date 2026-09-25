@@ -2211,9 +2211,13 @@ class WorkersProjectsService:
             worker, run, lease, absence_reader=absence_reader
         )
 
-    def shutdown(self, *, timeout_seconds: float = 10.0) -> None:
+    def begin_shutdown(self) -> None:
+        """Start no new work; every later lease snapshot then sees all this executor runs."""
         with self._processors_lock:
             self._shutdown_event.set()
+
+    def shutdown(self, *, timeout_seconds: float = 10.0) -> None:
+        self.begin_shutdown()
         # Stop owned running generations before releasing their dispatch fences. Unknown
         # termination keeps the exact lease for startup reconciliation to prove safe later.
         self.release_owned_host_run_leases()
