@@ -595,6 +595,52 @@ def test_armed_admission_refusal_blocks_only_its_first_dispatch_order(coordinato
     assert len(admissions) == 3 and reserved == ['a', 'c', 'b'] and replay['run_id']
 
 
+def test_maintenance_replays_capacity_blocked_goals_but_not_permanent_admission_refusals(coordinator):
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'turn', 'raw', [Goal(id=g, text=g) for g in ('busy', 'missing')])
+    project_id = coordinator.snapshot('local', 'owner', cid)['scope']['project_id']
+    runs = {}
+    for goal in ('busy', 'missing'):
+        worker = coordinator.store.create_worker(
+            project_id, 'owner', goal, goal, 'codex-cli', 'codex-cli', 'codex-cli',
+            'exact-worker-model', execution_mode='host',
+        )
+        runs[goal] = (worker, coordinator.store.create_run(worker['worker_id'], project_id, goal))
+
+    class Capacity(RuntimeError):
+        code = 'host_capacity'
+
+    failures = {
+        'busy': Capacity('busy'),
+        'missing': ParallelExecutionIsolationError('missing', reason_code='shared_configuration_required'),
+    }
+    reserved = []
+
+    def reserve(**kwargs):
+        goal = kwargs['idempotency_key'].rsplit(':', 1)[1]
+        reserved.append(goal)
+        failure = failures.pop(goal, None)
+        if failure is not None:
+            raise failure
+        worker, run = runs[goal]
+        return {'work_ref': f'work-{goal}', 'worker_id': worker['worker_id'], 'initial_run_id': run['run_id']}
+
+    coordinator.service.reserve_delegation = reserve
+    coordinator.service.start_assigned_run = lambda worker_id: None
+    for goal in ('busy', 'missing'):
+        assert coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id=goal, route_id='route', instruction=goal))['state'] == 'blocked'
+
+    recovered = coordinator.recover_dispatches('local', 'owner', cid)
+
+    assert [(r['goal_id'], r['run_id']) for r in recovered] == [('busy', runs['busy'][1]['run_id'])]
+    assert reserved == ['busy', 'missing', 'busy']
+    missing = next(g for g in coordinator.snapshot('local', 'owner', cid)['goals'] if g['goal_id'] == 'missing')
+    assert missing['state'] == 'blocked' and missing['blocker'] == 'shared_configuration_required'
+    # An explicit re-dispatch with the same goal, route and instruction still retries it.
+    retried = coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id='missing', route_id='route', instruction='missing'))
+    assert retried['run_id'] == runs['missing'][1]['run_id'] and reserved[-1] == 'missing'
+
+
 def test_replayed_dispatch_preserves_steered_replacement_run(coordinator):
     cid = create(coordinator)
     coordinator.accept_turn('local', 'owner', cid, 'turn', 'raw', [Goal(id='a', text='goal')])

@@ -1409,6 +1409,10 @@ class CoordinatorService:
         results = []
         for goal in rows:
             if goal["intent_state"] != "cancelled":
+                # As for turns, a permanent typed admission blocker waits for an explicit
+                # re-dispatch; only crash recovery and capacity blockers replay here.
+                if goal["blocker"] and goal["blocker"] not in _RETRYABLE_ADMISSION_CODES:
+                    continue
                 results.append(self.dispatch(tenant, owner, conversation_id, Dispatch.model_validate_json(goal["dispatch_json"])))
                 continue
             # Stop can win between the service reservation and goal attachment. Recover
