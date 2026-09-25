@@ -110,7 +110,10 @@ def test_reconcile_does_not_race_a_locally_owned_active_run(tmp_path, monkeypatc
 
     monkeypatch.setattr(service, "_collect_completed_run", forbidden_collect)
 
-    service._reconcile_worker_row(worker)
+    try:
+        service._reconcile_worker_row(worker)
+    finally:
+        service.shutdown()
 
 
 def test_heal_worker_does_not_race_a_locally_owned_active_run(tmp_path, monkeypatch):
@@ -128,7 +131,10 @@ def test_heal_worker_does_not_race_a_locally_owned_active_run(tmp_path, monkeypa
         raise AssertionError("a live queue processor owns its native evidence")
 
     monkeypatch.setattr(service, "_collect_completed_run", forbidden_collect)
-    result = service.heal_worker(worker["worker_id"])
+    try:
+        result = service.heal_worker(worker["worker_id"])
+    finally:
+        service.shutdown()
 
     assert result["worker_id"] == worker["worker_id"]
     assert store.get_run(run["run_id"])["state"] == "running"

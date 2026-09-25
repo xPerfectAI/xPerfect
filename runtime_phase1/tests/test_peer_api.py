@@ -48,6 +48,34 @@ def app(tmp_path, monkeypatch):
         yield application, client, workers
 
 
+def seed_running_run(store, worker, instruction, *, attempt_id=None):
+    """Seed a running turn in the live app without exposing it as due queued work.
+
+    The app's scheduler dispatches queued runs of a dispatchable worker. A paused
+    worker is never dispatched, so it stays paused until its run is running.
+    """
+    with store._connect() as conn:
+        (state,) = conn.execute(
+            "SELECT state FROM workers WHERE worker_id=?", (worker["worker_id"],)
+        ).fetchone()
+        conn.execute(
+            "UPDATE workers SET state='paused' WHERE worker_id=?", (worker["worker_id"],)
+        )
+    run = store.create_run(worker["worker_id"], worker["project_id"], instruction)
+    with store._connect() as conn:
+        if attempt_id is None:
+            conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+        else:
+            conn.execute(
+                "UPDATE runs SET state='running',active_attempt_id=? WHERE run_id=?",
+                (attempt_id, run["run_id"]),
+            )
+        conn.execute(
+            "UPDATE workers SET state=? WHERE worker_id=?", (state, worker["worker_id"])
+        )
+    return run
+
+
 def enable(application, workers):
     peers = application.state.service.peers
     for worker in workers:
@@ -136,11 +164,7 @@ def test_native_mcp_requires_run_token_and_has_no_owner_mutations(app):
     application, client, workers = app
     a, b = workers
     peers = enable(application, workers)
-    run = application.state.store.create_run(
-        a["worker_id"], a["project_id"], "Synthetic native turn", state="running"
-    )
-    with application.state.store._connect() as conn:
-        conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+    run = seed_running_run(application.state.store, a, "Synthetic native turn")
     token = peers.mint_native_session(a["worker_id"], run["run_id"])
     url = "/v1/native/peers/"
     packet = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
@@ -249,14 +273,9 @@ def test_native_mcp_message_reaches_recipient_turn_and_wait_times_out(app):
             idempotency_key="native-grant",
         ),
     )
-    source = application.state.store.create_run(
-        a["worker_id"], a["project_id"], "Synthetic native sender"
+    source = seed_running_run(
+        application.state.store, a, "Synthetic native sender", attempt_id="synthetic-attempt"
     )
-    with application.state.store._connect() as conn:
-        conn.execute(
-            "UPDATE runs SET state='running',active_attempt_id='synthetic-attempt' WHERE run_id=?",
-            (source["run_id"],),
-        )
     token = peers.mint_native_session(a["worker_id"], source["run_id"])
     headers = {
         "Authorization": "Bearer " + token,
