@@ -6847,6 +6847,13 @@ def create_app(
         processed = service.process_due_schedules_once()
         return {"status": "ok", "processed": processed}
 
+    @app.post("/v1/admin/maintenance/release-idle-compute")
+    def release_idle_compute(request: Request) -> dict[str, object]:
+        # The package's own upgrade calls this with its service credential only.
+        if _auth_context(request).auth_mode != "service":
+            raise HTTPException(status_code=403, detail="Exact service authentication is required")
+        return {"status": "ok", **service.release_idle_compute_for_upgrade()}
+
     @app.get("/ui", response_class=HTMLResponse)
     def ui_home(request: Request) -> str:
         ctx = _auth_context(request)

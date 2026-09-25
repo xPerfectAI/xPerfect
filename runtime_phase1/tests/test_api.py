@@ -4592,6 +4592,92 @@ def test_idle_reaper_stops_compute_but_preserves_worker(tmp_path, monkeypatch):
         service.shutdown()
 
 
+def test_upgrade_stops_only_idle_compute_and_keeps_workspaces_warm_by_default(
+    tmp_path, monkeypatch
+):
+    class ReleaseRuntime(StubRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.terminated: list[str] = []
+            self.boxes: list[str] = []
+
+        def terminate_worker(self, worker: dict) -> RuntimeInfo:
+            self.terminated.append(worker["worker_id"])
+            return RuntimeInfo(
+                runtime=str(worker.get("runtime") or "openclaw-stub"),
+                model=str(worker.get("model") or "stub-model"),
+                gateway_url="",
+                gateway_port=None,
+                gateway_token=None,
+                session_key=str(worker.get("session_key") or ""),
+                state_dir=str(worker.get("state_dir") or ""),
+                workspace_dir=str(worker.get("workspace_dir") or ""),
+                pid=None,
+            )
+
+        def release_idle_workspace_box(self, worker: dict) -> bool:
+            self.boxes.append(worker["worker_id"])
+            return True
+
+    monkeypatch.delenv("GLASSHIVE_IDLE_TERMINATE_AFTER_S", raising=False)
+    monkeypatch.setenv("GLASSHIVE_IDLE_REAPER_INTERVAL_S", "3600")
+    monkeypatch.setenv("WPR_API_TOKEN", "service-token")
+    runtime = ReleaseRuntime()
+    app = create_app(
+        db_path=str(tmp_path / "runtime.db"), runtime=runtime, reconcile_on_startup=False
+    )
+    store, service = app.state.store, app.state.service
+    client = TestClient(app)  # no lifespan: the scheduler must not run the queued work
+    url = "/v1/admin/maintenance/release-idle-compute"
+    try:
+        project = service.create_project("owner", "Upgrade", "Keep idle workspaces", "openclaw-general")
+        ids = {
+            name: service.create_worker(
+                project_id=project["project_id"], owner_id="owner", name=name,
+                role="research", profile="openclaw-general", backend="openclaw",
+            )["worker_id"]
+            for name in ("idle", "queued", "paused")
+        }
+        store.create_run(ids["queued"], project["project_id"], "Queued work")
+        store.update_worker_state(ids["paused"], "paused")
+
+        # Workers stay warm by default; the periodic reaper releases nothing.
+        assert service.reap_idle_workers_once() == []
+        assert runtime.terminated == []
+        # Only the package's own service credential may stop compute package-wide.
+        person = client.post(url, headers={"X-WPR-Token": "service-token", "X-Viventium-User-Id": "owner"})
+        assert person.status_code == 403
+        assert runtime.terminated == []
+
+        released = client.post(url, headers={"X-WPR-Token": "service-token"})
+        assert released.status_code == 200
+        assert released.json() == {"status": "ok", "released": [ids["idle"]]}
+        assert runtime.terminated == [ids["idle"]]
+        assert runtime.boxes == [ids["idle"]]
+        kept = store.get_worker(ids["idle"])
+        assert kept["compute_released_at"] and kept["state"] not in {"terminated", "failed"}
+        assert store.get_worker(ids["queued"])["compute_released_at"] is None
+        assert store.get_worker(ids["paused"])["compute_released_at"] is None
+        again = client.post(url, headers={"X-WPR-Token": "service-token"})
+        assert again.json() == {"status": "ok", "released": []}
+
+        # When a deployment enables the idle timer, its release also closes the shared box.
+        monkeypatch.setenv("GLASSHIVE_IDLE_TERMINATE_AFTER_S", "1")
+        later = service.create_worker(
+            project_id=project["project_id"], owner_id="owner", name="later",
+            role="research", profile="openclaw-general", backend="openclaw",
+        )["worker_id"]
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE workers SET updated_at = ? WHERE worker_id = ?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(), later),
+            )
+        assert [item["worker_id"] for item in service.reap_idle_workers_once()] == [later]
+        assert runtime.boxes == [ids["idle"], later]
+    finally:
+        service.shutdown()
+
+
 def test_idle_reaper_preserves_completed_worker_state(tmp_path, monkeypatch):
     class ReaperRuntime(StubRuntime):
         def __init__(self) -> None:
