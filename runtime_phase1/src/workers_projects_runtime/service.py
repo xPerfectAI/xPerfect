@@ -5225,8 +5225,32 @@ class WorkersProjectsService:
         instruction starts compute again. Running, queued, paused or waiting work is left for
         the upgrade's idle proof to refuse.
         """
-        released = self._release_idle_workers(0.0)
-        return {"released": sorted(str(item.get("worker_id") or "") for item in released)}
+        released = {str(item.get("worker_id") or "") for item in self._release_idle_workers(0.0)}
+        # A member whose compute is already recorded as released can still share a box
+        # that stayed up. The box closes only through its own durable idle rule, lock
+        # and live-process check, exactly as after a workspace close.
+        release_idle_box = getattr(self.runtime, "release_idle_workspace_box", None)
+        if callable(release_idle_box):
+            for worker in self.store.list_all_workers():
+                worker_id = str(worker.get("worker_id") or "")
+                if (
+                    not worker_id
+                    or worker_id in released
+                    or not worker.get("compute_released_at")
+                    or str(worker.get("execution_mode") or "docker") != "docker"
+                    or worker.get("state") in {"terminating", "termination_failed"}
+                ):
+                    continue
+                try:
+                    if release_idle_box(worker):
+                        released.add(worker_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Idle workspace release could not be confirmed for %s: %s",
+                        worker_id,
+                        type(exc).__name__,
+                    )
+        return {"released": sorted(released)}
 
     def _release_idle_workers(self, threshold: float) -> list[dict[str, object]]:
         released: list[dict[str, object]] = []

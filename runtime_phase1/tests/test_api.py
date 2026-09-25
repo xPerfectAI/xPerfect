@@ -4616,6 +4616,8 @@ def test_upgrade_stops_only_idle_compute_and_keeps_workspaces_warm_by_default(
             )
 
         def release_idle_workspace_box(self, worker: dict) -> bool:
+            if worker["worker_id"] in self.boxes:
+                return False  # a box is released once; absent boxes report False
             self.boxes.append(worker["worker_id"])
             return True
 
@@ -4636,10 +4638,12 @@ def test_upgrade_stops_only_idle_compute_and_keeps_workspaces_warm_by_default(
                 project_id=project["project_id"], owner_id="owner", name=name,
                 role="research", profile="openclaw-general", backend="openclaw",
             )["worker_id"]
-            for name in ("idle", "queued", "paused")
+            for name in ("idle", "queued", "paused", "stale")
         }
         store.create_run(ids["queued"], project["project_id"], "Queued work")
         store.update_worker_state(ids["paused"], "paused")
+        # Compute already recorded as released while its box stayed up.
+        store.update_worker(ids["stale"], state="paused", compute_released_at="2026-09-25T18:06:35+00:00")
 
         # Workers stay warm by default; the periodic reaper releases nothing.
         assert service.reap_idle_workers_once() == []
@@ -4651,9 +4655,9 @@ def test_upgrade_stops_only_idle_compute_and_keeps_workspaces_warm_by_default(
 
         released = client.post(url, headers={"X-WPR-Token": "service-token"})
         assert released.status_code == 200
-        assert released.json() == {"status": "ok", "released": [ids["idle"]]}
+        assert released.json() == {"status": "ok", "released": sorted([ids["idle"], ids["stale"]])}
         assert runtime.terminated == [ids["idle"]]
-        assert runtime.boxes == [ids["idle"]]
+        assert sorted(runtime.boxes) == sorted([ids["idle"], ids["stale"]])
         kept = store.get_worker(ids["idle"])
         assert kept["compute_released_at"] and kept["state"] not in {"terminated", "failed"}
         assert store.get_worker(ids["queued"])["compute_released_at"] is None
@@ -4673,7 +4677,7 @@ def test_upgrade_stops_only_idle_compute_and_keeps_workspaces_warm_by_default(
                 ((datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(), later),
             )
         assert [item["worker_id"] for item in service.reap_idle_workers_once()] == [later]
-        assert runtime.boxes == [ids["idle"], later]
+        assert runtime.boxes[-1] == later
     finally:
         service.shutdown()
 
