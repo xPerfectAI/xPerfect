@@ -233,16 +233,17 @@ class FakeDocker:
             return subprocess.CompletedProcess(args, 1, b'', self.closed_work_refusal)
         identities = sorted([item['worker_id'] for item in self.closed_work]
                             + [value for item in self.closed_work for value in item['runs'] + item['leases']])
+        identities = sorted(identities + self.closed_boxes)
         if apply:
             expect = program.split("'--expect','", 1)[1].split("'", 1)[0].split(',')
             if sorted(expect) != identities:
                 return subprocess.CompletedProcess(args, 1, b'', b'ValueError: GlassHive closed-worker work '
                                                    b'changed since it was reviewed\n')
-        report = {'closed_workers': len(self.closed_work), 'applied': bool(apply and self.closed_work),
-                  'targets': [dict(item) for item in self.closed_work],
+        report = {'closed_workers': len(self.closed_work), 'applied': bool(apply and identities),
+                  'targets': [dict(item) for item in self.closed_work], 'boxes': list(self.closed_boxes),
                   'boxes_released': list(self.closed_boxes) if apply else []}
         if apply:
-            self.closed_work = []
+            self.closed_work, self.closed_boxes = [], []
         if self.closed_work_report is not None:
             report = self.closed_work_report
         return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b'')
@@ -1889,6 +1890,7 @@ def test_a_closed_workers_open_work_blocks_every_proof_until_the_new_release_set
     result = _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
     assert result['status'] == 'awaiting_commit'
     assert result['closed_work_settled'] == {'settled': CLOSED_IDENTITIES, 'boxes_released': ['xperfect-wsp-synthetic']}
+    assert json.loads(path.read_text())['upgrade']['boxes_released'] == ['xperfect-wsp-synthetic']
     assert json.loads(path.read_text())['upgrade']['closed_work_settled'] == CLOSED_IDENTITIES
     # The new release reviewed, then settled, with Docker for the generation proof, before any idle proof ran.
     assert fake.settlement == [('review', NEW, True), ('settle', NEW, True)] and fake.closed_work == []
@@ -1901,6 +1903,7 @@ def test_a_closed_workers_open_work_blocks_every_proof_until_the_new_release_set
     assert record.stat().st_mode & 0o077 == 0
     evidence = json.loads(record.read_text())
     assert evidence['status'] == 'settled' and evidence['reviewed'] == [CLOSED]
+    assert evidence['boxes'] == ['xperfect-wsp-synthetic']
     assert evidence['boxes_released'] == ['xperfect-wsp-synthetic']
     assert _runner(path).commit()['status'] == 'committed'
 
@@ -1925,10 +1928,12 @@ def test_closed_work_settlement_needs_a_new_image_that_carries_it_and_refuses_wi
 
 
 @pytest.mark.parametrize('report', [
-    {'closed_workers': 1, 'applied': True, 'targets': [CLOSED], 'boxes_released': []},  # a review that applied
-    {'closed_workers': 2, 'applied': False, 'targets': [CLOSED], 'boxes_released': []},
-    {'closed_workers': 1, 'applied': False, 'targets': [{**CLOSED, 'runs': ['../x']}], 'boxes_released': []},
-    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes_released': ['xperfect-wsp-early']},
+    {'closed_workers': 1, 'applied': True, 'targets': [CLOSED], 'boxes': [], 'boxes_released': []},  # applied early
+    {'closed_workers': 2, 'applied': False, 'targets': [CLOSED], 'boxes': [], 'boxes_released': []},
+    {'closed_workers': 1, 'applied': False, 'targets': [{**CLOSED, 'runs': ['../x']}], 'boxes': [], 'boxes_released': []},
+    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes': ['xperfect-wsp-early'],
+     'boxes_released': ['xperfect-wsp-early']},
+    {'closed_workers': 1, 'applied': False, 'targets': [CLOSED], 'boxes': ['../box'], 'boxes_released': []},
     'not a report',
 ])
 def test_an_unexpected_closed_work_report_changes_nothing(package, report):
@@ -1965,3 +1970,13 @@ def test_nothing_to_settle_is_a_no_op_and_rollback_says_settled_work_is_not_rest
     runner.upgrade(service_image=NEW, settle_closed_work=True)
     result = runner.rollback()
     assert result['status'] == 'rolled_back' and result['closed_work_settled_not_restored'] == CLOSED_IDENTITIES
+
+
+def test_a_box_whose_closed_work_was_settled_earlier_is_released_on_a_later_pass(package):
+    fake, path, receipt = package
+    fake.closed_boxes = ['xperfect-wsp-synthetic']  # an earlier pass settled the work but kept the box
+    result = _runner(path).upgrade(service_image=NEW, settle_closed_work=True)
+    assert result['closed_work_settled'] == {'settled': [], 'boxes_released': ['xperfect-wsp-synthetic']}
+    assert [step for step, _, _ in fake.settlement] == ['review', 'settle'] and fake.closed_boxes == []
+    evidence = json.loads(_closed_work_record(path)[0].read_text())
+    assert evidence['reviewed'] == [] and evidence['boxes'] == ['xperfect-wsp-synthetic']

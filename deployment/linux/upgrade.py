@@ -115,7 +115,7 @@ def closed_work_program(expect: list[str] | None = None) -> str:
     """The new release's review of open work an earlier release left on closed workers. With
     ``expect`` (the reviewed worker, run and lease identities) it settles exactly those and
     releases the idle boxes they held, or refuses. Typed JSON out."""
-    if expect is not None and not all(CLOSED_WORK_ID.fullmatch(item) for item in expect):
+    if expect is not None and not all(CLOSED_WORK_ID.fullmatch(item) or BOX_NAME.fullmatch(item) for item in expect):
         raise UpgradeError('Unexpected closed-worker work identity')
     flag = '' if expect is None else f",'--apply','--expect','{','.join(expect)}'"
     return _ENV + (
@@ -646,7 +646,7 @@ class Upgrade:
         def report_of(result: subprocess.CompletedProcess, *, applied: bool) -> dict:
             try:
                 report = json.loads(result.stdout)
-                targets, boxes = report['targets'], report['boxes_released']
+                targets, boxes, released = report['targets'], report['boxes'], report['boxes_released']
                 valid = (type(report['closed_workers']) is int and type(report['applied']) is bool
                          and isinstance(targets, list) and len(targets) == report['closed_workers']
                          and all(isinstance(item, dict) and CLOSED_WORK_ID.fullmatch(str(item.get('worker_id')))
@@ -654,7 +654,8 @@ class Upgrade:
                                  and all(CLOSED_WORK_ID.fullmatch(str(value)) for value in item['runs'] + item['leases'])
                                  for item in targets)
                          and isinstance(boxes, list) and all(BOX_NAME.fullmatch(str(box)) for box in boxes)
-                         and report['applied'] is (applied and bool(targets)) and (applied or not boxes))
+                         and isinstance(released, list) and set(released) <= set(boxes)
+                         and report['applied'] is (applied and bool(targets or boxes)) and (applied or not released))
             except (ValueError, KeyError, TypeError):
                 valid = False
             if not valid:
@@ -662,9 +663,12 @@ class Upgrade:
                                    + ('; whether work was settled is unknown' if applied else '. Nothing was changed'))
             return report
 
-        def identities(report: dict) -> list[str]:
+        def work(report: dict) -> list[str]:
             return sorted([item['worker_id'] for item in report['targets']]
                           + [value for item in report['targets'] for value in item['runs'] + item['leases']])
+
+        def identities(report: dict) -> list[str]:
+            return sorted(work(report) + report['boxes'])
 
         result = run(CLOSED_WORK_REPORT, 'closed-review')
         if result.returncode == 2 and b'invalid choice' in result.stderr:
@@ -678,7 +682,7 @@ class Upgrade:
         if not reviewed:
             return {'settled': [], 'boxes_released': []}
         # Identities only: no names, owners, messages or paths.
-        evidence = {'transaction': txn, 'status': 'settling', 'reviewed': review['targets']}
+        evidence = {'transaction': txn, 'status': 'settling', 'reviewed': review['targets'], 'boxes': review['boxes']}
         _write_private_json(record, evidence, create=True)
         journal['closed_work_settling'] = reviewed
         self._save(journal)
@@ -700,7 +704,7 @@ class Upgrade:
             raise UpgradeError('The new image settled a different set than it reviewed; stop and inspect '
                                f'{record.name}')
         _write_private_json(record, {**evidence, 'status': 'settled', 'boxes_released': applied['boxes_released']})
-        return {'settled': reviewed, 'boxes_released': applied['boxes_released']}
+        return {'settled': work(applied), 'boxes_released': applied['boxes_released']}
 
     def _prove_idle(self, *, receipt: dict, name: str, txn: str, current_image: str, service_image: str,
                     device: str, runtime: str, running: bool) -> dict:
@@ -1084,6 +1088,9 @@ class Upgrade:
             if journal['closed_work_settled']['settled']:
                 done.append('the open work of closed workers was already settled '
                             f'({len(journal["closed_work_settled"]["settled"])} identities)')
+            if journal['closed_work_settled']['boxes_released']:
+                done.append('idle workspace boxes were already released '
+                            f'({len(journal["closed_work_settled"]["boxes_released"])})')
             if done and isinstance(exc, UpgradeError):
                 already = '; '.join(done)
                 raise UpgradeError(str(exc).removesuffix(' Nothing was changed.') + ' ' + already[0].upper()
@@ -1213,6 +1220,7 @@ class Upgrade:
                                 'secrets_added': journal.get('secrets_added', {}),
                                 'files_recovered': journal.get('files_recovered', []),
                                 'closed_work_settled': journal.get('closed_work_settled', {}).get('settled', []),
+                                'boxes_released': journal.get('closed_work_settled', {}).get('boxes_released', []),
                                 'role_mapping_changed': roles_changed,
                                 'local_assertion_added': bool(signer),
                                 'from_native_image': journal['previous_native_image'],
@@ -1240,8 +1248,9 @@ class Upgrade:
             result['secrets_added'] = journal['secrets_added']
         if journal.get('files_recovered'):
             result['files_recovered'] = journal['files_recovered']
-        if (journal.get('closed_work_settled') or {}).get('settled'):
-            result['closed_work_settled'] = journal['closed_work_settled']
+        closed = journal.get('closed_work_settled') or {}
+        if closed.get('settled') or closed.get('boxes_released'):
+            result['closed_work_settled'] = closed
         if signer:
             result['local_assertion'] = {'added': True, 'ui_key_id': signer['kid']}
             result['local_assertion_note'] = ('Signed-in owners can now confirm workspace sharing and permission '
