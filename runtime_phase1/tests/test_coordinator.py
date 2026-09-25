@@ -556,6 +556,45 @@ def test_each_failed_admission_remains_visible_and_siblings_are_attempted(coordi
         coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id='0', route_id='route', instruction='changed'))
 
 
+def test_armed_admission_refusal_blocks_only_its_first_dispatch_order(coordinator):
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'turn', 'raw', [Goal(id=g, text=g) for g in ('a', 'b', 'c')])
+    project_id = coordinator.snapshot('local', 'owner', cid)['scope']['project_id']
+    runs = {}
+    for goal in ('a', 'b', 'c'):
+        worker = coordinator.store.create_worker(
+            project_id, 'owner', goal, goal, 'codex-cli', 'codex-cli', 'codex-cli',
+            'exact-worker-model', execution_mode='host',
+        )
+        runs[goal] = (worker, coordinator.store.create_run(worker['worker_id'], project_id, goal))
+    admissions, reserved = [], []
+
+    def admission(*, tenant_id, owner_id, conversation_id, ordinal):
+        admissions.append((tenant_id, owner_id, conversation_id, ordinal))
+        if ordinal == 2:
+            raise ParallelExecutionIsolationError('unavailable', reason_code='shared_configuration_required')
+
+    def reserve(**kwargs):
+        goal = kwargs['idempotency_key'].rsplit(':', 1)[1]
+        reserved.append(goal)
+        worker, run = runs[goal]
+        return {'work_ref': f'work-{goal}', 'worker_id': worker['worker_id'], 'initial_run_id': run['run_id']}
+
+    coordinator.service.local_qa_coordinator_admission = admission
+    coordinator.service.reserve_delegation = reserve
+    coordinator.service.start_assigned_run = lambda worker_id: None
+    snapshots = [coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id=g, route_id='route', instruction=g))
+                 for g in ('a', 'b', 'c')]
+
+    assert admissions == [('local', 'owner', cid, ordinal) for ordinal in (1, 2, 3)]
+    assert reserved == ['a', 'c']
+    assert snapshots[1]['state'] == 'blocked' and snapshots[1]['blocker'] == 'shared_configuration_required'
+    assert snapshots[0]['run_id'] and snapshots[2]['run_id']
+    # Replaying the recorded dispatch is not a new admission order.
+    replay = coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id='b', route_id='route', instruction='b'))
+    assert len(admissions) == 3 and reserved == ['a', 'c', 'b'] and replay['run_id']
+
+
 def test_replayed_dispatch_preserves_steered_replacement_run(coordinator):
     cid = create(coordinator)
     coordinator.accept_turn('local', 'owner', cid, 'turn', 'raw', [Goal(id='a', text='goal')])

@@ -683,7 +683,16 @@ class CoordinatorService:
             if current["dispatch_json"] and current["dispatch_json"] != serialized:
                 raise CoordinatorConflict("Goal already has a different dispatch; use exact run controls")
             conn.execute("UPDATE coordinator_goals SET dispatch_json=? WHERE conversation_id=? AND goal_id=? AND restore_hold=0", (serialized, conversation_id, dispatch.goal_id))
+            # A goal's first dispatch has one stable order among this conversation's delegations.
+            admission_ordinal = 0 if current["dispatch_json"] else conn.execute(
+                "SELECT COUNT(*) FROM coordinator_goals WHERE conversation_id=? AND dispatch_json<>''",
+                (conversation_id,),
+            ).fetchone()[0]
         try:
+            qa_admission = getattr(self.service, "local_qa_coordinator_admission", None)
+            if admission_ordinal and qa_admission is not None:
+                qa_admission(tenant_id=tenant, owner_id=owner, conversation_id=conversation_id,
+                             ordinal=admission_ordinal)
             reservation = self.service.reserve_delegation(
                 tenant_id=tenant, owner_id=owner, idempotency_key=f"{conversation_id}:{goal['goal_id']}",
                 request_digest=digest({
