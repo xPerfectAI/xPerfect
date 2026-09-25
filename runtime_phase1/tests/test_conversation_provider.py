@@ -5211,6 +5211,147 @@ def test_blocking_response_waits_for_the_run_processor_to_accept_the_turn(tmp_pa
     assert json.loads(row["replay_decision_json"])["admission_state"] == "accepted"
 
 
+class RunUsageRuntime(StubRuntime):
+    """Native log per run: its answer and prompt-token usage (high for one chosen run)."""
+
+    def __init__(self, high_usage_run=None):
+        super().__init__()
+        self.high_usage_run = high_usage_run
+        self.ordinals = {}
+
+    def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+        self.ordinals.setdefault(str(run_id), len(self.ordinals) + 1)
+        return super().run_task(worker, instruction, timeout_sec, run_id)
+
+    def provider_activity_log(self, worker: dict, run_id: str) -> tuple[str, str]:
+        ordinal = self.ordinals.get(str(run_id))
+        if ordinal is None:
+            return "codex-cli", ""
+        tokens = 250_000 if ordinal == self.high_usage_run else 17
+        return "codex-cli", "\n".join([
+            json.dumps({"type": "item.completed",
+                        "item": {"type": "agent_message", "text": f"Native answer {ordinal}."}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": tokens, "output_tokens": 4}}),
+        ])
+
+
+def _continue_conversation(client, workspace, history, number, user):
+    history.append({"role": "user", "content": user})
+    payload = _payload(workspace)
+    payload["messages"] = [payload["messages"][0], *history]
+    payload["metadata"].update({"message_id": f"response-{number}", "idempotency_key": f"request-{number}",
+                                "stream_id": f"stream-{number}"})
+    response = client.post("/v1/chat/completions", headers=AUTH, json=payload)
+    assert response.status_code == 200, response.text
+    history.append({"role": "assistant", "content": response.json()["choices"][0]["message"]["content"]})
+    return client.app.state.store.get_provider_request(response.json()["id"])
+
+
+def test_late_settlement_pass_keeps_the_next_turns_native_context_rotation(tmp_path, monkeypatch):
+    """A turn's session write belongs to the pass that settles it, never to a later pass.
+
+    The run processor reads turn 2 as pending, then the blocking waiter settles turn 2, so the
+    processor's pass runs late. Park that pass where the scheduler or a slow native-log read can
+    already park it, after it read the session and before it would write it, until turn 3 has
+    been admitted. Turn 3 is admitted under measured native pressure and rotates the epoch.
+    """
+    processor_read_pending = threading.Event()
+    waiter_returned = threading.Event()
+    next_turn_admitted = threading.Event()
+    parked = threading.Event()
+    local = threading.local()
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, RunUsageRuntime(high_usage_run=2))
+    provider = client.app.state.conversation_provider
+    store = client.app.state.store
+    original_wait, original_sync, original_start = provider.wait, provider._sync, provider.start
+    original_output = provider._native_output_snapshot
+
+    def marked_wait(request_id, **kwargs):
+        local.waiter = True
+        try:
+            result = original_wait(request_id, **kwargs)
+        finally:
+            local.waiter = False
+        if result[0]["message_id"] == "response-2":
+            waiter_returned.set()
+        return result
+
+    def ordered_sync(request_record):
+        if request_record["message_id"] != "response-2":
+            return original_sync(request_record)
+        if getattr(local, "waiter", False):
+            processor_read_pending.wait(timeout=10)
+            return original_sync(request_record)
+        if threading.current_thread().name.startswith("wpr-") and not processor_read_pending.is_set():
+            processor_read_pending.set()
+            waiter_returned.wait(timeout=10)
+            local.late = True
+            try:
+                return original_sync(request_record)
+            finally:
+                local.late = False
+        return original_sync(request_record)
+
+    def slow_output_read(request_record, run):
+        if getattr(local, "late", False) and not parked.is_set():
+            parked.set()
+            next_turn_admitted.wait(timeout=10)
+        return original_output(request_record, run)
+
+    def marked_start(payload, **kwargs):
+        result = original_start(payload, **kwargs)
+        if payload.metadata.message_id == "response-3":
+            next_turn_admitted.set()
+        return result
+
+    monkeypatch.setattr(provider, "wait", marked_wait)
+    monkeypatch.setattr(provider, "_sync", ordered_sync)
+    monkeypatch.setattr(provider, "_native_output_snapshot", slow_output_read)
+    monkeypatch.setattr(provider, "start", marked_start)
+    history = []
+    try:
+        _continue_conversation(client, workspace, history, 1, "Plan the launch checklist.")
+        _continue_conversation(client, workspace, history, 2, "Add the security review.")
+        third = _continue_conversation(client, workspace, history, 3, "Summarize the open items.")
+    finally:
+        processor_read_pending.set()
+        waiter_returned.set()
+        next_turn_admitted.set()
+    assert parked.is_set()
+    rotation = json.loads(third["replay_decision_json"])
+    assert rotation["native_context_transition"]["reason"] == "native_occupancy_pressure"
+    manifest = json.loads(store.get_provider_session_by_id(third["session_id"])["context_manifest_json"])
+    assert manifest["native_context_epoch"] == rotation["native_context_epoch"] != ""
+    assert manifest["latest_native_prompt_tokens"] == 17
+    fourth = json.loads(_continue_conversation(
+        client, workspace, history, 4, "What is still blocking?")["replay_decision_json"])
+    assert fourth["native_context_epoch"] == rotation["native_context_epoch"]
+    assert fourth["native_occupancy"]["state"] == "healthy"
+    assert fourth["mode"] == "delta"
+
+
+def test_reading_an_earlier_turns_activity_keeps_the_session_on_its_latest_turn(tmp_path, monkeypatch):
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, RunUsageRuntime(high_usage_run=2))
+    store = client.app.state.store
+    history = []
+    _continue_conversation(client, workspace, history, 1, "Plan the launch checklist.")
+    second = _continue_conversation(client, workspace, history, 2, "Add the security review.")
+    third = _continue_conversation(client, workspace, history, 3, "Summarize the open items.")
+    assert json.loads(third["replay_decision_json"])["native_context_transition"]["reason"] == (
+        "native_occupancy_pressure")
+    activity = client.get(f"/v1/requests/{second['request_id']}/activity", headers=AUTH)
+    assert activity.status_code == 200, activity.text
+    manifest = json.loads(store.get_provider_session_by_id(third["session_id"])["context_manifest_json"])
+    assert manifest["last_request_id"] == third["request_id"]
+    fourth = json.loads(_continue_conversation(
+        client, workspace, history, 4, "What is still blocking?")["replay_decision_json"])
+    assert fourth["native_tool_evidence_coverage"] == "complete"
+
+
 def test_reserved_source_stays_in_next_instruction_until_delivery_is_accepted(tmp_path, monkeypatch):
     from workers_projects_runtime.conversation_provider import _visible_message_keys
     workspace = tmp_path / "Life"

@@ -4529,6 +4529,12 @@ class ConversationProvider:
         # that exits after an interrupt must never resurrect the client-visible request.
         if str(request_record.get("state") or "") in {"cancelled", "failed"}:
             return request_record
+        # The pass that commits a turn's response settles that turn's session. A later pass
+        # (the run processor, an activity read, a same-key retry) may run after newer turns
+        # wrote the session, so it must not write this turn's older view of it.
+        settled_before_this_pass = str(request_record.get("state") or "") == "completed" and bool(
+            str(request_record.get("response_json") or "").strip()
+        )
         run_id = str(request_record.get("run_id") or "")
         if not run_id:
             return request_record
@@ -4753,10 +4759,13 @@ class ConversationProvider:
                     *decision.get("admitted_visible_message_keys", []),
                     *([response_key] if response_key else []),
                 ]))
-                self.store.update_provider_session_history(
-                    str(request_record["session_id"]), history_count=visible_history_count,
-                    context_manifest=next_manifest,
-                )
+                # This write replaces the whole manifest. Main-context turns above advance
+                # through a transaction fenced by their accepted advancement key instead.
+                if not settled_before_this_pass:
+                    self.store.update_provider_session_history(
+                        str(request_record["session_id"]), history_count=visible_history_count,
+                        context_manifest=next_manifest,
+                    )
         return updated
 
     def _reconcile_detached_request_once(self, request_id: str) -> bool:
