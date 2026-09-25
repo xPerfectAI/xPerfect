@@ -520,6 +520,91 @@ def _fault_parameters(boundary: str) -> dict[str, object]:
     return {"faultClass": boundary, **fixed[boundary]}
 
 
+def initialize_local_qa_schema(connection: sqlite3.Connection) -> None:
+    """Create or migrate the local-QA fault authority's own tables and indexes."""
+    connection.executescript(
+        """
+                CREATE TABLE IF NOT EXISTS local_qa_fault_controls (
+                    control_ref TEXT PRIMARY KEY,
+                    contract_version INTEGER NOT NULL CHECK (contract_version = 1),
+                    case_id TEXT NOT NULL,
+                    case_mode TEXT NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    session_hash TEXT NOT NULL,
+                    candidate_digest TEXT NOT NULL,
+                    component_artifact_digest TEXT NOT NULL,
+                    boundary TEXT NOT NULL,
+                    owner_hash TEXT NOT NULL,
+                    work_hash TEXT NOT NULL,
+                    run_hash TEXT NOT NULL,
+                    artifact_hash TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('armed', 'consumed', 'cleared', 'expired')),
+                    armed_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    cleared_at TEXT,
+                    consumption_count INTEGER NOT NULL DEFAULT 0 CHECK (consumption_count IN (0, 1))
+                );
+
+                CREATE TABLE IF NOT EXISTS local_qa_fault_audit (
+                    audit_ref TEXT PRIMARY KEY,
+                    control_ref TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    boundary TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    detail_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS local_qa_fault_arm_ledger (
+                    arm_identity_hash TEXT PRIMARY KEY,
+                    idempotency_hash TEXT NOT NULL,
+                    control_ref TEXT NOT NULL UNIQUE,
+                    ttl_seconds INTEGER NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 3600),
+                    status TEXT NOT NULL
+                        CHECK (status IN ('armed', 'consumed', 'cleared', 'expired')),
+                    expires_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_local_qa_fault_audit_control
+                    ON local_qa_fault_audit (control_ref, occurred_at);
+                """
+    )
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(local_qa_fault_controls)"
+        ).fetchall()
+    }
+    if "candidate_digest" not in columns:
+        connection.execute(
+            "ALTER TABLE local_qa_fault_controls "
+            "ADD COLUMN candidate_digest TEXT NOT NULL DEFAULT ''"
+        )
+    connection.executescript(
+        """
+                DROP INDEX IF EXISTS idx_local_qa_fault_exact_consume;
+                DROP INDEX IF EXISTS idx_local_qa_fault_one_live_exact;
+                CREATE INDEX idx_local_qa_fault_exact_consume
+                    ON local_qa_fault_controls (
+                        case_id, case_mode, token_hash, session_hash,
+                        candidate_digest, component_artifact_digest, boundary,
+                        owner_hash, work_hash, run_hash, artifact_hash,
+                        status, expires_at
+                    );
+                CREATE INDEX IF NOT EXISTS idx_local_qa_fault_session
+                    ON local_qa_fault_controls (case_id, token_hash, session_hash, armed_at);
+                CREATE UNIQUE INDEX idx_local_qa_fault_one_live_exact
+                    ON local_qa_fault_controls (
+                        case_id, case_mode, token_hash, session_hash,
+                        candidate_digest, component_artifact_digest,
+                        boundary, owner_hash, work_hash, run_hash, artifact_hash
+                    ) WHERE status = 'armed';
+                """
+    )
+
+
 class LocalQAControlPlane:
     """Durable, exact-scope, one-shot fault authority for installed local QA."""
 
@@ -608,87 +693,7 @@ class LocalQAControlPlane:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS local_qa_fault_controls (
-                    control_ref TEXT PRIMARY KEY,
-                    contract_version INTEGER NOT NULL CHECK (contract_version = 1),
-                    case_id TEXT NOT NULL,
-                    case_mode TEXT NOT NULL,
-                    token_hash TEXT NOT NULL,
-                    session_hash TEXT NOT NULL,
-                    candidate_digest TEXT NOT NULL,
-                    component_artifact_digest TEXT NOT NULL,
-                    boundary TEXT NOT NULL,
-                    owner_hash TEXT NOT NULL,
-                    work_hash TEXT NOT NULL,
-                    run_hash TEXT NOT NULL,
-                    artifact_hash TEXT NOT NULL,
-                    parameters_json TEXT NOT NULL,
-                    status TEXT NOT NULL
-                        CHECK (status IN ('armed', 'consumed', 'cleared', 'expired')),
-                    armed_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    consumed_at TEXT,
-                    cleared_at TEXT,
-                    consumption_count INTEGER NOT NULL DEFAULT 0 CHECK (consumption_count IN (0, 1))
-                );
-
-                CREATE TABLE IF NOT EXISTS local_qa_fault_audit (
-                    audit_ref TEXT PRIMARY KEY,
-                    control_ref TEXT NOT NULL,
-                    case_id TEXT NOT NULL,
-                    boundary TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    detail_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS local_qa_fault_arm_ledger (
-                    arm_identity_hash TEXT PRIMARY KEY,
-                    idempotency_hash TEXT NOT NULL,
-                    control_ref TEXT NOT NULL UNIQUE,
-                    ttl_seconds INTEGER NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 3600),
-                    status TEXT NOT NULL
-                        CHECK (status IN ('armed', 'consumed', 'cleared', 'expired')),
-                    expires_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_local_qa_fault_audit_control
-                    ON local_qa_fault_audit (control_ref, occurred_at);
-                """
-            )
-            columns = {
-                str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(local_qa_fault_controls)"
-                ).fetchall()
-            }
-            if "candidate_digest" not in columns:
-                connection.execute(
-                    "ALTER TABLE local_qa_fault_controls "
-                    "ADD COLUMN candidate_digest TEXT NOT NULL DEFAULT ''"
-                )
-            connection.executescript(
-                """
-                DROP INDEX IF EXISTS idx_local_qa_fault_exact_consume;
-                DROP INDEX IF EXISTS idx_local_qa_fault_one_live_exact;
-                CREATE INDEX idx_local_qa_fault_exact_consume
-                    ON local_qa_fault_controls (
-                        case_id, case_mode, token_hash, session_hash,
-                        candidate_digest, component_artifact_digest, boundary,
-                        owner_hash, work_hash, run_hash, artifact_hash,
-                        status, expires_at
-                    );
-                CREATE INDEX IF NOT EXISTS idx_local_qa_fault_session
-                    ON local_qa_fault_controls (case_id, token_hash, session_hash, armed_at);
-                CREATE UNIQUE INDEX idx_local_qa_fault_one_live_exact
-                    ON local_qa_fault_controls (
-                        case_id, case_mode, token_hash, session_hash,
-                        candidate_digest, component_artifact_digest,
-                        boundary, owner_hash, work_hash, run_hash, artifact_hash
-                    ) WHERE status = 'armed';
-                """
-            )
+            initialize_local_qa_schema(connection)
 
     @staticmethod
     def _coordinator_admission_fixture(

@@ -129,6 +129,29 @@ def test_native_schema_accepts_only_complete_owner_compositions(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("damage", ["none", "partial", "altered"])
+def test_native_schema_accepts_the_local_qa_authority_tables_only_complete_and_exact(tmp_path, damage):
+    from workers_projects_runtime.local_qa_control import LocalQAControlPlane
+    from workers_projects_runtime.native_continuity import _require_schema
+
+    database, store, _, _ = source_state(tmp_path)
+    database.chmod(0o600)
+    LocalQAControlPlane(database, environment={})
+    with sqlite3.connect(database) as connection:
+        if damage == "partial":
+            connection.execute("DROP TABLE local_qa_fault_arm_ledger")
+        elif damage == "altered":
+            connection.execute("ALTER TABLE local_qa_fault_audit ADD COLUMN note TEXT")
+    with sqlite3.connect(database) as connection:
+        if damage == "none":
+            _require_schema(connection)
+            _require_schema(connection, incoming=True)
+        else:
+            with pytest.raises(ValueError, match="partial optional schema|unreviewed schema shape"):
+                _require_schema(connection)
+    store.close()
+
+
 def test_native_schema_rejects_weakened_table_check(tmp_path):
     from workers_projects_runtime.native_continuity import _require_schema
 
