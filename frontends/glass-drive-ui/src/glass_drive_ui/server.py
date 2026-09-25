@@ -1674,9 +1674,15 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     status_code=503,
                     content={"detail": "Sign-in is temporarily busy; retry shortly"},
                 )
+            # The local unlock page asks only for its one password; email sign-in keeps
+            # the message that does not say which field was wrong.
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Email or password is incorrect"},
+                content={
+                    "detail": "That password is incorrect"
+                    if human_auth.mode == "local_password"
+                    else "Email or password is incorrect"
+                },
             )
         response = JSONResponse(
             {"authenticated": True, "redirect_url": safe_return_to}

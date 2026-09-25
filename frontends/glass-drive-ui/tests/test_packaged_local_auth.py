@@ -141,6 +141,14 @@ def test_browser_unlock_csrf_reload_rotation_and_origin(gateway):
     assert restarted.get('/api/control-plane').status_code == 401
 
 
+def test_local_unlock_names_only_the_password_it_asked_for(gateway):
+    gateway.provision_local_owner(password=PASSWORD)
+    client = TestClient(create_app())
+    wrong = login(client, password='fixture-only-wrong-password-0987654321')
+    assert (wrong.status_code, wrong.json()) == (401, {'detail': 'That password is incorrect'})
+    assert login(client).status_code == 200
+
+
 def test_wrong_password_lockout_survives_restart(gateway):
     gateway.provision_local_owner(password=PASSWORD)
     for _ in range(5):
