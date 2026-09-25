@@ -2530,7 +2530,6 @@ def test_retryable_capacity_wait_does_not_consume_generic_retry_budget(
         assert waiting["capacity_retry_count"] >= 1
         assert waiting["failure_class"] == "host_capacity"
         assert waiting["failure_retryable"] == 1
-        assert (store.get_worker(worker["worker_id"]) or {})["state"] == "ready"
         wait_until(
             lambda: any(
                 payload.get("event") == "run.waiting_on_capacity"
@@ -2538,6 +2537,9 @@ def test_retryable_capacity_wait_does_not_consume_generic_retry_budget(
             ),
             timeout=3.0,
         )
+        # The requeue commits the run before the worker's ready state; the waiting
+        # callback is emitted only after both.
+        assert (store.get_worker(worker["worker_id"]) or {})["state"] == "ready"
         assert len(
             [
                 payload
