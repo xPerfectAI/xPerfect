@@ -157,20 +157,23 @@ def test_file_workspace_root_uses_admitted_owner_workspace(tmp_path):
         store, TemporaryWorkspaceRuntime(tmp_path / "runtime"),
         reconcile_on_startup=False,
     )
-    with pytest.raises(RuntimeError, match="not prepared"):
-        service.file_workspace_root(
+    try:
+        with pytest.raises(RuntimeError, match="not prepared"):
+            service.file_workspace_root(
+                worker["worker_id"], tenant_id="tenant-a", owner_id="owner-a"
+            )
+        root = tmp_path / "files"
+        root.mkdir()
+        store.update_worker(worker["worker_id"], workspace_dir=str(root))
+        assert service.file_workspace_root(
             worker["worker_id"], tenant_id="tenant-a", owner_id="owner-a"
-        )
-    root = tmp_path / "files"
-    root.mkdir()
-    store.update_worker(worker["worker_id"], workspace_dir=str(root))
-    assert service.file_workspace_root(
-        worker["worker_id"], tenant_id="tenant-a", owner_id="owner-a"
-    ) == root.resolve()
-    with pytest.raises(ValueError, match="unavailable"):
-        service.file_workspace_root(
-            worker["worker_id"], tenant_id="tenant-a", owner_id="owner-b"
-        )
+        ) == root.resolve()
+        with pytest.raises(ValueError, match="unavailable"):
+            service.file_workspace_root(
+                worker["worker_id"], tenant_id="tenant-a", owner_id="owner-b"
+            )
+    finally:
+        service.shutdown()
 
 
 def test_store_migrates_existing_workers_to_legacy_workspace_kind(tmp_path):
