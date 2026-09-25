@@ -3526,7 +3526,11 @@ def test_provider_cancel_settles_exact_pending_run(
 ):
     store = Store(str(tmp_path / "runtime.db"))
     runtime = InterruptCountingRuntime()
-    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False)
+    # Cancellation is exercised directly. A live scheduler would race the running
+    # snapshots restored below and add its own wake-ups to `awakened`.
+    service = WorkersProjectsService(
+        store, runtime, reconcile_on_startup=False, start_background_consumers=False
+    )
     provider: ConversationProvider | None = None
     try:
         project = store.create_project(
