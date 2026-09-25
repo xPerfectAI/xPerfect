@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -311,6 +312,7 @@ def test_fault_catalog_is_exact_and_data_driven() -> None:
             "artifact_link_expired",
             "artifact_unavailable_restart_recovery",
         ),
+        "XPF-COORD-001": ("coordinator_admission_prerequisite_missing",),
     }
 
 
@@ -1992,3 +1994,251 @@ def test_cli_query_clear_and_cleanup_use_the_same_private_session(
     assert cleaned["removedControls"] == 1
     serialized = json.dumps([armed, queried, cleared, cleaned], sort_keys=True)
     _assert_private_values_absent(serialized, private_scope)
+
+
+COORDINATOR_CASE = local_qa_control.COORDINATOR_ADMISSION_CASE_ID
+COORDINATOR_FAULT = local_qa_control.COORDINATOR_ADMISSION_FAULT
+
+
+def _seed_conversation(
+    db_path: Path, *, conversation_id: str, owner_id: str, restore_hold: int = 0
+) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS coordinator_conversations ("
+            "conversation_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, "
+            "owner_id TEXT NOT NULL, restore_hold INTEGER NOT NULL DEFAULT 0)"
+        )
+        connection.execute(
+            "INSERT INTO coordinator_conversations VALUES (?, 'local', ?, ?)",
+            (conversation_id, owner_id, restore_hold),
+        )
+
+
+def _coordinator_arm(
+    scope: dict[str, str], *, owner_id: str, work_id: str, **overrides: object
+) -> dict[str, object]:
+    attested = json.dumps(
+        {
+            "artifactId": "",
+            "candidateDigest": CANDIDATE_A,
+            "caseId": COORDINATOR_CASE,
+            "componentArtifactDigest": ARTIFACT_A,
+            "ownerId": owner_id,
+            "runId": "",
+            "sessionRef": scope["session_ref"],
+            "workId": work_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    request: dict[str, object] = {
+        **_private_base(COORDINATOR_CASE, scope["token"], scope["session_ref"]),
+        "scopeKind": local_qa_control.COORDINATOR_ADMISSION_SCOPE,
+        "boundary": COORDINATOR_FAULT,
+        "ownerId": owner_id,
+        "workId": work_id,
+        "runId": "",
+        "artifactId": "",
+        "ttlSeconds": 60,
+        "parameters": {},
+        "fixtureAttestation": "sha256:" + hmac.new(
+            scope["token"].encode(),
+            ("glasshive-fixture-control-v1\0" + attested).encode(),
+            hashlib.sha256,
+        ).hexdigest(),
+    }
+    request.update(overrides)
+    return request
+
+
+def test_coordinator_admission_control_refuses_only_its_exact_conversation_ordinal(
+    tmp_path: Path, private_scope: dict[str, str]
+) -> None:
+    plane = _plane(
+        tmp_path,
+        case_id=COORDINATOR_CASE,
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+    )
+    conversation = "conv_" + secrets.token_hex(8)
+    _seed_conversation(plane.db_path, conversation_id=conversation, owner_id="local-owner")
+    work_id = f"{conversation}#admission-2"
+
+    receipt = plane.arm(_coordinator_arm(private_scope, owner_id="local-owner", work_id=work_id))
+
+    assert receipt["status"] == "armed"
+    for other_owner, other_work in (
+        ("local-owner", f"{conversation}#admission-1"),
+        ("local-owner", f"{conversation}#admission-3"),
+        ("other-owner", work_id),
+    ):
+        assert plane.consume(COORDINATOR_FAULT, owner_id=other_owner, work_id=other_work) is None
+    for pwk_boundary in ("provider_auth_missing", "provider_unavailable"):
+        assert plane.consume(pwk_boundary, owner_id="local-owner", work_id=work_id) is None
+    directive = plane.consume(COORDINATOR_FAULT, owner_id="local-owner", work_id=work_id)
+    assert directive is not None
+    assert directive.parameters == {
+        "faultClass": COORDINATOR_FAULT,
+        "reasonCode": "shared_configuration_required",
+        "retryable": False,
+    }
+    assert plane.consume(COORDINATOR_FAULT, owner_id="local-owner", work_id=work_id) is None
+
+
+def test_coordinator_admission_control_expires_without_consumption(
+    tmp_path: Path, private_scope: dict[str, str]
+) -> None:
+    conversation = "conv_" + secrets.token_hex(8)
+    armed = _plane(
+        tmp_path,
+        case_id=COORDINATOR_CASE,
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+    )
+    _seed_conversation(armed.db_path, conversation_id=conversation, owner_id="local-owner")
+    work_id = f"{conversation}#admission-2"
+    armed.arm(_coordinator_arm(private_scope, owner_id="local-owner", work_id=work_id, ttlSeconds=30))
+    later = _plane(
+        tmp_path,
+        case_id=COORDINATOR_CASE,
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+        now=NOW + timedelta(seconds=31),
+    )
+
+    assert later.consume(COORDINATOR_FAULT, owner_id="local-owner", work_id=work_id) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_conversation",
+        "other_owners_conversation",
+        "restore_held_conversation",
+        "malformed_work",
+        "zero_ordinal",
+        "run_scope",
+        "parameters",
+        "attestation",
+        "synthetic_owner",
+    ],
+)
+def test_coordinator_admission_arm_fails_closed_outside_its_exact_scope(
+    tmp_path: Path, private_scope: dict[str, str], mutation: str
+) -> None:
+    plane = _plane(
+        tmp_path,
+        case_id=COORDINATOR_CASE,
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+    )
+    conversation = "conv_" + secrets.token_hex(8)
+    owner_id = "qa_owner_" + secrets.token_hex(4) if mutation == "synthetic_owner" else "local-owner"
+    if mutation != "missing_conversation":
+        _seed_conversation(
+            plane.db_path,
+            conversation_id=conversation,
+            owner_id="other-owner" if mutation == "other_owners_conversation" else owner_id,
+            restore_hold=1 if mutation == "restore_held_conversation" else 0,
+        )
+    work_id = {
+        "malformed_work": conversation,
+        "zero_ordinal": f"{conversation}#admission-0",
+    }.get(mutation, f"{conversation}#admission-2")
+    overrides: dict[str, object] = {
+        "run_scope": {"runId": "run_" + secrets.token_hex(8)},
+        "parameters": {"parameters": {"reasonCode": "provider_auth_missing"}},
+        "attestation": {"fixtureAttestation": "sha256:" + "0" * 64},
+    }.get(mutation, {})
+
+    with pytest.raises(LocalQAControlError):
+        plane.arm(_coordinator_arm(private_scope, owner_id=owner_id, work_id=work_id, **overrides))
+
+
+def test_coordinator_scope_and_case_must_match(
+    tmp_path: Path, private_scope: dict[str, str]
+) -> None:
+    conversation = "conv_" + secrets.token_hex(8)
+    (tmp_path / "pwk").mkdir()
+    pwk = _plane(
+        tmp_path / "pwk",
+        case_id="PWK-UC-016",
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+    )
+    _seed_conversation(pwk.db_path, conversation_id=conversation, owner_id="local-owner")
+    request = _coordinator_arm(
+        private_scope,
+        owner_id="local-owner",
+        work_id=f"{conversation}#admission-2",
+        caseId="PWK-UC-016",
+    )
+    with pytest.raises(LocalQAControlError):
+        pwk.arm(request)
+
+    coordinator = _plane(
+        tmp_path,
+        case_id=COORDINATOR_CASE,
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+    )
+    _seed_conversation(coordinator.db_path, conversation_id=conversation, owner_id="local-owner")
+    synthetic = _coordinator_arm(
+        private_scope,
+        owner_id="local-owner",
+        work_id=f"{conversation}#admission-2",
+        scopeKind="synthetic_local_qa",
+    )
+    synthetic.pop("fixtureAttestation")
+    with pytest.raises(LocalQAControlError):
+        coordinator.arm(synthetic)
+
+
+def test_coordinator_admission_is_default_off_without_the_complete_authority(
+    tmp_path: Path,
+) -> None:
+    plane = LocalQAControlPlane(tmp_path / "runtime.sqlite3", environment={}, clock=lambda: NOW)
+
+    assert plane.consume(
+        COORDINATOR_FAULT, owner_id="local-owner", work_id="conv_a#admission-2"
+    ) is None
+
+
+def test_service_admission_hook_raises_the_boundary_typed_refusal_once(
+    tmp_path: Path, private_scope: dict[str, str]
+) -> None:
+    from types import SimpleNamespace
+
+    from workers_projects_runtime.service import (
+        ParallelExecutionIsolationError,
+        WorkersProjectsService,
+    )
+
+    plane = _plane(
+        tmp_path,
+        case_id=COORDINATOR_CASE,
+        token=private_scope["token"],
+        session_ref=private_scope["session_ref"],
+    )
+    conversation = "conv_" + secrets.token_hex(8)
+    _seed_conversation(plane.db_path, conversation_id=conversation, owner_id="local-owner")
+    plane.arm(_coordinator_arm(
+        private_scope, owner_id="local-owner", work_id=f"{conversation}#admission-2"
+    ))
+    effects: list[str] = []
+    service = SimpleNamespace(
+        _local_qa_control_plane=plane,
+        _record_local_qa_effect=lambda directive, outcome: effects.append(outcome),
+    )
+    hook = WorkersProjectsService.local_qa_coordinator_admission
+    scope = {"tenant_id": "local", "owner_id": "local-owner", "conversation_id": conversation}
+
+    hook(service, **scope, ordinal=1)
+    with pytest.raises(ParallelExecutionIsolationError) as refused:
+        hook(service, **scope, ordinal=2)
+    hook(service, **scope, ordinal=2)
+    hook(SimpleNamespace(_local_qa_control_plane=None), **scope, ordinal=2)
+
+    assert refused.value.reason_code == "shared_configuration_required"
+    assert effects == ["coordinator_admission_refused"]

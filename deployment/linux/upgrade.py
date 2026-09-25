@@ -51,6 +51,21 @@ TMPFS = 'rw,noexec,nosuid,nodev,size=64m,mode=1777'
 RUNTIME_PYTHON = '/opt/xperfect/venvs/runtime/bin/python'
 SHA = re.compile(r'sha256:[a-f0-9]{64}')
 ID = re.compile(r'[a-f0-9]{64}')
+# The runtime's default-off local-QA fault authority. Only an explicit private input on a local
+# package supplies it; its values never enter the journal and rollback restores the previous config.
+LOCAL_QA_AUTHORITY_KEYS = frozenset({
+    'VIVENTIUM_GLASSHIVE_LOCAL_QA_MODE', 'VIVENTIUM_LOCAL_QA_CASE_ID', 'VIVENTIUM_LOCAL_QA_CASE_TOKEN',
+    'VIVENTIUM_LOCAL_QA_SESSION_REF', 'VIVENTIUM_LOCAL_QA_CANDIDATE_DIGEST',
+    'VIVENTIUM_LOCAL_QA_COMPONENT_ARTIFACT_DIGEST',
+})
+
+
+def validate_local_qa_authority(value: object) -> dict[str, str]:
+    if (not isinstance(value, dict) or set(value) != LOCAL_QA_AUTHORITY_KEYS
+            or any(not isinstance(item, str) or not 0 < len(item.strip()) <= 1024
+                   or any(ord(character) < 32 for character in item) for item in value.values())):
+        raise UpgradeError('The local-QA authority must name exactly its six values. Nothing was changed')
+    return {key: item.strip() for key, item in value.items()}
 
 # Loads the role's own persisted configuration inside the package image, so the
 # idle check and health probe run with exactly the runtime's settings. Nothing
@@ -793,8 +808,12 @@ class Upgrade:
     # -- upgrade ----------------------------------------------------------
     def upgrade(self, *, service_image: str, native_image: str | None = None, models: dict | None = None,
                 adopt: bool = False, recover_unpublished: bool = False, role_map: dict | None = None,
-                role_claim: str | None = None, clear_roles: bool = False) -> dict:
+                role_claim: str | None = None, clear_roles: bool = False,
+                local_qa_authority: dict | None = None, clear_local_qa: bool = False) -> dict:
         models = base.validate_models(models)
+        if local_qa_authority is not None and clear_local_qa:
+            raise UpgradeError('Choose --local-qa-authority or --no-local-qa-authority, not both')
+        qa_environment = None if local_qa_authority is None else validate_local_qa_authority(local_qa_authority)
         for value in [service_image] + ([native_image] if native_image else []):
             if not SHA.fullmatch(value):
                 raise UpgradeError('Exact locally verified image identities (sha256:…) are required')
@@ -803,6 +822,8 @@ class Upgrade:
         if completed:
             receipt = {**receipt, 'volumes': {**receipt['volumes'], **completed}}
         profile, name = validate_receipt(receipt)
+        if (qa_environment is not None or clear_local_qa) and profile != 'local-linux':
+            raise UpgradeError('The local-QA authority is available only for a local package. Nothing was changed')
         if self.journal_path.exists():
             raise UpgradeError('An upgrade is already open for this package; run upgrade-commit or upgrade-rollback')
         for image in [service_image] + ([native_image] if native_image else []):
@@ -909,9 +930,12 @@ class Upgrade:
                                'cannot serve its workers that way. Choose an image that declares an isolated '
                                'worker network. Nothing was changed')
         isolate = wants_isolated and not isolated
+        changes_qa = (any(environment.get(key) != value for key, value in qa_environment.items())
+                      if qa_environment is not None
+                      else clear_local_qa and bool(LOCAL_QA_AUTHORITY_KEYS & set(environment)))
         if (service_image == current_image and wanted_native == current_native and not changes_models
                 and not settings_added and not secrets_added and wanted_roles == current_roles
-                and not local_signer and not isolate):
+                and not local_signer and not isolate and not changes_qa):
             raise UpgradeError('The package already runs this image and configuration')
         backup = f'{name}-upgrade-{txn}'
         journal = {'version': 1, 'transaction': txn, 'phase': 'prepared', 'profile': profile, 'name': name,
@@ -924,6 +948,8 @@ class Upgrade:
                    'settings_kept': settings_kept, 'secrets_added': secrets_added,
                    'role_mapping': {'from': current_roles, 'to': wanted_roles},
                    'local_assertion': local_signer, 'isolate_workers_network': isolate,
+                   'local_qa_authority': ('set' if qa_environment is not None
+                                          else 'cleared' if changes_qa else 'unchanged'),
                    'service_image': service_image, 'native_image': wanted_native,
                    'previous_native_image': current_native,
                    'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
@@ -949,7 +975,8 @@ class Upgrade:
                                    'the package was otherwise not changed') from None
             raise
         try:
-            return self._apply(journal, receipt, profile, name, shapes, environment, models, configs)
+            return self._apply(journal, receipt, profile, name, shapes, environment, models, configs,
+                               qa_environment=qa_environment, clear_local_qa=clear_local_qa)
         except BaseException as exc:
             if self.journal_path.exists():
                 try:
@@ -960,7 +987,8 @@ class Upgrade:
                 raise UpgradeError(f'Upgrade failed and the previous version is running again: {_detail(exc)}') from exc
             raise
 
-    def _apply(self, journal, receipt, profile, name, shapes, environment, models, configs) -> dict:
+    def _apply(self, journal, receipt, profile, name, shapes, environment, models, configs, *,
+               qa_environment: dict | None = None, clear_local_qa: bool = False) -> dict:
         endpoint, txn = self.endpoint, journal['transaction']
         # UI and MCP first, so no new person or client work starts; then the runtime.
         for role in ('ui', 'mcp', 'runtime'):
@@ -1017,6 +1045,9 @@ class Upgrade:
                                                                         ui_url=signer['ui_url']))
         environment = {**environment, **{key: settings[key] for key in journal['settings_added'].get('runtime', [])},
                        **generated['runtime'], **base.model_environment(models)}
+        if qa_environment is not None or clear_local_qa:
+            environment = {key: value for key, value in environment.items() if key not in LOCAL_QA_AUTHORITY_KEYS}
+            environment.update(qa_environment or {})
         environment['XPERFECT_SHARED_IMAGE'] = journal['native_image']
         created = {}
         for role in ROLES:
@@ -1236,6 +1267,11 @@ def main(argv: list[str]) -> None:
     upgrade.add_argument('--role-claim', metavar='CLAIM', help='Hosted: the token claim holding role values (roles)')
     upgrade.add_argument('--no-role-map', action='store_true',
                          help='Hosted: remove the role mapping; admitted roles apply again')
+    upgrade.add_argument('--local-qa-authority', type=Path, metavar='PRIVATE_JSON',
+                         help='Local package only: supply the default-off local-QA fault authority from a private '
+                              'file; upgrade-rollback removes it')
+    upgrade.add_argument('--no-local-qa-authority', action='store_true',
+                         help='Local package only: remove a supplied local-QA fault authority')
     upgrade.add_argument('--recover-unpublished-files', action='store_true',
                          help='First retire stored-file attachments the running version registered but never '
                               'published, as reviewed by the new image')
@@ -1268,7 +1304,10 @@ def main(argv: list[str]) -> None:
                                     models=base.parse_model_arguments(args.model),
                                     adopt=args.adopt_running_containers,
                                     recover_unpublished=args.recover_unpublished_files,
-                                    role_map=pairs, role_claim=args.role_claim, clear_roles=args.no_role_map)
+                                    role_map=pairs, role_claim=args.role_claim, clear_roles=args.no_role_map,
+                                    local_qa_authority=(_private_json(args.local_qa_authority)
+                                                        if args.local_qa_authority else None),
+                                    clear_local_qa=args.no_local_qa_authority)
         elif args.action == 'upgrade-commit':
             result = runner.commit()
         else:

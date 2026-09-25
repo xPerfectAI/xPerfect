@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -28,6 +29,14 @@ AUTHORITY_KEYS = (
 )
 CANDIDATE_DIGEST_ENV = "VIVENTIUM_LOCAL_QA_CANDIDATE_DIGEST"
 COMPONENT_ARTIFACT_DIGEST_ENV = "VIVENTIUM_LOCAL_QA_COMPONENT_ARTIFACT_DIGEST"
+# One exact coordinator conversation: the Nth first delegated admission receives the
+# admission boundary's own typed missing-prerequisite refusal.
+COORDINATOR_ADMISSION_CASE_ID = "XPF-COORD-001"
+COORDINATOR_ADMISSION_FAULT = "coordinator_admission_prerequisite_missing"
+COORDINATOR_ADMISSION_SCOPE = "selected_coordinator_conversation_qa"
+_COORDINATOR_ADMISSION_WORK = re.compile(
+    r"(?P<conversation>[A-Za-z0-9_.:-]{1,256})#admission-(?P<ordinal>[1-9][0-9]?)"
+)
 SUPPORTED_FAULTS = {
     "PWK-UC-016": (
         "provider_auth_missing",
@@ -50,14 +59,17 @@ SUPPORTED_FAULTS = {
         "artifact_link_expired",
         "artifact_unavailable_restart_recovery",
     ),
+    COORDINATOR_ADMISSION_CASE_ID: (COORDINATOR_ADMISSION_FAULT,),
 }
 CASE_MODES = {
     "PWK-UC-016": "pwk_uc_016",
     "PWK-UC-017": "pwk_uc_017",
+    COORDINATOR_ADMISSION_CASE_ID: "xpf_coord_001",
 }
 RUN_SCOPED_FAULTS = frozenset(
     boundary
-    for boundaries in SUPPORTED_FAULTS.values()
+    for case_id, boundaries in SUPPORTED_FAULTS.items()
+    if case_id != COORDINATOR_ADMISSION_CASE_ID
     for boundary in boundaries
 )
 ARTIFACT_SCOPED_FAULTS = frozenset(
@@ -500,6 +512,10 @@ def _fault_parameters(boundary: str) -> dict[str, object]:
             "artifactOutcome": "unavailable_once",
             "restartSafe": True,
         },
+        COORDINATOR_ADMISSION_FAULT: {
+            "reasonCode": "shared_configuration_required",
+            "retryable": False,
+        },
     }
     return {"faultClass": boundary, **fixed[boundary]}
 
@@ -673,6 +689,34 @@ class LocalQAControlPlane:
                     ) WHERE status = 'armed';
                 """
             )
+
+    @staticmethod
+    def _coordinator_admission_fixture(
+        connection: sqlite3.Connection,
+        *,
+        owner_id: str,
+        work_id: str,
+    ) -> tuple[str, str, str]:
+        """Bind an admission control to one existing conversation of the exact owner."""
+
+        match = _COORDINATOR_ADMISSION_WORK.fullmatch(work_id)
+        if match is None:
+            raise LocalQAControlError("The exact coordinator conversation is unavailable")
+        try:
+            row = connection.execute(
+                """
+                SELECT restore_hold FROM coordinator_conversations
+                WHERE conversation_id = ? AND tenant_id = 'local' AND owner_id = ?
+                """,
+                (match["conversation"], owner_id),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise LocalQAControlError(
+                "The exact coordinator conversation is unavailable"
+            ) from exc
+        if row is None or int(row["restore_hold"] or 0):
+            raise LocalQAControlError("The exact coordinator conversation is unavailable")
+        return f"qa_coordinator_admission:{work_id}", "", ""
 
     @staticmethod
     def _synthetic_fixture(
@@ -1415,7 +1459,10 @@ class LocalQAControlPlane:
             )
 
     def arm(self, request: Mapping[str, object]) -> dict[str, object]:
-        selected_owner_scope = request.get("scopeKind") == "selected_synthetic_account_qa"
+        coordinator_scope = request.get("scopeKind") == COORDINATOR_ADMISSION_SCOPE
+        selected_owner_scope = coordinator_scope or (
+            request.get("scopeKind") == "selected_synthetic_account_qa"
+        )
         request_authority = self._base_request(
             request,
             exact_fields=(
@@ -1427,8 +1474,11 @@ class LocalQAControlPlane:
         if request.get("scopeKind") not in {
             "synthetic_local_qa",
             "selected_synthetic_account_qa",
+            COORDINATOR_ADMISSION_SCOPE,
         }:
             raise LocalQAControlError("scopeKind must identify exact synthetic local QA")
+        if coordinator_scope != (authority.case_id == COORDINATOR_ADMISSION_CASE_ID):
+            raise LocalQAControlError("scopeKind is not valid for this case")
         boundary = _clean_private_identity(request.get("boundary"), "boundary", required=True)
         if boundary not in SUPPORTED_FAULTS[authority.case_id]:
             raise LocalQAControlError("The fault boundary is not valid for this case")
@@ -1480,7 +1530,11 @@ class LocalQAControlPlane:
                 now=now,
             )
             idempotency_key, fixture_run_id, fixture_artifact_id = (
-                self._synthetic_fixture(
+                self._coordinator_admission_fixture(
+                    connection, owner_id=owner_id, work_id=work_id
+                )
+                if coordinator_scope
+                else self._synthetic_fixture(
                     connection,
                     owner_id=owner_id,
                     work_id=work_id,

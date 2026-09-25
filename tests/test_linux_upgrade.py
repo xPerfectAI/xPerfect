@@ -1773,3 +1773,63 @@ def test_an_interrupted_isolation_is_restored_by_the_automatic_rollback(package,
     assert _attached(fake, previous)[f'{NAME}-workers'] == {'Aliases': ['runtime']}
     assert all(fake.find(identity)['State']['Running'] for identity in receipt['containers'].values())
     assert not linux_upgrade.journal_path(path).exists()
+
+
+# -- local-QA fault authority: explicit, local-only, runtime-only, never journaled --
+
+QA_AUTHORITY = {
+    'VIVENTIUM_GLASSHIVE_LOCAL_QA_MODE': 'xpf_coord_001',
+    'VIVENTIUM_LOCAL_QA_CASE_ID': 'XPF-COORD-001',
+    'VIVENTIUM_LOCAL_QA_CASE_TOKEN': 'case-token-' + 'x' * 40,
+    'VIVENTIUM_LOCAL_QA_SESSION_REF': 'session-' + 'y' * 20,
+    'VIVENTIUM_LOCAL_QA_CANDIDATE_DIGEST': 'sha256:' + 'c' * 64,
+    'VIVENTIUM_LOCAL_QA_COMPONENT_ARTIFACT_DIGEST': 'sha256:' + 'd' * 64,
+}
+
+
+def test_local_qa_authority_reaches_only_the_runtime_and_rollback_removes_it(package):
+    fake, path, receipt = package
+    runner = _runner(path)
+    assert runner.upgrade(service_image=NEW, local_qa_authority=dict(QA_AUTHORITY))['status'] == 'awaiting_commit'
+    runtime = _config(fake)['environment']
+    assert {key: runtime[key] for key in QA_AUTHORITY} == QA_AUTHORITY
+    for role in ('ui', 'mcp'):
+        assert not set(QA_AUTHORITY) & set(_config(fake, role)['environment'])
+    journal = linux_upgrade.journal_path(path).read_text()
+    assert QA_AUTHORITY['VIVENTIUM_LOCAL_QA_CASE_TOKEN'] not in journal
+    assert json.loads(journal)['local_qa_authority'] == 'set'
+
+    runner.rollback()
+
+    assert not set(QA_AUTHORITY) & set(_config(fake)['environment'])
+
+
+@pytest.mark.parametrize('authority', [
+    {key: value for key, value in QA_AUTHORITY.items() if key != 'VIVENTIUM_LOCAL_QA_CASE_TOKEN'},
+    {**QA_AUTHORITY, 'EXTRA_SETTING': 'value'},
+    {**QA_AUTHORITY, 'VIVENTIUM_LOCAL_QA_SESSION_REF': '  '},
+    {**QA_AUTHORITY, 'VIVENTIUM_LOCAL_QA_SESSION_REF': 'line\nbreak'},
+])
+def test_an_invalid_local_qa_authority_changes_nothing(package, authority):
+    fake, path, receipt = package
+    with pytest.raises(linux_upgrade.UpgradeError, match='Nothing was changed'):
+        _runner(path).upgrade(service_image=NEW, local_qa_authority=authority)
+    assert not _mutations(fake)
+    assert not linux_upgrade.journal_path(path).exists()
+
+
+def test_a_hosted_package_refuses_the_local_qa_authority(package, monkeypatch):
+    fake, path, receipt = package
+    monkeypatch.setattr(linux_upgrade, 'validate_receipt', lambda value: ('hosted-xfs', NAME))
+    with pytest.raises(linux_upgrade.UpgradeError, match='only for a local package'):
+        _runner(path).upgrade(service_image=NEW, local_qa_authority=dict(QA_AUTHORITY))
+    assert not _mutations(fake)
+
+
+def test_a_later_upgrade_clears_the_local_qa_authority(package):
+    fake, path, receipt = package
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW, local_qa_authority=dict(QA_AUTHORITY))
+    runner.commit()
+    runner.upgrade(service_image=NEW, clear_local_qa=True)
+    assert not set(QA_AUTHORITY) & set(_config(fake)['environment'])

@@ -144,6 +144,7 @@ from .local_qa_control import (
     AUTHORITY_KEYS as LOCAL_QA_AUTHORITY_KEYS,
     CANDIDATE_DIGEST_ENV as LOCAL_QA_CANDIDATE_DIGEST_ENV,
     COMPONENT_ARTIFACT_DIGEST_ENV as LOCAL_QA_COMPONENT_DIGEST_ENV,
+    COORDINATOR_ADMISSION_FAULT as LOCAL_QA_COORDINATOR_ADMISSION_FAULT,
     RUN_SCOPED_FAULTS as LOCAL_QA_RUN_SCOPED_FAULTS,
     LocalQAControlPlane,
     LocalQAFaultDirective,
@@ -16193,6 +16194,32 @@ class WorkersProjectsService:
             work_id=str(delegation.get("work_ref") or ""),
             run_id=run_id,
             artifact_id=artifact_id,
+        )
+
+    def local_qa_coordinator_admission(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        conversation_id: str,
+        ordinal: int,
+    ) -> None:
+        """Refuse one exactly armed coordinator admission with its typed prerequisite code."""
+
+        plane = self._local_qa_control_plane
+        if plane is None or (tenant_id or "local") != "local" or ordinal < 1:
+            return
+        directive = plane.consume(
+            LOCAL_QA_COORDINATOR_ADMISSION_FAULT,
+            owner_id=owner_id,
+            work_id=f"{conversation_id}#admission-{ordinal}",
+        )
+        if directive is None:
+            return
+        self._record_local_qa_effect(directive, "coordinator_admission_refused")
+        raise ParallelExecutionIsolationError(
+            "A prerequisite for this delegated work is unavailable.",
+            reason_code=str(directive.parameters.get("reasonCode") or ""),
         )
 
     def _record_local_qa_effect(
