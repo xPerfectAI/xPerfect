@@ -969,6 +969,118 @@ def test_confirmed_box_release_invalidates_only_cached_capacity(monkeypatch):
     assert resources.usage(object())["available_memory_bytes"] == 7
 
 
+@pytest.mark.parametrize(
+    ('scenario', 'settled', 'recorded'),
+    [
+        ('removed_between_reads', True, ''),
+        ('account_finished_during_measurement', True, ''),
+        ('unknown_container_stays_attached', False, 'native_network_membership_unverified'),
+        ('daemon_refuses_account_inspection', False, 'resource_probe_failed'),
+    ],
+)
+def test_refresh_settles_a_box_change_but_keeps_typed_membership_refusal(
+    monkeypatch, tmp_path, scenario, settled, recorded
+):
+    # The controlled refresh reads network membership, then each box and account
+    # container, then stats. A container the runtime removes between those reads
+    # is measured once more; an unknown or unreadable container still fails closed.
+    image, controller, guard_id = 'sha256:' + 'a' * 64, 'c' * 64, 'd' * 64
+    unknown, account_id = 'e' * 64, 'f' * 64
+    data, control = tmp_path / 'data', tmp_path / 'control'
+    data.mkdir()
+    control.mkdir()
+    for key, value in {
+        'XPERFECT_SHARED_IMAGE': image, 'XPERFECT_SHARED_VOLUME_NAME': 'shared-data',
+        'XPERFECT_SHARED_VOLUME_ROOT': str(data), 'XPERFECT_CONTROL_ROOT': str(control),
+        'XPERFECT_SHARED_NETWORK': 'workers', 'XPERFECT_CONTROLLER_ID': controller,
+        'XPERFECT_SHARED_MEMORY_BYTES': str(1024**3), 'XPERFECT_SHARED_PIDS_LIMIT': '64',
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setattr(workspace_resources.shutil, 'which', lambda name: '/usr/bin/' + name)
+    monkeypatch.setattr(workspace_resources.subprocess, 'run',
+                        lambda arguments, **_kwargs: subprocess.CompletedProcess(arguments, 0, '', ''))
+    network_reads = [0]
+    removed = [False]
+
+    def docker(arguments, **kwargs):
+        assert kwargs['timeout_sec'] == 10
+        code, output, error = 0, '', ''
+        if arguments[:2] == ['image', 'inspect']:
+            output = image
+        elif arguments[:1] == ['inspect'] and arguments[1] == controller:
+            output = json.dumps([{'Id': controller, 'State': {'Running': True}, 'Mounts': [
+                {'Destination': str(data), 'Type': 'volume', 'Name': 'shared-data', 'RW': True},
+                {'Destination': str(control), 'Type': 'volume', 'Name': 'control-state', 'RW': True},
+            ]}])
+        elif arguments[:1] == ['inspect'] and arguments[1] == guard_id and removed[0]:
+            code, error = 1, 'Error: No such object'
+        elif arguments[:1] == ['inspect'] and arguments[1].startswith('xperfect-readiness-'):
+            output = json.dumps([{'Id': guard_id, 'State': {'Running': False, 'ExitCode': 0, 'OOMKilled': False}}])
+        elif arguments[:1] == ['inspect'] and account_id in arguments:
+            code, error = 1, ('Error response from daemon: Cannot connect to the Docker daemon'
+                              if scenario == 'daemon_refuses_account_inspection'
+                              else f'Error: No such object: {account_id}')
+        elif arguments[:2] == ['network', 'inspect']:
+            network_reads[0] += 1
+            members = {controller: {}}
+            # Read 1 renews the substrate proof; read 2 is the first measurement.
+            if scenario == 'unknown_container_stays_attached' or (
+                    scenario == 'removed_between_reads' and network_reads[0] == 2):
+                members[unknown] = {}
+            output = json.dumps([{'Driver': 'bridge', 'Containers': members}])
+        elif arguments[:1] == ['create']:
+            output = guard_id
+        elif arguments[:1] == ['wait']:
+            output = '0'
+        elif arguments[:1] == ['logs']:
+            output = 'xperfect-native-guard-ready'
+        elif arguments[:2] == ['rm', '-f']:
+            removed[0] = True
+            output = guard_id
+        elif arguments[:1] == ['info']:
+            output = json.dumps({'CgroupVersion': '2', 'MemTotal': 16 * 1024**3})
+        elif arguments[:1] == ['stats']:
+            output = ''
+        elif arguments[:1] != ['start']:
+            raise AssertionError(arguments)
+        if code and kwargs.get('check', True):
+            raise subprocess.CalledProcessError(code, ['docker', *arguments], output, error)
+        return subprocess.CompletedProcess(arguments, code, output, error)
+
+    inventories = [0]
+
+    def inventory():
+        inventories[0] += 1
+        if scenario == 'daemon_refuses_account_inspection' or (
+                scenario == 'account_finished_during_measurement' and inventories[0] == 1):
+            return (SimpleNamespace(container_id=account_id, memory_bytes=1024**3,
+                                    pids_limit=64, pending_recovery=False),)
+        return ()
+
+    class ReadOnlyStore:
+        @contextmanager
+        def _connect(self):
+            yield SimpleNamespace(execute=lambda _query: [])
+
+    homes = SimpleNamespace(native_launcher=SimpleNamespace(inventory=inventory),
+                            account_home_path=lambda *_args: data)
+    shared = SharedWorkspaceRuntimes(ReadOnlyStore(), binder=SimpleNamespace(store=object(), homes=homes))
+    runtime = SimpleNamespace(codex=SimpleNamespace(sandbox=SimpleNamespace(_docker=docker)))
+
+    result = shared.resources.refresh(runtime)
+
+    assert result['process_probe_ok'] is settled
+    assert shared.resources.last_refresh_error_code == recorded
+    admission = shared.resources.usage(runtime, cached_only=True)
+    if settled:
+        assert admission['process_probe_ok'] is True
+    else:
+        assert result['probe_error_code'] == recorded
+        assert admission['probe_error_code'] == recorded
+        assert admission['probe_transient'] is False
+
+
 def test_owner_recovery_settles_only_idle_quarantined_projections():
     records = [
         {'binding': {'worker_id': 'wrk_pending', 'tenant_id': 't', 'owner_id': 'o'}, 'metadata': {}, 'state': 'pending'},

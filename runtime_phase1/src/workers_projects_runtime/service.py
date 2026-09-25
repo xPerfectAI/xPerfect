@@ -5919,7 +5919,7 @@ class WorkersProjectsService:
         if updated_run is None:
             return None
         self.store.update_worker_state(str(worker["worker_id"]), "ready", last_error="")
-        if capacity_wait:
+        if capacity_wait and not getattr(exc, "probe_transient", False):
             self._release_capacity_wait_compute(
                 self.store.get_worker(str(worker["worker_id"])) or worker,
                 updated_run,
@@ -6117,7 +6117,7 @@ class WorkersProjectsService:
         if updated_run is None:
             return None
         self.store.update_worker_state(str(worker["worker_id"]), "ready", last_error="")
-        if capacity_wait:
+        if capacity_wait and not getattr(exc, "probe_transient", False):
             self._release_capacity_wait_compute(
                 self.store.get_worker(str(worker["worker_id"])) or worker,
                 updated_run,
@@ -18500,6 +18500,7 @@ class WorkersProjectsService:
         host_probe_healthy = process_probe_ok and memory_probe_ok and disk_probe_ok
         workspace_pressure = False
         docker_probe_error_code = ""
+        docker_probe_transient = False
         prospective_docker = (
             isinstance(prospective_worker, dict)
             and str(prospective_worker.get("execution_mode") or "docker") == "docker"
@@ -18570,6 +18571,7 @@ class WorkersProjectsService:
                 ).strip()
                 if re.fullmatch(r"[a-z][a-z0-9_]{1,79}", candidate_probe_error_code):
                     docker_probe_error_code = candidate_probe_error_code
+                docker_probe_transient = docker_usage.get("probe_transient") is True
                 try:
                     running_containers = int(
                         docker_usage.get("running_worker_containers") or 0
@@ -18840,6 +18842,14 @@ class WorkersProjectsService:
                 docker_probe_error_code
                 if prospective_docker and host_probe_healthy
                 else ""
+            )
+            # Only the Docker probe's own unrecorded timing state is transient: its
+            # waiting worker keeps compute. Recorded or host failures keep releasing it.
+            error.probe_transient = bool(
+                error.capacity_class == "resource_probe_unavailable"
+                and docker_probe_transient
+                and prospective_docker
+                and host_probe_healthy
             )
             error.available = dict(available_before_reservation)
             error.required = dict(total_required)

@@ -288,6 +288,93 @@ def test_capacity_wait_uses_one_persisted_episode_and_backed_off_retry_clock(
         service.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("probe_state", "transient"),
+    [
+        ("refresh_in_progress", True),
+        ("proof_lapsed", True),
+        ("snapshot_invalidated", True),
+        ("native_network_membership_unverified", False),
+        ("filesystem_acl_application_unavailable", False),
+    ],
+)
+def test_probe_timing_wait_keeps_worker_compute_and_recorded_failures_release_it(
+    tmp_path, monkeypatch, probe_state, transient
+):
+    import time
+    from types import SimpleNamespace
+
+    from workers_projects_runtime.service import HostResourceUsage
+    from workers_projects_runtime.workspace_resources import WorkspaceResources
+
+    monkeypatch.setenv("XPERFECT_CONTROLLER_ID", "c" * 64)
+    monkeypatch.setenv("XPERFECT_SHARED_NETWORK", "workers")
+    resources = WorkspaceResources(SimpleNamespace(recovery_issues=[]))
+    proof = {"image": "", "volume_name": "", "volume_root": "", "control_root": "",
+             "controller": "c" * 64, "network": "workers"}
+    resources._substrate_proof = (time.monotonic(), proof)
+    resources.cached = (time.monotonic(), {
+        "child_processes": 0, "threads": 0,
+        "available_memory_bytes": 16 * 1024**3, "available_disk_bytes": 64 * 1024**3,
+        "running_worker_containers": 0, "running_worker_ids": [],
+        "process_probe_ok": True, "memory_probe_ok": True, "disk_probe_ok": True,
+    })
+    if probe_state == "proof_lapsed":
+        resources._substrate_proof = (time.monotonic() - 31.0, proof)
+    elif probe_state == "snapshot_invalidated":
+        resources.invalidate_capacity_snapshot()
+    elif not transient:
+        # A completed controlled refresh failed closed and recorded its typed reason.
+        resources._substrate_proof = None
+        resources.last_refresh_error_code = probe_state
+
+    class PackagedRuntime(StubRuntime):
+        def isolated_resource_usage(self, *, cached_only=False):
+            return resources.usage(self, cached_only=cached_only)
+
+    monkeypatch.setattr(service_module, "host_resource_usage", lambda _leases: HostResourceUsage(
+        child_processes=0, threads=0,
+        available_memory_bytes=16 * 1024**3, available_disk_bytes=64 * 1024**3,
+    ))
+    store = Store(str(tmp_path / f"probe-{probe_state}.sqlite3"))
+    record, worker = _reserve_callback_delegation(store, suffix=probe_state)
+    service = WorkersProjectsService(store, PackagedRuntime(), reconcile_on_startup=False)
+    service._deliver_callback_record = lambda *_args, **_kwargs: None
+    released: list[str] = []
+    release = service._release_capacity_wait_compute
+    monkeypatch.setattr(service, "_release_capacity_wait_compute",
+                        lambda held, run: released.append(run["run_id"]) or release(held, run))
+    try:
+        if probe_state == "refresh_in_progress":
+            resources._probe_lock.acquire()
+        try:
+            # Admission reads only the background snapshot, exactly as dispatch does.
+            error = service._host_resource_capacity_error(worker, docker_cached_only=True)
+        finally:
+            if probe_state == "refresh_in_progress":
+                resources._probe_lock.release()
+        assert isinstance(error, HostCapacityError)
+        assert error.capacity_class == "resource_probe_unavailable"
+        if not transient:
+            assert error.probe_error_code == probe_state
+
+        run = store.get_run(record["current_run_id"])
+        updated = service._requeue_retryable_run(
+            worker, run, error, failure_fields=_capacity_failure_fields()
+        )
+        # Admission is refused the same way in every state: one open capacity wait
+        # with its retry clock. Only a recorded failure stops the waiting worker.
+        assert updated is not None
+        assert updated["state"] == "queued"
+        assert updated["queue_wait_open"] == 1
+        assert updated["capacity_retry_count"] == 1
+        assert updated["retry_after"]
+        assert released == ([] if transient else [run["run_id"]])
+        assert error.probe_transient is transient
+    finally:
+        service.shutdown()
+
+
 def test_queue_refresh_identity_survives_restart_without_duplicate(tmp_path, monkeypatch):
     start = datetime(2026, 8, 22, 13, 0, tzinfo=timezone.utc)
     clock = [start]

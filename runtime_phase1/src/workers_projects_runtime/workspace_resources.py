@@ -68,20 +68,31 @@ def _probe_error_code(exc: BaseException) -> str:
     return "resource_probe_failed"
 
 
-def unavailable(error_code: str = "resource_probe_unavailable"):
+def unavailable(error_code: str = "resource_probe_unavailable", *, transient: bool = False):
+    """``transient``: no failure is recorded; the controlled probe is running or has not
+    yet published a current proof and snapshot. Admission still refuses it."""
     return {'accounting_version': 'workspace-v1', 'child_processes': 0, 'threads': 0,
             'available_memory_bytes': 0, 'available_disk_bytes': 0,
             'running_worker_containers': 0, 'running_worker_ids': [],
             'worker_process_counts': {}, 'process_probe_ok': False,
             'memory_probe_ok': False, 'disk_probe_ok': False,
-            'probe_error_code': str(error_code or 'resource_probe_unavailable')}
+            'probe_error_code': str(error_code or 'resource_probe_unavailable'),
+            'probe_transient': bool(transient)}
 
 
 # Admission and readiness accept a substrate proof younger than 30 seconds.
-# The service readiness loop runs about every ten seconds and renews the proof
-# once it is 15 seconds old, so a steady loop never lets a valid proof lapse.
+# The service readiness loop renews the proof once it is 15 seconds old. A loop
+# slowed by Docker can still let it lapse briefly; admission then waits.
 PROOF_MAX_AGE_SECONDS = 30.0
 PROOF_RENEW_AGE_SECONDS = 15.0
+
+# A box start or release during one measurement can separate its network, inspect,
+# top and stats reads. Those typed disagreements are measured once more at once; an
+# unknown container or a still-missing box fails the second measurement as well.
+_SETTLE_ERRORS = frozenset({
+    'Native network contains unverified containers',
+    'Container disappeared during measurement',
+})
 
 PROSPECTIVE_WORKER_KEY = '__prospective_worker__'
 """Reservation key the service admission uses for a worker not yet persisted."""
@@ -145,7 +156,7 @@ class WorkspaceResources:
         # If it is running, fail closed and let the retry scheduler revisit
         # this work after the readiness loop publishes a complete snapshot.
         if not self._probe_lock.acquire(blocking=not cached_only):
-            return unavailable("resource_probe_in_progress")
+            return unavailable("resource_probe_in_progress", transient=True)
         try:
             controller = str(os.environ.get("XPERFECT_CONTROLLER_ID") or "").strip()
             network = str(os.environ.get("XPERFECT_SHARED_NETWORK") or "").strip()
@@ -163,12 +174,14 @@ class WorkspaceResources:
                 # its last specific failure instead of masking it with the
                 # generic missing-proof error from _measure.
                 return unavailable(
-                    self.last_refresh_error_code or "shared_substrate_proof_unavailable"
+                    self.last_refresh_error_code or "shared_substrate_proof_unavailable",
+                    transient=not self.last_refresh_error_code,
                 )
             if cached_only:
-                return unavailable(self.last_refresh_error_code or "resource_probe_snapshot_unavailable")
+                return unavailable(self.last_refresh_error_code or "resource_probe_snapshot_unavailable",
+                                   transient=not self.last_refresh_error_code)
             try:
-                result = self._measure(runtime)
+                result = self._measure_settled(runtime)
                 self.last_refresh_error_code = ""
             except Exception as exc:
                 self._record_failure(_probe_error_code(exc), "Workspace resource probe unavailable")
@@ -195,7 +208,7 @@ class WorkspaceResources:
                     max_age=PROOF_RENEW_AGE_SECONDS,
                 ):
                     self._refresh_substrate_proof(runtime)
-                result = self._measure(runtime)
+                result = self._measure_settled(runtime)
             except Exception as exc:
                 self._substrate_proof = None
                 self._record_failure(_probe_error_code(exc), "Workspace resource refresh failed closed")
@@ -464,6 +477,17 @@ class WorkspaceResources:
             if cleanup_error is not None:
                 raise cleanup_error
 
+    def _measure_settled(self, runtime):
+        try:
+            return self._measure(runtime)
+        except WorkspaceBoxUnavailable as exc:
+            if str(exc) not in _SETTLE_ERRORS:
+                raise
+            code = _probe_error_code(exc)
+            logger.info("Workspace resource measurement repeated after a box change: %s", code,
+                        extra={"error_code": code})
+        return self._measure(runtime)
+
     def _measure(self, runtime):
         shared = self.shared
         controller = os.environ.get('XPERFECT_CONTROLLER_ID', '')
@@ -476,6 +500,17 @@ class WorkspaceResources:
         docker = runtime.codex.sandbox._docker
         def call(args):
             return docker(args, capture_output=True, timeout_sec=10).stdout
+        def read(args, identity):
+            # A container removed after it was listed answers only "no such"; any other
+            # failure keeps its own typed error.
+            try:
+                return call(args)
+            except subprocess.CalledProcessError:
+                answer = docker(['inspect', '--format', '{{.Id}}', identity],
+                                capture_output=True, timeout_sec=10, check=False)
+                if answer.returncode and 'no such' in str(answer.stderr or '').lower():
+                    raise WorkspaceBoxUnavailable('Container disappeared during measurement') from None
+                raise
         info = json.loads(call(['info', '--format', '{{json .}}']))
         if str(info.get('CgroupVersion')) != '2' or int(info.get('MemTotal') or 0) <= 0:
             raise WorkspaceBoxUnavailable('Container memory authority is unavailable')
@@ -512,7 +547,7 @@ class WorkspaceResources:
             verified.add(identity)
             limits[identity] = box.memory_bytes
             workspace_ids.add(box.binding.workspace_id)
-            measured = process_counts(call(['top', identity, '-eLo', 'uid,pid,lwp']))
+            measured = process_counts(read(['top', identity, '-eLo', 'uid,pid,lwp'], identity))
             for uid, (processes, threads) in measured.items():
                 worker_id = identities.get(uid)
                 if worker_id is None:
@@ -535,7 +570,7 @@ class WorkspaceResources:
                 continue
             # Inventory owns generation/lease identity; capacity independently
             # verifies the live cgroup bounds and counts every contained task.
-            record = json.loads(call(['inspect', account.container_id]))[0]
+            record = json.loads(read(['inspect', account.container_id], account.container_id))[0]
             if (record.get('Id') != account.container_id
                     or record['HostConfig'].get('Memory') != account.memory_bytes
                     or record['HostConfig'].get('PidsLimit') != account.pids_limit):
@@ -548,7 +583,8 @@ class WorkspaceResources:
             if account.container_id in limits:
                 raise WorkspaceBoxUnavailable('Duplicate container reservation')
             limits[account.container_id] = account.memory_bytes
-            measured = process_counts(call(['top', account.container_id, '-eLo', 'uid,pid,lwp']))
+            measured = process_counts(read(['top', account.container_id, '-eLo', 'uid,pid,lwp'],
+                                           account.container_id))
             background_processes += sum(value[0] for value in measured.values())
             background_threads += sum(value[1] for value in measured.values())
         if attached != verified:
