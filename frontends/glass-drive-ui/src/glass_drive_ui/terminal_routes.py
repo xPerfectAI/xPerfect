@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import re
 import secrets
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import anyio
 import httpx
@@ -12,6 +13,9 @@ import websockets
 from fastapi import HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketDisconnect
+
+# The live view names the exact run its terminal shows; the runtime checks it belongs here.
+RUN_ID = re.compile(r'run_[A-Za-z0-9_-]{1,64}')
 
 
 def install_terminal_routes(app, *, static_dir, client_for_request, identity_for_request,
@@ -39,7 +43,10 @@ def install_terminal_routes(app, *, static_dir, client_for_request, identity_for
 
     @app.websocket('/ws/workers/{worker_id}/terminal')
     async def terminal_socket(websocket: WebSocket, worker_id: str):
+        run_id = str(websocket.query_params.get('run') or '')
         try:
+            if run_id and not RUN_ID.fullmatch(run_id):
+                raise HTTPException(404, 'Run is unavailable')
             authorize(websocket, worker_id)
             # A browser WebSocket is a mutation surface. Check exact Origin and
             # the existing session CSRF token; neither secret goes into its URL.
@@ -63,10 +70,13 @@ def install_terminal_routes(app, *, static_dir, client_for_request, identity_for
             return
         base = urlsplit(runtime_base_url())
         target = urlunsplit(('wss' if base.scheme == 'https' else 'ws', base.netloc,
-                             '/ws/workers/' + worker_id + '/terminal', '', ''))
+                             '/ws/workers/' + worker_id + '/terminal',
+                             urlencode({'run': run_id}) if run_id else '', ''))
         tasks = set()
+        connection = None
         try:
             async with websockets.connect(target, additional_headers=headers, max_size=1024 * 1024) as upstream:
+                connection = upstream
                 await websocket.accept(subprotocol='xperfect-terminal')
 
                 async def send_input():
@@ -102,10 +112,17 @@ def install_terminal_routes(app, *, static_dir, client_for_request, identity_for
         finally:
             for task in tasks:
                 task.cancel()
+            # The runtime says why a run's terminal closed (not started yet, session ended,
+            # saved output shown); pass that on so the page can explain it.
+            code = getattr(connection, 'close_code', None)
+            reason = str(getattr(connection, 'close_reason', '') or '') if code else ''
             with anyio.CancelScope(shield=True):
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 try:
-                    await websocket.close(code=1000)
+                    if isinstance(code, int) and 4000 <= code < 5000:
+                        await websocket.close(code=code, reason=reason)
+                    else:
+                        await websocket.close(code=1000)
                 except RuntimeError:
                     pass

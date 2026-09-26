@@ -1982,6 +1982,9 @@ def test_rolling_back_removes_a_newly_set_coordinator_config(package):
     {**COORDINATOR, 'routes': [{**COORDINATOR['routes'][0], 'execution_mode': 'cloud'}]},
     {**COORDINATOR, 'routes': [COORDINATOR['routes'][0], COORDINATOR['routes'][0]]},
     {**COORDINATOR, 'routes': [{key: value for key, value in COORDINATOR['routes'][0].items() if key != 'model'}]},
+    {**COORDINATOR, 'scope': {'execution_mode': 'docker', 'connection_id': 'acct\x7fbad'}},
+    {**COORDINATOR, 'scope': {'execution_mode': ['docker']}},
+    {**COORDINATOR, 'model': '\ud800claude'},
 ])
 def test_an_invalid_coordinator_config_changes_nothing(package, config):
     fake, path, receipt = package

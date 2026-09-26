@@ -545,6 +545,84 @@ def test_host_terminal_finds_its_session_on_the_host_without_a_docker_sandbox(tm
     assert live.session_bound is True
 
 
+def _run_output(target) -> str:
+    return subprocess.run(target.command, cwd=target.cwd, env=target.env, capture_output=True,
+                          text=True, check=True, timeout=10).stdout
+
+
+def test_host_run_terminal_shows_only_that_run_and_then_its_saved_output(tmp_path):
+    """The live view names one run. A host terminal follows that run's own session and attempt,
+    never another run's, and once it ends shows that run's saved output instead of a shell."""
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path))
+    worker = {"worker_id": "wrk_host_exact", "name": "Host Claude", "profile": "claude-code",
+              "execution_mode": "host"}
+    runtime._ensure_dirs(worker["worker_id"])
+    runtime.ensure_worker_ready = lambda worker: runtime._runtime_info(worker, pid=1234)  # type: ignore[method-assign]
+
+    def no_sandbox(*_args, **_kwargs):
+        raise AssertionError("a host terminal must not create or probe a Docker sandbox")
+
+    runtime.sandbox.ensure_ready = no_sandbox  # type: ignore[method-assign]
+    runtime.sandbox.list_screen_sessions = no_sandbox  # type: ignore[method-assign]
+    prior = {"run_id": "run_prior00001", "state": "running", "active_attempt_id": "att_prior"}
+    follow_up = {"run_id": "run_follow0001", "state": "queued", "active_attempt_id": ""}
+    prior_log = tmp_path / "prior.log"
+    runtime._active_session_meta_path(worker["worker_id"]).parent.mkdir(parents=True, exist_ok=True)
+    runtime._active_session_meta_path(worker["worker_id"]).write_text(json.dumps({
+        "session_name": "conversation-prior", "run_id": prior["run_id"], "attempt_id": "att_prior",
+        "stdout_path": str(prior_log)}))
+
+    assert runtime.run_terminal_target(worker, follow_up) is None
+    assert runtime.run_terminal_target(
+        worker, {**follow_up, "state": "running", "active_attempt_id": "att_follow"}) is None
+    live = runtime.run_terminal_target(worker, prior)
+    assert str(prior_log) in live.command[-1] and live.session_bound and live.close_code == 4409
+    assert runtime.run_terminal_target(worker, {**prior, "active_attempt_id": "att_retry"}) is None
+
+    run_root = runtime._run_root(worker["worker_id"], prior["run_id"])
+    run_root.mkdir(parents=True, exist_ok=True)
+    (run_root / "stdout.log").write_text("prior line one\nprior final answer\n")
+    runtime._active_session_meta_path(worker["worker_id"]).unlink()
+    saved = runtime.run_terminal_target(worker, {**prior, "state": "completed"})
+    output = _run_output(saved)
+    assert "prior final answer" in output and f"Run {prior['run_id']} completed" in output
+    assert saved.close_code == 4410
+    assert "No terminal output was kept" in _run_output(runtime.run_terminal_target(worker, {**follow_up, "state": "failed"}))
+
+
+def test_container_run_terminal_attaches_only_that_runs_session(tmp_path):
+    runtime = CodexCliRuntime(base_dir=str(tmp_path))
+    worker = {"worker_id": "wrk_box_exact", "name": "Main Worker", "profile": "codex-cli"}
+    runtime._ensure_dirs(worker["worker_id"])
+    started = []
+    runtime.ensure_worker_ready = lambda worker: started.append(worker["worker_id"]) or runtime._runtime_info(worker, pid=1234)  # type: ignore[method-assign]
+    prior = {"run_id": "run_prior00002", "state": "running", "active_attempt_id": "att_prior"}
+    later = {"run_id": "run_follow0002", "state": "queued", "active_attempt_id": ""}
+    sessions = [runtime._session_name_for_run_id(prior["run_id"])]
+    runtime.sandbox.list_screen_sessions = lambda worker_id, runtime_name, worker=None: list(sessions)  # type: ignore[method-assign]
+    runtime.sandbox.terminal_attach_command = (  # type: ignore[method-assign]
+        lambda worker_id, runtime_name, session_name="operator": ["attach", session_name]
+    )
+    prior_root = runtime._attempt_run_root(worker["worker_id"], prior["run_id"], "att_prior")
+    prior_root.mkdir(parents=True, exist_ok=True)
+
+    assert runtime.run_terminal_target(worker, later) is None
+    assert started == []
+    live = runtime.run_terminal_target(worker, prior)
+    assert live.command == ["attach", sessions[0]] and live.session_bound
+    running = {**later, "state": "running", "active_attempt_id": "att_later"}
+    runtime._attempt_run_root(worker["worker_id"], later["run_id"], "att_later").mkdir(parents=True, exist_ok=True)
+    assert runtime.run_terminal_target(worker, running) is None
+    sessions.append(runtime._session_name_for_run_id(later["run_id"]))
+    assert runtime.run_terminal_target(worker, running).command == ["attach", sessions[1]]
+
+    started.clear()
+    (prior_root / "stdout.log").write_text("box final answer\n")
+    saved = runtime.run_terminal_target(worker, {**prior, "state": "completed"})
+    assert "box final answer" in _run_output(saved)
+    assert started == []
+
+
 def test_host_runtime_recovers_and_stops_a_persisted_process_after_api_restart(tmp_path):
     runtime_before_restart = HostCodexCliRuntime(base_dir=str(tmp_path))
     runtime_after_restart = HostCodexCliRuntime(base_dir=str(tmp_path))

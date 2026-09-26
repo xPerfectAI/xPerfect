@@ -444,10 +444,12 @@ class CoordinatorService:
         policy_service = getattr(self.service, "allowed_ai_policy", None)
         if policy_service is None:
             return
-        model = self.provider._model(config.model)
+        tenant = str(conversation.get("tenant_id") or "local")
+        owner = str(conversation.get("owner_id") or "")
+        model = self.provider._model(config.model, tenant_id=tenant, owner_id=owner)
         worker = {
-            "tenant_id": str(conversation.get("tenant_id") or "local"),
-            "owner_id": str(conversation.get("owner_id") or ""),
+            "tenant_id": tenant,
+            "owner_id": owner,
             "project_id": str(scope.get("project_id") or ""),
             "workspace_id": str(scope.get("workspace_id") or ""),
             "profile": str(getattr(model, "harness_profile", "") or ""),
@@ -469,8 +471,9 @@ class CoordinatorService:
             raise CoordinatorScopeError("Authenticated owner required")
         if len({route.id for route in config.routes}) != len(config.routes):
             raise CoordinatorConflict("Route IDs must be unique")
-        # Existing registry remains the authority for exact foreground model and effort.
-        model = self.provider._model(config.model)
+        # Existing registry remains the authority for exact foreground model and effort,
+        # including a model this owner chose in Connections.
+        model = self.provider._model(config.model, tenant_id=tenant, owner_id=owner)
         if config.effort not in model.effort_choices:
             raise CoordinatorConflict("Unsupported exact model effort")
         identity = f"coordinator-{uuid.uuid4().hex}"
@@ -632,7 +635,7 @@ class CoordinatorService:
             _validate_parallel_clean_room_files(bundle)
             _validate_parallel_clean_room_mcp(bundle)
             standalone_model, bundle = self.service._configured_parallel_worker_route(
-                route.profile, route.execution_mode, bundle
+                route.profile, route.execution_mode, bundle, tenant_id=tenant, owner_id=owner,
             )
             bundle.pop("viventium_launch_authority")
             account_store = getattr(self.service, "control_plane_store", None)

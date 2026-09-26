@@ -18,7 +18,8 @@ from workers_projects_runtime.failure_classification import is_user_resumable_fa
 
 
 class Provider:
-    def _model(self, model):
+    def _model(self, model, *, tenant_id='local', owner_id=''):
+        self.__dict__.setdefault('model_owners', []).append((tenant_id, owner_id))
         if model != 'exact-native-model':
             raise ValueError('unsupported model')
         return SimpleNamespace(effort_choices=('high',))
@@ -1104,6 +1105,67 @@ def test_packaged_coordinator_uses_isolated_owner_box_and_exact_native_route(tmp
         store.close()
 
 
+def test_packaged_conversation_uses_the_owners_saved_grok_model_for_itself_and_its_helper(tmp_path, monkeypatch):
+    """An exact Grok model saved only in the owner's Connections, with no deployment-wide model,
+    is the one the conversation, its turn policy and its Grok helper use. Another owner without
+    that choice does not get it."""
+    import json
+    from workers_projects_runtime.conversation_provider import ConversationProvider
+    from workers_projects_runtime.native_model_selection import ModelConfigurationRequired
+
+    monkeypatch.setenv('XPERFECT_EXECUTION_PROFILE', 'local-linux')
+    monkeypatch.setenv('GLASSHIVE_BACKGROUND_CONSUMERS_ENABLED', 'false')
+    monkeypatch.delenv('WPR_MODEL_GROK_BUILD', raising=False)
+    data = tmp_path / 'data'
+    data.mkdir()
+    monkeypatch.setenv('XPERFECT_SHARED_VOLUME_ROOT', str(data))
+    store = Store(tmp_path / 'standalone.sqlite3')
+    store.upsert_user_preferences(tenant_id='local', owner_id='owner', grok_model='grok-4.6')
+    account = {'account_id': 'owned-grok', 'provider': 'grok', 'status': 'ready', 'is_default': True}
+
+    class Accounts:
+        def list_provider_accounts(self, *, tenant_id, owner_id):
+            return [account] if (tenant_id, owner_id) == ('local', 'owner') else []
+
+        def get_provider_account(self, *, account_id, tenant_id, owner_id):
+            return account if (account_id, tenant_id, owner_id) == ('owned-grok', 'local', 'owner') else None
+
+    service = WorkersProjectsService(store, StubRuntime(), control_plane_store=Accounts(), reconcile_on_startup=False)
+    service.start_assigned_run = lambda _: None
+    checked = []
+    service.allowed_ai_policy = SimpleNamespace(admission_snapshot=checked.append)
+    provider = ConversationProvider.__new__(ConversationProvider)
+    provider.store = store
+    core = CoordinatorService(store, service, provider)
+    config = CoordinatorConfig(model='grok-build:grok-4.6', effort='default',
+        scope=CoordinatorScope(execution_mode='docker'), routes=[Route(
+            id='grok', profile='grok-build', model='grok-build:grok-4.6',
+            effort='default', execution_mode='docker')])
+    try:
+        created = core.create('local', 'owner', config)
+        assert created['model'] == 'grok-build:grok-4.6'
+        cid = created['conversation_id']
+        core._assert_foreground_allowed_ai(core._conversation('local', 'owner', cid), config)
+        assert [(item['profile'], item['model']) for item in checked] == [('grok-build', 'grok-4.6')]
+        core.accept_turn('local', 'owner', cid, 'turn', 'Delegate', [Goal(id='child', text='Exact goal')])
+        result = core.dispatch('local', 'owner', cid, Dispatch(goal_id='child', route_id='grok', instruction='Exact goal'))
+        assert result['state'] == 'queued', result
+        worker = store.get_worker(result['worker_id'])
+        assert worker['model'] == 'grok-4.6'
+        assert json.loads(worker['bootstrap_bundle_json'])['provider_account'] == {
+            'policy': 'personal_required', 'account_id': 'owned-grok'}
+        with pytest.raises(ModelConfigurationRequired):
+            core.create('local', 'other-owner', config)
+    finally:
+        service.shutdown()
+        store.close()
+
+
+def test_conversation_model_is_checked_for_its_authenticated_owner(coordinator):
+    create(coordinator)
+    assert coordinator.provider.model_owners == [('local', 'owner')]
+
+
 def test_stop_before_provider_start_persists_and_uses_existing_tombstone(coordinator):
     cid = create(coordinator)
     coordinator.accept_turn('local', 'owner', cid, 'turn', 'raw')
@@ -1357,6 +1419,11 @@ def test_owner_api_selects_only_owned_ready_native_account(coordinator):
     assert config.scope.execution_mode == 'docker'
     assert config.scope.connection_id == 'ready-grok'
     assert config.scope.project_id == project['project_id']
+    # The chosen account's conversation runs in its own container; a caller cannot move it.
+    moved = client.post('/v1/coordinator/conversations', json={
+        'account_id': 'ready-grok', 'scope': {'project_id': project['project_id'], 'execution_mode': 'host'},
+    })
+    assert moved.status_code == 409, moved.text
     assert client.post('/v1/coordinator/conversations', json={'account_id': 'foreign'},
                        headers={'x-test-owner': 'foreign'}).status_code == 409
     assert client.post('/v1/coordinator/conversations', json={
@@ -1563,14 +1630,50 @@ def test_default_config_uses_the_selected_substrate_model(coordinator, monkeypat
     assert config.scope.execution_mode == 'docker'
 
 
-def test_choosing_the_conversation_account_keeps_configured_helper_routes(coordinator, monkeypatch):
-    """A deployment can configure helper routes on other connected accounts; choosing which
-    account answers the conversation keeps them. Without that configuration one route uses the
-    chosen account, as before."""
+def test_configured_conversation_model_without_helper_routes_keeps_one_exact_route(coordinator, monkeypatch):
+    """A deployment configuration with only the conversation model still offers one helper route
+    on that exact model, effort and placement; a malformed configuration is a clear conflict."""
+    import json
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.coordinator_api import install_coordinator_routes
+    from workers_projects_runtime.coordinator_config import configured_coordinator
+
+    coordinator.provider._model = lambda model_id, **_: SimpleNamespace(
+        id=model_id, harness_profile='claude-code', effort_choices=('high',))
+    monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON', json.dumps({
+        'model': 'claude-code:claude-opus-5-5', 'effort': 'high', 'scope': {'execution_mode': 'docker'}}))
+    config = configured_coordinator(coordinator.service, coordinator.provider, 'local', 'owner')
+    assert (config.model, config.effort) == ('claude-code:claude-opus-5-5', 'high')
+    assert [(r.id, r.profile, r.model, r.effort, r.execution_mode, r.connection_id) for r in config.routes] == [
+        ('default', 'claude-code', 'claude-code:claude-opus-5-5', 'high', 'docker', '')]
+    route = {'id': 'same', 'profile': 'codex-cli', 'model': 'codex-cli:gpt-6-sol', 'effort': 'medium',
+             'execution_mode': 'docker'}
+    app = FastAPI()
+    install_coordinator_routes(app, coordinator, lambda request: ('local', 'owner'),
+                               lambda tenant, owner, profile='': configured_coordinator(
+                                   coordinator.service, coordinator.provider, tenant, owner, profile))
+    client = TestClient(app)
+    for broken in ({'model': 'claude-code:claude-opus-5-5', 'effort': 'high', 'routes': [route, route]},
+                   {'model': 'claude-code:claude-opus-5-5', 'effort': 'high', 'scope': {'connection_id': 'a\x7fb'}}):
+        monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON', json.dumps(broken))
+        with pytest.raises(CoordinatorConflict):
+            configured_coordinator(coordinator.service, coordinator.provider, 'local', 'owner')
+        refused = client.post('/v1/coordinator/conversations')
+        assert refused.status_code == 409, refused.text
+        assert 'coordinator' in refused.json()['detail']
+
+
+def test_choosing_the_conversation_account_keeps_the_configured_model_and_helper_routes(coordinator, monkeypatch):
+    """A deployment can configure the conversation's exact model and effort plus helper routes on
+    other connected accounts. Choosing which account answers keeps all of them, or is refused when
+    that account is not for the configured model. Without configuration one route uses the chosen
+    account, as before."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from workers_projects_runtime.coordinator import Route
     from workers_projects_runtime.coordinator_api import install_coordinator_routes
+    from workers_projects_runtime.coordinator_config import configured_coordinator
 
     accounts = {'claude-acct': 'claude', 'codex-acct': 'codex', 'grok-acct': 'grok'}
     coordinator.service.control_plane_store = SimpleNamespace(
@@ -1580,24 +1683,45 @@ def test_choosing_the_conversation_account_keeps_configured_helper_routes(coordi
         ),
         list_connections=lambda **kwargs: [],
     )
-    coordinator.service._resolve_worker_model = lambda profile, mode, **_: 'claude-opus-5-5'
-    coordinator.provider._model = lambda model_id, **_: SimpleNamespace(
-        id=model_id, harness_profile='claude-code', native_model='claude-opus-5-5',
-        recommended_effort='medium', effort_choices=('medium',),
-    )
+    coordinator.service.store = coordinator.store
+    coordinator.store.get_user_preferences = lambda tenant, owner: {}
+    catalog = {
+        'claude-code:claude-opus-5-5': SimpleNamespace(
+            id='claude-code:claude-opus-5-5', harness_profile='claude-code', native_model='claude-opus-5-5',
+            recommended_effort='medium', effort_choices=('low', 'medium', 'high')),
+        'claude-code:claude-opus-5': SimpleNamespace(
+            id='claude-code:claude-opus-5', harness_profile='claude-code', native_model='claude-opus-5',
+            recommended_effort='medium', effort_choices=('low', 'medium', 'high')),
+    }
+    looked_up = []
+
+    def exact_model(model_id, *, tenant_id='local', owner_id=''):
+        looked_up.append((model_id, tenant_id, owner_id))
+        if model_id not in catalog:
+            raise HTTPException(400, 'unsupported')
+        return catalog[model_id]
+
+    coordinator.provider._model = exact_model
+    # The profile's current default is not the configured model; it must not be consulted.
+    coordinator.service._resolve_worker_model = lambda profile, mode, **_: 'claude-opus-5'
     helpers = [Route(id='codex', profile='codex-cli', model='codex-cli:gpt-6-sol', effort='medium',
                      execution_mode='docker', connection_id='codex-acct'),
                Route(id='grok', profile='grok-build', model='grok-build:grok-4.6', effort='default',
                      execution_mode='docker', connection_id='grok-acct')]
-    configured = CoordinatorConfig(model='codex-cli:gpt-6-sol', effort='medium', routes=helpers,
+    configured = CoordinatorConfig(model='claude-code:claude-opus-5-5', effort='high', routes=helpers,
                                    scope=CoordinatorScope(execution_mode='docker'))
     app = FastAPI()
     install_coordinator_routes(app, coordinator, lambda request: ('local', 'owner'),
-                               lambda tenant, owner, profile='': configured)
+                               lambda tenant, owner, profile='': configured_coordinator(
+                                   coordinator.service, coordinator.provider, tenant, owner, profile))
     client = TestClient(app)
 
-    def saved_config():
-        created = client.post('/v1/coordinator/conversations', json={'account_id': 'claude-acct'})
+    def conversations():
+        with coordinator.store._connect() as conn:
+            return conn.execute('SELECT COUNT(*) FROM coordinator_conversations').fetchone()[0]
+
+    def saved_config(body):
+        created = client.post('/v1/coordinator/conversations', json=body)
         assert created.status_code == 200, created.text
         with coordinator.store._connect() as conn:
             row = conn.execute('SELECT config_json FROM coordinator_conversations WHERE conversation_id=?',
@@ -1605,13 +1729,41 @@ def test_choosing_the_conversation_account_keeps_configured_helper_routes(coordi
         return CoordinatorConfig.model_validate_json(row['config_json'])
 
     monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON', configured.model_dump_json())
-    with_routes = saved_config()
-    assert with_routes.model == 'claude-code:claude-opus-5-5'
+    with_routes = saved_config({'account_id': 'claude-acct'})
+    assert (with_routes.model, with_routes.effort) == ('claude-code:claude-opus-5-5', 'high')
     assert with_routes.scope.connection_id == 'claude-acct'
+    assert with_routes.scope.execution_mode == 'docker'
     assert [(route.id, route.connection_id) for route in with_routes.routes] == [
         ('codex', 'codex-acct'), ('grok', 'grok-acct')]
+    assert ('claude-code:claude-opus-5-5', 'local', 'owner') in looked_up
+
+    # An account for another AI, an unavailable configured model or effort, or a caller-chosen
+    # host placement is refused before anything is saved.
+    before = conversations()
+    refused = client.post('/v1/coordinator/conversations', json={'account_id': 'codex-acct'})
+    assert refused.status_code == 409
+    assert 'configured conversation model' in refused.text
+    assert client.post('/v1/coordinator/conversations', json={
+        'account_id': 'claude-acct', 'scope': {'execution_mode': 'host'},
+    }).status_code == 409
+    monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON',
+                       configured.model_copy(update={'effort': 'max'}).model_dump_json())
+    assert client.post('/v1/coordinator/conversations', json={'account_id': 'claude-acct'}).status_code == 409
+    monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON',
+                       configured.model_copy(update={'model': 'claude-code:retired'}).model_dump_json())
+    assert client.post('/v1/coordinator/conversations', json={'account_id': 'claude-acct'}).status_code == 409
+    assert conversations() == before
+
+    # A configuration with only the conversation model keeps a helper route on the chosen account.
+    monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON', configured.model_copy(update={'routes': []}).model_dump_json())
+    foreground_only = saved_config({'account_id': 'claude-acct'})
+    assert (foreground_only.model, foreground_only.effort) == ('claude-code:claude-opus-5-5', 'high')
+    assert [(route.id, route.profile, route.model, route.effort, route.execution_mode, route.connection_id)
+            for route in foreground_only.routes] == [
+        ('default', 'claude-code', 'claude-code:claude-opus-5-5', 'high', 'docker', 'claude-acct')]
 
     monkeypatch.delenv('GLASSHIVE_COORDINATOR_CONFIG_JSON')
-    single = saved_config()
+    single = saved_config({'account_id': 'claude-acct'})
+    assert (single.model, single.effort) == ('claude-code:claude-opus-5', 'medium')
     assert [(route.id, route.profile, route.connection_id) for route in single.routes] == [
         ('default', 'claude-code', 'claude-acct')]

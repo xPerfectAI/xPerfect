@@ -72,3 +72,38 @@ def test_terminal_socket_requires_session_origin_csrf_and_preserves_private_hop(
     assert 'cookie' not in str(observations['headers']).lower()
     assert csrf not in observations['target']
     assert observations['input']['data']=='fixture command\r'
+
+
+def test_terminal_socket_forwards_its_exact_run_and_the_runtime_close_reason(gateway, monkeypatch):
+    gateway.provision_local_owner(password=PASSWORD)
+    runtime=Runtime(); client=TestClient(create_app(runtime_client=runtime))
+    login(client)
+    csrf=client.cookies['glasshive_csrf']
+    options=dict(headers={'Origin':'http://testserver'},subprotocols=['xperfect-terminal','csrf.'+csrf])
+    targets=[]
+    class Upstream:
+        close_code=None; close_reason=''
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def send(self, data): pass
+        def __aiter__(self): self.sent=False; return self
+        async def __anext__(self):
+            if self.sent:
+                # The runtime closed: this run has not started its session yet.
+                self.close_code, self.close_reason = 4408, 'Run session not started'
+                raise StopAsyncIteration
+            self.sent=True
+            return 'This run is queued and has not started yet.'
+    def connect(target,**kwargs):
+        targets.append(target)
+        return Upstream()
+    monkeypatch.setattr(terminal_routes.websockets,'connect',connect)
+    with client.websocket_connect('/ws/workers/wrk_fixture/terminal?run=run_0123456789',**options) as socket:
+        assert socket.receive_text()=='This run is queued and has not started yet.'
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_text()
+    assert closed.value.code==4408
+    assert targets==['ws://runtime:8766/ws/workers/wrk_fixture/terminal?run=run_0123456789']
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect('/ws/workers/wrk_fixture/terminal?run=../other',**options): pass
+    assert len(targets)==1

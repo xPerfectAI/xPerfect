@@ -734,6 +734,12 @@ _ACTIVE_RUN_STATUS_LOCK = Lock()
 _ACTIVE_RUN_TERMINAL_STATES = frozenset(
     {"completed", "failed", "timeout", "paused", "interrupted", "terminated"}
 )
+# A run in one of these states has no live session; its terminal shows its saved output.
+_ENDED_RUN_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+# Application close codes the terminal page explains: a live run session ended, or an ended
+# run's saved output was shown in full.
+_RUN_SESSION_ENDED_CLOSE = 4409
+_RUN_OUTPUT_SHOWN_CLOSE = 4410
 _TELEMETRY_INTEGER_FIELDS = frozenset(
     {
         "duration_ms",
@@ -3105,6 +3111,13 @@ class ProfiledWorkerRuntime:
         if callable(checker):
             return bool(checker(worker))
         return bool(runtime.reconcile_worker(worker).pid)
+
+    def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
+        runtime = self._runtime_for_worker(worker)
+        resolver = getattr(runtime, "run_terminal_target", None)
+        if callable(resolver):
+            return resolver(worker, run)
+        return self.terminal_target(worker)
 
     def terminal_target(self, worker: dict) -> TerminalTarget:
         runtime = self._runtime_for_worker(worker)
@@ -5491,6 +5504,59 @@ class BaseCliWorkerRuntime:
         if not provider_path:
             raise RuntimeErrorBase("Parallel clean-room provider route is unsupported")
         return f"{str(configuration['provider_proxy_url']).rstrip('/')}/{provider_path}"
+
+    def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
+        """The terminal for exactly this run and attempt: its live session while it runs and its
+        saved output once it has ended. None while it has no session yet, never another run's."""
+        run_id = str(run.get("run_id") or "").strip()
+        if str(run.get("state") or "").strip() in _ENDED_RUN_STATES:
+            return self._saved_run_output_terminal(worker, run)
+        attempt_id = str(run.get("active_attempt_id") or "").strip()
+        if not run_id or not attempt_id:
+            return None
+        try:
+            session = self._infer_active_session({**worker, "_run_attempt_id": attempt_id}, run_id=run_id)
+        except Exception:
+            return None
+        session_name = str((session or {}).get("session_name") or "").strip()
+        if not session or str(session.get("run_id") or "") != run_id or not session_name:
+            return None
+        self.ensure_worker_ready(worker)
+        return TerminalTarget(
+            command=self.sandbox.terminal_attach_command(worker["worker_id"], self.runtime_name, session_name=session_name),
+            cwd=str(self._workspace_dir(worker["worker_id"])),
+            title=f"{worker['name']} live session",
+            subtitle=f"{self.runtime_name} run {run_id}",
+            session_bound=True,
+            close_code=_RUN_SESSION_ENDED_CLOSE,
+            close_reason="Run session ended",
+        )
+
+    def _saved_run_output_terminal(self, worker: dict, run: dict) -> TerminalTarget:
+        """A read-only view of an ended run's own saved terminal output; no workspace is started."""
+        worker_id = str(worker["worker_id"])
+        run_id = str(run.get("run_id") or "").strip()
+        attempt_id = str(run.get("active_attempt_id") or "").strip()
+        roots = [self._attempt_run_root(worker_id, run_id, attempt_id), self._run_root(worker_id, run_id)]
+        saved = next((root / "stdout.log" for root in roots if (root / "stdout.log").is_file()), None)
+        state = str(run.get("state") or "ended").strip()
+        if saved is not None:
+            notice = f"[Run {run_id} {state}. This is its saved output.]"
+            command = ["/bin/sh", "-c", 'tail -n 400 -- "$1"; printf "\\r\\n%s\\r\\n" "$2"', "saved-output",
+                       str(saved), notice]
+        else:
+            notice = f"[Run {run_id} {state}. No terminal output was kept for it; its result is in the workspace.]"
+            command = ["/bin/sh", "-c", 'printf "%s\\r\\n" "$1"', "saved-output", notice]
+        return TerminalTarget(
+            command=command,
+            cwd="/",
+            env={"TERM": "xterm-256color", "PATH": "/usr/bin:/bin"},
+            title=f"{worker['name']} run output",
+            subtitle=f"Run {run_id} {state}",
+            session_bound=True,
+            close_code=_RUN_OUTPUT_SHOWN_CLOSE,
+            close_reason="Run output shown",
+        )
 
     def terminal_target(self, worker: dict) -> TerminalTarget:
         self.ensure_worker_ready(worker)
@@ -14236,6 +14302,31 @@ raise SystemExit(exit_code)
         ):
             return current
         return None
+
+    def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
+        """This exact run's host session, or its saved output once ended; None until it starts."""
+        run_id = str(run.get("run_id") or "").strip()
+        if str(run.get("state") or "").strip() in _ENDED_RUN_STATES:
+            return self._saved_run_output_terminal(worker, run)
+        attempt_id = str(run.get("active_attempt_id") or "").strip()
+        if not run_id or not attempt_id:
+            return None
+        active = self._infer_active_session({**worker, "_run_attempt_id": attempt_id}, run_id=run_id)
+        stdout = str((active or {}).get("stdout_path") or "")
+        if not active or str(active.get("run_id") or "") != run_id or not stdout:
+            return None
+        info = self.ensure_worker_ready(worker)
+        workspace = str(info.workspace_dir or "")
+        return TerminalTarget(
+            command=["bash", "-lc", f"cd {shlex.quote(workspace)} && tail -n 80 -f {shlex.quote(stdout)}"],
+            cwd=workspace,
+            env={"TERM": "xterm-256color"},
+            title=f"{worker['name']} host session",
+            subtitle=f"{self.runtime_name} run {run_id} on host computer",
+            session_bound=True,
+            close_code=_RUN_SESSION_ENDED_CLOSE,
+            close_reason="Run session ended",
+        )
 
     def terminal_target(self, worker: dict) -> TerminalTarget:
         info = self.ensure_worker_ready(worker)

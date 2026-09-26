@@ -59,7 +59,7 @@ def selected_grok_model(store, tenant_id: str = "local", owner_id: str = "") -> 
         if not valid_model_id(deployment):
             raise ModelConfigurationRequired("The deployment Grok model is invalid. Set an exact model with --model grok-build=<id>.")
         return deployment, "deployment"
-    if owner_id:
+    if owner_id and store is not None:
         saved = (store.get_user_preferences(tenant_id, owner_id) or {}).get("grok_model", "")
         if saved:
             if not valid_model_id(saved):

@@ -66,27 +66,41 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             }.get(str((account or {}).get("provider") or "").lower())
             if not account or account.get("status") != "ready" or not profile:
                 raise HTTPException(409, "Choose a connected assistant before starting a conversation")
-            native_model = coordinator.service._resolve_worker_model(profile, "docker", tenant_id=tenant, owner_id=owner)
-            try:
-                model = coordinator.provider._model(f"{profile}:{native_model}", tenant_id=tenant, owner_id=owner)
-            except HTTPException as exc:
-                raise HTTPException(409, "The selected assistant model is unavailable for conversations") from exc
-            if model.harness_profile != profile or model.native_model != native_model:
-                raise HTTPException(409, "The selected assistant model is unavailable for conversations")
+            from .coordinator_config import explicit_coordinator_config
+            explicit = invoke(explicit_coordinator_config)
+            if explicit is not None:
+                # A configured conversation model and effort are exact choices: the
+                # chosen account must be for that AI; they are never swapped silently.
+                try:
+                    model = coordinator.provider._model(explicit.model, tenant_id=tenant, owner_id=owner)
+                except HTTPException as exc:
+                    raise HTTPException(409, "The configured conversation model is unavailable") from exc
+                if model.harness_profile != profile:
+                    raise HTTPException(409, "The chosen account is not for the configured conversation model")
+                if explicit.effort not in tuple(model.effort_choices):
+                    raise HTTPException(409, "The configured conversation effort is unavailable for its model")
+                effort = explicit.effort
+            else:
+                native_model = coordinator.service._resolve_worker_model(profile, "docker", tenant_id=tenant, owner_id=owner)
+                try:
+                    model = coordinator.provider._model(f"{profile}:{native_model}", tenant_id=tenant, owner_id=owner)
+                except HTTPException as exc:
+                    raise HTTPException(409, "The selected assistant model is unavailable for conversations") from exc
+                if model.harness_profile != profile or model.native_model != native_model:
+                    raise HTTPException(409, "The selected assistant model is unavailable for conversations")
+                effort = model.recommended_effort
             config = invoke(default_config, tenant, owner, profile)
             if config is None:
                 raise HTTPException(409, {"code": "coordinator_not_configured", "message": "Connect an assistant in Connections to start a conversation."})
             selected = CoordinatorConfig.model_validate(config)
             # The chosen account answers in the conversation. Configured helper routes,
-            # each with its own account, stay; without them one route uses the same account.
-            from .coordinator_config import explicit_coordinator_config
-            routes = (selected.routes if explicit_coordinator_config() is not None else
-                      [Route(id="default", profile=profile, model=model.id,
-                             effort=model.recommended_effort, execution_mode="docker",
-                             connection_id=payload.account_id)])
+            # each with its own account, stay; without any, one route uses the same account.
+            routes = explicit.routes if explicit is not None and explicit.routes else [
+                Route(id="default", profile=profile, model=model.id, effort=effort,
+                      execution_mode="docker", connection_id=payload.account_id)]
             selected = selected.model_copy(update={
                 "model": model.id,
-                "effort": model.recommended_effort,
+                "effort": effort,
                 "scope": selected.scope.model_copy(update={"connection_id": payload.account_id, "execution_mode": "docker"}),
                 "routes": routes,
             })
@@ -97,6 +111,10 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             selected = CoordinatorConfig.model_validate(config)
         if payload is not None and payload.scope is not None:
             scope_update = payload.scope.model_dump(exclude_unset=True)
+            if payload.account_id and scope_update.get("execution_mode", "docker") != "docker":
+                # A connected account's conversation runs in its own container; the
+                # caller cannot move it onto the host.
+                raise HTTPException(409, "A conversation with a connected account runs in its own container")
             if "connection_id" in scope_update and selected.scope.connection_id and (
                 scope_update["connection_id"] != selected.scope.connection_id
             ):

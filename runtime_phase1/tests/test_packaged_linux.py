@@ -1322,35 +1322,69 @@ def test_every_packaged_profile_declares_the_isolated_worker_network():
         'local-linux': 'isolated', 'hosted-xfs': 'isolated'}
 
 
+_COORDINATOR_ROUTE = {'id': 'codex', 'profile': 'codex-cli', 'model': 'codex-cli:gpt-6-sol', 'effort': 'medium',
+                      'execution_mode': 'docker'}
+
+
+def _accepts(validate, value) -> bool:
+    try:
+        validate(value)
+        return True
+    except ValueError:
+        return False
+
+
 @pytest.mark.parametrize('config', [
     {'model': 'claude-code:claude-opus-5-5', 'effort': 'medium'},
+    {'model': 'm', 'effort': 'e', 'routes': []},
     {'model': 'm', 'effort': 'e', 'max_goals': 1000, 'wake_on_results': False, 'developer_instructions': '',
-     'scope': {'execution_mode': 'docker', 'project_id': 'prj_1', 'workspace_id': 'wsp_1'},
-     'routes': [{'id': 'codex', 'profile': 'codex-cli', 'model': 'codex-cli:gpt-6-sol', 'effort': 'medium',
-                 'execution_mode': 'docker', 'connection_id': 'acct_1', 'resource_class': 'light'}]},
+     'scope': {'execution_mode': 'docker', 'project_id': 'prj_1', 'workspace_id': 'wsp_1', 'connection_id': 'acct_1'},
+     'routes': [{**_COORDINATOR_ROUTE, 'connection_id': 'acct_2', 'resource_class': 'light'},
+                {**_COORDINATOR_ROUTE, 'id': 'grok', 'profile': 'grok-build', 'model': 'grok-build:grok-4.6',
+                 'effort': 'default'}]},
     {'effort': 'medium'},
     {'model': 'm', 'effort': 'e', 'extra': True},
     {'model': 'm', 'effort': 'e', 'max_goals': 9},
+    {'model': 'm', 'effort': 'e', 'max_goals': True},
+    {'model': 'm', 'effort': 'e', 'bootstrap_bundle': None},
     {'model': 'm', 'effort': 'e', 'scope': {'execution_mode': 'cloud'}},
+    {'model': 'm', 'effort': 'e', 'scope': {'execution_mode': ['docker']}},
     {'model': 'm', 'effort': 'e', 'scope': {'workspace_id': 'wsp_1'}},
-    {'model': 'm', 'effort': 'e', 'routes': [{'id': 'r', 'profile': 'p', 'model': 'm', 'effort': 'e',
-                                              'execution_mode': 'docker', 'extra': 1}]},
-    {'model': 'm', 'effort': 'e', 'routes': [{'id': 'r', 'profile': 'p', 'model': 'm', 'effort': 'e'}]},
+    {'model': 'm', 'effort': 'e', 'scope': {'project_id': 'prj_1', 'connection_id': 'acct\x7fbad', 'execution_mode': 'docker'}},
+    {'model': 'm', 'effort': 'e', 'scope': {'project_id': 'prj\x00'}},
+    {'model': '\ud800m', 'effort': 'e'},
+    {'model': 'm', 'effort': 'e', 'bootstrap_bundle': {'note': '\udc00'}},
+    {'model': 'm', 'effort': 'e', 'routes': [_COORDINATOR_ROUTE, _COORDINATOR_ROUTE]},
+    {'model': 'm', 'effort': 'e', 'routes': [{**_COORDINATOR_ROUTE, 'id': ''}]},
+    {'model': 'm', 'effort': 'e', 'routes': [{**_COORDINATOR_ROUTE, 'extra': 1}]},
+    {'model': 'm', 'effort': 'e', 'routes': [{k: v for k, v in _COORDINATOR_ROUTE.items() if k != 'execution_mode'}]},
+    {'model': 'm', 'effort': 'e', 'routes': [{**_COORDINATOR_ROUTE, 'execution_mode': {'docker': True}}]},
+    {'model': 'm', 'effort': 'e', 'routes': [{**_COORDINATOR_ROUTE, 'id': f'r{index}'} for index in range(33)]},
 ])
-def test_the_launcher_accepts_a_coordinator_config_exactly_when_the_runtime_does(config):
-    """The package launcher carries the runtime's coordinator configuration without importing it;
-    its shape check must never accept what the runtime would reject."""
-    import pydantic
-    from workers_projects_runtime.coordinator import CoordinatorConfig
+def test_the_launcher_never_accepts_a_coordinator_config_the_runtime_refuses(config):
+    """The package launcher carries the runtime's coordinator configuration without importing it.
+    The runtime reads the JSON text the launcher writes, including its unique-route check."""
+    from workers_projects_runtime.coordinator_config import validate_configured_coordinator
 
-    try:
-        CoordinatorConfig.model_validate(config)
-        runtime_accepts = True
-    except pydantic.ValidationError:
-        runtime_accepts = False
-    try:
+    runtime_accepts = _accepts(validate_configured_coordinator, json.dumps(config))
+    assert _accepts(_launch_module().validate_coordinator_config, config) == runtime_accepts
+
+
+@pytest.mark.parametrize('config', [
+    {'model': ' ', 'effort': 'e'},
+    {'model': 'm\t', 'effort': 'e'},
+    {'model': 'm', 'effort': 'e', 'max_goals': 10.0},
+    {'model': 'm', 'effort': 'e', 'wake_on_results': 'true'},
+    {'model': 'm', 'effort': 'e', 'scope': {'connection_id': 'acct\n'}},
+    {'model': 'm', 'effort': 'e', 'routes': [{**_COORDINATOR_ROUTE, 'connection_id': 'acct\x7f'}]},
+    {'model': 'm', 'effort': 'e', 'routes': [{**_COORDINATOR_ROUTE, 'resource_class': 'x' * 51}]},
+    {'model': 'm', 'effort': 'e', 'developer_instructions': 'x' * 70000},
+])
+def test_the_launcher_is_deliberately_stricter_for_these_coordinator_configs(config):
+    """Blank or control-character names, loosely typed values, long resource classes and files over
+    64 KiB are refused before any package change, although the runtime could read them."""
+    from workers_projects_runtime.coordinator_config import validate_configured_coordinator
+
+    assert _accepts(validate_configured_coordinator, json.dumps(config))
+    with pytest.raises(ValueError):
         _launch_module().validate_coordinator_config(config)
-        launcher_accepts = True
-    except ValueError:
-        launcher_accepts = False
-    assert launcher_accepts == runtime_accepts

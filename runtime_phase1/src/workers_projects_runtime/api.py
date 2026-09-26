@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -303,9 +303,11 @@ ARTIFACT_DOWNLOAD_SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 SIGNED_QUERY_KEYS = {"gh_token", "gh_sig", "gh_exp", "gh_kind"}
-# A host run records its terminal session a moment after it starts; a terminal opened
-# in that gap waits this long for it before falling back to a plain shell.
-HOST_TERMINAL_SESSION_WAIT_SECONDS = 15.0
+# A terminal opened for one run waits this long for that run's own session, then asks the
+# page to reconnect; it never attaches another run's session or a plain shell instead.
+RUN_TERMINAL_SESSION_WAIT_SECONDS = 15.0
+RUN_TERMINAL_NOT_STARTED_CLOSE = 4408
+RUN_TERMINAL_ID = re.compile(r"run_[A-Za-z0-9_-]{1,64}")
 
 
 def _http_request_head_bytes(scope: dict) -> int:
@@ -1428,6 +1430,26 @@ def create_app(
             "workspace_dir": str(worker.get("workspace_dir") or ""),
             "state_dir": str(worker.get("state_dir") or ""),
         }
+
+    def _run_terminal_target(worker: dict, run: dict) -> TerminalTarget | None:
+        resolver = getattr(runtime_impl, "run_terminal_target", None)
+        if callable(resolver):
+            return resolver(worker, run)
+        # Runtimes without per-run sessions have only the worker terminal.
+        return _terminal_target(worker)
+
+    def _run_terminal_notice(worker_id: str, run: dict) -> str:
+        state = str(run.get("state") or "").strip()
+        if state == "paused":
+            return "This run is paused. Resume it to continue."
+        if state == "needs_input":
+            return "This run is waiting for your answer."
+        active = store.get_active_run(worker_id)
+        if active and str(active.get("run_id") or "") != str(run.get("run_id") or ""):
+            return "This run is queued behind the run still working in this workspace."
+        if state in {"running", "settling"}:
+            return "This run is starting its session…"
+        return "This run is queued and has not started yet."
 
     def _terminal_target(worker: dict) -> TerminalTarget:
         if hasattr(runtime_impl, "terminal_target"):
@@ -8020,19 +8042,52 @@ def create_app(
         if str(worker.get("state") or "") in {"terminating", "termination_failed", "terminated"}:
             await websocket.close(code=4404)
             return
+        closed_states = {"terminating", "termination_failed", "terminated"}
+        requested_run = str(websocket.query_params.get("run") or "").strip()
+        if requested_run:
+            # The live view names the exact run it shows. Attach that run's own session or its
+            # saved output; until its session exists, say so and let the page reconnect.
+            run = store.get_run(requested_run) if RUN_TERMINAL_ID.fullmatch(requested_run) else None
+            if not run or str(run.get("worker_id") or "") != worker_id:
+                await websocket.close(code=4404)
+                return
+            await websocket.accept()
+            deadline = time.monotonic() + RUN_TERMINAL_SESSION_WAIT_SECONDS
+            shown = ""
+            try:
+                while True:
+                    current = store.get_worker(worker_id)
+                    run = store.get_run(requested_run)
+                    if (not current or not run or str(run.get("worker_id") or "") != worker_id
+                            or str(current.get("state") or "") in closed_states):
+                        await websocket.close(code=4404)
+                        return
+                    run_target = await asyncio.to_thread(_run_terminal_target, current, run)
+                    if run_target is not None:
+                        break
+                    notice = _run_terminal_notice(worker_id, run)
+                    if notice != shown:
+                        # One status line, rewritten in place across reconnects.
+                        await websocket.send_text("\r\x1b[2K" + notice)
+                        shown = notice
+                    if time.monotonic() >= deadline:
+                        await websocket.close(code=RUN_TERMINAL_NOT_STARTED_CLOSE, reason="Run session not started")
+                        return
+                    await asyncio.sleep(0.25)
+                if shown:
+                    await websocket.send_text("\x1b[2J\x1b[H")
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            await bridge_terminal(
+                websocket,
+                run_target,
+                should_close=lambda: str(
+                    (store.get_worker(worker_id) or {}).get("state") or ""
+                ) in closed_states,
+                accepted=True,
+            )
+            return
         target = _terminal_target(worker)
-        # The live view opens its terminal right after Run Project or a follow-up,
-        # usually before that host run has recorded its session. Wait briefly for
-        # it so the terminal follows the work instead of opening a plain shell.
-        if (
-            not target.session_bound
-            and str(worker.get("execution_mode") or "") == "host"
-            and (store.get_active_run(worker_id) or store.has_queued_runs(worker_id))
-        ):
-            deadline = time.monotonic() + HOST_TERMINAL_SESSION_WAIT_SECONDS
-            while not target.session_bound and time.monotonic() < deadline:
-                await asyncio.sleep(0.25)
-                target = _terminal_target(store.get_worker(worker_id) or worker)
         current = store.get_worker(
             worker_id,
             tenant_id=ctx.tenant_id if ctx.is_user_scoped else None,

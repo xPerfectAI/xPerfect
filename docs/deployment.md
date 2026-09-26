@@ -43,8 +43,10 @@ By default a conversation's helpers use the account chosen for the conversation,
 that one account. To let helpers run on other connected accounts at the same time, give the
 package a private coordinator file with `--coordinator-config /private/coordinator.json` at launch,
 or later with `upgrade --coordinator-config` (remove it with `--no-coordinator-config`). Each route
-names an exact model and one of your connected accounts; the account chosen in the conversation
-still answers there:
+names an exact model and one of your connected accounts. The conversation itself answers with the
+file's exact `model` and `effort` on the account chosen in the conversation, which must be for that
+model; a mismatch is refused, never answered by another model. A file without `routes` keeps one
+helper route on the chosen account:
 
 ```json
 {"model": "claude-code:<exact-model>", "effort": "medium", "scope": {"execution_mode": "docker"},
@@ -56,7 +58,10 @@ still answers there:
 ```
 
 The file is checked before anything changes and kept across later upgrades. Machine resources
-still decide how many helpers run at once.
+still decide how many helpers run at once: the conversation and each running helper use their own
+6 GiB workspace, and new work starts only while 2 GiB stay free. A conversation with two helpers
+running at the same time therefore needs about 21 GiB of Docker memory (Docker Desktop: Settings →
+Resources); with less, the second helper waits for the first.
 
 Open the printed loopback UI URL. On **Unlock xPerfect**, enter `ui_password` from the mode-0600
 credentials file and select **Unlock**; the browser then stays unlocked for 12 hours by default.

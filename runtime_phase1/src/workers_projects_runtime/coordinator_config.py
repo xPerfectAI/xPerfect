@@ -6,10 +6,22 @@ import os
 from .coordinator import CoordinatorConfig, CoordinatorConflict, CoordinatorScope, Route
 
 
+def validate_configured_coordinator(value: object) -> CoordinatorConfig:
+    """Check a coordinator configuration as conversation creation will use it."""
+    try:
+        config = (CoordinatorConfig.model_validate_json(value) if isinstance(value, str)
+                  else CoordinatorConfig.model_validate(value))
+    except ValueError as exc:  # includes pydantic's ValidationError
+        raise CoordinatorConflict("The deployment's coordinator configuration is invalid") from exc
+    if len({route.id for route in config.routes}) != len(config.routes):
+        raise CoordinatorConflict("The deployment's coordinator route IDs must be unique")
+    return config
+
+
 def explicit_coordinator_config() -> CoordinatorConfig | None:
     """The deployment's explicit coordinator configuration and helper routes, if set."""
     explicit = os.environ.get("GLASSHIVE_COORDINATOR_CONFIG_JSON", "").strip()
-    return CoordinatorConfig.model_validate_json(explicit) if explicit else None
+    return validate_configured_coordinator(explicit) if explicit else None
 
 
 def configured_coordinator(service, provider, tenant_id: str = "local", owner_id: str = "",
@@ -18,7 +30,13 @@ def configured_coordinator(service, provider, tenant_id: str = "local", owner_id
     # a model-routing heuristic and never falls back after an invalid selection.
     explicit = explicit_coordinator_config()
     if explicit is not None:
-        return explicit
+        if explicit.routes:
+            return explicit
+        # Without configured helper routes, one route uses the conversation's own exact model.
+        model = provider._model(explicit.model, tenant_id=tenant_id, owner_id=owner_id)
+        return explicit.model_copy(update={"routes": [Route(
+            id="default", profile=model.harness_profile, model=model.id,
+            effort=explicit.effort, execution_mode=explicit.scope.execution_mode)]})
     preferences = service.store.get_user_preferences(tenant_id, owner_id) if owner_id else {}
     preferences = preferences or {}
     profile = selected_profile or preferences.get("default_worker_profile") or os.environ.get("GLASSHIVE_DEFAULT_WORKER_PROFILE") or os.environ.get("WPR_DEFAULT_WORKER_PROFILE") or "codex-cli"

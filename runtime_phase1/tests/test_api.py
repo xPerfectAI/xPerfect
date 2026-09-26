@@ -12220,24 +12220,32 @@ def test_closed_workspace_rejects_terminal_websocket(tmp_path, closed_state):
 
 
 
-def test_host_terminal_opened_before_the_run_records_its_session_follows_that_run(tmp_path):
-    """The live view opens its terminal right after Run Project or a follow-up, usually before
-    the host run has recorded its session. That terminal must follow the run, not open a shell;
-    with no run waiting it opens the shell at once."""
+def test_live_view_terminal_attaches_only_its_exact_run(tmp_path, monkeypatch):
+    """The live view names the run it shows. Its terminal attaches that run's own session, says
+    the run is waiting and asks the page to reconnect until that session exists, shows the ended
+    run's saved output on reload, and never attaches another run's session or a plain shell."""
+    import workers_projects_runtime.api as api_module
 
-    class HostSessionRuntime(StubRuntime):
+    monkeypatch.setattr(api_module, "RUN_TERMINAL_SESSION_WAIT_SECONDS", 0.6)
+
+    class ExactRunRuntime(StubRuntime):
         def __init__(self) -> None:
             super().__init__()
-            self.calls = 0
+            self.bound: set[str] = set()
 
         def terminal_target(self, worker: dict) -> TerminalTarget:
-            self.calls += 1
-            if self.session_after and self.calls >= self.session_after:
-                return TerminalTarget(command=["/bin/sh", "-c", "echo following-run; exec sleep 30"],
-                                      cwd=str(tmp_path), session_bound=True)
             return TerminalTarget(command=["/bin/sh", "-c", "echo plain-shell; exec sleep 30"], cwd=str(tmp_path))
 
-    runtime = HostSessionRuntime()
+        def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
+            if run["state"] in {"completed", "failed", "cancelled"}:
+                return TerminalTarget(command=["/bin/sh", "-c", f"echo saved-{run['run_id']}"], cwd=str(tmp_path),
+                                      session_bound=True, close_code=4410, close_reason="Run output shown")
+            if run["run_id"] not in self.bound:
+                return None
+            return TerminalTarget(command=["/bin/sh", "-c", f"echo session-{run['run_id']}; exec sleep 30"],
+                                  cwd=str(tmp_path), session_bound=True)
+
+    runtime = ExactRunRuntime()
     app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
     client = TestClient(app)
     project = client.post(
@@ -12246,23 +12254,58 @@ def test_host_terminal_opened_before_the_run_records_its_session_follows_that_ru
     ).json()
     worker = client.post(
         f"/v1/projects/{project['project_id']}/workers",
-        json={"owner_id": "demo-owner", "name": "Host worker", "role": "operator"},
+        json={"owner_id": "demo-owner", "name": "Worker", "role": "operator"},
+    ).json()
+    other = client.post(
+        f"/v1/projects/{project['project_id']}/workers",
+        json={"owner_id": "demo-owner", "name": "Other", "role": "operator"},
     ).json()
     store = app.state.store
-    store.update_worker(worker["worker_id"], execution_mode="host")
+    prior = store.create_run(worker["worker_id"], project["project_id"], "first")
+    follow_up = store.create_run(worker["worker_id"], project["project_id"], "follow-up", state="queued")
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET state='running', started_at=queued_at WHERE run_id=?", (prior["run_id"],))
+    foreign = store.create_run(other["worker_id"], project["project_id"], "elsewhere", state="queued")
+    runtime.bound.add(prior["run_id"])
 
-    def first_output() -> str:
-        with client.websocket_connect(f"/ws/workers/{worker['worker_id']}/terminal") as websocket:
-            return websocket.receive_text()
+    def read(run_id: str, until) -> tuple[str, int | None]:
+        texts: list[str] = []
+        with client.websocket_connect(f"/ws/workers/{worker['worker_id']}/terminal?run={run_id}") as websocket:
+            try:
+                while not until("".join(texts)):
+                    texts.append(websocket.receive_text())
+            except WebSocketDisconnect as closed:
+                return "".join(texts), closed.code
+        return "".join(texts), None
 
-    runtime.session_after = 3
-    assert "plain-shell" in first_output()
-    assert runtime.calls == 1
-
-    store.create_run(worker["worker_id"], project["project_id"], "follow-up", state="queued")
-    runtime.calls = 0
-    assert "following-run" in first_output()
-    assert runtime.calls == 3
+    # First run: its own live session.
+    text, code = read(prior["run_id"], lambda seen: "session-" in seen)
+    assert f"session-{prior['run_id']}" in text and code is None
+    # A queued follow-up says so while the prior run still works, then asks for a reconnect.
+    text, code = read(follow_up["run_id"], lambda seen: False)
+    assert "queued behind the run still working" in text
+    assert code == api_module.RUN_TERMINAL_NOT_STARTED_CLOSE
+    assert "plain-shell" not in text and prior["run_id"] not in text
+    # Its session appearing during the wait attaches it.
+    binder = Thread(target=lambda: (time.sleep(0.2), runtime.bound.add(follow_up["run_id"])))
+    binder.start()
+    text, code = read(follow_up["run_id"], lambda seen: "session-" in seen)
+    binder.join()
+    assert f"session-{follow_up['run_id']}" in text and prior["run_id"] not in text
+    # Reloading after it ends shows its saved output, then closes as shown.
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET state='completed' WHERE run_id=?", (follow_up["run_id"],))
+    text, code = read(follow_up["run_id"], lambda seen: False)
+    assert f"saved-{follow_up['run_id']}" in text and code == 4410
+    # Another worker's run, or a malformed one, is not this terminal's.
+    for run_id in (foreign["run_id"], "run_../x"):
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(f"/ws/workers/{worker['worker_id']}/terminal?run={run_id}"):
+                pass
+        assert refused.value.code == 4404
+    # Without a named run the worker terminal opens at once, as before.
+    with client.websocket_connect(f"/ws/workers/{worker['worker_id']}/terminal") as websocket:
+        assert "plain-shell" in websocket.receive_text()
 
 
 def test_open_terminal_websocket_is_revoked_when_workspace_closes(tmp_path):

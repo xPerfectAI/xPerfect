@@ -19,7 +19,11 @@
     cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Monaco, Consolas, monospace',
     theme: { background: '#10151b', foreground: '#e4e8ed' } });
   terminal.open(host);
+  // The live view names the exact run this terminal shows; the runtime attaches only that run.
+  const runId = new URLSearchParams(location.search).get('run') || '';
   let socket;
+  let retryTimer = 0;
+  let sessionEndRetries = 0;
   const csrf = () => decodeURIComponent(document.cookie.split('; ').find(item => item.startsWith('glasshive_csrf='))?.slice(15) || '');
   function resize() {
     const cols = Math.max(20, Math.floor((host.clientWidth - 20) / 8.45));
@@ -27,21 +31,38 @@
     terminal.resize(cols, rows);
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
+  // Why the runtime closed this run's terminal, and whether to reconnect by itself.
+  function closedStatus(code) {
+    if (runId && code === 4408) return { text: 'Waiting for this run to start…', retryMs: 1500 };
+    if (runId && code === 4409) {
+      return { text: 'This run’s live session ended.', retryMs: sessionEndRetries++ < 3 ? 2000 : 0 };
+    }
+    if (runId && code === 4410) return { text: 'This run has ended. Its saved output is shown.', retryMs: 0 };
+    if (code === 4404) return { text: 'This run is not available in this workspace.', retryMs: 0 };
+    return { text: 'Terminal disconnected. Unlock again if your session expired, then reconnect.', retryMs: 0 };
+  }
   function connect() {
+    window.clearTimeout(retryTimer);
     if (socket) socket.close();
     status.textContent = 'Connecting…';
     const protocols = ['xperfect-terminal'];
     if (csrf()) protocols.push(`csrf.${csrf()}`);
-    const next = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/workers/${encodeURIComponent(workerId)}/terminal`, protocols);
+    const query = runId ? `?run=${encodeURIComponent(runId)}` : '';
+    const next = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/workers/${encodeURIComponent(workerId)}/terminal${query}`, protocols);
     socket = next;
     next.onopen = () => { if (socket !== next) return; status.textContent = 'Terminal connected'; resize(); terminal.focus(); };
     next.onmessage = event => { if (socket === next) terminal.write(event.data); };
-    next.onclose = () => { if (socket === next) status.textContent = 'Terminal disconnected. Unlock again if your session expired, then reconnect.'; };
+    next.onclose = event => {
+      if (socket !== next) return;
+      const closed = closedStatus(event.code);
+      status.textContent = closed.text;
+      if (closed.retryMs) retryTimer = window.setTimeout(connect, closed.retryMs);
+    };
     next.onerror = () => { if (socket === next) status.textContent = 'Terminal unavailable. Check the workspace status and reconnect.'; };
   }
   terminal.onData(data => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
   new ResizeObserver(resize).observe(host);
-  document.getElementById('reconnect').addEventListener('click', connect);
+  document.getElementById('reconnect').addEventListener('click', () => { sessionEndRetries = 0; connect(); });
   for (const button of document.querySelectorAll('[data-action]')) button.addEventListener('click', async () => {
     button.disabled = true;
     try {

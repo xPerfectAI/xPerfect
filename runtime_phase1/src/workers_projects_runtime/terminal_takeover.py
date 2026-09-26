@@ -22,6 +22,9 @@ class TerminalTarget:
     subtitle: str = ""
     # True when the terminal follows a run's recorded session rather than a plain shell.
     session_bound: bool = False
+    # How the socket closes when the command ends, so the page can say why.
+    close_code: int = 1000
+    close_reason: str = ""
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
@@ -41,8 +44,10 @@ async def bridge_terminal(
     target: TerminalTarget,
     *,
     should_close: Callable[[], bool] | None = None,
+    accepted: bool = False,
 ) -> None:
-    await websocket.accept()
+    if not accepted:
+        await websocket.accept()
     master_fd, slave_fd = pty.openpty()
     process = subprocess.Popen(
         target.command,
@@ -130,4 +135,9 @@ async def bridge_terminal(
         try:
             os.close(master_fd)
         except OSError:
+            pass
+        try:
+            await websocket.close(code=target.close_code, reason=target.close_reason)
+        except RuntimeError:
+            # Already closed by the page or by the workspace-closed monitor.
             pass

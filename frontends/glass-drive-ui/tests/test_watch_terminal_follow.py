@@ -1,5 +1,6 @@
-"""Watch keeps its terminal on the latest run: a new run re-attaches it so it follows that
-run's work, and a finished run keeps its output. Runs the real watch.js functions under Node."""
+"""Watch's terminal shows exactly the latest run: it waits while that run is queued, attaches
+its own session once it starts and shows its saved output once it ends, never another run's
+session. Runs the real watch.js functions and terminal.js page script under Node."""
 from __future__ import annotations
 
 import json
@@ -10,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-WATCH_JS = Path(__file__).resolve().parents[1] / "src/glass_drive_ui/static/watch.js"
+STATIC = Path(__file__).resolve().parents[1] / "src/glass_drive_ui/static"
+WATCH_JS = STATIC / "watch.js"
+node = pytest.mark.skipif(shutil.which("node") is None, reason="Node is required to run the page scripts")
 
 
 def _function(source: str, name: str) -> str:
@@ -19,31 +22,91 @@ def _function(source: str, name: str) -> str:
     return match.group(0)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node is required to run watch.js functions")
-def test_terminal_url_changes_only_when_a_new_run_starts():
+def _node(script: str) -> dict:
+    return json.loads(subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout)
+
+
+@node
+def test_terminal_url_names_the_run_and_changes_only_with_its_run_or_phase():
     source = WATCH_JS.read_text()
-    script = "\n".join([
+    result = _node("\n".join([
         "let signedToken = 'link token';",
+        _function(source, "terminalRunPhase"),
         _function(source, "terminalViewUrl"),
         _function(source, "withAuth"),
-        "const url = (run) => withAuth(terminalViewUrl('http://127.0.0.1:8780', 'wrk_1', run));",
-        "console.log(JSON.stringify({before: url(''), first: url('run_a'), again: url('run_a'),",
-        "  next: url('run_b'), plain: terminalViewUrl('', 'wrk_1', '')}));",
-    ])
-    result = json.loads(subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout)
+        "const url = (run, state) => withAuth(terminalViewUrl('http://127.0.0.1:8780', 'wrk_1', run, state));",
+        "console.log(JSON.stringify({before: url('', ''), queued: url('run_a', 'queued'),",
+        "  claimed: url('run_a', 'claimed'), running: url('run_a', 'running'), settling: url('run_a', 'settling'),",
+        "  completed: url('run_a', 'completed'), failed: url('run_a', 'failed'), next: url('run_b', 'queued'),",
+        "  plain: terminalViewUrl('', 'wrk_1', '')}));",
+    ]))
     assert result["plain"] == "/ui/workers/wrk_1/terminal"
     assert result["before"] == "http://127.0.0.1:8780/ui/workers/wrk_1/terminal?gh_token=link%20token"
-    assert result["first"] == "http://127.0.0.1:8780/ui/workers/wrk_1/terminal?run=run_a&gh_token=link%20token"
-    assert result["again"] == result["first"]
-    assert result["next"] != result["first"] and "run=run_b" in result["next"]
+    assert result["queued"] == ("http://127.0.0.1:8780/ui/workers/wrk_1/terminal"
+                                "?run=run_a&phase=waiting&gh_token=link%20token")
+    # One reattachment per phase: waiting, live, ended.
+    assert result["claimed"] == result["queued"]
+    assert result["settling"] == result["running"] != result["queued"] and "phase=live" in result["running"]
+    assert result["failed"] == result["completed"] != result["running"] and "phase=ended" in result["completed"]
+    assert result["next"] != result["queued"] and "run=run_b" in result["next"]
 
 
-def test_watch_attaches_the_terminal_for_the_latest_run():
+def test_watch_attaches_the_terminal_for_the_latest_run_and_its_state():
     source = WATCH_JS.read_text()
-    assert "currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || '')));" in source
+    assert ("currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || ''),\n"
+            "      String(data.latest_run?.state || '')));") in source
 
 
-def test_watch_page_loads_the_terminal_following_script_version():
-    # Browsers keep a cached watch.js for the same ?v= token, so a changed script needs a new token.
-    watch_html = (WATCH_JS.parent / "watch.html").read_text()
-    assert 'src="/static/watch.js?v=20260926follow1"' in watch_html
+def test_watch_and_terminal_pages_load_the_exact_run_script_versions():
+    # Browsers keep a cached script for the same ?v= token, so a changed script needs a new token.
+    assert 'src="/static/watch.js?v=20260926run1"' in (STATIC / "watch.html").read_text()
+    assert 'src="/static/terminal.js?v=20260926run1"' in (STATIC / "terminal.html").read_text()
+
+
+@node
+def test_terminal_page_carries_the_run_and_explains_each_close():
+    page = (STATIC / "terminal.js").read_text()
+    result = _node(r"""
+const status = {textContent: ''};
+const buttons = {};
+global.document = {
+  getElementById: id => id === 'terminal-status' ? status
+    : id === 'terminal' ? {clientWidth: 800, clientHeight: 400}
+    : {addEventListener: (_type, handler) => { buttons[id] = handler; }},
+  querySelector: () => ({content: 'nonce'}),
+  querySelectorAll: () => [],
+  createElement: () => ({}),
+  cookie: '',
+};
+global.location = {pathname: '/ui/workers/wrk_1/terminal', search: '?run=run_a&phase=waiting',
+                   protocol: 'http:', host: 'testserver'};
+const sockets = [];
+global.WebSocket = class { constructor(url) { this.url = url; sockets.push(this); } send() {} close() {} };
+global.WebSocket.OPEN = 1;
+global.ResizeObserver = class { observe() {} };
+global.Terminal = class { open() {} resize() {} focus() {} write() {} onData() {} };
+const timers = [];
+global.window = {setTimeout: (callback, ms) => timers.push({callback, ms}), clearTimeout: () => {}};
+eval(""" + json.dumps(page) + r""");
+const seen = [];
+const close = code => { sockets[sockets.length - 1].onclose({code}); seen.push([status.textContent, timers.length]); };
+close(4408);
+timers[0].callback();
+close(4409);
+timers[1].callback();
+close(4410);
+close(1000);
+console.log(JSON.stringify({urls: sockets.map(socket => socket.url), seen,
+                            delays: timers.map(timer => timer.ms)}));
+""")
+    assert result["urls"][0] == "ws://testserver/ws/workers/wrk_1/terminal?run=run_a"
+    assert all(url == result["urls"][0] for url in result["urls"])
+    assert [text for text, _ in result["seen"]] == [
+        "Waiting for this run to start…",
+        "This run’s live session ended.",
+        "This run has ended. Its saved output is shown.",
+        "Terminal disconnected. Unlock again if your session expired, then reconnect.",
+    ]
+    # Waiting and an ended live session reconnect by themselves; shown output does not.
+    assert result["delays"] == [1500, 2000]
+    assert [count for _, count in result["seen"]] == [1, 2, 2, 2]

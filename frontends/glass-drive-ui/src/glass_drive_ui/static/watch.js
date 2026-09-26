@@ -135,11 +135,19 @@ let nativeControls = null;
 let latestFileActivityKey = '';
 let listedFileActivityKey = '';
 
-// Keyed on the latest run: a new run re-attaches the terminal so it follows that
-// run's work, while a finished run keeps its output on screen.
-function terminalViewUrl(base, id, runId) {
+// Keyed on the latest run and its phase: the terminal shows exactly that run, attaching its
+// session once it starts and its saved output once it ends.
+function terminalRunPhase(runState) {
+  const state = String(runState || '').trim().toLowerCase();
+  if (['completed', 'failed', 'cancelled', 'interrupted'].includes(state)) return 'ended';
+  if (['running', 'settling', 'paused', 'needs_input'].includes(state)) return 'live';
+  return 'waiting';
+}
+
+function terminalViewUrl(base, id, runId, runState = '') {
   const url = `${base}/ui/workers/${id}/terminal`;
-  return runId ? `${url}?run=${encodeURIComponent(runId)}` : url;
+  if (!runId) return url;
+  return `${url}?run=${encodeURIComponent(runId)}&phase=${terminalRunPhase(runState)}`;
 }
 
 function withAuth(url) {
@@ -1083,7 +1091,8 @@ async function refresh() {
 
     currentDesktopAvailable = Boolean(runtime.view_available || runtime.view_url);
   currentDesktopUrl = currentDesktopAvailable ? withUiRev(withAuth(`${uiBase}/desktop/${workerId}`)) : '';
-    currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || '')));
+    currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || ''),
+      String(data.latest_run?.state || '')));
 
     renderOutput(data);
     syncSteerAvailability(displayState);

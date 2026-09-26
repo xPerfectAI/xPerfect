@@ -171,14 +171,27 @@ _COORDINATOR_SCOPE_FIELDS = {'project_id', 'workspace_id', 'connection_id', 'exe
 
 
 def validate_coordinator_config(value: object) -> str:
-    """Return the coordinator configuration as canonical JSON, or raise ValueError."""
+    """Return the coordinator configuration as canonical JSON, or raise ValueError.
+
+    It never accepts a configuration the runtime would refuse; a few of its limits are stricter.
+    """
+    def printable(item: str) -> bool:
+        return not any(ord(character) < 32 or ord(character) == 127 for character in item)
+
     def named(item: object, limit: int) -> bool:
-        return (isinstance(item, str) and bool(item.strip()) and len(item) <= limit
-                and not any(ord(character) < 32 for character in item))
+        return isinstance(item, str) and bool(item.strip()) and len(item) <= limit and printable(item)
 
     def optional_text(item: object, limit: int) -> bool:
-        return isinstance(item, str) and len(item) <= limit and not any(ord(c) < 32 for c in item)
+        return isinstance(item, str) and len(item) <= limit and printable(item)
 
+    def placement(item: object) -> bool:
+        return isinstance(item, str) and item in {'host', 'docker'}
+
+    try:
+        # The runtime reads this text as UTF-8 JSON; unpaired surrogates cannot be read back.
+        json.dumps(value, ensure_ascii=False).encode('utf-8')
+    except UnicodeEncodeError:
+        raise ValueError('The coordinator configuration contains text that is not valid Unicode') from None
     if (not isinstance(value, dict) or not {'model', 'effort'} <= set(value)
             or not set(value) <= _COORDINATOR_FIELDS or not named(value['model'], 200)
             or not named(value['effort'], 50)):
@@ -191,7 +204,7 @@ def validate_coordinator_config(value: object) -> str:
         raise ValueError('The coordinator configuration has an invalid goal limit, flag, instructions or bundle')
     scope = value.get('scope', {})
     if (not isinstance(scope, dict) or not set(scope) <= _COORDINATOR_SCOPE_FIELDS
-            or scope.get('execution_mode', 'host') not in {'host', 'docker'}
+            or not placement(scope.get('execution_mode', 'host'))
             or not all(optional_text(scope.get(key, ''), 512) for key in ('project_id', 'workspace_id', 'connection_id'))
             or (scope.get('workspace_id') and not scope.get('project_id'))):
         raise ValueError('The coordinator scope is invalid')
@@ -203,7 +216,7 @@ def validate_coordinator_config(value: object) -> str:
         if (not isinstance(route, dict) or not {'id', 'profile', 'model', 'effort', 'execution_mode'} <= set(route)
                 or not set(route) <= _COORDINATOR_ROUTE_FIELDS or not named(route['id'], 100)
                 or not named(route['profile'], 100) or not named(route['model'], 200)
-                or not named(route['effort'], 50) or route['execution_mode'] not in {'host', 'docker'}
+                or not named(route['effort'], 50) or not placement(route['execution_mode'])
                 or not optional_text(route.get('connection_id', ''), 512)
                 or not named(route.get('resource_class', 'standard'), 50)
                 or not isinstance(route.get('bootstrap_bundle', {}), dict) or route['id'] in ids):
