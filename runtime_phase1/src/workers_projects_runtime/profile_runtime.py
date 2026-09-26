@@ -5566,8 +5566,9 @@ class BaseCliWorkerRuntime:
         return TerminalTarget(
             command=command,
             cwd="/",
+            # Saved output is UTF-8; without this the pager shows non-ASCII text as escaped bytes.
             env={"TERM": "xterm-256color", "PATH": "/usr/bin:/bin", "LESSSECURE": "1", "LESS": "",
-                 "LESSOPEN": "", "LESSCLOSE": "", "LESSHISTFILE": "-"},
+                 "LESSOPEN": "", "LESSCLOSE": "", "LESSHISTFILE": "-", "LESSCHARSET": "utf-8"},
             title=f"{worker['name']} run output",
             subtitle=f"Run {run_id} {state}",
             session_bound=True,

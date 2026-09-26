@@ -550,6 +550,40 @@ def _run_output(target) -> str:
                           text=True, check=True, timeout=10).stdout
 
 
+def _terminal_screen(target, keys: bytes = b"") -> str:
+    """What the target shows on a real terminal (the live view runs it under a pty)."""
+    import fcntl, os, pty, select, struct, termios
+    primary, secondary = pty.openpty()
+    fcntl.ioctl(secondary, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    process = subprocess.Popen(target.command, cwd=target.cwd, env=target.env, stdin=secondary,
+                               stdout=secondary, stderr=secondary, start_new_session=True)
+    os.close(secondary)
+    screen = b""
+
+    def drain(seconds: float) -> None:
+        # Keep reading until the pager exits: it blocks writing its exit output otherwise.
+        nonlocal screen
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and process.poll() is None:
+            if select.select([primary], [], [], 0.1)[0]:
+                try:
+                    screen += os.read(primary, 65536)
+                except OSError:
+                    return
+
+    try:
+        drain(1.5)
+        if keys:
+            os.write(primary, keys)
+            drain(1.5)
+        os.write(primary, b"q")
+        drain(5)
+        process.wait(timeout=5)
+    finally:
+        os.close(primary)
+    return screen.decode("utf-8", "replace")
+
+
 def test_host_run_terminal_shows_only_that_run_and_then_its_saved_output(tmp_path):
     """The live view names one run. A host terminal follows that run's own session and attempt,
     never another run's, and once it ends shows that run's saved output instead of a shell."""
@@ -590,6 +624,13 @@ def test_host_run_terminal_shows_only_that_run_and_then_its_saved_output(tmp_pat
     assert saved.env["LESSSECURE"] == "1" and "less" in saved.command[2]
     assert f"Run {prior['run_id']} completed - saved output line %lb of %L" in saved.command[-1]
     assert saved.close_code == 4410
+    # On a terminal it opens at the end, reaches the first line and shows UTF-8 text as text.
+    with (run_root / "stdout.log").open("a") as handle:
+        handle.write("done \u2014 result \u00b7 ok\n")
+    at_end = _terminal_screen(saved)
+    assert "done \u2014 result \u00b7 ok" in at_end and "<E2>" not in at_end
+    assert "saved output line 1002 of 1002" in at_end
+    assert "saved output line 23 of 1002" in _terminal_screen(saved, b"g")
     assert "No terminal output was kept" in _run_output(runtime.run_terminal_target(worker, {**follow_up, "state": "failed"}))
 
 
