@@ -6,13 +6,19 @@ import os
 from .coordinator import CoordinatorConfig, CoordinatorConflict, CoordinatorScope, Route
 
 
+def explicit_coordinator_config() -> CoordinatorConfig | None:
+    """The deployment's explicit coordinator configuration and helper routes, if set."""
+    explicit = os.environ.get("GLASSHIVE_COORDINATOR_CONFIG_JSON", "").strip()
+    return CoordinatorConfig.model_validate_json(explicit) if explicit else None
+
+
 def configured_coordinator(service, provider, tenant_id: str = "local", owner_id: str = "",
                            selected_profile: str = "") -> CoordinatorConfig:
     # Optional advanced deployment/owner configuration is explicit. It never becomes
     # a model-routing heuristic and never falls back after an invalid selection.
-    explicit = os.environ.get("GLASSHIVE_COORDINATOR_CONFIG_JSON", "").strip()
-    if explicit:
-        return CoordinatorConfig.model_validate_json(explicit)
+    explicit = explicit_coordinator_config()
+    if explicit is not None:
+        return explicit
     preferences = service.store.get_user_preferences(tenant_id, owner_id) if owner_id else {}
     preferences = preferences or {}
     profile = selected_profile or preferences.get("default_worker_profile") or os.environ.get("GLASSHIVE_DEFAULT_WORKER_PROFILE") or os.environ.get("WPR_DEFAULT_WORKER_PROFILE") or "codex-cli"

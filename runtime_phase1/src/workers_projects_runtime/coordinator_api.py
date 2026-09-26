@@ -77,13 +77,18 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             if config is None:
                 raise HTTPException(409, {"code": "coordinator_not_configured", "message": "Connect an assistant in Connections to start a conversation."})
             selected = CoordinatorConfig.model_validate(config)
+            # The chosen account answers in the conversation. Configured helper routes,
+            # each with its own account, stay; without them one route uses the same account.
+            from .coordinator_config import explicit_coordinator_config
+            routes = (selected.routes if explicit_coordinator_config() is not None else
+                      [Route(id="default", profile=profile, model=model.id,
+                             effort=model.recommended_effort, execution_mode="docker",
+                             connection_id=payload.account_id)])
             selected = selected.model_copy(update={
                 "model": model.id,
                 "effort": model.recommended_effort,
                 "scope": selected.scope.model_copy(update={"connection_id": payload.account_id, "execution_mode": "docker"}),
-                "routes": [Route(id="default", profile=profile, model=model.id,
-                                 effort=model.recommended_effort, execution_mode="docker",
-                                 connection_id=payload.account_id)],
+                "routes": routes,
             })
         else:
             config = invoke(default_config, tenant, owner)

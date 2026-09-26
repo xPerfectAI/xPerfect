@@ -1320,3 +1320,37 @@ def test_every_packaged_profile_declares_the_isolated_worker_network():
     module = service_module()
     assert {profile: settings['XPERFECT_WORKER_NETWORK'] for profile, settings in module.PROFILE_SETTINGS.items()} == {
         'local-linux': 'isolated', 'hosted-xfs': 'isolated'}
+
+
+@pytest.mark.parametrize('config', [
+    {'model': 'claude-code:claude-opus-5-5', 'effort': 'medium'},
+    {'model': 'm', 'effort': 'e', 'max_goals': 1000, 'wake_on_results': False, 'developer_instructions': '',
+     'scope': {'execution_mode': 'docker', 'project_id': 'prj_1', 'workspace_id': 'wsp_1'},
+     'routes': [{'id': 'codex', 'profile': 'codex-cli', 'model': 'codex-cli:gpt-6-sol', 'effort': 'medium',
+                 'execution_mode': 'docker', 'connection_id': 'acct_1', 'resource_class': 'light'}]},
+    {'effort': 'medium'},
+    {'model': 'm', 'effort': 'e', 'extra': True},
+    {'model': 'm', 'effort': 'e', 'max_goals': 9},
+    {'model': 'm', 'effort': 'e', 'scope': {'execution_mode': 'cloud'}},
+    {'model': 'm', 'effort': 'e', 'scope': {'workspace_id': 'wsp_1'}},
+    {'model': 'm', 'effort': 'e', 'routes': [{'id': 'r', 'profile': 'p', 'model': 'm', 'effort': 'e',
+                                              'execution_mode': 'docker', 'extra': 1}]},
+    {'model': 'm', 'effort': 'e', 'routes': [{'id': 'r', 'profile': 'p', 'model': 'm', 'effort': 'e'}]},
+])
+def test_the_launcher_accepts_a_coordinator_config_exactly_when_the_runtime_does(config):
+    """The package launcher carries the runtime's coordinator configuration without importing it;
+    its shape check must never accept what the runtime would reject."""
+    import pydantic
+    from workers_projects_runtime.coordinator import CoordinatorConfig
+
+    try:
+        CoordinatorConfig.model_validate(config)
+        runtime_accepts = True
+    except pydantic.ValidationError:
+        runtime_accepts = False
+    try:
+        _launch_module().validate_coordinator_config(config)
+        launcher_accepts = True
+    except ValueError:
+        launcher_accepts = False
+    assert launcher_accepts == runtime_accepts

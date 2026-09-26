@@ -1561,3 +1561,57 @@ def test_default_config_uses_the_selected_substrate_model(coordinator, monkeypat
     assert config.model == 'codex-cli:gpt-5.4'
     assert config.routes[0].execution_mode == 'docker'
     assert config.scope.execution_mode == 'docker'
+
+
+def test_choosing_the_conversation_account_keeps_configured_helper_routes(coordinator, monkeypatch):
+    """A deployment can configure helper routes on other connected accounts; choosing which
+    account answers the conversation keeps them. Without that configuration one route uses the
+    chosen account, as before."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.coordinator import Route
+    from workers_projects_runtime.coordinator_api import install_coordinator_routes
+
+    accounts = {'claude-acct': 'claude', 'codex-acct': 'codex', 'grok-acct': 'grok'}
+    coordinator.service.control_plane_store = SimpleNamespace(
+        get_provider_account=lambda *, account_id, tenant_id, owner_id: (
+            {'account_id': account_id, 'provider': accounts[account_id], 'status': 'ready'}
+            if account_id in accounts and owner_id == 'owner' else None
+        ),
+        list_connections=lambda **kwargs: [],
+    )
+    coordinator.service._resolve_worker_model = lambda profile, mode, **_: 'claude-opus-5-5'
+    coordinator.provider._model = lambda model_id, **_: SimpleNamespace(
+        id=model_id, harness_profile='claude-code', native_model='claude-opus-5-5',
+        recommended_effort='medium', effort_choices=('medium',),
+    )
+    helpers = [Route(id='codex', profile='codex-cli', model='codex-cli:gpt-6-sol', effort='medium',
+                     execution_mode='docker', connection_id='codex-acct'),
+               Route(id='grok', profile='grok-build', model='grok-build:grok-4.6', effort='default',
+                     execution_mode='docker', connection_id='grok-acct')]
+    configured = CoordinatorConfig(model='codex-cli:gpt-6-sol', effort='medium', routes=helpers,
+                                   scope=CoordinatorScope(execution_mode='docker'))
+    app = FastAPI()
+    install_coordinator_routes(app, coordinator, lambda request: ('local', 'owner'),
+                               lambda tenant, owner, profile='': configured)
+    client = TestClient(app)
+
+    def saved_config():
+        created = client.post('/v1/coordinator/conversations', json={'account_id': 'claude-acct'})
+        assert created.status_code == 200, created.text
+        with coordinator.store._connect() as conn:
+            row = conn.execute('SELECT config_json FROM coordinator_conversations WHERE conversation_id=?',
+                               (created.json()['conversation_id'],)).fetchone()
+        return CoordinatorConfig.model_validate_json(row['config_json'])
+
+    monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON', configured.model_dump_json())
+    with_routes = saved_config()
+    assert with_routes.model == 'claude-code:claude-opus-5-5'
+    assert with_routes.scope.connection_id == 'claude-acct'
+    assert [(route.id, route.connection_id) for route in with_routes.routes] == [
+        ('codex', 'codex-acct'), ('grok', 'grok-acct')]
+
+    monkeypatch.delenv('GLASSHIVE_COORDINATOR_CONFIG_JSON')
+    single = saved_config()
+    assert [(route.id, route.profile, route.connection_id) for route in single.routes] == [
+        ('default', 'claude-code', 'claude-acct')]

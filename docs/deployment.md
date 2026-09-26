@@ -39,6 +39,25 @@ python3 deployment/linux/launch.py \
 To use Grok, add `--model grok-build=<model>` with an exact ID from `grok models`. The launcher
 never picks a model; the choice is saved in the package and kept across restarts and upgrades.
 
+By default a conversation's helpers use the account chosen for the conversation, so they queue on
+that one account. To let helpers run on other connected accounts at the same time, give the
+package a private coordinator file with `--coordinator-config /private/coordinator.json` at launch,
+or later with `upgrade --coordinator-config` (remove it with `--no-coordinator-config`). Each route
+names an exact model and one of your connected accounts; the account chosen in the conversation
+still answers there:
+
+```json
+{"model": "claude-code:<exact-model>", "effort": "medium", "scope": {"execution_mode": "docker"},
+ "routes": [
+  {"id": "codex", "profile": "codex-cli", "model": "codex-cli:<exact-model>", "effort": "medium",
+   "execution_mode": "docker", "connection_id": "<codex-account-id>"},
+  {"id": "grok", "profile": "grok-build", "model": "grok-build:<exact-model>", "effort": "default",
+   "execution_mode": "docker", "connection_id": "<grok-account-id>"}]}
+```
+
+The file is checked before anything changes and kept across later upgrades. Machine resources
+still decide how many helpers run at once.
+
 Open the printed loopback UI URL. On **Unlock xPerfect**, enter `ui_password` from the mode-0600
 credentials file and select **Unlock**; the browser then stays unlocked for 12 hours by default.
 The password is reusable across reloads and service restarts. It is
