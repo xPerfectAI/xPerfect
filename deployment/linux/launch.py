@@ -159,6 +159,62 @@ def model_environment(models: dict[str, str]) -> dict[str, str]:
     return {MODEL_ENVIRONMENTS[profile]: model for profile, model in models.items()}
 
 
+# The runtime's optional coordinator configuration: the conversation model and the helper
+# routes it may delegate to, each with its own exact model and connected account. The
+# launcher only checks its shape and carries it; the runtime validates it again on use.
+COORDINATOR_CONFIG_KEY = 'GLASSHIVE_COORDINATOR_CONFIG_JSON'
+_COORDINATOR_FIELDS = {'model', 'effort', 'max_goals', 'wake_on_results', 'routes', 'bootstrap_bundle',
+                       'context_manifest', 'developer_instructions', 'scope'}
+_COORDINATOR_ROUTE_FIELDS = {'id', 'profile', 'model', 'effort', 'execution_mode', 'connection_id',
+                             'resource_class', 'bootstrap_bundle'}
+_COORDINATOR_SCOPE_FIELDS = {'project_id', 'workspace_id', 'connection_id', 'execution_mode'}
+
+
+def validate_coordinator_config(value: object) -> str:
+    """Return the coordinator configuration as canonical JSON, or raise ValueError."""
+    def named(item: object, limit: int) -> bool:
+        return (isinstance(item, str) and bool(item.strip()) and len(item) <= limit
+                and not any(ord(character) < 32 for character in item))
+
+    def optional_text(item: object, limit: int) -> bool:
+        return isinstance(item, str) and len(item) <= limit and not any(ord(c) < 32 for c in item)
+
+    if (not isinstance(value, dict) or not {'model', 'effort'} <= set(value)
+            or not set(value) <= _COORDINATOR_FIELDS or not named(value['model'], 200)
+            or not named(value['effort'], 50)):
+        raise ValueError('The coordinator configuration needs a model and effort, and only its known fields')
+    max_goals = value.get('max_goals', 100)
+    if (isinstance(max_goals, bool) or not isinstance(max_goals, int) or not 10 <= max_goals <= 1000
+            or not isinstance(value.get('wake_on_results', True), bool)
+            or not isinstance(value.get('developer_instructions', ''), str)
+            or not all(isinstance(value.get(key, {}), dict) for key in ('bootstrap_bundle', 'context_manifest'))):
+        raise ValueError('The coordinator configuration has an invalid goal limit, flag, instructions or bundle')
+    scope = value.get('scope', {})
+    if (not isinstance(scope, dict) or not set(scope) <= _COORDINATOR_SCOPE_FIELDS
+            or scope.get('execution_mode', 'host') not in {'host', 'docker'}
+            or not all(optional_text(scope.get(key, ''), 512) for key in ('project_id', 'workspace_id', 'connection_id'))
+            or (scope.get('workspace_id') and not scope.get('project_id'))):
+        raise ValueError('The coordinator scope is invalid')
+    routes = value.get('routes', [])
+    if not isinstance(routes, list) or len(routes) > 32:
+        raise ValueError('The coordinator configuration allows at most 32 routes')
+    ids = set()
+    for route in routes:
+        if (not isinstance(route, dict) or not {'id', 'profile', 'model', 'effort', 'execution_mode'} <= set(route)
+                or not set(route) <= _COORDINATOR_ROUTE_FIELDS or not named(route['id'], 100)
+                or not named(route['profile'], 100) or not named(route['model'], 200)
+                or not named(route['effort'], 50) or route['execution_mode'] not in {'host', 'docker'}
+                or not optional_text(route.get('connection_id', ''), 512)
+                or not named(route.get('resource_class', 'standard'), 50)
+                or not isinstance(route.get('bootstrap_bundle', {}), dict) or route['id'] in ids):
+            raise ValueError('Each coordinator route needs a unique id, profile, model, effort and execution mode')
+        ids.add(route['id'])
+    text = json.dumps(value, sort_keys=True, separators=(',', ':'))
+    if len(text) > 65536:
+        raise ValueError('The coordinator configuration is too large')
+    return text
+
+
 def role_create_args(*, profile: str, name: str, role: str, volumes: dict, networks: dict,
                      publish: str = '', extra_hosts: dict | None = None, device: str = '') -> list[str]:
     """One container shape per role, shared by launch and upgrade."""
@@ -241,8 +297,10 @@ def _wait_until_runnable(endpoint: str, containers: dict[str, str], ui_port: int
 
 def launch(*, endpoint: str, name: str, image: str, native_image: str,
            ui_port: int, mcp_port: int, credentials, owner_id: str = "local-owner",
-           models: dict[str, str] | None = None) -> dict:
+           models: dict[str, str] | None = None, coordinator: dict | None = None) -> dict:
     models = validate_models(models)
+    coordinator_environment = ({} if coordinator is None
+                               else {COORDINATOR_CONFIG_KEY: validate_coordinator_config(coordinator)})
     if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', name):
         raise ValueError('Package name must start with xperfect-')
     if not endpoint.startswith('unix:///'):
@@ -290,7 +348,7 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
     runtime = {**common, 'XPERFECT_SHARED_VOLUME_NAME': volumes['data'],
                'XPERFECT_SHARED_IMAGE': native_image, 'WPR_BOOTSTRAP_SOURCE_ROOTS': '/data/managed-files', 'XPERFECT_SHARED_NETWORK': networks['workers'],
                'XPERFECT_SHARED_MEMORY_BYTES': str(6 * 1024**3), 'XPERFECT_SHARED_PIDS_LIMIT': '512',
-               **model_environment(models)}
+               **model_environment(models), **coordinator_environment}
     environments = {'runtime': runtime,
                     'ui': {**common, 'GLASSHIVE_HUMAN_AUTH_MODE': 'local_password',
                            'GLASSHIVE_LOCAL_AUTH_NAMESPACE': secrets.token_hex(16),
@@ -343,7 +401,7 @@ HOSTED_REQUIRED = {'public_url', 'mcp_public_url', 'issuer', 'client_id', 'clien
                    'tls_certificate_file', 'tls_key_file', 'xfs_mount', 'xfs_device'}
 HOSTED_OPTIONAL = {'principal_claim', 'mcp_audiences', 'mcp_scopes', 'mcp_client_ids', 'storage_limit_bytes',
                    'shared_memory_bytes', 'extra_hosts', 'bind_address', 'tls_ca_file', 'models',
-                   'role_claim', 'role_map'}
+                   'role_claim', 'role_map', 'coordinator'}
 # The sign-in gateway's existing identity-provider role settings, given to the UI and MCP only.
 ROLE_ENVIRONMENT = ('GLASSHIVE_OIDC_ROLE_CLAIM', 'GLASSHIVE_OIDC_ROLE_MAP_JSON')
 # A top-level token claim (nested paths are not read). Claims a person can edit themselves
@@ -507,6 +565,8 @@ def validate_hosted(source: dict) -> dict:
     if value['bind_address'] not in {'127.0.0.1', '0.0.0.0'}:
         raise ValueError('bind_address must be 127.0.0.1 or 0.0.0.0')
     value['models'] = validate_models(value.get('models'))
+    if value.get('coordinator') is not None:
+        validate_coordinator_config(value['coordinator'])
     value['role_mapping'] = validate_role_mapping(value.pop('role_claim', None), value.pop('role_map', None))
     return value
 
@@ -602,7 +662,9 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
                'XPERFECT_SHARED_IMAGE': native_image, 'WPR_BOOTSTRAP_SOURCE_ROOTS': '/data/owners', 'XPERFECT_SHARED_NETWORK': networks['workers'],
                'XPERFECT_SHARED_MEMORY_BYTES': str(value['shared_memory_bytes']), 'XPERFECT_SHARED_PIDS_LIMIT': '512',
                'GLASSHIVE_INTERNAL_ASSERTION_JWKS_FILE': '/control/assertion-jwks.json',
-               **model_environment(value['models'])}
+               **model_environment(value['models']),
+               **({COORDINATOR_CONFIG_KEY: validate_coordinator_config(value['coordinator'])}
+                  if value.get('coordinator') is not None else {})}
     environments = {
         'runtime': runtime,
         'ui': {**common, 'GLASSHIVE_HUMAN_AUTH_MODE': 'oidc', 'GLASSHIVE_OIDC_CLIENT_ID': value['client_id'],
@@ -742,8 +804,12 @@ def main():
     parser.add_argument('--hosted-config', type=Path, help='Private hosted input JSON (hosted-xfs only)')
     parser.add_argument('--model', action='append', metavar='PROFILE=MODEL',
                         help='Exact native model for a worker profile, e.g. grok-build=<model>; repeatable')
+    parser.add_argument('--coordinator-config', type=Path, metavar='PRIVATE_JSON',
+                        help='Conversation model and helper routes (see docs/deployment.md); private file')
     args = parser.parse_args()
     models = parse_model_arguments(args.model)
+    coordinator = (json.loads(_private_file(args.coordinator_config, 'coordinator_config').read_text())
+                   if args.coordinator_config else None)
     if args.profile == 'hosted-xfs':
         if not args.hosted_config:
             raise SystemExit('--hosted-config is required for hosted-xfs')
@@ -755,6 +821,10 @@ def main():
             if any(existing.get(profile, model) != model for profile, model in models.items()):
                 raise ValueError('--model conflicts with models in the hosted input; keep one')
             hosted = {**hosted, 'models': {**existing, **models}}
+        if coordinator is not None:
+            if not isinstance(hosted, dict) or hosted.get('coordinator') is not None:
+                raise ValueError('--coordinator-config conflicts with coordinator in the hosted input; keep one')
+            hosted = {**hosted, 'coordinator': coordinator}
         with args.receipt.open('x') as output:
             args.receipt.chmod(0o600)
             receipt = launch_hosted(endpoint=args.docker_host, name=args.name, image=args.service_image,
@@ -771,7 +841,8 @@ def main():
         args.receipt.chmod(0o600)
         receipt = launch(endpoint=args.docker_host, name=args.name, image=args.service_image,
                          native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
-                         credentials=credentials, owner_id=args.owner_id, models=models)
+                         credentials=credentials, owner_id=args.owner_id, models=models,
+                         coordinator=coordinator)
         json.dump(receipt, output, indent=2)
     print(receipt['ui_url'])
     print('Local unlock and MCP credentials: ' + str(args.credentials))

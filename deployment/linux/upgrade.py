@@ -958,11 +958,18 @@ class Upgrade:
                 adopt: bool = False, recover_unpublished: bool = False, role_map: dict | None = None,
                 role_claim: str | None = None, clear_roles: bool = False,
                 local_qa_authority: dict | None = None, clear_local_qa: bool = False,
-                settle_closed_work: bool = False) -> dict:
+                settle_closed_work: bool = False, coordinator: dict | None = None,
+                clear_coordinator: bool = False) -> dict:
         models = base.validate_models(models)
         if local_qa_authority is not None and clear_local_qa:
             raise UpgradeError('Choose --local-qa-authority or --no-local-qa-authority, not both')
         qa_environment = None if local_qa_authority is None else validate_local_qa_authority(local_qa_authority)
+        if coordinator is not None and clear_coordinator:
+            raise UpgradeError('Choose --coordinator-config or --no-coordinator-config, not both')
+        try:
+            coordinator_text = None if coordinator is None else base.validate_coordinator_config(coordinator)
+        except ValueError as error:
+            raise UpgradeError(f'{error}. Nothing was changed') from None
         for value in [service_image] + ([native_image] if native_image else []):
             if not SHA.fullmatch(value):
                 raise UpgradeError('Exact locally verified image identities (sha256:…) are required')
@@ -1082,9 +1089,12 @@ class Upgrade:
         changes_qa = (any(environment.get(key) != value for key, value in qa_environment.items())
                       if qa_environment is not None
                       else clear_local_qa and bool(LOCAL_QA_AUTHORITY_KEYS & set(environment)))
+        changes_coordinator = (environment.get(base.COORDINATOR_CONFIG_KEY) != coordinator_text
+                               if coordinator_text is not None
+                               else clear_coordinator and base.COORDINATOR_CONFIG_KEY in environment)
         if (service_image == current_image and wanted_native == current_native and not changes_models
                 and not settings_added and not secrets_added and wanted_roles == current_roles
-                and not local_signer and not isolate and not changes_qa):
+                and not local_signer and not isolate and not changes_qa and not changes_coordinator):
             raise UpgradeError('The package already runs this image and configuration')
         backup = f'{name}-upgrade-{txn}'
         journal = {'version': 1, 'transaction': txn, 'phase': 'prepared', 'profile': profile, 'name': name,
@@ -1099,6 +1109,8 @@ class Upgrade:
                    'local_assertion': local_signer, 'isolate_workers_network': isolate,
                    'local_qa_authority': ('set' if qa_environment is not None
                                           else 'cleared' if changes_qa else 'unchanged'),
+                   'coordinator_config': ('set' if changes_coordinator and coordinator_text is not None
+                                          else 'cleared' if changes_coordinator else 'unchanged'),
                    'service_image': service_image, 'native_image': wanted_native,
                    'previous_native_image': current_native,
                    'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
@@ -1148,7 +1160,8 @@ class Upgrade:
             raise
         try:
             return self._apply(journal, receipt, profile, name, shapes, environment, models, configs,
-                               qa_environment=qa_environment, clear_local_qa=clear_local_qa)
+                               qa_environment=qa_environment, clear_local_qa=clear_local_qa,
+                               coordinator_text=coordinator_text, clear_coordinator=clear_coordinator)
         except BaseException as exc:
             if self.journal_path.exists():
                 try:
@@ -1160,7 +1173,8 @@ class Upgrade:
             raise
 
     def _apply(self, journal, receipt, profile, name, shapes, environment, models, configs, *,
-               qa_environment: dict | None = None, clear_local_qa: bool = False) -> dict:
+               qa_environment: dict | None = None, clear_local_qa: bool = False,
+               coordinator_text: str | None = None, clear_coordinator: bool = False) -> dict:
         endpoint, txn = self.endpoint, journal['transaction']
         # UI and MCP first, so no new person or client work starts; then the runtime.
         for role in ('ui', 'mcp', 'runtime'):
@@ -1220,6 +1234,11 @@ class Upgrade:
         if qa_environment is not None or clear_local_qa:
             environment = {key: value for key, value in environment.items() if key not in LOCAL_QA_AUTHORITY_KEYS}
             environment.update(qa_environment or {})
+        # The coordinator configuration is kept as written unless this upgrade sets or removes it.
+        if coordinator_text is not None:
+            environment[base.COORDINATOR_CONFIG_KEY] = coordinator_text
+        elif clear_coordinator:
+            environment.pop(base.COORDINATOR_CONFIG_KEY, None)
         environment['XPERFECT_SHARED_IMAGE'] = journal['native_image']
         created = {}
         for role in ROLES:
@@ -1460,6 +1479,11 @@ def main(argv: list[str]) -> None:
                               'file; upgrade-rollback removes it')
     upgrade.add_argument('--no-local-qa-authority', action='store_true',
                          help='Local package only: remove a supplied local-QA fault authority')
+    upgrade.add_argument('--coordinator-config', type=Path, metavar='PRIVATE_JSON',
+                         help='Set the conversation model and helper routes from a private file; '
+                              'kept by later upgrades (see docs/deployment.md)')
+    upgrade.add_argument('--no-coordinator-config', action='store_true',
+                         help='Remove the coordinator configuration; conversations use one default route again')
     upgrade.add_argument('--recover-unpublished-files', action='store_true',
                          help='First retire stored-file attachments the running version registered but never '
                               'published, as reviewed by the new image')
@@ -1499,7 +1523,10 @@ def main(argv: list[str]) -> None:
                                     local_qa_authority=(_private_json(args.local_qa_authority)
                                                         if args.local_qa_authority else None),
                                     clear_local_qa=args.no_local_qa_authority,
-                                    settle_closed_work=args.settle_closed_worker_work)
+                                    settle_closed_work=args.settle_closed_worker_work,
+                                    coordinator=(_private_json(args.coordinator_config)
+                                                 if args.coordinator_config else None),
+                                    clear_coordinator=args.no_coordinator_config)
         elif args.action == 'upgrade-commit':
             result = runner.commit()
         else:

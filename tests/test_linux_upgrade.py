@@ -1937,6 +1937,79 @@ def test_a_later_upgrade_clears_the_local_qa_authority(package):
     assert not set(QA_AUTHORITY) & set(_config(fake)['environment'])
 
 
+
+COORDINATOR = {
+    'model': 'claude-code:claude-opus-5-5', 'effort': 'medium', 'scope': {'execution_mode': 'docker'},
+    'routes': [{'id': 'codex', 'profile': 'codex-cli', 'model': 'codex-cli:gpt-6-sol', 'effort': 'medium',
+                'execution_mode': 'docker', 'connection_id': 'acct_codex'},
+               {'id': 'grok', 'profile': 'grok-build', 'model': 'grok-build:grok-4.6', 'effort': 'default',
+                'execution_mode': 'docker', 'connection_id': 'acct_grok'}]}
+
+
+def test_the_coordinator_config_reaches_only_the_runtime_and_later_upgrades_keep_it(package):
+    fake, path, receipt = package
+    key = linux_upgrade.base.COORDINATOR_CONFIG_KEY
+    runner = _runner(path)
+    assert runner.upgrade(service_image=NEW, coordinator=COORDINATOR)['status'] == 'awaiting_commit'
+    assert json.loads(_config(fake)['environment'][key]) == COORDINATOR
+    assert all(key not in _config(fake, role)['environment'] for role in ('ui', 'mcp'))
+    assert json.loads(linux_upgrade.journal_path(path).read_text())['coordinator_config'] == 'set'
+    runner.commit()
+
+    runner.upgrade(service_image=NEW, models={'grok-build': 'grok-4.6'})
+    assert json.loads(_config(fake)['environment'][key]) == COORDINATOR
+    runner.commit()
+    with pytest.raises(linux_upgrade.UpgradeError, match='already runs this image and configuration'):
+        runner.upgrade(service_image=NEW, coordinator=COORDINATOR)
+
+    assert runner.upgrade(service_image=NEW, clear_coordinator=True)['status'] == 'awaiting_commit'
+    assert key not in _config(fake)['environment']
+    assert json.loads(linux_upgrade.journal_path(path).read_text())['coordinator_config'] == 'cleared'
+
+
+def test_rolling_back_removes_a_newly_set_coordinator_config(package):
+    fake, path, receipt = package
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW, coordinator=COORDINATOR)
+    runner.rollback()
+    assert linux_upgrade.base.COORDINATOR_CONFIG_KEY not in _config(fake)['environment']
+
+
+@pytest.mark.parametrize('config', [
+    {'effort': 'medium'},
+    {**COORDINATOR, 'unknown_field': 1},
+    {**COORDINATOR, 'max_goals': 5},
+    {**COORDINATOR, 'routes': [{**COORDINATOR['routes'][0], 'execution_mode': 'cloud'}]},
+    {**COORDINATOR, 'routes': [COORDINATOR['routes'][0], COORDINATOR['routes'][0]]},
+    {**COORDINATOR, 'routes': [{key: value for key, value in COORDINATOR['routes'][0].items() if key != 'model'}]},
+])
+def test_an_invalid_coordinator_config_changes_nothing(package, config):
+    fake, path, receipt = package
+    with pytest.raises(linux_upgrade.UpgradeError, match='Nothing was changed'):
+        _runner(path).upgrade(service_image=NEW, coordinator=config)
+    assert not _mutations(fake)
+    assert not linux_upgrade.journal_path(path).exists()
+
+
+def test_setting_and_removing_the_coordinator_config_together_is_refused(package):
+    fake, path, receipt = package
+    with pytest.raises(linux_upgrade.UpgradeError, match='not both'):
+        _runner(path).upgrade(service_image=NEW, coordinator=COORDINATOR, clear_coordinator=True)
+    assert not _mutations(fake)
+
+
+def test_a_fresh_local_package_carries_its_coordinator_config(tmp_path, monkeypatch):
+    fake = FakeDocker()
+    monkeypatch.setattr(linux_launch, 'docker', fake.launcher_docker)
+    monkeypatch.setattr(linux_launch.urllib.request, 'urlopen', lambda *args, **kwargs: Health())
+    with (tmp_path / 'credentials.json').open('w') as credentials:
+        linux_launch.launch(endpoint='unix:///docker.sock', name=NAME, image=OLD, native_image=NATIVE,
+                            ui_port=18880, mcp_port=18867, credentials=credentials, coordinator=COORDINATOR)
+    assert json.loads(_config(fake)['environment'][linux_launch.COORDINATOR_CONFIG_KEY]) == COORDINATOR
+    with pytest.raises(ValueError, match='coordinator route'):
+        linux_launch.validate_coordinator_config({**COORDINATOR, 'routes': [{'id': 'x'}]})
+
+
 CLOSED = {'worker_id': 'wrk_' + '9' * 10, 'runs': ['run_' + 'd' * 10], 'leases': ['hrl_' + 'e' * 32]}
 CLOSED_IDENTITIES = sorted([CLOSED['worker_id'], *CLOSED['runs'], *CLOSED['leases']])
 
