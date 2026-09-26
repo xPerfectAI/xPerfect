@@ -774,3 +774,120 @@ def test_workspace_zip_post_uses_read_assertion_without_mutation_authority(tmp_p
     assert client.post(path+'/export', json={'file_ids':[selected]}, headers=fresh_assertion_headers(private_key, subject='other-owner', **claims)).status_code == 404
     for route in [path, path+'/'+selected+'/restore', path+'/folders']:
         assert client.post(route, json={}, headers=fresh_assertion_headers(private_key, **claims)).status_code == 403
+
+
+def test_workspace_link_view_gate_is_a_read_that_never_heals_or_starts_queued_work(
+    tmp_path, monkeypatch, assertion_keys
+):
+    """Run Project opens the live view through a workspace link. Its runtime gate takes the
+    link's viewer assertion (read scope only) and records the opening; it must not finish a
+    stale run or start that run's queued successor, which an ordinary read may heal."""
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    from workers_projects_runtime.store import RunRestorationState
+
+    class FinishedNativeRun(StubRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.collected: list[str] = []
+
+        def collect_completed_run(self, worker: dict, run_id: str | None = None) -> dict[str, str] | None:
+            self.collected.append(str(worker["worker_id"]))
+            return {"state": "completed", "output_text": "done", "error_text": ""}
+
+    private_key, jwks = assertion_keys
+    configure_signed_assertions(monkeypatch, jwks)
+    runtime = FinishedNativeRun()
+    app = create_app(db_path=str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
+    store, service = app.state.store, app.state.service
+    started: list[str] = []
+    monkeypatch.setattr(service, "_ensure_worker_processor", started.append)
+    owner = "user-public-safe"
+    project = store.create_project(owner, "Live view", "Open the live view", "codex-cli", tenant_id=TENANT)
+    worker = store.create_worker(project["project_id"], owner, "View worker", "main", "codex-cli",
+                                 "stub", "stub", "stub", tenant_id=TENANT)
+    stale = store.create_run(worker["worker_id"], project["project_id"], "finished natively",
+                             state=RunRestorationState.RUNNING)
+    queued = store.create_run(worker["worker_id"], project["project_id"], "queued follow-up", state="queued")
+    store.update_worker(worker["worker_id"], state="running", last_run_id=stale["run_id"])
+    client = TestClient(app)
+    worker_path = f"/v1/workers/{worker['worker_id']}"
+    link = {"role": "viewer", "scope": "runtime:access workspaces:read"}
+
+    opened = client.post(f"{worker_path}/view-opened", headers=fresh_assertion_headers(private_key, **link))
+
+    assert opened.status_code == 204, opened.text
+    assert runtime.collected == [] and started == []
+    assert store.get_run(stale["run_id"])["state"] == "running"
+    assert store.get_run(queued["run_id"])["state"] == "queued"
+    assert "worker.view_opened" in [event["event_type"] for event in store.list_events(worker["worker_id"])]
+    # It stays a read for its owner only, and the link still cannot change the workspace.
+    assert client.post(f"{worker_path}/view-opened",
+                       headers=fresh_assertion_headers(private_key, role="viewer", scope="runtime:access")).status_code == 403
+    assert client.post(f"{worker_path}/view-opened",
+                       headers=fresh_assertion_headers(private_key, subject="other-owner", **link)).status_code == 404
+    assert client.post(f"{worker_path}/pause", headers=fresh_assertion_headers(private_key, **link)).status_code == 403
+    # Any other read by the link only looks as well.
+    for path in (worker_path, f"{worker_path}/live"):
+        assert client.get(path, headers=fresh_assertion_headers(private_key, **link)).status_code == 200
+    assert runtime.collected == [] and started == []
+    assert store.get_run(stale["run_id"])["state"] == "running"
+    # The owner's ordinary read is what heals, so the state above really held finished work.
+    assert client.get(worker_path, headers=fresh_assertion_headers(private_key)).status_code == 200
+    assert runtime.collected == [worker["worker_id"]] and started == [worker["worker_id"]]
+    assert store.get_run(stale["run_id"])["state"] == "completed"
+    store.update_worker(worker["worker_id"], state="terminated")
+    assert client.post(f"{worker_path}/view-opened", headers=fresh_assertion_headers(private_key, **link)).status_code == 404
+
+
+def test_local_owner_channel_viewer_reads_never_heal_or_start_queued_work(tmp_path, monkeypatch, assertion_keys):
+    """The local package channel now accepts the owner's viewer assertion (workspace links).
+    Its reads, like the gate, must only look; the owner's member reads still heal."""
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    from workers_projects_runtime.store import RunRestorationState
+
+    class FinishedNativeRun(StubRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.collected: list[str] = []
+
+        def collect_completed_run(self, worker: dict, run_id: str | None = None) -> dict[str, str] | None:
+            self.collected.append(str(worker["worker_id"]))
+            return {"state": "completed", "output_text": "done", "error_text": ""}
+
+    private_key, jwks = assertion_keys
+    for name in ("GLASSHIVE_ENTERPRISE_MODE", "GLASSHIVE_AUTH_MODE", "GLASSHIVE_ENTERPRISE_TENANT_ID",
+                 "GLASSHIVE_SECURITY_MODE", "GLASSHIVE_INTERNAL_ASSERTION_PRIVATE_KEY_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    owner = "user-public-safe"
+    for name, value in {"WPR_API_TOKEN": "runtime-service-token", "GLASSHIVE_LOCAL_HUMAN_ASSERTION": "1",
+                        "GLASSHIVE_HUMAN_AUTH_MODE": "local_password", "GLASSHIVE_DEFAULT_OWNER_ID": owner,
+                        "GLASSHIVE_INTERNAL_ASSERTION_ISSUER": ISSUER, "GLASSHIVE_INTERNAL_ASSERTION_AUDIENCE": AUDIENCE,
+                        "GLASSHIVE_INTERNAL_ASSERTION_JWKS_JSON": json.dumps(jwks)}.items():
+        monkeypatch.setenv(name, value)
+    runtime = FinishedNativeRun()
+    app = create_app(db_path=str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
+    store, service = app.state.store, app.state.service
+    started: list[str] = []
+    monkeypatch.setattr(service, "_ensure_worker_processor", started.append)
+    project = store.create_project(owner, "Local link", "Open the live view", "claude-code", tenant_id="local")
+    worker = store.create_worker(project["project_id"], owner, "Local worker", "main", "claude-code",
+                                 "stub", "stub", "stub", tenant_id="local")
+    stale = store.create_run(worker["worker_id"], project["project_id"], "finished natively",
+                             state=RunRestorationState.RUNNING)
+    queued = store.create_run(worker["worker_id"], project["project_id"], "queued follow-up", state="queued")
+    store.update_worker(worker["worker_id"], state="running", last_run_id=stale["run_id"])
+    client = TestClient(app)
+    worker_path = f"/v1/workers/{worker['worker_id']}"
+    link = {"tenant": "local", "role": "viewer", "scope": "runtime:access workspaces:read"}
+
+    assert client.post(f"{worker_path}/view-opened", headers=fresh_assertion_headers(private_key, **link)).status_code == 204
+    for path in (worker_path, f"{worker_path}/live"):
+        assert client.get(path, headers=fresh_assertion_headers(private_key, **link)).status_code == 200
+    assert runtime.collected == [] and started == []
+    assert store.get_run(stale["run_id"])["state"] == "running"
+    assert store.get_run(queued["run_id"])["state"] == "queued"
+
+    member = client.get(worker_path, headers=fresh_assertion_headers(private_key, tenant="local"))
+    assert member.status_code == 200, member.text
+    assert runtime.collected == [worker["worker_id"]] and started == [worker["worker_id"]]
+    assert store.get_run(stale["run_id"])["state"] == "completed"

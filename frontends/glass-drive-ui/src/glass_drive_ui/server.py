@@ -669,7 +669,9 @@ def _append_signed_worker_token(
     target_url = _strip_signed_query_params(url)
     # Local operator navigation already has local-owner authority. Minting a
     # view credential here would downgrade that same browser to read-only.
-    if identity and str(identity.get("auth_source") or "") == "local":
+    # A browser unlocked with the local password is that same operator.
+    if identity and (str(identity.get("auth_source") or "") == "local"
+                     or str(identity.get("auth_method") or "") == "local_password"):
         return target_url
     token = _worker_view_token(
         worker_id,
@@ -1882,6 +1884,12 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     ) -> bool:
         """Return true when this request's authority is a shareable view token."""
 
+        # When the signed-in owner session is the request's authority (the
+        # same precedence as _request_identity), a leftover view cookie from
+        # watching a launch must not refuse that owner's own actions, terminal
+        # or desktop. Without a session, any valid view token still decides.
+        if not _public_links_only_enabled() and _session_for_request(request) is not None:
+            return False
         tokens = [_signed_token_from_request(request, worker_id)]
         # HTTP middleware runs before route path parameters are populated, so
         # inspect the worker-scoped cookie namespace directly as well. One
@@ -1921,15 +1929,9 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         # A viewRef is intentionally reusable for bounded observation. It is
         # never an account/member/action capability—even after the watch page
         # moves it to an HttpOnly cookie or a browser sends it via Referer.
-        # When the signed-in owner session is the request's authority (the
-        # same precedence as _request_identity), a leftover view cookie from
-        # watching a launch must not refuse that owner's own actions.
-        owner_session_authority = (
-            not _public_links_only_enabled() and _session_for_request(request) is not None
-        )
+        # A signed-in owner session outranks it (see _uses_worker_view_credential).
         if (
             request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
-            and not owner_session_authority
             and _uses_worker_view_credential(request)
             and not _valid_signed_link_communication_request(request)
             and not _workspace_file_export_worker_id(request)

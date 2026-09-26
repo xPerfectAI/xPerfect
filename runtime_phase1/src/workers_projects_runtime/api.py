@@ -1056,9 +1056,13 @@ def create_app(
             return JSONResponse(status_code=401, content={"detail": str(exc)})
         ctx = request.state.auth_context
         if ctx.auth_mode == "signed_internal_assertion":
+            # Two POSTs are reads: a selected-file ZIP export, and the gate a workspace
+            # link passes before its view opens, which records the opening and nothing else.
             read_only = request.method.upper() in {"GET", "HEAD", "OPTIONS"} or (
                 request.method.upper() == "POST"
-                and re.fullmatch(r"/v1/workers/[A-Za-z0-9._-]{1,128}/files/export", request.url.path) is not None
+                and re.fullmatch(
+                    r"/v1/workers/[A-Za-z0-9._-]{1,128}/(?:files/export|view-opened)", request.url.path
+                ) is not None
             )
             if read_only and "workspaces:read" not in ctx.scopes:
                 return JSONResponse(status_code=403, content={"detail": "Signed assertion is missing read scope"})
@@ -1244,7 +1248,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Project not found")
         return project
 
-    def require_worker(worker_id: str, request: Request | None = None) -> dict:
+    def require_worker(worker_id: str, request: Request | None = None, *, heal: bool = True) -> dict:
         ctx = _auth_context(request)
         try:
             worker = service.require_worker(worker_id)
@@ -1256,7 +1260,13 @@ def create_app(
             raise HTTPException(status_code=404, detail="Worker not found")
         # A signed read must not heal/mutate worker state and must never rely
         # on ambient WPR_DB_PATH to decide whether a terminal worker is live.
-        if ctx.auth_mode == "signed_link":
+        # Healing can finish a run and start its queued successor, so callers
+        # that only look (heal=False) and viewers get the same non-healing
+        # lookup, whatever they read. Workspace links reach here as viewers by
+        # assertion (hosted, and the local owner channel) or by forwarded role
+        # headers (the local UI's sessionless link fallback).
+        viewer = ctx.role.strip().lower() == "viewer"
+        if ctx.auth_mode == "signed_link" or viewer or not heal:
             if str(worker.get("state") or "") == "terminated":
                 raise HTTPException(status_code=404, detail="Worker not found")
             return worker
@@ -2093,7 +2103,10 @@ def create_app(
         return safe
 
     def _can_show_internal_details(ctx: AuthContext) -> bool:
-        if not auth_settings.enterprise and not ctx.enterprise:
+        # A workspace link's viewer assertion never sees gateway credentials or
+        # host details, on the local owner channel as on hosted packages.
+        link_viewer = ctx.auth_mode == "signed_internal_assertion" and ctx.role.strip().lower() == "viewer"
+        if not auth_settings.enterprise and not ctx.enterprise and not link_viewer:
             return True
         if ctx.auth_mode == "signed_link":
             return False
@@ -6142,7 +6155,9 @@ def create_app(
 
     @app.post("/v1/workers/{worker_id}/view-opened", status_code=204)
     def worker_view_opened(worker_id: str, request: Request) -> Response:
-        worker = require_worker(worker_id, request)
+        # Opening a view only looks: it records the opening but never heals,
+        # which could finish a stale run and start its queued successor.
+        worker = require_worker(worker_id, request, heal=False)
         # The UI uses this scoped runtime response as its final authorization
         # gate, so terminal workers must fail before any redirect/cookie.
         if str(worker.get("state") or "") == "terminated":

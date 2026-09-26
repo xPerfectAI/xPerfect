@@ -510,6 +510,39 @@ def test_host_terminal_target_preserves_shell_fallback_expression(tmp_path):
     assert target.title == "Host Claude host terminal"
 
 
+def test_host_terminal_finds_its_session_on_the_host_without_a_docker_sandbox(tmp_path):
+    # Opening a finished host run's terminal once built a Docker sandbox home for the worker
+    # and copied this computer's whole Claude folder into it before failing.
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path))
+    worker = {
+        "worker_id": "wrk_host_done",
+        "name": "Host Claude",
+        "profile": "claude-code",
+        "execution_mode": "host",
+    }
+    runtime._ensure_dirs(worker["worker_id"])
+    runtime._run_root(worker["worker_id"], "run_123456789abc").mkdir(parents=True, exist_ok=True)
+    runtime.ensure_worker_ready = lambda worker: runtime._runtime_info(worker, pid=1234)  # type: ignore[method-assign]
+
+    def no_sandbox(*_args, **_kwargs):
+        raise AssertionError("a host terminal must not create or probe a Docker sandbox")
+
+    runtime.sandbox.ensure_ready = no_sandbox  # type: ignore[method-assign]
+    runtime.sandbox.list_screen_sessions = no_sandbox  # type: ignore[method-assign]
+
+    finished = runtime.terminal_target(worker)
+    assert finished.command[-1].endswith("exec ${SHELL:-/bin/bash}")
+    assert finished.title == "Host Claude host terminal"
+
+    stdout = tmp_path / "live.log"
+    runtime._active_session_meta_path(worker["worker_id"]).write_text(
+        json.dumps({"session_name": "host-run", "run_id": "run_live", "stdout_path": str(stdout)})
+    )
+    live = runtime.terminal_target(worker)
+    assert str(stdout) in live.command[-1]
+    assert live.title == "Host Claude host session"
+
+
 def test_host_runtime_recovers_and_stops_a_persisted_process_after_api_restart(tmp_path):
     runtime_before_restart = HostCodexCliRuntime(base_dir=str(tmp_path))
     runtime_after_restart = HostCodexCliRuntime(base_dir=str(tmp_path))

@@ -189,3 +189,42 @@ def test_watch_view_cookie_does_not_block_the_signed_in_owner(gateway):
     denied = viewer.post('/api/launch', json={'goal': 'Synthetic follow-up project.'},
                          headers={'Origin': 'http://testserver'})
     assert denied.status_code in {401, 403}
+
+
+def test_the_unlocked_owners_launch_opens_watch_with_owner_authority(gateway, tmp_path, monkeypatch):
+    # Run Project opens the live view. A view link there left a read-only cookie that
+    # refused the owner's own terminal ("An authenticated operator is required").
+    from test_server import FakeRuntimeClient
+    monkeypatch.setenv('GLASSHIVE_LINK_REF_STATE_PATH', str(tmp_path / 'link-refs.sqlite3'))
+    gateway.provision_local_owner(password=PASSWORD)
+    owner = TestClient(create_app(runtime_client=FakeRuntimeClient()))
+    assert login(owner).status_code == 200
+    launched = owner.post('/api/launch', json={'description': 'Write a short note', 'workspace_option': 'new:claude-code',
+                                               'launch_surface': 'terminal'},
+                          headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': owner.cookies['glasshive_csrf']})
+    assert launched.status_code == 200, launched.text
+    watch_url = launched.json()['watch_url']
+    assert owner.get(watch_url).status_code == 200
+    terminal = owner.get('/ui/workers/wrk_new/terminal')
+    assert terminal.status_code == 200, terminal.text
+    assert watch_url.startswith('/watch/wrk_new?') and 'surface=terminal' in watch_url
+    assert not [name for name in owner.cookies if name.startswith('glasshive_gh_token_')]
+
+
+def test_a_leftover_view_cookie_does_not_refuse_the_owners_terminal(gateway):
+    # A browser that watched an earlier launch through a view link still holds that cookie,
+    # which counts for every workspace. The signed-in owner keeps the terminal everywhere;
+    # the cookie alone still opens nothing.
+    from test_server import FakeRuntimeClient
+    gateway.provision_local_owner(password=PASSWORD)
+    name, token = _view_cookie()
+    owner = TestClient(create_app(runtime_client=FakeRuntimeClient()))
+    assert login(owner).status_code == 200
+    owner.cookies.set(name, token)
+    for worker in ('wrk_1', 'wrk_2'):
+        terminal = owner.get(f'/ui/workers/{worker}/terminal')
+        assert terminal.status_code == 200, (worker, terminal.text)
+
+    bare = TestClient(create_app(runtime_client=FakeRuntimeClient()))
+    bare.cookies.set(name, token)
+    assert bare.get('/ui/workers/wrk_1/terminal', follow_redirects=False).status_code in {401, 403}
