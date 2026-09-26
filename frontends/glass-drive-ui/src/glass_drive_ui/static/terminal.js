@@ -33,12 +33,16 @@
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
   // Why the runtime closed this run's terminal, and whether to reconnect by itself.
-  function closedStatus(code) {
+  function closedStatus(code, reason) {
     if (runId && code === 4408) return { text: 'Waiting for this run to start…', retryMs: 1500 };
     if (runId && code === 4409) {
       return { text: 'This run’s live session ended.', retryMs: sessionEndRetries++ < 3 ? 2000 : 0 };
     }
-    if (runId && code === 4410) return { text: 'Saved output closed. Select Reconnect to view it again.', retryMs: 0 };
+    if (runId && code === 4410) {
+      return reason === 'No saved output'
+        ? { text: 'This run has ended. No terminal output was kept for it.', retryMs: 0 }
+        : { text: 'Saved output closed. Select Reconnect to view it again.', retryMs: 0 };
+    }
     if (code === 4404) return { text: 'This run is not available in this workspace.', retryMs: 0 };
     return { text: 'Terminal disconnected. Unlock again if your session expired, then reconnect.', retryMs: 0 };
   }
@@ -53,15 +57,14 @@
     socket = next;
     next.onopen = () => {
       if (socket !== next) return;
-      status.textContent = runId && ended
-        ? 'This run has ended. Its complete saved output is shown; scroll up for earlier output.'
-        : 'Terminal connected';
+      // The saved view's own pager line or notice says what was kept; opening claims nothing more.
+      status.textContent = runId && ended ? 'This run has ended.' : 'Terminal connected';
       resize(); terminal.focus();
     };
     next.onmessage = event => { if (socket === next) terminal.write(event.data); };
     next.onclose = event => {
       if (socket !== next) return;
-      const closed = closedStatus(event.code);
+      const closed = closedStatus(event.code, event.reason);
       status.textContent = closed.text;
       if (closed.retryMs) retryTimer = window.setTimeout(connect, closed.retryMs);
     };

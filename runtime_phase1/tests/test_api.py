@@ -1872,7 +1872,8 @@ def test_release_host_capacity_waiters_filters_to_the_released_structural_lane(t
     assert store.get_run(docker_run["run_id"])["retry_after"] is not None
 
 
-def test_host_capacity_waiters_remain_delayed_while_the_lane_is_still_held(tmp_path):
+def test_host_capacity_waiters_remain_delayed_while_the_lane_is_still_held(tmp_path, background_consumers_disabled):
+    _ = background_consumers_disabled
     class BusyRuntime(StubRuntime):
         active_worker_id = ""
 
@@ -2120,7 +2121,8 @@ def test_host_control_terminal_paths_wake_the_released_capacity_lane(
         service.shutdown()
 
 
-def test_recovered_terminal_run_wakes_the_released_host_capacity_lane(tmp_path):
+def test_recovered_terminal_run_wakes_the_released_host_capacity_lane(tmp_path, background_consumers_disabled):
+    _ = background_consumers_disabled
     store = Store(str(tmp_path / "runtime.db"))
     service = WorkersProjectsService(store, StubRuntime(), max_workers=2, reconcile_on_startup=False)
     try:

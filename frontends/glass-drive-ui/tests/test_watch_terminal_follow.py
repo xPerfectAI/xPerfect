@@ -62,7 +62,7 @@ def test_watch_and_terminal_pages_load_the_exact_run_script_versions():
     watch_html = (STATIC / "watch.html").read_text()
     assert 'src="/static/watch.js?v=20260926run2"' in watch_html
     assert 'href="/static/styles.css?v=20260926run2"' in watch_html
-    assert 'src="/static/terminal.js?v=20260926run2"' in (STATIC / "terminal.html").read_text()
+    assert 'src="/static/terminal.js?v=20260926run3"' in (STATIC / "terminal.html").read_text()
 
 
 @node
@@ -177,7 +177,9 @@ console.log(JSON.stringify({
 
 
 @node
-def test_terminal_page_says_the_complete_saved_output_is_shown_for_an_ended_run():
+def test_terminal_page_status_for_an_ended_run_claims_only_what_the_runtime_reports():
+    """Opening an ended run's terminal claims nothing about its output: the pager line or the
+    no-output notice says what was kept, and the close reason tells the two ends apart."""
     page = (STATIC / "terminal.js").read_text()
     result = _node(r"""
 const status = {textContent: ''};
@@ -197,9 +199,12 @@ global.window = {setTimeout: () => 0, clearTimeout: () => {}};
 eval(""" + json.dumps(page) + r""");
 sockets[0].onopen();
 const opened = status.textContent;
-sockets[0].onclose({code: 4410});
-console.log(JSON.stringify({url: sockets[0].url, opened, closed: status.textContent}));
+sockets[0].onclose({code: 4410, reason: 'No saved output'});
+const none = status.textContent;
+sockets[0].onclose({code: 4410, reason: 'Run output shown'});
+console.log(JSON.stringify({url: sockets[0].url, opened, none, shown: status.textContent}));
 """)
     assert result["url"] == "ws://testserver/ws/workers/wrk_1/terminal?run=run_a"
-    assert result["opened"] == "This run has ended. Its complete saved output is shown; scroll up for earlier output."
-    assert result["closed"] == "Saved output closed. Select Reconnect to view it again."
+    assert result["opened"] == "This run has ended."
+    assert result["none"] == "This run has ended. No terminal output was kept for it."
+    assert result["shown"] == "Saved output closed. Select Reconnect to view it again."

@@ -102,7 +102,7 @@ def test_terminal_socket_forwards_its_exact_run_and_the_runtime_close_reason(gat
         assert socket.receive_text()=='This run is queued and has not started yet.'
         with pytest.raises(WebSocketDisconnect) as closed:
             socket.receive_text()
-    assert closed.value.code==4408
+    assert closed.value.code==4408 and closed.value.reason=='Run session not started'
     assert targets==['ws://runtime:8766/ws/workers/wrk_fixture/terminal?run=run_0123456789']
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect('/ws/workers/wrk_fixture/terminal?run=../other',**options): pass

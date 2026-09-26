@@ -5573,7 +5573,8 @@ class BaseCliWorkerRuntime:
             subtitle=f"Run {run_id} {state}",
             session_bound=True,
             close_code=_RUN_OUTPUT_SHOWN_CLOSE,
-            close_reason="Run output shown",
+            # The page tells the two ends apart by this reason: output shown, or none kept.
+            close_reason="Run output shown" if saved is not None else "No saved output",
         )
 
     def terminal_target(self, worker: dict) -> TerminalTarget:
