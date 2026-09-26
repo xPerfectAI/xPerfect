@@ -4903,6 +4903,27 @@ def create_app(
             raise ControlPlaneError("The local Claude runtime is unavailable; finish xPerfect host setup")
         return CurrentNativeAccountManager(control_plane, provider_setup.homes)
 
+    def _recover_current_native_leases(*, account_id: str, tenant_id: str, owner_id: str) -> None:
+        """On Verify, release an existing sign-in held after an unconfirmed stop once that run is proven stopped."""
+        from .current_native_binding import recover_retained_leases
+
+        def confirm_stopped(worker_id: str, run_id: str) -> None:
+            worker = store.get_worker(worker_id, tenant_id, owner_id)
+            confirm = getattr(runtime_impl, "confirm_native_run_stopped", None)
+            if worker is None or not callable(confirm):
+                raise ControlPlaneError("The held run cannot be checked")
+            # Durable host records of that run: a missing session file alone is never proof.
+            confirm(worker, run_id, store.host_run_leases_for_run(worker_id, run_id))
+
+        try:
+            recover_retained_leases(control_plane, account_id=account_id, tenant_id=tenant_id,
+                                    owner_id=owner_id, confirm_stopped=confirm_stopped)
+        except Exception as exc:
+            logger.warning("Existing sign-in recovery did not finish: %s", type(exc).__name__)
+            raise ControlPlaneConflict(
+                "The earlier run's native process is not proven stopped yet; select Verify again once it has ended"
+            ) from exc
+
     @app.get("/v1/provider-accounts/current-native/claude")
     def current_native_claude_status(request: Request) -> dict[str, object]:
         _current_principal(request)
@@ -5047,6 +5068,7 @@ def create_app(
                 logger.warning("Quarantined credential recovery did not finish: %s", type(exc).__name__)
         from .current_native_account import is_current_account
         if is_current_account(account):
+            _recover_current_native_leases(account_id=account_id, tenant_id=tenant_id, owner_id=owner_id)
             return _current_native_manager().verify(account_id=account_id, tenant_id=tenant_id, owner_id=owner_id)
         if native_key_account(account):
             return NativeApiKeyManager(control_plane, provider_setup.homes).connect(

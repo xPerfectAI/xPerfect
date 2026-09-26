@@ -16930,6 +16930,23 @@ class Store:
             ).fetchone()
         return self._row(row) if row else None
 
+    def host_run_leases_for_run(self, worker_id: str, run_id: str) -> list[dict[str, Any]]:
+        """Every host generation record of one run, with whether its attempt invoked the runtime."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT leases.*, attempts.attempt_id AS recorded_attempt_id,
+                       COALESCE(attempts.runtime_invoked_at, '') AS attempt_runtime_invoked_at
+                FROM host_run_leases AS leases
+                LEFT JOIN run_attempts AS attempts
+                  ON attempts.attempt_id = leases.attempt_id AND attempts.run_id = leases.run_id
+                WHERE leases.worker_id = ? AND leases.run_id = ?
+                ORDER BY leases.acquired_at, leases.lease_id
+                """,
+                (str(worker_id or ""), str(run_id or "")),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
     def list_active_host_run_leases(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

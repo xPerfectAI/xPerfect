@@ -1,9 +1,45 @@
 """Lease the explicit OS-native account without copying any credential artifact."""
 from contextlib import contextmanager
 from threading import Lock
+import time
 
 from .control_plane import ControlPlaneError
 from .current_native_account import PREFIX, MARKER, require_local, verify_identity
+
+# An Interrupt or Stop of the same run can still be ending its native generation when the run
+# returns: the host stop waits up to 5 s after SIGTERM and 2 s after SIGKILL for the process group
+# and each descendant before it releases that generation. Until then the exact stop is refused, so
+# keep asking for longer than that before holding the account for recovery. This window counts
+# refusals only; a confirmation waiting on the session lock returns when that stop does.
+STOP_CONFIRMATION_SECONDS = 20.0
+STOP_CONFIRMATION_INTERVAL_SECONDS = 0.2
+
+
+def _confirm_native_stop(stop_native) -> None:
+    deadline = time.monotonic() + STOP_CONFIRMATION_SECONDS
+    while True:
+        try:
+            stop_native()
+            return
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+        time.sleep(STOP_CONFIRMATION_INTERVAL_SECONDS)
+
+
+def recover_retained_leases(store, *, account_id, tenant_id, owner_id, confirm_stopped) -> list[str]:
+    """Release leases an existing sign-in kept after an unconfirmed stop, once each run is proven stopped.
+
+    ``confirm_stopped(worker_id, run_id)`` raises unless durable records prove that run's native
+    generations gone, and the lease then stays held.
+    """
+    recovered = []
+    for lease in store.retained_current_native_leases(account_id=account_id, tenant_id=tenant_id, owner_id=owner_id):
+        confirm_stopped(str(lease['worker_id']), str(lease['run_id']))
+        store.release_retained_current_native_lease(lease_id=lease['lease_id'], account_id=account_id,
+            tenant_id=tenant_id, owner_id=owner_id)
+        recovered.append(str(lease['lease_id']))
+    return recovered
 
 
 @contextmanager
@@ -80,10 +116,10 @@ def bind_current_account(binder, worker, *, account, selection, runtime_name, ru
             if lease is not None:
                 try:
                     if not confirmed_stop:
-                        stop_native()
+                        _confirm_native_stop(stop_native)
                 except BaseException:
                     binder.store.update_provider_account_status(account_id=selection.account_id, tenant_id=tenant, owner_id=owner,
-                        status='action_required', reconnect_reason='The exact native process could not be stopped. Recover that workspace before reconnecting',
+                        status='action_required', reconnect_reason='The exact native process was not confirmed stopped. Once that workspace\'s run has ended, select Verify',
                         recovery_code='credential_cleanup_failed')
                     raise
                 finally:

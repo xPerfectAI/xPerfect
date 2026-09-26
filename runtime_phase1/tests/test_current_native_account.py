@@ -7,6 +7,8 @@ import time
 
 import pytest
 from workers_projects_runtime import current_native_account as native
+from workers_projects_runtime import current_native_binding
+from workers_projects_runtime.current_native_binding import recover_retained_leases
 from workers_projects_runtime.control_plane import ControlPlaneStore, ControlPlaneError, ControlPlaneConflict
 from workers_projects_runtime.mission_provider_accounts import MissionProviderAccountBinder, apply_bound_provider_account_environment, native_current_account_allowed
 from workers_projects_runtime.provider_accounts import ProviderAccountHomeManager, ProviderSetupManager
@@ -25,6 +27,9 @@ def host(tmp_path, monkeypatch):
         calls.append((command,kwargs))
         return subprocess.CompletedProcess(command,0,json.dumps(payload))
     monkeypatch.setattr(native.subprocess,'run',run)
+    # Keep an unconfirmed stop's confirmation window short in tests.
+    monkeypatch.setattr(current_native_binding,'STOP_CONFIRMATION_SECONDS',0.3)
+    monkeypatch.setattr(current_native_binding,'STOP_CONFIRMATION_INTERVAL_SECONDS',0.01)
     binder=MissionProviderAccountBinder(db_path=str(root/'runtime.db'),home_root=root/'accounts')
     manager=native.CurrentNativeAccountManager(binder.store,binder.homes)
     return manager,binder,payload,calls
@@ -117,6 +122,51 @@ def test_uncertain_native_stop_retains_even_expired_lease_and_denies_reconnect(h
     with pytest.raises(ControlPlaneConflict):manager.disconnect(account_id=account['account_id'],tenant_id='local',owner_id='owner')
 
 
+def test_stop_still_ending_from_an_interrupt_of_the_same_run_does_not_hold_the_account(host):
+    """An Interrupt of the same run can still be ending its native generation when the run returns.
+    The binding keeps confirming that exact stop, then releases the account as after any run."""
+    account,worker=connect(host);manager,binder,_,_=host
+    attempts=[]
+    def ending(bound):
+        attempts.append(bound['_active_run_id'])
+        if len(attempts)<3:raise RuntimeError('Host run ownership changed during exact-run cleanup')
+    with binder.bind(worker,runtime_name='claude-code',run_id='run',timeout_sec=1,abort_binding=ending):pass
+    assert attempts==['run','run','run']
+    record=binder.store.get_provider_account_record(account_id=account['account_id'],tenant_id='local',owner_id='owner')
+    assert record['status']=='ready' and record['recovery_code']==''
+    assert binder.store.active_provider_account_lease(account['account_id']) is None
+    assert manager.verify(account_id=account['account_id'],tenant_id='local',owner_id='owner')['status']=='ready'
+
+
+def test_verify_releases_a_held_sign_in_only_after_its_exact_run_is_proven_stopped(host):
+    account,worker=connect(host);manager,binder,_,_=host
+    ids={'account_id':account['account_id'],'tenant_id':'local','owner_id':'owner'}
+    def uncertain(_):raise RuntimeError('synthetic uncertain stop')
+    with pytest.raises(RuntimeError):
+        with binder.bind(worker,runtime_name='claude-code',run_id='run',timeout_sec=1,abort_binding=uncertain):pass
+    checked=[]
+    def still_running(worker_id,run_id):
+        checked.append((worker_id,run_id));raise RuntimeError('The exact host process identity is not confirmed')
+    with pytest.raises(RuntimeError):recover_retained_leases(binder.store,confirm_stopped=still_running,**ids)
+    assert checked==[('worker','run')]
+    assert binder.store.active_provider_account_lease(account['account_id']) is not None
+    with pytest.raises(ControlPlaneConflict):manager.verify(**ids)
+    assert len(recover_retained_leases(binder.store,confirm_stopped=lambda *_:None,**ids))==1
+    assert binder.store.active_provider_account_lease(account['account_id']) is None
+    assert manager.verify(**ids)['status']=='ready'
+    stops=[]
+    with binder.bind(worker,runtime_name='claude-code',run_id='next',timeout_sec=1,abort_binding=lambda w:stops.append(w['_active_run_id'])):pass
+    assert stops==['next']
+
+
+def test_recovery_never_releases_the_lease_of_a_run_still_using_the_sign_in(host):
+    account,worker=connect(host);binder=host[1]
+    ids={'account_id':account['account_id'],'tenant_id':'local','owner_id':'owner'}
+    with binder.bind(worker,runtime_name='claude-code',run_id='run',timeout_sec=1,abort_binding=lambda _:None):
+        assert recover_retained_leases(binder.store,confirm_stopped=lambda *_:pytest.fail('checked a live run'),**ids)==[]
+        assert binder.store.active_provider_account_lease(account['account_id'])['run_id']=='run'
+
+
 def test_second_owner_alias_and_preferred_or_container_route_cannot_use_current_account(host):
     account,worker=connect(host);manager,binder,_,_=host
     with pytest.raises(ControlPlaneConflict):manager.connect(tenant_id='local',owner_id='another-owner')
@@ -141,6 +191,99 @@ def test_current_native_api_connect_verify_disconnect_are_owner_scoped(host,monk
         assert client.post(f'/v1/provider-accounts/{account_id}/verify').json()['status']=='ready'
         assert client.post(f'/v1/provider-accounts/{account_id}/disconnect').json()['status']=='disconnected'
         assert 'person@example.test' not in client.get('/v1/provider-accounts').text
+
+
+def test_held_run_recovery_needs_positive_proof_even_after_a_restart(host,tmp_path):
+    """A fresh runtime has no in-memory process handle, as after a restart. A missing session
+    file is not proof: only the run's durable host records, with every recorded process proven
+    gone, can release its held account lease."""
+    import fcntl,threading
+    from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
+    from workers_projects_runtime.profile_runtime import HostClaudeCodeRuntime
+    runtime=HostClaudeCodeRuntime(base_dir=str(tmp_path/'native-work'))
+    worker={'worker_id':'wrk_held','execution_mode':'host','profile':'claude-code'}
+    live=subprocess.Popen(['sleep','60'],start_new_session=True)
+    try:
+        identity=runtime._process_start_identity(live.pid)
+        assert identity.startswith('ps-lstart:')
+        def record(**fields):
+            return {'worker_id':'wrk_held','run_id':'run_held','status':'released','startup_state':'confirmed',
+                    'pid':live.pid,'process_group':live.pid,'process_start_identity':identity,
+                    'recorded_attempt_id':'att_1','attempt_runtime_invoked_at':'2026-09-26T00:00:00Z',**fields}
+        def refused(records):
+            with pytest.raises(RuntimeErrorBase):runtime.confirm_retained_run_stopped(worker,'run_held',records)
+        assert not runtime._active_session_meta_path('wrk_held').exists()
+        refused([])                                    # no durable record
+        refused([record()])                            # released record, but its process is alive
+        refused([record(status='active')])
+        refused([record(startup_state='reserved',pid=None,process_group=None,process_start_identity='')])  # invoked, unidentified spawn
+        refused([record(run_id='run_other')])
+        runtime.confirm_retained_run_stopped(worker,'run_held',[record(startup_state='reserved',pid=None,process_group=None,
+            process_start_identity='',attempt_runtime_invoked_at='')])  # never invoked the runtime
+    finally:
+        live.kill();live.wait()
+    runtime.confirm_retained_run_stopped(worker,'run_held',[record()])  # the exact process is gone
+    session=runtime._active_session_meta_path('wrk_held');session.parent.mkdir(parents=True,exist_ok=True)
+    later=subprocess.Popen(['sleep','60'],start_new_session=True)
+    try:
+        later_identity=runtime._process_start_identity(later.pid)
+        session.write_text(json.dumps({'session_name':'host-run_newer','run_id':'run_newer','process_pid':later.pid,
+                                       'process_group':later.pid,'process_start_identity':later_identity}))
+        refused([record()])                            # another run owns the workspace
+        session.write_text(json.dumps({'session_name':'host-run_held','run_id':'run_held','process_pid':live.pid,
+                                       'process_group':live.pid,'process_start_identity':identity}))
+        runtime.confirm_retained_run_stopped(worker,'run_held',[record()])  # this run's session, process gone
+        ledger=runtime._stop_descendant_ledger_path('wrk_held')
+        ledger.write_text(json.dumps({'session':'x','descendants':{str(later.pid):later_identity}}))
+        refused([record()])                            # a remembered descendant is still alive
+        ledger.unlink()
+        held=threading.Event();release=threading.Event()
+        def hold():
+            with open(session.parent/'active_terminal_session.lock','a+') as handle:
+                fcntl.flock(handle.fileno(),fcntl.LOCK_EX);held.set();release.wait(5)
+        holder=threading.Thread(target=hold);holder.start();held.wait(5)
+        started=time.monotonic()
+        with pytest.raises(RuntimeErrorBase,match='still stopping'):runtime.confirm_retained_run_stopped(worker,'run_held',[record()])
+        assert time.monotonic()-started<1              # never waits on a stop holding the lock
+        release.set();holder.join()
+    finally:
+        later.kill();later.wait()
+
+
+def test_verify_api_checks_the_held_runs_exact_stop_before_releasing_the_sign_in(host):
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.api import create_app,StubRuntime
+    manager,binder,_,_=host
+    runtime=StubRuntime();runtime.host_claude=object();runtime.provider_account_binder=binder
+    checked=[]
+    def confirm(worker,run_id,host_leases):
+        assert host_leases==binder_store.host_run_leases_for_run(worker['worker_id'],run_id)
+        checked.append((worker['worker_id'],worker['execution_mode'],run_id))
+        if len(checked)==1:raise RuntimeError('The exact host process identity is not confirmed')
+    runtime.confirm_native_run_stopped=confirm
+    from workers_projects_runtime.store import Store
+    binder_store=Store(str(binder.store.db_path))
+    with TestClient(create_app(db_path=str(binder.store.db_path),runtime_backend='stub',runtime=runtime,reconcile_on_startup=False)) as client:
+        account_id=client.post('/v1/provider-accounts/current-native/claude').json()['account_id']
+        account=next(a for a in client.get('/v1/provider-accounts').json()['items'] if a['account_id']==account_id)
+        owner,tenant=account['owner_id'],account['tenant_id']
+        project=client.post('/v1/projects',json={'owner_id':owner,'title':'Held','goal':'Synthetic'}).json()
+        worker=client.post(f"/v1/projects/{project['project_id']}/workers",json={'owner_id':owner,'name':'Held','role':'main',
+            'profile':'claude-code','execution_mode':'host','bootstrap_bundle':{'provider_account':{'policy':'personal_required','account_id':account_id}}}).json()
+        record=binder.store.get_provider_account_record(account_id=account_id,tenant_id=tenant,owner_id=owner)
+        held={'worker_id':worker['worker_id'],'tenant_id':tenant,'owner_id':owner,'execution_mode':'host','profile':'claude-code',
+              'bootstrap_bundle':{'provider_account':{'policy':'personal_required','account_id':account_id}}}
+        assert record['status']=='ready'
+        with pytest.raises(RuntimeError):
+            with binder.bind(held,runtime_name='claude-code',run_id='run_held',timeout_sec=1,abort_binding=lambda _:(_ for _ in ()).throw(RuntimeError('uncertain'))):pass
+        refused=client.post(f'/v1/provider-accounts/{account_id}/verify')
+        assert refused.status_code==409 and 'not proven stopped' in refused.text
+        assert checked==[(worker['worker_id'],'host','run_held')]
+        assert binder.store.active_provider_account_lease(account_id)['run_id']=='run_held'
+        result=client.post(f'/v1/provider-accounts/{account_id}/verify')
+        assert result.status_code==200 and result.json()['status']=='ready'
+        assert checked[-1]==(worker['worker_id'],'host','run_held')
+        assert binder.store.active_provider_account_lease(account_id) is None
 
 
 def test_no_fake_marker_or_changed_account_can_replay_native_binding(host):

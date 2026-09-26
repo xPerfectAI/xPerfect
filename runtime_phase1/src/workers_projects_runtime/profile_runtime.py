@@ -1960,6 +1960,19 @@ class ProfiledWorkerRuntime:
             return None
         return runtimes.settle_member_projections(worker, self)
 
+    def confirm_native_run_stopped(self, worker: dict, run_id: str, host_leases: list[dict]) -> None:
+        """Positive proof that one run's native generations are gone, from its durable records.
+
+        Raises unless proven. It only reads: it never stops a process or changes state.
+        """
+        if str(worker.get("execution_mode") or "") != "host" or str(worker.get("profile") or "") != "claude-code":
+            raise RuntimeErrorBase("Only a local Claude Code run holds an existing sign-in")
+        runtime = self._runtime_for_worker(worker)
+        confirm = getattr(runtime, "confirm_retained_run_stopped", None)
+        if not callable(confirm):
+            raise RuntimeErrorBase("This runtime cannot prove a native run stopped")
+        confirm(worker, run_id, host_leases)
+
     def recover_quarantined_provider_projections(self, *, account_id: str) -> list[str]:
         """Settle one account's quarantined projections on an owner's verify/reconnect."""
         runtimes = getattr(self, "_shared_workspace_runtimes", None)
@@ -3790,6 +3803,23 @@ class BaseCliWorkerRuntime:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
                 yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _try_active_session_file_lock(self, worker_id: str):
+        """The session lock without waiting: yields False while another operation holds it."""
+        lock_path = self._state_dir(worker_id) / "active_terminal_session.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as handle:
+            lock_path.chmod(0o600)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            try:
+                yield True
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
@@ -14488,6 +14518,89 @@ raise SystemExit(exit_code)
             "pid": pid,
             "process_start_identity": start_identity,
         }
+
+    def confirm_retained_run_stopped(
+        self, worker: dict, run_id: str, host_leases: list[dict]
+    ) -> None:
+        """Prove from durable records that one run's native generations are gone.
+
+        Releasing an account lease kept after an unconfirmed stop needs positive proof,
+        also after a restart, when no in-memory process handle is left. A missing record
+        is never proof. Every host generation of the run must be released: one whose
+        start was confirmed must have its recorded process proven gone with an empty
+        process group, and one without a confirmed start must never have invoked the
+        runtime. No live handle, other run's session, unproven session process or
+        remembered descendant of this worker may remain. This only reads; it never
+        waits for the session lock, stops a process or changes state.
+        """
+
+        worker_id = str(worker.get("worker_id") or "")
+
+        def gone(pid: int, group: int, identity: str) -> bool:
+            return (
+                pid > 0
+                and group > 0
+                and identity.startswith("ps-lstart:")
+                and self._recorded_pid_is_proven_gone(pid, identity)
+                and not self._host_process_group_alive(group)
+            )
+
+        def number(value: object) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return -1
+
+        unproven = RuntimeErrorBase("The run's native process is not proven stopped")
+        if not worker_id or not run_id or not host_leases:
+            raise unproven
+        for lease in host_leases:
+            if (
+                str(lease.get("worker_id") or "") != worker_id
+                or str(lease.get("run_id") or "") != run_id
+                or str(lease.get("status") or "") != "released"
+            ):
+                raise unproven
+            pid = number(lease.get("pid"))
+            identity = str(lease.get("process_start_identity") or "").strip()
+            if pid or str(lease.get("startup_state") or "") == "confirmed":
+                if not gone(pid, number(lease.get("process_group")), identity):
+                    raise unproven
+            elif not lease.get("recorded_attempt_id") or str(
+                lease.get("attempt_runtime_invoked_at") or ""
+            ):
+                # An invoked start without a recorded identity may have spawned a process.
+                raise unproven
+        with self._process_lock:
+            process = self._active_processes.get(worker_id)
+        if process is not None and process.poll() is None:
+            raise unproven
+        with self._try_active_session_file_lock(worker_id) as locked:
+            if not locked:
+                raise RuntimeErrorBase("The workspace is still stopping; check it again shortly")
+            if self._active_session_meta_path(worker_id).exists():
+                session = self._read_active_session(worker_id)
+                if (
+                    not session
+                    or str(session.get("run_id") or "") != run_id
+                    or not gone(
+                        number(session.get("process_pid")),
+                        number(session.get("process_group")),
+                        str(session.get("process_start_identity") or "").strip(),
+                    )
+                ):
+                    raise unproven
+            ledger = self._stop_descendant_ledger_path(worker_id)
+            if ledger.exists():
+                try:
+                    descendants = json.loads(ledger.read_text()).get("descendants")
+                except (OSError, ValueError, AttributeError) as exc:
+                    raise unproven from exc
+                if not isinstance(descendants, dict) or not all(
+                    self._recorded_pid_is_proven_gone(number(pid), str(identity))
+                    for pid, identity in descendants.items()
+                ):
+                    raise unproven
 
     def _agent_builder_output_schema(self, worker: dict) -> dict[str, object] | None:
         if not self._conversation_mode_from_worker(worker):

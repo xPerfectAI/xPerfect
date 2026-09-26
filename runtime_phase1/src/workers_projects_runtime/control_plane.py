@@ -1228,6 +1228,53 @@ class ControlPlaneStore:
         if not cursor.rowcount:
             raise ControlPlaneError("Provider account lease not found for this user")
 
+    def retained_current_native_leases(self, *, account_id: str, tenant_id: str, owner_id: str) -> list[dict[str, Any]]:
+        """Leases an existing sign-in kept because its run's native stop was not confirmed."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT leases.* FROM provider_account_leases AS leases
+                JOIN provider_accounts AS accounts ON accounts.account_id = leases.account_id
+                WHERE leases.account_id = ? AND leases.tenant_id = ? AND leases.owner_id = ?
+                  AND leases.released_at IS NULL
+                  AND accounts.tenant_id = ? AND accounts.owner_id = ?
+                  AND accounts.secret_locator LIKE 'native-home://current-claude/%'
+                  AND accounts.recovery_code = 'credential_cleanup_failed'
+                ORDER BY leases.acquired_at, leases.lease_id
+                """,
+                (account_id, tenant_id, owner_id, tenant_id, owner_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def release_retained_current_native_lease(self, *, lease_id: str, account_id: str, tenant_id: str, owner_id: str) -> None:
+        """Release one retained lease whose run was proven stopped; lift the hold once none remains.
+
+        The account keeps its action_required status; Verify still checks the sign-in itself.
+        """
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM provider_account_projections WHERE lease_id = ? AND state != 'complete'", (lease_id,)).fetchone():
+                raise ProviderProjectionPending("Credential recovery must complete before releasing its lease")
+            cursor = conn.execute(
+                """
+                UPDATE provider_account_leases SET released_at = ?
+                WHERE lease_id = ? AND account_id = ? AND tenant_id = ? AND owner_id = ? AND released_at IS NULL
+                  AND account_id IN (
+                    SELECT account_id FROM provider_accounts
+                    WHERE tenant_id = ? AND owner_id = ? AND recovery_code = 'credential_cleanup_failed'
+                      AND secret_locator LIKE 'native-home://current-claude/%')
+                """,
+                (now, lease_id, account_id, tenant_id, owner_id, tenant_id, owner_id),
+            )
+            if not cursor.rowcount:
+                raise ControlPlaneConflict("Provider account recovery state changed; refresh and try again")
+            if conn.execute("SELECT 1 FROM provider_account_leases WHERE account_id = ? AND released_at IS NULL LIMIT 1", (account_id,)).fetchone() is None:
+                conn.execute(
+                    "UPDATE provider_accounts SET recovery_code = '', updated_at = ? WHERE account_id = ? AND tenant_id = ? AND owner_id = ? AND recovery_code = 'credential_cleanup_failed'",
+                    (now, account_id, tenant_id, owner_id),
+                )
+
     def create_connection(
         self,
         *,
