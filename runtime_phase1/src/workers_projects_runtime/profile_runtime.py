@@ -5501,6 +5501,7 @@ class BaseCliWorkerRuntime:
             cwd=str(self._workspace_dir(worker["worker_id"])),
             title=f"{worker['name']} live session" if active_session else f"{worker['name']} terminal",
             subtitle=f"{self.runtime_name} active run" if active_session else f"{self.runtime_name} sandbox",
+            session_bound=bool(active_session),
         )
 
     def desktop_action(
@@ -14247,6 +14248,7 @@ raise SystemExit(exit_code)
             env={"TERM": "xterm-256color"},
             title=f"{worker['name']} host session" if active else f"{worker['name']} host terminal",
             subtitle=f"{self.runtime_name} on host computer",
+            session_bound=bool(active),
         )
 
     def desktop_action(

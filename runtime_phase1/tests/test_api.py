@@ -12219,6 +12219,52 @@ def test_closed_workspace_rejects_terminal_websocket(tmp_path, closed_state):
     assert disconnected.value.code == 4404
 
 
+
+def test_host_terminal_opened_before_the_run_records_its_session_follows_that_run(tmp_path):
+    """The live view opens its terminal right after Run Project or a follow-up, usually before
+    the host run has recorded its session. That terminal must follow the run, not open a shell;
+    with no run waiting it opens the shell at once."""
+
+    class HostSessionRuntime(StubRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def terminal_target(self, worker: dict) -> TerminalTarget:
+            self.calls += 1
+            if self.session_after and self.calls >= self.session_after:
+                return TerminalTarget(command=["/bin/sh", "-c", "echo following-run; exec sleep 30"],
+                                      cwd=str(tmp_path), session_bound=True)
+            return TerminalTarget(command=["/bin/sh", "-c", "echo plain-shell; exec sleep 30"], cwd=str(tmp_path))
+
+    runtime = HostSessionRuntime()
+    app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=runtime)
+    client = TestClient(app)
+    project = client.post(
+        "/v1/projects",
+        json={"owner_id": "demo-owner", "title": "Follow the run", "goal": "Watch the work."},
+    ).json()
+    worker = client.post(
+        f"/v1/projects/{project['project_id']}/workers",
+        json={"owner_id": "demo-owner", "name": "Host worker", "role": "operator"},
+    ).json()
+    store = app.state.store
+    store.update_worker(worker["worker_id"], execution_mode="host")
+
+    def first_output() -> str:
+        with client.websocket_connect(f"/ws/workers/{worker['worker_id']}/terminal") as websocket:
+            return websocket.receive_text()
+
+    runtime.session_after = 3
+    assert "plain-shell" in first_output()
+    assert runtime.calls == 1
+
+    store.create_run(worker["worker_id"], project["project_id"], "follow-up", state="queued")
+    runtime.calls = 0
+    assert "following-run" in first_output()
+    assert runtime.calls == 3
+
+
 def test_open_terminal_websocket_is_revoked_when_workspace_closes(tmp_path):
     pid_path = tmp_path / "terminal.pid"
 

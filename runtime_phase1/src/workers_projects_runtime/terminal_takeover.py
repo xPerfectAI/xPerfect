@@ -20,6 +20,8 @@ class TerminalTarget:
     env: dict[str, str] | None = None
     title: str = "Worker Terminal"
     subtitle: str = ""
+    # True when the terminal follows a run's recorded session rather than a plain shell.
+    session_bound: bool = False
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:

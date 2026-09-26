@@ -303,6 +303,9 @@ ARTIFACT_DOWNLOAD_SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 SIGNED_QUERY_KEYS = {"gh_token", "gh_sig", "gh_exp", "gh_kind"}
+# A host run records its terminal session a moment after it starts; a terminal opened
+# in that gap waits this long for it before falling back to a plain shell.
+HOST_TERMINAL_SESSION_WAIT_SECONDS = 15.0
 
 
 def _http_request_head_bytes(scope: dict) -> int:
@@ -8018,6 +8021,18 @@ def create_app(
             await websocket.close(code=4404)
             return
         target = _terminal_target(worker)
+        # The live view opens its terminal right after Run Project or a follow-up,
+        # usually before that host run has recorded its session. Wait briefly for
+        # it so the terminal follows the work instead of opening a plain shell.
+        if (
+            not target.session_bound
+            and str(worker.get("execution_mode") or "") == "host"
+            and (store.get_active_run(worker_id) or store.has_queued_runs(worker_id))
+        ):
+            deadline = time.monotonic() + HOST_TERMINAL_SESSION_WAIT_SECONDS
+            while not target.session_bound and time.monotonic() < deadline:
+                await asyncio.sleep(0.25)
+                target = _terminal_target(store.get_worker(worker_id) or worker)
         current = store.get_worker(
             worker_id,
             tenant_id=ctx.tenant_id if ctx.is_user_scoped else None,

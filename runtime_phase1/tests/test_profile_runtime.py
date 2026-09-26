@@ -533,6 +533,7 @@ def test_host_terminal_finds_its_session_on_the_host_without_a_docker_sandbox(tm
     finished = runtime.terminal_target(worker)
     assert finished.command[-1].endswith("exec ${SHELL:-/bin/bash}")
     assert finished.title == "Host Claude host terminal"
+    assert finished.session_bound is False
 
     stdout = tmp_path / "live.log"
     runtime._active_session_meta_path(worker["worker_id"]).write_text(
@@ -541,6 +542,7 @@ def test_host_terminal_finds_its_session_on_the_host_without_a_docker_sandbox(tm
     live = runtime.terminal_target(worker)
     assert str(stdout) in live.command[-1]
     assert live.title == "Host Claude host session"
+    assert live.session_bound is True
 
 
 def test_host_runtime_recovers_and_stops_a_persisted_process_after_api_restart(tmp_path):

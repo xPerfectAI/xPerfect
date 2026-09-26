@@ -105,7 +105,7 @@ document.getElementById('watch-add-folder').addEventListener('click', () => {
 
 let activeSurface = requestedSurface;
 let currentDesktopUrl = withUiRev(withAuth(`${uiBase}/desktop/${workerId}`));
-let currentTerminalUrl = withAuth(`${runtimeBase}/ui/workers/${workerId}/terminal`);
+let currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, ''));
 let lastAttachedUrl = '';
 let attachStartedAt = 0;
 let retryTimers = [];
@@ -134,6 +134,13 @@ let refreshInFlight = false;
 let nativeControls = null;
 let latestFileActivityKey = '';
 let listedFileActivityKey = '';
+
+// Keyed on the latest run: a new run re-attaches the terminal so it follows that
+// run's work, while a finished run keeps its output on screen.
+function terminalViewUrl(base, id, runId) {
+  const url = `${base}/ui/workers/${id}/terminal`;
+  return runId ? `${url}?run=${encodeURIComponent(runId)}` : url;
+}
 
 function withAuth(url) {
   if (!signedToken) return url;
@@ -1076,7 +1083,7 @@ async function refresh() {
 
     currentDesktopAvailable = Boolean(runtime.view_available || runtime.view_url);
   currentDesktopUrl = currentDesktopAvailable ? withUiRev(withAuth(`${uiBase}/desktop/${workerId}`)) : '';
-    currentTerminalUrl = withAuth(`${runtimeBase}/ui/workers/${workerId}/terminal`);
+    currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || '')));
 
     renderOutput(data);
     syncSteerAvailability(displayState);
