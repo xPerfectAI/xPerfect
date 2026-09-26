@@ -41,3 +41,9 @@ def test_terminal_url_changes_only_when_a_new_run_starts():
 def test_watch_attaches_the_terminal_for_the_latest_run():
     source = WATCH_JS.read_text()
     assert "currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || '')));" in source
+
+
+def test_watch_page_loads_the_terminal_following_script_version():
+    # Browsers keep a cached watch.js for the same ?v= token, so a changed script needs a new token.
+    watch_html = (WATCH_JS.parent / "watch.html").read_text()
+    assert 'src="/static/watch.js?v=20260926follow1"' in watch_html
