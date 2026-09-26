@@ -1093,6 +1093,183 @@ def test_a_signed_in_owner_confirmation_reaches_the_runtime_guard_only_through_t
         assert confirm({'X-WPR-Token': environments['mcp']['WPR_API_TOKEN']}).status_code == 403
 
 
+def test_a_signed_in_owners_workspace_link_passes_the_runtime_view_gate(tmp_path, monkeypatch):
+    """Run Project sends the browser to its workspace link. Before redirecting, the UI checks the
+    link with the runtime using the viewer assertion it signs; the runtime must accept that read
+    (first start once showed "workspace link is no longer available" instead of the live view)."""
+    import os
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.api import create_app as runtime_app
+
+    ui_root = Path(__file__).parents[2] / 'frontends/glass-drive-ui'
+    monkeypatch.syspath_prepend(str(ui_root / 'tests'))
+    monkeypatch.syspath_prepend(str(ui_root / 'src'))
+    from glass_drive_ui.auth_gateway import HumanAuthGateway
+    from glass_drive_ui.runtime_client import RuntimeClient
+    from glass_drive_ui.server import create_app as ui_app
+    from glass_drive_ui.signed_links import create_signed_link_ref, sign_link_token
+    from test_packaged_local_auth import login
+
+    _, roots, environments, _, credentials = _local_launch(tmp_path, monkeypatch)
+    db_path = str(tmp_path / 'runtime.db')
+    _use_environment(monkeypatch, environments['ui'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    gateway = HumanAuthGateway.from_env()
+    gateway.provision_local_owner(password=credentials['ui_password'])
+    owner, tenant = gateway.local_owner_id, os.environ.get('GLASSHIVE_ENTERPRISE_TENANT_ID') or 'local'
+
+    _use_environment(monkeypatch, environments['runtime'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+
+    class DesktopRuntime(StubRuntime):
+        def describe_worker(self, worker):
+            return {'mode': 'desktop', 'runtime': 'claude-code', 'gateway_url': 'http://127.0.0.1:61001/gateway',
+                    'view_url': 'http://127.0.0.1:61002/?autoconnect=1&password=synthetic-desktop-secret'}
+
+    store = runtime_app(db_path=db_path, runtime_backend='stub', reconcile_on_startup=False).state.store
+    project = store.create_project(owner, 'First result', 'Write a short note', 'claude-code', tenant_id=tenant)
+    worker = store.create_worker(project['project_id'], owner, 'Claude Code', 'main', 'claude-code',
+                                 'stub', 'stub', 'stub', tenant_id=tenant)
+
+    sent = []
+
+    def relay(self, method, path, *, json_body=None):
+        sent.append((method, path, self._request_headers() or {}))
+        return {}
+
+    monkeypatch.setattr(RuntimeClient, '_request', relay)
+    _use_environment(monkeypatch, environments['ui'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    browser = TestClient(ui_app())
+    assert login(browser, password=credentials['ui_password']).status_code == 200
+    token = sign_link_token(kind='worker_view', worker_id=worker['worker_id'], tenant_id=tenant, owner_id=owner)
+    ref = create_signed_link_ref(
+        token=token, target_url=f"/watch/{worker['worker_id']}?project_id={project['project_id']}&surface=terminal")
+    gate_path = f"/v1/workers/{worker['worker_id']}/view-opened"
+
+    def link_assertion():
+        sent.clear()
+        opened = browser.get(f'/r/{ref}', follow_redirects=False)
+        assert opened.status_code == 307, opened.text
+        (_, _, headers), = [call for call in sent if call[:2] == ('POST', gate_path)]
+        assert 'X-GlassHive-User-Assertion' in headers
+        return headers
+
+    opening, mutation, confirmation, reading = (link_assertion() for _ in range(4))
+
+    _use_environment(monkeypatch, environments['runtime'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    with TestClient(runtime_app(db_path=db_path, runtime_backend='stub', runtime=DesktopRuntime(),
+                                reconcile_on_startup=False)) as runtime:
+        gate = runtime.post(gate_path, headers=opening)
+        assert gate.status_code == 204, gate.text
+        assert 'worker.view_opened' in [event['event_type'] for event in store.list_events(worker['worker_id'])]
+        # The link's assertion only looks: it cannot change the workspace or confirm a change.
+        paused = runtime.post(f"/v1/workers/{worker['worker_id']}/pause", headers=mutation)
+        assert paused.status_code == 403 and 'viewer' in paused.text.lower()
+        confirmed = runtime.post('/v1/pending-changes/chg_fixture/confirm', headers=confirmation,
+                                 json={'confirmation_token': 'fixture-confirmation-token'})
+        assert confirmed.status_code == 403, confirmed.text
+        # Nor can it read the desktop's interactive credential or gateway, which the service can.
+        live_path = f"/v1/workers/{worker['worker_id']}/live"
+        viewed = runtime.get(live_path, headers=reading)
+        assert viewed.status_code == 200, viewed.text
+        assert 'synthetic-desktop-secret' not in viewed.text and '61001' not in viewed.text
+        service = runtime.get(live_path, headers={'X-WPR-Token': reading['X-WPR-Token']})
+        assert 'synthetic-desktop-secret' in service.text
+
+
+def test_local_link_viewer_polls_never_heal_while_the_owner_still_does(tmp_path, monkeypatch):
+    """A browser holding only a workspace link polls the live view through the UI's local fallback:
+    forwarded viewer role headers, no assertion. Those polls must never finish a stale run or start
+    its queued successor; the signed-in owner's poll still heals."""
+    import os
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.api import create_app as runtime_app
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    from workers_projects_runtime.store import RunRestorationState
+
+    ui_root = Path(__file__).parents[2] / 'frontends/glass-drive-ui'
+    monkeypatch.syspath_prepend(str(ui_root / 'tests'))
+    monkeypatch.syspath_prepend(str(ui_root / 'src'))
+    from glass_drive_ui.auth_gateway import HumanAuthGateway
+    from glass_drive_ui.runtime_client import RuntimeClient
+    from glass_drive_ui.server import create_app as ui_app
+    from glass_drive_ui.signed_links import sign_link_token
+    from test_packaged_local_auth import login
+
+    class FinishedNativeRun(StubRuntime):
+        def __init__(self):
+            super().__init__()
+            self.collected = []
+
+        def collect_completed_run(self, worker, run_id=None):
+            self.collected.append(str(worker['worker_id']))
+            return {'state': 'completed', 'output_text': 'done', 'error_text': ''}
+
+    _, roots, environments, _, credentials = _local_launch(tmp_path, monkeypatch)
+    db_path = str(tmp_path / 'runtime.db')
+    _use_environment(monkeypatch, environments['ui'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    gateway = HumanAuthGateway.from_env()
+    gateway.provision_local_owner(password=credentials['ui_password'])
+    owner, tenant = gateway.local_owner_id, os.environ.get('GLASSHIVE_ENTERPRISE_TENANT_ID') or 'local'
+
+    _use_environment(monkeypatch, environments['runtime'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    store = runtime_app(db_path=db_path, runtime_backend='stub', reconcile_on_startup=False).state.store
+    project = store.create_project(owner, 'Live view', 'Watch the work', 'claude-code', tenant_id=tenant)
+    worker = store.create_worker(project['project_id'], owner, 'Claude Code', 'main', 'claude-code',
+                                 'stub', 'stub', 'stub', tenant_id=tenant)
+    stale = store.create_run(worker['worker_id'], project['project_id'], 'finished natively',
+                             state=RunRestorationState.RUNNING)
+    queued = store.create_run(worker['worker_id'], project['project_id'], 'queued follow-up', state='queued')
+    store.update_worker(worker['worker_id'], state='running', last_run_id=stale['run_id'])
+    live_path = f"/v1/workers/{worker['worker_id']}/live"
+
+    sent = []
+
+    def relay(self, method, path, **_kwargs):
+        sent.append((method, path, self._request_headers() or {}))
+        return {}
+
+    monkeypatch.setattr(RuntimeClient, '_request', relay)
+
+    def ui_poll(browser, **params):
+        sent.clear()
+        polled = browser.get(f"/api/worker/{worker['worker_id']}/live", params=params)
+        assert polled.status_code == 200, polled.text
+        return next(headers for method, path, headers in sent if (method, path) == ('GET', live_path))
+
+    _use_environment(monkeypatch, environments['ui'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    link = sign_link_token(kind='worker_view', worker_id=worker['worker_id'], tenant_id=tenant, owner_id=owner)
+    viewer_poll = ui_poll(TestClient(ui_app()), gh_token=link)
+    assert viewer_poll.get('X-Viventium-User-Role') == 'viewer'
+    assert 'X-GlassHive-User-Assertion' not in viewer_poll
+    signed_in = TestClient(ui_app())
+    assert login(signed_in, password=credentials['ui_password']).status_code == 200
+    owner_poll = ui_poll(signed_in)
+    assert 'X-GlassHive-User-Assertion' in owner_poll
+
+    _use_environment(monkeypatch, environments['runtime'], roots)
+    monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
+    runtime = FinishedNativeRun()
+    app = runtime_app(db_path=db_path, runtime_backend='stub', runtime=runtime, reconcile_on_startup=False)
+    started = []
+    monkeypatch.setattr(app.state.service, '_ensure_worker_processor', started.append)
+    client = TestClient(app)
+    for _ in range(2):
+        assert client.get(live_path, headers=viewer_poll).status_code == 200
+    assert runtime.collected == [] and started == []
+    assert store.get_run(stale['run_id'])['state'] == 'running'
+    assert store.get_run(queued['run_id'])['state'] == 'queued'
+    assert client.get(live_path, headers=owner_poll).status_code == 200
+    assert runtime.collected == [worker['worker_id']] and started == [worker['worker_id']]
+    assert store.get_run(stale['run_id'])['state'] == 'completed'
+
+
 @pytest.mark.parametrize(('declared', 'options', 'isolated'), [
     ('isolated', {'com.docker.network.bridge.enable_icc': 'false'}, True),
     ('isolated', {}, False),

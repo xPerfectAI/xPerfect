@@ -674,8 +674,10 @@ class EnterpriseAuthSettings:
             os.environ.get("GLASSHIVE_DEFAULT_OWNER_ID")
             or os.environ.get("WPR_DEFAULT_OWNER_ID") or ""
         ).strip()
+        # The owner's workspace links arrive as the owner with the viewer role; the
+        # service middleware keeps viewer requests read-only apart from link messages.
         if (not expected_owner or verified.user_id != expected_owner
-                or verified.role not in {"member", "tenant_admin"}):
+                or verified.role not in {"member", "tenant_admin", "viewer"}):
             raise GlassHiveAuthError("Local human assertion owner is unavailable")
         return AuthContext(
             tenant_id=DEFAULT_TENANT_ID,

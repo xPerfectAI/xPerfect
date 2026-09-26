@@ -14222,6 +14222,20 @@ raise SystemExit(exit_code)
         self._append_work_log(worker, f"Run {effective_run_id} completed.")
         return redacted_output
 
+    def _infer_active_session(self, worker: dict, run_id: str | None = None) -> dict[str, str] | None:
+        # A host run is a host process, not a Docker screen session: only the host's own
+        # recorded active session counts. Asking the Docker sandbox would create a sandbox
+        # home for this worker and seed it with this computer's sign-in files.
+        attempt_id = str(worker.get("_run_attempt_id") or "").strip()
+        current = self._read_active_session(worker["worker_id"])
+        if (
+            current
+            and (run_id is None or current.get("run_id") == run_id)
+            and (not attempt_id or str(current.get("attempt_id") or "") == attempt_id)
+        ):
+            return current
+        return None
+
     def terminal_target(self, worker: dict) -> TerminalTarget:
         info = self.ensure_worker_ready(worker)
         active = self._infer_active_session(worker)
