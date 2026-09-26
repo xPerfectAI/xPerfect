@@ -307,6 +307,8 @@ SIGNED_QUERY_KEYS = {"gh_token", "gh_sig", "gh_exp", "gh_kind"}
 # page to reconnect; it never attaches another run's session or a plain shell instead.
 RUN_TERMINAL_SESSION_WAIT_SECONDS = 15.0
 RUN_TERMINAL_NOT_STARTED_CLOSE = 4408
+RUN_TERMINAL_SESSION_ENDED_CLOSE = 4409
+RUN_TERMINAL_ENDED_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 RUN_TERMINAL_ID = re.compile(r"run_[A-Za-z0-9_-]{1,64}")
 
 
@@ -1449,6 +1451,8 @@ def create_app(
             return "This run is queued behind the run still working in this workspace."
         if state in {"running", "settling"}:
             return "This run is starting its session…"
+        if store.list_run_attempts(str(run.get("run_id") or "")):
+            return "This run is waiting to start its next attempt."
         return "This run is queued and has not started yet."
 
     def _terminal_target(worker: dict) -> TerminalTarget:
@@ -8078,14 +8082,23 @@ def create_app(
                     await websocket.send_text("\x1b[2J\x1b[H")
             except (WebSocketDisconnect, RuntimeError):
                 return
-            await bridge_terminal(
-                websocket,
-                run_target,
-                should_close=lambda: str(
-                    (store.get_worker(worker_id) or {}).get("state") or ""
-                ) in closed_states,
-                accepted=True,
-            )
+            # A live view belongs to the attempt it attached. When that attempt is replaced
+            # (a retry) or the run ends, close so the page reattaches the current session or
+            # the saved output.
+            bound_attempt = str(run.get("active_attempt_id") or "")
+            bound_live = str(run.get("state") or "") not in RUN_TERMINAL_ENDED_STATES
+
+            def run_terminal_closed() -> bool | tuple[int, str]:
+                if str((store.get_worker(worker_id) or {}).get("state") or "") in closed_states:
+                    return True
+                if bound_live:
+                    latest = store.get_run(requested_run) or {}
+                    if (str(latest.get("active_attempt_id") or "") != bound_attempt
+                            or str(latest.get("state") or "") in RUN_TERMINAL_ENDED_STATES):
+                        return (RUN_TERMINAL_SESSION_ENDED_CLOSE, "Run session ended")
+                return False
+
+            await bridge_terminal(websocket, run_target, should_close=run_terminal_closed, accepted=True)
             return
         target = _terminal_target(worker)
         current = store.get_worker(

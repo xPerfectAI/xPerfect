@@ -290,11 +290,13 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
             runtime_name, repair_paths=False)
         return self.box.command(command, env=env)
 
-    def terminal_attach_command(self, worker_id, runtime_name, session_name='operator'):
+    def terminal_attach_command(self, worker_id, runtime_name, session_name='operator', *, attach_only=False):
+        # attach_only attaches one existing session (e.g. <pid>.<name>) and never creates a shell.
         self._member(worker_id)
         self.assert_native_launch()
         self._ensure_screen_runtime_dir(self.box.ensure_box())
-        command = self.box.command(['screen', '-xRR', session_name], env={'SCREENDIR': self.home_mount + '/.screen'})
+        command = self.box.command(['screen', '-x' if attach_only else '-xRR', session_name],
+                                   env={'SCREENDIR': self.home_mount + '/.screen'})
         command[2] = '-it'
         return command
 

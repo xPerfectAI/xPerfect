@@ -43,7 +43,7 @@ async def bridge_terminal(
     websocket: WebSocket,
     target: TerminalTarget,
     *,
-    should_close: Callable[[], bool] | None = None,
+    should_close: Callable[[], bool | tuple[int, str]] | None = None,
     accepted: bool = False,
 ) -> None:
     if not accepted:
@@ -94,9 +94,12 @@ async def bridge_terminal(
     async def close_monitor() -> None:
         while True:
             await asyncio.sleep(0.2)
-            if should_close and should_close():
+            verdict = should_close() if should_close else None
+            if verdict:
+                # True closes for a closed workspace; a (code, reason) pair explains another end.
+                code, reason = verdict if isinstance(verdict, tuple) else (1008, "Workspace closed")
                 try:
-                    await websocket.close(code=1008, reason="Workspace closed")
+                    await websocket.close(code=code, reason=reason)
                 except RuntimeError:
                     pass
                 return

@@ -581,46 +581,81 @@ def test_host_run_terminal_shows_only_that_run_and_then_its_saved_output(tmp_pat
 
     run_root = runtime._run_root(worker["worker_id"], prior["run_id"])
     run_root.mkdir(parents=True, exist_ok=True)
-    (run_root / "stdout.log").write_text("prior line one\nprior final answer\n")
+    (run_root / "stdout.log").write_text("".join(f"prior line {n}\n" for n in range(1, 1001)) + "prior final answer\n")
     runtime._active_session_meta_path(worker["worker_id"]).unlink()
     saved = runtime.run_terminal_target(worker, {**prior, "state": "completed"})
+    # The complete saved output, not only its end: the secure pager copies it all without a terminal.
     output = _run_output(saved)
-    assert "prior final answer" in output and f"Run {prior['run_id']} completed" in output
+    assert "prior line 1\n" in output and "prior line 500\n" in output and "prior final answer" in output
+    assert saved.env["LESSSECURE"] == "1" and "less" in saved.command[2]
+    assert f"Run {prior['run_id']} completed - saved output line %lb of %L" in saved.command[-1]
     assert saved.close_code == 4410
     assert "No terminal output was kept" in _run_output(runtime.run_terminal_target(worker, {**follow_up, "state": "failed"}))
 
 
-def test_container_run_terminal_attaches_only_that_runs_session(tmp_path):
+def test_container_run_terminal_attaches_only_that_runs_attempt(tmp_path):
+    """A retry makes its attempt directory while the previous attempt's screen, which has the same
+    run-based name, is still alive. Only the session record written after the new screen starts,
+    and that screen's own pid, may attach; never the old screen and never a new shell."""
     runtime = CodexCliRuntime(base_dir=str(tmp_path))
     worker = {"worker_id": "wrk_box_exact", "name": "Main Worker", "profile": "codex-cli"}
     runtime._ensure_dirs(worker["worker_id"])
     started = []
     runtime.ensure_worker_ready = lambda worker: started.append(worker["worker_id"]) or runtime._runtime_info(worker, pid=1234)  # type: ignore[method-assign]
-    prior = {"run_id": "run_prior00002", "state": "running", "active_attempt_id": "att_prior"}
-    later = {"run_id": "run_follow0002", "state": "queued", "active_attempt_id": ""}
-    sessions = [runtime._session_name_for_run_id(prior["run_id"])]
-    runtime.sandbox.list_screen_sessions = lambda worker_id, runtime_name, worker=None: list(sessions)  # type: ignore[method-assign]
+    run_id = "run_retry00002"
+    session_name = runtime._session_name_for_run_id(run_id)
+    runtime.sandbox.list_screen_sessions = lambda worker_id, runtime_name, worker=None: [session_name]  # type: ignore[method-assign]
     runtime.sandbox.terminal_attach_command = (  # type: ignore[method-assign]
-        lambda worker_id, runtime_name, session_name="operator": ["attach", session_name]
+        lambda worker_id, runtime_name, session_name="operator", attach_only=False: ["attach", session_name, attach_only]
     )
-    prior_root = runtime._attempt_run_root(worker["worker_id"], prior["run_id"], "att_prior")
-    prior_root.mkdir(parents=True, exist_ok=True)
+    record = runtime._active_session_meta_path(worker["worker_id"])
+    record.parent.mkdir(parents=True, exist_ok=True)
 
-    assert runtime.run_terminal_target(worker, later) is None
+    def write_record(attempt_id: str, pid: int) -> None:
+        record.write_text(json.dumps({"session_name": session_name, "run_id": run_id, "attempt_id": attempt_id,
+                                      "process_pid": pid}))
+
+    assert runtime.run_terminal_target(worker, {"run_id": "run_follow0002", "state": "queued", "active_attempt_id": ""}) is None
     assert started == []
-    live = runtime.run_terminal_target(worker, prior)
-    assert live.command == ["attach", sessions[0]] and live.session_bound
-    running = {**later, "state": "running", "active_attempt_id": "att_later"}
-    runtime._attempt_run_root(worker["worker_id"], later["run_id"], "att_later").mkdir(parents=True, exist_ok=True)
-    assert runtime.run_terminal_target(worker, running) is None
-    sessions.append(runtime._session_name_for_run_id(later["run_id"]))
-    assert runtime.run_terminal_target(worker, running).command == ["attach", sessions[1]]
+    write_record("att_first", 101)
+    first = runtime.run_terminal_target(worker, {"run_id": run_id, "state": "running", "active_attempt_id": "att_first"})
+    assert first.command == ["attach", f"101.{session_name}", True] and first.session_bound
+
+    # The retry's attempt directory exists and the old screen is still listed under the same name.
+    runtime._attempt_run_root(worker["worker_id"], run_id, "att_retry").mkdir(parents=True, exist_ok=True)
+    retry = {"run_id": run_id, "state": "running", "active_attempt_id": "att_retry"}
+    assert runtime.run_terminal_target(worker, retry) is None
+    write_record("att_retry", 202)
+    assert runtime.run_terminal_target(worker, retry).command == ["attach", f"202.{session_name}", True]
 
     started.clear()
-    (prior_root / "stdout.log").write_text("box final answer\n")
-    saved = runtime.run_terminal_target(worker, {**prior, "state": "completed"})
-    assert "box final answer" in _run_output(saved)
+    (runtime._attempt_run_root(worker["worker_id"], run_id, "att_retry") / "stdout.log").write_text(
+        "".join(f"box line {n}\n" for n in range(1, 801)))
+    saved = runtime.run_terminal_target(worker, {**retry, "state": "failed"})
+    output = _run_output(saved)
+    assert "box line 1\n" in output and "box line 800\n" in output
     assert started == []
+
+
+def test_exact_run_screen_attach_never_creates_a_shell(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from workers_projects_runtime.docker_sandbox import DockerSandboxManager
+    from workers_projects_runtime.workspace_sandbox import WorkspaceMemberSandbox
+
+    docker = DockerSandboxManager(base_dir=str(tmp_path), create_directories=False)
+    monkeypatch.setattr(docker, "ensure_ready", lambda *args, **kwargs: SimpleNamespace(container_name="box", execution_policy=""))
+    monkeypatch.setattr(docker, "_ensure_screen_runtime_dir", lambda *args, **kwargs: None)
+    assert docker.terminal_attach_command("wrk_x", "codex-cli", "101.job-run_x", attach_only=True)[-3:] == ["screen", "-x", "101.job-run_x"]
+    assert docker.terminal_attach_command("wrk_x", "codex-cli", "operator")[-3:] == ["screen", "-xRR", "operator"]
+
+    member = WorkspaceMemberSandbox.__new__(WorkspaceMemberSandbox)
+    member.home_mount = "/workspace/data/members/20001/home"
+    member.box = SimpleNamespace(ensure_box=lambda: "box", command=lambda argv, env=None: ["docker", "exec", "-i", "box", *argv])
+    member._member = lambda worker_id: None
+    member.assert_native_launch = lambda: None
+    member._ensure_screen_runtime_dir = lambda box: None
+    assert member.terminal_attach_command("wrk_x", "codex-cli", "101.job-run_x", attach_only=True)[-3:] == ["screen", "-x", "101.job-run_x"]
+    assert member.terminal_attach_command("wrk_x", "codex-cli", "operator")[-3:] == ["screen", "-xRR", "operator"]
 
 
 def test_host_runtime_recovers_and_stops_a_persisted_process_after_api_restart(tmp_path):

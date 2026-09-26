@@ -135,8 +135,9 @@ let nativeControls = null;
 let latestFileActivityKey = '';
 let listedFileActivityKey = '';
 
-// Keyed on the latest run and its phase: the terminal shows exactly that run, attaching its
-// session once it starts and its saved output once it ends.
+// Keyed on the latest run, its attempt and its phase: the terminal shows exactly that run,
+// attaching its current attempt's session once it starts (again after a retry) and its saved
+// output once it ends.
 function terminalRunPhase(runState) {
   const state = String(runState || '').trim().toLowerCase();
   if (['completed', 'failed', 'cancelled', 'interrupted'].includes(state)) return 'ended';
@@ -144,10 +145,18 @@ function terminalRunPhase(runState) {
   return 'waiting';
 }
 
-function terminalViewUrl(base, id, runId, runState = '') {
+function terminalViewUrl(base, id, runId, runState = '', attemptId = '') {
   const url = `${base}/ui/workers/${id}/terminal`;
   if (!runId) return url;
-  return `${url}?run=${encodeURIComponent(runId)}&phase=${terminalRunPhase(runState)}`;
+  const attempt = attemptId ? `&attempt=${encodeURIComponent(attemptId)}` : '';
+  return `${url}?run=${encodeURIComponent(runId)}${attempt}&phase=${terminalRunPhase(runState)}`;
+}
+
+// A failed, cancelled or interrupted run keeps its saved terminal output on screen below the
+// attention notice, so the reason it stopped stays visible.
+function showsSavedRunOutput(state) {
+  return activeSurface === 'terminal' && TERMINAL_ATTENTION_STATES.has(state)
+    && /[?&]run=/.test(currentTerminalUrl);
 }
 
 function withAuth(url) {
@@ -439,7 +448,8 @@ function setSurface(surface, { force = false } = {}) {
     setOverlay('terminated');
     return;
   }
-  if (['created', 'starting', 'paused', 'idle', 'idle_terminated', 'stopped', 'terminating', 'termination_failed', 'terminated'].includes(state) || TERMINAL_ATTENTION_STATES.has(state)) {
+  if (['created', 'starting', 'paused', 'idle', 'idle_terminated', 'stopped', 'terminating', 'termination_failed', 'terminated'].includes(state)
+      || (TERMINAL_ATTENTION_STATES.has(state) && !showsSavedRunOutput(state))) {
     clearAttachedView();
     setOverlay(state);
     return;
@@ -914,9 +924,12 @@ function setOverlay(state, detail) {
   const connecting = !completed && attachStartedAt && !frameReady && Date.now() - attachStartedAt < 12000;
   const filePreviewActive = activeSurface === 'desktop' && Boolean(filePreviewUrl());
   const waiting = state === 'starting' || state === 'paused' || state === 'idle' || state === 'idle_terminated' || state === 'stopped' || state === 'terminating' || state === 'termination_failed' || state === 'terminated' || needsAttention || connecting;
+  // The attention notice sits above that run's saved output instead of covering it.
+  const banner = needsAttention && showsSavedRunOutput(state);
   overlay.hidden = !waiting;
   if (stage) {
-    stage.dataset.overlayActive = String(waiting);
+    stage.dataset.overlayActive = String(waiting && !banner);
+    stage.dataset.overlayMode = banner ? 'banner' : '';
   }
   if (!waiting) return;
 
@@ -925,7 +938,9 @@ function setOverlay(state, detail) {
       overlayLabel.textContent = 'Workspace needs attention';
     }
     overlayTitle.textContent = 'Workspace needs attention';
-    overlayDetail.textContent = 'The latest run did not complete. Review the status details, then send a corrected follow-up.';
+    overlayDetail.textContent = banner
+      ? 'The latest run did not complete. Its saved terminal output is below; review it, then send a corrected follow-up.'
+      : 'The latest run did not complete. Review the status details, then send a corrected follow-up.';
     return;
   }
 
@@ -1092,7 +1107,7 @@ async function refresh() {
     currentDesktopAvailable = Boolean(runtime.view_available || runtime.view_url);
   currentDesktopUrl = currentDesktopAvailable ? withUiRev(withAuth(`${uiBase}/desktop/${workerId}`)) : '';
     currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || ''),
-      String(data.latest_run?.state || '')));
+      String(data.latest_run?.state || ''), String(data.latest_run?.active_attempt_id || '')));
 
     renderOutput(data);
     syncSteerAvailability(displayState);

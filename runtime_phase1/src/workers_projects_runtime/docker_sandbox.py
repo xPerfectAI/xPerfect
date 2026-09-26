@@ -2099,7 +2099,10 @@ class DockerSandboxManager:
         docker_command.extend(command)
         return docker_command
 
-    def terminal_attach_command(self, worker_id: str, runtime_name: str, session_name: str = "operator") -> list[str]:
+    def terminal_attach_command(self, worker_id: str, runtime_name: str, session_name: str = "operator",
+                                *, attach_only: bool = False) -> list[str]:
+        """Attach to a screen session. ``attach_only`` attaches one existing session (for example
+        ``<pid>.<name>``) and fails instead of creating a new shell when it is gone."""
         sandbox = self.ensure_ready({"worker_id": worker_id}, runtime_name=runtime_name)
         self._ensure_screen_runtime_dir(
             sandbox.container_name,
@@ -2126,7 +2129,7 @@ class DockerSandboxManager:
             f"XDG_CONFIG_HOME={self._browser_config_dir()}",
             sandbox.container_name,
             "screen",
-            "-xRR",
+            *(["-x"] if attach_only else ["-xRR"]),
             session_name,
         ]
 

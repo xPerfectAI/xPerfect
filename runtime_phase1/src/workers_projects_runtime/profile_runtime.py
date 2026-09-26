@@ -5514,16 +5514,26 @@ class BaseCliWorkerRuntime:
         attempt_id = str(run.get("active_attempt_id") or "").strip()
         if not run_id or not attempt_id:
             return None
-        try:
-            session = self._infer_active_session({**worker, "_run_attempt_id": attempt_id}, run_id=run_id)
-        except Exception:
+        # Only the session record written after this attempt's screen started identifies it. A
+        # retry creates its attempt directory while the previous attempt's screen, which has the
+        # same run-based name, may still be alive; the screen's own pid tells them apart.
+        session = self._read_active_session(str(worker["worker_id"]))
+        if (not session or str(session.get("run_id") or "") != run_id
+                or str(session.get("attempt_id") or "") != attempt_id):
             return None
-        session_name = str((session or {}).get("session_name") or "").strip()
-        if not session or str(session.get("run_id") or "") != run_id or not session_name:
+        session_name = str(session.get("session_name") or "").strip()
+        try:
+            screen_pid = int(session.get("process_pid") or 0)
+        except (TypeError, ValueError):
+            screen_pid = 0
+        if not session_name or screen_pid <= 0:
             return None
         self.ensure_worker_ready(worker)
         return TerminalTarget(
-            command=self.sandbox.terminal_attach_command(worker["worker_id"], self.runtime_name, session_name=session_name),
+            command=self.sandbox.terminal_attach_command(
+                worker["worker_id"], self.runtime_name, session_name=f"{screen_pid}.{session_name}",
+                attach_only=True,
+            ),
             cwd=str(self._workspace_dir(worker["worker_id"])),
             title=f"{worker['name']} live session",
             subtitle=f"{self.runtime_name} run {run_id}",
@@ -5533,7 +5543,10 @@ class BaseCliWorkerRuntime:
         )
 
     def _saved_run_output_terminal(self, worker: dict, run: dict) -> TerminalTarget:
-        """A read-only view of an ended run's own saved terminal output; no workspace is started."""
+        """A read-only view of an ended run's complete saved terminal output; no workspace is started.
+
+        The pager opens at the end and scrolls back to the first line. Its secure mode has no shell,
+        file, editor or save commands. Without a terminal it copies the whole file."""
         worker_id = str(worker["worker_id"])
         run_id = str(run.get("run_id") or "").strip()
         attempt_id = str(run.get("active_attempt_id") or "").strip()
@@ -5541,16 +5554,20 @@ class BaseCliWorkerRuntime:
         saved = next((root / "stdout.log" for root in roots if (root / "stdout.log").is_file()), None)
         state = str(run.get("state") or "ended").strip()
         if saved is not None:
-            notice = f"[Run {run_id} {state}. This is its saved output.]"
-            command = ["/bin/sh", "-c", 'tail -n 400 -- "$1"; printf "\\r\\n%s\\r\\n" "$2"', "saved-output",
-                       str(saved), notice]
+            # Prompt characters . : ? are special to less; this text avoids them. Run IDs and
+            # states are plain words.
+            prompt = (f"Run {run_id} {state} - saved output line %lb of %L - "
+                      "PageUp or arrows for earlier output, q closes")
+            command = ["/bin/sh", "-c", 'exec less -R -X -K --mouse +G "--prompt=s$2" -- "$1"', "saved-output",
+                       str(saved), prompt]
         else:
             notice = f"[Run {run_id} {state}. No terminal output was kept for it; its result is in the workspace.]"
             command = ["/bin/sh", "-c", 'printf "%s\\r\\n" "$1"', "saved-output", notice]
         return TerminalTarget(
             command=command,
             cwd="/",
-            env={"TERM": "xterm-256color", "PATH": "/usr/bin:/bin"},
+            env={"TERM": "xterm-256color", "PATH": "/usr/bin:/bin", "LESSSECURE": "1", "LESS": "",
+                 "LESSOPEN": "", "LESSCLOSE": "", "LESSHISTFILE": "-"},
             title=f"{worker['name']} run output",
             subtitle=f"Run {run_id} {state}",
             session_bound=True,

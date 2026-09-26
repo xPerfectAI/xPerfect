@@ -2226,6 +2226,22 @@ textarea { resize: vertical; min-height: 78px; }
   padding: 24px;
 }
 .stage-overlay > div { max-width: 760px; }
+/* A run that did not complete keeps its saved terminal output visible under a compact notice. */
+.watch-stage[data-overlay-mode="banner"] { flex-direction: column; }
+.watch-stage[data-overlay-mode="banner"] .stage-overlay {
+  position: static;
+  display: block;
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  background: #1a0f0f;
+  border-bottom: 1px solid rgba(255, 122, 69, 0.45);
+  text-align: left;
+}
+.watch-stage[data-overlay-mode="banner"] .stage-overlay > div { max-width: none; }
+.watch-stage[data-overlay-mode="banner"] .stage-overlay .overlay-label { display: none; }
+.watch-stage[data-overlay-mode="banner"] .stage-overlay h2 { margin: 0; font-size: 1rem; }
+.watch-stage[data-overlay-mode="banner"] .stage-overlay #overlay-detail { margin: 4px 0 0; max-width: none; font-size: 0.9rem; }
+.watch-stage[data-overlay-mode="banner"] #desktop-frame { height: auto; }
 .stage-overlay h2 {
   margin: 10px 0 0;
   font-size: clamp(2rem, 4.6vw, 3rem);

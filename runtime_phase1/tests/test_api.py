@@ -2059,7 +2059,10 @@ def test_host_control_terminal_paths_wake_the_released_capacity_lane(
 
     store = Store(str(tmp_path / "runtime.db"))
     runtime = ControlRuntime()
-    service = WorkersProjectsService(store, runtime, max_workers=2, reconcile_on_startup=False)
+    # This checks the control path's own wake. The background scheduler would also dispatch the
+    # now-due waiting run (a second, legitimate wake) and could claim the queued runs first.
+    service = WorkersProjectsService(store, runtime, max_workers=2, reconcile_on_startup=False,
+                                     start_background_consumers=False)
     try:
         project = store.create_project("owner", "Control Handoff", "Release on control.", "codex-cli")
 
@@ -12306,6 +12309,60 @@ def test_live_view_terminal_attaches_only_its_exact_run(tmp_path, monkeypatch):
     # Without a named run the worker terminal opens at once, as before.
     with client.websocket_connect(f"/ws/workers/{worker['worker_id']}/terminal") as websocket:
         assert "plain-shell" in websocket.receive_text()
+
+
+def test_live_run_terminal_reattaches_when_its_attempt_is_replaced_or_the_run_ends(tmp_path):
+    """A live view belongs to the attempt it attached. A retry replacing that attempt, or the run
+    ending, closes it for reattachment: then the new attempt's session, then the saved output."""
+
+    class AttemptRuntime(StubRuntime):
+        def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
+            attempt = run["active_attempt_id"]
+            if run["state"] in {"completed", "failed", "cancelled", "interrupted"}:
+                return TerminalTarget(command=["/bin/sh", "-c", f"echo saved-{attempt}"], cwd=str(tmp_path),
+                                      session_bound=True, close_code=4410, close_reason="Run output shown")
+            if not attempt:
+                return None
+            return TerminalTarget(command=["/bin/sh", "-c", f"echo live-{attempt}; exec sleep 30"], cwd=str(tmp_path),
+                                  session_bound=True, close_code=4409, close_reason="Run session ended")
+
+    app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=AttemptRuntime())
+    client = TestClient(app)
+    project = client.post("/v1/projects", json={"owner_id": "demo-owner", "title": "Retry", "goal": "Watch it."}).json()
+    worker = client.post(f"/v1/projects/{project['project_id']}/workers",
+                         json={"owner_id": "demo-owner", "name": "Worker", "role": "operator"}).json()
+    store = app.state.store
+    run = store.create_run(worker["worker_id"], project["project_id"], "work")
+    url = f"/ws/workers/{worker['worker_id']}/terminal?run={run['run_id']}"
+
+    def update(**values) -> None:
+        with store._connect() as conn:
+            for column, value in values.items():
+                conn.execute(f"UPDATE runs SET {column}=? WHERE run_id=?", (value, run["run_id"]))
+
+    def closed_code(websocket) -> int:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            while True:
+                websocket.receive_text()
+        return closed.value.code
+
+    # The live stand-in keeps running for 30 s; each close must come from the change, promptly.
+    update(state="running", active_attempt_id="att_1")
+    with client.websocket_connect(url) as websocket:
+        assert "live-att_1" in websocket.receive_text()
+        changed = time.monotonic()
+        update(active_attempt_id="att_2")
+        assert closed_code(websocket) == 4409
+        assert time.monotonic() - changed < 5
+    with client.websocket_connect(url) as websocket:
+        assert "live-att_2" in websocket.receive_text()
+        changed = time.monotonic()
+        update(state="completed")
+        assert closed_code(websocket) == 4409
+        assert time.monotonic() - changed < 5
+    with client.websocket_connect(url) as websocket:
+        assert "saved-att_2" in websocket.receive_text()
+        assert closed_code(websocket) == 4410
 
 
 def test_open_terminal_websocket_is_revoked_when_workspace_closes(tmp_path):

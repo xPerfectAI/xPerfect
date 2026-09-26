@@ -21,6 +21,7 @@
   terminal.open(host);
   // The live view names the exact run this terminal shows; the runtime attaches only that run.
   const runId = new URLSearchParams(location.search).get('run') || '';
+  const ended = new URLSearchParams(location.search).get('phase') === 'ended';
   let socket;
   let retryTimer = 0;
   let sessionEndRetries = 0;
@@ -37,7 +38,7 @@
     if (runId && code === 4409) {
       return { text: 'This run’s live session ended.', retryMs: sessionEndRetries++ < 3 ? 2000 : 0 };
     }
-    if (runId && code === 4410) return { text: 'This run has ended. Its saved output is shown.', retryMs: 0 };
+    if (runId && code === 4410) return { text: 'Saved output closed. Select Reconnect to view it again.', retryMs: 0 };
     if (code === 4404) return { text: 'This run is not available in this workspace.', retryMs: 0 };
     return { text: 'Terminal disconnected. Unlock again if your session expired, then reconnect.', retryMs: 0 };
   }
@@ -50,7 +51,13 @@
     const query = runId ? `?run=${encodeURIComponent(runId)}` : '';
     const next = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/workers/${encodeURIComponent(workerId)}/terminal${query}`, protocols);
     socket = next;
-    next.onopen = () => { if (socket !== next) return; status.textContent = 'Terminal connected'; resize(); terminal.focus(); };
+    next.onopen = () => {
+      if (socket !== next) return;
+      status.textContent = runId && ended
+        ? 'This run has ended. Its complete saved output is shown; scroll up for earlier output.'
+        : 'Terminal connected';
+      resize(); terminal.focus();
+    };
     next.onmessage = event => { if (socket === next) terminal.write(event.data); };
     next.onclose = event => {
       if (socket !== next) return;
