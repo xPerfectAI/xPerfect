@@ -3057,6 +3057,108 @@ def test_unexpected_processor_exception_requeues_run_releases_lease_and_logs(
     assert "Unexpected GlassHive worker processor failure" in caplog.text
 
 
+def _fenced_start_service(tmp_path, monkeypatch, suffix):
+    """Run the real queue processor while the workspace is paused between claim and
+    start, the race that made the final start check refuse after the runtime was chosen."""
+    store = Store(str(tmp_path / f"{suffix}.sqlite3"))
+    _project, worker, run = _active_worker_and_run(store, suffix, run_state="queued")
+    store.update_worker_state(worker["worker_id"], "ready")
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    generation = 9
+    with service._processors_lock:
+        service._active_processors.add(worker["worker_id"])
+        service._processor_generations[worker["worker_id"]] = generation
+
+    def acquire_exact(worker_row, run_row):
+        return store.acquire_host_run_lease(
+            runtime_family="codex", lane="mission", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_row["worker_id"], run_id=run_row["run_id"],
+            executor_id=service.executor_id, conversation_limit=2, mission_limit=3,
+            account_mission_limit=4, tenant_mission_limit=12, lease_ttl_s=30,
+        )
+
+    monkeypatch.setattr(service, "_acquire_host_run_lease", acquire_exact)
+    original_record = service._run_start_callback_record
+
+    def paused_during_start(worker_row, run_row, token):
+        store.update_worker_state(worker_row["worker_id"], "paused")
+        return original_record(worker_row, run_row, token)
+
+    monkeypatch.setattr(service, "_run_start_callback_record", paused_during_start)
+    monkeypatch.setattr(service, "_ensure_worker_processor", lambda _worker_id: None)
+    return store, service, worker, run, generation
+
+
+def test_start_refused_before_the_runtime_runs_is_queued_again_not_left_admitted(
+    tmp_path, monkeypatch
+):
+    store, service, worker, run, generation = _fenced_start_service(
+        tmp_path, monkeypatch, "fenced-start"
+    )
+    try:
+        service._process_worker_queue(worker["worker_id"], generation)
+    finally:
+        service.shutdown()
+    durable = store.get_run(run["run_id"])
+    assert durable["state"] == "queued" and not durable["runtime_invoked_at"]
+    assert durable["failure_class"] == "service_startup_fenced"
+    assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
+    assert store.latest_host_run_lease_for_run(run["run_id"])["release_reason"] == "startup_generation_cleaned"
+    assert store.get_worker(worker["worker_id"])["state"] == "paused"
+    assert "run.requeued" in [event["event_type"] for event in store.list_events(worker["worker_id"])]
+    # Once the workspace is running again the same run is claimed normally.
+    store.update_worker_state(worker["worker_id"], "ready")
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET retry_after = NULL WHERE run_id = ?", (run["run_id"],))
+    assert store.claim_next_queued_run(worker["worker_id"])["run_id"] == run["run_id"]
+
+
+def test_reconcile_queues_again_a_run_an_earlier_start_fence_left_admitted(tmp_path, monkeypatch):
+    store, service, worker, run, generation = _fenced_start_service(
+        tmp_path, monkeypatch, "stranded-start"
+    )
+    # The previous fence released the generation and left the run admitted.
+    monkeypatch.setattr(
+        service,
+        "_requeue_fenced_run_start",
+        lambda _worker, run_row, _lease: service._release_host_run_lease(
+            str(run_row["run_id"]), reason="startup_fenced"
+        ),
+    )
+    try:
+        service._process_worker_queue(worker["worker_id"], generation)
+        stranded = store.get_run(run["run_id"])
+        assert stranded["state"] == "admitted" and not stranded["runtime_invoked_at"]
+        assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
+        service._reconcile_worker_row(store.get_worker(worker["worker_id"]))
+    finally:
+        service.shutdown()
+    durable = store.get_run(run["run_id"])
+    assert durable["state"] == "queued" and durable["failure_class"] == "service_startup_fenced"
+    assert "run.requeued" in [event["event_type"] for event in store.list_events(worker["worker_id"])]
+
+
+def test_fenced_start_requeue_needs_proof_the_runtime_never_ran(tmp_path):
+    store = Store(str(tmp_path / "prelaunch-proof.sqlite3"))
+    _project, worker, run = _active_worker_and_run(store, "prelaunch-proof", run_state="queued")
+    lease = store.acquire_host_run_lease(
+        runtime_family="codex", lane="mission", tenant_id="local", owner_id="owner-a",
+        worker_id=worker["worker_id"], run_id=run["run_id"], executor_id="executor-a",
+        conversation_limit=2, mission_limit=3, account_mission_limit=4,
+        tenant_mission_limit=12, lease_ttl_s=30,
+    )
+    claimed = store.claim_next_queued_run(worker["worker_id"], executor_id="executor-a")
+    assert claimed is not None
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET runtime_invoked_at = ? WHERE run_id = ?",
+                     ("2026-09-26T00:00:00+00:00", run["run_id"]))
+    arguments = dict(worker_id=worker["worker_id"], run_id=run["run_id"], lease_id=lease["lease_id"],
+                     startup_token=lease["startup_token"], retry_after="", error_text="fenced")
+    assert store.requeue_unconfirmed_host_run_start(**arguments, require_prelaunch=True) is None
+    assert store.get_run(run["run_id"])["state"] == "claimed"
+    assert store.requeue_unconfirmed_host_run_start(**arguments, released_by_start_fence=True) is None
+
+
 def test_docker_stop_failure_stays_pending_and_preserves_running_run(tmp_path):
     class FailingDockerStopRuntime(StubRuntime):
         def interrupt_worker(self, worker, run_id=None):

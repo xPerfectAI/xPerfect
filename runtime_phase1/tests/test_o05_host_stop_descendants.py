@@ -268,3 +268,116 @@ def test_unconfirmed_start_cleanup_ends_a_remembered_child_before_release(tmp_pa
     finally:
         if _alive(command_pid):
             os.kill(command_pid, 9)
+
+
+def _start_recorded_host_run(runtime, worker, run_id, attempt_id):
+    """A real supervisor that records its native child, as host launches do."""
+    run_root = runtime._run_root(worker["worker_id"], run_id)
+    run_root.mkdir(parents=True, exist_ok=True)
+    child_record = runtime._native_child_record_path(run_root, attempt_id)
+    process = subprocess.Popen(
+        runtime._durable_host_process_command(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            run_root=run_root,
+            exit_path=run_root / "exit_code",
+            child_record_path=child_record,
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    runtime._wait_for_durable_host_supervisor(process, run_root=run_root)
+    runtime._write_active_session(
+        worker["worker_id"],
+        {
+            "session_name": f"conversation-{run_id[:12]}",
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "stdout_path": str(run_root / "stdout.log"),
+            "stderr_path": str(run_root / "stderr.log"),
+            "exit_path": str(run_root / "exit_code"),
+            "model": "gpt-5.6-sol",
+            "process_pid": process.pid,
+            "run_mode": "conversation",
+        },
+    )
+    assert runtime.reconcile_worker(worker).pid == process.pid
+    deadline = time.monotonic() + 5
+    child = None
+    while time.monotonic() < deadline:
+        child = __import__("json").loads(child_record.read_text()).get("child")
+        if child and child.get("process_start_identity"):
+            break
+        time.sleep(0.02)
+    assert child and child["process_group"] == child["pid"] != process.pid
+    return process, child
+
+
+def _recorded_worker(worker_id):
+    return {
+        "worker_id": worker_id,
+        "name": "Synthetic recorded native child worker",
+        "profile": "codex-cli",
+        "execution_mode": "host",
+        "trusted_run_lane": "conversation",
+    }
+
+
+def test_stop_after_its_supervisor_died_still_ends_the_recorded_native_child(tmp_path):
+    """The native child runs in its own process group. If its supervisor dies abruptly,
+    only the child's own record, written before it ran, still identifies it for Stop."""
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = _recorded_worker("wrk_orphaned_native")
+    process, child = _start_recorded_host_run(runtime, worker, "run_orphaned_native", "att_orphaned")
+    try:
+        os.kill(process.pid, 9)
+        process.wait(timeout=5)
+        assert _alive(child["pid"]), "the native child outlived its supervisor"
+
+        assert runtime._stop_active_process(
+            worker["worker_id"], worker=worker, run_id="run_orphaned_native"
+        )
+
+        assert not _alive(child["pid"]), "Stop confirmed while the native child ran on"
+        assert runtime._read_active_session(worker["worker_id"]) is None
+    finally:
+        if _alive(child["pid"]):
+            os.killpg(child["process_group"], 9)
+        if process.poll() is None:
+            os.killpg(process.pid, 9)
+            process.wait(timeout=5)
+
+
+def test_exact_stop_confirmation_refuses_while_the_recorded_native_child_lives(tmp_path):
+    """The confirmation an account binding asks for after a run never accepts a dead
+    supervisor as proof while the native child it recorded still runs."""
+    from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
+
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = _recorded_worker("wrk_confirm_native")
+    process, child = _start_recorded_host_run(runtime, worker, "run_confirm_native", "att_confirm")
+    bound = {**worker, "_active_run_id": "run_confirm_native"}
+    try:
+        os.kill(process.pid, 9)
+        process.wait(timeout=5)
+        with runtime._process_lock:
+            runtime._active_processes.pop(worker["worker_id"], None)
+        assert _alive(child["pid"])
+
+        with pytest.raises(RuntimeErrorBase):
+            runtime.terminate_worker(bound)
+        assert runtime._read_active_session(worker["worker_id"]) is not None
+
+        os.killpg(child["process_group"], 9)
+        deadline = time.monotonic() + 5
+        while _alive(child["pid"]) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        runtime.terminate_worker(bound)
+        assert runtime._read_active_session(worker["worker_id"]) is None
+    finally:
+        if _alive(child["pid"]):
+            os.killpg(child["process_group"], 9)
+        if process.poll() is None:
+            os.killpg(process.pid, 9)
+            process.wait(timeout=5)

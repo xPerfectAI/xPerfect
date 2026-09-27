@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
+import os
 import subprocess
 import time
 
@@ -193,10 +194,12 @@ def test_current_native_api_connect_verify_disconnect_are_owner_scoped(host,monk
         assert 'person@example.test' not in client.get('/v1/provider-accounts').text
 
 
-def test_held_run_recovery_needs_positive_proof_even_after_a_restart(host,tmp_path):
+def test_held_run_recovery_needs_positive_proof_even_after_a_restart(tmp_path,monkeypatch):
     """A fresh runtime has no in-memory process handle, as after a restart. A missing session
     file is not proof: only the run's durable host records, with every recorded process proven
-    gone, can release its held account lease."""
+    gone, can release its held account lease. Uses real process identities, not the
+    host fixture's faked subprocess.run."""
+    monkeypatch.setenv('HOME',str(tmp_path))
     import fcntl,threading
     from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
     from workers_projects_runtime.profile_runtime import HostClaudeCodeRuntime
@@ -208,7 +211,7 @@ def test_held_run_recovery_needs_positive_proof_even_after_a_restart(host,tmp_pa
         assert identity.startswith('ps-lstart:')
         def record(**fields):
             return {'worker_id':'wrk_held','run_id':'run_held','status':'released','startup_state':'confirmed',
-                    'pid':live.pid,'process_group':live.pid,'process_start_identity':identity,
+                    'pid':live.pid,'process_group':live.pid,'process_start_identity':identity,'attempt_id':'att_1',
                     'recorded_attempt_id':'att_1','attempt_runtime_invoked_at':'2026-09-26T00:00:00Z',**fields}
         def refused(records):
             with pytest.raises(RuntimeErrorBase):runtime.confirm_retained_run_stopped(worker,'run_held',records)
@@ -222,7 +225,13 @@ def test_held_run_recovery_needs_positive_proof_even_after_a_restart(host,tmp_pa
             process_start_identity='',attempt_runtime_invoked_at='')])  # never invoked the runtime
     finally:
         live.kill();live.wait()
-    runtime.confirm_retained_run_stopped(worker,'run_held',[record()])  # the exact process is gone
+    refused([record()])                                # supervisor gone, but its native child was never recorded
+    run_root=runtime._run_root('wrk_held','run_held');run_root.mkdir(parents=True,exist_ok=True)
+    child_record=runtime._native_child_record_path(run_root,'att_1')
+    child_record.write_text(json.dumps({'supervisor_pid':live.pid+1,'child':None}))
+    refused([record()])                                # a record from another supervisor proves nothing
+    child_record.write_text(json.dumps({'supervisor_pid':live.pid,'child':None}))
+    runtime.confirm_retained_run_stopped(worker,'run_held',[record()])  # the exact supervisor is gone and never started a child
     session=runtime._active_session_meta_path('wrk_held');session.parent.mkdir(parents=True,exist_ok=True)
     later=subprocess.Popen(['sleep','60'],start_new_session=True)
     try:
@@ -248,6 +257,57 @@ def test_held_run_recovery_needs_positive_proof_even_after_a_restart(host,tmp_pa
         release.set();holder.join()
     finally:
         later.kill();later.wait()
+
+
+def test_held_run_recovery_needs_the_supervisors_native_child_gone_after_a_restart(tmp_path,monkeypatch):
+    """The supervisor runs its native CLI in a separate process group. If the supervisor is
+    killed abruptly, that child can outlive it with no Stop ledger entry, so only the child's
+    own record, written before it runs, can prove the account free."""
+    monkeypatch.setenv('HOME',str(tmp_path))
+    import signal
+    from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
+    from workers_projects_runtime.profile_runtime import HostClaudeCodeRuntime
+    runtime=HostClaudeCodeRuntime(base_dir=str(tmp_path/'native-work'))
+    worker={'worker_id':'wrk_split','execution_mode':'host','profile':'claude-code'}
+    run_root=runtime._run_root('wrk_split','run_split');run_root.mkdir(parents=True)
+    child_record=runtime._native_child_record_path(run_root,'att_split')
+    command=runtime._durable_host_process_command(['sleep','60'],run_root=run_root,exit_path=run_root/'exit_code',
+                                                  child_record_path=child_record)
+    supervisor=subprocess.Popen(command,start_new_session=True)
+    child=None
+    def wait_for(check):
+        deadline=time.monotonic()+10
+        while not check():
+            assert time.monotonic()<deadline
+            time.sleep(0.05)
+    try:
+        wait_for(lambda:(run_root/'supervisor-ready').exists())
+        assert json.loads(child_record.read_text())=={'supervisor_pid':supervisor.pid,'child':None}
+        (run_root/'start-permit').write_text('synthetic permit')
+        wait_for(lambda:(json.loads(child_record.read_text()).get('child') or {}).get('process_start_identity'))
+        child=json.loads(child_record.read_text())['child']
+        assert child['pid']!=supervisor.pid and child['process_group']==child['pid']
+        supervisor_identity=runtime._process_start_identity(supervisor.pid)
+        os.kill(supervisor.pid,signal.SIGKILL);supervisor.wait()
+        os.kill(child['pid'],0)                        # the native child outlived its supervisor
+        record={'worker_id':'wrk_split','run_id':'run_split','status':'released','startup_state':'confirmed',
+                'pid':supervisor.pid,'process_group':supervisor.pid,'process_start_identity':supervisor_identity,
+                'attempt_id':'att_split','recorded_attempt_id':'att_split','attempt_runtime_invoked_at':'2026-09-26T00:00:00Z'}
+        restarted=HostClaudeCodeRuntime(base_dir=str(tmp_path/'native-work'))  # empty handle map, no session or ledger
+        assert not restarted._active_session_meta_path('wrk_split').exists()
+        assert not restarted._stop_descendant_ledger_path('wrk_split').exists()
+        with pytest.raises(RuntimeErrorBase):restarted.confirm_retained_run_stopped(worker,'run_split',[record])
+    finally:
+        if child:
+            try:os.killpg(child['process_group'],signal.SIGKILL)
+            except ProcessLookupError:pass
+        if supervisor.poll() is None:supervisor.kill();supervisor.wait()
+    def child_gone():
+        try:os.kill(child['pid'],0)
+        except ProcessLookupError:return True
+        return restarted._pid_is_zombie(child['pid'])
+    wait_for(child_gone)
+    restarted.confirm_retained_run_stopped(worker,'run_split',[record])
 
 
 def test_verify_api_checks_the_held_runs_exact_stop_before_releasing_the_sign_in(host):

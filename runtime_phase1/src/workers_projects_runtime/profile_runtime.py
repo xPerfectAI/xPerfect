@@ -3837,6 +3837,12 @@ class BaseCliWorkerRuntime:
             + hashlib.sha256(clean_attempt_id.encode("utf-8")).hexdigest()
         )
 
+    def _native_child_record_path(self, run_root: Path, attempt_id: str | None) -> Path:
+        """Where one attempt's supervisor records its native child's identity."""
+        clean_attempt_id = str(attempt_id or "").strip()
+        ref = self._run_attempt_ref(clean_attempt_id) if clean_attempt_id else "run"
+        return run_root / f"native-child-{ref}.json"
+
     def _attempt_run_root(
         self, worker_id: str, run_id: str, attempt_id: str | None
     ) -> Path:
@@ -10500,6 +10506,14 @@ class HostNativeCliMixin:
                     for pid, identity in remembered.items()
                 ):
                     return False
+                # Nor while the native child its supervisor recorded, which runs in its
+                # own process group, is not proven gone.
+                native_child = self._session_native_child(worker_id, expected_session)
+                if native_child is False or (
+                    isinstance(native_child, dict)
+                    and not self._native_child_proven_gone(native_child)
+                ):
+                    return False
                 if clear_session and current_session is not None:
                     try:
                         session_path.unlink()
@@ -10670,8 +10684,14 @@ class HostNativeCliMixin:
         stdin_path: Path | None = None,
         native_input_context: dict[str, object] | None = None,
         response_deadline_at: str = "",
+        child_record_path: Path | None = None,
     ) -> list[str]:
-        """Wrap a native CLI so the surviving process owns its terminal marker."""
+        """Wrap a native CLI so the surviving process owns its terminal marker.
+
+        With ``child_record_path``, the supervisor durably records its native child
+        before that child can run: it runs in its own process group, so the
+        supervisor's recorded identity alone never proves it stopped.
+        """
         if native_input_context is not None:
             context_path = run_root / "native-input-context.json"
             native_input.publish(context_path, native_input_context)
@@ -10684,6 +10704,7 @@ class HostNativeCliMixin:
             """#!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -10699,7 +10720,8 @@ ready_path = Path(sys.argv[3])
 timeout_sec = float(sys.argv[4]) if sys.argv[4] else None
 stdin_path = Path(sys.argv[5]) if sys.argv[5] else None
 response_deadline_at = sys.argv[6]
-command = sys.argv[7:]
+child_record_path = Path(sys.argv[7]) if sys.argv[7] else None
+command = sys.argv[8:]
 child: subprocess.Popen[bytes] | None = None
 requested_signal = 0
 
@@ -10720,6 +10742,21 @@ def write_exit(exit_code: int) -> None:
             temp_path.unlink()
         except OSError:
             pass
+
+
+def write_child_record(child_identity: dict | None, supervisor_pid: int) -> None:
+    if child_record_path is None:
+        return
+    temp_path = child_record_path.with_name(f"{child_record_path.name}.tmp.{os.getpid()}")
+    temp_path.write_text(json.dumps({"supervisor_pid": supervisor_pid, "child": child_identity}))
+    temp_path.chmod(0o600)
+    os.replace(temp_path, child_record_path)
+
+
+def record_child_before_exec() -> None:
+    # Runs in the child after it has its own process group and before exec, so the
+    # native process is recorded before it can run.
+    write_child_record({"pid": os.getpid(), "process_group": os.getpgrp()}, os.getppid())
 
 
 def stop_child(signum: int) -> None:
@@ -10772,6 +10809,7 @@ for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
 
 exit_code = 70
 try:
+    write_child_record(None, os.getpid())
     ready_temp_path = ready_path.with_name(f"{ready_path.name}.tmp.{os.getpid()}")
     ready_temp_path.write_text(f"{os.getpid()}\\n")
     ready_temp_path.chmod(0o600)
@@ -10791,7 +10829,25 @@ try:
                 sys.stderr.write("Native start was denied after the provider response deadline.\\n")
                 exit_code = 75
             else:
-                child = subprocess.Popen(command, stdin=stdin_handle, process_group=0)
+                child = subprocess.Popen(
+                    command,
+                    stdin=stdin_handle,
+                    process_group=0,
+                    preexec_fn=record_child_before_exec if child_record_path is not None else None,
+                )
+                if child_record_path is not None:
+                    try:
+                        started = subprocess.run(
+                            ["ps", "-o", "lstart=", "-p", str(child.pid)],
+                            check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, timeout=2,
+                        )
+                        lstart = " ".join(started.stdout.split())
+                        if started.returncode == 0 and lstart:
+                            write_child_record({"pid": child.pid, "process_group": child.pid,
+                                                "process_start_identity": f"ps-lstart:{lstart}"}, os.getpid())
+                    except (OSError, subprocess.SubprocessError):
+                        pass
                 try:
                     exit_code = child.wait(timeout=timeout_sec)
                 except subprocess.TimeoutExpired:
@@ -10830,6 +10886,7 @@ raise SystemExit(exit_code)
             f"{timeout_sec:g}" if timeout_sec is not None else "",
             str(stdin_path) if stdin_path is not None else "",
             str(response_deadline_at or ""),
+            str(child_record_path) if child_record_path is not None else "",
             *command,
         ]
 
@@ -12984,6 +13041,94 @@ raise SystemExit(exit_code)
                 return True
         return False
 
+    def _session_native_child(
+        self, worker_id: str, session: dict[str, object] | None
+    ) -> dict[str, object] | None | bool:
+        """The native child this session's supervisor recorded before it ran.
+
+        ``None``: no child to prove, because none was started or an older supervisor
+        kept no record. ``False``: a record exists but cannot be trusted.
+        """
+
+        if not isinstance(session, dict) or not str(session.get("run_id") or "").strip():
+            return None
+        path = self._native_child_record_path(
+            self._run_root(worker_id, str(session.get("run_id") or "").strip()),
+            str(session.get("attempt_id") or ""),
+        )
+        try:
+            record = json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            return False
+        try:
+            matches = (
+                isinstance(record, dict)
+                and "child" in record
+                and int(record.get("supervisor_pid") or 0)
+                == int(session.get("process_pid") or 0)
+                > 0
+            )
+        except (TypeError, ValueError):
+            return False
+        if not matches:
+            return False
+        child = record["child"]
+        if child is None:
+            return None
+        return child if isinstance(child, dict) else False
+
+    def _native_child_proven_gone(self, child: dict[str, object]) -> bool:
+        try:
+            pid = int(child.get("pid") or 0)
+            group = int(child.get("process_group") or 0)
+        except (TypeError, ValueError):
+            return False
+        identity = str(child.get("process_start_identity") or "").strip()
+        return (
+            pid > 0
+            and group > 0
+            and self._recorded_pid_is_proven_gone(pid, identity)
+            and not self._host_process_group_alive(group)
+        )
+
+    def _end_recorded_native_child(self, child: dict[str, object]) -> bool:
+        """End a recorded native child and its process group; True only with proof.
+
+        The group is signalled only while its leader is that exact recorded
+        incarnation, or once the leader is gone and the group remains: a group ID is
+        never reused while any of its members live.
+        """
+
+        try:
+            pid = int(child.get("pid") or 0)
+            group = int(child.get("process_group") or 0)
+        except (TypeError, ValueError):
+            return False
+        identity = str(child.get("process_start_identity") or "").strip()
+        if pid <= 0 or group <= 0:
+            return False
+        for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
+            if self._native_child_proven_gone(child):
+                return True
+            if (
+                self._pid_is_live(pid)
+                and not self._pid_is_zombie(pid)
+                and (not identity or self._process_start_identity(pid) != identity)
+            ):
+                return False  # never signal an unverified incarnation
+            try:
+                os.killpg(group, sig)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return False
+            deadline = time.monotonic() + wait
+            while not self._native_child_proven_gone(child) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        return self._native_child_proven_gone(child)
+
     def _clear_active_session(
         self,
         worker_id: str,
@@ -13258,6 +13403,14 @@ raise SystemExit(exit_code)
                     return False
                 if not stop_remembered_descendants():
                     return False
+                # The supervisor may have died abruptly while its recorded native child,
+                # in its own process group, runs on: end that exact child too.
+                native_child = self._session_native_child(worker_id, identity_session)
+                if native_child is False or (
+                    isinstance(native_child, dict)
+                    and not self._end_recorded_native_child(native_child)
+                ):
+                    return False
                 released = self._finalize_owned_host_generation(
                     worker_id,
                     expected_process=process,
@@ -13374,6 +13527,13 @@ raise SystemExit(exit_code)
                 return False
             descendants_gone = escaped_descendants_gone(2)
         confirmed = group_gone and descendants_gone
+        if confirmed:
+            native_child = self._session_native_child(worker_id, identity_session)
+            if native_child is False or (
+                isinstance(native_child, dict)
+                and not self._end_recorded_native_child(native_child)
+            ):
+                return False
         if confirmed and local_process is not None:
             try:
                 local_process.wait(timeout=2)
@@ -13698,6 +13858,9 @@ raise SystemExit(exit_code)
                     timeout_sec=run_timeout_sec,
                     stdin_path=host_stdin if stdin_text is not None else None,
                     response_deadline_at=str(worker.get("_provider_response_deadline_at") or ""),
+                    child_record_path=self._native_child_record_path(
+                        run_root, str(worker.get("_run_attempt_id") or "")
+                    ),
                 )
                 process = subprocess.Popen(
                     process_command,
@@ -13953,6 +14116,9 @@ raise SystemExit(exit_code)
                     stdin_path=host_stdin if stdin_text is not None else None,
                     native_input_context=self._native_input_context(worker),
                     response_deadline_at=str(worker.get("_provider_response_deadline_at") or ""),
+                    child_record_path=self._native_child_record_path(
+                        run_root, str(worker.get("_run_attempt_id") or "")
+                    ),
                 )
                 process = subprocess.Popen(
                     process_command,
@@ -14529,18 +14695,21 @@ raise SystemExit(exit_code)
         is never proof. Every host generation of the run must be released: one whose
         start was confirmed must have its recorded process proven gone with an empty
         process group, and one without a confirmed start must never have invoked the
-        runtime. No live handle, other run's session, unproven session process or
-        remembered descendant of this worker may remain. This only reads; it never
-        waits for the session lock, stops a process or changes state.
+        runtime. Each supervisor's native child runs in its own process group, so the
+        child it recorded must be proven gone too; an unrecorded child is never proof.
+        No live handle, other run's session, unproven session process or remembered
+        descendant of this worker may remain. This only reads; it never waits for the
+        session lock, stops a process or changes state.
         """
 
         worker_id = str(worker.get("worker_id") or "")
 
-        def gone(pid: int, group: int, identity: str) -> bool:
+        def gone(pid: int, group: int, identity: str, *, identity_required: bool = True) -> bool:
+            # Without a recorded start identity, only an absent PID proves the process gone.
             return (
                 pid > 0
                 and group > 0
-                and identity.startswith("ps-lstart:")
+                and (identity.startswith("ps-lstart:") or not identity_required)
                 and self._recorded_pid_is_proven_gone(pid, identity)
                 and not self._host_process_group_alive(group)
             )
@@ -14550,6 +14719,30 @@ raise SystemExit(exit_code)
                 return int(value or 0)
             except (TypeError, ValueError):
                 return -1
+
+        def native_child_gone(attempt_id: str, supervisor_pid: int) -> bool:
+            path = self._native_child_record_path(self._run_root(worker_id, run_id), attempt_id)
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                return False
+            if (
+                not isinstance(record, dict)
+                or "child" not in record
+                or number(record.get("supervisor_pid")) != supervisor_pid
+            ):
+                return False
+            child = record["child"]
+            if child is None:
+                return True  # the supervisor never started its native child
+            if not isinstance(child, dict):
+                return False
+            return gone(
+                number(child.get("pid")),
+                number(child.get("process_group")),
+                str(child.get("process_start_identity") or "").strip(),
+                identity_required=False,
+            )
 
         unproven = RuntimeErrorBase("The run's native process is not proven stopped")
         if not worker_id or not run_id or not host_leases:
@@ -14565,6 +14758,8 @@ raise SystemExit(exit_code)
             identity = str(lease.get("process_start_identity") or "").strip()
             if pid or str(lease.get("startup_state") or "") == "confirmed":
                 if not gone(pid, number(lease.get("process_group")), identity):
+                    raise unproven
+                if not native_child_gone(str(lease.get("attempt_id") or ""), pid):
                     raise unproven
             elif not lease.get("recorded_attempt_id") or str(
                 lease.get("attempt_runtime_invoked_at") or ""

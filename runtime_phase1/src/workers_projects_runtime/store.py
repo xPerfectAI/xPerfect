@@ -16695,8 +16695,17 @@ class Store:
         startup_token: str,
         retry_after: str,
         error_text: str,
+        require_prelaunch: bool = False,
+        released_by_start_fence: bool = False,
     ) -> dict[str, Any] | None:
-        """Atomically retire one proven-absent startup generation and requeue its run."""
+        """Atomically retire one proven-absent startup generation and requeue its run.
+
+        ``require_prelaunch`` also proves absence directly: the reserved generation never
+        invoked the runtime, so no native process exists for it.
+        ``released_by_start_fence`` repairs a run an earlier start fence left admitted
+        after releasing its generation; it implies ``require_prelaunch``.
+        """
+        require_prelaunch = require_prelaunch or released_by_start_fence
 
         now = utc_now()
         event_id = "evt_start_requeue_" + hashlib.sha256(
@@ -16722,11 +16731,36 @@ class Store:
                 and str(run["state"] or "")
                 in {"claimed", "admitted", "running", "settling", "queued"}
                 and str(lease["worker_id"] or "") == worker_id
-                and str(lease["status"] or "") == "active"
+                and (
+                    str(lease["status"] or "") == "active"
+                    if not released_by_start_fence
+                    else str(lease["status"] or "") == "released"
+                    and str(lease["release_reason"] or "") == "startup_fenced"
+                    and conn.execute(
+                        "SELECT 1 FROM host_run_leases WHERE run_id = ? AND status = 'active' LIMIT 1",
+                        (run_id,),
+                    ).fetchone() is None
+                )
                 and str(lease["startup_state"] or "")
                 in {"reserved", "termination_unconfirmed"}
                 and str(lease["startup_token"] or "") == str(startup_token)
             )
+            if exact and require_prelaunch:
+                attempt_id = str(run["active_attempt_id"] or "")
+                attempt = (
+                    conn.execute(
+                        "SELECT runtime_invoked_at FROM run_attempts WHERE attempt_id = ? AND run_id = ?",
+                        (attempt_id, run_id),
+                    ).fetchone()
+                    if attempt_id
+                    else None
+                )
+                exact = bool(
+                    str(run["state"] or "") in {"claimed", "admitted"}
+                    and str(lease["startup_state"] or "") == "reserved"
+                    and not str(run["runtime_invoked_at"] or "")
+                    and (attempt is None or not str(attempt["runtime_invoked_at"] or ""))
+                )
             if not exact:
                 conn.execute("COMMIT")
                 return None

@@ -13206,6 +13206,31 @@ class WorkersProjectsService:
         if worker["state"] in {"terminated", "failed"}:
             self._reconcile_terminated_worker_compute(worker)
             return
+        if (
+            active_run
+            and str(active_run.get("state") or "") in {"claimed", "admitted"}
+            and not self._local_processor_owns(str(worker["worker_id"]))
+        ):
+            # An earlier start fence released this generation before the runtime ran and
+            # left the run admitted, blocking the workspace. No process exists: queue it again.
+            fenced = self.store.latest_host_run_lease_for_run(str(active_run["run_id"]))
+            if (
+                fenced
+                and str(fenced.get("status") or "") == "released"
+                and str(fenced.get("release_reason") or "") == "startup_fenced"
+                and self.store.requeue_unconfirmed_host_run_start(
+                    worker_id=str(worker["worker_id"]),
+                    run_id=str(active_run["run_id"]),
+                    lease_id=str(fenced.get("lease_id") or ""),
+                    startup_token=str(fenced.get("startup_token") or ""),
+                    retry_after=self._now_datetime().isoformat(),
+                    error_text="A start refused before it ran left this run waiting; it is queued again.",
+                    released_by_start_fence=True,
+                )
+                is not None
+            ):
+                self._ensure_worker_processor(str(worker["worker_id"]))
+                return
         # A local processor owns provider completion and its final durable CAS. Reconciliation
         # must not parse the same just-finished transcript concurrently; that race previously
         # applied mission evidence rules to a valid conversation result and replaced it with a
@@ -14518,9 +14543,7 @@ class WorkersProjectsService:
                     )
                     if callable(clear_run_grant):
                         clear_run_grant(worker)
-                    self._release_host_run_lease(
-                        str(run["run_id"]), reason="startup_fenced"
-                    )
+                    self._requeue_fenced_run_start(worker, run, lease)
                     return
                 pending_start: dict[str, object] = {
                     "worker_id": worker_id,
@@ -15583,9 +15606,7 @@ class WorkersProjectsService:
                     )
                     if callable(clear_run_grant):
                         clear_run_grant(worker)
-                    self._release_host_run_lease(
-                        str(run["run_id"]), reason="startup_fenced"
-                    )
+                    self._requeue_fenced_run_start(worker, run, lease)
                     return
                 pending_start: dict[str, object] = {
                     "worker_id": worker_id,
@@ -19875,6 +19896,37 @@ class WorkersProjectsService:
                 "terminate_worker",
             }
         )
+
+    def _requeue_fenced_run_start(self, worker: dict, run: dict, lease: dict) -> None:
+        """Queue a run again when its start was refused before the runtime ran.
+
+        No native process exists for that generation. Leaving the run admitted without
+        a lease would block every later run of the workspace. A lease another owner holds
+        (restart retention, managed shutdown or an unfinished control) keeps its release path.
+        """
+
+        run_id = str(run.get("run_id") or "")
+        lease_id = str(lease.get("lease_id") or "")
+        with self._processors_lock:
+            shutdown_owned = lease_id in self._managed_shutdown_lease_ids
+        current = self.store.get_worker(str(worker.get("worker_id") or "")) or worker
+        if not (
+            shutdown_owned
+            or self._run_retained_for_restart(run_id)
+            or self._lease_is_fenced_by_lifecycle_claim(current, lease)
+        ):
+            requeued = self.store.requeue_unconfirmed_host_run_start(
+                worker_id=str(worker.get("worker_id") or ""),
+                run_id=run_id,
+                lease_id=lease_id,
+                startup_token=str(lease.get("startup_token") or ""),
+                retry_after=(self._now_datetime() + timedelta(seconds=2)).isoformat(),
+                error_text="The workspace changed before this run could start; it is queued again.",
+                require_prelaunch=True,
+            )
+            if requeued is not None:
+                return
+        self._release_host_run_lease(run_id, reason="startup_fenced")
 
     def reconcile_host_run_leases(self, *, stale_after_s: float | None = None) -> dict[str, int]:
         threshold = datetime.now(timezone.utc) - timedelta(
