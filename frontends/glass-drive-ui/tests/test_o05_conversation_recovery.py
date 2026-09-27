@@ -117,3 +117,37 @@ if (posted[1].idempotency_key!==posted[2].idempotency_key || posted[1].idempoten
 '''
     result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
+
+
+def test_a_conversation_this_deployment_cannot_run_says_why_and_offers_no_retry():
+    """On `./xperfect start` a conversation with a connected account needs the shared Linux
+    runtime. The reply states that and where to work instead; a Retry could never succeed."""
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index("const blockerMessages")
+    body = source[start:source.index("async function refresh()", start)]
+    node = shutil.which("node")
+    assert node, "Node is required for the conversation recovery proof"
+    code = r'''
+class El {
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
+  addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){}
+}
+const elements = {};
+const $ = (id) => (elements[id] ||= new El('div'));
+globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null};
+const base = '/v1/coordinator/conversations'; const conversationId = 'c1'; let latest = null;
+const states = {};
+async function refresh() {}
+globalThis.fetch = async () => ({ok:true, status:200, json:async()=>({})});
+''' + body + r'''
+const turn = (turn_id, blocker) => ({turn_id, origin:'interactive', message:`msg ${turn_id}`, blocker, request_id:'', response_json:''});
+render({turns:[turn('linux','shared_linux_runtime_required'), turn('busy','provider_account_busy')], goals:[]});
+const rows = $('messages').children.filter((c) => c.textContent.includes('Your message is saved'));
+if (rows[0].textContent !== 'Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project. Your message is saved.') throw new Error(rows[0].textContent);
+if (rows[0].children.length !== 0) throw new Error('a blocker this deployment cannot clear offered Retry');
+if (rows[1].children.length !== 1 || rows[1].children[0].textContent !== 'Retry') throw new Error('a retryable blocker lost Retry');
+console.log('ok');
+'''
+    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr or result.stdout

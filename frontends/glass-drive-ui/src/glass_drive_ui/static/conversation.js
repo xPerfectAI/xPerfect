@@ -27,7 +27,10 @@ const blockerMessages = Object.freeze({
   shared_resource_authority_unavailable:'The workspace is preparing.',
   ParallelExecutionIsolationError:'The worker runtime is not ready. Check setup, then Retry.',
   HostCapacityError:'The workspace capacity check is unavailable. Retry after it recovers.',
+  shared_linux_runtime_required:'Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.',
 });
+// A blocker no retry can clear on this deployment offers no Retry.
+const unavailableHere = new Set(['shared_linux_runtime_required']);
 function blockerMessage(code) {
   return blockerMessages[code] || 'The assistant is unavailable right now.';
 }
@@ -113,7 +116,9 @@ function render(snapshot) {
       messages.push(node('div',`${blockerMessage(turn.blocker)} Your message is saved and will start automatically.`,'message'));
     } else if (turn.origin === 'interactive' && turn.blocker && !turn.response_json) {
       const blocked=node('div',`${blockerMessage(turn.blocker)} Your message is saved.`,'message');
-      blocked.append(action('Retry',() => api(`${base}/${encodeURIComponent(conversationId)}/turns`,'POST',{idempotency_key:turn.turn_id,message:turn.message})));
+      if (!unavailableHere.has(turn.blocker)) {
+        blocked.append(action('Retry',() => api(`${base}/${encodeURIComponent(conversationId)}/turns`,'POST',{idempotency_key:turn.turn_id,message:turn.message})));
+      }
       messages.push(blocked);
     } else if (turn.origin === 'worker_results' && turn.blocker && !turn.response_json && turn.request_id) {
       const later=snapshot.turns.slice(snapshot.turns.indexOf(turn)+1);
