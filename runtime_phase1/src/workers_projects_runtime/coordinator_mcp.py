@@ -79,15 +79,38 @@ def project_coordinator_bootstrap(worker: dict, bundle: dict) -> dict:
     mcp = result.get("claude_project_mcp") or {}
     servers = mcp.get("mcpServers", mcp)
     from . import native_transport
+    servers["xperfect-coordinator"] = _claude_server(projection)
     if projection.get("transport") == "stdio":
-        servers["xperfect-coordinator"] = native_transport.stdio_server(projection["url"], "GLASSHIVE_PEER_TOKEN")
         block = native_transport.codex_stdio_block("xperfect-coordinator", projection["url"], "GLASSHIVE_PEER_TOKEN")
     else:
-        servers["xperfect-coordinator"] = {"type": "http", "url": projection["url"],
-                                          "headers": {"Authorization": "Bearer ${GLASSHIVE_PEER_TOKEN}"}}
         block = '[mcp_servers.xperfect-coordinator]\nurl = ' + json.dumps(projection["url"]) + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
     result["claude_project_mcp"] = {"mcpServers": servers}
     from .bootstrap import _strip_codex_mcp_server_blocks
     append = _strip_codex_mcp_server_blocks(result.get("codex_config_append", ""), {"xperfect-coordinator"}).rstrip()
     result["codex_config_append"] = append + '\n\n' + block
     return result
+
+
+def _claude_server(projection: dict) -> dict:
+    from . import native_transport
+    if projection.get("transport") == "stdio":
+        return native_transport.stdio_server(projection["url"], "GLASSHIVE_PEER_TOKEN")
+    return {"type": "http", "url": projection["url"],
+            "headers": {"Authorization": "Bearer ${GLASSHIVE_PEER_TOKEN}"}}
+
+
+def claude_coordinator_tool_rules(worker: dict, bundle: dict, servers: dict) -> list[str]:
+    """Claude permission rules for this run's own coordinator tools, as the Grok runner grants them.
+
+    Only the server entry this run's projection produced, with its token in the run's bundle,
+    qualifies; anything else keeps Claude's ordinary permission prompt.
+    """
+    projection = worker.get("_coordinator_native_projection")
+    environment = bundle.get("env") if isinstance(bundle.get("env"), dict) else {}
+    if (not isinstance(projection, dict) or not projection.get("token")
+            or projection.get("worker_id") != worker.get("worker_id")
+            or projection.get("run_id") != worker.get("_active_run_id")
+            or environment.get("GLASSHIVE_PEER_TOKEN") != projection["token"]
+            or servers.get("xperfect-coordinator") != _claude_server(projection)):
+        return []
+    return ["mcp__xperfect-coordinator__" + name for name in coordinator_tool_manifest()["tools"]]

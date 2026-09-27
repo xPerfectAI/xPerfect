@@ -15753,6 +15753,14 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             mcp_config = str(mcp_path) if mcp_path.is_file() else '{"mcpServers":{}}'
             command.extend(["--mcp-config", mcp_config, "--strict-mcp-config"])
         self._assert_host_claude_mcp_config(worker, mcp_path)
+        if self._conversation_mode_from_worker(worker) and mcp_path.is_file():
+            from .coordinator_mcp import claude_coordinator_tool_rules
+            coordinator_rules = claude_coordinator_tool_rules(
+                worker, bundle, json.loads(mcp_path.read_text()).get("mcpServers") or {})
+            if coordinator_rules and isinstance(settings.setdefault("permissions", {}), dict):
+                permissions = settings["permissions"]
+                allowed = permissions.get("allow") if isinstance(permissions.get("allow"), list) else []
+                permissions["allow"] = [*allowed, *coordinator_rules]
         if native_web_locked:
             sandbox = settings.setdefault("sandbox", {})
             if isinstance(sandbox, dict):

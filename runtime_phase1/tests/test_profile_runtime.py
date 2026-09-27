@@ -11542,6 +11542,73 @@ def test_host_claude_workspace_access_fails_closed_into_native_sandbox(tmp_path,
     assert settings["sandbox"]["filesystem"]["allowRead"] == [str(life.resolve())]
 
 
+def test_host_claude_workspace_access_allows_only_this_runs_coordinator_tools(tmp_path, monkeypatch):
+    # Workspace access keeps Claude in acceptEdits, where print mode denies every MCP tool its
+    # settings do not allow. The run's own coordinator projection authorizes exactly the manifest's
+    # tools, as the Grok runner's grant does; any other server entry is granted nothing.
+    from workers_projects_runtime.bootstrap import bootstrap_bundle_for
+    from workers_projects_runtime.coordinator_mcp import coordinator_tool_manifest
+
+    monkeypatch.setenv("WPR_CLAUDE_CODE_CONVERSATION_AUTO_MEMORY", "false")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "0")
+    source_claude_home = tmp_path / "source-claude"
+    (source_claude_home / "plugins" / "cache").mkdir(parents=True)
+    (source_claude_home / "plugins" / "marketplaces").mkdir(parents=True)
+    (source_claude_home / "plugins" / "installed_plugins.json").write_text("{}\n")
+    monkeypatch.setenv("GLASSHIVE_HOST_CLAUDE_CONFIG", str(source_claude_home))
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path / "private-state"))
+    life = tmp_path / "Life"
+    life.mkdir()
+    worker = {
+        "worker_id": "wrk_claude_coordinator",
+        "name": "Coordinator",
+        "profile": "claude-code",
+        "execution_mode": "host",
+        "trusted_run_lane": "conversation",
+        "workspace_root": str(life),
+        "model": "opus",
+        "_active_run_id": "run_coordinator",
+        "_coordinator_native_projection": {
+            "worker_id": "wrk_claude_coordinator",
+            "run_id": "run_coordinator",
+            "token": "synthetic-peer-token",
+            "url": "http://127.0.0.1:48766/v1/native/coordinator/",
+        },
+        "bootstrap_bundle_json": json.dumps(
+            {"run_mode": "conversation", "provider_model": "opus", "access_mode": "workspace"}
+        ),
+    }
+    # The service hands the runtime the run's projected bundle.
+    worker["bootstrap_bundle_json"] = json.dumps(bootstrap_bundle_for(worker))
+    runtime._materialize_workspace(worker, runtime._host_workspace_dir(worker))
+
+    def settings_for(candidate):
+        command, _ = runtime._build_command(
+            candidate, "Coordinate the work.", runtime._host_runtime_info(candidate)
+        )
+        assert command[command.index("--permission-mode") + 1] == "acceptEdits"
+        return json.loads(command[command.index("--settings") + 1])
+
+    granted = settings_for(worker)
+    other_endpoint = settings_for({
+        **worker,
+        "_coordinator_native_projection": {
+            **worker["_coordinator_native_projection"],
+            "url": "http://127.0.0.1:48766/v1/native/elsewhere/",
+        },
+    })
+
+    assert granted["permissions"] == {
+        "defaultMode": "acceptEdits",
+        "allow": [
+            "mcp__xperfect-coordinator__" + name
+            for name in coordinator_tool_manifest()["tools"]
+        ],
+    }
+    assert granted["sandbox"]["enabled"] is True
+    assert other_endpoint["permissions"] == {"defaultMode": "acceptEdits"}
+
+
 @pytest.mark.parametrize("chrome_enabled", ["0", "1"])
 def test_host_claude_private_config_receives_subscription_auth_without_copying_user_config(
     tmp_path, monkeypatch, chrome_enabled
