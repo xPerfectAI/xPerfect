@@ -891,6 +891,71 @@ def test_a_retried_goal_can_be_retried_again_after_its_replacement_fails(tmp_pat
     assert delegation['current_run_id'] == second['run_id']
 
 
+@pytest.mark.parametrize('entry', ['user_retry', 'recorded_retry'])
+def test_a_delegation_an_earlier_retry_left_behind_follows_that_retry(tmp_path, entry):
+    # A retry bound before delegations followed their replacements left the delegation on the run
+    # it replaced. The goal's own recorded retry names both runs, so a later Retry, or the
+    # maintenance tick that finishes a recorded one, continues from the goal's run.
+    store = Store(tmp_path / 'state.sqlite3')
+    service = WorkersProjectsService(
+        store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False,
+    )
+    service.start_assigned_run = lambda worker_id: None
+    core = CoordinatorService(store, service, Provider())
+    cid = create(core)
+    core.accept_turn('local', 'owner', cid, 'turn', 'Exact original request',
+                     [Goal(id='child', text='Exact child goal')])
+    work = store.reserve_delegation(
+        tenant_id='local', owner_id='owner', idempotency_key='left-behind-source',
+        request_digest='left-behind-source-digest', origin_ref='left-behind-origin',
+        title='Exact child', goal='Exact child goal', instruction='Exact child instruction',
+        origin_surface='coordinator', worker_name='Child', worker_role='research',
+        profile='openclaw-general', backend='openclaw', runtime='openclaw-stub',
+        model='stub-model', execution_mode='docker',
+    )
+    source_id = str(work['run_id'])
+    store.update_run(source_id, state='failed', failure_class='native_input_expired', failure_retryable=0)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE coordinator_goals SET work_ref=?,worker_id=?,run_id=? "
+            "WHERE conversation_id=? AND goal_id='child'",
+            (work['work_ref'], str(work['worker_id']), source_id, cid),
+        )
+    first = core.control('local', 'owner', cid, 'child', Control(
+        action='retry', run_id=source_id, idempotency_key='first-retry',
+    ))
+    store.update_run(first['run_id'], state='failed', failure_class='native_input_expired',
+                     failure_retryable=0)
+    unrelated = store.create_run(str(work['worker_id']), str(work['project_id']), 'Unrelated run')
+    store.update_run(unrelated['run_id'], state='failed', failure_class='native_input_expired')
+
+    def leave_delegation_on(run_id):
+        with store._connect() as conn:
+            conn.execute("UPDATE delegations SET current_run_id=? WHERE work_ref=?", (run_id, work['work_ref']))
+
+    second_retry = Control(action='retry', run_id=first['run_id'], idempotency_key='second-retry')
+    if entry == 'recorded_retry':
+        # No recorded retry names an unrelated run: refused, and left recorded for maintenance.
+        leave_delegation_on(unrelated['run_id'])
+        with pytest.raises(CoordinatorConflict):
+            core.control('local', 'owner', cid, 'child', second_retry)
+    leave_delegation_on(source_id)
+    if entry == 'user_retry':
+        second = core.control('local', 'owner', cid, 'child', second_retry)
+    else:
+        core.recover_retry_actions('local', 'owner', cid)
+        second = core.goal_snapshot('local', 'owner', cid, 'child')
+
+    assert second['run_id'] not in {source_id, first['run_id'], unrelated['run_id']}
+    delegation = store.get_delegation(work['work_ref'], tenant_id='local', owner_id='owner')
+    assert delegation['current_run_id'] == second['run_id']
+    with store._connect() as conn:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM coordinator_actions WHERE conversation_id=? AND response_json=''", (cid,),
+        ).fetchone()[0]
+    assert pending == 0
+
+
 @pytest.mark.parametrize('phase', ['before_binding', 'after_binding', 'bound_success'])
 def test_real_retry_dispatch_binding_and_exact_stop(tmp_path, monkeypatch, phase):
     class CountingRuntime(StubRuntime):

@@ -887,6 +887,39 @@ class CoordinatorService:
             conn.execute("UPDATE coordinator_actions SET response_json=? WHERE conversation_id=? AND goal_id=? AND idempotency_key=?", (canonical(response), conversation_id, goal_id, control.idempotency_key))
         return response
 
+    def _follow_recorded_retry(self, tenant: str, owner: str, conversation_id: str, goal_id: str,
+                               work_ref: str, run_id: str) -> None:
+        """Move a delegation that an earlier retry of this goal left on the run it replaced.
+
+        Before delegations followed their goal's replacements, a completed retry recorded its
+        source run and its replacement. Only that recorded pair moves the delegation here.
+        """
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            delegation = conn.execute(
+                "SELECT current_run_id FROM delegations WHERE work_ref=? AND tenant_id=? AND owner_id=?",
+                (work_ref, tenant, owner),
+            ).fetchone()
+            if delegation is None or delegation["current_run_id"] == run_id:
+                return
+            for action in conn.execute(
+                "SELECT payload_json,response_json FROM coordinator_actions "
+                "WHERE conversation_id=? AND goal_id=? AND response_json<>''",
+                (conversation_id, goal_id),
+            ).fetchall():
+                try:
+                    payload, response = json.loads(action["payload_json"]), json.loads(action["response_json"])
+                except ValueError:
+                    continue
+                if (isinstance(payload, dict) and isinstance(response, dict) and payload.get("action") == "retry"
+                        and payload.get("run_id") == delegation["current_run_id"] and response.get("run_id") == run_id):
+                    conn.execute(
+                        "UPDATE delegations SET current_run_id=?,updated_at=? "
+                        "WHERE work_ref=? AND tenant_id=? AND owner_id=? AND current_run_id=?",
+                        (run_id, utc_now(), work_ref, tenant, owner, delegation["current_run_id"]),
+                    )
+                    return
+
     def _retry_goal(self, tenant: str, owner: str, conversation_id: str, goal_id: str, control: Control) -> dict:
         """Continue one failed child and bind its exact replacement to the same goal."""
 
@@ -915,6 +948,7 @@ class CoordinatorService:
         if replacement is None:
             if goal["intent_state"] == "cancelled" or goal["run_id"] != control.run_id:
                 raise CoordinatorConflict("Retry targets a stopped or changed goal")
+            self._follow_recorded_retry(tenant, owner, conversation_id, goal_id, goal["work_ref"], control.run_id)
             try:
                 outcome = self.service.execute_active_work_action(
                     delegation, action="retry", idempotency_key=effect_key,
