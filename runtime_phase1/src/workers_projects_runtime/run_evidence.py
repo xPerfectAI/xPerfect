@@ -64,8 +64,9 @@ _OWNER_SECRET_REDACTIONS: tuple[RedactionRule, ...] = (
 _SECRET_REDACTIONS = (*_LOCAL_PATH_REDACTIONS, *_OWNER_SECRET_REDACTIONS)
 _FINAL_REPORT_RE = re.compile(
     r"(?m)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*)?"
-    r"(?:(?:[*_]{1,3}|`{1,3})[ \t]*)?FINAL REPORT\s*:\s*"
-    r"(?:(?:[*_]{1,3}|`{1,3})[ \t]*)?",
+    r"(?:(?P<wrap>[*_]{1,3}|`{1,3})[ \t]*)?FINAL REPORT\s*:"
+    # Only the marker's own closing wrapper belongs to it: a report may start with code or emphasis.
+    r"(?(wrap)(?P=wrap)?)\s*",
     re.I,
 )
 

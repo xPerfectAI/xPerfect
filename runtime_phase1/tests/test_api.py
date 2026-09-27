@@ -1172,6 +1172,19 @@ def test_terminal_callback_message_accepts_backtick_wrapped_final_report_marker(
     assert terminal_callback_full_message(output) == "Captured 42 rows."
 
 
+def test_terminal_callback_message_keeps_a_report_that_starts_with_code_or_emphasis():
+    # Only the marker's own wrapper is removed; the report's first character is its own.
+    cases = {
+        "Done.\n\nFINAL REPORT:\n`release-notes.md` is done.": "`release-notes.md` is done.",
+        "FINAL REPORT: **Done.** Nothing is blocking.": "**Done.** Nothing is blocking.",
+        "**FINAL REPORT:**\n_Draft_ saved.": "_Draft_ saved.",
+        "`FINAL REPORT:` `notes.md` is ready.": "`notes.md` is ready.",
+    }
+    for output, report in cases.items():
+        assert terminal_callback_message(output) == report
+        assert terminal_callback_full_message(output) == report
+
+
 def test_terminal_callback_message_uses_tail_without_mid_word_fragment():
     output = "\n\n".join(
         [

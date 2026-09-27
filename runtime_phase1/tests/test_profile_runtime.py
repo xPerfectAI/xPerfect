@@ -3494,6 +3494,21 @@ def test_codex_parser_accepts_backtick_wrapped_final_report_section(tmp_path):
     assert output == "Only this final result should be posted."
 
 
+def test_claude_parser_keeps_a_final_report_that_starts_with_code(tmp_path):
+    # Only the marker's own wrapper is removed; the report's first character is its own.
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path))
+    worker = {"worker_id": "wrk_code_first_report", "name": "Synthetic worker", "profile": "claude-code", "model": "opus"}
+    report = "I wrote `release-notes.md`.\n\nFINAL REPORT:\n`release-notes.md` is done. It is 89 words."
+    stdout = "\n".join([
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": report}]}}),
+        json.dumps({"type": "result", "session_id": "claude-session", "result": report}),
+    ])
+
+    _, output = runtime._parse_output(worker, stdout, "", runtime._runtime_info(worker))
+
+    assert output == "`release-notes.md` is done. It is 89 words."
+
+
 def test_codex_parser_strips_plain_resume_final_report(tmp_path):
     runtime = CodexCliRuntime(base_dir=str(tmp_path))
     worker = {

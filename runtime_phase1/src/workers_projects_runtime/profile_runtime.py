@@ -9854,11 +9854,6 @@ _SECRET_REDACTIONS: tuple[RedactionRule, ...] = (
     (re.compile(r"(?i)data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{256,}"), "[REDACTED_IMAGE_BASE64]"),
     (re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{512,}={0,2}(?![A-Za-z0-9+/=])"), "[REDACTED_LONG_BASE64]"),
 )
-_FINAL_REPORT_PATTERN = re.compile(
-    r"(?mi)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*)?"
-    r"(?:(?:[*_]{1,3}|`{1,3})[ \t]*)?FINAL REPORT\s*:\s*"
-    r"(?:(?:[*_]{1,3}|`{1,3})[ \t]*)?"
-)
 _HOST_RUN_OUTPUT_MAX_CHARS = 64000
 
 
@@ -14472,7 +14467,7 @@ raise SystemExit(exit_code)
 
         session_key, output = self._parse_output(worker, stdout, stderr, info)
         self._remember_native_session_key(worker, session_key)
-        if _FINAL_REPORT_PATTERN.search(stdout) and not _FINAL_REPORT_PATTERN.search(output):
+        if FINAL_REPORT_PATTERN.search(stdout) and not FINAL_REPORT_PATTERN.search(output):
             output = f"FINAL REPORT:\n{output.strip()}"
         redacted_output = _redact_text(output.strip())
         if len(redacted_output) > _HOST_RUN_OUTPUT_MAX_CHARS:

@@ -87,6 +87,7 @@ from .recurrence import (
 )
 from .runtime_env import load_viventium_runtime_env
 from .runtime_identity import derive_legacy_backend_label
+from .run_evidence import FINAL_REPORT_PATTERN
 from .run_actions import (
     RunActionError,
     mint_run_action_capability,
@@ -206,11 +207,6 @@ from .worker_isolation_audit import capture_worker_isolation_audit
 
 logger = logging.getLogger(__name__)
 TERMINAL_CALLBACK_MESSAGE_LIMIT = 4000
-FINAL_REPORT_PATTERN = re.compile(
-    r"(?mi)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*)?"
-    r"(?:(?:[*_]{1,3}|`{1,3})[ \t]*)?FINAL REPORT\s*:\s*"
-    r"(?:(?:[*_]{1,3}|`{1,3})[ \t]*)?"
-)
 VIVENTIUM_CALLBACK_PATH = "/api/viventium/glasshive/callback"
 SCHEDULING_CORTEX_CALLBACK_PATH = "/internal/scheduled-prompts/glasshive-callback"
 ACTIONABLE_CALLBACK_LINK_EVENTS = {
