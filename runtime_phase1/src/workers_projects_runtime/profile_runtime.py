@@ -10446,8 +10446,12 @@ class HostNativeCliMixin:
     execution_mode = "host"
     worker_root_name = "host_cli_runtime"
 
+    def _release_run_transcript(self, run_root: Path) -> None:
+        """End every attempt's claim on the run's one transcript before a launch rewrites it."""
+        (run_root / "transcript-owner.json").unlink(missing_ok=True)
+
     def _claim_run_transcript(self, run_root: Path, attempt_id: str) -> None:
-        """Name the launch that is about to rewrite the run's one transcript, before it does."""
+        """Name the launch whose fresh transcript this is, once it holds nothing earlier."""
         _atomic_write_private_text(
             run_root / "transcript-owner.json",
             json.dumps({"attempt_id": attempt_id, "launch_id": secrets.token_hex(16)}),
@@ -13947,10 +13951,12 @@ raise SystemExit(exit_code)
         native_session_stop = Event()
         native_session_thread: Thread | None = None
         try:
-            self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
+            self._release_run_transcript(run_root)
             with raw_stdout.open("w") as stdout_handle, raw_stderr.open("w") as stderr_handle:
                 raw_stdout.chmod(0o600)
                 raw_stderr.chmod(0o600)
+                # Only the fresh transcript is this launch's; its attempt may read it from here.
+                self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
                 process_command = self._durable_host_process_command(
                     command,
                     run_root=run_root,
@@ -14205,10 +14211,12 @@ raise SystemExit(exit_code)
         owned_session: dict[str, object] | None = None
         startup_cleanup_unconfirmed = False
         try:
-            self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
+            self._release_run_transcript(run_root)
             with raw_stdout.open("w") as stdout_handle, raw_stderr.open("w") as stderr_handle:
                 raw_stdout.chmod(0o600)
                 raw_stderr.chmod(0o600)
+                # Only the fresh transcript is this launch's; its attempt may read it from here.
+                self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
                 process_command = self._durable_host_process_command(
                     command,
                     run_root=run_root,

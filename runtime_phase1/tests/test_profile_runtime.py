@@ -10611,9 +10611,8 @@ def test_provider_activity_log_reads_only_the_bound_native_attempt(tmp_path):
     assert second == ("codex-cli", "second")
 
 
-def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_path, monkeypatch):
-    # A host launch rewrites the run's one transcript at its run root. A read bound to an attempt
-    # returns that transcript only while that attempt's launch owns it.
+def _host_attempt_launcher(tmp_path, monkeypatch):
+    """Launch host conversation attempts of one run through the real writer and read them back."""
     runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
     host = runtime.host_claude
     life = tmp_path / "Life"
@@ -10628,12 +10627,12 @@ def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_pat
         "bootstrap_bundle_json": json.dumps({"run_mode": "conversation"}),
     }
     run_id = "run_host_attempts"
+    answers = []
+    in_process = []
 
-    def read(attempt, reader=runtime):
+    def read(attempt, reader=None):
+        reader = reader or runtime
         return reader.provider_activity_log({**worker, "_provider_activity_attempt_id": attempt}, run_id)[1]
-
-    answers = iter(["First attempt's answer.", "Second attempt's answer."])
-    during_second_launch = []
 
     class NativeProcess:
         pid = 12345
@@ -10643,10 +10642,9 @@ def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_pat
             _mark_fake_host_supervisor_ready(list(command), self.pid)
             # The supervisor records this attempt's native child before the child runs.
             Path(command[8]).write_text(json.dumps({"supervisor_pid": self.pid, "child": None}))
-            answer = next(answers)
-            if answer.startswith("Second"):
-                during_second_launch.append((read("att-first"), read("att-second")))
-            kwargs["stdout"].write(json.dumps({"type": "result", "result": answer}) + "\n")
+            for observe in in_process:
+                observe()
+            kwargs["stdout"].write(json.dumps({"type": "result", "result": answers.pop(0)}) + "\n")
             kwargs["stdout"].flush()
 
         def communicate(self, input=None, timeout=None):
@@ -10665,9 +10663,23 @@ def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_pat
     monkeypatch.setattr(host, "_process_start_identity", lambda _pid: "ps-lstart:Mon Jan 01 00:00:00 2024")
     monkeypatch.setattr("workers_projects_runtime.profile_runtime.subprocess.Popen", NativeProcess)
 
-    host.run_task({**worker, "_run_attempt_id": "att-first"}, "Talk naturally.", run_id=run_id)
+    def launch(attempt, answer):
+        answers.append(answer)
+        host.run_task({**worker, "_run_attempt_id": attempt}, "Talk naturally.", run_id=run_id)
+
+    return runtime, host, run_id, launch, read, in_process
+
+
+def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_path, monkeypatch):
+    # A host launch rewrites the run's one transcript at its run root. A read bound to an attempt
+    # returns that transcript only while that attempt's launch owns it.
+    _, host, _, launch, read, in_process = _host_attempt_launcher(tmp_path, monkeypatch)
+
+    launch("att-first", "First attempt's answer.")
     first_while_current = read("att-first")
-    host.run_task({**worker, "_run_attempt_id": "att-second"}, "Talk naturally.", run_id=run_id)
+    during_second_launch = []
+    in_process.append(lambda: during_second_launch.append((read("att-first"), read("att-second"))))
+    launch("att-second", "Second attempt's answer.")
 
     assert "First attempt's answer." in first_while_current
     assert during_second_launch == [("", "")]
@@ -10686,6 +10698,49 @@ def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_pat
         return current
     monkeypatch.setattr(host, "_attempt_transcript", claimed_mid_read)
     assert read("att-second") == ""
+
+
+def test_a_host_launch_claims_only_its_fresh_transcript(tmp_path, monkeypatch):
+    # The moment a launch's attempt can read the run's transcript, it holds nothing an earlier
+    # launch wrote.
+    _, host, _, launch, read, _ = _host_attempt_launcher(tmp_path, monkeypatch)
+    launch("att-first", "First attempt's answer.")
+    claim = host._claim_run_transcript
+    at_claim = []
+
+    def observed_claim(run_root, attempt_id):
+        claim(run_root, attempt_id)
+        at_claim.append(read(attempt_id))
+    monkeypatch.setattr(host, "_claim_run_transcript", observed_claim)
+    launch("att-second", "Second attempt's answer.")
+
+    assert at_claim == [""]
+
+
+@pytest.mark.parametrize("stopped_at", ["released", "rewritten"])
+def test_a_host_launch_stopped_before_its_claim_leaves_no_owner(tmp_path, monkeypatch, stopped_at):
+    # A launch stopped after ending the earlier claim, before or after rewriting the transcript,
+    # leaves no attempt that can read it, across a restart too.
+    _, host, _, launch, read, _ = _host_attempt_launcher(tmp_path, monkeypatch)
+    launch("att-first", "First attempt's answer.")
+
+    class LaunchStopped(BaseException):
+        pass
+
+    def stop(*_args):
+        raise LaunchStopped()
+    if stopped_at == "released":
+        release = host._release_run_transcript
+        monkeypatch.setattr(host, "_release_run_transcript", lambda run_root: (release(run_root), stop()))
+    else:
+        monkeypatch.setattr(host, "_claim_run_transcript", stop)
+    with pytest.raises(LaunchStopped):
+        launch("att-second", "Second attempt's answer.")
+
+    restarted = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
+    for reader in (None, restarted):
+        assert read("att-second", reader) == ""
+        assert read("att-first", reader) == ""
 
 
 def test_host_conversation_broker_config_stays_in_private_worker_state(tmp_path, monkeypatch):
