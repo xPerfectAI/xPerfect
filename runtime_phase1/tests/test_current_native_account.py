@@ -449,3 +449,72 @@ def test_a_child_orphaned_before_its_record_is_held_then_recovered_after_it_exit
             try:os.kill(child_pid,signal.SIGKILL)
             except ProcessLookupError:pass
         if supervisor.poll() is None:supervisor.kill();supervisor.wait()
+
+
+def test_stop_ends_a_child_orphaned_in_the_fork_gap_and_the_account_is_then_recovered(tmp_path,monkeypatch):
+    """The supervisor dies after the fork, before its long-running child has left its group.
+    The child records its own start identity before it runs, so Stop can still end that exact
+    child, never an unverified process, and the held account is recovered for the next run."""
+    monkeypatch.setenv('HOME',str(tmp_path))
+    import signal
+    from workers_projects_runtime.profile_runtime import HostClaudeCodeRuntime
+    runtime=HostClaudeCodeRuntime(base_dir=str(tmp_path/'native-work'))
+    worker={'worker_id':'wrk_gap_stop','execution_mode':'host','profile':'claude-code'}
+    run_root=runtime._run_root('wrk_gap_stop','run_gap_stop');run_root.mkdir(parents=True)
+    child_record=runtime._native_child_record_path(run_root,'att_gap_stop')
+    command=runtime._durable_host_process_command(['sleep','60'],run_root=run_root,exit_path=run_root/'exit_code',
+                                                  child_record_path=child_record)
+    supervisor_script=run_root/'native-process-supervisor.py'
+    source=supervisor_script.read_text()
+    anchor='def record_child_before_exec() -> None:\n'
+    assert source.count(anchor)==1
+    supervisor_script.write_text(source.replace(anchor,anchor+'    time.sleep(2.0)  # widened scheduling gap\n'))
+    supervisor=subprocess.Popen(command,start_new_session=True,stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    child_pid=0
+    def wait_for(check,seconds=10):
+        deadline=time.monotonic()+seconds
+        while not check():
+            assert time.monotonic()<deadline
+            time.sleep(0.02)
+    try:
+        wait_for(lambda:(run_root/'supervisor-ready').exists())
+        runtime._write_active_session('wrk_gap_stop',{
+            'session_name':'host-run_gap_stop','run_id':'run_gap_stop','attempt_id':'att_gap_stop',
+            'stdout_path':str(run_root/'stdout.log'),'stderr_path':str(run_root/'stderr.log'),
+            'exit_path':str(run_root/'exit_code'),'model':'opus','process_pid':supervisor.pid})
+        session=runtime._read_active_session('wrk_gap_stop')
+        supervisor_pid=supervisor.pid
+        (run_root/'start-permit').write_text('synthetic permit')
+        def found_child():
+            nonlocal child_pid
+            listed=subprocess.run(['pgrep','-P',str(supervisor_pid)],capture_output=True,text=True).stdout.split()
+            child_pid=int(listed[0]) if listed else 0
+            return child_pid
+        wait_for(found_child)
+        assert os.getpgid(child_pid)==supervisor_pid and json.loads(child_record.read_text())['child'] is None
+        os.kill(supervisor_pid,signal.SIGKILL);supervisor.wait()
+        wait_for(lambda:(json.loads(child_record.read_text()).get('child') or {}).get('process_start_identity'))
+        wait_for(lambda:os.getpgid(child_pid)==child_pid)
+        child=json.loads(child_record.read_text())['child']
+        assert child['pid']==child_pid and child['process_start_identity']==runtime._process_start_identity(child_pid)
+
+        assert runtime._stop_active_process('wrk_gap_stop',worker=worker,run_id='run_gap_stop')
+        def child_gone():
+            try:os.kill(child_pid,0)
+            except ProcessLookupError:return True
+            return runtime._pid_is_zombie(child_pid)
+        assert child_gone(), 'Stop confirmed while the orphaned native child ran on'
+        assert runtime._read_active_session('wrk_gap_stop') is None
+
+        record={'worker_id':'wrk_gap_stop','run_id':'run_gap_stop','status':'released','startup_state':'confirmed',
+                'pid':supervisor_pid,'process_group':int(session['process_group']),
+                'process_start_identity':session['process_start_identity'],'attempt_id':'att_gap_stop',
+                'recorded_attempt_id':'att_gap_stop','attempt_runtime_invoked_at':'2026-09-26T00:00:00Z'}
+        HostClaudeCodeRuntime(base_dir=str(tmp_path/'native-work')).confirm_retained_run_stopped(
+            worker,'run_gap_stop',[record])        # the held account is free for the next run
+    finally:
+        if child_pid:
+            try:os.killpg(child_pid,signal.SIGKILL)
+            except (ProcessLookupError,PermissionError):pass
+        if supervisor.poll() is None:supervisor.kill();supervisor.wait()

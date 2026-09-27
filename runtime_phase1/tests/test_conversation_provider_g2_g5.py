@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from pathlib import Path
 import subprocess
 from threading import Event, Lock
 import sys
@@ -472,6 +474,58 @@ def test_native_supervisor_denies_permit_consumed_after_provider_deadline(tmp_pa
         assert process.returncode == 75, stderr
         assert not marker.exists()
         assert exit_path.read_text().strip() == "75"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+
+
+def test_native_child_whose_identity_lookup_outlasts_the_provider_deadline_never_runs(tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    exit_path = run_root / "exit_code"
+    marker = run_root / "native-child-started"
+    lookup = run_root / "identity-lookup-began"
+    child_record = run_root / "native-child-run.json"
+    command = HostCodexCliRuntime._durable_host_process_command(
+        object(),
+        [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)],
+        run_root=run_root,
+        exit_path=exit_path,
+        response_deadline_at=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+        child_record_path=child_record,
+    )
+    supervisor = Path(command[1])
+    source = supervisor.read_text()
+    anchor = "def own_start_identity() -> str:\n"
+    assert source.count(anchor) == 1
+    # The supervisor forks in time; the child's identity lookup then returns just after the deadline.
+    supervisor.write_text(source.replace(anchor, anchor + (
+        f"    Path({str(lookup)!r}).write_text('began')\n"
+        "    while not response_deadline_expired():\n"
+        "        time.sleep(0.02)\n"
+    )))
+    process = subprocess.Popen(
+        command, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        start_new_session=True, text=True,
+    )
+    try:
+        ready = run_root / "supervisor-ready"
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        (run_root / "start-permit").write_text("start\n")
+        _, stderr = process.communicate(timeout=5)
+        assert lookup.exists(), stderr
+        assert process.returncode == 75, stderr
+        assert "denied after the provider response deadline" in stderr
+        assert not marker.exists()
+        assert exit_path.read_text().strip() == "75"
+        assert json.loads(child_record.read_text())["child"] is None
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process.pid, 0)
     finally:
         if process.poll() is None:
             process.terminate()

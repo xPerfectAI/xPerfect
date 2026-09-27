@@ -10755,11 +10755,30 @@ def write_child_record(child_identity: dict | None) -> None:
     os.replace(temp_path, child_record_path)
 
 
+def own_start_identity() -> str:
+    started = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(os.getpid())],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5,
+    )
+    lstart = " ".join(started.stdout.split())
+    return f"ps-lstart:{lstart}" if started.returncode == 0 and lstart else ""
+
+
 def record_child_before_exec() -> None:
-    # Runs in the child before exec. The record is written while the child is still in
-    # this supervisor's process group, and only then does the child lead its own group:
-    # a child without a record is always in the supervisor's group.
-    write_child_record({"pid": os.getpid(), "process_group": os.getpid()})
+    # Runs in the child before exec. The record, with the child's own start identity, is
+    # written while the child is still in this supervisor's process group, and only then
+    # does the child lead its own group. A child without a record is always in the
+    # supervisor's group, and one that cannot prove its identity never runs.
+    identity = own_start_identity()
+    if not identity:
+        raise RuntimeError("The native child could not record its start identity")
+    # That lookup can wait, so the provider response deadline checked before the fork is
+    # checked again here: a child that reaches it late neither records nor runs.
+    if response_deadline_expired():
+        raise RuntimeError("Native start was denied after the provider response deadline")
+    write_child_record(
+        {"pid": os.getpid(), "process_group": os.getpid(), "process_start_identity": identity}
+    )
     os.setpgid(0, 0)
 
 
@@ -10833,35 +10852,30 @@ try:
                 sys.stderr.write("Native start was denied after the provider response deadline.\\n")
                 exit_code = 75
             else:
-                child = subprocess.Popen(
-                    command,
-                    stdin=stdin_handle,
-                    preexec_fn=record_child_before_exec if child_record_path is not None else None,
-                    **({} if child_record_path is not None else {"process_group": 0}),
-                )
-                if child_record_path is not None:
-                    try:
-                        started = subprocess.run(
-                            ["ps", "-o", "lstart=", "-p", str(child.pid)],
-                            check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            text=True, timeout=2,
-                        )
-                        lstart = " ".join(started.stdout.split())
-                        if started.returncode == 0 and lstart:
-                            write_child_record({"pid": child.pid, "process_group": child.pid,
-                                                "process_start_identity": f"ps-lstart:{lstart}"})
-                    except (OSError, subprocess.SubprocessError):
-                        pass
                 try:
-                    exit_code = child.wait(timeout=timeout_sec)
-                except subprocess.TimeoutExpired:
-                    sys.stderr.write(
-                        f"GlassHive host-native process timed out after {timeout_sec:g}s.\\n"
+                    child = subprocess.Popen(
+                        command,
+                        stdin=stdin_handle,
+                        preexec_fn=record_child_before_exec if child_record_path is not None else None,
+                        **({} if child_record_path is not None else {"process_group": 0}),
                     )
-                    sys.stderr.flush()
-                    stop_child(signal.SIGTERM)
-                    await_child_stop()
-                    exit_code = 124
+                except subprocess.SubprocessError:
+                    # The child refused before exec, so nothing native ran.
+                    if not response_deadline_expired():
+                        raise
+                    sys.stderr.write("Native start was denied after the provider response deadline.\\n")
+                    exit_code = 75
+                else:
+                    try:
+                        exit_code = child.wait(timeout=timeout_sec)
+                    except subprocess.TimeoutExpired:
+                        sys.stderr.write(
+                            f"GlassHive host-native process timed out after {timeout_sec:g}s.\\n"
+                        )
+                        sys.stderr.flush()
+                        stop_child(signal.SIGTERM)
+                        await_child_stop()
+                        exit_code = 124
         finally:
             stdin_handle.close()
 except SupervisorSignal:
