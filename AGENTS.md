@@ -5,6 +5,18 @@ examples usable without another application. When this checkout is nested in a h
 `viventium_v0_4/xPerfect` is in Viventium, and `../../AGENTS.md` exists, read it before work that
 affects the host; it owns the host's scope, safety, delivery, and verification rules.
 
+## Product Standard
+
+- Own the whole user result, not one file. Trace the real trigger, runtime, and output first, and
+  judge a change by what a new user gets: output quality, wait, and actions needed, not code or
+  test volume.
+- A new user should reach the main value on first use, with no learning curve, in the fewest
+  actions, with their exact choices and safety kept. Say what cannot work before asking for input.
+- Reuse existing project mechanisms and current established practice before adding one. Never
+  hardcode or overfit to one example.
+- QA scope: follow the latest explicit or approved mode (`skip`, `critical-path`, `blast-radius`,
+  or `full`) and pass it unchanged to every delegated agent. Skipped is not passed.
+
 ## Worker Runtime Boundary
 
 - Workers are general intelligent
