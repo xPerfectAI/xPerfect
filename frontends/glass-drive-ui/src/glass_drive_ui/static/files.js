@@ -10,6 +10,14 @@ const stateLabel = (state) => ({ pending: 'Waiting', checking: 'Preparing', rece
 
 const key = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+// One logical attach per upload and destination. The runtime replays a request key it has already
+// accepted, so a retry or a reload cannot add the same upload to the workspace twice.
+async function attachRequestKey(uploadId, directory) {
+  const bytes = new TextEncoder().encode(JSON.stringify([uploadId, directory ?? null]));
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes));
+  return `attach.${Array.from(digest.slice(0, 24), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 // Browser storage is optional. Keep retry keys and hints usable for this page
 // when access is denied or storage is full; this fallback does not survive reload.
 const transientFileHints = new Map();
@@ -874,9 +882,22 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
     render();
   }
   render();
-  return { readyIds, readyRefs, blocked, items, addFiles, addDrop, refreshBudget, setOwnerScope, setBusy, ownerScope: () => ownerScope, dismissReady(uploadId) {
-    if (!ownerScope) return;
-    if (!items.some((item) => item.upload_id === uploadId && item.state === 'ready')) return;
+  return { readyIds, readyRefs, blocked, items, addFiles, addDrop, refreshBudget, setOwnerScope, setBusy, ownerScope: () => ownerScope, dismissReady(uploadId, owner = ownerScope) {
+    // An accepted attach belongs to the owner who made it. A failed Files refresh may have cleared
+    // this draft's owner since; record the upload in that owner's draft only, never another's.
+    if (!owner) return;
+    if (owner !== ownerScope) {
+      const ownerStorageKey = `xperfect.files.draft.${scope}.${owner}`;
+      const ownerDraftId = fileHints.getItem(ownerStorageKey);
+      if (!ownerDraftId) return;
+      const ownerDismissedKey = `${ownerStorageKey}.attached.${ownerDraftId}`;
+      let dismissed = [];
+      try { dismissed = JSON.parse(fileHints.getItem(ownerDismissedKey) || '[]'); } catch { dismissed = []; }
+      if (!Array.isArray(dismissed)) dismissed = [];
+      if (!dismissed.includes(uploadId)) fileHints.setItem(ownerDismissedKey, JSON.stringify([...dismissed, uploadId]));
+      return;
+    }
+    if (items.some((item) => item.upload_id === uploadId && item.state !== 'ready')) return;
     attached.add(uploadId);
     fileHints.setItem(dismissedKey, JSON.stringify([...attached]));
     render();
@@ -1251,14 +1272,36 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
   });
   moveButton.addEventListener('click', () => pickMove([...selected.values()]));
   more.addEventListener('click', () => void open(directory, true));
+  // An upload keeps the destination of its first attach attempt, so a retry after a failed or
+  // unanswered attempt reuses its request key even if Files now shows another folder.
+  const attachDestination = (uploadId, chosen) => {
+    const hint = `xperfect.files.attach.${workerId}.${uploadId}`;
+    try {
+      const stored = JSON.parse(fileHints.getItem(hint) || 'null');
+      if (stored && typeof stored.directory === 'string') return stored.directory;
+    } catch { /* A damaged hint falls back to the folder chosen now. */ }
+    fileHints.setItem(hint, JSON.stringify({ directory: chosen }));
+    return chosen;
+  };
   return { open, refresh: () => open(directory), attach: async (uploadIds) => {
-    if (!uploadIds.length) return;
-    const attachKey = `xperfect.files.attach.${workerId}.${JSON.stringify([directory, uploadIds])}`;
-    const idempotencyKey = fileHints.getItem(attachKey) || key();
-    fileHints.setItem(attachKey, idempotencyKey);
-    const data = await mutate('/files', 'POST', { upload_ids: uploadIds, idempotency_key: idempotencyKey, directory });
-    fileHints.removeItem(attachKey);
-    await open(directory);
-    return data;
+    // The folder shown when adding is where every new upload goes, even if Files moves on while
+    // earlier requests are still being sent; each is filed before any request starts.
+    const chosen = directory;
+    const destinations = uploadIds.map((uploadId) => [uploadId, attachDestination(uploadId, chosen)]);
+    // Each upload is its own request: one refusal neither hides uploads accepted before it nor
+    // stops the ones after it. Returns which uploads were accepted and why others were not.
+    const accepted = [];
+    const failed = [];
+    for (const [uploadId, destination] of destinations) {
+      try {
+        const idempotencyKey = await attachRequestKey(uploadId, destination);
+        await mutate('/files', 'POST', { upload_ids: [uploadId], idempotency_key: idempotencyKey, directory: destination });
+        accepted.push(uploadId);
+      } catch (error) {
+        failed.push({ uploadId, error });
+      }
+    }
+    if (accepted.length) await open(directory);
+    return { accepted, failed };
   } };
 }

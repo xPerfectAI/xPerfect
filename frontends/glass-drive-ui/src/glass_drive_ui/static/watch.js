@@ -1,6 +1,6 @@
 import { watchOutputModel } from './delivery-presenter.js?v=20260923closed1';
 import { workspaceLifecycleControl } from './launch-policy.js?v=20260811m';
-import { createFileDraft, createWorkspaceFiles } from './files.js?v=20260923readable1';
+import { createFileDraft, createWorkspaceFiles } from './files.js?v=20260927attach2';
 import { attachNativeControls } from './native-controls.js?v=20260922o03c';
 import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
 
@@ -665,36 +665,61 @@ const workspaceFiles = createWorkspaceFiles({
 // One attach per upload from this page. The automatic attach and Add to workspace can both see a
 // ready upload; attaching it twice would add a second copy to the workspace. A failed attach can retry.
 const attachStarted = new Set();
+// Reports which of this call's uploads were accepted and which failed; an upload another call is
+// already attaching is left to that call. Only failed uploads become available to retry.
 async function attachOnce(ids) {
   const fresh = ids.filter((id) => !attachStarted.has(id));
   fresh.forEach((id) => attachStarted.add(id));
+  let result = { accepted: [], failed: [] };
   try {
-    if (fresh.length) await workspaceFiles.attach(fresh);
+    if (fresh.length) result = await workspaceFiles.attach(fresh);
   } catch (error) {
     fresh.forEach((id) => attachStarted.delete(id));
     throw error;
   }
+  result.failed.forEach(({ uploadId }) => attachStarted.delete(uploadId));
+  return result;
 }
 const unattachedIds = (readyIds) => readyIds.filter((id) => !attachStarted.has(id));
 const syncAttachButton = () => { filesAttach.hidden = !unattachedIds(watchDraft.readyIds()).length; };
+// An accepted attach belongs to the owner who made it, even if the Files refresh that follows fails
+// and clears this page's owner: the draft records it for that owner, so it is not offered again.
+async function attachForOwner(ids, ownerScope) {
+  const attaching = attachOnce(ids);
+  syncAttachButton();
+  try {
+    const { accepted, failed } = await attaching;
+    // Uploads accepted in this attempt are recorded even when another one was refused.
+    for (const id of accepted) watchDraft.dismissReady(id, ownerScope);
+    if (failed.length === 1) throw failed[0].error;
+    if (failed.length) throw new Error(`${failed.length} files were not added: ${failed[0].error.message}`);
+  } finally { syncAttachButton(); }
+}
+async function attachReadyUpload(item, ownerScope) {
+  if (ownerScope !== watchDraft.ownerScope()) return;
+  try {
+    await attachForOwner([item.upload_id], ownerScope);
+  } catch (error) {
+    if (ownerScope === watchDraft.ownerScope()) fileError(`${item.name} was not added: ${error.message}. Retry below.`);
+  }
+}
+async function attachPendingUploads() {
+  const pending = unattachedIds(watchDraft.readyIds());
+  const ownerScope = watchDraft.ownerScope();
+  if (!ownerScope || !pending.length) return;
+  try {
+    await attachForOwner(pending, ownerScope);
+  } catch (error) {
+    if (ownerScope === watchDraft.ownerScope()) fileError(error.message);
+  }
+}
 const watchDraft = createFileDraft({
   input: filesInput, folderInput: filesFolderInput,
   drop: filesDrop, list: filesUploads, help: filesHelp,
   budget: filesBudget, csrf: currentCsrfToken, scope: `watch.${workerId}`,
   quietReady: true, dropOpensPicker: false,
   onChange: ({ readyIds }) => { filesAttach.hidden = !unattachedIds(readyIds).length; },
-  onReady: async (item, ownerScope) => {
-    if (ownerScope !== watchDraft.ownerScope()) return;
-    try {
-      const attaching = attachOnce([item.upload_id]);
-      syncAttachButton();
-      await attaching;
-      if (ownerScope !== watchDraft.ownerScope()) return;
-      watchDraft.dismissReady(item.upload_id);
-    } catch (error) {
-      if (ownerScope === watchDraft.ownerScope()) fileError(`${item.name} was not added: ${error.message}. Retry below.`);
-    } finally { syncAttachButton(); }
-  },
+  onReady: attachReadyUpload,
 });
 const setWatchDraftBusy = (busy) => {
   watchDraft.setBusy(busy);
@@ -1210,20 +1235,7 @@ filesClose?.addEventListener('click', () => {
   filesToggle?.setAttribute('aria-expanded', 'false');
   filesToggle?.focus();
 });
-filesAttach?.addEventListener('click', async () => {
-  const pending = unattachedIds(watchDraft.readyIds());
-  const ownerScope = watchDraft.ownerScope();
-  if (!ownerScope || !pending.length) return;
-  try {
-    const attaching = attachOnce(pending);
-    syncAttachButton();
-    await attaching;
-    if (ownerScope !== watchDraft.ownerScope()) return;
-    pending.forEach((id) => watchDraft.dismissReady(id));
-  } catch (error) {
-    if (ownerScope === watchDraft.ownerScope()) fileError(error.message);
-  } finally { syncAttachButton(); }
-});
+filesAttach?.addEventListener('click', attachPendingUploads);
 // A parent overlay receives file drags before the desktop iframe can intercept them.
 const desktopFileOverlay = document.getElementById('watch-desktop-file-drop');
 let dragDepth = 0;

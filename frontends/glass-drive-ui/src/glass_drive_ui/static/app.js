@@ -5,7 +5,7 @@ import { initializeControlPlane, refreshControlPlane, renderActivity } from './c
 import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20260924notice1';
 import { workspaceDeliveryModel } from './delivery-presenter.js?v=20260923closed1';
 import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20260811m';
-import { createFileDraft } from './files.js?v=20260923readable1';
+import { createFileDraft } from './files.js?v=20260927attach2';
 import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
 import { showLaunchedWorkspace, watchHref } from './launch-result.js?v=20260924launch1';
 import { initializeStorageAdmin } from './storage-admin.js?v=20260924storage3';

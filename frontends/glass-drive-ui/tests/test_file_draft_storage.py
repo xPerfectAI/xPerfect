@@ -78,8 +78,9 @@ assert.notEqual(lastDraft,firstDraft);
 // An ambiguous attach failure keeps the same key even when storage cannot write.
 const options=new Proxy({workerId:'worker-test',csrf:()=>'',canUpload:()=>true,onAccess:()=>{}},{get(target,name){return name in target?target[name]:new Element();}});
 const workspace=createWorkspaceFiles(options);
-await assert.rejects(workspace.attach([uploadId]),/connection lost/);
-await workspace.attach([uploadId]);
+const lost=await workspace.attach([uploadId]);
+assert.deepEqual(lost.accepted,[]);assert.match(lost.failed[0].error.message,/connection lost/);
+const retried=await workspace.attach([uploadId]);assert.deepEqual(retried.accepted,[uploadId]);
 assert.equal(attachCalls[0].idempotency_key,attachCalls[1].idempotency_key);
 console.log('pass');
 '''
