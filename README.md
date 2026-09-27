@@ -80,14 +80,18 @@ results needed for their requests; local storage does not mean local-only AI pro
   verified yet. Use **Add files** and **Download**.
 - **API keys:** the key option exists, but API-key setup has not been verified end to end yet. Use
   a subscription sign-in.
-- **Duplicate:** copies a workspace's files. Continuing the copy with a personal account needs an
-  account confirmation that has not been verified end to end yet.
+- **Duplicate:** copies a workspace's files. A copy whose AI is managed by your organization
+  continues directly. Continuing a copy with a personal account needs an account confirmation that
+  has not been verified end to end yet.
+- **Conversation on your own computer:** with `./xperfect start`, a conversation with a connected
+  account cannot run; the page says so before you type and offers **Run project**. Conversations run
+  on a configured Linux host, such as the packaged install.
 
 ## Use and extend
 
 - **Files:** keep original input bytes, inspect outputs, and download results. A filename alone is not an uploaded file.
 - **Controls:** Watch, steer, interrupt or continue the exact worker. Read its recorded state before retrying.
-- **AI providers:** Codex CLI, Claude Code and Grok Build use their own supported routes. Grok needs one exact model: `grok models`, then `./xperfect restart --model grok-build=<model>`.
+- **AI providers:** Codex CLI, Claude Code and Grok Build use their own supported routes. Grok needs one exact model: choose it under **Grok model** in Connections, or run `./xperfect restart --model grok-build=<model>`.
 - **MCP:** connect over stdio or authenticated streamable HTTP; compatibility SSE remains available.
 - **API:** projects, workers, runs, schedules, events, files and lifecycle controls use the existing typed runtime.
 - **Build on it:** the [developer walkthrough](docs/developer.md) shows how to connect, discover tools, start, check and steer work, and add a harness.

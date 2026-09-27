@@ -20,8 +20,8 @@ Install your provider's native CLI, then open **Connections → Connect an AI ac
 **Connect another account** once you have one) and choose the **AI**:
 
 - [Codex](https://developers.openai.com/codex/cli/): choose **My subscription** for native device sign-in, or **Connected API key**.
-- [Claude Code](https://code.claude.com/docs/en/setup): choose **Connected API key**. For an existing Claude subscription, choose **Use existing Claude sign-in** in Connections. xPerfect verifies the current OS sign-in and connects it as a distinct selected account. If setup is needed, open **Sign-in help**, complete the native install/sign-in, then choose **Check again**. Named Claude subscription accounts are unavailable on macOS because their isolation cannot be guaranteed.
-- [Grok](https://github.com/xai-org/grok-build): choose **My subscription** for native device sign-in, or **Connected API key**. Grok also needs one exact model: run `grok models` to list them, then `./xperfect restart --model grok-build=<model>`. xPerfect never picks a Grok model for you; `./xperfect doctor` shows what each installed harness will use.
+- [Claude Code](https://code.claude.com/docs/en/setup): choose **Connected API key**. For an existing Claude subscription, choose **Use existing Claude sign-in** in Connections. xPerfect verifies the current OS sign-in and connects it as a distinct selected account. If setup is needed, open **Sign-in help**, complete the native install/sign-in, then choose **Check again**. Named Claude subscription accounts are unavailable on macOS because their isolation cannot be guaranteed; there, `./xperfect doctor` shows Claude setup as `use_existing_sign_in`.
+- [Grok](https://github.com/xai-org/grok-build): choose **My subscription** for native device sign-in, or **Connected API key**. Grok also needs one exact model: choose it under **Grok model** in Connections and select **Use model**, or run `grok models` and `./xperfect restart --model grok-build=<model>`. xPerfect never picks a Grok model for you; `./xperfect doctor` shows what each installed harness will use.
 
 Tested versions are the ones the workspace image pins: Codex `0.155.0-alpha.9.2` and Claude Code
 `2.1.280` from npm (with Node.js 22), and Grok `1.0.34` from xAI's CLI download. A per-user install
@@ -43,8 +43,8 @@ store; Claude must confirm that it selected the API-key authentication method.
 **Current limit:** the full API-key path, from entering a key to a finished result, has not been
 verified end to end yet. Until it is, prefer a subscription sign-in.
 
-Select the connected account in **Run project**, enter your goal, and start. Verify a real completed
-result before relying on that route. **Verify** checks an existing Claude sign-in without copying credentials or signing out the native app. **More → Test connection** checks a ready account
+**Run project** starts on a worker whose account is ready; check its **Worker** and **Account**, enter your goal, and start. Verify a real completed
+result before relying on that route. **Verify** checks an existing Claude sign-in without copying credentials or signing out the native app. If the account says the exact native process was not confirmed stopped, wait until that workspace's run has ended, then select **Verify** again. **More → Test connection** checks a ready account
 again. If an account stops working, **Reconnect** (subscription) or **Reconnect & test** (API key) sets it up again. **More → Remove** deletes only xPerfect's local account credentials. To revoke an API key
 at its provider, use the provider's own console. A required named account never falls back to your
 current OS account. The optional preferred-account policy can use its explicitly allowed fallback.

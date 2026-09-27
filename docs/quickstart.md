@@ -37,8 +37,8 @@ Open **Connections**. Under **Connect an AI account**, choose your **AI**, then:
 - **Claude Code:** if you are signed in to Claude Code on this computer, choose
   **Use existing Claude sign-in**.
 - **Grok Build:** choose **My subscription** and **Connect Grok Build**, then
-  **Open provider sign-in**. Grok also needs one exact model: run `grok models`, then
-  `./xperfect restart --model grok-build=<model>`.
+  **Open provider sign-in**. Grok also needs one exact model: choose it under **Grok model** in
+  Connections and select **Use model**.
 
 Wait until the account shows **Ready**. A running app is not yet a connected AI.
 
@@ -47,7 +47,8 @@ Wait until the account shows **Ready**. A running app is not yet a connected AI.
 Open **Run project**. Under **What would you like to do?**:
 
 1. Describe the goal. Add **Success criteria** or **Background** if they help.
-2. Choose the **Worker** for your AI tool and its **Account**. Keep **Separate workspace (default)**.
+2. Check the **Worker** and its **Account**: xPerfect starts on a worker whose account is ready.
+   Keep **Separate workspace (default)**.
 3. Select **Add files** to attach files. The worker gets their exact bytes; a file name typed in
    the goal is not an upload.
 4. Select **Run Project**.
@@ -68,8 +69,8 @@ left unanswered expires after about a minute and stops the run. Send a follow-up
 
 ## 6. Open the result
 
-When the work is done, open **Latest workspace output** or **Files**, then **Open** or
-**Download** what it made. Reload the page: the result is still there. It also survives
+When the work is done, select **Open result** to read the answer, or open **Files**, then **Open**
+or **Download** what it made. Reload the page: the result is still there. It also survives
 `./xperfect restart`.
 
 ## 7. Come back to it
@@ -83,7 +84,9 @@ Scheduling a one-off run keeps it as a saved workspace.
 
 ## Good to know
 
-- **Several goals at once.** In **Conversation**, write them in one message. xPerfect keeps every
+- **Several goals at once.** In **Conversation**, write them in one message. Conversation needs
+  xPerfect on a configured Linux host, such as the packaged install; with `./xperfect start` the
+  Conversation page says so and offers **Run project**. xPerfect keeps every
   goal and shows each as Working, Waiting to start or Complete. The AI decides whether to answer a
   goal itself or hand it to a worker. Ten goals do not mean ten workers at once: a worker starts
   when its account is free and the machine has room. See [several goals](capability-matrix.md#working-on-several-goals).
@@ -111,6 +114,8 @@ Scheduling a one-off run keeps it as a saved workspace.
 | A host resource message after **Run Project** | The machine is busy. Check **Workspaces** so you do not start the same work twice, wait a moment, then try again. |
 | “Not enough storage for this file” | Delete files you no longer need, or ask your administrator to raise your limit, then **Retry**. |
 | “Shared workspaces need xPerfect on a configured Linux host.” | Choose **Separate workspace** on this computer. |
+| “Conversations with a connected account need xPerfect on a configured Linux host” | On this computer, use **Run project**. |
+| An account says “The exact native process was not confirmed stopped” | Wait until that workspace's run has ended, then select **Verify** in Connections. |
 | The result is missing | Check the workspace's status and **Files** before running it again. |
 
 Use the same `--state-dir` for every command if you chose one. `./xperfect stop` keeps your
@@ -121,8 +126,9 @@ not always continue by itself.
 
 - Dragging files into or out of the browser has not been verified yet. Use **Add files** and **Download**.
 - API-key sign-in has not been verified end to end yet. Use your subscription sign-in.
-- **Duplicate** copies a workspace's files. Before the copy can run, its account must be approved
-  for it; continuing a copy this way has not been verified end to end yet.
+- **Duplicate** copies a workspace's files. A copy of a workspace whose AI is managed by your
+  organization continues directly. A copy of a workspace that uses your own account must have that
+  account approved for it before it runs; continuing such a copy has not been verified end to end yet.
 - Several goals in one conversation and shared workspaces were verified on the packaged Linux
   install, not with `./xperfect start`.
 
