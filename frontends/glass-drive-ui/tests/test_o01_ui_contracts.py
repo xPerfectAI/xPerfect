@@ -61,7 +61,8 @@ def test_watch_renderer_clears_stale_result_and_preserves_action_failure_during_
     rendered=function(source,'renderOutputContent(', '\nasync function postAction')
     result=node(f"""
       import {{watchOutputModel}} from {json.dumps((STATIC/'delivery-presenter.js').as_uri())};
-      const node=()=>({{textContent:'stale',hidden:false,open:true,setAttribute:()=>{{}}}});
+      const node=()=>({{textContent:'stale',innerHTML:'stale',hidden:false,open:true,setAttribute:()=>{{}}}});
+      const resultMarkdown={{render:(text)=>`<p>${{text}}</p>`}};
       const statusLabel=node(),resultPanelTitle=node(),latestOutputInline=node(),latestOutputHuman=node(),latestOutputFull=node(),latestOutputTechnical=node(),resultTechnical=node(),resultToggle=node(),resultToggleAction=node(),resultPanel=node();
       let currentSummary='',currentFullOutput='',currentResultText='',currentRunState='',actionFailure=null,opened=false;
       const openResultPanel=()=>{{opened=true;}}; const closeResultPanel=()=>{{}};
@@ -69,18 +70,18 @@ def test_watch_renderer_clears_stale_result_and_preserves_action_failure_during_
       const summarizeOutput=data=>{{currentRunState=data?.latest_run?.state || '';return watchOutputModel(data,'trace');}};
       {rendered}
       renderOutput({{latest_run:{{state:'completed'}},latest_output:'useful result'}});
-      const completed={{text:latestOutputFull.textContent,hidden:latestOutputFull.hidden}};
+      const completed={{text:latestOutputFull.innerHTML,hidden:latestOutputFull.hidden}};
       showActionFailure(new Error('synthetic network failure'));
       renderOutput({{latest_run:{{state:'running'}}}});
-      const failure={{summary:latestOutputHuman.textContent,result:latestOutputFull.textContent,hidden:latestOutputFull.hidden,technical:latestOutputTechnical.textContent,expanded:resultTechnical.open,opened}};
+      const failure={{summary:latestOutputHuman.textContent,result:latestOutputFull.innerHTML,hidden:latestOutputFull.hidden,technical:latestOutputTechnical.textContent,expanded:resultTechnical.open,opened}};
       actionFailure=null;renderOutput({{latest_run:{{state:'completed'}},latest_output:'new result'}});
-      console.log(JSON.stringify({{completed,failure,recovered:latestOutputFull.textContent}}));
+      console.log(JSON.stringify({{completed,failure,recovered:latestOutputFull.innerHTML}}));
     """)
-    assert result['completed']=={'text':'useful result','hidden':False}
+    assert result['completed']=={'text':'<p>useful result</p>','hidden':False}
     assert result['failure']['result']=='' and result['failure']['hidden']
     assert result['failure']['technical']=='synthetic network failure'
     assert result['failure']['opened'] and not result['failure']['expanded']
-    assert result['recovered']=='new result'
+    assert result['recovered']=='<p>new result</p>'
 
 
 def test_restore_preserves_novice_disclosure_default_preference_and_files_hooks():

@@ -6,7 +6,7 @@
     <meta name="referrer" content="same-origin" />
     <title>xPerfect</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260927result1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260927result2" />
   </head>
   <body class="watch-body">
     <div class="watch-app">
@@ -55,7 +55,7 @@
         <div id="native-controls"></div>
         <div id="artifact-list" class="artifact-list" hidden></div>
         <p id="latest-output-human" class="latest-output-human">Checking workspace status.</p>
-        <pre id="latest-output-full" hidden></pre>
+        <div id="latest-output-full" class="rendered-result" hidden></div>
         <details id="result-technical" class="result-technical" hidden>
           <summary>Technical details</summary>
           <pre id="latest-output-technical"></pre>
@@ -145,7 +145,7 @@
             <h2 id="overlay-title">Preparing live workspace…</h2>
             <p id="overlay-detail">The view will attach automatically when the workspace is ready.</p>
             <a id="watch-sign-in" class="watch-sign-in" href="/login" hidden>Sign in again</a>
-            <div id="stage-result-text" hidden></div>
+            <div id="stage-result-text" class="rendered-result" hidden></div>
           </div>
         </div>
         <iframe id="desktop-frame" title="Workspace live surface" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
@@ -179,6 +179,6 @@
         </div>
       </footer>
     </div>
-    <script src="/static/watch.js?v=20260927result1" type="module"></script>
+    <script src="/static/watch.js?v=20260927result2" type="module"></script>
   </body>
 </html>

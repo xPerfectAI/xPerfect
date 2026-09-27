@@ -2047,9 +2047,8 @@ textarea { resize: vertical; min-height: 78px; }
 #latest-output-full {
   margin: 0;
   color: var(--text);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 500 0.95rem/1.6 "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.6;
 }
 .watch-controls {
   display: flex;
@@ -2286,16 +2285,17 @@ textarea { resize: vertical; min-height: 78px; }
   overflow-y: auto;
 }
 .stage-overlay[data-result="true"] #stage-result-text:not([hidden]) { max-height: none; }
-#stage-result-text > :first-child { margin-top: 0; }
-#stage-result-text > :last-child { margin-bottom: 0; }
-#stage-result-text p, #stage-result-text ul, #stage-result-text ol { margin: 0 0 0.8em; }
-#stage-result-text ul, #stage-result-text ol { padding-left: 1.4em; }
-#stage-result-text h1, #stage-result-text h2, #stage-result-text h3 { margin: 1em 0 0.5em; font-size: 1.05rem; line-height: 1.3; letter-spacing: 0; }
-#stage-result-text table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.8em; }
-#stage-result-text th, #stage-result-text td { border: 1px solid rgba(255,255,255,0.14); padding: 6px 9px; text-align: left; }
-#stage-result-text pre { overflow-x: auto; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,0.35); white-space: pre; }
-#stage-result-text code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
-#stage-result-text a { color: #ff9a6b; text-decoration: underline; }
+/* A completed run's answer, rendered from markdown wherever Watch shows it. */
+.rendered-result > :first-child { margin-top: 0; }
+.rendered-result > :last-child { margin-bottom: 0; }
+.rendered-result p, .rendered-result ul, .rendered-result ol { margin: 0 0 0.8em; }
+.rendered-result ul, .rendered-result ol { padding-left: 1.4em; }
+.rendered-result h1, .rendered-result h2, .rendered-result h3 { margin: 1em 0 0.5em; font-size: 1.05rem; line-height: 1.3; letter-spacing: 0; }
+.rendered-result table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.8em; }
+.rendered-result th, .rendered-result td { border: 1px solid rgba(255,255,255,0.14); padding: 6px 9px; text-align: left; }
+.rendered-result pre { overflow-x: auto; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,0.35); white-space: pre; }
+.rendered-result code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+.rendered-result a { color: #ff9a6b; text-decoration: underline; }
 .watch-footer {
   position: relative;
   z-index: 5;

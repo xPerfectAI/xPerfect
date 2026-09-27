@@ -839,7 +839,8 @@ function renderOutputContent(output) {
   resultPanelTitle.textContent = output.panelTitle;
   latestOutputInline.textContent = output.summary;
   latestOutputHuman.textContent = output.summary;
-  latestOutputFull.textContent = output.result || '';
+  // Only a completed run's answer is a result; other output stays in Technical details.
+  latestOutputFull.innerHTML = output.result ? resultMarkdown.render(output.result) : '';
   latestOutputFull.hidden = !output.result;
   const kind = output.result ? 'result' : 'status';
   const verb = resultPanel.hidden ? 'Open' : 'Close';
