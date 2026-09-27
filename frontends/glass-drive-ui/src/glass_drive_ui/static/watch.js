@@ -1300,6 +1300,8 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     closeMenu();
     closeResultPanel();
+    // A dialog open inside Files handles its own Escape first.
+    if (!filesPanel.hidden && !document.querySelector('dialog[open]')) filesClose?.click();
   }
   setQueueModifierActive(Boolean(event.metaKey || event.ctrlKey));
 });

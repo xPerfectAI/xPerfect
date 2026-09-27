@@ -568,7 +568,14 @@ def main() -> int:
                     env = environment(state, config, result["instance"])
                     request = urllib.request.Request(f"http://127.0.0.1:{config['ports']['api']}/health", headers={"Authorization": f"Bearer {env['WPR_API_TOKEN']}"})
                     with urllib.request.urlopen(request, timeout=2) as response:
-                        result["ui_account_setup"] = json.load(response).get("provider_setup_support", {})
+                        health = json.load(response)
+                    result["ui_account_setup"] = health.get("provider_setup_support", {})
+                    # Named Claude subscriptions cannot be isolated on a macOS host, but its current
+                    # OS sign-in can be used: say which one applies here.
+                    if (isinstance(result["ui_account_setup"], dict)
+                            and result["ui_account_setup"].get("claude") == "unsupported_macos_host"
+                            and (health.get("current_native_claude") or {}).get("available") is True):
+                        result["ui_account_setup"]["claude"] = "use_existing_sign_in"
                 except (OSError, ValueError):
                     result["ui_account_setup"] = "unavailable"
             print(json.dumps(result, indent=2))

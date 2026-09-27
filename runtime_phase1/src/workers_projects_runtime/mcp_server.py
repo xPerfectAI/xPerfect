@@ -4198,7 +4198,7 @@ def create_mcp_server(
     recent_dispatches: dict[tuple[str, str, str, str, str], RecentDispatchContext] = {}
     recent_dispatches_lock = threading.RLock()
     server = GlassHiveFastMCP(
-        name="glass-hive",
+        name="xperfect",
         instructions=glasshive_workers_server_instructions(),
         host=host,
         port=port,
