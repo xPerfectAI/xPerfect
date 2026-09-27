@@ -4276,6 +4276,28 @@ def test_native_visible_text_waits_for_claude_result_and_excludes_working_preamb
     assert _native_visible_text("claude-code", "\n".join(raw.splitlines()[:-1])) == ""
 
 
+def test_native_visible_text_delivers_every_claude_turn_result_in_order():
+    # Each native `result` ends one authored turn. A later turn, such as one a finished
+    # background task starts, may refer to an earlier one, so the reply carries them all.
+    turns = [
+        "None of the three tasks is finished yet.",
+        "Two workers finished. The poem is:\n\n> The moon leans close",
+        "Working through the last one.\nFINAL REPORT:\nAll three finished; the poem is in my last message.",
+    ]
+    raw = "\n".join(
+        line
+        for text in turns
+        for line in (
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}),
+            json.dumps({"type": "result", "subtype": "success", "result": text}),
+        )
+    )
+
+    assert _native_visible_text("claude-code", raw) == "\n\n".join(
+        [turns[0], turns[1], "All three finished; the poem is in my last message."]
+    )
+
+
 def test_native_visible_text_waits_for_codex_turn_and_returns_only_latest_agent_message():
     lines = [
         json.dumps(

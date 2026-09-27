@@ -2281,7 +2281,9 @@ def _native_visible_text(profile: str, stdout: str) -> str:
     # Every harness answers with its user-facing report, as worker results do: the narration
     # before a FINAL REPORT section, and the marker itself, are not part of the reply.
     if profile == "claude-code":
-        return _select_user_facing_agent_output(result_parts[-1:])
+        # Each Claude `result` ends one authored turn. A later turn (one a finished background
+        # task starts, for example) may refer to an earlier one, so the reply carries every turn.
+        return "\n\n".join(_select_user_facing_agent_output([part]) for part in result_parts)
     if profile == "codex-cli" and codex_turn_completed:
         return _select_user_facing_agent_output(assistant_parts[-1:])
     if profile == "grok-build" and len(grok_results) == 1:
