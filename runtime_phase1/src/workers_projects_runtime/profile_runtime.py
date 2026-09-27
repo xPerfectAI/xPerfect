@@ -13111,12 +13111,18 @@ raise SystemExit(exit_code)
             and not self._host_process_group_alive(group)
         )
 
-    def _end_recorded_native_child(self, child: dict[str, object]) -> bool:
+    def _end_recorded_native_child(
+        self,
+        child: dict[str, object],
+        remember: Callable[[dict[int, str]], None] | None = None,
+    ) -> bool:
         """End a recorded native child and its process group; True only with proof.
 
         The group is signalled only while its leader is that exact recorded
         incarnation, or once the leader is gone and the group remains: a group ID is
-        never reused while any of its members live.
+        never reused while any of its members live. Just before each signal, the
+        live descendants that left the group are handed to ``remember`` by exact
+        identity, while the tree still links them; ending those is the caller's.
         """
 
         try:
@@ -13136,6 +13142,14 @@ raise SystemExit(exit_code)
                 and (not identity or self._process_start_identity(pid) != identity)
             ):
                 return False  # never signal an unverified incarnation
+            if remember is not None:
+                members = self._host_process_group_members(group)
+                if members is None:
+                    return False
+                escaped = self._host_escaped_descendants(members, group) if members else {}
+                if escaped is None:
+                    return False
+                remember(escaped)
             try:
                 os.killpg(group, sig)
             except ProcessLookupError:
@@ -13395,6 +13409,20 @@ raise SystemExit(exit_code)
         def stop_remembered_descendants() -> bool:
             return self._end_remembered_descendants(escaped_descendants)
 
+        def end_native_child_tree() -> bool:
+            """End the native child this session's supervisor recorded, then every
+            remembered descendant, including the ones that left the child's own group."""
+
+            native_child = self._session_native_child(worker_id, identity_session)
+            if native_child is False or (
+                isinstance(native_child, dict)
+                and not self._end_recorded_native_child(
+                    native_child, remember=remember_escaped_descendants
+                )
+            ):
+                return False
+            return stop_remembered_descendants()
+
         if local_process is not None:
             try:
                 local_pid = int(local_process.pid)
@@ -13419,15 +13447,11 @@ raise SystemExit(exit_code)
                 # Keep ownership evidence rather than claim a successful stop.
                 if recorded_group <= 0 or self._host_process_group_alive(recorded_group):
                     return False
-                if not stop_remembered_descendants():
-                    return False
                 # The supervisor may have died abruptly while its recorded native child,
-                # in its own process group, runs on: end that exact child too.
-                native_child = self._session_native_child(worker_id, identity_session)
-                if native_child is False or (
-                    isinstance(native_child, dict)
-                    and not self._end_recorded_native_child(native_child)
-                ):
+                # in its own process group, runs on. No live supervisor links that child's
+                # tree any more, so its escaped descendants are remembered while the child
+                # still links them, before the child is signalled.
+                if not end_native_child_tree():
                     return False
                 released = self._finalize_owned_host_generation(
                     worker_id,
@@ -13545,13 +13569,8 @@ raise SystemExit(exit_code)
                 return False
             descendants_gone = escaped_descendants_gone(2)
         confirmed = group_gone and descendants_gone
-        if confirmed:
-            native_child = self._session_native_child(worker_id, identity_session)
-            if native_child is False or (
-                isinstance(native_child, dict)
-                and not self._end_recorded_native_child(native_child)
-            ):
-                return False
+        if confirmed and not end_native_child_tree():
+            return False
         if confirmed and local_process is not None:
             try:
                 local_process.wait(timeout=2)
@@ -13787,6 +13806,14 @@ raise SystemExit(exit_code)
     ) -> bool:
         """Clean up only the invocation's captured process, session, and capacity slot."""
         if process is not None and process.poll() is None:
+            return self._stop_active_process(
+                str(worker["worker_id"]), worker=worker, run_id=run_id,
+                expected_session=session, control_session=session,
+            )
+        # A supervisor that ended abruptly can leave the native child it recorded running.
+        # The rest of this generation then ends exactly, as Stop would end it.
+        native_child = self._session_native_child(str(worker["worker_id"]), session)
+        if isinstance(native_child, dict) and not self._native_child_proven_gone(native_child):
             return self._stop_active_process(
                 str(worker["worker_id"]), worker=worker, run_id=run_id,
                 expected_session=session, control_session=session,

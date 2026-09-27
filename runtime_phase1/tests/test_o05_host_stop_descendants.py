@@ -270,14 +270,14 @@ def test_unconfirmed_start_cleanup_ends_a_remembered_child_before_release(tmp_pa
             os.kill(command_pid, 9)
 
 
-def _start_recorded_host_run(runtime, worker, run_id, attempt_id):
+def _start_recorded_host_run(runtime, worker, run_id, attempt_id, provider="import time; time.sleep(60)"):
     """A real supervisor that records its native child, as host launches do."""
     run_root = runtime._run_root(worker["worker_id"], run_id)
     run_root.mkdir(parents=True, exist_ok=True)
     child_record = runtime._native_child_record_path(run_root, attempt_id)
     process = subprocess.Popen(
         runtime._durable_host_process_command(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+            [sys.executable, "-c", provider, str(run_root / "command.pid")],
             run_root=run_root,
             exit_path=run_root / "exit_code",
             child_record_path=child_record,
@@ -347,6 +347,106 @@ def test_stop_after_its_supervisor_died_still_ends_the_recorded_native_child(tmp
         if process.poll() is None:
             os.killpg(process.pid, 9)
             process.wait(timeout=5)
+
+
+def _orphan_a_native_tree(runtime, worker, run_id, attempt_id):
+    """The native child runs a command in its own session; then its supervisor dies."""
+    process, child = _start_recorded_host_run(runtime, worker, run_id, attempt_id, provider=_PROVIDER)
+    command_pid_path = runtime._run_root(worker["worker_id"], run_id) / "command.pid"
+    deadline = time.monotonic() + 5
+    while not command_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    command_pid = int(command_pid_path.read_text())
+    assert os.getpgid(command_pid) == command_pid != child["process_group"]
+    os.kill(process.pid, 9)
+    process.wait(timeout=5)
+    assert _alive(child["pid"]) and _alive(command_pid)
+    return process, child, command_pid
+
+
+def test_stop_after_its_supervisor_died_ends_the_command_its_native_child_started(tmp_path):
+    """No live supervisor links that command any more, and ending the child's group alone
+    would orphan it. Stop remembers it by exact identity while the child still links it,
+    ends it, and leaves a process outside the run's tree alone."""
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = _recorded_worker("wrk_orphaned_tree")
+    unrelated = subprocess.Popen([sys.executable, "-c", _COMMAND], start_new_session=True)
+    process, child, command_pid = _orphan_a_native_tree(runtime, worker, "run_orphaned_tree", "att_tree")
+    try:
+        assert runtime._stop_active_process(worker["worker_id"], worker=worker, run_id="run_orphaned_tree")
+
+        assert not _alive(child["pid"]), "Stop confirmed while the native child ran on"
+        assert not _alive(command_pid), "the native child's command outlived Stop"
+        assert _alive(unrelated.pid), "Stop signalled a process outside the run's tree"
+        assert runtime._read_active_session(worker["worker_id"]) is None
+        assert not runtime._stop_descendant_ledger_path(worker["worker_id"]).exists()
+    finally:
+        for pid in (command_pid, child["pid"]):
+            if _alive(pid):
+                os.kill(pid, 9)
+        unrelated.kill()
+        unrelated.wait(timeout=5)
+
+
+def test_a_command_remembered_before_its_native_child_ended_holds_recovery_until_it_ends(tmp_path, monkeypatch):
+    """Ending that command fails once, after the child is gone and with it the command's
+    ancestry. The ledger written before the child was signalled still names it, so account
+    recovery refuses while it lives, and the next Stop ends it by exact identity."""
+    from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
+
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = _recorded_worker("wrk_remembered_tree")
+    run_id = "run_remembered_tree"
+    process, child, command_pid = _orphan_a_native_tree(runtime, worker, run_id, "att_remembered")
+    session = runtime._read_active_session(worker["worker_id"])
+    released_lease = {
+        "worker_id": worker["worker_id"], "run_id": run_id, "status": "released",
+        "startup_state": "confirmed", "pid": process.pid, "process_group": session["process_group"],
+        "process_start_identity": session["process_start_identity"], "attempt_id": "att_remembered",
+    }
+    real_kill = os.kill
+
+    def deny_command(pid, sig):
+        if pid == command_pid and sig != 0:
+            raise PermissionError("synthetic temporary command signal failure")
+        return real_kill(pid, sig)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "kill", deny_command)
+            assert runtime._stop_active_process(worker["worker_id"], worker=worker, run_id=run_id) is False
+        assert not _alive(child["pid"]) and _alive(command_pid)
+        with pytest.raises(RuntimeErrorBase):
+            runtime.confirm_retained_run_stopped(worker, run_id, [released_lease])
+
+        assert runtime._stop_active_process(worker["worker_id"], worker=worker, run_id=run_id)
+
+        assert not _alive(command_pid), "the remembered command outlived Stop"
+        runtime.confirm_retained_run_stopped(worker, run_id, [released_lease])
+    finally:
+        for pid in (command_pid, child["pid"]):
+            if _alive(pid):
+                real_kill(pid, 9)
+
+
+def test_a_run_whose_supervisor_died_ends_its_native_tree_in_its_own_cleanup(tmp_path):
+    """The run's own cleanup, not only a later Stop, ends what the dead supervisor's native
+    child still runs, then releases the generation instead of reporting an ownership change."""
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = _recorded_worker("wrk_cleanup_tree")
+    process, child, command_pid = _orphan_a_native_tree(runtime, worker, "run_cleanup_tree", "att_cleanup")
+    session = runtime._read_active_session(worker["worker_id"])
+    try:
+        assert runtime._finish_host_run_generation(
+            worker, "run_cleanup_tree", process, session, None, clear_session=False
+        )
+
+        assert not _alive(child["pid"]) and not _alive(command_pid)
+        assert runtime._read_active_session(worker["worker_id"]) is None
+    finally:
+        for pid in (command_pid, child["pid"]):
+            if _alive(pid):
+                os.kill(pid, 9)
 
 
 def test_exact_stop_confirmation_refuses_while_the_recorded_native_child_lives(tmp_path):
