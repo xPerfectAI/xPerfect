@@ -10722,6 +10722,8 @@ stdin_path = Path(sys.argv[5]) if sys.argv[5] else None
 response_deadline_at = sys.argv[6]
 child_record_path = Path(sys.argv[7]) if sys.argv[7] else None
 command = sys.argv[8:]
+# Captured before any fork: a child orphaned before it records must still name this supervisor.
+SUPERVISOR_PID = os.getpid()
 child: subprocess.Popen[bytes] | None = None
 requested_signal = 0
 
@@ -10744,11 +10746,11 @@ def write_exit(exit_code: int) -> None:
             pass
 
 
-def write_child_record(child_identity: dict | None, supervisor_pid: int) -> None:
+def write_child_record(child_identity: dict | None) -> None:
     if child_record_path is None:
         return
     temp_path = child_record_path.with_name(f"{child_record_path.name}.tmp.{os.getpid()}")
-    temp_path.write_text(json.dumps({"supervisor_pid": supervisor_pid, "child": child_identity}))
+    temp_path.write_text(json.dumps({"supervisor_pid": SUPERVISOR_PID, "child": child_identity}))
     temp_path.chmod(0o600)
     os.replace(temp_path, child_record_path)
 
@@ -10757,7 +10759,7 @@ def record_child_before_exec() -> None:
     # Runs in the child before exec. The record is written while the child is still in
     # this supervisor's process group, and only then does the child lead its own group:
     # a child without a record is always in the supervisor's group.
-    write_child_record({"pid": os.getpid(), "process_group": os.getpid()}, os.getppid())
+    write_child_record({"pid": os.getpid(), "process_group": os.getpid()})
     os.setpgid(0, 0)
 
 
@@ -10811,7 +10813,7 @@ for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
 
 exit_code = 70
 try:
-    write_child_record(None, os.getpid())
+    write_child_record(None)
     ready_temp_path = ready_path.with_name(f"{ready_path.name}.tmp.{os.getpid()}")
     ready_temp_path.write_text(f"{os.getpid()}\\n")
     ready_temp_path.chmod(0o600)
@@ -10847,7 +10849,7 @@ try:
                         lstart = " ".join(started.stdout.split())
                         if started.returncode == 0 and lstart:
                             write_child_record({"pid": child.pid, "process_group": child.pid,
-                                                "process_start_identity": f"ps-lstart:{lstart}"}, os.getpid())
+                                                "process_start_identity": f"ps-lstart:{lstart}"})
                     except (OSError, subprocess.SubprocessError):
                         pass
                 try:

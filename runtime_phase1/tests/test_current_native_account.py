@@ -388,10 +388,11 @@ def test_conversation_flag_cannot_turn_selected_account_into_ambient_auth(host):
         apply_bound_provider_account_environment(worker,{},runtime_name='claude-code')
 
 
-def test_a_child_without_its_record_is_still_in_the_supervisors_group(tmp_path,monkeypatch):
-    """Widen the gap between a child's fork and its record: until the record exists, the child
-    stays in the supervisor's process group, so a supervisor killed in that gap can never be
-    taken for one whose child never started."""
+def test_a_child_orphaned_before_its_record_is_held_then_recovered_after_it_exits(tmp_path,monkeypatch):
+    """Widen the gap between a child's fork and its record, and kill the supervisor inside it.
+    Until the record exists the child stays in the supervisor's group, so recovery refuses. The
+    orphaned child still records the supervisor that started it, and once it exits by itself the
+    held account is recovered rather than kept for good."""
     monkeypatch.setenv('HOME',str(tmp_path))
     import signal
     from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
@@ -400,7 +401,7 @@ def test_a_child_without_its_record_is_still_in_the_supervisors_group(tmp_path,m
     worker={'worker_id':'wrk_gap','execution_mode':'host','profile':'claude-code'}
     run_root=runtime._run_root('wrk_gap','run_gap');run_root.mkdir(parents=True)
     child_record=runtime._native_child_record_path(run_root,'att_gap')
-    command=runtime._durable_host_process_command(['sleep','60'],run_root=run_root,exit_path=run_root/'exit_code',
+    command=runtime._durable_host_process_command(['sleep','1'],run_root=run_root,exit_path=run_root/'exit_code',
                                                   child_record_path=child_record)
     supervisor_script=run_root/'native-process-supervisor.py'
     source=supervisor_script.read_text()
@@ -409,30 +410,42 @@ def test_a_child_without_its_record_is_still_in_the_supervisors_group(tmp_path,m
     supervisor_script.write_text(source.replace(anchor,anchor+'    time.sleep(2.0)  # widened scheduling gap\n'))
     supervisor=subprocess.Popen(command,start_new_session=True)
     child_pid=0
-    try:
-        deadline=time.monotonic()+10
-        while not (run_root/'supervisor-ready').exists():
-            assert time.monotonic()<deadline;time.sleep(0.02)
-        (run_root/'start-permit').write_text('synthetic permit')
-        while not child_pid:
+    def wait_for(check,seconds=10):
+        deadline=time.monotonic()+seconds
+        while not check():
             assert time.monotonic()<deadline
-            found=subprocess.run(['pgrep','-P',str(supervisor.pid)],capture_output=True,text=True).stdout.split()
-            child_pid=int(found[0]) if found else 0
             time.sleep(0.02)
+    try:
+        wait_for(lambda:(run_root/'supervisor-ready').exists())
+        (run_root/'start-permit').write_text('synthetic permit')
+        def found_child():
+            nonlocal child_pid
+            listed=subprocess.run(['pgrep','-P',str(supervisor.pid)],capture_output=True,text=True).stdout.split()
+            child_pid=int(listed[0]) if listed else 0
+            return child_pid
+        wait_for(found_child)
         assert json.loads(child_record.read_text())['child'] is None   # forked, not yet recorded
         assert os.getpgid(child_pid)==supervisor.pid                   # and still in the supervisor's group
-        supervisor_identity=runtime._process_start_identity(supervisor.pid)
-        os.kill(supervisor.pid,signal.SIGKILL);supervisor.wait()
+        supervisor_pid=supervisor.pid
+        supervisor_identity=runtime._process_start_identity(supervisor_pid)
+        os.kill(supervisor_pid,signal.SIGKILL);supervisor.wait()
         record={'worker_id':'wrk_gap','run_id':'run_gap','status':'released','startup_state':'confirmed',
-                'pid':supervisor.pid,'process_group':supervisor.pid,'process_start_identity':supervisor_identity,
+                'pid':supervisor_pid,'process_group':supervisor_pid,'process_start_identity':supervisor_identity,
                 'attempt_id':'att_gap','recorded_attempt_id':'att_gap','attempt_runtime_invoked_at':'2026-09-26T00:00:00Z'}
         restarted=HostClaudeCodeRuntime(base_dir=str(tmp_path/'native-work'))
         with pytest.raises(RuntimeErrorBase):restarted.confirm_retained_run_stopped(worker,'run_gap',[record])
+        # The orphaned child records its own identity and still names the supervisor that started it.
+        wait_for(lambda:json.loads(child_record.read_text())['child'] is not None)
+        written=json.loads(child_record.read_text())
+        assert written['supervisor_pid']==supervisor_pid and written['child']['pid']==child_pid
+        def child_gone():
+            try:os.kill(child_pid,0)
+            except ProcessLookupError:return True
+            return restarted._pid_is_zombie(child_pid)
+        wait_for(child_gone)
+        restarted.confirm_retained_run_stopped(worker,'run_gap',[record])  # recovered, not held for good
     finally:
         if child_pid:
-            for target in (child_pid,):
-                try:os.killpg(os.getpgid(target),signal.SIGKILL)
-                except (ProcessLookupError,PermissionError):pass
-                try:os.kill(target,signal.SIGKILL)
-                except ProcessLookupError:pass
+            try:os.kill(child_pid,signal.SIGKILL)
+            except ProcessLookupError:pass
         if supervisor.poll() is None:supervisor.kill();supervisor.wait()
