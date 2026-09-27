@@ -10754,9 +10754,11 @@ def write_child_record(child_identity: dict | None, supervisor_pid: int) -> None
 
 
 def record_child_before_exec() -> None:
-    # Runs in the child after it has its own process group and before exec, so the
-    # native process is recorded before it can run.
-    write_child_record({"pid": os.getpid(), "process_group": os.getpgrp()}, os.getppid())
+    # Runs in the child before exec. The record is written while the child is still in
+    # this supervisor's process group, and only then does the child lead its own group:
+    # a child without a record is always in the supervisor's group.
+    write_child_record({"pid": os.getpid(), "process_group": os.getpid()}, os.getppid())
+    os.setpgid(0, 0)
 
 
 def stop_child(signum: int) -> None:
@@ -10832,8 +10834,8 @@ try:
                 child = subprocess.Popen(
                     command,
                     stdin=stdin_handle,
-                    process_group=0,
                     preexec_fn=record_child_before_exec if child_record_path is not None else None,
+                    **({} if child_record_path is not None else {"process_group": 0}),
                 )
                 if child_record_path is not None:
                     try:
