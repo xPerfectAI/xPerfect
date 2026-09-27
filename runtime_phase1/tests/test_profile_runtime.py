@@ -10651,11 +10651,18 @@ def _host_attempt_launcher(tmp_path, monkeypatch):
             return None, None
 
         def wait(self, timeout=None):
+            # The supervisor writes its launch's exit code at the run root when its child ends.
+            Path(self.command[2]).write_text(f"{self.returncode}\n")
             return self.returncode
 
         def poll(self):
             return self.returncode
 
+    real_init = NativeProcess.__init__
+    def remember_command(self, command, **kwargs):
+        self.command = list(command)
+        real_init(self, command, **kwargs)
+    NativeProcess.__init__ = remember_command
     host.ensure_worker_ready = lambda _worker: host._host_runtime_info(worker)  # type: ignore[method-assign]
     host._build_command = lambda _worker, _instruction, _info: (["claude"], {})  # type: ignore[method-assign]
     monkeypatch.setattr(host, "_process_identity_sha256", lambda _pid: "1" * 64)
@@ -10715,6 +10722,39 @@ def test_a_host_launch_claims_only_its_fresh_transcript(tmp_path, monkeypatch):
     launch("att-second", "Second attempt's answer.")
 
     assert at_claim == [""]
+
+
+def test_a_pidless_host_session_exits_only_from_its_own_launch(tmp_path, monkeypatch):
+    # A session record without its process is accepted as exited only from the exit code at the
+    # run root, and only while its attempt's launch holds the run's claim.
+    _, host, run_id, launch, _, _ = _host_attempt_launcher(tmp_path, monkeypatch)
+    worker = {"worker_id": "wrk_host_attempts", "profile": "claude-code", "execution_mode": "host"}
+    run_root = host._run_root(worker["worker_id"], run_id)
+
+    def pidless_state(attempt):
+        host._write_active_session(worker["worker_id"], {
+            "session_name": host._session_name_for_run_id(run_id), "run_id": run_id,
+            "attempt_id": attempt, "process_pid": None, "process_start_identity": "",
+            "exit_path": str(run_root / "exit_code"),
+        })
+        state = host.host_active_process_status(worker)["state"]
+        host._clear_active_session(worker["worker_id"])
+        return state
+
+    launch("att-first", "First attempt's answer.")
+    after_first = (pidless_state("att-first"), pidless_state("att-other"))
+    claim = host._claim_run_transcript
+    earlier_artifacts_at_claim = []
+    def observed_claim(root, attempt_id):
+        earlier_artifacts_at_claim.append(((root / "exit_code").exists(), (root / "start-permit").exists()))
+        claim(root, attempt_id)
+    monkeypatch.setattr(host, "_claim_run_transcript", observed_claim)
+    launch("att-second", "Second attempt's answer.")
+
+    assert after_first == ("absent", "uncertain")
+    assert earlier_artifacts_at_claim == [(False, False)]
+    assert pidless_state("att-first") == "uncertain"
+    assert pidless_state("att-second") == "absent"
 
 
 @pytest.mark.parametrize("stopped_at", ["released", "rewritten"])

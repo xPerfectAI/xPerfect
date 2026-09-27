@@ -10447,8 +10447,10 @@ class HostNativeCliMixin:
     worker_root_name = "host_cli_runtime"
 
     def _release_run_transcript(self, run_root: Path) -> None:
-        """End every attempt's claim on the run's one transcript before a launch rewrites it."""
-        (run_root / "transcript-owner.json").unlink(missing_ok=True)
+        """End every earlier launch's claim on the run root, then its exit code and start permit,
+        before a launch rewrites them."""
+        for name in ("transcript-owner.json", "exit_code", "start-permit"):
+            (run_root / name).unlink(missing_ok=True)
 
     def _claim_run_transcript(self, run_root: Path, attempt_id: str) -> None:
         """Name the launch whose fresh transcript this is, once it holds nothing earlier."""
@@ -10656,11 +10658,11 @@ class HostNativeCliMixin:
             != self._session_name_for_run_id(run_id)
         ):
             return False
-        canonical_exit = self._attempt_run_root(
-            worker_id,
-            run_id,
-            attempt_id,
-        ) / "exit_code"
+        # A host launch writes its exit code at the run root; it is this attempt's only while this
+        # attempt's launch holds the run's claim.
+        if attempt_id and self._attempt_transcript(worker_id, run_id, attempt_id) is None:
+            return False
+        canonical_exit = self._run_root(worker_id, run_id) / "exit_code"
         recorded_exit = Path(str(active_session.get("exit_path") or "").strip())
         try:
             if recorded_exit.resolve(strict=True) != canonical_exit.resolve(strict=True):
