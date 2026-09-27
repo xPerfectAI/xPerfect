@@ -662,20 +662,38 @@ const workspaceFiles = createWorkspaceFiles({
     watchDraftActivation = activateWatchDraft(canWrite);
   },
 });
+// One attach per upload from this page. The automatic attach and Add to workspace can both see a
+// ready upload; attaching it twice would add a second copy to the workspace. A failed attach can retry.
+const attachStarted = new Set();
+async function attachOnce(ids) {
+  const fresh = ids.filter((id) => !attachStarted.has(id));
+  fresh.forEach((id) => attachStarted.add(id));
+  try {
+    if (fresh.length) await workspaceFiles.attach(fresh);
+  } catch (error) {
+    fresh.forEach((id) => attachStarted.delete(id));
+    throw error;
+  }
+}
+const unattachedIds = (readyIds) => readyIds.filter((id) => !attachStarted.has(id));
+const syncAttachButton = () => { filesAttach.hidden = !unattachedIds(watchDraft.readyIds()).length; };
 const watchDraft = createFileDraft({
   input: filesInput, folderInput: filesFolderInput,
   drop: filesDrop, list: filesUploads, help: filesHelp,
   budget: filesBudget, csrf: currentCsrfToken, scope: `watch.${workerId}`,
   quietReady: true, dropOpensPicker: false,
-  onChange: ({ readyIds }) => { filesAttach.hidden = !readyIds.length; },
+  onChange: ({ readyIds }) => { filesAttach.hidden = !unattachedIds(readyIds).length; },
   onReady: async (item, ownerScope) => {
     if (ownerScope !== watchDraft.ownerScope()) return;
     try {
-      await workspaceFiles.attach([item.upload_id]);
+      const attaching = attachOnce([item.upload_id]);
+      syncAttachButton();
+      await attaching;
       if (ownerScope !== watchDraft.ownerScope()) return;
       watchDraft.dismissReady(item.upload_id);
-      filesAttach.hidden = !watchDraft.readyIds().length;
-    } catch (error) { if (ownerScope === watchDraft.ownerScope()) fileError(`${item.name} was not added: ${error.message}. Retry below.`); }
+    } catch (error) {
+      if (ownerScope === watchDraft.ownerScope()) fileError(`${item.name} was not added: ${error.message}. Retry below.`);
+    } finally { syncAttachButton(); }
   },
 });
 const setWatchDraftBusy = (busy) => {
@@ -1193,15 +1211,18 @@ filesClose?.addEventListener('click', () => {
   filesToggle?.focus();
 });
 filesAttach?.addEventListener('click', async () => {
-  const pending = watchDraft.readyIds();
+  const pending = unattachedIds(watchDraft.readyIds());
   const ownerScope = watchDraft.ownerScope();
   if (!ownerScope || !pending.length) return;
   try {
-    await workspaceFiles.attach(pending);
+    const attaching = attachOnce(pending);
+    syncAttachButton();
+    await attaching;
     if (ownerScope !== watchDraft.ownerScope()) return;
     pending.forEach((id) => watchDraft.dismissReady(id));
-    filesAttach.hidden = true;
-  } catch (error) { if (ownerScope === watchDraft.ownerScope()) fileError(error.message); }
+  } catch (error) {
+    if (ownerScope === watchDraft.ownerScope()) fileError(error.message);
+  } finally { syncAttachButton(); }
 });
 // A parent overlay receives file drags before the desktop iframe can intercept them.
 const desktopFileOverlay = document.getElementById('watch-desktop-file-drop');
