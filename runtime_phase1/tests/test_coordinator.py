@@ -713,6 +713,14 @@ def _bound_failed_child(core, monkeypatch):
             "WHERE conversation_id=? AND goal_id='sibling'",
             ('work-sibling', sibling['worker_id'], untouched['run_id'], cid),
         )
+        # A goal's work is a durable delegation; Retry moves it to the replacement.
+        conn.execute(
+            "INSERT INTO delegations(work_ref,tenant_id,owner_id,idempotency_key,request_digest,title,"
+            "origin_surface,project_id,worker_id,initial_run_id,current_run_id,created_at,updated_at) "
+            "VALUES('work-child','local','owner','work-child','work-child-digest','Child','coordinator',"
+            "?,?,?,?,'2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')",
+            (project_id, child['worker_id'], failed['run_id'], failed['run_id']),
+        )
     delegation = {
         'work_ref': 'work-child', 'tenant_id': 'local', 'owner_id': 'owner',
         'worker_id': child['worker_id'], 'project_id': project_id,
@@ -838,6 +846,49 @@ def test_second_retry_key_cannot_start_while_first_is_pending(coordinator, monke
         release.set()
         assert pending.result(5)['run_id'] == replacement_id
     assert len(calls) == 1
+
+
+def test_a_retried_goal_can_be_retried_again_after_its_replacement_fails(tmp_path):
+    # Active Work reads the goal's work through its delegation. Once a replacement ends, that
+    # delegation must name it, or the next Retry targets a run the work no longer calls current.
+    store = Store(tmp_path / 'state.sqlite3')
+    service = WorkersProjectsService(
+        store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False,
+    )
+    service.start_assigned_run = lambda worker_id: None  # Each replacement's outcome is set below.
+    core = CoordinatorService(store, service, Provider())
+    cid = create(core)
+    core.accept_turn('local', 'owner', cid, 'turn', 'Exact original request',
+                     [Goal(id='child', text='Exact child goal')])
+    work = store.reserve_delegation(
+        tenant_id='local', owner_id='owner', idempotency_key='second-retry-source',
+        request_digest='second-retry-source-digest', origin_ref='second-retry-origin',
+        title='Exact child', goal='Exact child goal', instruction='Exact child instruction',
+        origin_surface='coordinator', worker_name='Child', worker_role='research',
+        profile='openclaw-general', backend='openclaw', runtime='openclaw-stub',
+        model='stub-model', execution_mode='docker',
+    )
+    source_id = str(work['run_id'])
+    store.update_run(source_id, state='failed', failure_class='native_input_expired', failure_retryable=0)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE coordinator_goals SET work_ref=?,worker_id=?,run_id=? "
+            "WHERE conversation_id=? AND goal_id='child'",
+            (work['work_ref'], str(work['worker_id']), source_id, cid),
+        )
+
+    first = core.control('local', 'owner', cid, 'child', Control(
+        action='retry', run_id=source_id, idempotency_key='first-retry',
+    ))
+    store.update_run(first['run_id'], state='failed', failure_class='native_input_expired',
+                     failure_retryable=0)
+    second = core.control('local', 'owner', cid, 'child', Control(
+        action='retry', run_id=first['run_id'], idempotency_key='second-retry',
+    ))
+
+    assert second['run_id'] not in {source_id, first['run_id']}
+    delegation = store.get_delegation(work['work_ref'], tenant_id='local', owner_id='owner')
+    assert delegation['current_run_id'] == second['run_id']
 
 
 @pytest.mark.parametrize('phase', ['before_binding', 'after_binding', 'bound_success'])

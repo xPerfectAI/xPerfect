@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from .failure_classification import is_user_resumable_failure
+from .models import utc_now
 
 
 class CoordinatorConflict(ValueError):
@@ -940,6 +941,15 @@ class CoordinatorService:
                 "AND (SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?)=0",
                 (replacement_id, conversation_id, goal_id, control.run_id, conversation_id),
             ).rowcount
+            # Active Work reads this goal's work through its delegation; it follows the same
+            # replacement, or a later Retry of that replacement targets a stale generation.
+            if updated and not conn.execute(
+                "UPDATE delegations SET current_run_id=?,updated_at=? "
+                "WHERE work_ref=? AND tenant_id=? AND owner_id=? AND current_run_id=?",
+                (replacement_id, utc_now(), goal["work_ref"], tenant, owner, control.run_id),
+            ).rowcount:
+                conn.execute("ROLLBACK")
+                updated = 0
             current = conn.execute(
                 "SELECT run_id,intent_state FROM coordinator_goals WHERE conversation_id=? AND goal_id=?",
                 (conversation_id, goal_id),
