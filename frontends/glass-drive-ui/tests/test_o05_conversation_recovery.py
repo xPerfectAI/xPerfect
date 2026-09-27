@@ -82,6 +82,37 @@ catch (error) { if (error.message !== 'Choose a connected assistant before start
     assert result.returncode == 0, result.stderr
 
 
+def test_a_goal_the_runtime_refused_to_start_says_it_is_blocked_and_why():
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index("const blockerMessages")
+    body = source[start:source.index("async function refresh()", start)]
+    node = shutil.which("node")
+    assert node, "Node is required for the goal state proof"
+    code = r"""
+class El {
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
+  addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){} setAttribute(){}
+}
+const elements = {};
+const $ = (id) => (elements[id] ||= new El('div'));
+globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null};
+const base = '/v1/coordinator/conversations'; const conversationId = 'c1'; let latest = null;
+const states = {accepted:'Accepted',queued:'Waiting to start',blocked:'Waiting to start'};
+async function refresh() {}
+""" + body + r"""
+const refused = {goal_id:'poem',text:'Write the poem',state:'blocked',blocker:'ParallelExecutionIsolationError',run_id:'',worker_id:''};
+const queued = {goal_id:'csv',text:'Make the CSV',state:'queued',blocker:'',run_id:'run-1',worker_id:'w-1'};
+render({turns:[],goals:[refused, queued]});
+const labels = $('goals').children.map((card) => card.children.find((c) => c.className === 'goal-state').textContent);
+if (labels[0] !== 'Blocked: The worker runtime is not ready. Check setup, then Retry.') throw new Error(labels[0]);
+if (labels[1] !== 'Waiting to start') throw new Error(labels[1]);
+if (!$('goals').children[0].children.some((c) => c.textContent === 'Stop')) throw new Error('blocked goal lost Stop');
+"""
+    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
 def test_uncertain_send_reconciles_saved_turn_and_reuses_key_if_not_saved():
     source = SOURCE.read_text(encoding="utf-8")
     submit = source[source.index("$('composer').addEventListener('submit'"):source.index("$('stop-response').addEventListener")]

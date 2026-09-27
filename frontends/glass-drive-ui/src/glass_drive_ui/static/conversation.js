@@ -13,7 +13,7 @@ let draftKey = '';
 let draftText = '';
 const nativeWidgets = new Map();
 const requestedProjectId = new URLSearchParams(location.search).get('project_id') || '';
-const states = {accepted:'Accepted',queued:'Waiting to start',running:'Working',paused:'Paused',needs_input:'Needs your input',completed:'Complete',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted',blocked:'Waiting to start'};
+const states = {accepted:'Accepted',queued:'Waiting to start',running:'Working',paused:'Paused',needs_input:'Needs your input',completed:'Complete',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted',blocked:'Blocked'};
 const blockerMessages = Object.freeze({
   provider_account_busy:'The connected assistant is busy.',
   host_capacity:'The workspace is busy.',
@@ -41,6 +41,10 @@ const blockerMessages = Object.freeze({
 const unavailableHere = new Set(['shared_linux_runtime_required', 'shared_runtime_unavailable']);
 function blockerMessage(code) {
   return blockerMessages[code] || 'The assistant is unavailable right now.';
+}
+// A goal the runtime refused to start says so, and why, instead of seeming to wait.
+function goalStateLabel(goal) {
+  return goal.state === 'blocked' && goal.blocker ? `Blocked: ${blockerMessage(goal.blocker)}` : states[goal.state] || goal.state;
 }
 // Why a connected account's conversation cannot start here, before anything is typed.
 function connectedUnavailableMessage(code) {
@@ -155,7 +159,7 @@ function render(snapshot) {
   const goalDigest=JSON.stringify(snapshot.goals);
   if ($('goals').dataset.version !== goalDigest && !$('goals').contains(document.activeElement)) {
     const cards=snapshot.goals.map((goal) => {
-      const card=node('section',undefined,'goal'); card.append(node('p',goal.text),node('span',states[goal.state] || goal.state,'goal-state'));
+      const card=node('section',undefined,'goal'); card.append(node('p',goal.text),node('span',goalStateLabel(goal),'goal-state'));
       if (!goal.run_id && ['accepted','blocked'].includes(goal.state)) card.append(action('Stop',() => api(`${base}/${encodeURIComponent(conversationId)}/goals/${encodeURIComponent(goal.goal_id)}/control`,'POST',{action:'stop',run_id:'',idempotency_key:crypto.randomUUID()})));
       if (goal.run_id) {
         const controls=node('div',undefined,'goal-actions');
