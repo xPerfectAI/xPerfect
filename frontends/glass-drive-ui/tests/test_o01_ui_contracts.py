@@ -206,3 +206,23 @@ def test_explicit_strict_account_survives_readiness_and_catalog_refresh():
         'value': '', 'label': 'Choose an account', 'state': 'choose', 'disabled': False,
         'help': 'Choose one of your connected accounts.',
     }
+
+
+def test_workspace_summaries_read_as_formatted_text_and_stay_safe():
+    """A completed run's summary on the Workspaces tile showed the answer's markdown raw."""
+    source = (STATIC / 'app.js').read_text()
+    start = source.index('const inlineMarkdown = new MarkdownIt')
+    helper = source[start:source.index('\nfunction summarizeLive(', start)]
+    result = node(f"""
+      import MarkdownIt from {json.dumps((STATIC / 'vendor' / 'markdown-it-15.0.2.mjs').as_uri())};
+      {helper}
+      const element = {{innerHTML: ''}};
+      setInlineResult(element, 'Saved it as `rain_note.txt`, **217 words** <img src=x onerror=alert(1)> [terms](https://example.test/terms)');
+      const shown = element.innerHTML;
+      setInlineResult(element, '');
+      console.log(JSON.stringify({{shown, cleared: element.innerHTML}}));
+    """)
+    assert '<code>rain_note.txt</code>' in result['shown'] and '<strong>217 words</strong>' in result['shown']
+    assert '`' not in result['shown'] and '<img' not in result['shown'] and '&lt;img' in result['shown']
+    assert '<a href="https://example.test/terms" target="_blank" rel="noopener noreferrer">terms</a>' in result['shown']
+    assert result['cleared'] == ''

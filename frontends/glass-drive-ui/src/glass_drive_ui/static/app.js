@@ -6,6 +6,7 @@ import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnW
 import { workspaceDeliveryModel } from './delivery-presenter.js?v=20260923closed1';
 import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20260811m';
 import { createFileDraft } from './files.js?v=20260923readable1';
+import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
 import { showLaunchedWorkspace, watchHref } from './launch-result.js?v=20260924launch1';
 import { initializeStorageAdmin } from './storage-admin.js?v=20260924storage3';
 
@@ -589,6 +590,18 @@ function workerApiUrl(workerId, path = '') {
   return `/api/worker/${encodeURIComponent(String(workerId || ''))}${path}`;
 }
 
+// A result's short summary reads as formatted text, as in Watch: raw HTML is escaped and
+// unsafe link schemes are refused. Links open beside this page.
+const inlineMarkdown = new MarkdownIt({ html: false, linkify: false, typographer: false });
+inlineMarkdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
+  tokens[index].attrSet('target', '_blank');
+  tokens[index].attrSet('rel', 'noopener noreferrer');
+  return self.renderToken(tokens, index, options);
+};
+function setInlineResult(element, text) {
+  element.innerHTML = inlineMarkdown.renderInline(String(text || ''));
+}
+
 function summarizeLive(data) {
   const runState = String(data?.latest_run?.state || '').trim();
   const output = String(data?.latest_output || '').trim();
@@ -755,7 +768,7 @@ function renderWorkspaceDelivery(tile, data) {
 
   const summary = document.createElement('p');
   summary.className = 'workspace-delivery-summary';
-  summary.textContent = model.summary || 'No run output yet.';
+  setInlineResult(summary, model.summary || 'No run output yet.');
   panel.appendChild(summary);
   if (!model.available) return;
 
@@ -868,7 +881,7 @@ async function refreshWorkspaceTile(workerId, refreshBootstrap) {
       favorite.title = isFavorite ? 'Remove favorite' : 'Mark favorite';
       favorite.setAttribute('aria-label', favorite.title);
     }
-    if (output) output.textContent = summarizeLive(data);
+    if (output) setInlineResult(output, summarizeLive(data));
   } catch (error) {
     markNextRefresh(ACTIVE_TILE_REFRESH_MS);
     if (output) output.textContent = error.message;
