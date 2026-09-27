@@ -42,6 +42,8 @@ Open **Connections**.
 
 Wait until the account shows **Ready**. A running app is not yet a connected AI.
 
+![Connections with the existing Claude sign-in Ready](assets/screens/connections.png)
+
 ## 4. Start a project
 
 Open **Run project**. Under **What would you like to do?**:
@@ -54,6 +56,8 @@ Open **Run project**. Under **What would you like to do?**:
 4. Select **Run Project**.
 
 Try: “Write a short note explaining rain and save it as a text file.”
+
+![Run project with a goal, an attached file, a worker and a ready account](assets/screens/run-project.png)
 
 The workspace's live view opens. If the page stays on “Starting project...”, open the workspace
 from **Workspaces**.
@@ -73,10 +77,14 @@ When the work is done, select **Open result** to read the answer, or open **File
 or **Download** what it made. Reload the page: the result is still there. It also survives
 `./xperfect restart`.
 
+![Open result: release-notes.md with Open file and Download file, above the answer](assets/screens/open-result.png)
+
 ## 7. Come back to it
 
 In **Workspaces**, choose **Open workspace**. In **Files**, **Add files**, then send a new
 instruction. The workspace keeps its files and history.
+
+![Workspaces listing two finished workspaces with their delivered files](assets/screens/workspaces.png)
 
 To run it later or repeatedly, open **Schedules** and select **New schedule**. Choose the
 workspace, write what it should do, choose when it repeats and select **Create schedule**.

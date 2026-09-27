@@ -24,7 +24,7 @@ preserved, and a readable downloadable Markdown file under 150 words.
 
 | Time | Show | Say |
 | --- | --- | --- |
-| 0–2 min | A previously rehearsed input and output, clearly labelled as recorded evidence | “The result must be useful to someone. We will check this one against its source.” |
+| 0–2 min | A previously rehearsed input and output, clearly labelled as recorded evidence, such as [this recorded result](assets/screens/result.png) | “The result must be useful to someone. We will check this one against its source.” |
 | 2–4 min | [First result](assets/first-result.png), then the [workspace diagram](assets/workspaces.png) | “A project groups the work. Each worker uses a native agent and an execution workspace. Grouping workers does not itself make them share a computer.” |
 | 4–6 min | The unlocked web UI, then `./xperfect doctor` | “A running UI is only the start. Doctor shows the exact model and whether the provider's tool is installed; Connections shows the signed-in account.” |
 | 6–10 min | **Run project** with the synthetic file added through **Add files**, progress and the produced Markdown file; the [context and tools diagram](assets/context-tools.png) while it runs. If the worker asks before running a command, answer it: an unanswered request expires. | “The worker gets the goal and the file we attached. It keeps its own built-in tools, and only the connections we allow. Our check is simple: every listed change survives, and missing information stays explicit.” |

@@ -34,6 +34,10 @@ Try: “Write a short note explaining rain and save it as a text file.”
 
 ![From a goal to a result you can reopen](docs/assets/first-result.png)
 
+| Run project | The finished result |
+| --- | --- |
+| ![Run project with a goal, an attached changelog and a ready Claude account](docs/assets/screens/run-project.png) | ![Watch showing the finished answer, with Open result for release-notes.md](docs/assets/screens/result.png) |
+
 ```sh
 ./xperfect doctor
 ./xperfect stop
