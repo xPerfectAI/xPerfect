@@ -10611,24 +10611,81 @@ def test_provider_activity_log_reads_only_the_bound_native_attempt(tmp_path):
     assert second == ("codex-cli", "second")
 
 
-def test_provider_activity_log_reads_the_host_transcript_its_bound_attempt_wrote(tmp_path):
-    # A host launch writes the run's native transcript at the run root, and its supervisor records
-    # the launched attempt's native child beside it before that child starts.
+def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_path, monkeypatch):
+    # A host launch rewrites the run's one transcript at its run root. A read bound to an attempt
+    # returns that transcript only while that attempt's launch owns it.
     runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
-    worker = {"worker_id": "wrk_host_attempt", "profile": "claude-code", "execution_mode": "host"}
-    run_id = "run-host-attempt"
-    run_root = runtime.host_claude._run_root(worker["worker_id"], run_id)
-    run_root.mkdir(parents=True)
-    transcript = json.dumps({"type": "result", "subtype": "success", "result": "The answer."}) + "\n"
-    (run_root / "stdout.log").write_text(transcript)
-    runtime.host_claude._native_child_record_path(run_root, "att-launched").write_text("{}")
+    host = runtime.host_claude
+    life = tmp_path / "Life"
+    life.mkdir()
+    worker = {
+        "worker_id": "wrk_host_attempts",
+        "profile": "claude-code",
+        "execution_mode": "host",
+        "trusted_run_lane": "conversation",
+        "workspace_root": str(life),
+        "model": "opus",
+        "bootstrap_bundle_json": json.dumps({"run_mode": "conversation"}),
+    }
+    run_id = "run_host_attempts"
 
-    launched = runtime.provider_activity_log({**worker, "_provider_activity_attempt_id": "att-launched"}, run_id)
-    unlaunched = runtime.provider_activity_log({**worker, "_provider_activity_attempt_id": "att-next"}, run_id)
+    def read(attempt, reader=runtime):
+        return reader.provider_activity_log({**worker, "_provider_activity_attempt_id": attempt}, run_id)[1]
 
-    assert launched == ("claude-code", transcript)
-    assert unlaunched == ("claude-code", "")
-    assert runtime.provider_activity_log(worker, run_id) == ("claude-code", transcript)
+    answers = iter(["First attempt's answer.", "Second attempt's answer."])
+    during_second_launch = []
+
+    class NativeProcess:
+        pid = 12345
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            _mark_fake_host_supervisor_ready(list(command), self.pid)
+            # The supervisor records this attempt's native child before the child runs.
+            Path(command[8]).write_text(json.dumps({"supervisor_pid": self.pid, "child": None}))
+            answer = next(answers)
+            if answer.startswith("Second"):
+                during_second_launch.append((read("att-first"), read("att-second")))
+            kwargs["stdout"].write(json.dumps({"type": "result", "result": answer}) + "\n")
+            kwargs["stdout"].flush()
+
+        def communicate(self, input=None, timeout=None):
+            return None, None
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    host.ensure_worker_ready = lambda _worker: host._host_runtime_info(worker)  # type: ignore[method-assign]
+    host._build_command = lambda _worker, _instruction, _info: (["claude"], {})  # type: ignore[method-assign]
+    monkeypatch.setattr(host, "_process_identity_sha256", lambda _pid: "1" * 64)
+    monkeypatch.setattr(host, "_process_group_identity", lambda pid: pid)
+    monkeypatch.setattr(host, "_process_start_identity", lambda _pid: "ps-lstart:Mon Jan 01 00:00:00 2024")
+    monkeypatch.setattr("workers_projects_runtime.profile_runtime.subprocess.Popen", NativeProcess)
+
+    host.run_task({**worker, "_run_attempt_id": "att-first"}, "Talk naturally.", run_id=run_id)
+    first_while_current = read("att-first")
+    host.run_task({**worker, "_run_attempt_id": "att-second"}, "Talk naturally.", run_id=run_id)
+
+    assert "First attempt's answer." in first_while_current
+    assert during_second_launch == [("", "")]
+    assert read("att-first") == ""
+    assert "Second attempt's answer." in read("att-second")
+    assert "First attempt's answer." not in read("att-second")
+    assert read("att-never-launched") == ""
+    restarted = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
+    assert "Second attempt's answer." in read("att-second", restarted)
+
+    # A launch that claims the transcript while it is being read voids that read.
+    claim = host._attempt_transcript
+    def claimed_mid_read(worker_id, run, attempt):
+        current = claim(worker_id, run, attempt)
+        host._claim_run_transcript(host._run_root(worker_id, run), "att-third")
+        return current
+    monkeypatch.setattr(host, "_attempt_transcript", claimed_mid_read)
+    assert read("att-second") == ""
 
 
 def test_host_conversation_broker_config_stays_in_private_worker_state(tmp_path, monkeypatch):

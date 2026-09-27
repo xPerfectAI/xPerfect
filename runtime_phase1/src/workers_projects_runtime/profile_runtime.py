@@ -1855,7 +1855,7 @@ class ProfiledWorkerRuntime:
         from .grok_runtime import GrokBuildRuntime, HostGrokBuildRuntime
         self.grok = GrokBuildRuntime(base_dir=base_dir, create_directories=create_directories)
         self.host_grok = HostGrokBuildRuntime(base_dir=base_dir, create_directories=create_directories)
-        self._provider_log_cache: dict[tuple[str, str, str], dict[str, object]] = {}
+        self._provider_log_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self._provider_log_cache_lock = Lock()
         provider_home_root = Path(
             os.environ.get("GLASSHIVE_PROVIDER_ACCOUNT_HOME_ROOT")
@@ -3201,9 +3201,10 @@ class ProfiledWorkerRuntime:
             raise ValueError("invalid run id")
         runtime = self._runtime_for_worker(worker)
         attempt_id = str(worker.get("_provider_activity_attempt_id") or "").strip()
-        stdout_path = runtime._attempt_stdout_path(str(worker["worker_id"]), clean_run_id, attempt_id)
-        if stdout_path is None or not stdout_path.is_file():
+        transcript = runtime._attempt_transcript(str(worker["worker_id"]), clean_run_id, attempt_id)
+        if transcript is None or not transcript[0].is_file():
             return str(worker.get("profile") or ""), ""
+        stdout_path, claim = transcript
         try:
             max_bytes = max(
                 1024,
@@ -3217,7 +3218,7 @@ class ProfiledWorkerRuntime:
             )
         except ValueError:
             max_bytes = 8 * 1024 * 1024
-        cache_key = (str(worker["worker_id"]), clean_run_id, attempt_id)
+        cache_key = (str(worker["worker_id"]), clean_run_id, attempt_id, claim)
         stat = stdout_path.stat()
         with self._provider_log_cache_lock:
             cached = self._provider_log_cache.get(cache_key)
@@ -3226,7 +3227,8 @@ class ProfiledWorkerRuntime:
                 and int(cached.get("size") or -1) == stat.st_size
                 and int(cached.get("mtime_ns") or -1) == stat.st_mtime_ns
             ):
-                return str(worker.get("profile") or ""), str(cached.get("rendered") or "")
+                return self._claimed_provider_log(worker, runtime, clean_run_id, attempt_id, transcript,
+                                                  str(cached.get("rendered") or ""))
 
             data = b""
             previous_size = int(cached.get("size") or 0) if cached else 0
@@ -3273,6 +3275,14 @@ class ProfiledWorkerRuntime:
             }
             while len(self._provider_log_cache) > 16:
                 self._provider_log_cache.pop(next(iter(self._provider_log_cache)))
+        return self._claimed_provider_log(worker, runtime, clean_run_id, attempt_id, transcript, text)
+
+    @staticmethod
+    def _claimed_provider_log(worker: dict, runtime, run_id: str, attempt_id: str,
+                              transcript: tuple[Path, str], text: str) -> tuple[str, str]:
+        # A later launch may claim and rewrite the transcript while it is read.
+        if runtime._attempt_transcript(str(worker["worker_id"]), run_id, attempt_id) != transcript:
+            return str(worker.get("profile") or ""), ""
         return str(worker.get("profile") or ""), text
 
     def collect_completed_run(
@@ -3864,11 +3874,11 @@ class BaseCliWorkerRuntime:
             return run_root
         return run_root / "attempts" / self._run_attempt_ref(clean_attempt_id)
 
-    def _attempt_stdout_path(
+    def _attempt_transcript(
         self, worker_id: str, run_id: str, attempt_id: str | None
-    ) -> Path | None:
-        """Where this runtime writes one attempt's native transcript."""
-        return self._attempt_run_root(worker_id, run_id, attempt_id) / "stdout.log"
+    ) -> tuple[Path, str] | None:
+        """One attempt's native transcript and the claim under which it holds that attempt's output."""
+        return self._attempt_run_root(worker_id, run_id, attempt_id) / "stdout.log", ""
 
     def _attempt_container_run_root(
         self, run_id: str, attempt_id: str | None
@@ -10436,16 +10446,30 @@ class HostNativeCliMixin:
     execution_mode = "host"
     worker_root_name = "host_cli_runtime"
 
-    def _attempt_stdout_path(
+    def _claim_run_transcript(self, run_root: Path, attempt_id: str) -> None:
+        """Name the launch that is about to rewrite the run's one transcript, before it does."""
+        _atomic_write_private_text(
+            run_root / "transcript-owner.json",
+            json.dumps({"attempt_id": attempt_id, "launch_id": secrets.token_hex(16)}),
+        )
+
+    def _attempt_transcript(
         self, worker_id: str, run_id: str, attempt_id: str | None
-    ) -> Path | None:
-        """A host launch rewrites the run's one transcript at its run root. The attempt that owns
-        it is the one whose native child record the supervisor wrote there before the child ran."""
+    ) -> tuple[Path, str] | None:
+        """A host launch rewrites the run's one transcript at its run root after claiming it, so
+        the transcript holds an attempt's output only while that attempt's launch owns the claim."""
         run_root = self._run_root(worker_id, run_id)
         clean_attempt_id = str(attempt_id or "").strip()
-        if clean_attempt_id and not self._native_child_record_path(run_root, clean_attempt_id).is_file():
+        if not clean_attempt_id:
+            return run_root / "stdout.log", ""
+        try:
+            owner = json.loads((run_root / "transcript-owner.json").read_text())
+        except (OSError, ValueError):
             return None
-        return run_root / "stdout.log"
+        if (not isinstance(owner, dict) or owner.get("attempt_id") != clean_attempt_id
+                or not isinstance(owner.get("launch_id"), str) or not owner["launch_id"]):
+            return None
+        return run_root / "stdout.log", owner["launch_id"]
 
     def _release_host_slot_locked(
         self,
@@ -13923,6 +13947,7 @@ raise SystemExit(exit_code)
         native_session_stop = Event()
         native_session_thread: Thread | None = None
         try:
+            self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
             with raw_stdout.open("w") as stdout_handle, raw_stderr.open("w") as stderr_handle:
                 raw_stdout.chmod(0o600)
                 raw_stderr.chmod(0o600)
@@ -14180,6 +14205,7 @@ raise SystemExit(exit_code)
         owned_session: dict[str, object] | None = None
         startup_cleanup_unconfirmed = False
         try:
+            self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
             with raw_stdout.open("w") as stdout_handle, raw_stderr.open("w") as stderr_handle:
                 raw_stdout.chmod(0o600)
                 raw_stderr.chmod(0o600)
