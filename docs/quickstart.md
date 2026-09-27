@@ -30,15 +30,15 @@ and the exact model each one will use. Your saved work lives outside the checkou
 
 ## 3. Connect your AI account
 
-Open **Connections**. Under **Connect an AI account**, choose your **AI**, then:
+Open **Connections**.
 
-- **Codex:** choose **My subscription** and **Connect Codex**, then **Open Codex sign-in** and
-  enter the one-time code shown in xPerfect.
-- **Claude Code:** if you are signed in to Claude Code on this computer, choose
-  **Use existing Claude sign-in**.
-- **Grok Build:** choose **My subscription** and **Connect Grok Build**, then
-  **Open provider sign-in**. Grok also needs one exact model: choose it under **Grok model** in
-  Connections and select **Use model**.
+- **Claude Code:** if you are signed in to Claude Code on this computer, select
+  **Use existing Claude sign-in** under **AI accounts**. Nothing else is needed.
+- **Codex:** under **Connect an AI account**, choose **Codex**, **My subscription** and
+  **Connect Codex**, then **Open Codex sign-in** and enter the one-time code shown in xPerfect.
+- **Grok Build:** under **Connect an AI account**, choose **Grok Build**, **My subscription** and
+  **Connect Grok Build**, then **Open provider sign-in**. Grok also needs one exact model: choose it
+  under **Grok model** in Connections and select **Use model**.
 
 Wait until the account shows **Ready**. A running app is not yet a connected AI.
 
