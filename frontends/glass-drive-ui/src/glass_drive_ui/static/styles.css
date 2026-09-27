@@ -201,6 +201,10 @@ button, input, textarea, select { font: inherit; }
 }
 .view-tabs::-webkit-scrollbar { display: none; }
 .view-tab {
+  /* The Conversation link and the tab buttons centre their label the same way. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   text-decoration: none;
   min-height: 34px;
   padding: 7px 13px;
@@ -2374,6 +2378,10 @@ textarea { resize: vertical; min-height: 78px; }
   font-size: 0.8rem;
   line-height: 1.4;
   transition: background 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+/* A hint with nothing to say takes no space; an empty pill reads as a broken control. */
+.steer-guidance-chip:empty {
+  display: none;
 }
 .steer-guidance-chip[data-active="true"] {
   color: var(--text);

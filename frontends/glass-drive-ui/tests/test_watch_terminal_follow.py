@@ -61,7 +61,7 @@ def test_watch_and_terminal_pages_load_the_exact_run_script_versions():
     # Browsers keep a cached script for the same ?v= token, so a changed script needs a new token.
     watch_html = (STATIC / "watch.html").read_text()
     assert 'src="/static/watch.js?v=20260927result3"' in watch_html
-    assert 'href="/static/styles.css?v=20260927result2"' in watch_html
+    assert 'href="/static/styles.css?v=20260927polish1"' in watch_html
     assert 'src="/static/terminal.js?v=20260926run3"' in (STATIC / "terminal.html").read_text()
 
 
