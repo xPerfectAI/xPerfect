@@ -454,7 +454,22 @@ function renderWorkspaceOptions(select, data, selectedValue = '') {
   const optionValues = Array.from(select.querySelectorAll('option')).map((option) => option.value);
   select.value = optionValues.includes(selectedValue)
     ? selectedValue
-    : String(data.default_workspace_option || '');
+    : runnableDefaultOption(data, optionValues, document.getElementById('provider-account-policy')?.value);
+}
+
+// Without a saved worker choice, start on a worker this user can run. Under the default
+// only-my-account policy a new worker without a ready account for its AI is refused, so the
+// deployment default gives way to the first worker that has one.
+function runnableDefaultOption(data, optionValues, policy = 'personal_required') {
+  const fallback = String(data?.default_workspace_option || '');
+  if (String(data?.user_preferences?.default_worker_profile || '') || policy !== 'personal_required') return fallback;
+  const ready = new Set((data?.provider_accounts || [])
+    .filter((account) => String(account.status || '').toLowerCase() === 'ready')
+    .map((account) => String(account.provider || '').toLowerCase()));
+  const runnable = (value) => value.startsWith('new:')
+    && (data?.profile_account_providers?.[value.slice(4)] || []).some((provider) => ready.has(String(provider).toLowerCase()));
+  if (!fallback.startsWith('new:') || runnable(fallback)) return fallback;
+  return optionValues.find(runnable) || fallback;
 }
 
 function uniqueWorkspaces(workspaces) {

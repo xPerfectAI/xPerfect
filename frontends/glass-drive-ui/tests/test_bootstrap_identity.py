@@ -74,3 +74,31 @@ run().catch(error=>{console.error(error);process.exitCode=1;});
         timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_without_a_saved_choice_a_new_run_starts_on_a_worker_this_user_can_run():
+    """On a fresh host the deployment default is Codex, but the only ready account is Claude.
+    Under the default only-my-account policy Codex would be refused, so Run project starts on
+    Claude Code. A saved worker choice, another policy or a runnable default is kept."""
+    source = (Path(__file__).parents[1] / "src/glass_drive_ui/static/app.js").read_text(encoding="utf-8")
+    start = source.index("function runnableDefaultOption(")
+    helper = source[start:source.index("\n}\n", start) + 3]
+    script = helper + r'''
+const options = ['open:wrk_saved', 'new:codex-cli', 'new:claude-code', 'new:grok-build'];
+const host = {default_workspace_option: 'new:codex-cli', user_preferences: {},
+  provider_accounts: [{provider: 'claude', status: 'ready'}],
+  profile_account_providers: {'claude-code': ['anthropic', 'claude'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai']}};
+console.log(JSON.stringify({
+  fresh: runnableDefaultOption(host, options),
+  saved: runnableDefaultOption({...host, user_preferences: {default_worker_profile: 'codex-cli'}}, options),
+  fallbackPolicy: runnableDefaultOption(host, options, 'personal_preferred'),
+  runnableDefault: runnableDefaultOption({...host, provider_accounts: [{provider: 'openai', status: 'ready'}, {provider: 'claude', status: 'ready'}]}, options),
+  nothingReady: runnableDefaultOption({...host, provider_accounts: [{provider: 'claude', status: 'needs_attention'}]}, options),
+}));
+'''
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "fresh": "new:claude-code", "saved": "new:codex-cli", "fallbackPolicy": "new:codex-cli",
+        "runnableDefault": "new:codex-cli", "nothingReady": "new:codex-cli",
+    }
