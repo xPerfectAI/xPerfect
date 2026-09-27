@@ -3509,6 +3509,40 @@ def test_claude_parser_keeps_a_final_report_that_starts_with_code(tmp_path):
     assert output == "`release-notes.md` is done. It is 89 words."
 
 
+@pytest.mark.parametrize("result, stored", [
+    ("Checked it.\n\nFINAL REPORT:\n", ""),
+    ("Checked it.\nFINAL REPORT:\nFINAL REPORT:", "FINAL REPORT:"),
+    ("Checked it.\n\nFINAL REPORT:\nThe template first line is:\nFINAL REPORT:\nThat is all.",
+     "The template first line is:\nFINAL REPORT:\nThat is all."),
+    ("    FINAL REPORT:\n    Status: ready", "FINAL REPORT:\n    Status: ready"),
+])
+def test_claude_worker_output_is_settled_once_and_callbacks_keep_it(tmp_path, result, stored):
+    # Extraction decides the report once: a truly empty report is stored empty, and literal
+    # FINAL REPORT text in a report stays. The completion callback uses the stored text as written.
+    from workers_projects_runtime.service import terminal_callback_full_message
+
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path))
+    worker = {"worker_id": "wrk_settled_report", "name": "Synthetic worker", "profile": "claude-code", "model": "opus"}
+    stdout = json.dumps({"type": "result", "subtype": "success", "session_id": "s", "result": result})
+
+    _, output = runtime._parse_output(worker, stdout, "", runtime._runtime_info(worker))
+
+    assert output == stored
+    assert terminal_callback_full_message(output) == (stored or "Run completed")
+
+
+def test_codex_parser_keeps_an_indented_literal_heading(tmp_path):
+    runtime = CodexCliRuntime(base_dir=str(tmp_path))
+    worker = {"worker_id": "wrk_indented_literal", "name": "Main Worker", "profile": "codex-cli", "model": "gpt-5.4"}
+    runtime._ensure_dirs(worker["worker_id"])
+    stdout = json.dumps({"type": "item.completed",
+                         "item": {"type": "agent_message", "text": "    FINAL REPORT:\n    Status: ready"}})
+
+    _, output = runtime._parse_output(worker, stdout, "", runtime._runtime_info(worker))
+
+    assert output == "FINAL REPORT:\n    Status: ready"
+
+
 def test_codex_parser_strips_plain_resume_final_report(tmp_path):
     runtime = CodexCliRuntime(base_dir=str(tmp_path))
     worker = {

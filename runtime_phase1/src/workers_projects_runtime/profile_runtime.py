@@ -110,7 +110,7 @@ from .openclaw_release import reviewed_openclaw_env
 from .provider_accounts import ProviderAccountHomeManager
 from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, host_runtime_requirement_issue
 from .run_evidence import (
-    FINAL_REPORT_PATTERN,
+    final_report_text,
     build_constraint_ledger,
     build_run_evidence,
     write_constraint_ledger,
@@ -180,7 +180,7 @@ from .openclaw_runtime import (
 )
 
 from .run_evidence import (
-    FINAL_REPORT_PATTERN,
+    final_report_text,
     build_constraint_ledger,
     build_run_evidence,
     write_constraint_ledger,
@@ -8057,17 +8057,17 @@ class OpenClawWorkstationRuntime(BaseCliWorkerRuntime):
                 if item.get("type") == "message":
                     for content in item.get("content", []):
                         if content.get("type") == "output_text":
-                            text = str(content.get("text") or "").strip()
-                            if text:
+                            text = str(content.get("text") or "")
+                            if text.strip():
                                 output_parts.append(text)
                 elif item.get("type") == "function_call":
                     name = str(item.get("name") or "function").strip()
                     output_parts.append(f"[Tool call: {name}]")
             for payload in data.get("payloads", []):
-                text = str(payload.get("text") or "").strip()
-                if text:
+                text = str(payload.get("text") or "")
+                if text.strip():
                     output_parts.append(text)
-        output = _select_user_facing_agent_output(output_parts) or json.dumps(data, indent=2)
+        output = _select_user_facing_agent_output(output_parts) if output_parts else json.dumps(data, indent=2)
         session_id = str(((data.get("meta") or {}).get("agentMeta") or {}).get("sessionId") or info.session_key or "").strip() or None
         return session_id, output
 
@@ -8996,8 +8996,8 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
                     session_key = maybe_session
             item = payload.get("item") or {}
             if payload.get("type") == "item.completed" and item.get("type") == "agent_message":
-                text = str(item.get("text") or "").strip()
-                if text:
+                text = str(item.get("text") or "")
+                if text.strip():
                     output_parts.append(text)
         if session_key:
             self._require_native_children_completed(
@@ -9009,8 +9009,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
         if getattr(self, "_conversation_mode_from_worker", lambda _worker: False)(worker):
             return session_key, "The harness completed without a user-facing response."
         fallback = self._extract_plain_output(stdout, stderr)
-        selected = _select_user_facing_agent_output([fallback])
-        return session_key, (selected or fallback)[-4000:]
+        return session_key, _select_user_facing_agent_output([fallback])[-4000:]
 
 
     _native_child_limit = 64
@@ -9413,8 +9412,8 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
                                 separators=(",", ":"),
                             )
                         )
-                    result = str(event.get("result") or "").strip()
-                    if result:
+                    result = str(event.get("result") or "")
+                    if result.strip():
                         result_parts.append(result)
                 if str(event.get("type") or "") != "assistant":
                     continue
@@ -9424,8 +9423,8 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
                     str(block.get("text") or "")
                     for block in content
                     if isinstance(block, dict) and str(block.get("type") or "") == "text"
-                ).strip()
-                if text:
+                )
+                if text.strip():
                     assistant_parts.append(text)
             selected = _select_user_facing_agent_output(
                 structured_parts or result_parts or assistant_parts
@@ -9435,8 +9434,8 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
         if not payload:
             return info.session_key, ""
         session_key = str(payload.get("session_id") or info.session_key or "").strip() or None
-        result = str(payload.get("result") or "").strip()
-        return session_key, _select_user_facing_agent_output([result]) or result
+        result = str(payload.get("result") or "")
+        return session_key, _select_user_facing_agent_output([result])
 
     @staticmethod
     def _terminal_result_payload(stdout: str) -> dict:
@@ -9858,15 +9857,19 @@ _HOST_RUN_OUTPUT_MAX_CHARS = 64000
 
 
 def _select_user_facing_agent_output(output_parts: list[str]) -> str:
-    """Prefer an explicit final report; otherwise use the latest assistant result."""
-    cleaned = [part.strip() for part in output_parts if str(part or "").strip()]
+    """The run's user-facing text, settled once when the native transcript is read: the latest
+    part's FINAL REPORT (empty when the report is empty), otherwise the latest assistant result.
+    Stored output is final; callbacks and views use it as written."""
+    # Detection reads each part as written: its indentation decides whether a FINAL REPORT line is
+    # Markdown body text or literal code.
+    cleaned = [str(part) for part in output_parts if str(part or "").strip()]
     if not cleaned:
         return ""
     for part in reversed(cleaned):
-        marker_matches = list(FINAL_REPORT_PATTERN.finditer(part))
-        if marker_matches:
-            return part[marker_matches[-1].end() :].strip()
-    return cleaned[-1]
+        report = final_report_text(part)
+        if report is not None:
+            return report
+    return cleaned[-1].strip()
 
 
 def _redact_text(value: str, max_chars: int | None = None) -> str:
@@ -14467,8 +14470,6 @@ raise SystemExit(exit_code)
 
         session_key, output = self._parse_output(worker, stdout, stderr, info)
         self._remember_native_session_key(worker, session_key)
-        if FINAL_REPORT_PATTERN.search(stdout) and not FINAL_REPORT_PATTERN.search(output):
-            output = f"FINAL REPORT:\n{output.strip()}"
         redacted_output = _redact_text(output.strip())
         if len(redacted_output) > _HOST_RUN_OUTPUT_MAX_CHARS:
             redacted_output = f"{redacted_output[: _HOST_RUN_OUTPUT_MAX_CHARS - 3].rstrip()}..."

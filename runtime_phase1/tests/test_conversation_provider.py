@@ -4322,6 +4322,57 @@ def test_native_visible_text_shows_only_grok_final_report_when_present():
     assert _native_visible_text("grok-build", "\n".join((started, completed))) == "The requested answer."
 
 
+def _claude_final(text):
+    return "\n".join((json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}),
+                      json.dumps({"type": "result", "result": text})))
+
+
+def _codex_final(text):
+    return "\n".join((json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}),
+                      json.dumps({"type": "turn.completed"})))
+
+
+@pytest.mark.parametrize("profile, stdout", [
+    ("claude-code", _claude_final("I saved it.\n\nFINAL REPORT:\n`tides.md` is saved.")),
+    ("codex-cli", _codex_final("I saved it.\n\nFINAL REPORT:\n`tides.md` is saved.")),
+])
+def test_native_visible_text_shows_only_the_final_report_for_every_harness(profile, stdout):
+    # A conversation reply is the user-facing report, as for Grok and worker runs: never the
+    # narration before it, the marker itself, or the same answer twice.
+    assert _native_visible_text(profile, stdout) == "`tides.md` is saved."
+
+
+@pytest.mark.parametrize("profile, stdout", [
+    ("claude-code", _claude_final("Hello from LIFE.")), ("codex-cli", _codex_final("Hello from LIFE.")),
+])
+def test_native_visible_text_keeps_a_reply_without_a_final_report(profile, stdout):
+    assert _native_visible_text(profile, stdout) == "Hello from LIFE."
+
+
+@pytest.mark.parametrize("profile", ["claude-code", "codex-cli", "grok-build"])
+def test_native_visible_text_keeps_an_indented_literal_heading(profile):
+    reply = "    FINAL REPORT:\n    Status: ready"
+    stdout = {
+        "claude-code": _claude_final(reply),
+        "codex-cli": _codex_final(reply),
+        "grok-build": "\n".join((json.dumps({"type": "grok.session.started", "session_id": "s"}),
+                                 json.dumps({"type": "grok.result", "session_id": "s", "stop_reason": "end_turn", "output": reply}))),
+    }[profile]
+    assert _native_visible_text(profile, stdout) == "FINAL REPORT:\n    Status: ready"
+
+
+@pytest.mark.parametrize("profile", ["claude-code", "codex-cli", "grok-build"])
+def test_native_visible_text_keeps_a_literal_final_report_inside_the_reply(profile):
+    reply = "Drafted.\n\nFINAL REPORT:\nHere is document:\n```text\nTitle: Notes\nFINAL REPORT:\nStatus: ready\n```"
+    stdout = {
+        "claude-code": _claude_final(reply),
+        "codex-cli": _codex_final(reply),
+        "grok-build": "\n".join((json.dumps({"type": "grok.session.started", "session_id": "s"}),
+                                 json.dumps({"type": "grok.result", "session_id": "s", "stop_reason": "end_turn", "output": reply}))),
+    }[profile]
+    assert _native_visible_text(profile, stdout) == "Here is document:\n```text\nTitle: Notes\nFINAL REPORT:\nStatus: ready\n```"
+
+
 @pytest.mark.parametrize("profile", ["codex-cli", "claude-code"])
 def test_completed_native_harness_without_terminal_answer_fails_loudly(
     tmp_path, monkeypatch, profile

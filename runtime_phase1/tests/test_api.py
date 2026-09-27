@@ -999,24 +999,6 @@ def test_store_migrates_run_scoped_runtime_bundle_for_existing_db(tmp_path):
         }
 
 
-def test_terminal_callback_message_prefers_final_report():
-    output = "\n".join(
-        [
-            "I am starting the browser.",
-            "I am still scrolling through results.",
-            "",
-            "FINAL REPORT:",
-            "Captured 42 rows.",
-            "",
-            "Created `results.md` and stopped on the target page.",
-        ]
-    )
-
-    assert terminal_callback_message(output) == (
-        "Captured 42 rows.\n\nCreated `results.md` and stopped on the target page."
-    )
-
-
 def test_user_preferences_are_scoped_and_validate_profile_allowlist(tmp_path, monkeypatch):
     monkeypatch.setenv("WPR_API_TOKEN", "service-token")
     monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "signed-link-secret")
@@ -1146,43 +1128,51 @@ def test_local_service_identity_cannot_cross_owner_project_worker_or_run_scope(
     assert cross_owner_terminal.value.code == 4404
 
 
-def test_terminal_callback_message_uses_line_anchored_final_report_marker():
-    output = "\n".join(
-        [
-            "Progress: the harness says to include FINAL REPORT: at the end.",
-            "",
-            "FINAL REPORT:",
-            "Captured 42 rows.",
-        ]
-    )
+def test_user_facing_output_is_selected_once_from_the_native_text():
+    # Extraction, not the callback, reads the report protocol. The first FINAL REPORT line that is
+    # Markdown body text is the marker: narration before it is dropped, and everything after it,
+    # including literal FINAL REPORT text in a document, is the report.
+    from workers_projects_runtime.profile_runtime import _select_user_facing_agent_output as select
 
-    assert terminal_callback_message(output) == "Captured 42 rows."
-
-
-def test_terminal_callback_message_accepts_inline_final_report_marker():
-    output = "Progress that should not surface.\nFINAL REPORT: Captured 42 rows."
-
-    assert terminal_callback_message(output) == "Captured 42 rows."
-
-
-def test_terminal_callback_message_accepts_backtick_wrapped_final_report_marker():
-    output = "Progress that should not surface.\n\n`FINAL REPORT:`\n\nCaptured 42 rows."
-
-    assert terminal_callback_message(output) == "Captured 42 rows."
-    assert terminal_callback_full_message(output) == "Captured 42 rows."
-
-
-def test_terminal_callback_message_keeps_a_report_that_starts_with_code_or_emphasis():
-    # Only the marker's own wrapper is removed; the report's first character is its own.
     cases = {
+        "I am starting the browser.\nI am still scrolling through results.\n\nFINAL REPORT:\nCaptured 42 rows.\n\n"
+        "Created `results.md` and stopped on the target page.":
+            "Captured 42 rows.\n\nCreated `results.md` and stopped on the target page.",
+        "Progress: the harness says to include FINAL REPORT: at the end.\n\nFINAL REPORT:\nCaptured 42 rows.": "Captured 42 rows.",
+        "Progress that should not surface.\nFINAL REPORT: Captured 42 rows.": "Captured 42 rows.",
+        "Progress that should not surface.\n\n`FINAL REPORT:`\n\nCaptured 42 rows.": "Captured 42 rows.",
+        "Progress.\n\n```FINAL REPORT:```\nCaptured 42 rows.": "Captured 42 rows.",
         "Done.\n\nFINAL REPORT:\n`release-notes.md` is done.": "`release-notes.md` is done.",
         "FINAL REPORT: **Done.** Nothing is blocking.": "**Done.** Nothing is blocking.",
         "**FINAL REPORT:**\n_Draft_ saved.": "_Draft_ saved.",
-        "`FINAL REPORT:` `notes.md` is ready.": "`notes.md` is ready.",
+        "Working.\n\nFINAL REPORT:\nHere is document:\n```text\nTitle: Notes\nFINAL REPORT:\nStatus: ready\n```":
+            "Here is document:\n```text\nTitle: Notes\nFINAL REPORT:\nStatus: ready\n```",
+        "FINAL REPORT:\nThe template first line is:\nFINAL REPORT:\nThat is all.":
+            "The template first line is:\nFINAL REPORT:\nThat is all.",
+        "Narration.\nFINAL REPORT:\nFINAL REPORT:": "FINAL REPORT:",
+        "The brief said:\n> FINAL REPORT:\n> keep it short\n\nFINAL REPORT:\nShort.": "Short.",
+        "Doc:\n\n    FINAL REPORT:\n    indented heading\n\nFINAL REPORT:\nKept.": "Kept.",
+        "Use `FINAL REPORT:` as the heading.": "Use `FINAL REPORT:` as the heading.",
+        "Done.\n\nFINAL REPORT:\n": "",
+        "    FINAL REPORT:\n    Status: ready": "FINAL REPORT:\n    Status: ready",
+        "\n    FINAL REPORT:\n    Status: ready": "FINAL REPORT:\n    Status: ready",
     }
-    for output, report in cases.items():
-        assert terminal_callback_message(output) == report
-        assert terminal_callback_full_message(output) == report
+    for native, report in cases.items():
+        assert select([native]) == report, native
+
+
+def test_terminal_callbacks_use_the_stored_output_as_written():
+    # The runtime stored the run's user-facing text once; a callback does not read it again.
+    for stored in (
+        "The template first line is:\nFINAL REPORT:\nThat is all.",
+        "FINAL REPORT:",
+        "Here is document:\n```text\nTitle: Notes\nFINAL REPORT:\nStatus: ready\n```",
+        "`release-notes.md` is done.",
+    ):
+        assert terminal_callback_message(stored) == stored
+        assert terminal_callback_full_message(stored) == stored
+    assert terminal_callback_message("", fallback="Run completed") == "Run completed"
+    assert terminal_callback_full_message("  \n", fallback="Run completed") == "Run completed"
 
 
 def test_terminal_callback_message_uses_tail_without_mid_word_fragment():
@@ -1229,28 +1219,19 @@ def test_terminal_callback_message_keeps_short_markerless_multiline_result():
 
 
 def test_terminal_callback_message_respects_visible_budget_with_prefix():
-    output = "\n\n".join(
-        [
-            "Opening the browser and scrolling.",
-            "FINAL REPORT:",
-            "A" * 1500,
-            "B" * 1500,
-            "C" * 1500,
-        ]
-    )
+    stored_report = "\n\n".join(["A" * 1500, "B" * 1500, "C" * 1500])
 
-    message = terminal_callback_message(output)
+    message = terminal_callback_message(stored_report)
 
     assert len(message) <= 4000
-    assert message.startswith("A")
-    assert message.endswith("...")
+    assert message.startswith("...\n\n")
+    assert message.endswith("C" * 1500)
 
 
 def test_terminal_callback_full_message_preserves_long_final_report():
-    final_report = "\n\n".join(["A" * 1500, "B" * 1500, "C" * 1500])
-    output = f"Progress that should not surface.\nFINAL REPORT:\n{final_report}"
+    stored_report = "\n\n".join(["A" * 1500, "B" * 1500, "C" * 1500])
 
-    assert terminal_callback_full_message(output) == final_report
+    assert terminal_callback_full_message(stored_report) == stored_report
 
 
 def test_completed_callback_uses_final_report_message(tmp_path, monkeypatch):
@@ -1264,17 +1245,8 @@ def test_completed_callback_uses_final_report_message(tmp_path, monkeypatch):
         ) -> str:
             _ = worker, instruction, timeout_sec, run_id
             publish_in_process_test_start(worker)
-            return "\n".join(
-                [
-                    "Opening the browser and scrolling.",
-                    "Still collecting rows from the page.",
-                    "",
-                    "FINAL REPORT:",
-                    "Captured 42 rows.",
-                    "",
-                    "Created `recent-connections.md` and stopped on the target page.",
-                ]
-            )
+            # Like every runtime parser, return the report selected from the native transcript.
+            return "Captured 42 rows.\n\nCreated `recent-connections.md` and stopped on the target page."
 
     class Response:
         status_code = 200

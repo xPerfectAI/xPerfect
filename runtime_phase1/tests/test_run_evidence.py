@@ -1639,6 +1639,35 @@ def test_run_evidence_accepts_markdown_decorated_final_report_marker(tmp_path):
     assert evidence["evidence_result"]["status"] == "warn"
 
 
+def test_final_report_marker_ignores_fenced_quoted_and_inline_literals():
+    from workers_projects_runtime.run_evidence import final_report_marker, final_report_text
+
+    assert final_report_marker("```\nFINAL REPORT:\nx\n```") is None
+    assert final_report_marker("~~~~md\nFINAL REPORT:\n~~~\n~~~~") is None
+    assert final_report_marker("> FINAL REPORT:\n> quoted") is None
+    assert final_report_marker("`FINAL REPORT:` is the heading.") is None
+    # CommonMark: four columns of indentation make indented code; a backtick fence's info string
+    # has no backtick, so a triple-backtick-wrapped marker line is inline code, not a fence.
+    assert final_report_marker("    FINAL REPORT:\n    literal") is None
+    assert final_report_marker("\tFINAL REPORT:\nliteral") is None
+    assert final_report_marker("~~~FINAL REPORT:~~~\nliteral") is None
+    assert final_report_text("   FINAL REPORT:\nDone.") == "Done."
+    assert final_report_text("```FINAL REPORT:```\nDone.") == "Done."
+    assert final_report_text("```FINAL REPORT:```\n```text\nFINAL REPORT:\n```") == "```text\nFINAL REPORT:\n```"
+    for text, report in (
+        ("FINAL REPORT:\nDone.", "Done."),
+        ("FINAL REPORT: Captured 42 rows.", "Captured 42 rows."),
+        ("### FINAL REPORT:\nDone.", "Done."),
+        ("**FINAL REPORT:**\nDone.", "Done."),
+        ("**FINAL REPORT:** Done.", "Done."),
+        ("`FINAL REPORT:`\n\nDone.", "Done."),
+        ("```\nFINAL REPORT:\n```\nFINAL REPORT:\n`a.md` saved.", "`a.md` saved."),
+        ("Narration.\r\nFINAL REPORT:\r\nDone.", "Done."),
+        ("FINAL REPORT:", ""),
+    ):
+        assert final_report_text(text) == report, text
+
+
 def test_run_evidence_accepts_backtick_wrapped_final_report_marker(tmp_path):
     result = "Confirmed the artifacts.\n\n`FINAL REPORT:`\n\nAll outputs are ready."
     evidence = build_run_evidence(

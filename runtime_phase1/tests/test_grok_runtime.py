@@ -116,6 +116,34 @@ def test_parser_rejects_mismatched_terminal_session(tmp_path):
         runtime._parse_output(worker(tmp_path), '\n'.join(map(json.dumps,events)), '', info(tmp_path))
 
 
+def test_parser_settles_the_report_like_the_other_harnesses(tmp_path):
+    runtime = GrokBuildRuntime(str(tmp_path))
+    started = {'type':'grok.session.started','session_id':'native-id','model':'grok-selected'}
+    for output, stored in (('Working.\n\nFINAL REPORT:\nGrok report.', 'Grok report.'),
+                           ('Plain answer.', 'Plain answer.'),
+                           ('Working.\n\nFINAL REPORT:\n', '')):
+        events = [started, {'type':'grok.result','session_id':'native-id','stop_reason':'end_turn','output':output}]
+        assert runtime._parse_output(worker(tmp_path), '\n'.join(map(json.dumps,events)), '', info(tmp_path, 'native-id'))[1] == stored
+
+
+def test_run_evidence_reads_the_report_from_the_typed_grok_terminal_event(tmp_path):
+    from workers_projects_runtime.run_evidence import build_run_evidence
+
+    runtime = GrokBuildRuntime(str(tmp_path))
+    events = [{'type':'grok.session.started','session_id':'native-id','model':'grok-selected'},
+              {'type':'grok.result','session_id':'native-id','stop_reason':'end_turn','output':'Working.\n\nFINAL REPORT:\nDone.'}]
+    stdout = '\n'.join(map(json.dumps, events))
+    _, output = runtime._parse_output(worker(tmp_path), stdout, '', info(tmp_path, 'native-id'))
+    evidence = build_run_evidence(
+        worker={'worker_id': 'wrk_grok_evidence', 'profile': 'grok-build', 'execution_mode': 'docker'},
+        run_id='run_grok_evidence', runtime_name='grok-build', model='grok-selected', command=['grok'], env={},
+        workspace_dir=tmp_path, stdout_text=stdout, stderr_text='', output_text=output, error_text='', exit_code=0,
+        timeout_seconds=None, stop_reason='process_exit', constraint_ledger=None)
+
+    assert output == 'Done.'
+    assert evidence['final_output']['has_final_report'] is True
+
+
 def test_runner_subprocess_preserves_native_protocol_and_resumes(tmp_path):
     # This peer is a protocol fixture, not evidence of provider or account parity.
     fake = tmp_path/'grok-fixture'

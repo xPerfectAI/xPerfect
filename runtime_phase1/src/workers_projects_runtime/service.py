@@ -87,7 +87,6 @@ from .recurrence import (
 )
 from .runtime_env import load_viventium_runtime_env
 from .runtime_identity import derive_legacy_backend_label
-from .run_evidence import FINAL_REPORT_PATTERN
 from .run_actions import (
     RunActionError,
     mint_run_action_capability,
@@ -1522,14 +1521,10 @@ def allowed_worker_profiles() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+# A run's output is its user-facing text, settled once when the runtime read the native
+# transcript. Callbacks use it as written: parsing it again would cut literal report content.
 def terminal_callback_full_message(output_text: str, *, fallback: str = "Run completed") -> str:
     text = str(output_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not text:
-        return fallback
-
-    marker_matches = list(FINAL_REPORT_PATTERN.finditer(text))
-    if marker_matches:
-        text = text[marker_matches[-1].end() :].strip()
     return text or fallback
 
 
@@ -1538,16 +1533,8 @@ def terminal_callback_message(output_text: str, *, fallback: str = "Run complete
     if not text:
         return fallback
 
-    marker_matches = list(FINAL_REPORT_PATTERN.finditer(text))
-    has_final_report = bool(marker_matches)
-    if marker_matches:
-        text = text[marker_matches[-1].end() :].strip()
-
     if len(text) <= TERMINAL_CALLBACK_MESSAGE_LIMIT:
-        return text or fallback
-
-    if has_final_report:
-        return f"{text[: TERMINAL_CALLBACK_MESSAGE_LIMIT - 3].rstrip()}..."
+        return text
 
     prefix = "...\n\n"
     paragraph_budget = TERMINAL_CALLBACK_MESSAGE_LIMIT - len(prefix)

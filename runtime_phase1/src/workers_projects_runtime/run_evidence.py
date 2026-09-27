@@ -71,6 +71,52 @@ _FINAL_REPORT_RE = re.compile(
 )
 
 FINAL_REPORT_PATTERN = _FINAL_REPORT_RE
+_FENCE_RE = re.compile(r" {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)")
+
+
+def _indent_columns(line: str) -> int:
+    columns = 0
+    for character in line:
+        if character == " ":
+            columns += 1
+        elif character == "\t":
+            columns += 4 - columns % 4
+        else:
+            break
+    return columns
+
+
+def final_report_marker(text: str) -> tuple[int, int] | None:
+    """Locate the report protocol's own marker: the first FINAL REPORT line that is Markdown body
+    text, not fenced or indented code or a block quote (CommonMark). A code-wrapped marker counts
+    only alone on its line. Anything after the marker, including literal FINAL REPORT text, is
+    report content."""
+    fence = ""
+    offset = 0
+    for line in str(text or "").splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        opener = _FENCE_RE.match(content)
+        if opener and opener.group("fence")[0] == "`" and "`" in opener.group("info"):
+            opener = None  # A backtick fence's info string has no backtick: this line is inline code.
+        if fence:
+            if (opener and opener.group("fence")[0] == fence[0] and len(opener.group("fence")) >= len(fence)
+                    and not opener.group("info").strip()):
+                fence = ""
+        elif opener:
+            fence = opener.group("fence")
+        elif _indent_columns(content) < 4 and not content.lstrip().startswith(">"):
+            match = _FINAL_REPORT_RE.match(content)
+            wrap = match.group("wrap") if match else None
+            if match and not (wrap and wrap.startswith("`") and content[match.end():].strip()):
+                return offset + match.start(), offset + match.end()
+        offset += len(line)
+    return None
+
+
+def final_report_text(text: str) -> str | None:
+    """The report after the protocol marker, or None when the text has no report marker."""
+    marker = final_report_marker(text)
+    return None if marker is None else str(text)[marker[1]:].strip()
 
 _MONTHS = {
     "jan": 1,
@@ -332,11 +378,14 @@ def _stdout_agent_has_final_report(stdout_text: str) -> bool:
         for item in iter_dicts(payload):
             for key in final_text_keys:
                 text = str(item.get(key) or "")
-                if FINAL_REPORT_PATTERN.search(text):
+                if final_report_marker(text) is not None:
                     return True
         if str(payload.get("type") or "") == "result":
             result_text = str(payload.get("result") or "")
-            if FINAL_REPORT_PATTERN.search(result_text):
+            if final_report_marker(result_text) is not None:
+                return True
+        if str(payload.get("type") or "") == "grok.result":
+            if final_report_marker(str(payload.get("output") or "")) is not None:
                 return True
         item = payload.get("item")
         if not isinstance(item, dict):
@@ -344,9 +393,9 @@ def _stdout_agent_has_final_report(stdout_text: str) -> bool:
         if str(item.get("type") or "") not in {"agent_message", "assistant_message"}:
             continue
         text = str(item.get("text") or "")
-        if FINAL_REPORT_PATTERN.search(text):
+        if final_report_marker(text) is not None:
             return True
-    return bool(FINAL_REPORT_PATTERN.search(str(stdout_text or "")))
+    return final_report_marker(str(stdout_text or "")) is not None
 
 
 def _safe_env_keys(env: dict[str, str] | None) -> list[str]:
@@ -2541,7 +2590,7 @@ def build_run_evidence(
     else:
         exit_source = normalized_stop_reason or "unknown"
     has_final_report = bool(
-        FINAL_REPORT_PATTERN.search(output_text)
+        final_report_marker(output_text) is not None
         or _stdout_agent_has_final_report(stdout_text)
     )
     final_output = {

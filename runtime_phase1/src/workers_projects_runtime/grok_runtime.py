@@ -11,7 +11,7 @@ import sys
 from .bootstrap import bootstrap_env_for, bootstrap_bundle_for
 from .mission_provider_accounts import apply_bound_provider_account_environment
 from .openclaw_runtime import ProviderAuthenticationMissingError, RuntimeConfigurationError, RuntimeDependencyMissingError, RuntimeErrorBase
-from .profile_runtime import BaseCliWorkerRuntime, HostNativeCliMixin, _atomic_write_private_text
+from .profile_runtime import BaseCliWorkerRuntime, HostNativeCliMixin, _atomic_write_private_text, _select_user_facing_agent_output
 
 
 class GrokBuildRuntime(BaseCliWorkerRuntime):
@@ -224,7 +224,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             raise RuntimeErrorBase('Grok terminal result does not match its configured native session/model')
         if info.session_key and session['session_id'] != info.session_key:
             raise RuntimeErrorBase('Grok resumed a different native session')
-        return session['session_id'], result['output']
+        return session['session_id'], _select_user_facing_agent_output([result['output']])
 
     def _stdout_has_complete_response(self, stdout_path):
         try:

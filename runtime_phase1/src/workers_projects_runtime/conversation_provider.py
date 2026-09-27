@@ -2247,13 +2247,13 @@ def _native_visible_text(profile: str, stdout: str) -> str:
                         or event.get("stop_reason") != "end_turn"
                         or not isinstance(event.get("output"), str)):
                     return ""
-                grok_results.append(event["output"].strip())
+                grok_results.append(event["output"])
             continue
         if profile == "codex-cli":
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             if event.get("type") == "item.completed" and item.get("type") == "agent_message":
-                text = str(item.get("text") or "").strip()
-                if text:
+                text = str(item.get("text") or "")
+                if text.strip():
                     assistant_parts.append(text)
             elif event.get("type") == "turn.completed":
                 codex_turn_completed = True
@@ -2263,8 +2263,8 @@ def _native_visible_text(profile: str, stdout: str) -> str:
         if event.get("type") == "stream_event":
             continue
         if event.get("type") == "result":
-            text = str(event.get("result") or "").strip()
-            if text:
+            text = str(event.get("result") or "")
+            if text.strip():
                 result_parts.append(text)
             continue
         if event.get("type") != "assistant":
@@ -2276,12 +2276,14 @@ def _native_visible_text(profile: str, stdout: str) -> str:
             for block in content
             if isinstance(block, dict) and block.get("type") == "text"
         )
-        if text:
+        if text.strip():
             assistant_parts.append(text)
+    # Every harness answers with its user-facing report, as worker results do: the narration
+    # before a FINAL REPORT section, and the marker itself, are not part of the reply.
     if profile == "claude-code":
-        return result_parts[-1] if result_parts else ""
+        return _select_user_facing_agent_output(result_parts[-1:])
     if profile == "codex-cli" and codex_turn_completed:
-        return assistant_parts[-1] if assistant_parts else ""
+        return _select_user_facing_agent_output(assistant_parts[-1:])
     if profile == "grok-build" and len(grok_results) == 1:
         return _select_user_facing_agent_output(grok_results)
     return ""
