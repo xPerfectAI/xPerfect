@@ -3201,12 +3201,8 @@ class ProfiledWorkerRuntime:
             raise ValueError("invalid run id")
         runtime = self._runtime_for_worker(worker)
         attempt_id = str(worker.get("_provider_activity_attempt_id") or "").strip()
-        run_root = (
-            runtime._attempt_run_root(str(worker["worker_id"]), clean_run_id, attempt_id)
-            if attempt_id else runtime._run_root(str(worker["worker_id"]), clean_run_id)
-        )
-        stdout_path = run_root / "stdout.log"
-        if not stdout_path.is_file():
+        stdout_path = runtime._attempt_stdout_path(str(worker["worker_id"]), clean_run_id, attempt_id)
+        if stdout_path is None or not stdout_path.is_file():
             return str(worker.get("profile") or ""), ""
         try:
             max_bytes = max(
@@ -3867,6 +3863,12 @@ class BaseCliWorkerRuntime:
         if not clean_attempt_id:
             return run_root
         return run_root / "attempts" / self._run_attempt_ref(clean_attempt_id)
+
+    def _attempt_stdout_path(
+        self, worker_id: str, run_id: str, attempt_id: str | None
+    ) -> Path | None:
+        """Where this runtime writes one attempt's native transcript."""
+        return self._attempt_run_root(worker_id, run_id, attempt_id) / "stdout.log"
 
     def _attempt_container_run_root(
         self, run_id: str, attempt_id: str | None
@@ -10433,6 +10435,17 @@ def _safe_slug(value: str) -> str:
 class HostNativeCliMixin:
     execution_mode = "host"
     worker_root_name = "host_cli_runtime"
+
+    def _attempt_stdout_path(
+        self, worker_id: str, run_id: str, attempt_id: str | None
+    ) -> Path | None:
+        """A host launch rewrites the run's one transcript at its run root. The attempt that owns
+        it is the one whose native child record the supervisor wrote there before the child ran."""
+        run_root = self._run_root(worker_id, run_id)
+        clean_attempt_id = str(attempt_id or "").strip()
+        if clean_attempt_id and not self._native_child_record_path(run_root, clean_attempt_id).is_file():
+            return None
+        return run_root / "stdout.log"
 
     def _release_host_slot_locked(
         self,

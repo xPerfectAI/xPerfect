@@ -10598,10 +10598,10 @@ def test_provider_activity_log_reads_incrementally_and_marks_a_bounded_tail(tmp_
 
 def test_provider_activity_log_reads_only_the_bound_native_attempt(tmp_path):
     runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
-    worker = {"worker_id": "wrk_native_attempt", "profile": "codex-cli", "execution_mode": "host"}
+    worker = {"worker_id": "wrk_native_attempt", "profile": "codex-cli", "execution_mode": "docker"}
     run_id = "run-native-attempt"
     for attempt, content in (("att-one", "first"), ("att-two", "second")):
-        root = runtime.host_codex._attempt_run_root(worker["worker_id"], run_id, attempt)
+        root = runtime.codex._attempt_run_root(worker["worker_id"], run_id, attempt)
         root.mkdir(parents=True)
         (root / "stdout.log").write_text(content)
     assert runtime.provider_activity_log(worker, run_id)[1] == ""
@@ -10609,6 +10609,26 @@ def test_provider_activity_log_reads_only_the_bound_native_attempt(tmp_path):
     second = runtime.provider_activity_log({**worker, "_provider_activity_attempt_id": "att-two"}, run_id)
     assert first == ("codex-cli", "first")
     assert second == ("codex-cli", "second")
+
+
+def test_provider_activity_log_reads_the_host_transcript_its_bound_attempt_wrote(tmp_path):
+    # A host launch writes the run's native transcript at the run root, and its supervisor records
+    # the launched attempt's native child beside it before that child starts.
+    runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = {"worker_id": "wrk_host_attempt", "profile": "claude-code", "execution_mode": "host"}
+    run_id = "run-host-attempt"
+    run_root = runtime.host_claude._run_root(worker["worker_id"], run_id)
+    run_root.mkdir(parents=True)
+    transcript = json.dumps({"type": "result", "subtype": "success", "result": "The answer."}) + "\n"
+    (run_root / "stdout.log").write_text(transcript)
+    runtime.host_claude._native_child_record_path(run_root, "att-launched").write_text("{}")
+
+    launched = runtime.provider_activity_log({**worker, "_provider_activity_attempt_id": "att-launched"}, run_id)
+    unlaunched = runtime.provider_activity_log({**worker, "_provider_activity_attempt_id": "att-next"}, run_id)
+
+    assert launched == ("claude-code", transcript)
+    assert unlaunched == ("claude-code", "")
+    assert runtime.provider_activity_log(worker, run_id) == ("claude-code", transcript)
 
 
 def test_host_conversation_broker_config_stays_in_private_worker_state(tmp_path, monkeypatch):
