@@ -264,8 +264,11 @@ async function loadAssistants() {
     const matched=accounts.find((account) => ({codex:'codex-cli',openai:'codex-cli',claude:'claude-code',anthropic:'claude-code',grok:'grok-build',xai:'grok-build'})[String(account.provider).toLowerCase()] === preferred);
     select.value=matched?.account_id || accounts[0]?.account_id || '';
     const available=options.length > 0;
+    // Nothing here can start a conversation: ask for no input it could not use.
     $('send').disabled=!available;
+    $('message').disabled=!available;
     $('conversation-assistant-field').hidden=!available;
+    if (!available) $('conversation-project-field').hidden=true;
     // Connecting an assistant cannot help where a connected account's conversation cannot run.
     $('conversation-connect').hidden=available || !connectedHere;
     $('conversation-run-project').hidden=available || connectedHere;

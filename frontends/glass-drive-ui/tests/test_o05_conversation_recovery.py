@@ -177,7 +177,8 @@ const run = async (readiness) => {
   for (const id in elements) delete elements[id];
   responses = {'/api/bootstrap': bootstrap, '/v1/coordinator/readiness': readiness};
   await loadAssistants();
-  return {send: $('send').disabled, field: $('conversation-assistant-field').hidden, run: $('conversation-run-project').hidden,
+  return {send: $('send').disabled, message: $('message').disabled, project: $('conversation-project-field').hidden,
+    field: $('conversation-assistant-field').hidden, run: $('conversation-run-project').hidden,
     connect: $('conversation-connect').hidden, status: $('status').textContent,
     options: $('conversation-assistant').children.map((o) => o.textContent), value: $('conversation-assistant').value};
 };
@@ -192,9 +193,11 @@ console.log(JSON.stringify({
     import json
     shown = json.loads(result.stdout)
     assert shown["here"] == {
-        "send": True, "field": True, "run": False, "connect": True, "options": [], "value": "",
+        "send": True, "message": True, "project": True, "field": True, "run": False, "connect": True,
+        "options": [], "value": "",
         "status": "Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.",
     }
-    assert shown["older"]["send"] is False and shown["older"]["run"] is True
+    assert shown["older"]["send"] is False and shown["older"]["message"] is False and shown["older"]["run"] is True
+    assert shown["older"]["project"] is False
     assert shown["older"]["options"] == ["Claude Code · Existing Claude sign-in", "Assistant on this computer"]
     assert shown["packaged"]["options"] == ["Claude Code · Existing Claude sign-in"] and shown["packaged"]["value"] == "acct_1"
