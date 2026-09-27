@@ -173,9 +173,9 @@ function showError(error){ throw error; }
 ''' + head + load + r'''
 const bootstrap = {provider_accounts:[{account_id:'acct_1',provider:'claude',status:'ready',label:'Existing Claude sign-in'}],
   workspace_type_options:[{value:'host',disabled:false}], user_preferences:{}};
-const run = async (readiness) => {
+const run = async (readiness, boot = bootstrap) => {
   for (const id in elements) delete elements[id];
-  responses = {'/api/bootstrap': bootstrap, '/v1/coordinator/readiness': readiness};
+  responses = {'/api/bootstrap': boot, '/v1/coordinator/readiness': readiness};
   await loadAssistants();
   return {send: $('send').disabled, message: $('message').disabled, project: $('conversation-project-field').hidden,
     field: $('conversation-assistant-field').hidden, run: $('conversation-run-project').hidden,
@@ -186,6 +186,9 @@ console.log(JSON.stringify({
   here: await run({connected_account:{available:false,code:'shared_linux_runtime_required'},default:{available:false,code:'native_cli_missing'}}),
   older: await run(new Error('Not found')),
   packaged: await run({connected_account:{available:true,code:'ready'},default:{available:false,code:'native_cli_missing'}}),
+  // A Linux host whose shared workspace is not set up: a known failure, before any input.
+  unconfigured: await run({connected_account:{available:false,code:'shared_configuration_required'},default:{available:true,code:'ready'}},
+    {...bootstrap, workspace_type_options: []}),
 }));
 '''
     result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
@@ -201,3 +204,7 @@ console.log(JSON.stringify({
     assert shown["older"]["project"] is False
     assert shown["older"]["options"] == ["Claude Code · Existing Claude sign-in", "Assistant on this computer"]
     assert shown["packaged"]["options"] == ["Claude Code · Existing Claude sign-in"] and shown["packaged"]["value"] == "acct_1"
+    assert shown["unconfigured"]["options"] == [] and shown["unconfigured"]["send"] and shown["unconfigured"]["message"]
+    assert shown["unconfigured"]["run"] is False and shown["unconfigured"]["connect"] is True
+    assert shown["unconfigured"]["status"] == ("Conversations with a connected account need this deployment's shared workspace, "
+                                           "which is not available. Use Run project for now.")

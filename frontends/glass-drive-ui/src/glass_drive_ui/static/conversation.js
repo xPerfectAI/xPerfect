@@ -29,12 +29,23 @@ const blockerMessages = Object.freeze({
   HostCapacityError:'The workspace capacity check is unavailable. Retry after it recovers.',
   shared_linux_runtime_required:'Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.',
   shared_runtime_unavailable:'Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.',
+  shared_configuration_required:'Conversations with a connected account need this deployment\'s shared workspace, which is not available. Use Run project for now.',
+  shared_configuration_invalid:'Conversations with a connected account need this deployment\'s shared workspace, which is not available. Use Run project for now.',
+  shared_storage_authority_unavailable:'Conversations with a connected account need this deployment\'s shared workspace, which is not available. Use Run project for now.',
+  shared_account_projection_unavailable:'Conversations with a connected account need this deployment\'s shared workspace, which is not available. Use Run project for now.',
+  shared_owner_storage_unavailable:'Conversations with a connected account need this deployment\'s shared workspace, which is not available. Use Run project for now.',
+  shared_account_container_unavailable:'Conversations with a connected account need this deployment\'s shared workspace, which is not available. Use Run project for now.',
+  shared_account_recovery_pending:'A connected account is being recovered. Try again shortly.',
 });
-// A blocker no retry can clear on this deployment offers no Retry, and a way to start
-// that would meet one is not offered.
-const unavailableHere = new Set(['shared_linux_runtime_required', 'shared_runtime_unavailable', 'native_cli_missing']);
+// A blocker no retry can clear on this deployment offers no Retry.
+const unavailableHere = new Set(['shared_linux_runtime_required', 'shared_runtime_unavailable']);
 function blockerMessage(code) {
   return blockerMessages[code] || 'The assistant is unavailable right now.';
+}
+// Why a connected account's conversation cannot start here, before anything is typed.
+function connectedUnavailableMessage(code) {
+  return blockerMessages[code]
+    || 'Conversations with a connected account are not available on this deployment right now. Use Run project for now.';
 }
 // A turn whose provider attempt already ran has a final outcome; Retry would replay it.
 function endedMessage(code) {
@@ -245,9 +256,10 @@ async function loadAssistants() {
       // Without readiness (an older runtime), every way to start stays offered, as before.
       api('/v1/coordinator/readiness').catch(() => null),
     ]);
+    // The runtime's typed readiness decides; only a known failure withholds a way to start.
     const connectedCode=String(readiness?.connected_account?.code || '');
-    const connectedHere=!unavailableHere.has(connectedCode);
-    const defaultHere=!unavailableHere.has(String(readiness?.default?.code || ''));
+    const connectedHere=readiness?.connected_account?.available !== false;
+    const defaultHere=readiness?.default?.available !== false;
     const select=$('conversation-assistant');
     const names={codex:'Codex',openai:'Codex',claude:'Claude Code',anthropic:'Claude Code',grok:'Grok Build',xai:'Grok Build'};
     const accounts=(connectedHere ? bootstrap.provider_accounts || [] : []).filter((account) =>
@@ -272,7 +284,7 @@ async function loadAssistants() {
     // Connecting an assistant cannot help where a connected account's conversation cannot run.
     $('conversation-connect').hidden=available || !connectedHere;
     $('conversation-run-project').hidden=available || connectedHere;
-    if (!available) $('status').textContent=connectedHere ? 'Connect an assistant to start.' : blockerMessage(connectedCode);
+    if (!available) $('status').textContent=connectedHere ? 'Connect an assistant to start.' : connectedUnavailableMessage(connectedCode);
   } catch (error) {showError(error); $('send').disabled=true;}
 }
 $('composer').addEventListener('submit',async(event)=>{

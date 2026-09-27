@@ -452,24 +452,35 @@ function renderWorkspaceOptions(select, data, selectedValue = '') {
 
   select.replaceChildren(...groups);
   const optionValues = Array.from(select.querySelectorAll('option')).map((option) => option.value);
+  const policySelect = document.getElementById('provider-account-policy');
   select.value = optionValues.includes(selectedValue)
     ? selectedValue
-    : runnableDefaultOption(data, optionValues, document.getElementById('provider-account-policy')?.value);
+    : runnableDefaultOption(data, optionValues, {
+      currentPolicy: policySelect?.value,
+      savedPersonalPolicy: policySelect?.dataset.personalPolicy,
+      forcedLegacy: policySelect?.dataset.forcedLegacy === 'true',
+    });
 }
 
-// Without a saved worker choice, start on a worker this user can run. Under the default
-// only-my-account policy a new worker without a ready account for its AI is refused, so the
-// deployment default gives way to the first worker that has one.
-function runnableDefaultOption(data, optionValues, policy = 'personal_required') {
+// Without a saved worker choice, start on a worker this user can run. The deployment default
+// gives way only when its effective policy requires a personal account and none is ready;
+// the replacement is the first worker with a ready personal account. An unread saved choice
+// or account list is not evidence of either, so the default then stays.
+function runnableDefaultOption(data, optionValues, policyState = {}) {
   const fallback = String(data?.default_workspace_option || '');
-  if (String(data?.user_preferences?.default_worker_profile || '') || policy !== 'personal_required') return fallback;
+  const sections = data?.bootstrap_sections || {};
+  if (sections.preferences !== 'ready' || sections.provider_accounts !== 'ready'
+      || String(data?.user_preferences?.default_worker_profile || '')) return fallback;
   const ready = new Set((data?.provider_accounts || [])
     .filter((account) => String(account.status || '').toLowerCase() === 'ready')
     .map((account) => String(account.provider || '').toLowerCase()));
-  const runnable = (value) => value.startsWith('new:')
-    && (data?.profile_account_providers?.[value.slice(4)] || []).some((provider) => ready.has(String(provider).toLowerCase()));
-  if (!fallback.startsWith('new:') || runnable(fallback)) return fallback;
-  return optionValues.find(runnable) || fallback;
+  const providers = (value) => data?.profile_account_providers?.[value.slice(4)] || [];
+  const hasReadyAccount = (value) => providers(value).some((provider) => ready.has(String(provider).toLowerCase()));
+  const needsPersonalAccount = (value) => credentialPolicyTransition({
+    ...policyState, supportsPersonalAccounts: providers(value).length > 0,
+  }).value === 'personal_required';
+  if (!fallback.startsWith('new:') || !needsPersonalAccount(fallback) || hasReadyAccount(fallback)) return fallback;
+  return optionValues.find((value) => value.startsWith('new:') && hasReadyAccount(value)) || fallback;
 }
 
 function uniqueWorkspaces(workspaces) {
