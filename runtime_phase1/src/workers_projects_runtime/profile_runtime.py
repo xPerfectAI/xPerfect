@@ -8014,11 +8014,14 @@ class OpenClawWorkstationRuntime(BaseCliWorkerRuntime):
         return value if isinstance(value, dict) else {}
 
     def _openclaw_final_text(self, data: dict[str, object]) -> str:
-        direct = str(data.get("finalAssistantVisibleText") or data.get("finalAssistantRawText") or "").strip()
-        if direct:
+        # As written, like every other parser input: indentation decides whether a FINAL REPORT
+        # line is body text or literal code. Whitespace-only text counts as none.
+        direct = str(data.get("finalAssistantVisibleText") or data.get("finalAssistantRawText") or "")
+        if direct.strip():
             return direct
         meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-        return str(meta.get("finalAssistantVisibleText") or meta.get("finalAssistantRawText") or "").strip()
+        text = str(meta.get("finalAssistantVisibleText") or meta.get("finalAssistantRawText") or "")
+        return text if text.strip() else ""
 
     def _openclaw_stop_reason(self, data: dict[str, object]) -> str:
         completion = data.get("completion") if isinstance(data.get("completion"), dict) else {}

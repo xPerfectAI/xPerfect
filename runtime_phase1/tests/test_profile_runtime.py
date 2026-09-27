@@ -3895,6 +3895,24 @@ def test_collect_completed_run_with_explicit_run_id_ignores_previous_finished_ru
     assert recovered["output_text"] == "NEW"
 
 
+@pytest.mark.parametrize("payload, stored", [
+    ({"finalAssistantVisibleText": "    FINAL REPORT:\n    Status: ready"}, "FINAL REPORT:\n    Status: ready"),
+    ({"meta": {"finalAssistantRawText": "    FINAL REPORT:\n    Status: ready"}}, "FINAL REPORT:\n    Status: ready"),
+    ({"finalAssistantRawText": "Working.\n\nFINAL REPORT:\nDone."}, "Done."),
+    ({"meta": {"finalAssistantVisibleText": "Working.\n\nFINAL REPORT:\nDone."}}, "Done."),
+])
+def test_openclaw_parser_reads_its_final_text_as_written(tmp_path, payload, stored):
+    # The final text reaches the report selector unstripped: indentation decides whether a
+    # FINAL REPORT line is Markdown body text or a literal heading.
+    runtime = OpenClawWorkstationRuntime(base_dir=str(tmp_path))
+    worker = {"worker_id": "wrk_openclaw_final", "name": "Main Worker", "profile": "openclaw-general", "model": "openai/gpt-5.2"}
+    runtime._ensure_dirs(worker["worker_id"])
+
+    _, output = runtime._parse_output(worker, json.dumps(payload), "", runtime._runtime_info(worker))
+
+    assert output == stored
+
+
 def test_openclaw_command_uses_private_instruction_file_pointer(tmp_path):
     runtime = OpenClawWorkstationRuntime(base_dir=str(tmp_path))
     worker = {
