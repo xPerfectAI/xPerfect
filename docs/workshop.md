@@ -32,9 +32,10 @@ preserved, and a readable downloadable Markdown file under 150 words.
 | 12–14 min | A rehearsed interrupt/continue flow on a disposable task | “Control and recovery are part of the work.” |
 | 14–15 min | [Deployment diagram](assets/deployment.png) and the next exercise | “On your computer or a hosted server, the work stays with you; provider requests can leave. Use one source, one useful output and one peer who can tell you whether it worked.” |
 
-Optional 3-minute extension, only if rehearsed on the same release and install route. It needs a
-configured Linux host such as the packaged install; with `./xperfect start` the Conversation page says
-so and offers **Run project**. Ask for two
+Optional 3-minute extension, only if rehearsed on the same release and install route. A
+conversation with a connected account needs a configured Linux host such as the packaged install;
+with `./xperfect start` only **Assistant on this computer** can run, when the AI tool chosen as
+**Default Worker** is installed on this computer. Ask for two
 independent short results in one **Conversation**. Show the [several-goals diagram](assets/parallel-work.png),
 then each goal's status and the answer after a reload. Describe what the AI actually did: it may
 answer itself or use workers. Say: “Ten goals would not mean ten workers at once.”

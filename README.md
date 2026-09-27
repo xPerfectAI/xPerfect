@@ -84,8 +84,10 @@ results needed for their requests; local storage does not mean local-only AI pro
   continues directly. Continuing a copy with a personal account needs an account confirmation that
   has not been verified end to end yet.
 - **Conversation on your own computer:** with `./xperfect start`, a conversation with a connected
-  account cannot run; the page says so before you type and offers **Run project**. Conversations run
-  on a configured Linux host, such as the packaged install.
+  account cannot run; it needs a configured Linux host, such as the packaged install. **Assistant on
+  this computer** runs when the AI tool chosen as **Default Worker** (Run project → **More settings**)
+  is installed on this computer; otherwise the page explains the limit before you type and offers
+  **Run project**.
 
 ## Use and extend
 

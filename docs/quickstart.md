@@ -84,9 +84,11 @@ Scheduling a one-off run keeps it as a saved workspace.
 
 ## Good to know
 
-- **Several goals at once.** In **Conversation**, write them in one message. Conversation needs
-  xPerfect on a configured Linux host, such as the packaged install; with `./xperfect start` the
-  Conversation page says so and offers **Run project**. xPerfect keeps every
+- **Several goals at once.** In **Conversation**, write them in one message. A conversation with a
+  connected account needs xPerfect on a configured Linux host, such as the packaged install. With
+  `./xperfect start`, **Assistant on this computer** is offered when the AI tool chosen as **Default
+  Worker** (Run project → **More settings**) is installed on this computer; otherwise the page
+  explains the limit and offers **Run project**. xPerfect keeps every
   goal and shows each as Working, Waiting to start or Complete. The AI decides whether to answer a
   goal itself or hand it to a worker. Ten goals do not mean ten workers at once: a worker starts
   when its account is free and the machine has room. See [several goals](capability-matrix.md#working-on-several-goals).
