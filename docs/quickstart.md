@@ -113,6 +113,7 @@ Scheduling a one-off run keeps it as a saved workspace.
 | “Connect an AI account to start.” | Connect an account in Connections and wait for **Ready**. |
 | A run stopped with your provider's words, such as a usage limit | Follow them. Connections shows the message under that account until a later run completes. xPerfect never switches accounts for you. |
 | “Queued” or “Waiting to start” | The account is busy or the machine is short of room. It starts on its own when that clears. |
+| “Another project is already running on this computer” | With `./xperfect start`, projects run one at a time. Wait until the current one finishes in **Workspaces**, then select **Run Project** again. |
 | A host resource message after **Run Project** | The machine is busy. Check **Workspaces** so you do not start the same work twice, wait a moment, then try again. |
 | “Not enough storage for this file” | Delete files you no longer need, or ask your administrator to raise your limit, then **Retry**. |
 | “Shared workspaces need xPerfect on a configured Linux host.” | Choose **Separate workspace** on this computer. |

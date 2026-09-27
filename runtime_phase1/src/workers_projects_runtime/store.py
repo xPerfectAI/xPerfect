@@ -15224,7 +15224,7 @@ class Store:
                 ).fetchone()
                 if mutation_owner is not None:
                     raise HostRunLeaseCapacityError(
-                        "The target repository already has an active host mutation mission.",
+                        "Another project is already running on this computer, and projects here run one at a time.",
                         capacity_class="mutation_scope",
                         **_slot_capacity_facts(
                             "mutationScopeSlots", configured=1, used=1
@@ -15730,7 +15730,7 @@ class Store:
                     if mutation_owner is not None:
                         conn.execute("ROLLBACK")
                         raise HostRunLeaseCapacityError(
-                            "The target repository already has an active host mutation mission.",
+                            "Another project is already running on this computer, and projects here run one at a time.",
                             capacity_class="mutation_scope",
                             **_slot_capacity_facts(
                                 "mutationScopeSlots", configured=1, used=1

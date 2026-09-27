@@ -5121,6 +5121,26 @@ def test_shared_target_repository_mutation_scope_serializes_host_missions(tmp_pa
             lease_ttl_s=30,
         )
     assert blocked.value.capacity_class == "mutation_scope"
+    # A person meets this refusal when starting another project or run: it must read plainly.
+    one_at_a_time = "Another project is already running on this computer, and projects here run one at a time."
+    assert str(blocked.value) == one_at_a_time
+    with pytest.raises(HostRunLeaseCapacityError) as refused:
+        store.acquire_preflight_capacity_reservation(
+            runtime_family="claude",
+            lane="mission",
+            tenant_id="tenant-a",
+            owner_id="owner-b",
+            profile="claude-code",
+            execution_mode="host",
+            executor_id="executor-second",
+            conversation_limit=2,
+            mission_limit=3,
+            account_mission_limit=4,
+            tenant_mission_limit=12,
+            mutation_scope=mutation_scope,
+            lease_ttl_s=30,
+        )
+    assert (refused.value.capacity_class, str(refused.value)) == ("mutation_scope", one_at_a_time)
 
     store.release_host_run_lease(
         first["lease_id"], executor_id="executor-first", reason="run_terminal"
