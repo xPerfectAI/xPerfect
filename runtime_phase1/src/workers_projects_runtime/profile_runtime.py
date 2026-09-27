@@ -1899,6 +1899,22 @@ class ProfiledWorkerRuntime:
             return {"available": False, "code": "shared_runtime_unavailable"}
         return shared.readiness(workspace, runtime=self)
 
+    def shared_workspace_deployment_readiness(self, workspace: dict) -> dict:
+        shared = getattr(self, "_shared_workspace_runtimes", None)
+        if shared is None:
+            return {"available": False, "code": "shared_runtime_unavailable"}
+        return shared.deployment_readiness(workspace)
+
+    def host_cli_installed(self, profile: str) -> bool | None:
+        """Whether a profile's host CLI is on PATH: the first condition of its host preflight,
+        read without starting the CLI. None when the profile has no host CLI adapter."""
+        try:
+            runtime = self._runtime_for_profile(profile, "host")
+        except UnsupportedWorkerProfileError:
+            return None
+        binary = str(getattr(runtime, "binary", "") or "").strip()
+        return shutil.which(binary) is not None if binary else None
+
     def shared_workspace_profile_support(self, profile: str) -> bool:
         """Return adapter registration for the supported shared native profiles.
 

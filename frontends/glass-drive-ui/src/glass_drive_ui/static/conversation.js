@@ -28,9 +28,11 @@ const blockerMessages = Object.freeze({
   ParallelExecutionIsolationError:'The worker runtime is not ready. Check setup, then Retry.',
   HostCapacityError:'The workspace capacity check is unavailable. Retry after it recovers.',
   shared_linux_runtime_required:'Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.',
+  shared_runtime_unavailable:'Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.',
 });
-// A blocker no retry can clear on this deployment offers no Retry.
-const unavailableHere = new Set(['shared_linux_runtime_required']);
+// A blocker no retry can clear on this deployment offers no Retry, and a way to start
+// that would meet one is not offered.
+const unavailableHere = new Set(['shared_linux_runtime_required', 'shared_runtime_unavailable', 'native_cli_missing']);
 function blockerMessage(code) {
   return blockerMessages[code] || 'The assistant is unavailable right now.';
 }
@@ -238,16 +240,23 @@ async function loadProjects() {
 async function loadAssistants() {
   if (conversationId) return;
   try {
-    const bootstrap=await api('/api/bootstrap');
+    const [bootstrap,readiness]=await Promise.all([
+      api('/api/bootstrap'),
+      // Without readiness (an older runtime), every way to start stays offered, as before.
+      api('/v1/coordinator/readiness').catch(() => null),
+    ]);
+    const connectedCode=String(readiness?.connected_account?.code || '');
+    const connectedHere=!unavailableHere.has(connectedCode);
+    const defaultHere=!unavailableHere.has(String(readiness?.default?.code || ''));
     const select=$('conversation-assistant');
     const names={codex:'Codex',openai:'Codex',claude:'Claude Code',anthropic:'Claude Code',grok:'Grok Build',xai:'Grok Build'};
-    const accounts=(bootstrap.provider_accounts || []).filter((account) =>
+    const accounts=(connectedHere ? bootstrap.provider_accounts || [] : []).filter((account) =>
       account.status === 'ready' && account.account_id && names[String(account.provider || '').toLowerCase()]);
     const options=accounts.map((account) => {
       const option=node('option',`${names[String(account.provider).toLowerCase()]} · ${account.label || 'Connected account'}`);
       option.value=account.account_id; return option;
     });
-    if ((bootstrap.workspace_type_options || []).some((item) => item.value === 'host' && !item.disabled)) {
+    if (defaultHere && (bootstrap.workspace_type_options || []).some((item) => item.value === 'host' && !item.disabled)) {
       const option=node('option','Assistant on this computer'); option.value=''; options.push(option);
     }
     select.replaceChildren(...options);
@@ -256,8 +265,11 @@ async function loadAssistants() {
     select.value=matched?.account_id || accounts[0]?.account_id || '';
     const available=options.length > 0;
     $('send').disabled=!available;
-    $('conversation-connect').hidden=available;
-    if (!available) $('status').textContent='Connect an assistant to start.';
+    $('conversation-assistant-field').hidden=!available;
+    // Connecting an assistant cannot help where a connected account's conversation cannot run.
+    $('conversation-connect').hidden=available || !connectedHere;
+    $('conversation-run-project').hidden=available || connectedHere;
+    if (!available) $('status').textContent=connectedHere ? 'Connect an assistant to start.' : blockerMessage(connectedCode);
   } catch (error) {showError(error); $('send').disabled=true;}
 }
 $('composer').addEventListener('submit',async(event)=>{

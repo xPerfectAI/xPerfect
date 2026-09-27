@@ -116,13 +116,11 @@ class SharedWorkspaceRuntimes:
             recovered.append(identity["worker_id"])
         return recovered
 
-    def readiness(self, workspace, *, runtime=None):
-        """Report the current shared substrate without creating a workspace or member.
+    def deployment_readiness(self, workspace):
+        """The checks readiness makes before its live capacity probe.
 
-        This is deliberately an observational probe.  It checks the authorities that
-        admission will use, then asks the existing resource accountant for a live
-        snapshot when a runtime is available.  Configuration strings alone never make
-        a shared workspace ready.
+        They depend only on this deployment and the workspace's placement, so they can be
+        read before anything is created or sent.
         """
         import sys
 
@@ -172,6 +170,19 @@ class SharedWorkspaceRuntimes:
         launcher = getattr(homes, "native_launcher", None)
         if launcher is None or not callable(getattr(launcher, "inventory", None)):
             return {"available": False, "code": "shared_account_container_unavailable"}
+        return {"available": True, "code": "ready"}
+
+    def readiness(self, workspace, *, runtime=None):
+        """Report the current shared substrate without creating a workspace or member.
+
+        This is deliberately an observational probe.  It checks the authorities that
+        admission will use, then asks the existing resource accountant for a live
+        snapshot when a runtime is available.  Configuration strings alone never make
+        a shared workspace ready.
+        """
+        deployment = self.deployment_readiness(workspace)
+        if deployment["available"] is not True:
+            return deployment
         if runtime is None:
             return {"available": False, "code": "shared_resource_authority_unavailable"}
 

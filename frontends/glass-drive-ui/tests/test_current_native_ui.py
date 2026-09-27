@@ -293,6 +293,7 @@ const stage = {dataset: {}}, signInLink = node();
 const window = {location: {pathname: '/watch/wrk_one', search: '?project_id=prj_one', hash: ''}};
     let currentDisplayState, currentRunState, currentDesktopAvailable, currentDeliverable, currentSummary, currentFullOutput, currentResultText, actionFailure;
 const clearAttachedView = () => {}, renderOutputContent = () => {}, syncResultActions = () => {}, syncArtifactList = () => {}, syncSendAffordance = () => {};
+const showResult = (text) => { stageResultText.hidden = !text; };
 showWorkspaceUnavailable(502);
 if (guidancePrimary.textContent !== 'Workspace status is unavailable right now.') throw new Error('5xx: ' + guidancePrimary.textContent);
 syncSteerAvailability('running');

@@ -124,6 +124,43 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             })
         return invoke(coordinator.create, tenant, owner, selected)
 
+    @router.get("/readiness")
+    def readiness(request: Request):
+        """What a new conversation would meet on this deployment, read before anything is sent.
+
+        A connected account's conversation runs in its own container, so it needs the
+        shared-workspace placement; one without an account runs the default conversation
+        model where it is configured, which on this computer needs that model's CLI. These
+        checks start nothing. Capacity and sign-in are still decided when the turn runs.
+        """
+        tenant, owner = principal(request)
+        placement = coordinator.service.shared_workspace_deployment_readiness(
+            {"mode": "shared", "execution_mode": "docker"}
+        )
+        default = {"available": True, "code": "ready"}
+        config = invoke(default_config, tenant, owner)
+        if config is None:
+            default = {"available": False, "code": "coordinator_not_configured"}
+        else:
+            selected = CoordinatorConfig.model_validate(config)
+            installed = getattr(coordinator.service.runtime, "host_cli_installed", None)
+            if selected.scope.execution_mode == "host" and callable(installed):
+                try:
+                    profile = coordinator.provider._model(
+                        selected.model, tenant_id=tenant, owner_id=owner
+                    ).harness_profile
+                except Exception:
+                    profile = ""  # an unavailable model is reported when the turn runs
+                if profile and installed(profile) is False:
+                    default = {"available": False, "code": "native_cli_missing"}
+        return {
+            "connected_account": {
+                "available": placement.get("available") is True,
+                "code": str(placement.get("code") or ""),
+            },
+            "default": default,
+        }
+
     @router.get("/conversations/{conversation_id}")
     def status(conversation_id: str, request: Request):
         return invoke(coordinator.refresh, *principal(request), conversation_id)

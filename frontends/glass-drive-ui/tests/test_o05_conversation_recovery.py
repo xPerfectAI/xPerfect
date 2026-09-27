@@ -151,3 +151,50 @@ console.log('ok');
 '''
     result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
     assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr or result.stdout
+
+
+def test_a_conversation_this_computer_cannot_start_says_why_before_anything_is_sent():
+    """On `./xperfect start` a connected account's conversation needs the shared Linux runtime and
+    this computer lacks the default assistant's CLI. The page states that and offers Run project
+    before anything is typed, instead of after Send. An older runtime keeps every option."""
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index("const blockerMessages")
+    head = source[start:source.index("function endedMessage", start)]
+    load = source[source.index("async function loadAssistants()"):source.index("$('composer').addEventListener('submit'")]
+    node = shutil.which("node")
+    assert node, "Node is required for the conversation start proof"
+    code = r'''
+class El { constructor(){this.hidden=false;this.disabled=false;this.textContent='';this.value='';this.children=[];} replaceChildren(...c){this.children=c;} }
+const elements = {}; const $ = (id) => (elements[id] ||= new El());
+function node(tag, text){ const e = new El(); e.textContent = text; return e; }
+let conversationId = ''; let responses = {};
+async function api(path){ if (!(path in responses)) throw new Error('unexpected ' + path); const r = responses[path]; if (r instanceof Error) throw r; return r; }
+function showError(error){ throw error; }
+''' + head + load + r'''
+const bootstrap = {provider_accounts:[{account_id:'acct_1',provider:'claude',status:'ready',label:'Existing Claude sign-in'}],
+  workspace_type_options:[{value:'host',disabled:false}], user_preferences:{}};
+const run = async (readiness) => {
+  for (const id in elements) delete elements[id];
+  responses = {'/api/bootstrap': bootstrap, '/v1/coordinator/readiness': readiness};
+  await loadAssistants();
+  return {send: $('send').disabled, field: $('conversation-assistant-field').hidden, run: $('conversation-run-project').hidden,
+    connect: $('conversation-connect').hidden, status: $('status').textContent,
+    options: $('conversation-assistant').children.map((o) => o.textContent), value: $('conversation-assistant').value};
+};
+console.log(JSON.stringify({
+  here: await run({connected_account:{available:false,code:'shared_linux_runtime_required'},default:{available:false,code:'native_cli_missing'}}),
+  older: await run(new Error('Not found')),
+  packaged: await run({connected_account:{available:true,code:'ready'},default:{available:false,code:'native_cli_missing'}}),
+}));
+'''
+    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    import json
+    shown = json.loads(result.stdout)
+    assert shown["here"] == {
+        "send": True, "field": True, "run": False, "connect": True, "options": [], "value": "",
+        "status": "Conversations with a connected account need xPerfect on a configured Linux host, such as the packaged install. On this computer, use Run project.",
+    }
+    assert shown["older"]["send"] is False and shown["older"]["run"] is True
+    assert shown["older"]["options"] == ["Claude Code · Existing Claude sign-in", "Assistant on this computer"]
+    assert shown["packaged"]["options"] == ["Claude Code · Existing Claude sign-in"] and shown["packaged"]["value"] == "acct_1"

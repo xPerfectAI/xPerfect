@@ -60,8 +60,8 @@ def test_watch_attaches_the_terminal_for_the_latest_run_and_its_state():
 def test_watch_and_terminal_pages_load_the_exact_run_script_versions():
     # Browsers keep a cached script for the same ?v= token, so a changed script needs a new token.
     watch_html = (STATIC / "watch.html").read_text()
-    assert 'src="/static/watch.js?v=20260926run2"' in watch_html
-    assert 'href="/static/styles.css?v=20260926run2"' in watch_html
+    assert 'src="/static/watch.js?v=20260927result1"' in watch_html
+    assert 'href="/static/styles.css?v=20260927result1"' in watch_html
     assert 'src="/static/terminal.js?v=20260926run3"' in (STATIC / "terminal.html").read_text()
 
 
@@ -137,7 +137,7 @@ def test_failed_cancelled_and_interrupted_runs_keep_their_saved_output_under_the
     functions = "\n".join(_function(source, name) for name in (
         "clearRetryTimers", "forceReloadFrame", "scheduleReconnects", "attachView", "filePreviewUrl",
         "isFilePreviewUrl", "currentSurfaceUrl", "clearAttachedView", "syncMenuLabels", "showsSavedRunOutput",
-        "setSurface", "setOverlay"))
+        "showResult", "setSurface", "setOverlay"))
     result = _node(r"""
 const TERMINAL_ATTENTION_STATES = new Set(['failed', 'cancelled', 'interrupted']);
 const element = () => ({hidden: true, textContent: '', dataset: {}});
@@ -145,6 +145,7 @@ const frame = {src: ''}; const overlay = element(); const stage = element();
 const overlayLabel = element(); const overlayTitle = element(); const overlayDetail = element();
 const stageResultText = element(); const surfaceTerminalButton = element(); const surfaceDesktopButton = element();
 const openExternal = element(); const watchSignIn = element();
+const resultMarkdown = {render: (text) => text};
 global.window = {setTimeout: () => 0, clearTimeout: () => {}};
 let activeSurface = 'terminal', currentDisplayState = '', currentWorkerState = 'ready', currentDesktopAvailable = false;
 let currentTerminalUrl = '', currentDesktopUrl = '', currentSummary = '', currentResultText = '', currentRunState = '';
@@ -208,3 +209,31 @@ console.log(JSON.stringify({url: sockets[0].url, opened, none, shown: status.tex
     assert result["opened"] == "This run has ended."
     assert result["none"] == "This run has ended. No terminal output was kept for it."
     assert result["shown"] == "Saved output closed. Select Reconnect to view it again."
+
+
+@node
+def test_a_completed_result_renders_its_markdown_safely_and_reads_from_the_top():
+    """The final answer's markdown reads as formatted text, raw HTML stays text, links open
+    beside the workspace, and a shown result marks the stage to read from the top."""
+    source = WATCH_JS.read_text()
+    start = source.index("const resultMarkdown = new MarkdownIt")
+    setup = source[start:source.index("\n};\n", start) + 4]
+    markdown = (STATIC / "vendor" / "markdown-it-15.0.2.mjs").as_uri()
+    result = _node(
+        "(async () => {"
+        f"const {{default: MarkdownIt}} = await import({json.dumps(markdown)});"
+        + setup
+        + "const overlay = {dataset: {}}; const stageResultText = {hidden: true, innerHTML: ''};\n"
+        + _function(source, "showResult")
+        + r"""
+showResult('- **Quantity:** 6 books\n\n<img src=x onerror=alert(1)> [terms](https://example.test/terms)');
+const shown = {html: stageResultText.innerHTML, hidden: stageResultText.hidden, result: overlay.dataset.result};
+showResult('');
+console.log(JSON.stringify({shown, cleared: {html: stageResultText.innerHTML, hidden: stageResultText.hidden, result: overlay.dataset.result}}));
+})()""")
+    html = result["shown"]["html"]
+    assert "<li><strong>Quantity:</strong> 6 books</li>" in html and "**" not in html
+    assert "<img" not in html and "&lt;img" in html
+    assert '<a href="https://example.test/terms" target="_blank" rel="noopener noreferrer">terms</a>' in html
+    assert result["shown"]["hidden"] is False and result["shown"]["result"] == "true"
+    assert result["cleared"] == {"html": "", "hidden": True, "result": "false"}

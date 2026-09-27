@@ -1767,3 +1767,33 @@ def test_choosing_the_conversation_account_keeps_the_configured_model_and_helper
     assert (single.model, single.effort) == ('claude-code:claude-opus-5', 'medium')
     assert [(route.id, route.profile, route.connection_id) for route in single.routes] == [
         ('default', 'claude-code', 'claude-acct')]
+
+
+def test_readiness_reports_what_a_new_conversation_would_meet_and_creates_nothing(coordinator):
+    """Read before anything is sent: a connected account's conversation needs the shared
+    container placement, one without an account needs this computer's default CLI."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.coordinator_api import install_coordinator_routes
+
+    probed = []
+    coordinator.service.shared_workspace_deployment_readiness = lambda workspace: (
+        probed.append(dict(workspace)) or {'available': False, 'code': 'shared_linux_runtime_required'})
+    installed = {'codex-cli': False}
+    coordinator.service.runtime = SimpleNamespace(host_cli_installed=lambda profile: installed.get(profile))
+    coordinator.provider._model = lambda model, *, tenant_id='local', owner_id='': SimpleNamespace(
+        harness_profile='codex-cli')
+    config = CoordinatorConfig(model='exact-native-model', effort='high', scope=CoordinatorScope(execution_mode='host'))
+    app = FastAPI()
+    install_coordinator_routes(app, coordinator, lambda request: ('local', 'owner'), lambda tenant, owner: config)
+    client = TestClient(app)
+
+    assert client.get('/v1/coordinator/readiness').json() == {
+        'connected_account': {'available': False, 'code': 'shared_linux_runtime_required'},
+        'default': {'available': False, 'code': 'native_cli_missing'},
+    }
+    assert probed == [{'mode': 'shared', 'execution_mode': 'docker'}]
+    installed['codex-cli'] = True
+    assert client.get('/v1/coordinator/readiness').json()['default'] == {'available': True, 'code': 'ready'}
+    with coordinator.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM coordinator_conversations').fetchone()[0] == 0

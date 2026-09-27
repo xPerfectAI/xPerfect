@@ -2,6 +2,16 @@ import { watchOutputModel } from './delivery-presenter.js?v=20260923closed1';
 import { workspaceLifecycleControl } from './launch-policy.js?v=20260811m';
 import { createFileDraft, createWorkspaceFiles } from './files.js?v=20260923readable1';
 import { attachNativeControls } from './native-controls.js?v=20260922o03c';
+import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
+
+// The same safe rendering as conversation replies: raw HTML is escaped and unsafe link
+// schemes are refused. Links open beside the workspace instead of replacing it.
+const resultMarkdown = new MarkdownIt({ html: false, linkify: false, typographer: false });
+resultMarkdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
+  tokens[index].attrSet('target', '_blank');
+  tokens[index].attrSet('rel', 'noopener noreferrer');
+  return self.renderToken(tokens, index, options);
+};
 
 const params = new URLSearchParams(window.location.search);
 const workerId = window.location.pathname.split('/').filter(Boolean).at(-1);
@@ -30,6 +40,13 @@ const overlayTitle = document.getElementById('overlay-title');
 const overlayDetail = document.getElementById('overlay-detail');
 const signInLink = document.getElementById('watch-sign-in');
 const stageResultText = document.getElementById('stage-result-text');
+
+// A shown result is read from the top of the stage, not centred under empty space.
+function showResult(text) {
+  stageResultText.innerHTML = text ? resultMarkdown.render(text) : '';
+  stageResultText.hidden = !text;
+  overlay.dataset.result = String(Boolean(text));
+}
 const title = document.getElementById('watch-title');
 const subtitle = document.getElementById('watch-subtitle');
 const addWorkerButton = document.getElementById('watch-add-worker');
@@ -441,7 +458,7 @@ function syncMenuLabels() {
 function setSurface(surface, { force = false } = {}) {
   activeSurface = surface === 'desktop' ? 'desktop' : 'terminal';
   syncMenuLabels();
-  stageResultText.hidden = true;
+  showResult('');
   const state = currentDisplayState;
   if (currentWorkerState === 'terminated') {
     clearAttachedView();
@@ -468,8 +485,7 @@ function setSurface(surface, { force = false } = {}) {
       ? 'Send a follow-up below when you are ready.'
       : currentSummary || 'Follow progress in the workspace status above.';
     if (state === 'completed' && currentResultText) {
-      stageResultText.textContent = currentResultText;
-      stageResultText.hidden = false;
+      showResult(currentResultText);
     }
     return;
   }
@@ -959,8 +975,7 @@ function setOverlay(state, detail) {
       : savedResult
       ? 'This workspace is closed. Your saved result remains available.'
       : 'This workspace was shut down. Return to Workspaces to create new work.';
-    stageResultText.hidden = !savedResult;
-    if (savedResult) stageResultText.textContent = currentResultText;
+    showResult(savedResult ? currentResultText : '');
     return;
   }
 
@@ -1035,7 +1050,7 @@ function showWorkspaceUnavailable(status) {
   currentSummary = message;
   currentFullOutput = message;
   currentResultText = '';
-  stageResultText.hidden = true;
+  showResult('');
   clearAttachedView();
   title.textContent = heading;
   subtitle.textContent = message;

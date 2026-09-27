@@ -102,3 +102,16 @@ def test_conversation_project_choices_use_owner_catalog(monkeypatch):
         response = client.get("/api/conversation-projects")
         assert response.status_code == 200
         assert response.json() == {"items": [{"project_id": "prj_1", "title": "Alpha"}]}
+
+
+def test_conversation_readiness_is_one_owner_read(monkeypatch, upstream):
+    monkeypatch.setenv("WPR_API_TOKEN", "synthetic-runtime-service")
+    monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "synthetic-link-secret")
+    with TestClient(create_app(runtime_client=FakeRuntimeClient())) as client:
+        assert client.get("/v1/coordinator/readiness").json() == {"saved": True}
+        assert client.post("/v1/coordinator/readiness", json={}).status_code == 404
+        signed = {"gh_token": signed_worker_token("synthetic-link-secret")}
+        assert client.get("/v1/coordinator/readiness", params=signed).status_code == 403
+    assert [(method, url) for method, url, _, _ in upstream] == [
+        ("GET", "http://runtime.test/v1/coordinator/readiness"),
+    ]

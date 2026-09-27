@@ -2600,6 +2600,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         normalized_method = str(method or "").upper()
         normalized_path = str(path or "").strip("/")
         if prefix == "v1" and normalized_path.startswith("coordinator/"):
+            if normalized_path == "coordinator/readiness":
+                return normalized_method == "GET"
             coordinator_path = re.fullmatch(
                 r"coordinator/conversations(?:/coordinator-[a-f0-9]{32}(?:/turns(?:/[A-Za-z0-9._:-]{1,160}/(?:stop|retry-result))?|/goals(?:/[^/]{1,160}/(?:control|result))?|/dispatch)?)?",
                 normalized_path,

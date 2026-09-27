@@ -8906,6 +8906,12 @@ class WorkersProjectsService:
             return probe(workspace)
         return {"available": False, "code": "shared_runtime_unavailable"}
 
+    def shared_workspace_deployment_readiness(self, workspace: dict) -> dict:
+        probe = getattr(self.runtime, "shared_workspace_deployment_readiness", None)
+        if callable(probe):
+            return probe(workspace)
+        return {"available": False, "code": "shared_runtime_unavailable"}
+
     def execution_workspace_members(
         self, workspace_id: str, *, tenant_id: str, owner_id: str
     ) -> dict[str, object]:
