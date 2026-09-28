@@ -1,6 +1,8 @@
 # xPerfect
 
-Give an AI a goal and files. Watch its work, open the result, and return to it later.
+**Our vision: Turn experts into the perfect AI version of themselves, working 24/7 across your channels and tools.**
+
+Raw models and harnesses alone can’t take over a full-time expert’s role. xPerfect AI’s harness and control plane aim to capture experts’ tribal knowledge and skills to create their perfect AI counterparts.
 
 xPerfect runs the AI tools you already use, such as Codex, Claude Code and Grok, and keeps each
 task's files, progress and results together. It works on its own, on your computer or your server.

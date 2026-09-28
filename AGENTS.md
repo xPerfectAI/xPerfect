@@ -31,6 +31,10 @@ affects the host; it owns the host's scope, safety, delivery, and verification r
 
 ## Component Safety
 
+- Attribute project work to `AdrienBeyk` using the project’s public GitHub noreply identity.
+  Do not add AI-tool authors, co-author trailers or generated-by credits to commits or PRs.
+  Keep third-party license and copyright notices intact.
+
 - Keep prompts and evidence public-safe. Never place credentials, private user data, raw exports,
   private paths, or owner-machine state in tracked fixtures, logs, docs, or reviewer handoffs.
 - Preserve unrelated changes. Do not commit or push unless the user requested those actions.
