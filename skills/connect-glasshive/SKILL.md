@@ -46,7 +46,8 @@ Call only the MCP tool needed for the requested outcome:
 - create a reusable expert ("xPerfect this"): `workspace_launch` with `favorite=true`
 - talk to an expert: `worker_message`, or `workspace_launch` with its exact name on the first line
   and `reuse_existing_workspace=true`
-- schedule an expert: `workspace_schedule` with its `workspace_alias`
+- schedule an expert: `workspace_schedule` with its `workspace_alias` (a saved expert keeps its
+  own AI account; do not pass an account policy when scheduling or talking to it)
 - rename or copy: `workspace_rename` or `workspace_duplicate`
 - check progress and results: `workspace_status`, `workspace_wait`, `workspace_artifacts`
 - inspect accounts, connected services, or reusable capabilities only when asked:
