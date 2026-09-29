@@ -6049,11 +6049,14 @@ def create_mcp_server(
             default_worker_profile=resolved_profile,
         )
         project_id = str(project.get("project_id") or "")
+        # Scheduling a saved workspace keeps its own name and role; the scheduled task's
+        # description is the run's instruction, not a new identity for the workspace.
+        existing_worker = existing_workspace["worker"] if existing_workspace else {}
         worker = client.find_or_resume_worker(
             project_id=project_id,
             owner_id=resolved_owner_id,
-            name=title,
-            role=clean_success_criteria,
+            name=str(existing_worker.get("name") or title),
+            role=str(existing_worker.get("role") or clean_success_criteria),
             alias=resolved_alias,
             profile=resolved_profile,
             backend=None,

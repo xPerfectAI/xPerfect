@@ -7234,3 +7234,43 @@ def test_deferred_callback_tool_registry_names_only_registered_dispatch_tools():
     # Request/response tools stay outside the registry so they never arm long host polling.
     for name in ("workspace_status", "workspace_wait", "run_get", "project_get", "workers_list"):
         assert name in registered and name not in DEFERRED_CALLBACK_TOOLS
+
+
+def test_scheduling_a_saved_expert_keeps_its_name_and_role(monkeypatch):
+    """The scheduled task describes a run; it never renames the saved expert it runs on."""
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
+
+    class SavedExpertClient(TrackingApiClient):
+        def list_workers(self, project_id: str):
+            return [{
+                "worker_id": "wrk_expert",
+                "project_id": project_id,
+                "profile": "codex-cli",
+                "state": "ready",
+                "alias": "codex-cli-supplies-expert-1a2b",
+                "name": "Supplies Expert",
+                "role": "Answer supply questions",
+            }]
+
+    api_client = SavedExpertClient()
+    server = create_mcp_server(api_client=api_client)
+
+    async def scenario():
+        async with Client(server) as client:
+            scheduled = await client.call_tool(
+                "workspace_schedule",
+                {
+                    "description": "Write scheduled-proof.txt with the total",
+                    "workspace_alias": "codex-cli-supplies-expert-1a2b",
+                    "delay_seconds": 180,
+                    "profile": "codex-cli",
+                },
+            )
+            assert _tool_json(scheduled)["status"] == "scheduled"
+
+    asyncio.run(scenario())
+    assert "create_project" not in api_client.calls
+    resumed = api_client.find_or_resume_payloads[-1]
+    assert resumed["name"] == "Supplies Expert"
+    assert resumed["role"] == "Answer supply questions"
+    assert resumed["alias"] == "codex-cli-supplies-expert-1a2b"
