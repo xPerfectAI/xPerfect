@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import time
 from urllib.parse import urlsplit
 from fastmcp import Client
@@ -7276,3 +7277,118 @@ def test_scheduling_a_saved_expert_keeps_its_name_and_role(monkeypatch):
     assert resumed["alias"] == "codex-cli-supplies-expert-1a2b"
     # Nor does the task replace what the expert is for (its saved project definition).
     assert "project_definition" not in (resumed.get("bootstrap_bundle") or {})
+
+
+def test_talking_to_a_saved_expert_by_name_keeps_its_role_and_definition(monkeypatch):
+    """Reusing an expert by its exact name sends it a request; the expert stays what it was."""
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
+
+    expert = {
+        "worker_id": "wrk_expert",
+        "profile": "claude-code",
+        "execution_mode": "host",
+        "state": "ready",
+        "alias": "claude-code-supplies-expert-1a2b",
+        "name": "Supplies Expert",
+        "role": "Answer supply questions",
+    }
+
+    class SavedExpertClient(TrackingApiClient):
+        def workspace_catalog(self, **kwargs):
+            return {"items": [{**expert, "project_id": "prj_123"}], "next_cursor": None}
+
+        def list_workers(self, project_id: str):
+            return [{**expert, "project_id": project_id}]
+
+    api_client = SavedExpertClient()
+    server = create_mcp_server(api_client=api_client)
+
+    async def scenario():
+        async with Client(server) as client:
+            launched = await client.call_tool(
+                "workspace_launch",
+                {
+                    "description": "Supplies Expert\nGive me the copy proof.",
+                    "reuse_existing_workspace": True,
+                },
+            )
+            assert _tool_json(launched)["status"] == "dispatched"
+
+    asyncio.run(scenario())
+    assert "create_project" not in api_client.calls
+    resumed = api_client.find_or_resume_payloads[-1]
+    assert resumed["alias"] == "claude-code-supplies-expert-1a2b"
+    assert resumed["name"] == "Supplies Expert"
+    assert resumed["role"] == "Answer supply questions"
+    assert "project_definition" not in (resumed.get("bootstrap_bundle") or {})
+    assert "Give me the copy proof." in api_client.assign_run_payloads[-1]["instruction"]
+
+
+def test_a_copied_expert_is_reached_by_its_exact_name(monkeypatch, tmp_path):
+    """Create an expert, copy it, then talk to the copy by name, through the real API."""
+    monkeypatch.setenv("WPR_API_TOKEN", "service-token")
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    monkeypatch.setenv("GLASSHIVE_DEFAULT_OWNER_ID", "local-owner")
+    monkeypatch.setenv("WPR_DEFAULT_OWNER_ID", "local-owner")
+    monkeypatch.setattr(mcp_server, "DEFAULT_OWNER_ID", "local-owner")
+    monkeypatch.delenv("GLASSHIVE_ENTERPRISE_MODE", raising=False)
+    monkeypatch.delenv("WPR_ENTERPRISE_MODE", raising=False)
+    database = tmp_path / "copied-expert.db"
+    api_http = TestClient(create_app(
+        db_path=str(database), runtime_backend="stub", runtime=StubRuntime(), reconcile_on_startup=False,
+    ))
+
+    class InProcessHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def request(self, method, url, json=None, headers=None):
+            parsed = urlsplit(url)
+            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            return api_http.request(method, path, json=json, headers=headers)
+
+    monkeypatch.setattr(mcp_server.httpx, "Client", InProcessHttpClient)
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
+    api = mcp_server.WorkersProjectsApiClient(base_url="http://glasshive.in-process", api_token="service-token")
+    server = create_mcp_server(api_client=api)
+
+    async def scenario():
+        async with Client(server) as client:
+            created = _tool_json(await client.call_tool("workspace_launch", {
+                "description": "Supplies Expert\nKeep the supply totals.",
+                "favorite": True,
+                "execution_mode": "docker",
+            }))
+            assert created["status"] == "dispatched"
+            source = next(
+                item for item in _tool_json(await client.call_tool("workspace_list", {"limit": 10}))["items"]
+                if item["name"] == "Supplies Expert"
+            )
+            copied = _tool_json(await client.call_tool("workspace_duplicate", {
+                "worker_id": source["worker_id"],
+                "name": "Supplies Expert (copy)",
+                "idempotency_key": "supplies-expert-copy-0001",
+            }))["workspace"]
+            reused = _tool_json(await client.call_tool("workspace_launch", {
+                "description": "Supplies Expert (copy)\nGive me the copy proof.",
+                "reuse_existing_workspace": True,
+            }))
+            assert reused["status"] == "dispatched"
+            assert copied["alias"] and copied["alias"] != source["alias"]
+            return copied["worker_id"]
+
+    copy_id = asyncio.run(scenario())
+    with sqlite3.connect(database) as conn:
+        worker_id, instruction = conn.execute(
+            "SELECT worker_id, instruction FROM runs ORDER BY queued_at DESC LIMIT 1"
+        ).fetchone()
+        name = conn.execute("SELECT name FROM workers WHERE worker_id = ?", (copy_id,)).fetchone()[0]
+    assert worker_id == copy_id
+    assert "Give me the copy proof." in instruction
+    assert name == "Supplies Expert (copy)"

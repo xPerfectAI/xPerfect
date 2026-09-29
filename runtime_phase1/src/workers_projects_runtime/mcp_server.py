@@ -5232,6 +5232,9 @@ def create_mcp_server(
             )
 
         bundle = _normalize_bootstrap_bundle(bootstrap_bundle_json) or {}
+        caller_project_definition = "project_definition" in bundle or isinstance(
+            bundle.get("viventium_delegation_packet"), dict
+        )
         default_project_definition = _default_project_definition(
             title=clean_title,
             goal=clean_goal,
@@ -5425,6 +5428,10 @@ def create_mcp_server(
             raise ValueError(
                 "Existing workspaces keep their saved provider account policy"
             )
+        if existing_workspace and not caller_project_definition:
+            # Reusing a saved workspace sends it this request as the run's instruction; it
+            # must not replace what the workspace is for (its saved project definition).
+            bundle.pop("project_definition", None)
         project = (
             existing_workspace["project"]
             if existing_workspace
@@ -5446,12 +5453,16 @@ def create_mcp_server(
         if not resolved_project_id:
             raise ValueError("GlassHive project creation did not return project_id")
 
+        # A reused saved workspace keeps its own name and role unless the caller sets them.
+        existing_worker = existing_workspace["worker"] if existing_workspace else {}
         try:
             worker = client.find_or_resume_worker(
                 project_id=resolved_project_id,
                 owner_id=resolved_owner_id,
-                name=(worker_name or clean_title).strip(),
-                role=(worker_role or clean_goal or clean_instruction).strip(),
+                name=(worker_name or str(existing_worker.get("name") or "") or clean_title).strip(),
+                role=(
+                    worker_role or str(existing_worker.get("role") or "") or clean_goal or clean_instruction
+                ).strip(),
                 alias=resolved_alias,
                 profile=resolved_profile,
                 backend=backend,

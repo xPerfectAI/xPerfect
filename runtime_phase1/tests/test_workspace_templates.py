@@ -163,6 +163,11 @@ def test_template_snapshot_is_immutable_sanitized_and_source_independent(tmp_pat
     assert instantiated.json()["workspace"]["state"] == "paused"
     assert instantiated.json()["workspace"]["worker_id"] == repeated.json()["workspace"]["worker_id"]
     assert repeated.json()["idempotent_replay"] is True
+    # A template start is a saved workspace: its own alias lets its exact name reach it.
+    import re
+    assert re.fullmatch(
+        r"[a-z0-9-]+-fresh-briefing-desk-[0-9a-f]{12}", instantiated.json()["workspace"]["alias"] or ""
+    )
     assert {item["stable_id"] for item in instantiated.json()["approvals_required"]} == {
         library["stable_id"],
         dependency["stable_id"],

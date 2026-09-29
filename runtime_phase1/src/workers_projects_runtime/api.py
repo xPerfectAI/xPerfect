@@ -4313,6 +4313,10 @@ def create_app(
             raise HTTPException(status_code=401, detail="Missing authenticated user assertion")
         return ctx, tenant_id, owner_id
 
+    def _saved_alias_scope(ctx: AuthContext):
+        # A copy or template start stores its alias in the caller's namespace, as find-or-resume does.
+        return (lambda alias: scoped_alias(ctx, alias)) if ctx.is_user_scoped else None
+
     def _allowed_ai_scope(
         scope: str,
         scope_id: str,
@@ -4759,6 +4763,7 @@ def create_app(
                 duplicate_name,
                 str(source.get("role") or "main"),
                 reapproval_items=reapproval_items,
+                alias_scope=_saved_alias_scope(ctx),
             )
             workspace = _workspace_catalog_item(worker)
             response: dict[str, object] = {"project": project, "workspace": workspace}
@@ -4875,7 +4880,7 @@ def create_app(
         payload: InstantiateWorkspaceTemplateRequest,
         request: Request,
     ) -> dict[str, object]:
-        _, tenant_id, owner_id = _current_principal(request)
+        ctx, tenant_id, owner_id = _current_principal(request)
         try:
             result = service.instantiate_workspace_template(
                 template_id,
@@ -4883,6 +4888,7 @@ def create_app(
                 owner_id=owner_id,
                 idempotency_key=payload.idempotency_key,
                 name=payload.name,
+                alias_scope=_saved_alias_scope(ctx),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5599,6 +5605,7 @@ def create_app(
             payload.name,
             payload.role,
             reapproval_items=reapproval_items,
+            alias_scope=_saved_alias_scope(ctx),
         )
         return WorkerResponse(**worker)
 

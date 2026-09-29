@@ -1237,6 +1237,16 @@ def _duplicate_bootstrap_bundle(bundle: dict | None) -> dict | None:
     return {"project_definition": project_definition}
 
 
+def saved_workspace_alias(profile: str, name: str) -> str:
+    """A fresh alias in the form workspace_launch gives a saved workspace.
+
+    Copies and template starts are saved workspaces too; with their own alias, their exact
+    name resolves to them and alias-based tools (reuse, schedule) reach them.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{profile}-{name}".lower()).strip("-")[:67].strip("-")
+    return f"{slug or 'glasshive-task'}-{uuid.uuid4().hex[:12]}"
+
+
 WORK_TRACE_SCHEMA_DIGEST = (
     "sha256:ba9b15e022a451c62be0c0f30a02d6615bea83e868b2ffdd349beff75002e790"
 )
@@ -10792,6 +10802,7 @@ class WorkersProjectsService:
         name: str,
         role: str,
         reapproval_items: list[dict[str, object]] | None = None,
+        alias_scope: Callable[[str], str] | None = None,
     ) -> dict:
         source_worker = self.require_worker(source_worker_id)
         required_items = [dict(item) for item in (reapproval_items or []) if isinstance(item, dict)]
@@ -10813,6 +10824,7 @@ class WorkersProjectsService:
         )
         if retained_selection is not None:
             bootstrap_bundle = {**(bootstrap_bundle or {}), "provider_account": retained_selection}
+        alias = saved_workspace_alias(profile, name)
         duplicated = self.create_worker(
             project_id=project_id,
             tenant_id=str(source_worker.get("tenant_id") or "local"),
@@ -10822,7 +10834,7 @@ class WorkersProjectsService:
             profile=profile,
             backend=self._legacy_backend_label(profile, execution_mode, str(source_worker.get("backend") or "")),
             execution_mode=execution_mode,
-            alias=None,
+            alias=alias_scope(alias) if alias_scope else alias,
             workspace_root=None,
             bootstrap_profile=str(source_worker.get("bootstrap_profile") or "") or None,
             bootstrap_bundle=bootstrap_bundle,
@@ -11007,6 +11019,7 @@ class WorkersProjectsService:
         owner_id: str,
         idempotency_key: str,
         name: str | None = None,
+        alias_scope: Callable[[str], str] | None = None,
     ) -> dict[str, object] | None:
         if self.control_plane_store is None:
             raise RuntimeError("Workspace templates require the user control plane")
@@ -11131,6 +11144,7 @@ class WorkersProjectsService:
             )
             if provider_account_selection is not None:
                 template_bootstrap["provider_account"] = provider_account_selection
+            alias = saved_workspace_alias(profile, requested_name)
             worker = self.create_worker(
                 project_id=str(project["project_id"]),
                 tenant_id=tenant_id,
@@ -11140,7 +11154,7 @@ class WorkersProjectsService:
                 profile=profile,
                 backend="",
                 execution_mode=execution_mode,
-                alias=None,
+                alias=alias_scope(alias) if alias_scope else alias,
                 workspace_root=None,
                 bootstrap_profile=str(worker_spec.get("bootstrap_profile") or "") or None,
                 bootstrap_bundle=template_bootstrap or None,
