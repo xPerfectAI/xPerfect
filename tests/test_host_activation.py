@@ -296,6 +296,49 @@ class LocalUnlockTests(unittest.TestCase):
         self.assertEqual(json.loads(ui["XPERFECT_LOCAL_MCP_COMMAND"])[1:],
                          ["mcp", "--state-dir", str(self.state)])
 
+    def test_an_ai_app_connection_reports_the_clis_of_the_running_service(self):
+        # An AI app starts `xperfect mcp` with its own PATH, which may lack a CLI the running
+        # service has; the connection then told clients that host worker was unavailable.
+        import threading
+        import time
+        ports = {}
+        for name in host.DEFAULT_PORTS:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                ports[name] = sock.getsockname()[1]
+        state = Path(self.temp.name).resolve() / "service-state"
+        host.configuration(state, ports)
+        host.private_dir(state / "logs")
+        key, jwks = host.assertion_paths(state)
+        host.private_dir(key.parent)
+        key.write_text("synthetic private key")
+        jwks.write_text(json.dumps({"keys": [{"kty": "RSA", "n": "x", "e": "AQAB", "kid": "xperfect-local-test"}]}))
+        service_path = os.pathsep.join([str(state.parent / "service-cli-bin"), "/usr/bin", "/bin"])
+        sleeper = [sys.executable, "-c", "import time; time.sleep(30)"]
+        captured = {}
+        umask = os.umask(0o077)
+        os.umask(umask)
+        with patch.object(host.signal, "signal"):
+            with patch.object(host, "commands", return_value={name: list(sleeper) for name in host.DEFAULT_PORTS}), \
+                    patch.object(host, "probe", return_value={name: True for name in host.DEFAULT_PORTS}), \
+                    patch.dict(os.environ, {"PATH": service_path}):
+                service = threading.Thread(target=host.serve, args=(state,), daemon=True)
+                service.start()
+                deadline = time.monotonic() + 20
+                while not host.control(state, "status") and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            try:
+                with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}), \
+                        patch.object(host.os, "execve", side_effect=lambda _path, _argv, env: captured.update(env)), \
+                        patch.object(sys, "argv", ["xperfect", "mcp", "--state-dir", str(state)]):
+                    host.main()
+            finally:
+                os.umask(umask)
+                host.control(state, "stop")
+                service.join(20)
+        self.assertEqual(captured["PATH"], service_path)
+        self.assertEqual(captured["GLASSHIVE_DEFAULT_EXECUTION_MODE"], "host")
+
     def test_private_config_cannot_redirect_signing_or_trust(self):
         # config.json env reaches environment() unfiltered; the role split must still win.
         config = {**self.config, "env": {

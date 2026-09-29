@@ -437,7 +437,8 @@ def serve(state: Path) -> None:
                 with connection:
                     connection.settimeout(3)
                     request = connection.recv(64).decode()
-                    payload = {"status": "running", "instance": instance, "ports": config["ports"], "checkout": str(ROOT)}
+                    payload = {"status": "running", "instance": instance, "ports": config["ports"], "checkout": str(ROOT),
+                               "path": env.get("PATH", "")}
                     if request == "stop":
                         running = False
                         payload["status"] = "stopping"
@@ -557,11 +558,17 @@ def main() -> int:
             except BlockingIOError:
                 raise RuntimeError("Another start/stop/restart command is running; retry when it finishes")
         if args.command == "mcp":
-            if not control(state, "status"):
+            running = control(state, "status")
+            if not running:
                 raise RuntimeError("Run ./xperfect start before connecting an MCP client")
             command = commands(state, config)["mcp"]
             command[command.index("streamable-http")] = "stdio"
-            os.execve(command[0], command, role_environment(state, config, environment(state, config, "stdio"), "mcp"))
+            env = environment(state, config, "stdio")
+            # The AI app starting this connection may have another PATH. The running service
+            # runs host workers, so the connection reports the CLIs that service can find.
+            if running.get("path"):
+                env["PATH"] = running["path"]
+            os.execve(command[0], command, role_environment(state, config, env, "mcp"))
         elif args.command == "_serve":
             serve(state)
         elif args.command == "stop":
