@@ -373,6 +373,39 @@ def test_provider_account_api_ignores_client_claims_about_platform_support(
     assert "proof_required" in created.json()["detail"]
 
 
+def test_hosted_upgrade_stops_idle_compute_only_from_inside_the_runtime(tmp_path, monkeypatch, assertion_keys):
+    # The package's own upgrade runs this inside the runtime container. Without it a hosted
+    # package could change its image or model only after closing every open workspace.
+    private_key, jwks = assertion_keys
+    configure_signed_assertions(monkeypatch, jwks)
+    app = create_app(db_path=str(tmp_path / "runtime.db"), runtime_backend="stub")
+    service = app.state.service
+    calls = []
+    release = service.release_idle_compute_for_upgrade
+    monkeypatch.setattr(service, "release_idle_compute_for_upgrade", lambda: calls.append(1) or release())
+    url = "/v1/admin/maintenance/release-idle-compute"
+    token = {"X-WPR-Token": "runtime-service-token"}
+
+    for peer in ("127.0.0.1", "::1"):
+        inside = TestClient(app, client=(peer, 40000)).post(url, headers=token)
+        assert inside.status_code == 200, inside.text
+        assert inside.json() == {"status": "ok", "released": []}
+    assert len(calls) == 2
+
+    # A network peer holding the same credential still needs a person's assertion.
+    network = TestClient(app, client=("10.20.0.5", 40000))
+    refused = network.post(url, headers=token)
+    assert refused.status_code == 401
+    assert "signed internal assertion" in refused.json()["detail"].lower()
+    loopback = TestClient(app, client=("127.0.0.1", 40000))
+    assert loopback.post(url, headers={"X-WPR-Token": "other-token"}).status_code == 401
+    assert loopback.post("/v1/admin/schedules/run-due", headers=token).status_code == 401
+    # A person, even from inside, cannot stop compute package-wide.
+    person = loopback.post(url, headers={**token, **request_headers(signed_assertion(private_key))})
+    assert person.status_code == 403
+    assert len(calls) == 2
+
+
 def test_signed_internal_assertion_mode_rejects_plain_identity_headers(tmp_path, monkeypatch, assertion_keys):
     _, jwks = assertion_keys
     configure_signed_assertions(monkeypatch, jwks)

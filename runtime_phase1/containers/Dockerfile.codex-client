@@ -1,0 +1,14 @@
+# Replace only the official Codex CLI in a verified native image, as the workstation builder
+# installs it, when the reviewed Codex spec (AI_WORKER_CODEX_NPM_SPEC) changes. Build from the
+# exact native image digest; the service image built on the result must carry the same spec.
+# Boxes run with an explicit user, so the base image's default user is left as it is.
+ARG XPERFECT_NATIVE_IMAGE
+FROM ${XPERFECT_NATIVE_IMAGE}
+ARG CODEX_NPM_SPEC
+USER root
+RUN test -n "${CODEX_NPM_SPEC}" \
+ && npm install -g --cache /tmp/glasshive-npm-cache "${CODEX_NPM_SPEC}" \
+ && npm cache clean --force --cache /tmp/glasshive-npm-cache \
+ && rm -rf /tmp/glasshive-npm-cache /root/.npm /home/seluser/.npm \
+ && codex --version
+LABEL com.glasshive.workstation.codex-spec=${CODEX_NPM_SPEC}

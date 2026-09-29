@@ -26,6 +26,7 @@ from workers_projects_runtime.inference_broker import (
 )
 from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase, RuntimeInfo
 from workers_projects_runtime.profile_runtime import CodexCliRuntime, ProfiledWorkerRuntime
+from workers_projects_runtime.native_model_selection import ModelConfigurationRequired
 
 
 SECRET = "synthetic-broker-secret-with-at-least-32-characters"
@@ -422,6 +423,56 @@ class RevokeFailureAfterDispatchBroker(RecordingBroker):
             "synthetic broker revocation failure",
             code="revoke_failed",
         )
+
+
+def test_gateway_route_without_an_exact_model_refuses_before_any_grant(tmp_path, monkeypatch):
+    # The gateway authorizes one exact model per run; native Codex's own default is
+    # unknown to it, so an unconfigured model is a typed refusal, never a guessed ID.
+    monkeypatch.delenv("GLASSHIVE_INFERENCE_BROKER_URL", raising=False)
+    db_path = tmp_path / "control-plane.db"
+    store = ControlPlaneStore(str(db_path))
+    account = store.create_provider_account(
+        tenant_id="glass-tenant",
+        owner_id="owner-a",
+        provider="openai",
+        label="Personal OpenAI",
+        auth_method="api_key",
+        platform_support="supported",
+        secret_locator="broker://librechat",
+        status="ready",
+    )
+    profiled = ProfiledWorkerRuntime(
+        base_dir=str(tmp_path / "runtime"),
+        provider_account_db_path=str(db_path),
+    )
+    runtime = RecordingRuntime()
+    runtime.resolve_model = lambda _profile: ""
+    broker = RecordingBroker()
+    monkeypatch.setattr(profiled, "_runtime_for_worker", lambda _worker: runtime)
+    profiled.inference_broker = broker
+    worker = {
+        "worker_id": "worker-a",
+        "owner_id": "owner-a",
+        "tenant_id": "glass-tenant",
+        "profile": "codex-cli",
+        "execution_mode": "docker",
+        "bootstrap_bundle_json": {
+            "provider_account": {
+                "policy": "personal_required",
+                "account_id": account["account_id"],
+            }
+        },
+    }
+
+    with pytest.raises(ModelConfigurationRequired) as refused:
+        profiled.run_task(worker, "Synthetic task", run_id="run-no-model")
+
+    classification = refused.value.failure_classification
+    assert classification.failure_class == "model_configuration_required"
+    assert classification.retryable is False
+    assert "--model codex-cli=" in classification.user_message
+    assert broker.binds == []
+    assert runtime.calls == []
 
 
 def test_scheduled_run_issues_at_execution_and_never_persists_grant(tmp_path, monkeypatch):

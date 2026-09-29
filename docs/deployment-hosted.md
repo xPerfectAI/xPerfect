@@ -167,9 +167,11 @@ a 16 GiB Files disk, one worker was admitted. Lower `shared_memory_bytes` for sm
 python3 deployment/linux/launch.py upgrade --docker-host unix:///var/run/docker.sock --receipt /etc/xperfect/receipt.json --service-image sha256:<new service image>
 ```
 
-The upgrade needs an idle package. A hosted upgrade cannot pause open workspaces for you, so close
-them first; running, queued, paused or waiting work also refuses the upgrade. It keeps sign-ins,
-roles, projects, owner files and quotas.
+The upgrade needs an idle package. It first stops idle open workspaces, which keep their files,
+history and sessions and start again on their next instruction. A package running an earlier
+release cannot do that on a hosted server, so close its open workspaces first. Running, queued,
+paused or waiting work refuses the upgrade. It keeps sign-ins, roles, projects, owner files and
+quotas.
 Check the new version, then run `upgrade-commit` to keep it or `upgrade-rollback` to go back.
 Rollback discards service records made after the upgrade, including access changes, and refuses
 once a new owner has received storage. See

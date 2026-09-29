@@ -71,7 +71,7 @@ from workers_projects_runtime.openclaw_runtime import HostCapacityError
 
 
 def test_worker_codex_uses_the_current_reviewed_release():
-    assert AI_WORKER_CODEX_NPM_SPEC == "@openai/codex@0.155.0-alpha.9.2"
+    assert AI_WORKER_CODEX_NPM_SPEC == "@openai/codex@0.159.0"
 
 
 def test_worker_claude_uses_the_current_reviewed_release():
@@ -5381,7 +5381,7 @@ def test_ensure_image_defaults_to_no_forced_ai_worker_browser_extensions(tmp_pat
     assert f"snapshot.ubuntu.com/ubuntu/{AI_WORKER_APT_SNAPSHOT}" in dockerfile
     assert "nodejs_22.23.2-1nodesource1_${arch}.deb" in dockerfile
     assert "sha256sum -c -" in dockerfile
-    assert "@openai/codex@0.155.0-alpha.9.2" in dockerfile
+    assert "@openai/codex@0.159.0" in dockerfile
     assert "@anthropic-ai/claude-code@2.1.280" in dockerfile
     assert "--cache /tmp/glasshive-npm-cache" in dockerfile
     assert "rm -rf /tmp/glasshive-npm-cache /root/.npm /home/seluser/.npm" in dockerfile

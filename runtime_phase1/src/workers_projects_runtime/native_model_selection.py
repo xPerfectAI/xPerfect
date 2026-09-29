@@ -5,11 +5,32 @@ import os
 import shutil
 import subprocess
 
+from .failure_classification import FailureClassification
 from .openclaw_runtime import RuntimeConfigurationError
 
 
 class ModelConfigurationRequired(RuntimeConfigurationError):
     code = "model_configuration_required"
+
+
+def gateway_codex_model_required() -> ModelConfigurationRequired:
+    """A gateway route authorizes one exact model, so native Codex's own default cannot run there."""
+    error = ModelConfigurationRequired(
+        "This AI connection runs through xPerfect's model gateway, which needs an exact Codex model. "
+        "Set --model codex-cli=<id> when starting xPerfect."
+    )
+    error.failure_classification = FailureClassification(
+        failure_class=ModelConfigurationRequired.code,
+        retryable=False,
+        user_message=str(error),
+        recommended_recovery=(
+            "Start or upgrade xPerfect with --model codex-cli=<id>, using an exact model this "
+            "connection lists, then continue the worker."
+        ),
+        diagnostic_summary="Gateway-routed Codex run has no configured exact model.",
+        structured=True,
+    )
+    return error
 
 
 def valid_model_id(value: object) -> bool:

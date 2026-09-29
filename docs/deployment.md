@@ -217,7 +217,8 @@ The upgrade:
    Idle workspaces keep their files, history and sessions and start again on their next
    instruction. Running, queued, paused or waiting work refuses the upgrade with the reason,
    and nothing else changes: finish or stop that work first. Workers otherwise stay warm, so a
-   running version that cannot stop idle workspaces (an earlier release, or a hosted package)
+   running version that cannot stop idle workspaces (an earlier release, or a hosted package on
+   an earlier release)
    needs them closed first. The running version checks its own state. If it cannot read
    state an earlier release wrote, the new version checks the state it will take over
    instead. Either way, the same check repeats once the package has stopped.

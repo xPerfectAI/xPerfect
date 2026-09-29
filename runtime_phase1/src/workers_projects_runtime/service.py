@@ -4224,7 +4224,10 @@ class WorkersProjectsService:
             logger.warning("Could not resolve model for worker %s profile %s: %s", worker_id, profile, exc)
             return worker
         current_model = str(worker.get("model") or "").strip()
-        if not resolved_model or resolved_model == current_model:
+        # Codex without a configured model runs the native default, so a model saved
+        # under an earlier configuration must not outlive that configuration.
+        native_default = not resolved_model and profile == "codex-cli"
+        if (not resolved_model and not native_default) or resolved_model == current_model:
             return worker
         updated = self.store.update_worker(worker_id, model=resolved_model) or worker
         self.store.add_event(
@@ -4232,7 +4235,8 @@ class WorkersProjectsService:
             worker_id,
             None,
             "worker.model_refreshed",
-            f"Worker model refreshed from {current_model or '<unset>'} to {resolved_model}",
+            f"Worker model refreshed from {current_model or '<unset>'} to "
+            f"{resolved_model or '<native default>'}",
         )
         return updated
 

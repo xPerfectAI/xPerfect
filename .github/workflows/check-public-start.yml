@@ -59,6 +59,11 @@ jobs:
           for record in receipt['containers'].values():
               container = json.loads(subprocess.check_output(['docker', 'inspect', record]))[0]
               assert container['State']['Running'] and container['Image'] == receipt['service_image']
+          # The release was proved with this official native client. Check the loaded
+          # binary without connecting an AI account or repeating the model workload.
+          version = subprocess.check_output(['docker', 'exec', receipt['containers']['runtime'],
+                                             'codex', '--version'], text=True).strip()
+          assert version == 'codex-cli ' + release['codex_client_version']
           # API clients get 401; browsers are redirected to the unlock page.
           # Keep both responses protected rather than making the app public.
           try:

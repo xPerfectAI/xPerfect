@@ -158,8 +158,9 @@ HEALTH = _ENV + (
     "request=urllib.request.Request('http://127.0.0.1:8766/health',headers={'Authorization':'Bearer '+env['WPR_API_TOKEN']})\n"
     "with urllib.request.urlopen(request,timeout=3) as response:\n"
     "    print(json.dumps({'status':json.load(response).get('status')}))\n")
-# The running release stops idle workspace compute its ordinary way. Exit 3: this release
-# has no such request, or it needs a person's identity (hosted), so the idle proof decides.
+# The running release stops idle workspace compute its ordinary way, from inside its own
+# container. Exit 3: this release has no such request, or refuses it (an earlier hosted release
+# needs a person's identity), so the idle proof decides.
 RELEASE_IDLE_COMPUTE = _ENV + (
     "import json,urllib.error,urllib.request\n"
     "request=urllib.request.Request('http://127.0.0.1:8766/v1/admin/maintenance/release-idle-compute',"

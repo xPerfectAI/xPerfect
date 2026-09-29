@@ -23,9 +23,9 @@ Install your provider's native CLI, then open **Connections → Connect an AI ac
 - [Claude Code](https://code.claude.com/docs/en/setup): choose **Connected API key**. For an existing Claude subscription, choose **Use existing Claude sign-in** in Connections. xPerfect verifies the current OS sign-in and connects it as a distinct selected account. If setup is needed, open **Sign-in help**, complete the native install/sign-in, then choose **Check again**. Named Claude subscription accounts are unavailable on macOS because their isolation cannot be guaranteed; there, `./xperfect doctor` shows Claude setup as `use_existing_sign_in`.
 - [Grok](https://github.com/xai-org/grok-build): choose **My subscription** for native device sign-in, or **Connected API key**. Grok also needs one exact model: choose it under **Grok model** in Connections and select **Use model**, or run `grok models` and `./xperfect restart --model grok-build=<model>`. xPerfect never picks a Grok model for you; `./xperfect doctor` shows what each installed harness will use.
 
-Tested versions are the ones the workspace image pins: Codex `0.155.0-alpha.9.2` and Claude Code
+Tested versions are the ones the workspace image pins: Codex `0.159.0` and Claude Code
 `2.1.280` from npm (with Node.js 22), and Grok `1.0.34` from xAI's CLI download. A per-user install
-needs no root, for example `npm install -g --prefix ~/.local @openai/codex@0.155.0-alpha.9.2`, with
+needs no root, for example `npm install -g --prefix ~/.local @openai/codex@0.159.0`, with
 `~/.local/bin` on PATH. After installing, `./xperfect doctor` should show the CLI as present. Its
 account setup changes from "CLI required" to what that provider's sign-in needs next.
 

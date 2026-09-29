@@ -107,6 +107,7 @@ from .openclaw_runtime import (
     runtime_start_boundary,
 )
 from .openclaw_release import reviewed_openclaw_env
+from .native_model_selection import gateway_codex_model_required
 from .provider_accounts import ProviderAccountHomeManager
 from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, host_runtime_requirement_issue
 from .run_evidence import (
@@ -2495,6 +2496,8 @@ class ProfiledWorkerRuntime:
             or runtime.resolve_model(str(worker.get("profile") or "codex-cli"))
             or ""
         ).strip()
+        if not model:
+            raise gateway_codex_model_required()
 
         def execute_reserved_route(routed_worker: dict) -> str:
             mission_dispatched = False
@@ -8243,7 +8246,10 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def resolve_model(self, profile: str) -> str:
         if profile == "codex-cli":
-            return os.environ.get("WPR_MODEL_CODEX_CLI", "gpt-5.4")
+            # Only an explicit choice (--model codex-cli=<id>) names a model. Without one,
+            # native Codex runs its own default for the signed-in account, as host Codex
+            # does; a remembered ID would be a silent substitution providers retire.
+            return os.environ.get("WPR_MODEL_CODEX_CLI", "").strip()
         return os.environ.get("WPR_MODEL_OPENCLAW_CODEX", "openai-codex/gpt-5.3-codex")
 
     def _default_session_key(self, worker: dict) -> str | None:

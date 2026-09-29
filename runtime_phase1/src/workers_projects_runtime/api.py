@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import hmac
+import ipaddress
 import re
 import sqlite3
 import stat
@@ -32,6 +33,7 @@ from .workspace_files import FileAdmissionError
 from .workspace_api import install_execution_workspace_routes
 
 from .auth import (
+    INTERNAL_ASSERTION_HEADER,
     AuthContext,
     EnterpriseAuthSettings,
     GlassHiveAuthError,
@@ -810,6 +812,27 @@ def create_app(
             )
         )
 
+    def _package_idle_release_request(request: Request, token: str) -> bool:
+        """The package's own upgrade, run inside the runtime container, stopping idle compute.
+
+        A hosted request otherwise needs a person's signed assertion, but this is one
+        package-wide operator action. Only the exact route, the exact service credential and
+        the container's own loopback qualify; any network peer still needs an assertion.
+        """
+        if (
+            request.method.upper() != "POST"
+            or request.url.path != "/v1/admin/maintenance/release-idle-compute"
+            or not _token_matches(token, api_token)
+            or str(request.headers.get(INTERNAL_ASSERTION_HEADER) or "").strip()
+        ):
+            return False
+        try:
+            peer = ipaddress.ip_address(str(getattr(request.client, "host", "") or ""))
+        except ValueError:
+            return False
+        mapped = getattr(peer, "ipv4_mapped", None)
+        return bool(peer.is_loopback or (mapped is not None and mapped.is_loopback))
+
     def _service_token_from_headers(headers) -> str:
         for name in ("x-wpr-token", "x-glasshive-service-token", "x-glasshive-mcp-service-token"):
             token = str(headers.get(name) or "").strip()
@@ -1055,6 +1078,9 @@ def create_app(
                     },
                 )
             return Response(status_code=401, content="Unauthorized")
+        if auth_settings.enterprise and _package_idle_release_request(request, token):
+            request.state.auth_context = AuthContext(auth_mode="service", enterprise=True)
+            return await call_next(request)
         try:
             request.state.auth_context = _service_auth_context_from_headers(
                 request.headers

@@ -430,8 +430,8 @@ AI_WORKER_BROWSER_EXTENSION_POLICY_PATHS = (
 from .grok_artifact import GROK_ARTIFACT_PROVENANCE, docker_install_instruction as grok_docker_install_instruction
 
 AI_WORKER_CODEX_NPM_SPEC = (
-    os.environ.get("WPR_SANDBOX_CODEX_NPM_SPEC", "@openai/codex@0.155.0-alpha.9.2").strip()
-    or "@openai/codex@0.155.0-alpha.9.2"
+    os.environ.get("WPR_SANDBOX_CODEX_NPM_SPEC", "@openai/codex@0.159.0").strip()
+    or "@openai/codex@0.159.0"
 )
 AI_WORKER_CLAUDE_CODE_NPM_SPEC = (
     os.environ.get("WPR_SANDBOX_CLAUDE_CODE_NPM_SPEC", "@anthropic-ai/claude-code@2.1.280").strip()

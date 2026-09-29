@@ -4511,6 +4511,27 @@ def test_host_codex_does_not_invent_automation_model_or_effort(tmp_path, monkeyp
     assert "model_reasoning_effort" not in joined
 
 
+def test_docker_codex_without_a_model_choice_runs_the_native_default(tmp_path, monkeypatch):
+    # A packaged worker with no configured model must not send a remembered ID, which a
+    # signed-in account's provider can reject; native Codex picks its own default instead.
+    runtime = CodexCliRuntime(base_dir=str(tmp_path / "data"))
+    monkeypatch.delenv("WPR_MODEL_CODEX_CLI", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WPR_CODEX_CLI_BASE_URL", raising=False)
+    worker = {"worker_id": "wrk_docker_native_default", "name": "Main Worker", "profile": "codex-cli"}
+    runtime._ensure_dirs(worker["worker_id"])
+
+    command, _env = runtime._build_command(worker, "Create the artifact.", runtime._runtime_info(worker))
+
+    assert runtime.resolve_model("codex-cli") == ""
+    assert "-m" not in command
+
+    monkeypatch.setenv("WPR_MODEL_CODEX_CLI", "gpt-6.1-sol")
+    command, _env = runtime._build_command(worker, "Create the artifact.", runtime._runtime_info(worker))
+
+    assert command[command.index("-m") + 1] == "gpt-6.1-sol"
+
+
 def test_host_codex_can_explicitly_inherit_provider_model_when_configured(tmp_path, monkeypatch):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     monkeypatch.setenv("WPR_MODEL_CODEX_CLI", "gpt-5.4")
