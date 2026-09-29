@@ -7241,17 +7241,21 @@ def test_scheduling_a_saved_expert_keeps_its_name_and_role(monkeypatch):
     """The scheduled task describes a run; it never renames the saved expert it runs on."""
     monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
 
+    expert = {
+        "worker_id": "wrk_expert",
+        "profile": "codex-cli",
+        "state": "ready",
+        "alias": "codex-cli-supplies-expert-1a2b",
+        "name": "Supplies Expert",
+        "role": "Answer supply questions",
+    }
+
     class SavedExpertClient(TrackingApiClient):
+        def workspace_catalog(self, **kwargs):
+            return {"items": [{**expert, "project_id": "prj_123"}], "next_cursor": None}
+
         def list_workers(self, project_id: str):
-            return [{
-                "worker_id": "wrk_expert",
-                "project_id": project_id,
-                "profile": "codex-cli",
-                "state": "ready",
-                "alias": "codex-cli-supplies-expert-1a2b",
-                "name": "Supplies Expert",
-                "role": "Answer supply questions",
-            }]
+            return [{**expert, "project_id": project_id}]
 
     api_client = SavedExpertClient()
     server = create_mcp_server(api_client=api_client)
@@ -7392,3 +7396,65 @@ def test_a_copied_expert_is_reached_by_its_exact_name(monkeypatch, tmp_path):
     assert worker_id == copy_id
     assert "Give me the copy proof." in instruction
     assert name == "Supplies Expert (copy)"
+
+
+def test_scheduling_a_saved_expert_by_name_never_creates_another_workspace(monkeypatch, tmp_path):
+    """A client that passes the expert's name as its alias schedules that expert; an unknown
+    name is refused instead of silently creating an empty workspace that runs the task."""
+    monkeypatch.setenv("WPR_API_TOKEN", "service-token")
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    monkeypatch.setattr(mcp_server, "DEFAULT_OWNER_ID", "local-owner")
+    monkeypatch.delenv("GLASSHIVE_ENTERPRISE_MODE", raising=False)
+    monkeypatch.delenv("WPR_ENTERPRISE_MODE", raising=False)
+    monkeypatch.setenv("GLASSHIVE_DEFAULT_OWNER_ID", "local-owner")
+    monkeypatch.setenv("WPR_DEFAULT_OWNER_ID", "local-owner")
+    database = tmp_path / "scheduled-expert.db"
+    api_http = TestClient(create_app(
+        db_path=str(database), runtime_backend="stub", runtime=StubRuntime(), reconcile_on_startup=False,
+    ))
+
+    class InProcessHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def request(self, method, url, json=None, headers=None):
+            parsed = urlsplit(url)
+            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            return api_http.request(method, path, json=json, headers=headers)
+
+    monkeypatch.setattr(mcp_server.httpx, "Client", InProcessHttpClient)
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
+    api = mcp_server.WorkersProjectsApiClient(base_url="http://glasshive.in-process", api_token="service-token")
+    server = create_mcp_server(api_client=api)
+
+    async def scenario():
+        async with Client(server) as client:
+            await client.call_tool("workspace_launch", {
+                "description": "Supplies Expert\nKeep the supply totals.",
+                "favorite": True,
+            })
+            scheduled = _tool_json(await client.call_tool("workspace_schedule", {
+                "description": "Write scheduled-proof.txt with the total",
+                "workspace_alias": "Supplies Expert",
+                "delay_seconds": 120,
+            }))
+            assert scheduled["status"] == "scheduled"
+            with pytest.raises(ToolError, match="Could not resolve exactly one saved workspace"):
+                await client.call_tool("workspace_schedule", {
+                    "description": "Write scheduled-proof.txt with the total",
+                    "workspace_alias": "Inventory Expert",
+                    "delay_seconds": 120,
+                })
+
+    asyncio.run(scenario())
+    with sqlite3.connect(database) as conn:
+        workers = conn.execute("SELECT worker_id, name FROM workers").fetchall()
+        scheduled_workers = conn.execute("SELECT worker_id FROM scheduled_runs").fetchall()
+    assert [name for _worker_id, name in workers] == ["Supplies Expert"]
+    assert scheduled_workers == [(workers[0][0],)]
