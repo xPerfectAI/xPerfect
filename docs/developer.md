@@ -15,8 +15,11 @@ Local keys live in `<state>/secrets.json`. The state directory defaults to
 
 On a deployment whose operator has registered supported AI clients, the web UI can do it: signed
 in, open **Connections → Use xPerfect from another AI app** for the exact add and sign-in steps.
-With the default launchers no client is registered, so that panel cannot set one up; use the
-stdio or manual steps below. [MCP publication](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection)
+The local host launcher has its own client setup. The container and hosted launchers do not
+configure a complete native-client registration: local clients can use stdio or the local
+container's private bearer key, but hosted OAuth setup needs the operator's supported client
+registration. The manual protocol example below assumes an already-authorized access token;
+it does not solve native-client registration. [MCP publication](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection)
 explains the client contract.
 
 For a local client over stdio, for example:
@@ -103,6 +106,19 @@ a Claude Code skill lives at `.claude/skills/<skill>/SKILL.md`, a Codex skill at
 requires a trusted source identity from an integrated host; a plain client gets "A trusted source
 event identity is required" for that one case. A retried `workspace_launch` can create a second
 workspace, so check `workspace_list` before retrying an unclear failure.
+
+### Serve a reusable expert
+
+Connect your product or AI client to the existing authenticated MCP endpoint. Use `workspace_list`
+to select an expert, `worker_run` to give it work, and `worker_message` for guidance or a follow-up.
+Use the returned run/worker context to check that exact result and retrieve its artifacts. Keep
+the same workspace for continuity; duplicate it when you want separate files and history.
+
+The optional [connection skill](../skills/connect-glasshive/SKILL.md) helps an AI use this existing
+control plane. A worker's own skills, files and tool setup belong inside its native workspace,
+not in a new per-expert server or routing layer. Text files can use `bootstrap_bundle_json`;
+binary files use the existing authenticated Files upload path. Never place provider credentials
+in either bundle. Hosted applications use MCP; the internal runtime HTTP port is not a public API.
 
 ## 4. Runtime HTTP API (local)
 

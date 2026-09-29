@@ -57,8 +57,9 @@ account for you.
 These API-key accounts use the local single-user host route, or a packaged Linux multi-user route
 with `per_worker_container` isolation and an owner-scoped private account home. The contained
 worker reads the selected key from its account mount at native start; the key is not saved in the
-worker route or Docker command arguments. Other multi-user substrates remain unavailable. Connecting
-any AI account on a hosted server has not been verified end to end yet.
+worker route or Docker command arguments. Other multi-user substrates remain unavailable. One
+hosted-mode Codex subscription-to-result path has passed; hosted API-key and other provider paths
+have not. See the bounded evidence and limits in [hosted setup](deployment-hosted.md).
 
 ## Connect an MCP client
 

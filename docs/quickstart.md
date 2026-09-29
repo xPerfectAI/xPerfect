@@ -7,6 +7,31 @@ later. It uses the private web app on your own computer.
 
 ![From a goal to a result you can reopen](assets/first-result.png)
 
+## On a hosted server
+
+If someone hosts xPerfect for you, no local xPerfect install is needed:
+
+1. Open their app address and sign in with the account they admitted.
+2. In **Connections**, connect your AI subscription and wait for **Ready**.
+3. In **Run project**, choose that worker and account, describe the goal, and **Add files**.
+   A ZIP can contain ordinary input files and a native skill folder. Ask the worker to unpack it;
+   Codex uses `.agents/skills/<name>/SKILL.md`, Claude Code uses `.claude/skills/<name>/SKILL.md`.
+4. Open **Watch** and its result. Use **Files** to open or download outputs. Reload to check they stay.
+5. In **Workspaces**, mark the expert as a favorite. Send a follow-up, or choose **More → Duplicate**
+   for a separate copy. Files and native skills stay in the workspace; no extra skill router is needed.
+6. In **Schedules → New schedule**, choose the workspace, instruction, time and time zone.
+   Open the workspace after it runs and check the new result.
+
+**Optional AI client.** **Connections → Use xPerfect from another AI app** provides native client
+setup only when the deployment has a complete registration. The current hosted launcher does not
+configure that registration; if setup is unavailable, the server operator must fix it. Connecting
+your worker's subscription is a separate sign-in and does not connect your Codex/Claude MCP client.
+Do not copy credentials or disable client approval to work around this.
+See [MCP and serving an expert](developer.md) and [host the service](deployment-hosted.md).
+
+The direct browser skill, follow-up and reload path passed on one hosted-mode Arm Linux test
+server. This is not a full Internet deployment or external native-client onboarding pass.
+
 ## 1. What you need
 
 - macOS or Linux, Python 3.11 or newer, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
@@ -139,9 +164,9 @@ not always continue by itself.
 
 - Dragging files into or out of the browser has not been verified yet. Use **Add files** and **Download**.
 - API-key sign-in has not been verified end to end yet. Use your subscription sign-in.
-- **Duplicate** copies a workspace's files. A copy of a workspace whose AI is managed by your
-  organization continues directly. A copy of a workspace that uses your own account must have that
-  account approved for it before it runs; continuing such a copy has not been verified end to end yet.
+- **Duplicate** copies a workspace's files and native skill folders. A same-owner copy retains
+  the selected ready account's authorized connection. Copies do not share private credentials
+  between owners; a new owner must connect their own account.
 - Several goals in one conversation and shared workspaces were verified on the packaged Linux
   install, not with `./xperfect start`.
 

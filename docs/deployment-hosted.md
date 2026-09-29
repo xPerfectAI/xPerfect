@@ -4,18 +4,38 @@ The hosted profile runs the same three containers as the local package — runti
 
 **Verified hosted-mode result (29 September 2026).** Install, sign-in and admission, per-person storage, attaching stored files, and upgrade and rollback are tested on a hosted server. A retained diagnostic package on a real Arm Linux host also produced a native `gpt-6.1-sol` result through the selected ready Codex subscription, using official Codex client 0.159.0. Its 50-byte output and unchanged 44-byte input were downloaded through authenticated Files routes and matched after a supported restart and fresh MCP/HTTP sessions. This is evidence for that exact package/account route, not every provider or the final service upgrade.
 
-**Still partial.** The Internet/cloud novice journey and external Codex/Claude setup through Connections remain unverified; that setup is currently unavailable. A worker writing past a person's storage limit has not been verified. The diagnostic expert was preserved; this result does not establish new cloud, automatic client setup or quota-overrun success.
+**Direct browser proof.** A fresh sign-in on the retained hosted-mode test server also completed a Codex expert from an uploaded native skill and CSV, then a follow-up with the same account; the result survived a real browser reload. This was a local Linux VM in hosted mode, not an Internet cloud deployment.
+
+**Still partial.** The Internet/cloud novice journey and external Codex/Claude setup through Connections remain unverified; that setup is currently unavailable. A worker writing past a person's storage limit has not been verified. The diagnostic expert was preserved; this result does not establish new cloud, automatic client setup or quota-overrun success. Users start with the [hosted browser steps](quickstart.md#on-a-hosted-server); server operators follow this page.
 
 ## What you need
 
-- **Linux server** with rootful Docker (cgroup v2). Rootless Docker and user-namespace remapping cannot set project quotas.
+- **Arm64 Linux server** with Python 3.11+ and rootful Docker (cgroup v2). The published images currently support `linux/arm64`; Intel/amd64 and Windows host startup remain deferred. Rootless Docker and user-namespace remapping cannot set project quotas.
 - **Files disk:** a dedicated XFS filesystem mounted with `prjquota`, not `pqnoenforce`. Mount it by UUID so it returns after a reboot, for example `UUID=… /srv/xperfect-data xfs prjquota,nosuid,nodev 0 2`. Docker's own storage (control state) must be on a different filesystem.
 - **OIDC provider** that issues:
   - an HTTPS issuer;
   - a confidential client for the browser, with redirect `https://<your host>/auth/oidc/callback`;
-  - JWT access tokens for MCP clients, carrying your MCP audience, a `scope` claim with the MCP scope, and an `azp`/`client_id` claim.
+  - JWT access tokens for MCP clients, carrying your MCP audience, a `scope` or `scp` claim with the MCP scope, and an `azp`, `appid` or `client_id` claim.
 - **TLS:** a certificate and key for the UI and MCP host names.
 - **Images:** the xPerfect service and native images on that Docker host, referenced by exact image ID.
+
+### Azure, AWS or Google Cloud
+
+Use the same Linux recipe on a VM with a durable Files disk. These are provider-supported
+infrastructure choices, not three verified xPerfect cloud deployments:
+
+| Provider | VM and Files disk | Setup reference |
+| --- | --- | --- |
+| Azure | Arm64 Linux, for example Dpsv5, plus a separate managed data disk | [Arm VM sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dpsv5-series) · [prepare and mount XFS](https://learn.microsoft.com/en-us/azure/virtual-machines/linux/disks-format-mount-data-disks-linux) |
+| AWS | Arm64/Graviton EC2 Linux with a separate EBS volume | [instance specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html) · [prepare and mount EBS](https://docs.aws.amazon.com/ebs/latest/userguide/ebs-using-volumes.html) |
+| Google Cloud | Arm Linux, for example C4A, with a supported durable Hyperdisk | [Arm instances](https://docs.cloud.google.com/compute/docs/instances/arm-on-compute) · [C4A disk support](https://docs.cloud.google.com/compute/docs/general-purpose-machines#c4a_series) |
+
+C4A does not support Persistent Disk. Do not use temporary/local SSD as the Files disk.
+Prepare a **new empty data disk**, identify its actual device and mount it by UUID with enforced
+XFS project quotas. Formatting an existing disk destroys its data. Keep Docker's control-state
+filesystem separate. Size the VM for [worker admission](#size-the-server), configure public DNS,
+trusted TLS and the exact OIDC redirects, and allow only the intended UI/MCP ports. A container-only
+PaaS is not this route: the runtime needs the Docker socket, quota device and declared privileges.
 
 ## Start
 
@@ -54,7 +74,35 @@ Optional fields:
 | `role_map` | none | Map your identity provider's role values to xPerfect roles, e.g. `{"xperfect-admins": "tenant_admin", "xperfect-users": "member"}`. See [Roles from your identity provider](#roles-from-your-identity-provider) |
 | `role_claim` | `roles` | The top-level token claim that carries those values, e.g. `groups`. Only used with `role_map` |
 
-Then run:
+Hosted `models` is explicit operator configuration; it does not inherit the local release defaults.
+For a repeatable exact Codex run, set `{"codex-cli":"<model ID available to your account>"}`.
+An omitted Codex model uses its native default; do not report that as a tested exact model.
+
+**Entra identity:** separate UI and MCP application registrations have pairwise `sub` values.
+Use a common immutable claim present in both tokens, such as `principal_claim: "oid"`, with the same
+exact issuer. Set `mcp_audiences` to the API token's actual audience. Entra's requested API scope
+and token `scp` can differ; this launcher currently uses `mcp_scopes` for both. A complete native
+Entra client recipe therefore needs that supported scope mapping before it can be claimed ready.
+See [Microsoft's claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference).
+
+Pull the reviewed release pair and resolve its local image IDs. Run this from the public checkout
+on the prepared Docker host; it reads the existing release manifest rather than private machine IDs:
+
+```sh
+XP_SERVICE_REF=$(python3 -c 'import json; from pathlib import Path; d=json.loads(Path("deployment/linux/candidate-images.json").read_text()); i=next(i for i in d["images"] if i["repository"]=="xperfect-service"); print(d["registry"]+"/xperfect-service@"+i["digest"])')
+XP_NATIVE_REF=$(python3 -c 'import json; from pathlib import Path; d=json.loads(Path("deployment/linux/candidate-images.json").read_text()); i=next(i for i in d["images"] if i["repository"]=="xperfect-native"); print(d["registry"]+"/xperfect-native@"+i["digest"])')
+docker pull "$XP_SERVICE_REF"
+docker pull "$XP_NATIVE_REF"
+XP_SERVICE_IMAGE=$(docker image inspect --format '{{.Id}}' "$XP_SERVICE_REF")
+XP_NATIVE_IMAGE=$(docker image inspect --format '{{.Id}}' "$XP_NATIVE_REF")
+python3 deployment/linux/launch.py \
+  --profile hosted-xfs --hosted-config /etc/xperfect/hosted.json \
+  --docker-host unix:///var/run/docker.sock --name xperfect-hosted \
+  --service-image "$XP_SERVICE_IMAGE" --native-image "$XP_NATIVE_IMAGE" \
+  --ui-port 443 --mcp-port 8443 --receipt /etc/xperfect/receipt.json
+```
+
+If the exact pair is already loaded, pass its image IDs directly:
 
 ```
 python3 deployment/linux/launch.py --profile hosted-xfs --hosted-config /etc/xperfect/hosted.json --docker-host unix:///var/run/docker.sock --name xperfect-hosted --service-image sha256:<service> --native-image sha256:<native> --ui-port 443 --mcp-port 8443 --receipt /etc/xperfect/receipt.json
@@ -124,6 +172,16 @@ curl -fsS https://xperfect.example.com:8443/.well-known/oauth-protected-resource
 
 The first returns `"status":"ok"`. The second names your MCP URL and issuer. Then sign in as an admitted person. Their storage shows 5,000,000,000 bytes with no file, count or batch limit, unless you set `storage_limit_bytes`. Attach one small stored file to a workspace and open it there: that confirms the runtime can publish stored files.
 
+## Connect external AI clients
+
+The MCP endpoint and an admitted person's worker account are not native-client registration.
+The current hosted input cannot configure the UI's Codex/Claude client IDs, callbacks and discovery
+metadata, so **Use xPerfect from another AI app** reports setup unavailable. An MCP token client
+allowlist does not supply those registrations. Keep this as an operator prerequisite; do not
+tell users to guess commands, add unsupported JSON fields or copy provider credentials.
+Use the direct browser path while the shared launcher contract is repaired.
+See [the native client contract](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection).
+
 ## Connect AI accounts
 
 Each person connects their own provider account. An account is never shared with, or copied
@@ -143,6 +201,9 @@ that separate client connection.
   3. `worker_account_test` confirms the account is ready.
 
   Grok sign-in is offered in Connections only.
+- **Codex device sign-in:** enable the provider's device-code login when required by your personal
+  or workspace security policy. Complete its browser step, wait for **Ready**, then run one small
+  task. [Official authentication guide](https://developers.openai.com/codex/auth/).
 - **Disconnect:** `worker_account_disconnect` releases the account and removes its sign-in files,
   which are kept in that person's storage.
 

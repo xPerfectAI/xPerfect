@@ -252,6 +252,12 @@ Prefer remote HTTP MCP with auth in front of the server when not loopback-only.
 
 ### Hosted user connection
 
+**Current launcher limit (29 September 2026):** the hosted input does not expose the UI's per-client
+registration fields or pass MCP discovery settings to the UI role. Connections therefore cannot
+generate native Codex/Claude setup on that profile. A ready worker account or a working authenticated
+MCP endpoint does not prove that client setup. Do not add unrecognized hosted JSON keys, edit
+generated container config, copy tokens or create a custom OAuth callback as the user workaround.
+
 The designed Glass Drive **Use xPerfect from another AI app** panel is the source of truth for a
 deployment's public HTTPS MCP URL and the exact clients that deployment has completely registered.
 It must not advertise Codex, Claude Code, ChatGPT, or another client unless the live endpoint returns
