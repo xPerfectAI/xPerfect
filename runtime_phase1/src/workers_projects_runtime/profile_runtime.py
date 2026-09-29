@@ -141,6 +141,8 @@ from .bootstrap import (
     GLASSHIVE_NATIVE_CAPABILITY_INVENTORY,
     GLASSHIVE_SAFETY_CHECKPOINT_RULE,
     GLASSHIVE_WORKER_COMPLETION_CONTRACT,
+    HOST_CLAUDE_CAPABILITY_REGISTRIES,
+    HOST_CLAUDE_CAPABILITY_ROOTS,
     PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
     _split_viventium_feeling_capsules,
     _write_clean_room_file,
@@ -11781,15 +11783,16 @@ raise SystemExit(exit_code)
 
     def _project_host_claude_capability_roots(self, target_claude_home: Path) -> None:
         source_home = self._source_host_claude_home()
-        for relative in (Path("plugins/cache"), Path("plugins/marketplaces"), Path("skills")):
+        for relative in HOST_CLAUDE_CAPABILITY_ROOTS:
             self._project_private_capability_directory(
                 source_home / relative,
                 target_claude_home / relative,
             )
-        for filename in ("installed_plugins.json", "known_marketplaces.json"):
-            source = source_home / "plugins" / filename
-            target = target_claude_home / "plugins" / filename
-            self._merge_private_capability_registry(source, target)
+        for relative in HOST_CLAUDE_CAPABILITY_REGISTRIES:
+            self._merge_private_capability_registry(
+                source_home / relative,
+                target_claude_home / relative,
+            )
 
     def _host_codex_native_mcp_allowlist(self) -> set[str]:
         raw = os.environ.get(

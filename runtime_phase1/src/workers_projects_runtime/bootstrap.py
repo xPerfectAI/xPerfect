@@ -207,6 +207,16 @@ CLEAN_ROOM_WORKSPACE_AUTHORITY_PATHS = (
     ".claude/settings.local.json",
 )
 
+# Installed capability catalogs the owner's Claude home shares with a worker: host workers link
+# them, container workers receive a copy. Paths are relative to that home.
+HOST_CLAUDE_CAPABILITY_ROOTS = ("plugins/cache", "plugins/marketplaces", "skills")
+HOST_CLAUDE_CAPABILITY_REGISTRIES = (
+    "plugins/installed_plugins.json",
+    "plugins/known_marketplaces.json",
+)
+# The container worker's Claude sign-in and settings.
+HOST_CLAUDE_REQUIRED_FILES = (".credentials.json", "settings.json")
+
 GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE = (
     "3. PROPORTIONAL VERIFICATION: Choose verification depth from the user's explicit success "
     "criteria, requested rigor, the risk of a wrong result, and concrete defects found. Use the "
@@ -922,6 +932,25 @@ def bootstrap_env_for(
     return env
 
 
+def _copy_host_claude_home(
+    home_dir: Path,
+    copy_file: Callable[[Path, Path], None],
+    copy_capability_tree: Callable[[Path, Path], None],
+) -> None:
+    """Give a container worker the owner's Claude sign-in, settings and shared capabilities.
+
+    The host Claude home also holds other projects' transcripts, history and debug logs; none of
+    that reaches the worker. Sign-in and settings keep their ordinary copy, so a missing sign-in
+    still fails at the harness exactly as before.
+    """
+    source = Path.home() / ".claude"
+    target = home_dir / ".claude"
+    for relative in HOST_CLAUDE_REQUIRED_FILES + HOST_CLAUDE_CAPABILITY_REGISTRIES:
+        copy_file(source / relative, target / relative)
+    for relative in HOST_CLAUDE_CAPABILITY_ROOTS:
+        copy_capability_tree(source / relative, target / relative)
+
+
 def apply_bootstrap(
     *,
     home_dir: Path,
@@ -931,12 +960,14 @@ def apply_bootstrap(
     copy_file: Callable[[Path, Path], None],
     copy_tree: Callable[[Path, Path], None],
     trusted_state_dir: Path | None = None,
+    copy_capability_tree: Callable[[Path, Path], None] | None = None,
 ) -> None:
     """Materialize login/config/files for a fresh sandbox worker.
 
     Local developer mode may copy existing CLI auth so the worker can run with the owner's tools.
     Enterprise mode does not copy host auth files; it projects only the scoped bundle/env allowed by
-    policy and writes MCP grants into owner-only files.
+    policy and writes MCP grants into owner-only files. `copy_capability_tree` copies optional
+    shared capability catalogs; it defaults to `copy_tree`.
     """
     profile = bootstrap_profile_for(worker, runtime_name)
     bundle = canonicalize_viventium_feeling_projection(
@@ -977,7 +1008,7 @@ def apply_bootstrap(
         if profile in {"host-login", "full-local", "claude-host"} or runtime_name in {"claude-code", "openclaw"}:
             copy_file(Path.home() / ".claude.json", home_dir / ".claude.json")
         if profile in {"host-login", "full-local", "claude-host"} and runtime_name == "claude-code":
-            copy_tree(Path.home() / ".claude", home_dir / ".claude")
+            _copy_host_claude_home(home_dir, copy_file, copy_capability_tree or copy_tree)
         if profile in {"host-login", "full-local", "claude-host"} and runtime_name == "openclaw":
             copy_file(Path.home() / ".claude" / "settings.json", home_dir / ".claude" / "settings.json")
         if profile in {"host-login", "full-local", "codex-host", "claude-host"}:

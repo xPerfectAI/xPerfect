@@ -168,6 +168,14 @@ def environment(state: Path, config: dict, instance: str) -> dict:
         "GLASSHIVE_RUNTIME_BASE_URL": f"http://127.0.0.1:{ports['api']}",
         "GLASSHIVE_PEER_RUNTIME_BASE_URL": f"http://127.0.0.1:{ports['api']}",
         "WPR_OPERATOR_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
+        # Watch, confirmation and file links returned to people and MCP clients open on this
+        # instance's own UI, and its MCP address is the configured one (as the Docker package does).
+        "GLASSHIVE_OPERATOR_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
+        "GLASSHIVE_MCP_PUBLIC_URL": f"http://127.0.0.1:{ports['mcp']}/mcp",
+        # The UI shows AI apps the one local connection that needs no sign-in: this checkout's
+        # own stdio MCP command for this instance, and this checkout as the skill's source.
+        "XPERFECT_LOCAL_MCP_COMMAND": json.dumps([str(ROOT / "xperfect"), "mcp", "--state-dir", str(state)]),
+        "XPERFECT_LOCAL_CHECKOUT": str(ROOT),
         "GLASSHIVE_PUBLIC_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
         "WPR_API_TOKEN": secret["api_token"], "GLASSHIVE_MCP_API_KEY": secret["mcp_token"],
         "GLASSHIVE_SIGNED_LINK_SECRET": secret["link_secret"],
@@ -533,7 +541,8 @@ def main() -> int:
                         help="start/restart: save the exact model for a harness, e.g. grok-build=<model>")
     args = parser.parse_args()
     os.umask(0o077)
-    state = args.state_dir.expanduser().absolute()
+    # One instance, one identity: a relative or linked path names the same instance as its canonical form.
+    state = args.state_dir.expanduser().resolve()
     try:
         config = configuration(state, {name: getattr(args, f"{name}_port") for name in DEFAULT_PORTS})
         if args.model and args.command not in {"start", "restart"}:

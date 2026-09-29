@@ -408,6 +408,55 @@ def test_duplicate_copies_only_regular_project_files_and_returns_report(tmp_path
     }
 
 
+def test_duplicate_keeps_native_skill_files_but_not_private_harness_state(tmp_path):
+    store = Store(str(tmp_path / "runtime.db"))
+    project = create_project(store)
+    service = WorkersProjectsService(store, TemporaryWorkspaceRuntime(tmp_path / "runtime"), reconcile_on_startup=False)
+    skill = "---\nname: onboarding-proof\ndescription: Synthetic proof.\n---\nReply with the marker.\n"
+    try:
+        source = service.create_worker(project_id=project["project_id"], tenant_id="tenant-a",
+            owner_id="owner-a", name="Skilled expert", role="main", profile="claude-code",
+            backend="claude-code", workspace_kind="named")
+        root = Path(source["workspace_dir"])
+        for relative, content in (
+            (".claude/skills/onboarding-proof/SKILL.md", skill),
+            (".claude/skills/onboarding-proof/scripts/total.py", "print(51)\n"),
+            (".agents/skills/codex-proof/SKILL.md", "---\nname: codex-proof\n---\nSynthetic.\n"),
+            (".claude/settings.json", '{"hooks": "must-not-copy"}'),
+            (".claude/settings.local.json", '{"permissions": "must-not-copy"}'),
+            (".claude/.credentials.json", '{"token": "must-not-copy"}'),
+            (".claude/.cc-writes/marker", "must-not-copy"),
+            (".claude/skills/onboarding-proof/.env", "SECRET=must-not-copy"),
+            ("stock.csv", "item,quantity\nA,51\n"),
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        # A link out of the workspace inside the skills folder is skipped, never followed,
+        # and does not fail the copy.
+        os.symlink(tmp_path / "outside", root / ".claude" / "skills" / "linked-elsewhere")
+
+        copied = service.duplicate_worker(source["worker_id"], project["project_id"], "owner-a", "Copy", "main")
+    finally:
+        service.shutdown()
+
+    target = Path(copied["workspace_dir"])
+    assert (target / ".claude/skills/onboarding-proof/SKILL.md").read_text() == skill
+    assert (target / ".claude/skills/onboarding-proof/scripts/total.py").read_text() == "print(51)\n"
+    assert (target / ".agents/skills/codex-proof/SKILL.md").exists()
+    assert (target / "stock.csv").exists()
+    for private in (
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/.credentials.json",
+        ".claude/.cc-writes",
+        ".claude/skills/onboarding-proof/.env",
+        ".claude/skills/linked-elsewhere",
+    ):
+        assert not (target / private).exists(), private
+    assert copied["duplication_report"]["source_state"] == "copied"
+
+
 def test_duplicate_keeps_exact_accepted_input_name_only_for_matching_bytes(tmp_path):
     store = Store(str(tmp_path / 'runtime.db'))
     project = create_project(store)

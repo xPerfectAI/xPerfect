@@ -95,7 +95,7 @@ def test_workspace_account_switch_is_confirmed_owner_scoped_and_future_only(tmp_
     assert "bootstrap_bundle_json" not in selected
 
 
-def test_workspace_duplicate_reports_personal_account_reapproval_without_copying_selection(tmp_path):
+def test_workspace_duplicate_keeps_a_ready_same_owner_personal_account_like_a_template(tmp_path):
     database = tmp_path / "runtime.db"
     client = TestClient(create_app(db_path=str(database), runtime_backend="stub"))
     workspace = _workspace(client)
@@ -123,55 +123,41 @@ def test_workspace_duplicate_reports_personal_account_reapproval_without_copying
     )
 
     assert copied.status_code == 201
-    report = copied.json()["workspace"]["duplication_report"]
-    assert report["capabilities_requiring_reapproval"] == 1
-    assert report["reapproval_items"] == [{
-        "action_id": "rea_" + hashlib.sha256(
-            f"provider_selection\0{account['account_id']}".encode()
-        ).hexdigest()[:24],
-        "kind": "provider_account",
-        "resolution": "provider_selection",
-        "reference": account["account_id"],
-        "label": "Synthetic private account",
-        "route": "connections",
+    copied_workspace = copied.json()["workspace"]
+    # The owner already chose this account for the source; the copy keeps that exact account
+    # (the template rule: same owner, matching profile, ready) instead of asking again.
+    assert copied_workspace["provider_account"] == {
         "policy": "personal_required",
-        "scopes": [],
-    }]
-    assert "provider_account" not in copied.json()["workspace"]
-    copied_worker_id = copied.json()["workspace"]["worker_id"]
+        "account_id": account["account_id"],
+    }
+    report = copied_workspace["duplication_report"]
+    assert report["capabilities_requiring_reapproval"] == 0
+    assert report["outstanding_reapproval_items"] == []
+    copied_worker_id = copied_workspace["worker_id"]
+    with sqlite3.connect(database) as conn:
+        copied_bundle = conn.execute(
+            "SELECT bootstrap_bundle_json FROM workers WHERE worker_id = ?",
+            (copied_worker_id,),
+        ).fetchone()[0]
+    assert "native-home://" not in copied_bundle
     assert client.post(
         f"/v1/workers/{copied_worker_id}/message",
-        json={"message": "Run before account review"},
-    ).status_code == 409
+        json={"message": "Run on the kept account"},
+    ).status_code == 202
+    # The kept account is still a selection, never something a waiver can skip.
     bypass = client.post(
         "/v1/pending-changes",
         json={
             "change_type": "workspace_duplication_reapproval_waiver",
             "target_id": copied_worker_id,
-            "payload": {"action_id": report["reapproval_items"][0]["action_id"]},
+            "payload": {
+                "action_id": "rea_" + hashlib.sha256(
+                    f"provider_selection\0{account['account_id']}".encode()
+                ).hexdigest()[:24],
+            },
         },
     )
     assert bypass.status_code == 409
-    assert "choose" in bypass.json()["detail"].lower()
-    copied_pending = client.post(
-        "/v1/pending-changes",
-        json={
-            "change_type": "workspace_provider_account",
-            "target_id": copied_worker_id,
-            "payload": {
-                "policy": "personal_required",
-                "account_id": account["account_id"],
-            },
-        },
-    ).json()
-    assert client.post(
-        f"/v1/pending-changes/{copied_pending['change_id']}/confirm",
-        json={"confirmation_token": copied_pending["confirmation_token"]},
-    ).status_code == 200
-    assert client.post(
-        f"/v1/workers/{copied_worker_id}/message",
-        json={"message": "Run after account review"},
-    ).status_code == 202
 
 
 def test_duplicate_handles_a_forgotten_selected_account_without_an_impossible_review(tmp_path):

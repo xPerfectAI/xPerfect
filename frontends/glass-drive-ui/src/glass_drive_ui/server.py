@@ -593,6 +593,24 @@ def _mcp_client_server_name(mcp_url: str) -> str:
     return f"glasshive-{sha256(canonical.encode('utf-8')).hexdigest()[:12]}"
 
 
+def _local_mcp_command() -> list[str]:
+    """The local launcher's own stdio MCP command for this instance, when it supplied one."""
+    raw = str(os.environ.get("XPERFECT_LOCAL_MCP_COMMAND") or "").strip()
+    if not raw:
+        return []
+    try:
+        command = json.loads(raw)
+    except ValueError:
+        return []
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) and part and "\n" not in part for part in command)
+    ):
+        return []
+    return command
+
+
 def _strip_signed_query_params(url: str) -> str:
     parsed = urlparse(str(url or ""))
     query = urlencode(
@@ -3241,6 +3259,24 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 "callback_port": codex_callback_port_number,
                 "callback_uri": codex_callback_uri,
             }
+        # A local single-user install needs no OAuth registration: AI apps on this computer start
+        # this instance's own stdio MCP command, the connection both local clients already use.
+        local_command = [] if multi_user or clients else _local_mcp_command()
+        skill_source = str(os.environ.get("XPERFECT_LOCAL_CHECKOUT") or "").strip() or "xPerfectAI/xPerfect"
+        if local_command:
+            stdio = " ".join(shlex.quote(part) for part in local_command)
+            local_note = "Run this in a terminal on this computer. There is no sign-in step."
+            clients["claude"] = {
+                "transport": "stdio",
+                "add_command": f"claude mcp add --scope user {server_name} -- {stdio}",
+                "card_note": local_note,
+                "login_note": "No sign-in step: Claude Code starts xPerfect's local connection itself.",
+            }
+            clients["codex"] = {
+                "transport": "stdio",
+                "add_command": f"codex mcp add {server_name} -- {stdio}",
+                "card_note": local_note,
+            }
         documentation_url = str(
             os.environ.get("GLASSHIVE_MCP_DOCUMENTATION_URL") or ""
         ).strip()
@@ -3248,7 +3284,25 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             "Connect the AI app you are using to xPerfect. Follow only the matching section; do not configure another client."
         ]
         codex_client = clients.get("codex")
-        if isinstance(codex_client, dict):
+        if isinstance(codex_client, dict) and local_command:
+            codex_setup_prompt = "\n".join(
+                (
+                    "You are Codex. Connect this Codex client to the xPerfect running on this computer.",
+                    "If xPerfect tools already work, do not change setup; make only the requested tool call.",
+                    "Otherwise install the xPerfect skill once:",
+                    f"codex plugin marketplace add {shlex.quote(skill_source)}",
+                    "codex plugin add glasshive@project-glasshive",
+                    f"Check `codex mcp get {server_name}`. If it already exists, do not add a duplicate. Otherwise run:",
+                    str(codex_client["add_command"]),
+                    "This local connection has no sign-in step. Restart Codex once if it was already open.",
+                    "When connected, call workspace_list once to verify. Never enumerate or summarize the tool catalog.",
+                )
+            )
+            codex_client["setup_prompt"] = codex_setup_prompt
+            guided_steps.extend(
+                ("", "If you are Codex, follow only the Codex section.", codex_setup_prompt)
+            )
+        elif isinstance(codex_client, dict):
             codex_setup_prompt = "\n".join(
                 (
                     "You are Codex. Connect this Codex client to xPerfect.",
@@ -3270,7 +3324,28 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 ("", "If you are Codex, follow only the Codex section.", codex_setup_prompt)
             )
         claude_client = clients.get("claude")
-        if isinstance(claude_client, dict):
+        if isinstance(claude_client, dict) and local_command:
+            claude_setup_prompt = "\n".join(
+                (
+                    "You are Claude Code. Connect this Claude Code client to the xPerfect running on this computer.",
+                    "Install the xPerfect skill once if it is not already installed:",
+                    f"claude plugin marketplace add {shlex.quote(skill_source)}",
+                    "claude plugin install glasshive@glasshive --scope user --yes",
+                    f"Check `claude mcp get {server_name}`. If it already exists, do not add a duplicate. Otherwise run:",
+                    str(claude_client["add_command"]),
+                    "This local connection has no sign-in step. Restart Claude Code once if it was already open.",
+                    "When connected, call workspace_list once to verify. Never enumerate or summarize the tool catalog.",
+                )
+            )
+            claude_client["setup_prompt"] = claude_setup_prompt
+            guided_steps.extend(
+                (
+                    "",
+                    "If you are Claude Code, follow only the Claude Code section.",
+                    claude_setup_prompt,
+                )
+            )
+        elif isinstance(claude_client, dict):
             claude_setup_prompt = "\n".join(
                 (
                     "You are Claude Code. Connect this Claude Code client to xPerfect.",

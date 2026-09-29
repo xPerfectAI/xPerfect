@@ -664,12 +664,13 @@ def test_parallel_clean_room_marker_is_invalidated_across_legacy_profile_transit
     marker = trusted_state_dir / ".parallel-clean-room-v1"
     assert marker.exists()
 
+    copied_sources = []
+
     def copy_legacy_claude_tree(source, target):
-        del source
-        for relative in ("plugins/host-hook.json", "projects/host-session.jsonl"):
-            destination = target / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text("synthetic-host-authority")
+        copied_sources.append(source)
+        destination = target / "host-hook.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("synthetic-host-authority")
 
     apply_bootstrap(
         home_dir=home_dir,
@@ -681,7 +682,8 @@ def test_parallel_clean_room_marker_is_invalidated_across_legacy_profile_transit
         trusted_state_dir=trusted_state_dir,
     )
     assert not marker.exists()
-    assert (home_dir / ".claude" / "plugins" / "host-hook.json").exists()
+    assert (home_dir / ".claude" / "plugins" / "cache" / "host-hook.json").exists()
+    assert copied_sources and all("projects" not in source.parts for source in copied_sources)
 
     apply_bootstrap(
         home_dir=home_dir,
@@ -693,8 +695,60 @@ def test_parallel_clean_room_marker_is_invalidated_across_legacy_profile_transit
         trusted_state_dir=trusted_state_dir,
     )
     assert marker.exists()
-    assert not (home_dir / ".claude" / "plugins" / "host-hook.json").exists()
-    assert not (home_dir / ".claude" / "projects" / "host-session.jsonl").exists()
+    assert not (home_dir / ".claude" / "plugins" / "cache" / "host-hook.json").exists()
+
+
+def test_container_claude_home_receives_only_signin_settings_and_shared_capabilities(
+    tmp_path, monkeypatch
+):
+    """The owner's Claude home holds other projects' transcripts; a worker receives none of it."""
+    from workers_projects_runtime.docker_sandbox import DockerSandboxManager
+
+    monkeypatch.delenv("GLASSHIVE_ENTERPRISE_MODE", raising=False)
+    owner_home = tmp_path / "owner"
+    claude = owner_home / ".claude"
+    for relative, content in (
+        (".credentials.json", "synthetic-signin"),
+        ("settings.json", '{"model": "synthetic"}'),
+        ("skills/proof/SKILL.md", "---\nname: proof\n---\nSynthetic skill."),
+        ("plugins/cache/tool/plugin.json", "{}"),
+        ("plugins/installed_plugins.json", "{}"),
+        ("projects/other-project/session.jsonl", "another project's transcript"),
+        ("history.jsonl", "owner prompt history"),
+        ("debug/run.txt", "debug log"),
+    ):
+        path = claude / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    # A volatile link whose target is gone: the observed Docker start failure.
+    os.symlink(claude / "debug" / "gone.txt", claude / "debug" / "latest")
+    os.symlink(claude / "skills" / "gone", claude / "skills" / "stale-link")
+    monkeypatch.setenv("HOME", str(owner_home))
+    home_dir = tmp_path / "worker-home"
+
+    apply_bootstrap(
+        home_dir=home_dir,
+        workspace_dir=tmp_path / "workspace",
+        runtime_name="claude-code",
+        worker={"bootstrap_profile": "claude-host", "bootstrap_bundle_json": "{}"},
+        copy_file=lambda source, target: DockerSandboxManager._copy_file(None, source, target),
+        copy_tree=lambda source, target: DockerSandboxManager._copy_tree(None, source, target),
+        copy_capability_tree=lambda source, target: DockerSandboxManager._copy_capability_tree(
+            None, source, target
+        ),
+    )
+
+    worker_claude = home_dir / ".claude"
+    assert (worker_claude / ".credentials.json").read_text() == "synthetic-signin"
+    assert (worker_claude / "settings.json").exists()
+    assert (worker_claude / "skills" / "proof" / "SKILL.md").exists()
+    assert (worker_claude / "plugins" / "cache" / "tool" / "plugin.json").exists()
+    assert (worker_claude / "plugins" / "installed_plugins.json").exists()
+    assert not (worker_claude / "skills" / "stale-link").exists()
+    assert not (worker_claude / "projects").exists()
+    assert not (worker_claude / "history.jsonl").exists()
+    assert not (worker_claude / "debug").exists()
+
 
 def test_enterprise_bootstrap_keeps_provider_secrets_out_of_interactive_runtime_env(tmp_path, monkeypatch):
     monkeypatch.setenv("GLASSHIVE_ENTERPRISE_MODE", "true")

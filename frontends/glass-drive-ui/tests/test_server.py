@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -8188,3 +8189,39 @@ def test_watch_zip_view_cookie_post_requires_origin_worker_and_read_route(tmp_pa
         assert set(claims['scope'].split()) == {'runtime:access','workspaces:read'}
     else:
         assert runtime.header_contexts[-1]['X-Viventium-User-Role'] == 'viewer'
+
+
+def test_connect_ai_offers_the_local_stdio_connection_on_a_single_user_install(tmp_path, monkeypatch):
+    """A local install needs no OAuth client registration: it offers its own stdio command."""
+    for name in (
+        "GLASSHIVE_SECURITY_MODE",
+        "GLASSHIVE_HUMAN_AUTH_MODE",
+        "GLASSHIVE_MCP_CLAUDE_CLIENT_ID",
+        "GLASSHIVE_MCP_CODEX_CLIENT_ID",
+        "GLASSHIVE_MCP_OAUTH_ISSUER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    launcher = str(tmp_path / "My xPerfect" / "xperfect")
+    state = str(tmp_path / "state dir")
+    monkeypatch.setenv("GLASSHIVE_MCP_PUBLIC_URL", "http://127.0.0.1:19967/mcp")
+    monkeypatch.setenv("XPERFECT_LOCAL_MCP_COMMAND", json.dumps([launcher, "mcp", "--state-dir", state]))
+    monkeypatch.setenv("XPERFECT_LOCAL_CHECKOUT", str(tmp_path / "My xPerfect"))
+    client = TestClient(create_app(runtime_client=FakeRuntimeClient()))
+
+    payload = client.get("/api/connect-ai").json()
+
+    assert payload["configuration_status"] == "ready"
+    assert payload["mcp_url"] == "http://127.0.0.1:19967/mcp"
+    name = payload["server_name"]
+    stdio = f"{shlex.quote(launcher)} mcp --state-dir {shlex.quote(state)}"
+    assert payload["clients"]["claude"]["add_command"] == f"claude mcp add --scope user {name} -- {stdio}"
+    assert payload["clients"]["codex"]["add_command"] == f"codex mcp add {name} -- {stdio}"
+    prompt = payload["guided_prompt"]
+    assert f"claude plugin marketplace add {shlex.quote(str(tmp_path / 'My xPerfect'))}" in prompt
+    assert f"codex plugin marketplace add {shlex.quote(str(tmp_path / 'My xPerfect'))}" in prompt
+    assert "no sign-in step" in prompt
+    assert "oauth" not in prompt.lower()
+
+    # Without the launcher's own command (for example the container package) nothing is invented.
+    monkeypatch.delenv("XPERFECT_LOCAL_MCP_COMMAND")
+    assert client.get("/api/connect-ai").json()["configuration_status"] == "action_required"

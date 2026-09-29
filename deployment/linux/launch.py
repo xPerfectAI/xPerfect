@@ -26,14 +26,75 @@ import urllib.request
 import sys
 
 
+# Daemon failures a person can act on. The daemon's own text can include operator paths or
+# configuration, so it is matched here and never printed; only the action is shown.
+DOCKER_FAILURE_ACTIONS = (
+    ('non-overlapping ipv4 address pool',
+     'Docker has no free network address range for this package. Remove Docker networks you '
+     'no longer use (see docker network ls) or add address pools in Docker settings, then launch again.'),
+    ('port is already allocated',
+     'A chosen port is already in use on this computer. Choose other --ui-port/--mcp-port values.'),
+    ('address already in use',
+     'A chosen port is already in use on this computer. Choose other --ui-port/--mcp-port values.'),
+    ('no such image', 'A package image is not on this computer. Use the published image references.'),
+    ('manifest unknown', 'The published package image was not found. Check the image reference.'),
+    ('pull access denied', 'The published package image was not found. Check the image reference.'),
+    ('cannot connect to the docker daemon', 'Docker is not running. Start Docker, then launch again.'),
+)
+
+
+def docker_failure(operation: str, detail: str) -> str:
+    """One plain line for a failed Docker operation: the operation and, when known, the action."""
+    lowered = str(detail or '').casefold()
+    for marker, action in DOCKER_FAILURE_ACTIONS:
+        if marker in lowered:
+            return f'Docker package operation failed: {operation}. {action}'
+    return 'Docker package operation failed: ' + operation
+
+
 def docker(endpoint: str, *args: str, data: bytes | None = None):
     result = subprocess.run(['docker', '--host', endpoint, *args], input=data,
                             capture_output=True, timeout=90)
     if result.returncode:
-        # CLI stderr can include operator paths/configuration. It is retained
-        # by the caller only on explicit investigation, not printed by default.
-        raise RuntimeError('Docker package operation failed: ' + args[0])
+        raise RuntimeError(docker_failure(args[0], result.stderr.decode(errors='replace')))
     return result.stdout.decode().strip()
+
+
+def local_docker_endpoint(value: str | None) -> str:
+    """The Docker endpoint on this computer: the explicit one, else the CLI's current context.
+
+    Only a local Unix socket is accepted; a remote or TCP endpoint is never used.
+    """
+    endpoint = str(value or '').strip()
+    if not endpoint:
+        result = subprocess.run(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'],
+                                capture_output=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError(docker_failure('context', result.stderr.decode(errors='replace')))
+        endpoint = result.stdout.decode().strip()
+    if not endpoint.startswith('unix:///'):
+        raise ValueError('Select an explicit local Unix Docker endpoint')
+    return endpoint
+
+
+def resolve_image(endpoint: str, reference: str) -> str:
+    """The exact local image identity for an identity or a digest-pinned published reference.
+
+    `sha256:<id>` must already be on this computer. `<repository>@sha256:<digest>` is pulled when
+    missing; the digest pins the exact published bytes, and the local identity is returned.
+    """
+    if re.fullmatch(r'sha256:[a-f0-9]{64}', reference):
+        return reference
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[a-f0-9]{64}', reference):
+        raise ValueError('Exact locally verified image identities are required')
+    try:
+        identity = docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', reference)
+    except RuntimeError:
+        docker(endpoint, 'pull', reference)
+        identity = docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', reference)
+    if not re.fullmatch(r'sha256:[a-f0-9]{64}', identity):
+        raise ValueError('Image identity could not be verified')
+    return identity
 
 
 # Exact native model per worker profile. This mirrors the runtime profile
@@ -319,7 +380,8 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
     if not endpoint.startswith('unix:///'):
         raise ValueError('Select an explicit local Unix Docker endpoint')
     for identity in (image, native_image):
-        if not re.fullmatch(r'sha256:[a-f0-9]{64}', identity):
+        if not (re.fullmatch(r'sha256:[a-f0-9]{64}', identity)
+                or re.fullmatch(r'[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[a-f0-9]{64}', identity)):
             raise ValueError('Exact locally verified image identities are required')
     if not (1024 <= ui_port <= 65535 and 1024 <= mcp_port <= 65535 and ui_port != mcp_port):
         raise ValueError('Two distinct unprivileged loopback ports are required')
@@ -328,6 +390,7 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
     info = json.loads(docker(endpoint, 'info', '--format', '{{json .}}'))
     if info.get('OSType') != 'linux' or str(info.get('CgroupVersion')) != '2':
         raise ValueError('Linux Docker with cgroup v2 is required')
+    image, native_image = resolve_image(endpoint, image), resolve_image(endpoint, native_image)
     for identity in (image, native_image):
         if docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', identity) != identity:
             raise ValueError('Image identity could not be verified')
@@ -336,17 +399,32 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
     volumes = {role: name + '-' + role for role in ('data', 'control', 'ui-state', 'mcp-state', 'links')}
     networks = {role: name + '-' + role for role in ('frontend', 'workers')}
     containers = {role: name + '-' + role for role in ('runtime', 'ui', 'mcp')}
-    # A single run owns only fresh names. Failure retains all created state for
-    # inspection/recovery; it never deletes data or adopts an existing resource.
+    # A single run owns only fresh names and never adopts an existing resource. If creating
+    # its networks and empty volumes fails, it removes exactly those it just created, so the
+    # same launch can simply run again; state that holds data is retained for recovery.
     for kind, planned in (('volume', volumes.values()), ('network', networks.values()), ('container', containers.values())):
         existing = set(docker(endpoint, kind, 'ls', *(['-a'] if kind == 'container' else []), '--format', '{{.Name}}' if kind != 'container' else '{{.Names}}').splitlines())
         if existing.intersection(planned):
-            raise ValueError('Package resources already exist; use their recorded identities to restart')
-    for volume in volumes.values():
-        docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
-    for role, network in networks.items():
-        docker(endpoint, *network_create_args(name=name, role=role, network=network,
-                                              settings=PROFILE_SETTINGS['local-linux']))
+            raise ValueError('Package resources already exist; use their recorded identities to restart, '
+                             'or remove an unstarted attempt with: launch.py discard-unstarted --name ' + name)
+    created: list[tuple[str, str]] = []
+    try:
+        # Networks first: they are what a crowded Docker host runs out of. Each is removed on
+        # rollback by the exact identity its creation returned, never by name.
+        for role, network in networks.items():
+            identity = docker(endpoint, *network_create_args(name=name, role=role, network=network,
+                                                             settings=PROFILE_SETTINGS['local-linux']))
+            created.append(('network', identity if re.fullmatch(r'[a-f0-9]{64}', identity) else network))
+        for volume in volumes.values():
+            docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
+            created.append(('volume', volume))
+    except (RuntimeError, ValueError):
+        for kind, resource in reversed(created):
+            try:
+                docker(endpoint, kind, 'rm', resource)
+            except RuntimeError:
+                pass
+        raise
     password, mcp_key = secrets.token_urlsafe(36), secrets.token_urlsafe(48)
     # The UI signs a signed-in owner's confirmations; its key never leaves its own state.
     ui_url = f'http://127.0.0.1:{ui_port}'
@@ -406,6 +484,64 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
     receipt['mcp_url'] = f'http://127.0.0.1:{mcp_port}/mcp'
     _wait_until_runnable(endpoint, containers, ui_port)
     return receipt
+
+
+def remove_own_empty_outputs(paths: list[Path]) -> None:
+    """Remove output files this run created that are still empty; anything with content stays."""
+    for path in paths:
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+            os.unlink(path)
+
+
+def discard_unstarted(endpoint: str, name: str) -> dict:
+    """Remove a named local package attempt that never started, so it can launch again.
+
+    Nothing is removed unless every check passes first: the package has no containers, its
+    networks have nothing attached, and each of its labelled volumes has no users and no data.
+    Only the package's own names are touched.
+    """
+    if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', name):
+        raise ValueError('Package name must start with xperfect-')
+    if not endpoint.startswith('unix:///'):
+        raise ValueError('Select an explicit local Unix Docker endpoint')
+    planned_containers = {name + '-' + role for role in ('runtime', 'ui', 'mcp')}
+    if planned_containers & set(docker(endpoint, 'ps', '-a', '--format', '{{.Names}}').splitlines()):
+        raise ValueError('This package started once; restart or recover it from its receipt instead')
+    label = 'xperfect.package=' + name
+    planned_volumes = {name + '-' + role for role in ('data', 'control', 'ui-state', 'mcp-state', 'links')}
+    volumes = sorted(planned_volumes & set(docker(
+        endpoint, 'volume', 'ls', '--filter', 'label=xperfect.package=' + name, '--format', '{{.Name}}').splitlines()))
+    usage = {str(row.get('Name')): row for row in json.loads(
+        docker(endpoint, 'system', 'df', '-v', '--format', '{{json .Volumes}}') or '[]') if isinstance(row, dict)}
+    for volume in volumes:
+        row = usage.get(volume, {})
+        if str(row.get('Links')) != '0' or str(row.get('Size')) not in {'0B', '0'}:
+            raise ValueError(f'{volume} is in use or holds data, so nothing was removed')
+    planned_networks = [name + '-' + role for role in ('frontend', 'workers')]
+    present_networks = set(docker(endpoint, 'network', 'ls', '--format', '{{.Name}}').splitlines())
+    networks: list[tuple[str, str]] = []
+    for network in planned_networks:
+        if network not in present_networks:
+            continue
+        # Identity, owner label and users of this exact network, read in one inspection.
+        identity, owner, attached = (docker(
+            endpoint, 'network', 'inspect', '--format',
+            '{{.Id}} {{index .Labels "xperfect.package"}} {{len .Containers}}', network).split() + ['', '', ''])[:3]
+        if 'xperfect.package=' + owner != label or not re.fullmatch(r'[a-f0-9]{64}', identity):
+            raise ValueError(f'{network} does not belong to this package, so nothing was removed')
+        if attached != '0':
+            raise ValueError(f'{network} is in use, so nothing was removed')
+        networks.append((network, identity))
+    for _, identity in networks:
+        docker(endpoint, 'network', 'rm', identity)
+    for volume in volumes:
+        docker(endpoint, 'volume', 'rm', volume)
+    return {'package': name, 'removed_networks': [network for network, _ in networks],
+            'removed_volumes': volumes}
 
 
 # The admission record owns roles; the identity provider only proves identity.
@@ -803,8 +939,15 @@ def main():
         # The identity arrives on stdin so subjects never enter shell history.
         print(preapprove(endpoint=args.docker_host, name=args.name, identity=sys.stdin.buffer.read()))
         return
+    if sys.argv[1:2] == ['discard-unstarted']:
+        parser = argparse.ArgumentParser(prog='launch.py discard-unstarted')
+        parser.add_argument('--docker-host', help='Local Docker endpoint; defaults to the current Docker context')
+        parser.add_argument('--name', required=True)
+        args = parser.parse_args(sys.argv[2:])
+        print(json.dumps(discard_unstarted(local_docker_endpoint(args.docker_host), args.name)))
+        return
     parser = argparse.ArgumentParser()
-    parser.add_argument('--docker-host', required=True)
+    parser.add_argument('--docker-host', help='Local Docker endpoint; defaults to the current Docker context')
     parser.add_argument('--name', required=True)
     parser.add_argument('--service-image', required=True)
     parser.add_argument('--native-image', required=True)
@@ -838,25 +981,40 @@ def main():
             if not isinstance(hosted, dict) or hosted.get('coordinator') is not None:
                 raise ValueError('--coordinator-config conflicts with coordinator in the hosted input; keep one')
             hosted = {**hosted, 'coordinator': coordinator}
-        with args.receipt.open('x') as output:
-            args.receipt.chmod(0o600)
-            receipt = launch_hosted(endpoint=args.docker_host, name=args.name, image=args.service_image,
-                                    native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
-                                    hosted=hosted)
-            json.dump(receipt, output, indent=2)
+        created: list[Path] = []
+        try:
+            with args.receipt.open('x') as output:
+                created.append(args.receipt)
+                args.receipt.chmod(0o600)
+                receipt = launch_hosted(endpoint=local_docker_endpoint(args.docker_host), name=args.name, image=args.service_image,
+                                        native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
+                                        hosted=hosted)
+                json.dump(receipt, output, indent=2)
+        except BaseException:
+            remove_own_empty_outputs(created)
+            raise
         print(receipt['ui_url'])
         return
     if not args.credentials:
         raise SystemExit('--credentials is required for the local profile')
-    # Reserve the private receipt before any Docker mutation.
+    # Reserve the private outputs before any Docker mutation. An existing file is never replaced.
     credential_fd = os.open(args.credentials, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(credential_fd, 'w') as credentials, args.receipt.open('x') as output:
-        args.receipt.chmod(0o600)
-        receipt = launch(endpoint=args.docker_host, name=args.name, image=args.service_image,
-                         native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
-                         credentials=credentials, owner_id=args.owner_id, models=models,
-                         coordinator=coordinator)
-        json.dump(receipt, output, indent=2)
+    created = [args.credentials]
+    try:
+        with os.fdopen(credential_fd, 'w') as credentials:
+            with args.receipt.open('x') as output:
+                created.append(args.receipt)
+                args.receipt.chmod(0o600)
+                receipt = launch(endpoint=local_docker_endpoint(args.docker_host), name=args.name, image=args.service_image,
+                                 native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
+                                 credentials=credentials, owner_id=args.owner_id, models=models,
+                                 coordinator=coordinator)
+                json.dump(receipt, output, indent=2)
+    except BaseException:
+        # A launch that rolled back leaves the same command ready to run again; credentials it
+        # already wrote for state it kept stay in place.
+        remove_own_empty_outputs(created)
+        raise
     print(receipt['ui_url'])
     print('Local unlock and MCP credentials: ' + str(args.credentials))
 

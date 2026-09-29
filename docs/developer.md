@@ -94,9 +94,15 @@ account in **Connections**, or over MCP:
 
 See [Connect AI accounts](deployment-hosted.md#connect-ai-accounts).
 
-`workspace_launch` and `worker_delegate_once` do the same work in one call, but only for
-integrated clients that send a trusted source identity. A plain MCP client gets "A trusted source
-event identity is required" and should use the steps above.
+**A reusable expert in one call.** `workspace_launch` creates a saved, named workspace and starts it
+when you set `favorite=true` (or resume one with `reuse_existing_workspace=true`); any MCP client
+can do this. Give it files and skills with `bootstrap_bundle_json` (`{"files": {"path": "content"}}`;
+a Claude Code skill lives at `.claude/skills/<skill>/SKILL.md`, a Codex skill at
+`.agents/skills/<skill>/SKILL.md`) and your own AI account with
+`provider_account_policy="personal_required"`. Only a fresh one-off launch without `favorite`
+requires a trusted source identity from an integrated host; a plain client gets "A trusted source
+event identity is required" for that one case. A retried `workspace_launch` can create a second
+workspace, so check `workspace_list` before retrying an unclear failure.
 
 ## 4. Runtime HTTP API (local)
 

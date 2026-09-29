@@ -1388,3 +1388,226 @@ def test_the_launcher_is_deliberately_stricter_for_these_coordinator_configs(con
     assert _accepts(validate_configured_coordinator, json.dumps(config))
     with pytest.raises(ValueError):
         _launch_module().validate_coordinator_config(config)
+
+
+def _stateful_docker(module, monkeypatch, *, fail_network=None, fail_detail=''):
+    """A fake Docker that tracks created networks, volumes and containers by name."""
+    import io
+    state = {'network': set(), 'volume': set(), 'container': set(), 'calls': [], 'ids': {}}
+
+    def docker(endpoint, *args, data=None):
+        state['calls'].append(args)
+        if args[:1] == ('info',):
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+        if args[:2] == ('image', 'inspect'):
+            return args[-1]
+        if args[1:2] == ('ls',):
+            kind = {'volume': 'volume', 'network': 'network', 'ps': 'container'}.get(args[0], args[0])
+            return '\n'.join(sorted(state.get(kind, set())))
+        if args[:2] == ('network', 'create'):
+            network = args[-1]
+            if network == fail_network:
+                raise RuntimeError(module.docker_failure('network', fail_detail))
+            state['network'].add(network)
+            identity = format(len(state['ids']) + 1, 'x').rjust(64, 'e')
+            state['ids'][identity] = network
+            return identity
+        if args[:2] == ('volume', 'create'):
+            state['volume'].add(args[-1])
+            return args[-1]
+        if args[1:2] == ('rm',):
+            state[args[0]].discard(state['ids'].get(args[2], args[2]))
+            return ''
+        if args[:1] == ('run',) and 'keygen' in args:
+            return json.dumps({'kty': 'RSA', 'n': 'synthetic', 'e': 'AQAB', 'kid': args[-1]})
+        if args[:1] == ('create',):
+            state['container'].add(args[args.index('--name') + 1] if '--name' in args else 'c')
+            return 'c' * 64
+        if args[:1] == ('inspect',):
+            return 'true'
+        return ''
+
+    class Health:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    monkeypatch.setattr(module, 'docker', docker)
+    monkeypatch.setattr(module.urllib.request, 'urlopen', lambda *a, **k: Health())
+    return state
+
+
+def test_daemon_failures_name_an_action_without_echoing_daemon_text():
+    module = _launch_module()
+    detail = ('Error response from daemon: could not find an available, non-overlapping IPv4 '
+              'address pool among the defaults to assign to the network /Users/private/config')
+    message = module.docker_failure('network', detail)
+    assert message.startswith('Docker package operation failed: network. Docker has no free network')
+    assert '/Users/private' not in message
+    assert module.docker_failure('create', 'Bind for 127.0.0.1:8780 failed: port is already allocated').endswith(
+        'Choose other --ui-port/--mcp-port values.')
+    assert module.docker_failure('volume', 'something unexpected /secret/path') == (
+        'Docker package operation failed: volume')
+
+
+def test_a_launch_that_runs_out_of_networks_leaves_nothing_behind_and_can_run_again(tmp_path, monkeypatch):
+    module = _launch_module()
+    state = _stateful_docker(
+        module, monkeypatch, fail_network='xperfect-fixture-workers',
+        fail_detail='could not find an available, non-overlapping IPv4 address pool')
+    arguments = dict(endpoint='unix:///var/run/docker.sock', name='xperfect-fixture',
+                     image='sha256:' + 'a' * 64, native_image='sha256:' + 'b' * 64,
+                     ui_port=18880, mcp_port=18867)
+
+    with (tmp_path / 'first.json').open('w') as credentials:
+        with pytest.raises(RuntimeError, match='no free network address range'):
+            module.launch(credentials=credentials, **arguments)
+    # Networks come first; the one that was created is removed again and no volume exists.
+    assert state['network'] == set() and state['volume'] == set()
+    frontend_id = next(identity for identity, network in state['ids'].items()
+                       if network == 'xperfect-fixture-frontend')
+    assert ('network', 'rm', frontend_id) in state['calls']
+
+    state2 = _stateful_docker(module, monkeypatch)
+    with (tmp_path / 'second.json').open('w') as credentials:
+        receipt = module.launch(credentials=credentials, **arguments)
+    assert set(receipt['networks'].values()) == state2['network']
+
+
+def test_a_digest_pinned_published_image_is_pulled_once_and_used_by_exact_identity(monkeypatch):
+    module = _launch_module()
+    reference = 'ghcr.io/xperfectai/xperfect-service@sha256:' + 'c' * 64
+    pulled = []
+
+    def docker(endpoint, *args, data=None):
+        if args[:2] == ('image', 'inspect'):
+            if not pulled:
+                raise RuntimeError(module.docker_failure('image', 'No such image'))
+            return 'sha256:' + 'd' * 64
+        if args[:1] == ('pull',):
+            pulled.append(args[1])
+            return ''
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module, 'docker', docker)
+    assert module.resolve_image('unix:///var/run/docker.sock', reference) == 'sha256:' + 'd' * 64
+    assert pulled == [reference]
+    with pytest.raises(ValueError, match='Exact locally verified image identities'):
+        module.resolve_image('unix:///var/run/docker.sock', 'ghcr.io/xperfectai/xperfect-service:latest')
+
+
+def test_discarding_an_unstarted_attempt_removes_only_its_unused_empty_resources(monkeypatch):
+    module = _launch_module()
+    name = 'xperfect-fixture'
+    volumes = {f'{name}-{role}' for role in ('data', 'control', 'ui-state', 'mcp-state', 'links')}
+    usage = {volume: {'Name': volume, 'Links': '0', 'Size': '0B'} for volume in volumes}
+    state = {'containers': set(), 'networks': {f'{name}-frontend', 'someone-elses-network'},
+             'volumes': set(volumes), 'attached': {}, 'owners': {f'{name}-frontend': name},
+             'ids': {f'{name}-frontend': 'f' * 64}}
+
+    def docker(endpoint, *args, data=None):
+        if args[:1] == ('ps',):
+            return '\n'.join(state['containers'])
+        if args[:2] == ('volume', 'ls'):
+            return '\n'.join(state['volumes'])
+        if args[:2] == ('system', 'df'):
+            return json.dumps(list(usage.values()))
+        if args[:2] == ('network', 'ls'):
+            return '\n'.join(state['networks'])
+        if args[:2] == ('network', 'inspect'):
+            network = args[-1]
+            return (f"{state['ids'].get(network, 'a' * 64)} {state['owners'].get(network, '')} "
+                    f"{state['attached'].get(network, 0)}")
+        if args[:2] == ('network', 'rm'):
+            state['networks'].discard(
+                next((network for network, identity in state['ids'].items() if identity == args[2]), args[2]))
+            state['removed_by'] = state.get('removed_by', []) + [args[2]]
+            return ''
+        if args[:2] == ('volume', 'rm'):
+            state['volumes'].discard(args[2])
+            return ''
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module, 'docker', docker)
+    endpoint = 'unix:///var/run/docker.sock'
+
+    usage[f'{name}-data'] = {'Name': f'{name}-data', 'Links': '0', 'Size': '12kB'}
+    with pytest.raises(ValueError, match='holds data, so nothing was removed'):
+        module.discard_unstarted(endpoint, name)
+    assert state['volumes'] == volumes and f'{name}-frontend' in state['networks']
+
+    usage[f'{name}-data'] = {'Name': f'{name}-data', 'Links': '0', 'Size': '0B'}
+    state['containers'] = {f'{name}-ui'}
+    with pytest.raises(ValueError, match='started once'):
+        module.discard_unstarted(endpoint, name)
+
+    state['containers'] = set()
+    # A same-named network that another owner made is never this package's, and fails the whole
+    # discard before anything is removed.
+    state['owners'][f'{name}-frontend'] = ''
+    with pytest.raises(ValueError, match='does not belong to this package, so nothing was removed'):
+        module.discard_unstarted(endpoint, name)
+    assert state['volumes'] == volumes and 'removed_by' not in state
+    state['owners'][f'{name}-frontend'] = name
+    result = module.discard_unstarted(endpoint, name)
+    assert state['removed_by'] == ['f' * 64]
+    assert result == {'package': name, 'removed_networks': [f'{name}-frontend'],
+                      'removed_volumes': sorted(volumes)}
+    assert state['volumes'] == set() and state['networks'] == {'someone-elses-network'}
+
+
+def test_the_docker_endpoint_is_the_local_context_and_never_a_remote_one(monkeypatch):
+    module = _launch_module()
+
+    class Result:
+        returncode = 0
+        stdout = b'unix:///Users/someone/.docker/run/docker.sock\n'
+        stderr = b''
+
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: Result())
+    assert module.local_docker_endpoint(None) == 'unix:///Users/someone/.docker/run/docker.sock'
+    assert module.local_docker_endpoint('unix:///var/run/docker.sock') == 'unix:///var/run/docker.sock'
+    for remote in ('tcp://10.0.0.2:2376', 'ssh://build-host', 'npipe:////build-host/pipe/docker_engine'):
+        with pytest.raises(ValueError, match='local Unix Docker endpoint'):
+            module.local_docker_endpoint(remote)
+
+
+def test_the_same_launch_command_runs_again_after_a_rolled_back_attempt(tmp_path, monkeypatch):
+    """The actual command: its reserved outputs never block the same command after a rollback."""
+    import sys as system
+    module = _launch_module()
+    credentials, receipt = tmp_path / 'credentials.json', tmp_path / 'receipt.json'
+    command = ['launch.py', '--docker-host', 'unix:///var/run/docker.sock', '--name', 'xperfect-fixture',
+               '--service-image', 'sha256:' + 'a' * 64, '--native-image', 'sha256:' + 'b' * 64,
+               '--ui-port', '18880', '--mcp-port', '18867',
+               '--receipt', str(receipt), '--credentials', str(credentials)]
+    monkeypatch.setattr(system, 'argv', command)
+
+    _stateful_docker(module, monkeypatch, fail_network='xperfect-fixture-workers',
+                     fail_detail='could not find an available, non-overlapping IPv4 address pool')
+    with pytest.raises(RuntimeError, match='no free network address range'):
+        module.main()
+    assert not credentials.exists() and not receipt.exists()
+
+    # A receipt someone already has is refused and kept; this run's empty credentials go.
+    receipt.write_text('{"kept": true}')
+    _stateful_docker(module, monkeypatch)
+    with pytest.raises(FileExistsError):
+        module.main()
+    assert receipt.read_text() == '{"kept": true}' and not credentials.exists()
+    receipt.unlink()
+
+    # Credentials that already exist are never replaced.
+    credentials.write_text('{"existing": true}')
+    with pytest.raises(FileExistsError):
+        module.main()
+    assert credentials.read_text() == '{"existing": true}' and not receipt.exists()
+    credentials.unlink()
+
+    # The exact same command now launches.
+    state = _stateful_docker(module, monkeypatch)
+    module.main()
+    assert json.loads(receipt.read_text())['networks'] == {
+        'frontend': 'xperfect-fixture-frontend', 'workers': 'xperfect-fixture-workers'}
+    assert json.loads(credentials.read_text())['ui_url'] == 'http://127.0.0.1:18880'
+    assert state['network'] == {'xperfect-fixture-frontend', 'xperfect-fixture-workers'}

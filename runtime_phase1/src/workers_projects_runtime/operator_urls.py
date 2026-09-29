@@ -8,7 +8,11 @@ OPERATOR_URL_SURFACES = {"", "web", "browser", "desktop", "playground", "librech
 
 
 def operator_base_url() -> str:
-    return os.environ.get("GLASSHIVE_OPERATOR_BASE_URL", "http://127.0.0.1:8780").strip().rstrip("/")
+    return (
+        os.environ.get("GLASSHIVE_OPERATOR_BASE_URL", "").strip()
+        or os.environ.get("WPR_OPERATOR_BASE_URL", "").strip()
+        or "http://127.0.0.1:8780"
+    ).rstrip("/")
 
 
 def surface_can_open_operator_url(surface: str | None) -> bool:

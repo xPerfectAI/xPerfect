@@ -581,13 +581,13 @@ function renderConnectAi() {
   if (canSetup && clients.codex) {
     clientCards.push(connectAiClientCard(
       'Codex',
-      'Open Settings → MCP servers → Add server. Paste the xPerfect address, restart if prompted, then Authenticate.',
+      String(clients.codex.card_note || 'Open Settings → MCP servers → Add server. Paste the xPerfect address, restart if prompted, then Authenticate.'),
     ));
   }
   if (canSetup && clients.claude) {
     clientCards.push(connectAiClientCard(
       'Claude Code',
-      'Use Terminal setup below, then run /mcp in Claude Code to finish sign-in.',
+      String(clients.claude.card_note || 'Use Terminal setup below, then run /mcp in Claude Code to finish sign-in.'),
     ));
   }
   clientsList?.replaceChildren(
@@ -597,7 +597,10 @@ function renderConnectAi() {
   );
 
   const rows = canSetup ? [
-    ...(clients.codex ? [
+    ...(clients.codex && clients.codex.transport === 'stdio' ? [
+      commandRow('Codex · Add server', String(clients.codex.add_command || '')),
+    ] : []),
+    ...(clients.codex && clients.codex.transport !== 'stdio' ? [
       commandRow('Codex · 1. Configure server', String(clients.codex.config_toml || '')),
       commandRow('Codex · 2. Sign in', String(clients.codex.login_command || '')),
     ] : []),
