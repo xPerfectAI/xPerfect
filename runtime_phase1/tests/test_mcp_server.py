@@ -7274,3 +7274,5 @@ def test_scheduling_a_saved_expert_keeps_its_name_and_role(monkeypatch):
     assert resumed["name"] == "Supplies Expert"
     assert resumed["role"] == "Answer supply questions"
     assert resumed["alias"] == "codex-cli-supplies-expert-1a2b"
+    # Nor does the task replace what the expert is for (its saved project definition).
+    assert "project_definition" not in (resumed.get("bootstrap_bundle") or {})

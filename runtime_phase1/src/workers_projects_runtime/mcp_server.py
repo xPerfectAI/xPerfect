@@ -5986,6 +5986,7 @@ def create_mcp_server(
                 ),
             )
         bundle = _normalize_bootstrap_bundle(bootstrap_bundle_json) or {}
+        caller_project_definition = "project_definition" in bundle
         bundle.setdefault(
             "project_definition",
             _default_project_definition(title=title, goal=clean_success_criteria, instruction=scheduled_instruction),
@@ -6042,6 +6043,10 @@ def create_mcp_server(
             raise ValueError(
                 "Existing workspaces keep their saved provider account policy"
             )
+        if existing_workspace and not caller_project_definition:
+            # A saved workspace keeps its own project definition; the scheduled task is this
+            # run's instruction and must not replace what the workspace is for.
+            bundle.pop("project_definition", None)
         project = existing_workspace["project"] if existing_workspace else client.create_project(
             owner_id=resolved_owner_id,
             title=title,
