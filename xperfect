@@ -2,5 +2,14 @@
 """Start the standalone xPerfect host services."""
 from pathlib import Path
 import runpy
+import sys
 
-runpy.run_path(str(Path(__file__).resolve().parent / "scripts" / "host.py"), run_name="__main__")
+root = Path(__file__).resolve().parent
+if sys.argv[1:2] == ["start"] and "--docker" in sys.argv[2:]:
+    # Packaging remains a startup option of the same product. The reviewed
+    # launcher owns images, private state, permissions, and optional overrides.
+    sys.argv = [str(root / "deployment/linux/launch.py"),
+                *[value for value in sys.argv[2:] if value != "--docker"]]
+    runpy.run_path(sys.argv[0], run_name="__main__")
+else:
+    runpy.run_path(str(root / "scripts" / "host.py"), run_name="__main__")

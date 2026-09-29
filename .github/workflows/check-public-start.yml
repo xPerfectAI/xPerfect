@@ -1,0 +1,100 @@
+name: Public package start
+
+# A critical-path acceptance check on the isolated delivery branch or on demand.
+# No build, provider sign-in, full release bank, or extra platform matrix.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/mf06-single-start']
+    paths:
+      - .github/workflows/check-public-start.yml
+      - deployment/linux/launch.py
+      - deployment/linux/candidate-images.json
+      - xperfect
+
+permissions:
+  contents: read
+
+jobs:
+  public-start:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Obtain the public source without credentials
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          mkdir "$RUNNER_TEMP/public-source"
+          curl --fail --silent --show-error --location \
+            "https://github.com/xPerfectAI/xPerfect/archive/$SOURCE_SHA.tar.gz" \
+            | tar -xz --strip-components=1 -C "$RUNNER_TEMP/public-source"
+      - name: Start exactly as a new user
+        run: |
+          cd "$RUNNER_TEMP/public-source"
+          export DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          # No login and no cached candidate images: the command must obtain them.
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          release = json.loads(Path('deployment/linux/candidate-images.json').read_text())
+          for image in release['images']:
+              ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
+              result = subprocess.run(['docker', 'image', 'inspect', ref], capture_output=True)
+              assert result.returncode != 0, 'The acceptance runner already has a candidate image'
+          PY
+          ./xperfect start --docker > "$RUNNER_TEMP/start-output.txt" 2>&1
+      - name: Verify the images, app and authenticated MCP
+        run: |
+          cd "$RUNNER_TEMP/public-source"
+          python3 - <<'PY'
+          import json, subprocess, urllib.request
+          from pathlib import Path
+          state = Path.home() / 'xperfect-local'
+          receipt = json.loads((state / 'receipt.json').read_text())
+          private = json.loads((state / 'credentials.json').read_text())
+          release = json.loads(Path('deployment/linux/candidate-images.json').read_text())
+          local_ids = {}
+          for image in release['images']:
+              ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
+              record = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref]))[0]
+              assert ref in record['RepoDigests'], 'Downloaded image is not the pinned release'
+              local_ids[image['repository']] = record['Id']
+          assert receipt['service_image'] == local_ids['xperfect-service']
+          assert receipt['native_image'] == local_ids['xperfect-native']
+          assert receipt['models'] == release['models']
+          for record in receipt['containers'].values():
+              container = json.loads(subprocess.check_output(['docker', 'inspect', record]))[0]
+              assert container['State']['Running'] and container['Image'] == receipt['service_image']
+          with urllib.request.urlopen(receipt['ui_url'], timeout=15) as response:
+              assert response.status == 200 and b'Unlock' in response.read()
+          body = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
+              'protocolVersion': '2025-03-26', 'capabilities': {},
+              'clientInfo': {'name': 'public-start-check', 'version': '1'}}}
+          request = urllib.request.Request(receipt['mcp_url'], data=json.dumps(body).encode(),
+              headers={'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
+                       'Authorization': 'Bearer ' + private['mcp_api_key']})
+          with urllib.request.urlopen(request, timeout=15) as response:
+              assert response.status == 200
+              if response.headers.get_content_type() == 'text/event-stream':
+                  for line in response:
+                      if line.startswith(b'data: '):
+                          result = json.loads(line[6:])
+                          break
+              else:
+                  result = json.load(response)
+              assert result['result']['serverInfo'], 'MCP initialize did not succeed'
+          print('PASS: anonymous source/image download, exact release, app and authenticated MCP')
+          PY
+      - name: Show a bounded failure without private output
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'start-output.txt'
+          if path.exists():
+              # The private output paths and credentials never enter public CI logs.
+              lines = [line for line in path.read_text().splitlines() if line.startswith('xPerfect:')]
+              print('\n'.join(lines[:3]) or 'Startup failed; retain private runner output for diagnosis.')
+          PY

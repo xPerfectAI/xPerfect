@@ -20,6 +20,26 @@ light/dark themes, UI and MCP routes. [Guide source](docs/user-guide/README.md).
 
 ## Start locally
 
+### With Docker
+
+With Python 3.11 or newer and Docker running, start the reviewed container package
+from this checkout:
+
+```sh
+./xperfect start --docker
+```
+
+The launcher downloads its release images automatically and keeps private state
+under `~/xperfect-local`. Open the printed URL and use `ui_password` from the
+private credentials file it prints. Connect your AI account in **Connections**.
+Keep that file private; it also holds the MCP credentials.
+
+The current image release is `linux/arm64`. Actual Windows startup and additional
+CPU architectures remain under construction. [Package details and optional
+settings](docs/deployment.md#packaged-linux).
+
+### With tools installed on your computer
+
 Requires macOS or Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/),
 and the command-line tool of one AI provider you use: [Codex](https://developers.openai.com/codex/cli/),
 [Claude Code](https://code.claude.com/docs/en/setup) or [Grok](https://github.com/xai-org/grok-build).

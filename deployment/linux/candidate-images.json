@@ -4,6 +4,8 @@
   "archive": "pair.tar",
   "archive_sha256": "62de296daf903ee772b0366156f9ab6373214c991c44ef87dc30f37356272f4c",
   "platform": "linux/arm64",
+  "registry": "ghcr.io/xperfectai",
+  "models": {"codex-cli": "gpt-6.1-sol", "claude-code": "claude-opus-5-5"},
   "images": [
     {"repository": "xperfect-service", "tag": "candidate-92755b4", "archive_ref": "onboarding-92755b4",
      "digest": "sha256:587140e91b81c17bfaede3c45eb792049dc997aa638ccd1ec64b9ee4ba96544c"},

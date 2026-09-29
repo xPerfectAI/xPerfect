@@ -1008,6 +1008,43 @@ def preapprove(*, endpoint: str, name: str, identity: bytes) -> str:
                   'ui', '--config', '/ui-state/config.json', '--admin', 'preapprove-oidc', data=identity)
 
 
+def published_release() -> tuple[dict[str, str], dict[str, str]]:
+    """Resolve the reviewed images and exact local model configuration."""
+    try:
+        release = json.loads(Path(__file__).with_name('candidate-images.json').read_text())
+        registry = release['registry']
+        images = release['images']
+        if not isinstance(registry, str) or not isinstance(images, list):
+            raise ValueError
+        result = {}
+        for role in ('xperfect-service', 'xperfect-native'):
+            selected = [image for image in images if isinstance(image, dict) and image.get('repository') == role]
+            if len(selected) != 1:
+                raise ValueError
+            reference = registry + '/' + role + '@' + selected[0]['digest']
+            if not re.fullmatch(r'[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[a-f0-9]{64}', reference):
+                raise ValueError
+            result[role] = reference
+        return result, validate_models(release.get('models'))
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError('Reviewed package release metadata is missing or invalid. '
+                         'Use a complete release or explicit --service-image and --native-image.') from None
+
+
+def local_output_defaults(args) -> None:
+    """Keep local startup outputs private without replacing an existing install."""
+    if args.receipt is not None and args.credentials is not None:
+        return
+    state = (args.state_dir or Path.home() / args.name).expanduser().absolute()
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = state.lstat()
+    if state.resolve(strict=True) != state or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError('Package state must be a real directory owned by the current user')
+    state.chmod(0o700)
+    args.receipt = args.receipt or state / 'receipt.json'
+    args.credentials = args.credentials or state / 'credentials.json'
+
+
 def main():
     if sys.argv[1:2] in (['upgrade'], ['upgrade-commit'], ['upgrade-rollback']):
         import upgrade
@@ -1030,12 +1067,13 @@ def main():
         return
     parser = argparse.ArgumentParser()
     parser.add_argument('--docker-host', help='Local Docker endpoint; defaults to the current Docker context')
-    parser.add_argument('--name', required=True)
-    parser.add_argument('--service-image', required=True)
-    parser.add_argument('--native-image', required=True)
+    parser.add_argument('--name', default='xperfect-local', help='Package instance name (default: xperfect-local)')
+    parser.add_argument('--service-image', help='Advanced: override the reviewed application image')
+    parser.add_argument('--native-image', help='Advanced: override the reviewed worker image')
     parser.add_argument('--ui-port', type=int, default=8780)
     parser.add_argument('--mcp-port', type=int, default=8767)
-    parser.add_argument('--receipt', type=Path, required=True)
+    parser.add_argument('--state-dir', type=Path, help='Local private state directory (default: ~/<package name>)')
+    parser.add_argument('--receipt', type=Path, help='Advanced: explicit receipt output')
     parser.add_argument('--credentials', type=Path, help='Local profile only: private unlock/MCP output')
     parser.add_argument('--owner-id', default='local-owner')
     parser.add_argument('--profile', choices=('local-linux', 'hosted-xfs'), default='local-linux')
@@ -1048,7 +1086,18 @@ def main():
                         help='Local profile: an unused private range for the frontend or workers network, '
                              'for when Docker has no free default range; repeatable')
     args = parser.parse_args()
+    if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', args.name):
+        raise ValueError('Package name must start with xperfect-')
+    release_models = {}
+    if args.service_image is None or args.native_image is None:
+        images, release_models = published_release()
+        args.service_image = args.service_image or images['xperfect-service']
+        args.native_image = args.native_image or images['xperfect-native']
     models = parse_model_arguments(args.model)
+    if args.profile == 'local-linux':
+        # The release owns current supported defaults; explicit profile choices win.
+        # Hosted inputs and fully explicit image deployments keep their own choices.
+        models = {**release_models, **models}
     subnets = validate_subnets(args.subnet)
     if subnets and args.profile != 'local-linux':
         raise ValueError('--subnet applies to the local profile')
@@ -1062,6 +1111,10 @@ def main():
     if args.profile == 'hosted-xfs':
         if not args.hosted_config:
             raise SystemExit('--hosted-config is required for hosted-xfs')
+        if not args.receipt:
+            raise SystemExit('--receipt is required for hosted-xfs')
+        if args.state_dir:
+            raise ValueError('--state-dir applies to the local profile')
         hosted = json.loads(_private_file(args.hosted_config, 'hosted_config').read_text())
         if models:
             if not isinstance(hosted, dict):
@@ -1088,8 +1141,7 @@ def main():
             raise
         print(receipt['ui_url'])
         return
-    if not args.credentials:
-        raise SystemExit('--credentials is required for the local profile')
+    local_output_defaults(args)
     # Reserve the private outputs before any Docker mutation. An existing file is never replaced.
     credential_fd = os.open(args.credentials, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     created = [args.credentials]
@@ -1115,6 +1167,10 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except FileExistsError:
+        print('xPerfect: Private package outputs already exist. Keep them for the existing package, '
+              'or choose another --name or --state-dir.', file=sys.stderr)
+        raise SystemExit(2)
     except (ValueError, RuntimeError) as exc:
         # Operator input and readiness problems are one-line remedies, not tracebacks.
         print(f'xPerfect: {exc}', file=sys.stderr)

@@ -4,6 +4,21 @@
 
 xPerfect is a standalone runtime for powerful AI workers that can be resumed, watched, interrupted, and steered in real time.
 
+### Packaged first use
+
+xPerfect is one product. With Docker running, the packaged entry point is
+`./xperfect start --docker`. The launcher reads the reviewed release metadata,
+downloads the required images, and creates private local state. Users do not choose
+internal image roles or copy image IDs. They open the printed app URL, unlock it,
+and connect their chosen AI account. Explicit model, image, state, port and network
+options remain available for advanced deployment; simplification never changes a
+chosen account or model, replaces existing state, or weakens isolation.
+
+Public installation is complete only after an anonymous new user can obtain the
+published release and use this startup path. Source tests and private cached
+images do not prove public availability. Platform support follows the actual
+published image and verified host route, not Docker's general platform claims.
+
 It is meant to feel like this:
 
 - define a `Project`
