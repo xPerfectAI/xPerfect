@@ -48,7 +48,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/public-source"
           python3 - <<'PY'
-          import json, subprocess, urllib.error, urllib.request
+          import json, subprocess, urllib.error, urllib.parse, urllib.request
           from pathlib import Path
           state = Path.home() / 'xperfect-local'
           receipt = json.loads((state / 'receipt.json').read_text())
@@ -66,14 +66,19 @@ jobs:
           for record in receipt['containers'].values():
               container = json.loads(subprocess.check_output(['docker', 'inspect', record]))[0]
               assert container['State']['Running'] and container['Image'] == receipt['service_image']
-          # The locked UI deliberately returns 401 with the browser login page.
-          # Anonymous startup must preserve that protection, not make it public.
+          # API clients get 401; browsers are redirected to the unlock page.
+          # Keep both responses protected rather than making the app public.
           try:
               urllib.request.urlopen(receipt['ui_url'], timeout=15)
           except urllib.error.HTTPError as response:
-              assert response.code == 401 and b'Unlock' in response.read()
+              assert response.code == 401
           else:
               raise AssertionError('A new package UI was accessible without unlocking')
+          browser = urllib.request.Request(receipt['ui_url'], headers={'Accept': 'text/html'})
+          with urllib.request.urlopen(browser, timeout=15) as response:
+              assert response.status == 200
+              assert urllib.parse.urlsplit(response.url).path == '/login'
+              assert b'auth-title' in response.read()
           body = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
               'protocolVersion': '2025-03-26', 'capabilities': {},
               'clientInfo': {'name': 'public-start-check', 'version': '1'}}}
