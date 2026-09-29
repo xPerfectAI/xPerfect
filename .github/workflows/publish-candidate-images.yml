@@ -46,10 +46,17 @@ jobs:
             digest="$(jq -r .digest <<<"$image")"
             printf '%s' "$GH_TOKEN" | docker run --rm -i --entrypoint sh -v "$RUNNER_TEMP:/work" "$SKOPEO" -c '
               skopeo login --username "$0" --password-stdin ghcr.io >/dev/null &&
-              skopeo copy --all --preserve-digests --retry-times 3 "oci-archive:/work/$1:$2" "docker://$3:$4" &&
-              skopeo inspect --raw "docker://$3@$5" | sha256sum' \
+              skopeo copy --quiet --all --preserve-digests --retry-times 3 "oci-archive:/work/$1:$2" "docker://$3:$4" &&
+              skopeo inspect --raw "docker://$3@$5" | sha256sum | cut -d" " -f1 > /work/published.sha' \
               "$GITHUB_ACTOR" "$archive" "$(jq -r .archive_ref <<<"$image")" "$destination" \
-              "$(jq -r .tag <<<"$image")" "$digest" > "$RUNNER_TEMP/published.sha"
-            test "sha256:$(cut -d' ' -f1 "$RUNNER_TEMP/published.sha")" = "$digest"
+              "$(jq -r .tag <<<"$image")" "$digest"
+            test "sha256:$(cat "$RUNNER_TEMP/published.sha")" = "$digest"
             echo "Published $destination@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Report package visibility
+        run: |
+          for name in $(jq -r '.images[].repository' "$RUNNER_TEMP/candidate-images.json"); do
+            visibility="$(gh api "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/$name" \
+              --jq '.visibility + " (repository: " + (.repository.full_name // "none") + ")"' 2>&1 || true)"
+            echo "$name: $visibility" | tee -a "$GITHUB_STEP_SUMMARY"
           done
