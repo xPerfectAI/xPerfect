@@ -1450,6 +1450,13 @@ def test_daemon_failures_name_an_action_without_echoing_daemon_text():
         'Docker package operation failed: volume')
 
 
+def test_a_registry_refusal_on_pull_names_the_action():
+    # Docker's reply for a private or misnamed ghcr.io reference, as seen on the published route.
+    module = _launch_module()
+    assert module.docker_failure('pull', 'unauthorized').startswith(
+        'Docker package operation failed: pull. The registry refused the image without a sign-in.')
+
+
 def test_current_docker_pool_exhaustion_names_the_action():
     # Docker 29 (Docker Desktop on the owner's Mac) words exhausted address pools differently.
     module = _launch_module()

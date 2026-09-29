@@ -45,6 +45,8 @@ DOCKER_FAILURE_ACTIONS = (
     ('no such image', 'A package image is not on this computer. Use the published image references.'),
     ('manifest unknown', 'The published package image was not found. Check the image reference.'),
     ('pull access denied', 'The published package image was not found. Check the image reference.'),
+    ('unauthorized', 'The registry refused the image without a sign-in. Check the image reference; '
+                     'a private image needs docker login first.'),
     ('cannot connect to the docker daemon', 'Docker is not running. Start Docker, then launch again.'),
 )
 
