@@ -75,7 +75,7 @@ shows whether your account is ready. This local app is for one person; the AI wo
 user account's permissions. It is not a public multi-user deployment.
 
 [Quickstart](docs/quickstart.md) · [Account and state setup](docs/host-setup.md) ·
-[Deployment and recovery](docs/deployment.md)
+[Deployment and recovery](docs/deployment.md) · [Changelog](CHANGELOG.md)
 
 ## Work together or separately
 
