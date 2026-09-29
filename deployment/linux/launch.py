@@ -28,10 +28,12 @@ import sys
 
 # Daemon failures a person can act on. The daemon's own text can include operator paths or
 # configuration, so it is matched here and never printed; only the action is shown.
+NO_FREE_NETWORK_RANGE = (
+    'Docker has no free network address range for this package. Remove Docker networks you '
+    'no longer use (see docker network ls) or add address pools in Docker settings, then launch again.')
 DOCKER_FAILURE_ACTIONS = (
-    ('non-overlapping ipv4 address pool',
-     'Docker has no free network address range for this package. Remove Docker networks you '
-     'no longer use (see docker network ls) or add address pools in Docker settings, then launch again.'),
+    ('non-overlapping ipv4 address pool', NO_FREE_NETWORK_RANGE),
+    ('all predefined address pools have been fully subnetted', NO_FREE_NETWORK_RANGE),
     ('port is already allocated',
      'A chosen port is already in use on this computer. Choose other --ui-port/--mcp-port values.'),
     ('address already in use',

@@ -1450,6 +1450,14 @@ def test_daemon_failures_name_an_action_without_echoing_daemon_text():
         'Docker package operation failed: volume')
 
 
+def test_current_docker_pool_exhaustion_names_the_action():
+    # Docker 29 (Docker Desktop on the owner's Mac) words exhausted address pools differently.
+    module = _launch_module()
+    message = module.docker_failure(
+        'network', 'Error response from daemon: all predefined address pools have been fully subnetted')
+    assert message.startswith('Docker package operation failed: network. Docker has no free network')
+
+
 def test_a_launch_that_runs_out_of_networks_leaves_nothing_behind_and_can_run_again(tmp_path, monkeypatch):
     module = _launch_module()
     state = _stateful_docker(
