@@ -65,8 +65,9 @@ and point the user to **Connections**.
 placed where that expert's own harness reads project skills: `.claude/skills/<skill>/SKILL.md` for a
 Claude Code expert, `.agents/skills/<skill>/SKILL.md` for a Codex expert. Pass the files unchanged;
 the expert discovers and uses its skills itself. For binary files, reserve each upload with
-`file_upload_begin`, send the bytes to the returned upload address, then pass the upload ids as
-`file_upload_ids`.
+`file_upload_begin`; the bytes then go to the returned upload address through xPerfect's
+authenticated HTTP API, and the ready upload ids are passed as `file_upload_ids`. If you cannot send
+authenticated HTTP yourself, ask the user to add the file in the xPerfect site instead.
 
 When the user asks to add, connect, configure, or use a capability **inside a xPerfect workspace**,
 put that outcome in `workspace_launch` or `workspace_continue` and let the workspace handle its own
