@@ -48,7 +48,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/public-source"
           python3 - <<'PY'
-          import json, subprocess, urllib.request
+          import json, subprocess, urllib.error, urllib.request
           from pathlib import Path
           state = Path.home() / 'xperfect-local'
           receipt = json.loads((state / 'receipt.json').read_text())
@@ -66,8 +66,14 @@ jobs:
           for record in receipt['containers'].values():
               container = json.loads(subprocess.check_output(['docker', 'inspect', record]))[0]
               assert container['State']['Running'] and container['Image'] == receipt['service_image']
-          with urllib.request.urlopen(receipt['ui_url'], timeout=15) as response:
-              assert response.status == 200 and b'Unlock' in response.read()
+          # The locked UI deliberately returns 401 with the browser login page.
+          # Anonymous startup must preserve that protection, not make it public.
+          try:
+              urllib.request.urlopen(receipt['ui_url'], timeout=15)
+          except urllib.error.HTTPError as response:
+              assert response.code == 401 and b'Unlock' in response.read()
+          else:
+              raise AssertionError('A new package UI was accessible without unlocking')
           body = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
               'protocolVersion': '2025-03-26', 'capabilities': {},
               'clientInfo': {'name': 'public-start-check', 'version': '1'}}}
@@ -76,6 +82,7 @@ jobs:
                        'Authorization': 'Bearer ' + private['mcp_api_key']})
           with urllib.request.urlopen(request, timeout=15) as response:
               assert response.status == 200
+              session = response.headers.get('Mcp-Session-Id')
               if response.headers.get_content_type() == 'text/event-stream':
                   for line in response:
                       if line.startswith(b'data: '):
@@ -84,6 +91,24 @@ jobs:
               else:
                   result = json.load(response)
               assert result['result']['serverInfo'], 'MCP initialize did not succeed'
+          headers = dict(request.headers)
+          if session:
+              headers['Mcp-Session-Id'] = session
+          notification = urllib.request.Request(receipt['mcp_url'], headers=headers,
+              data=json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}).encode())
+          with urllib.request.urlopen(notification, timeout=15) as response:
+              assert response.status == 202
+          call = urllib.request.Request(receipt['mcp_url'], headers=headers,
+              data=json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
+                  'params': {'name': 'workspace_list', 'arguments': {}}}).encode())
+          with urllib.request.urlopen(call, timeout=15) as response:
+              raw = response.read()
+              if response.headers.get_content_type() == 'text/event-stream':
+                  result = next(json.loads(line[6:]) for line in raw.splitlines()
+                                if line.startswith(b'data: '))
+              else:
+                  result = json.loads(raw)
+              assert 'result' in result and not result['result'].get('isError'), 'Workspace discovery failed'
           print('PASS: anonymous source/image download, exact release, app and authenticated MCP')
           PY
       - name: Show a bounded failure without private output
