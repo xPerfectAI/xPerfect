@@ -2,7 +2,9 @@
 
 The hosted profile runs the same three containers as the local package — runtime, UI and MCP — for several people who sign in through your identity provider. Each person's files live under an XFS project quota (5,000,000,000 bytes each by default). The local single-user package is unchanged.
 
-**Current limits.** Install, sign-in and admission, per-person storage, attaching stored files, and upgrade and rollback are tested on a hosted server. Connecting an AI account there and getting an AI result have not been verified end to end yet, and neither has a worker writing past a person's storage limit.
+**Verified hosted-mode result (29 September 2026).** Install, sign-in and admission, per-person storage, attaching stored files, and upgrade and rollback are tested on a hosted server. A retained diagnostic package on a real Arm Linux host also produced a native `gpt-6.1-sol` result through the selected ready Codex subscription, using official Codex client 0.159.0. Its 50-byte output and unchanged 44-byte input were downloaded through authenticated Files routes and matched after a supported restart and fresh MCP/HTTP sessions. This is evidence for that exact package/account route, not every provider or the final service upgrade.
+
+**Still partial.** The Internet/cloud novice journey and external Codex/Claude setup through Connections remain unverified; that setup is currently unavailable. A worker writing past a person's storage limit has not been verified. The diagnostic expert was preserved; this result does not establish new cloud, automatic client setup or quota-overrun success.
 
 ## What you need
 
@@ -125,8 +127,10 @@ The first returns `"status":"ok"`. The second names your MCP URL and issuer. The
 ## Connect AI accounts
 
 Each person connects their own provider account. An account is never shared with, or copied
-to, another person. This section describes the supported route; completing it on a hosted server has
-not been verified end to end yet.
+to, another person. The selected Codex subscription-to-native-result path passed in the diagnostic
+hosted-mode case above. The broader Internet/cloud first-use journey and external Codex/Claude
+client setup through Connections remain partial; provider account readiness does not establish
+that separate client connection.
 
 - **Browser:** open **Connections** and choose a provider. The browser must trust the
   deployment's certificate.
