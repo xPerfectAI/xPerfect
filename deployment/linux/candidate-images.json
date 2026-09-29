@@ -1,15 +1,27 @@
 {
-  "note": "An exact, tested package image pair to publish by digest. The service image was built with deployment/linux/Dockerfile.service from source tree 4026d3125e8427ae1cc120c61abca40b484fcc54 (public commit 84b493ae896dab31c30dd1900fde5eba8f4a6b51) on the unchanged native image.",
-  "staging_release": "candidate-images-92755b4",
+  "note": "The exact tested package pair. Service built with deployment/linux/Dockerfile.service from source tree c61ae133f786fcec72c7f4b94a8312f98ccd8f7a; packaged source inputs match public commit 40a60cd8d51319a411dc93580c1d654481746e77 byte-for-byte. Native retains the preceding image plus the official Codex 0.159.0 client layer.",
+  "staging_release": "candidate-images-2a11a03",
   "archive": "pair.tar",
-  "archive_sha256": "62de296daf903ee772b0366156f9ab6373214c991c44ef87dc30f37356272f4c",
+  "archive_sha256": "969f01d70139e587b20a8fc8f29184921dd8c98d5105d0b748cedad3102a9727",
   "platform": "linux/arm64",
   "registry": "ghcr.io/xperfectai",
-  "models": {"codex-cli": "gpt-6.1-sol", "claude-code": "claude-opus-5-5"},
+  "models": {
+    "codex-cli": "gpt-6.1-sol",
+    "claude-code": "claude-opus-5-5"
+  },
   "images": [
-    {"repository": "xperfect-service", "tag": "candidate-92755b4", "archive_ref": "onboarding-92755b4",
-     "digest": "sha256:587140e91b81c17bfaede3c45eb792049dc997aa638ccd1ec64b9ee4ba96544c"},
-    {"repository": "xperfect-native", "tag": "candidate-92755b4", "archive_ref": "o06",
-     "digest": "sha256:2845754df4ff12f13fba6a01a9e889392cfb921dcd23402b08e26cc93c1aca67"}
-  ]
+    {
+      "repository": "xperfect-service",
+      "tag": "candidate-2a11a03",
+      "archive_ref": "final-2a11a03",
+      "digest": "sha256:2f688d0fcd6c59951daa503878f0d282067cd8d7cf0cd3ec230f0eecd499171f"
+    },
+    {
+      "repository": "xperfect-native",
+      "tag": "candidate-2a11a03",
+      "archive_ref": "codex0159-candidate",
+      "digest": "sha256:f23706028997dc40696941506a5aa73a1217cbc4cdfe763f521a4e5b52adc764"
+    }
+  ],
+  "codex_client_version": "0.159.0"
 }
