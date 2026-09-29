@@ -169,9 +169,10 @@ def environment(state: Path, config: dict, instance: str) -> dict:
         "GLASSHIVE_PEER_RUNTIME_BASE_URL": f"http://127.0.0.1:{ports['api']}",
         "WPR_OPERATOR_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
         # Watch, confirmation and file links returned to people and MCP clients open on this
-        # instance's own UI, and its MCP address is the configured one (as the Docker package does).
+        # instance's own UI (as the Docker package does). GLASSHIVE_MCP_PUBLIC_URL stays unset: it
+        # is hosted OAuth configuration; the UI shows this instance's MCP address from its own name.
         "GLASSHIVE_OPERATOR_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
-        "GLASSHIVE_MCP_PUBLIC_URL": f"http://127.0.0.1:{ports['mcp']}/mcp",
+        "XPERFECT_LOCAL_MCP_URL": f"http://127.0.0.1:{ports['mcp']}/mcp",
         # The UI shows AI apps the one local connection that needs no sign-in: this checkout's
         # own stdio MCP command for this instance, and this checkout as the skill's source.
         "XPERFECT_LOCAL_MCP_COMMAND": json.dumps([str(ROOT / "xperfect"), "mcp", "--state-dir", str(state)]),

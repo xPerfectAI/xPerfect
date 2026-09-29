@@ -278,6 +278,24 @@ class LocalUnlockTests(unittest.TestCase):
         self.assertFalse({k for k in mcp if k in host.ASSERTION_KEYS})
         self.assertEqual(mcp["GLASSHIVE_HUMAN_AUTH_MODE"], "")
 
+    def test_the_local_mcp_role_starts_without_hosted_oauth_and_the_ui_names_its_address(self):
+        # The MCP server reads GLASSHIVE_MCP_PUBLIC_URL as hosted OAuth configuration; a local
+        # install must never set it, or the MCP role refuses to start.
+        import sys
+        sys.path.insert(0, str(Path(__file__).parents[1] / "runtime_phase1" / "src"))
+        from workers_projects_runtime import mcp_oauth
+
+        base = host.environment(self.state, self.config, "instance")
+        mcp = host.role_environment(self.state, self.config, base, "mcp")
+        ui = host.role_environment(self.state, self.config, base, "ui")
+        with patch.dict(os.environ, mcp, clear=True):
+            self.assertIsNone(mcp_oauth.oauth_from_env())
+        ports = self.config["ports"]
+        self.assertEqual(ui["GLASSHIVE_OPERATOR_BASE_URL"], f"http://127.0.0.1:{ports['ui']}")
+        self.assertEqual(ui["XPERFECT_LOCAL_MCP_URL"], f"http://127.0.0.1:{ports['mcp']}/mcp")
+        self.assertEqual(json.loads(ui["XPERFECT_LOCAL_MCP_COMMAND"])[1:],
+                         ["mcp", "--state-dir", str(self.state)])
+
     def test_private_config_cannot_redirect_signing_or_trust(self):
         # config.json env reaches environment() unfiltered; the role split must still win.
         config = {**self.config, "env": {

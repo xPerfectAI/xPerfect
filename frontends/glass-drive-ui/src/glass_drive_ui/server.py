@@ -3106,6 +3106,9 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def connect_ai(request: Request) -> dict[str, object]:
         _request_identity(request)
         mcp_url = str(os.environ.get("GLASSHIVE_MCP_PUBLIC_URL") or "").strip()
+        if not mcp_url and not _multi_user_security_enabled():
+            # A local launcher names its own MCP address; it is display only, not OAuth setup.
+            mcp_url = str(os.environ.get("XPERFECT_LOCAL_MCP_URL") or "").strip()
         if not mcp_url:
             base = str(os.environ.get("GLASSHIVE_OPERATOR_BASE_URL") or request.base_url).rstrip("/")
             mcp_url = f"{base}/mcp"
