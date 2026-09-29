@@ -30,6 +30,13 @@ desktop and mobile. This documentation change does not require a product runtime
 
 ## Provenance and privacy
 
+Instructions now match accepted published package `91f3120583df7cb549e7f81924a4f751089c1c31`
+and its immutable `linux/arm64` service/native pair. One-command public startup, the corrected
+manual MCP address and all repaired host expert/file/schedule paths have dated actual evidence.
+Mac package and real Arm Linux/hosted results are retained on their recorded candidates;
+Windows/x86-64 and automatic container client setup remain explicit limits. No new Grok run
+is claimed. The earlier hosted diagnostic expert was preserved, not overwritten.
+
 The five PNGs were captured from the xPerfect app on 29 September 2026 at public source `5d9a851`.
 They show synthetic onboarding tasks, a generic local-owner account and sample results. They contain
 no sign-in credentials, personal account addresses or customer material. The sample skill, CSV and
