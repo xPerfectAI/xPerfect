@@ -1,0 +1,13 @@
+{
+  "note": "An exact, tested package image pair to publish by digest. The service image was built with deployment/linux/Dockerfile.service from source tree 4026d3125e8427ae1cc120c61abca40b484fcc54 (public commit 84b493ae896dab31c30dd1900fde5eba8f4a6b51) on the unchanged native image.",
+  "staging_release": "candidate-images-92755b4",
+  "archive": "pair.tar",
+  "archive_sha256": "62de296daf903ee772b0366156f9ab6373214c991c44ef87dc30f37356272f4c",
+  "platform": "linux/arm64",
+  "images": [
+    {"repository": "xperfect-service", "tag": "candidate-92755b4", "archive_ref": "onboarding-92755b4",
+     "digest": "sha256:587140e91b81c17bfaede3c45eb792049dc997aa638ccd1ec64b9ee4ba96544c"},
+    {"repository": "xperfect-native", "tag": "candidate-92755b4", "archive_ref": "o06",
+     "digest": "sha256:2845754df4ff12f13fba6a01a9e889392cfb921dcd23402b08e26cc93c1aca67"}
+  ]
+}

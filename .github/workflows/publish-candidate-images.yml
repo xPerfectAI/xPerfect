@@ -1,0 +1,55 @@
+# Publish an exact, already tested package image pair to this repository's container packages.
+# A maintainer stages the pair as an OCI archive on a draft release; the committed manifest names
+# that release, the archive's SHA-256 and each image's digest. The copy preserves every digest,
+# so the published references are the images that were tested.
+name: Publish candidate package images
+
+on:
+  push:
+    branches: ['candidate/**']
+    paths:
+      - .github/workflows/publish-candidate-images.yml
+      - deployment/linux/candidate-images.json
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write  # read the maintainer's draft staging release; drafts need write access
+      packages: write  # push to this repository's container packages
+    env:
+      SKOPEO: quay.io/skopeo/stable@sha256:a45bb1884fe85a16b7be0612b847123495f42b6e3eb1e7c962df20490a5a9b03
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Read the manifest of this commit
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$GITHUB_REPOSITORY/contents/deployment/linux/candidate-images.json?ref=$GITHUB_SHA" \
+            > "$RUNNER_TEMP/candidate-images.json"
+          jq -e '.images | length > 0' "$RUNNER_TEMP/candidate-images.json"
+      - name: Download and verify the staged archive
+        run: |
+          manifest="$RUNNER_TEMP/candidate-images.json"
+          gh release download "$(jq -r .staging_release "$manifest")" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$(jq -r .archive "$manifest")" --dir "$RUNNER_TEMP"
+          echo "$(jq -r .archive_sha256 "$manifest")  $RUNNER_TEMP/$(jq -r .archive "$manifest")" | sha256sum --check --strict
+      - name: Copy each image by exact digest and verify it
+        run: |
+          manifest="$RUNNER_TEMP/candidate-images.json"
+          archive="$(jq -r .archive "$manifest")"
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          jq -c '.images[]' "$manifest" | while read -r image; do
+            destination="ghcr.io/$owner/$(jq -r .repository <<<"$image")"
+            digest="$(jq -r .digest <<<"$image")"
+            printf '%s' "$GH_TOKEN" | docker run --rm -i --entrypoint sh -v "$RUNNER_TEMP:/work" "$SKOPEO" -c '
+              skopeo login --username "$0" --password-stdin ghcr.io >/dev/null &&
+              skopeo copy --all --preserve-digests --retry-times 3 "oci-archive:/work/$1:$2" "docker://$3:$4" &&
+              skopeo inspect --raw "docker://$3@$5" | sha256sum' \
+              "$GITHUB_ACTOR" "$archive" "$(jq -r .archive_ref <<<"$image")" "$destination" \
+              "$(jq -r .tag <<<"$image")" "$digest" > "$RUNNER_TEMP/published.sha"
+            test "sha256:$(cut -d' ' -f1 "$RUNNER_TEMP/published.sha")" = "$digest"
+            echo "Published $destination@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
