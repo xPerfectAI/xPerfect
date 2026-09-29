@@ -319,10 +319,14 @@ class FakeDocker:
             if args[-1] in self.networks:
                 return fail()
             self.networks[args[-1]] = {'Options': dict(args[i + 1].split('=', 1) for i, value in enumerate(args)
-                                                       if value == '--opt')}
+                                                       if value == '--opt'),
+                                       'Subnet': next((args[i + 1] for i, value in enumerate(args)
+                                                       if value == '--subnet'), '')}
             return ok()
         if args[:2] == ('network', 'inspect'):
             network = self.networks.get(args[-1])
+            if network is not None and '{{range .IPAM.Config}}{{.Subnet}}{{end}}' in args:
+                return ok(network.get('Subnet', ''))
             return ok(json.dumps(network['Options'])) if network is not None else fail()
         if args[:2] == ('network', 'rm'):
             if args[-1] not in self.networks or any(
@@ -1823,6 +1827,19 @@ def test_an_earlier_shared_workers_network_is_isolated_and_rollback_restores_it(
     assert fake.networks[f'{NAME}-workers']['Options'] == {}
     assert _attached(fake, previous)[f'{NAME}-workers'] == {'Aliases': ['runtime']}
     assert fake.find(previous)['State']['Running'] is True
+
+
+def test_recreating_the_workers_network_keeps_its_explicit_range(package):
+    # A package launched with --subnet on a Docker host without free default ranges must
+    # upgrade and roll back without needing one.
+    fake, path, receipt = package
+    _older_launcher(fake)
+    fake.networks[f'{NAME}-workers']['Subnet'] = '10.201.3.0/24'
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW)
+    assert fake.networks[f'{NAME}-workers'] == {'Options': ISOLATED, 'Subnet': '10.201.3.0/24'}
+    runner.rollback()
+    assert fake.networks[f'{NAME}-workers'] == {'Options': {}, 'Subnet': '10.201.3.0/24'}
 
 
 def test_a_committed_isolation_needs_no_second_migration(package):

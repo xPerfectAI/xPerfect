@@ -30,10 +30,14 @@ import sys
 # configuration, so it is matched here and never printed; only the action is shown.
 NO_FREE_NETWORK_RANGE = (
     'Docker has no free network address range for this package. Remove Docker networks you '
-    'no longer use (see docker network ls) or add address pools in Docker settings, then launch again.')
+    'no longer use (see docker network ls), add address pools in Docker settings, or give each '
+    'package network an unused private range with --subnet frontend=<CIDR> --subnet workers=<CIDR>, '
+    'then launch again.')
 DOCKER_FAILURE_ACTIONS = (
     ('non-overlapping ipv4 address pool', NO_FREE_NETWORK_RANGE),
     ('all predefined address pools have been fully subnetted', NO_FREE_NETWORK_RANGE),
+    ('pool overlaps with other one on this address space',
+     'A chosen --subnet range is already used by a Docker network on this computer. Choose another range.'),
     ('port is already allocated',
      'A chosen port is already in use on this computer. Choose other --ui-port/--mcp-port values.'),
     ('address already in use',
@@ -325,14 +329,85 @@ def role_create_args(*, profile: str, name: str, role: str, volumes: dict, netwo
 ICC_OPTION = 'com.docker.network.bridge.enable_icc'
 
 
-def network_create_args(*, name: str, role: str, network: str, settings: dict) -> list[str]:
+def network_create_args(*, name: str, role: str, network: str, settings: dict,
+                        subnet: str | None = None) -> list[str]:
     """The package networks. An image that serves native tools through per-box
     sockets declares an isolated workers bridge: no container on it, box or
-    runtime, can reach another."""
+    runtime, can reach another. An explicit subnet only fixes the bridge's range;
+    Docker itself refuses one that overlaps a network it already has."""
     args = ['network', 'create', '--driver', 'bridge', '--label', 'xperfect.package=' + name]
+    if subnet:
+        args += ['--subnet', subnet]
     if role == 'workers' and settings.get('XPERFECT_WORKER_NETWORK') == 'isolated':
         args += ['--opt', ICC_OPTION + '=false']
     return args + [network]
+
+
+PRIVATE_RANGES = tuple(ipaddress.IPv4Network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+
+
+def validate_subnets(items: list[str] | None) -> dict[str, str]:
+    """Explicit ranges for the package bridges, given as ROLE=CIDR for frontend and/or workers."""
+    subnets: dict[str, ipaddress.IPv4Network] = {}
+    for item in items or []:
+        role, _, value = str(item).partition('=')
+        role = role.strip()
+        if role not in ('frontend', 'workers') or role in subnets:
+            raise ValueError('Give each range once as --subnet frontend=<CIDR> or --subnet workers=<CIDR>')
+        try:
+            network = ipaddress.IPv4Network(value.strip())
+        except ValueError:
+            raise ValueError(f'--subnet {role} needs an IPv4 network such as 10.<n>.<n>.0/24') from None
+        if not any(network.subnet_of(private) for private in PRIVATE_RANGES) or not 16 <= network.prefixlen <= 28:
+            raise ValueError(f'--subnet {role} must be a private range from /16 to /28')
+        subnets[role] = network
+    if len(subnets) == 2 and subnets['frontend'].overlaps(subnets['workers']):
+        raise ValueError('The frontend and workers ranges must not overlap')
+    return {role: str(network) for role, network in subnets.items()}
+
+
+def _route_destinations(output: str, *, bsd: bool) -> list[ipaddress.IPv4Network]:
+    """IPv4 destinations from `ip -4 route show table all` or BSD/macOS `netstat -rn -f inet`."""
+    destinations = []
+    for line in output.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if not bsd and fields[0] in ('unicast', 'local', 'broadcast', 'multicast', 'throw', 'unreachable',
+                                     'prohibit', 'blackhole', 'nat', 'anycast') and len(fields) > 1:
+            fields = fields[1:]
+        value = fields[0]
+        if value == 'default' or not value[:1].isdigit():
+            continue
+        address, _, prefix = value.partition('/')
+        octets = [part for part in address.split('%')[0].split('.') if part]
+        if not octets or len(octets) > 4 or not all(part.isdigit() for part in octets):
+            continue
+        # macOS abbreviates networks ("192.168.1" is a /24, "10.8/16" names its prefix).
+        length = int(prefix) if prefix.isdigit() else (8 * len(octets) if bsd else 32)
+        try:
+            destinations.append(ipaddress.IPv4Network('.'.join(octets + ['0'] * (4 - len(octets))) + f'/{length}',
+                                                      strict=False))
+        except ValueError:
+            continue
+    return destinations
+
+
+def host_route_overlaps(subnets: dict[str, str]) -> dict[str, list[str]]:
+    """Routes this computer already uses (LAN, VPN, VMs) that a chosen range would shadow."""
+    if not subnets:
+        return {}
+    for command, bsd in ((['ip', '-4', 'route', 'show', 'table', 'all'], False), (['netstat', '-rn', '-f', 'inet'], True)):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            routes = _route_destinations(result.stdout, bsd=bsd)
+            overlaps = {role: sorted({str(route) for route in routes if route.overlaps(ipaddress.IPv4Network(value))})
+                        for role, value in subnets.items()}
+            return {role: found for role, found in overlaps.items() if found}
+    raise ValueError("This computer's routes could not be read to check the --subnet ranges")
 
 
 def role_command(role: str) -> list[str]:
@@ -373,8 +448,10 @@ def _wait_until_runnable(endpoint: str, containers: dict[str, str], ui_port: int
 
 def launch(*, endpoint: str, name: str, image: str, native_image: str,
            ui_port: int, mcp_port: int, credentials, owner_id: str = "local-owner",
-           models: dict[str, str] | None = None, coordinator: dict | None = None) -> dict:
+           models: dict[str, str] | None = None, coordinator: dict | None = None,
+           subnets: dict[str, str] | None = None) -> dict:
     models = validate_models(models)
+    subnets = subnets or {}
     coordinator_environment = ({} if coordinator is None
                                else {COORDINATOR_CONFIG_KEY: validate_coordinator_config(coordinator)})
     if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', name):
@@ -415,7 +492,8 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
         # rollback by the exact identity its creation returned, never by name.
         for role, network in networks.items():
             identity = docker(endpoint, *network_create_args(name=name, role=role, network=network,
-                                                             settings=PROFILE_SETTINGS['local-linux']))
+                                                             settings=PROFILE_SETTINGS['local-linux'],
+                                                             subnet=subnets.get(role)))
             created.append(('network', identity if re.fullmatch(r'[a-f0-9]{64}', identity) else network))
         for volume in volumes.values():
             docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
@@ -964,8 +1042,19 @@ def main():
                         help='Exact native model for a worker profile, e.g. grok-build=<model>; repeatable')
     parser.add_argument('--coordinator-config', type=Path, metavar='PRIVATE_JSON',
                         help='Conversation model and helper routes (see docs/deployment.md); private file')
+    parser.add_argument('--subnet', action='append', metavar='ROLE=CIDR',
+                        help='Local profile: an unused private range for the frontend or workers network, '
+                             'for when Docker has no free default range; repeatable')
     args = parser.parse_args()
     models = parse_model_arguments(args.model)
+    subnets = validate_subnets(args.subnet)
+    if subnets and args.profile != 'local-linux':
+        raise ValueError('--subnet applies to the local profile')
+    shadowed = host_route_overlaps(subnets)
+    if shadowed:
+        raise ValueError('A --subnet range overlaps a route this computer already uses ('
+                         + '; '.join(f'{role}: {", ".join(found)}' for role, found in shadowed.items())
+                         + '). Choose another private range.')
     coordinator = (json.loads(_private_file(args.coordinator_config, 'coordinator_config').read_text())
                    if args.coordinator_config else None)
     if args.profile == 'hosted-xfs':
@@ -1010,7 +1099,7 @@ def main():
                 receipt = launch(endpoint=local_docker_endpoint(args.docker_host), name=args.name, image=args.service_image,
                                  native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
                                  credentials=credentials, owner_id=args.owner_id, models=models,
-                                 coordinator=coordinator)
+                                 coordinator=coordinator, subnets=subnets)
                 json.dump(receipt, output, indent=2)
     except BaseException:
         # A launch that rolled back leaves the same command ready to run again; credentials it

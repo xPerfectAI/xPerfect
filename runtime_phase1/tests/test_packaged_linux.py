@@ -1458,6 +1458,74 @@ def test_current_docker_pool_exhaustion_names_the_action():
     assert message.startswith('Docker package operation failed: network. Docker has no free network')
 
 
+def test_explicit_ranges_are_private_distinct_and_keep_the_isolated_workers_bridge():
+    module = _launch_module()
+    assert module.validate_subnets(['frontend=10.201.2.0/24', 'workers=10.201.3.0/24']) == {
+        'frontend': '10.201.2.0/24', 'workers': '10.201.3.0/24'}
+    for bad in (['frontend=8.8.8.0/24'], ['frontend=10.0.0.0/8'], ['frontend=10.1.1.0/30'],
+                ['frontend=10.1.1.0/24', 'frontend=10.1.2.0/24'], ['bridge=10.1.1.0/24'],
+                ['frontend=10.1.0.0/16', 'workers=10.1.3.0/24'], ['workers=not-a-range']):
+        with pytest.raises(ValueError):
+            module.validate_subnets(bad)
+    args = module.network_create_args(name='xperfect-fixture', role='workers', network='xperfect-fixture-workers',
+                                      settings={'XPERFECT_WORKER_NETWORK': 'isolated'}, subnet='10.201.3.0/24')
+    assert args[args.index('--subnet') + 1] == '10.201.3.0/24'
+    assert args[args.index('--opt') + 1] == module.ICC_OPTION + '=false'
+    assert '--subnet' not in module.network_create_args(name='xperfect-fixture', role='frontend',
+                                                        network='xperfect-fixture-frontend', settings={})
+
+
+MACOS_ROUTES = """Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.168.1.1        UGScg                 en0
+10.8/16            10.8.0.1           UGSc                utun4
+127                127.0.0.1          UCS                   lo0
+169.254            link#6             UCS                   en0      !
+192.168.1          link#6             UCS                   en0      !
+192.168.105        link#20            UC               bridge100      !
+224.0.0/4          link#6             UmCS                  en0
+"""
+LINUX_ROUTES = """default via 10.0.2.2 dev eth0 proto dhcp metric 100
+10.0.2.0/24 dev eth0 proto kernel scope link src 10.0.2.15
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown
+local 10.0.2.15 dev eth0 table local proto kernel scope host src 10.0.2.15
+broadcast 10.0.2.255 dev eth0 table local proto kernel scope link src 10.0.2.15
+"""
+
+
+@pytest.mark.parametrize('platform', ['macos', 'linux'])
+def test_a_range_that_would_shadow_a_route_on_this_computer_is_refused(monkeypatch, platform):
+    module = _launch_module()
+
+    def run(command, **kwargs):
+        if command[0] == 'ip':
+            if platform != 'linux':
+                raise FileNotFoundError(command[0])
+            return subprocess.CompletedProcess(command, 0, stdout=LINUX_ROUTES, stderr='')
+        return subprocess.CompletedProcess(command, 0, stdout=MACOS_ROUTES, stderr='')
+
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    shadowing = {'macos': {'frontend': '10.8.4.0/24', 'workers': '192.168.105.0/24'},
+                 'linux': {'frontend': '10.0.2.0/25', 'workers': '172.17.5.0/24'}}[platform]
+    assert set(module.host_route_overlaps(shadowing)) == {'frontend', 'workers'}
+    assert module.host_route_overlaps({'frontend': '10.201.2.0/24', 'workers': '10.201.3.0/24'}) == {}
+
+
+def test_launch_gives_each_package_network_its_chosen_range(tmp_path, monkeypatch):
+    module = _launch_module()
+    state = _stateful_docker(module, monkeypatch)
+    with (tmp_path / 'credentials.json').open('w') as credentials:
+        module.launch(endpoint='unix:///var/run/docker.sock', name='xperfect-fixture',
+                      image='sha256:' + 'a' * 64, native_image='sha256:' + 'b' * 64, ui_port=18880,
+                      mcp_port=18867, credentials=credentials,
+                      subnets={'frontend': '10.201.2.0/24', 'workers': '10.201.3.0/24'})
+    created = {call[-1]: call[call.index('--subnet') + 1] for call in state['calls']
+               if call[:2] == ('network', 'create')}
+    assert created == {'xperfect-fixture-frontend': '10.201.2.0/24', 'xperfect-fixture-workers': '10.201.3.0/24'}
+
+
 def test_a_launch_that_runs_out_of_networks_leaves_nothing_behind_and_can_run_again(tmp_path, monkeypatch):
     module = _launch_module()
     state = _stateful_docker(

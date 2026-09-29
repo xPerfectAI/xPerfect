@@ -840,7 +840,12 @@ class Upgrade:
         """
         network, endpoint = receipt['networks']['workers'], self.endpoint
         current = self._workers_isolated(network)
+        subnet = None
         if current is not None and current != isolated:
+            # The recreated bridge keeps its address range: a package launched with --subnet
+            # on a crowded Docker host must not need a free default range to upgrade.
+            subnet = _ok(endpoint, 'network', 'inspect', '--format', '{{range .IPAM.Config}}{{.Subnet}}{{end}}',
+                         network) or None
             listing = _ok(endpoint, 'ps', '--all', '--no-trunc', '--filter', 'network=' + network, '--format', '{{.ID}}')
             if {line.strip() for line in listing.splitlines() if line.strip()} - {runtime}:
                 raise UpgradeError('A workspace or account container still uses the workers network. Finish or '
@@ -853,7 +858,7 @@ class Upgrade:
         if current is None:
             _ok(endpoint, *base.network_create_args(
                 name=name, role='workers', network=network,
-                settings={'XPERFECT_WORKER_NETWORK': 'isolated'} if isolated else {}))
+                settings={'XPERFECT_WORKER_NETWORK': 'isolated'} if isolated else {}, subnet=subnet))
         attached = ((_inspect(endpoint, runtime) or {}).get('NetworkSettings') or {}).get('Networks') or {}
         if not isolated and network not in attached:
             _ok(endpoint, 'network', 'connect', '--alias', 'runtime', network, runtime)
