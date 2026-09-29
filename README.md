@@ -7,6 +7,9 @@ Raw models and harnesses alone can’t take over a full-time expert’s role. xP
 xPerfect runs the AI tools you already use, such as Codex, Claude Code and Grok, and keeps each
 task's files, progress and results together. It works on its own, on your computer or your server.
 
+**New here? [Follow the visual user guide](https://www.xperfect.ai/docs/)** — short steps, screenshots,
+light/dark themes, UI and MCP routes. [Guide source](docs/user-guide/README.md).
+
 **Choose how to start**
 - **On your computer:** `./xperfect start` gives one person a private web app. See below and the
   [quickstart](docs/quickstart.md).

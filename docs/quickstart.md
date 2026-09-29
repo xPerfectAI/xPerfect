@@ -1,5 +1,7 @@
 # xPerfect quickstart: your first result
 
+[Visual user guide](https://www.xperfect.ai/docs/) · [Editable guide source](user-guide/README.md)
+
 This walkthrough takes you from a fresh checkout to a finished result that you can open again
 later. It uses the private web app on your own computer.
 

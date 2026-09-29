@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>xPerfect User Guide · Create and reuse your AI expert</title>
+<meta name="description" content="A visual guide to running xPerfect, connecting your AI, creating reusable experts, adding files and skills, and scheduling work through the app or MCP.">
+<link rel="canonical" href="https://www.xperfect.ai/docs/">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to guide</a>
+<aside class="sidebar">
+<a class="brand" href="https://www.xperfect.ai/" aria-label="xPerfect home">xPerfect<b>✳</b>
+</a>
+<div class="edition">THE USER MANUAL / 2026</div>
+<nav aria-label="Guide chapters">
+<a href="#install">
+<span>01</span>Run xPerfect</a>
+<a href="#connect">
+<span>02</span>Connect your AI</a>
+<a href="#create">
+<span>03</span>Create an expert</a>
+<a href="#teach">
+<span>04</span>Files & skills</a>
+<a href="#schedule">
+<span>05</span>Schedule work</a>
+<a href="#reuse">
+<span>06</span>Reuse your expert</a>
+<a class="secondary" href="#proof">Current evidence</a>
+<a href="#help">Troubleshooting</a>
+</nav>
+<div class="sidebar-foot">
+<button class="theme" aria-label="Change appearance">
+</button>
+<div>One workspace.<br>Your AI. Your way.</div>
+</div>
+</aside>
+<div class="mobile-header">
+<a class="brand" href="https://www.xperfect.ai/" aria-label="xPerfect home">xPerfect<b>✳</b>
+</a>
+<button class="theme" aria-label="Change appearance">
+</button>
+</div>
+<details class="mobile-contents">
+<summary>In this guide</summary>
+<nav aria-label="Guide chapters">
+<a href="#install">01 · Run xPerfect</a>
+<a href="#connect">02 · Connect your AI</a>
+<a href="#create">03 · Create an expert</a>
+<a href="#teach">04 · Files & skills</a>
+<a href="#schedule">05 · Schedule work</a>
+<a href="#reuse">06 · Reuse your expert</a>
+<a href="#proof">Current limits</a>
+<a href="#help">Troubleshooting</a>
+</nav>
+</details>
+<main class="main" id="main-content">
+<div class="topline">
+<span class="dot">A PRACTICAL GUIDE</span>
+<span>LOCAL · UI · CODEX · CLAUDE</span>
+</div>
+<section id="start" class="hero">
+<div class="eyebrow">THE XPERFECT FIELD GUIDE <span>01 / START HERE</span>
+</div>
+<h1>Your expert.<br>
+<em>Ready when you are.</em>
+</h1>
+<p class="lead">Run xPerfect. Connect your AI. Give an expert its files and skills. Come back to the same workspace—from the app, Codex or Claude.</p>
+<div class="hero-actions">
+<a class="button" href="#install">Set up my expert <span>↗</span>
+</a>
+<a class="quiet" href="#proof">What works today →</a>
+</div>
+<div class="journey">
+<span>01 <b>Run</b>
+</span>
+<i>→</i>
+<span>02 <b>Connect</b>
+</span>
+<i>→</i>
+<span>03 <b>Create</b>
+</span>
+<i>→</i>
+<span>04 <b>Teach</b>
+</span>
+<i>→</i>
+<span>05 <b>Schedule</b>
+</span>
+<i>→</i>
+<span>06 <b>Reuse</b>
+</span>
+</div>
+<div class="note">
+<b>Current guide, not a launch-ready claim.</b> Screenshots come from a fresh local test. Platform and feature limits are marked below. The intended one-command Docker experience is still a delivery gap.</div>
+</section>
+<section id="install">
+<div class="section-label">01 / RUN XPERFECT</div>
+<h2>A private home for your experts.</h2>
+<p>A <b>workspace</b> keeps the files. A <b>worker</b> is the AI that uses them. xPerfect lets you keep and reuse both.</p>
+<div class="platforms">
+<article>
+<span class="tag good">TESTED HERE</span>
+<h3>Mac · local launcher</h3>
+<p>Git, Python 3.11+, uv and Claude Code or Codex must already be installed. This test used Apple Silicon.</p>
+</article>
+<article>
+<span class="tag">DOCUMENTED / NOT HOST-TESTED</span>
+<h3>Linux</h3>
+<p>The same local command is documented. A Linux-host install has not been executed in this session.</p>
+</article>
+<article>
+<span class="tag warn">NOT YET VERIFIED</span>
+<h3>Windows / Docker</h3>
+<p>Do not promise identical setup yet. The package launcher requires a Unix Docker socket. No Windows host was available for this test.</p>
+</article>
+</div>
+<ol class="steps">
+<li>
+<b>Get xPerfect.</b>
+<pre>
+<code>git clone https://github.com/xPerfectAI/xPerfect.git
+cd xPerfect
+./xperfect start</code>
+</pre>
+<p>Use the official <a href="https://docs.astral.sh/uv/getting-started/installation/">uv</a>, <a href="https://code.claude.com/docs/en/setup">Claude Code</a> or <a href="https://developers.openai.com/codex/cli/">Codex</a> setup if a prerequisite is missing.</p>
+</li>
+<li>
+<b>Save the unlock password.</b>
+<p>The first start asks you to choose one. Press Enter to generate one. Keep it in your password manager.</p>
+</li>
+<li>
+<b>Open the address shown in Terminal.</b>
+<p>Usually <code>http://127.0.0.1:8780</code>. Enter the password and choose <b>Unlock</b>.</p>
+</li>
+</ol>
+<details>
+<summary>Already running something on these ports?</summary>
+<pre>
+<code>./xperfect start --state-dir ~/.local/state/xperfect-demo   --api-port 18766 --ui-port 18780 --mcp-port 18767</code>
+</pre>
+<p>Use the same state directory for later commands. Never run two checkouts against the same state.</p>
+</details>
+<details>
+<summary>Docker / cloud parity: current limit</summary>
+<p>The existing Docker package is the shared foundation, but currently needs an explicit socket, service image ID, native image ID, ports and private credential output. There is no verified novice image-pull shortcut in this guide. The fresh Docker attempt hit exhausted local address pools; the local launcher was used to continue testing. Do not open local ports to the Internet as a cloud setup.</p>
+</details>
+</section>
+<section id="connect">
+<div class="section-label">02 / CONNECT YOUR AI</div>
+<h2>Bring the account you already use.</h2>
+<ol class="steps">
+<li>
+<b>Open Connections.</b>
+</li>
+<li>
+<b>Claude:</b> choose <b>Use existing Claude sign-in</b> if Claude Code already works on this computer.</li>
+<li>
+<b>Codex:</b> choose <b>Connect another account → Codex → My subscription</b>. Follow the provider's sign-in, then return.</li>
+<li>
+<b>Wait for Ready.</b>
+<p>Ready means connected. Your first completed task proves it can do the work.</p>
+</li>
+</ol>
+<figure>
+<img src="assets/connections.png" alt="Actual Connections page with an existing Claude subscription marked Ready" loading="lazy">
+<figcaption>Actual fresh setup: Claude subscription connected without copying credentials.</figcaption>
+</figure>
+<details>
+<summary>Account choice and safety</summary>
+<p>Use your intended account and exact model. xPerfect must not silently switch. A provider approval or personal-account confirmation belongs to you. Local workers run with your computer user's permissions. Your AI provider receives the task content required to do its work.</p>
+</details>
+</section>
+<section id="create">
+<div class="section-label">03 / CREATE YOUR EXPERT</div>
+<h2>Describe the job. Keep the workspace.</h2>
+<div class="tabs" role="tablist" aria-label="How you use xPerfect">
+<button class="active" data-route="ui" role="tab" aria-selected="true">Interface</button>
+<button data-route="codex" role="tab" aria-selected="false">Codex</button>
+<button data-route="claude" role="tab" aria-selected="false">Claude Code</button>
+</div>
+<div data-panel="ui">
+<ol class="steps">
+<li>
+<b>Open Run project.</b> Write a small, clear goal.</li>
+<li>
+<b>Choose Worker and Account.</b> Keep <b>Separate workspace</b> for the easiest start.</li>
+<li>
+<b>Select Run Project.</b> Watch the work, then open its result.</li>
+<li>
+<b>Keep it.</b> In Workspaces, choose <b>More → Keep as workspace</b> so it appears with your saved experts.</li>
+</ol>
+<div class="prompt">
+<span>TRY THIS</span>
+<p>Create a reusable Stock expert. Use the files and skill I attach. Save your result as expert-proof.txt.</p>
+</div>
+<figure>
+<img src="assets/run-project.png" alt="Actual Run project form with a Claude worker and selected account" loading="lazy">
+<figcaption>A goal, a worker and an account. Background and success criteria are optional.</figcaption>
+</figure>
+</div>
+<div data-panel="codex" hidden>
+<p>Start xPerfect first. Add its existing local MCP server once:</p>
+<pre>
+<code>codex mcp add xperfect -- /absolute/path/to/xPerfect/xperfect mcp</code>
+</pre>
+<p>Start an interactive Codex session, authorize xPerfect’s requested routine tools, and ask:</p>
+<div class="prompt">
+<span>PASTE INTO CODEX</span>
+<p>Use xPerfect to list my workspaces. Create a reusable Stock expert with my selected connected account. Add my files and skill inside its native harness. Run it and return the saved result and the workspace ID so I can use it again.</p>
+</div>
+<p>If you chose a custom state directory, append <code>--state-dir /absolute/path/to/state</code> after <code>mcp</code>. Use the setup you actually launched.</p>
+</div>
+<div data-panel="claude" hidden>
+<p>Start xPerfect first. From the project where you use Claude Code:</p>
+<pre>
+<code>claude mcp add xperfect -- /absolute/path/to/xPerfect/xperfect mcp</code>
+</pre>
+<p>Start a new Claude session, authorize xPerfect’s requested routine tools, and ask:</p>
+<div class="prompt">
+<span>PASTE INTO CLAUDE</span>
+<p>Use xPerfect to list my workspaces. Create a reusable Stock expert with my selected connected account. Add my files and skill inside its native harness. Run it and return the saved result and the workspace ID so I can use it again.</p>
+</div>
+<p>For custom state, add <code>--state-dir /absolute/path/to/state</code>. Authorize the requested workspace tools when your client asks. Account sign-in alone does not configure the client’s tool permissions.</p>
+</div>
+<details>
+<summary>Why not use the app's Automatic connection button?</summary>
+<p>In the tested default local setup, it is disabled because no client is registered. Manual mode is also blocked and shows the UI port instead of the separate MCP port. Use the documented stdio command above until this setup gap is fixed.</p>
+<img src="assets/mcp-setup-gap.png" alt="Actual automatic MCP panel reports missing registered client" loading="lazy">
+</details>
+</section>
+<section id="teach">
+<div class="section-label">04 / ADD FILES & SKILLS</div>
+<h2>Teach with files. No extra machinery.</h2>
+<ol class="steps">
+<li>
+<b>Add files.</b> Use the button on Run project, or Files in an existing workspace.</li>
+<li>
+<b>Add an ordinary SKILL.md file or skill ZIP.</b> It contains a <code>SKILL.md</code> with a name, description and instructions.</li>
+<li>
+<b>Ask the worker to install it normally.</b>
+<p>“Install this skill into your harness's normal skill folder. Keep these inputs and use the skill for future requests.”</p>
+</li>
+<li>
+<b>Ask for a real result.</b> Open the output file. Send a second request to check reuse.</li>
+</ol>
+<div class="split">
+<article class="soft">
+<h3>A tiny test kit</h3>
+<p>One skill and one CSV. The skill contains a hidden test phrase and asks for a stock total. The request itself does not reveal the phrase.</p>
+<a class="quiet" href="assets/SKILL.md" download>Download plain skill ↓</a>
+<br>
+<a class="quiet" href="assets/onboarding-proof.zip" download>Download ZIP version ↓</a>
+<br>
+<a class="quiet" href="assets/stock.csv" download>Download sample data ↓</a>
+</article>
+<article class="soft">
+<h3>Keep it native</h3>
+<p>Claude uses <code>.claude/skills/</code>; Codex uses <code>.agents/skills/</code>. Let the worker use its harness. Do not add a custom router, plugin service or phrase-matching code.</p>
+</article>
+</div>
+<div class="note">MCP file transfer and browser downloads were verified. Browser upload has not been verified in this guide’s test run.</div>
+</section>
+<section id="schedule">
+<div class="section-label">05 / RUN IT LATER</div>
+<h2>Give the same expert a next time.</h2>
+<ol class="steps">
+<li>
+<b>Open Schedules → New schedule.</b>
+</li>
+<li>
+<b>Choose your saved workspace.</b> Write what it should do.</li>
+<li>
+<b>Choose a one-time run or repeat.</b> Confirm the time zone before saving.</li>
+<li>
+<b>Check the actual result.</b> A saved schedule alone is not proof that it ran.</li>
+</ol>
+<div class="prompt">
+<span>OR ASK YOUR CONNECTED AI</span>
+<p>Schedule this xPerfect workspace to run the installed onboarding-proof skill once in five minutes. Tell me when it is due, then show the completed run and saved file.</p>
+</div>
+<p>Keep xPerfect and the computer running. If the chosen account is busy, work may wait. For a recurring job, verify one real due run before relying on it.</p>
+<div id="schedule-proof" class="note">Verified: one-time jobs from the UI and Claude MCP fired at their due times and saved real output. The UI one-time schedule paused itself after completion.</div>
+</section>
+<section id="reuse">
+<div class="section-label">06 / REUSE & SHARE THE INTERFACE</div>
+<h2>One expert. More than one way in.</h2>
+<div class="split">
+<article class="soft">
+<h3>In the app</h3>
+<p>Open <b>Workspaces</b>, find your expert, and open it. Use <b>Steer</b> for the next request. Reopen Files to check the saved result.</p>
+<p>Use <b>More → Duplicate</b> to copy ordinary files. <b>Current limit:</b> the tested copy lost its installed native skill. Keep using the original expert, or explicitly reinstall the skill in the copy and test it. A personal account can also require a fresh confirmation.</p>
+</article>
+<article class="soft">
+<h3>In Codex or Claude</h3>
+<p>“Find my Stock expert in xPerfect. Ask it to summarize this new file. Keep using the same workspace.”</p>
+<p>The client discovers the actual tools. Save the worker/workspace ID rather than inventing a new endpoint for each expert.</p>
+</article>
+</div>
+<details>
+<summary>Optional skill: “xPerfect this…”</summary>
+<p>The repository already includes <code>skills/connect-glasshive/SKILL.md</code>. Its name stays for compatibility. It is guidance for the native client, not another service.</p>
+<p>
+<b>Current gap:</b> it points first-time users to the disabled hosted setup panel and recommends a launch shortcut that plain local clients cannot always use. Use the working stdio setup and normal request above until the skill gains the same local instructions. Do not create a second router to work around it.</p>
+</details>
+<details>
+<summary>Build it into a product: MCP / API</summary>
+<p>Use the existing control plane: list workspaces, create a project and worker, run or continue it, read status and download artifacts. Local stdio uses the current OS identity. Local HTTP uses a separate private token. A hosted service needs supported human authentication, TLS and tenant isolation.</p>
+<div class="tool-grid">
+<code>workspace_list</code>
+<code>project_create</code>
+<code>worker_create</code>
+<code>worker_run</code>
+<code>worker_message</code>
+<code>workspace_status</code>
+<code>workspace_artifacts</code>
+<code>workspace_duplicate</code>
+</div>
+<p>The direct local API is separate from the UI: by default <code>127.0.0.1:8766</code>. Use its private API token in the Authorization header, never a URL. Docker packages keep that runtime API private; use their exposed authenticated MCP.</p>
+<p>
+<code>workspace_launch</code> is not currently a universal plain-client shortcut: the public documentation requires trusted source identity. Generic clients must use the supported project/worker steps. See the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/developer.md">developer contract</a>.</p>
+</details>
+</section>
+<section id="proof">
+<div class="section-label">CURRENT EVIDENCE</div>
+<h2>What works. What still needs fixing.</h2>
+<p>Fresh public source <code>5d9a8512</code> · 29 September 2026. These are flow results, not a percentage of code complete.</p>
+<div id="results">
+<p>
+<b>Tested 29 September 2026 · public source 5d9a851.</b> A fresh Mac state, real Chrome and separate native Codex / Claude clients. “Partial” means the stated path still has a gap.</p>
+<table>
+<thead>
+<tr>
+<th>User path</th>
+<th>Observed result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Run locally</td>
+<td>Mac host launcher passed. Docker stopped at exhausted local network pools. Windows, Linux-host and cloud parity remain unverified.</td>
+</tr>
+<tr>
+<td>Connect and run</td>
+<td>Existing Claude subscription became Ready. The UI produced welcome.txt with the selected account and exact Claude Opus 5.5 model.</td>
+</tr>
+<tr>
+<td>Keep and reuse</td>
+<td>UI result survived reload; a follow-up changed the same file. Claude MCP found and continued the same worker by alias.</td>
+</tr>
+<tr>
+<td>Copy</td>
+<td>Ordinary files copied (17 via Claude; 18 via Codex). But a real UI run of the skilled copy returned Unknown skill: its installed native skill was lost. Personal-account copies also need another owner confirmation.</td>
+</tr>
+<tr>
+<td>Files and skill</td>
+<td>MCP text bootstrap delivered the ordinary SKILL.md and CSV. Claude invoked its native Skill tool, produced the hidden phrase and total 51, then reused the skill. Browser download matched all 56 output bytes. Browser upload was not verified in this test run.</td>
+</tr>
+<tr>
+<td>Schedule</td>
+<td>UI one-time work fired at 13:31 UTC; file contains UI-SCHEDULE-OK 3. Claude MCP one-time work fired at 13:29 UTC; file contains total_quantity=51. Codex also completed its one-time skill run at 13:48 UTC. None of these jobs repeats.</td>
+</tr>
+<tr>
+<td>External clients / API</td>
+<td>Both clients discover MCP tools. Claude completed native work. Codex host recovery completed creation, native skill run, follow-up, 18-file copy and a real one-time scheduled run. Personal-account binding remains separate. Authenticated API file bytes matched the browser download; unauthenticated access returned 401.</td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img src="assets/skill-result.png" alt="Installed skill produced the hidden phrase and correct stock total, then ran again" loading="lazy">
+<figcaption>Ordinary skill file → native Skill tool → saved result → reuse.</figcaption>
+</figure>
+<figure>
+<img src="assets/schedule-result.png" alt="Actual scheduled worker completed and saved a downloadable result" loading="lazy">
+<figcaption>Real schedule, actual saved output. It ran at its due time without Run now.</figcaption>
+</figure>
+<p>The complete new-user flow is <b>not yet onboarding-ready</b>. This guide never turns an untested route into a passed one.</p>
+</div>
+<div class="note">Screenshots use synthetic tasks and sample files. The test phrase in the sample skill is demonstration text, not a credential.</div>
+</section>
+<section id="help">
+<div class="section-label">WHEN SOMETHING STOPS</div>
+<h2>Follow the cause, not a retry loop.</h2>
+<table>
+<thead>
+<tr>
+<th>You see</th>
+<th>Do this</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No ready account</td>
+<td>Connect the account for the selected worker. Wait for Ready, then run one small task.</td>
+</tr>
+<tr>
+<td>Queued / account busy</td>
+<td>Check the active workspace. Let it finish; do not launch copies to force progress.</td>
+</tr>
+<tr>
+<td>Approval required</td>
+<td>The account owner must approve the exact request. Do not switch identities.</td>
+</tr>
+<tr>
+<td>Missing result</td>
+<td>Check Watch and Files. A completed model answer and a downloadable artifact are different evidence.</td>
+</tr>
+<tr>
+<td>Docker network error</td>
+<td>Check the daemon's actual error. Do not prune personal volumes. The tested launcher did not expose address-pool exhaustion clearly.</td>
+</tr>
+<tr>
+<td>App restarted</td>
+<td>Use the same state directory. Reopen the workspace and verify files before resubmitting work.</td>
+</tr>
+</tbody>
+</table>
+<details>
+<summary>Start, check, stop</summary>
+<pre>
+<code>./xperfect doctor
+./xperfect stop
+./xperfect start</code>
+</pre>
+<p>Stop keeps saved state. Use the same custom state argument if one was selected. Stop only your own instance and avoid interrupting work you want to keep running.</p>
+</details>
+<p class="sources">Source references: <a href="https://github.com/xPerfectAI/xPerfect">xPerfect public source</a> · <a href="https://developers.openai.com/codex/mcp/">Codex MCP</a> · <a href="https://code.claude.com/docs/en/mcp">Claude MCP</a>. <a href="https://github.com/xPerfectAI/xPerfect/tree/main/docs/user-guide">Guide source and maintenance</a>. Results describe the dated source above; later product changes need fresh verification before these limits change.</p>
+</section>
+<footer>
+<span>
+<a href="https://www.xperfect.ai/">xPerfect home</a> · <a href="https://github.com/xPerfectAI/xPerfect">Open source · Apache 2.0</a>
+</span>
+<a href="#start">Back to top ↑</a>
+</footer>
+</main>
+<script src="guide.js" defer>
+</script>
+</body>
+</html>
