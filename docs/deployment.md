@@ -39,6 +39,26 @@ python3 deployment/linux/launch.py \
 To use Grok, add `--model grok-build=<model>` with an exact ID from `grok models`. The launcher
 never picks a model; the choice is saved in the package and kept across restarts and upgrades.
 
+The same package runs on Docker Desktop (macOS or Windows) as well as on a Linux Docker host. On
+Windows, use Docker Desktop's WSL 2 integration and run these commands inside the WSL distro; the
+Docker endpoint there is also `unix:///var/run/docker.sock`. If a launch stops without creating
+anything, correct the reported cause and run the same command again.
+
+**Docker has no free network range.** A Docker host with many networks can run out of default
+address ranges. Give the package's two networks unused private ranges instead, for example
+`--subnet frontend=10.201.0.0/24 --subnet workers=10.201.1.0/24`. The launcher refuses a range that
+overlaps a route this computer uses (your LAN, a VPN or a VM) and Docker refuses one another
+network holds, so pick others if either says so.
+
+**After Docker or the computer restarts,** the package stays stopped until you start it:
+
+```sh
+docker start xperfect-local-runtime xperfect-local-ui xperfect-local-mcp
+```
+
+State and files stay in the package's volumes, and the unlock password in the credentials file is
+unchanged.
+
 By default a conversation's helpers use the account chosen for the conversation, so they queue on
 that one account. To let helpers run on other connected accounts at the same time, give the
 package a private coordinator file with `--coordinator-config /private/coordinator.json` at launch,
