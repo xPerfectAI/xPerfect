@@ -524,6 +524,7 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
                **model_environment(models), **coordinator_environment}
     environments = {'runtime': runtime,
                     'ui': {**common, 'GLASSHIVE_HUMAN_AUTH_MODE': 'local_password',
+                           'XPERFECT_LOCAL_MCP_URL': f'http://127.0.0.1:{mcp_port}/mcp',
                            'GLASSHIVE_LOCAL_AUTH_NAMESPACE': secrets.token_hex(16),
                            'GLASSHIVE_LOCAL_AUTH_THROTTLE_KEY': secrets.token_urlsafe(48)},
                     'mcp': {**common, 'GLASSHIVE_MCP_API_KEY': mcp_key}}

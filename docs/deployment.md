@@ -22,7 +22,9 @@ does not make remote inference offline, local-only, or independent of the provid
 
 ### Packaged Linux
 
-With Python 3.11 or newer and Docker running, use the same xPerfect entry point:
+Download the [public source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip)
+and open a terminal in its folder. With Python 3.11 or newer and Docker running,
+use the same xPerfect entry point:
 
 ```sh
 ./xperfect start --docker
@@ -33,6 +35,11 @@ creates private state under `~/xperfect-local`. Open the printed app URL, use
 `ui_password` from the private credentials file, and connect your AI account in
 **Connections**. No image names or IDs are required. The MCP URL and token are in
 that same private file; do not share it.
+
+For this local container package, connect an MCP client to `mcp_url` with the
+private `mcp_api_key` as its bearer token. This route needs no hosted OAuth client
+registration. The UI's automatic AI-app setup currently applies to the host
+launcher; use the private credentials file for the container package.
 
 The container package creates one fixed local owner and a generated password;
 the ordinary receipt contains URLs and image identities only. Existing state is

@@ -1,16 +1,9 @@
 name: Public package start
 
-# A critical-path acceptance check on the isolated delivery branch or on demand.
+# A manual, critical-path acceptance check; retain valid proof between changes.
 # No build, provider sign-in, full release bank, or extra platform matrix.
 on:
   workflow_dispatch:
-  push:
-    branches: ['codex/mf06-single-start']
-    paths:
-      - .github/workflows/check-public-start.yml
-      - deployment/linux/launch.py
-      - deployment/linux/candidate-images.json
-      - xperfect
 
 permissions:
   contents: read

@@ -22,8 +22,9 @@ light/dark themes, UI and MCP routes. [Guide source](docs/user-guide/README.md).
 
 ### With Docker
 
-With Python 3.11 or newer and Docker running, start the reviewed container package
-from this checkout:
+Get the [public source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip)
+and open a terminal in its folder. With Python 3.11 or newer and Docker running,
+start the reviewed container package:
 
 ```sh
 ./xperfect start --docker
