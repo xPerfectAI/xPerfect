@@ -74,13 +74,13 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 ## 2026-08-18 — Reusable workspaces and connected accounts
 
 - **Added:** Reopen saved workspaces by human-readable name or alias and set up native tools in an idle workspace.
+- **Added:** Native client plugin packages and persistent personal-workspace plugins, alongside direct MCP launch and follow-up.
 - **Improved:** Supported workspace setup reuses the selected connected account; Claude sign-in and workspace tools work together without copying unrelated sessions.
 - **Fixed:** Stale workspace sessions, account removal and credential-bearing sandbox cleanup have explicit recovery paths.
 
-## 2026-08-14 — Simpler MCP setup and native plugins
+## 2026-08-14 — Simpler MCP setup
 
 - **Improved:** External AI setup discovers the appropriate connection path; Codex OAuth reconnect retains the required scope.
-- **Added:** Native client plugin packages and persistent personal-workspace plugins, alongside direct MCP launch and follow-up.
 - **Improved:** Workspace discovery tolerates large listing requests, and database/service shutdown waits for its own background work.
 
 ## 2026-08-11 — A workspace control room
@@ -99,10 +99,11 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Added:** A conversation-provider adapter and OpenAI-compatible Responses endpoint, including supported streaming options.
 - **Improved:** Activity stays separate from the final answer; provider authentication, rate limits and cancellation keep their own meaning.
 - **Improved:** Queued work can recover without repeated API polling. HTTP MCP requires isolated authentication.
+- **Added:** Retry-location telemetry helps identify where waiting work is being retried.
 
 ## 2026-07-24 — Live activity without exposing task content
 
-- **Added:** Bounded Claude activity and retry-location telemetry tied to the active run.
+- **Added:** Bounded Claude activity telemetry tied to the active run.
 - **Fixed:** Incremental activity stays cumulative, completed transcripts remain available, and telemetry responses avoid task content.
 
 ## 2026-07-22 — Bedrock and recorded usage
