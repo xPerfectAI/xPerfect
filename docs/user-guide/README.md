@@ -9,7 +9,7 @@ wiki repository.
 ## Edit and preview
 
 - `index.html`: six user journeys, commands, screenshots and dated verified limits.
-- `styles.css` and `guide.js`: responsive light/dark presentation and small browser enhancements.
+- `styles.css` and `guide.js`: website-matched graphite/pearl/taupe colors; system light/dark by default, with an optional system → light → dark cycle. The system choice follows OS changes during the visit.
 - `assets/`: only reviewed product screenshots with synthetic tasks and downloadable sample files.
 
 From this folder, run `python3 -m http.server 19990 --bind 127.0.0.1`, then open

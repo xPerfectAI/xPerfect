@@ -1,8 +1,9 @@
-:root{color-scheme:light;--bg:#f8f7f3;--surface:#fff;--ink:#242520;--muted:#696c63;--line:#dedfd6;--accent:#d65332;--soft:#eeeFE7;--note:#fff0d7;--good:#376754;--shadow:0 16px 50px #292b1810}
+:root{color-scheme:light;--bg:#f4f4f1;--surface:#faf9f5;--ink:#17191e;--muted:#555a62;--line:#d3d4d1;--accent:#806a4e;--soft:#e8e9e6;--note:#eee7dc;--good:#426345;--shadow:0 16px 50px #17191e10}
+:root[data-appearance="dark"]{color-scheme:dark;--bg:#111318;--surface:#1a1d22;--ink:#fdf6ec;--muted:#c7c8c4;--line:#35383e;--accent:#d8c3a5;--soft:#202329;--note:#2d2822;--good:#93bd91;--shadow:0 16px 50px #0003}
+@media(prefers-color-scheme:dark){:root:not([data-appearance="light"]){color-scheme:dark;--bg:#111318;--surface:#1a1d22;--ink:#fdf6ec;--muted:#c7c8c4;--line:#35383e;--accent:#d8c3a5;--soft:#202329;--note:#2d2822;--good:#93bd91;--shadow:0 16px 50px #0003}}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth;scroll-padding-top:30px}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
-body.dark{color-scheme:dark;--bg:#151817;--surface:#202421;--ink:#f2f1e8;--muted:#a6b0a5;--line:#363d35;--accent:#f39776;--soft:#292f29;--note:#382e20;--good:#a3c6ae;--shadow:0 16px 50px #0003}
 a{color:inherit}
 button,a{ -webkit-tap-highlight-color:transparent}
 button{font:inherit;cursor:pointer}

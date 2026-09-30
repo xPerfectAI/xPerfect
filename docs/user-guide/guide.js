@@ -1,20 +1,27 @@
-const body = document.body;
-let stored;
-try { stored = localStorage.getItem('xp-manual-theme'); } catch { /* Reading still works when storage is unavailable. */ }
-if (stored === 'dark' || (!stored && matchMedia('(prefers-color-scheme: dark)').matches)) {
-  body.classList.add('dark');
-}
+// System appearance is the default. An explicit visitor choice remains optional.
+const root = document.documentElement;
+const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+let appearance = 'system';
+try {
+  const stored = localStorage.getItem('xp-manual-theme');
+  if (['system', 'light', 'dark'].includes(stored)) appearance = stored;
+} catch { /* The manual remains readable without storage. */ }
 function renderTheme() {
+  root.dataset.appearance = appearance;
+  const actual = appearance === 'system' ? (systemTheme.matches ? 'dark' : 'light') : appearance;
   document.querySelectorAll('.theme').forEach(button => {
-    button.textContent = body.classList.contains('dark') ? '☀ Light appearance' : '◐ Dark appearance';
-    button.setAttribute('aria-pressed', String(body.classList.contains('dark')));
+    button.textContent = appearance === 'system' ? `◐ System · ${actual}` : `◐ ${appearance[0].toUpperCase()}${appearance.slice(1)}`;
+    const next = { system: 'light', light: 'dark', dark: 'system' }[appearance];
+    button.setAttribute('aria-label', `Appearance: ${appearance}. Switch to ${next}.`);
+    button.title = 'Cycle system, light and dark appearance';
   });
 }
 renderTheme();
+systemTheme.addEventListener('change', renderTheme);
 document.querySelectorAll('.theme').forEach(button => {
   button.addEventListener('click', () => {
-    body.classList.toggle('dark');
-    try { localStorage.setItem('xp-manual-theme', body.classList.contains('dark') ? 'dark' : 'light'); } catch { /* Appearance remains usable without persistence. */ }
+    appearance = { system: 'light', light: 'dark', dark: 'system' }[appearance];
+    try { localStorage.setItem('xp-manual-theme', appearance); } catch { /* Keep the choice for this visit. */ }
     renderTheme();
   });
 });
