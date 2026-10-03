@@ -8,6 +8,9 @@ Keep xPerfect publish-ready while preserving a strict line between:
 - private user-specific state
 - external client integrations
 
+For documentation ownership, names and maintenance, follow the
+[core documentation rules](00_Key_Principles.md#8-preserve-learning-without-drift).
+
 ## Repository Structure
 
 The repository is organized as follows:

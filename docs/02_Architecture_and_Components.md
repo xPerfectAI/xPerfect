@@ -66,6 +66,25 @@ durable Pause intent. A committed Pause or paused run remains paused even if a c
 row stale. Retry recovery cannot override a Work Stop, compute-release claim, termination boundary or
 concurrently admitted generation.
 
+Conversation capacity refusals default to a one-second `Retry-After`, the smallest valid HTTP delay.
+The same trusted lane reaches durable reservation and retry backoff; bounded jitter is unchanged.
+Mission and delegation retry keep their five-second default. Existing explicit host-busy or general
+retry settings remain authoritative; admission, durable capacity and cancellation gates are unchanged.
+
+Successful native Grok model catalogs may be reused for at most 30 seconds, keyed to the installed
+binary and current environment, authentication and configuration file identities. Changed identity
+refreshes immediately; empty or failed lookups are not cached. This affects catalog discovery only,
+not live provider authentication, model selection authority or capability grants.
+Concurrent lookups with the exact same scope share one in-flight result, including failure; a later
+lookup retries a failed probe. No global mutex is held while the native CLI is running.
+
+Verified selected output files retain their typed publication envelope on a completed conversation
+graph transfer as well as an assistant response. The envelope keeps the original publisher, owner,
+conversation, source message, stream, logical turn, invocation, run and attempt. The host retains
+transfer metadata until the successful visible final response; it does not emit intermediate text
+or attachments. The existing host attachment importer remains the authorization and byte-validation
+boundary. Refused, hidden and interrupted final paths do not publish retained files.
+
 ## 3. Execution Substrate
 
 Current phase-1 substrate:
@@ -115,6 +134,11 @@ This shape preserves the important separation:
 
 ## Native Grok adapter contract
 
+The native session-title helper defaults to `grok-4.7` through the CLI's existing
+`GROK_SESSION_SUMMARY_MODEL` setting. An explicit native helper-model setting remains authoritative.
+This helper has no reasoning-effort field; the selected conversation model and effort remain
+unchanged. Native title generation runs asynchronously and does not gate the public response.
+
 `grok_runtime.py` supplies Docker and host adapters on the existing worker interface.
 Host runs retain `HostNativeCliMixin` process supervision, generation fencing, capacity,
 Pause/Stop and restart handling. Container runs retain `BaseCliWorkerRuntime`. Both execute
@@ -128,10 +152,27 @@ and cancellation. It verifies the returned model and requested reasoning option 
 `WPR_GROK_BIN` selects the host executable (`WPR_GROK_CONTAINER_BIN` selects the container executable) and `WPR_GROK_REASONING_EFFORT` selects an optional
 native-advertised effort. Source protocol reference: [official Grok agent-mode guide](https://github.com/xai-org/grok-build/blob/4247f661689354b831191f11eeeac8424993fe3d/crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md).
 
+An admitted conversation attempt sets native `GROK_SUBAGENTS=0` and `GROK_WORKFLOWS=0`
+because its process closes at turn end. This also applies when loading a saved native session.
+These flags remove the native `GrokBuild:task` subagent tool and the separate `Workflow` tool,
+including their foreground use. The existing MCP worker delegation remains available for durable
+background work when authorized by the owner. Mission runs retain their configured native Task
+and Workflow capabilities. Native background shell commands
+still have process-local lifetime; they do not gain durable worker completion or callback delivery.
+
 Native updates, exact session identity and terminal results use separate typed envelopes. Unknown
 native child events remain native data; they do not invent xPerfect workers. Usage is unavailable
 unless independently projected from an authoritative native event. A terminal error, cancellation,
 protocol mismatch or exceeded output limit cannot become a successful empty result.
+The bridge accepts the native `_x.ai/session_notification` envelope with the same parent-session
+and event-identity checks as ordinary updates; persisted update names do not define the live wire.
+
+After a successful result is emitted, the bridge uses standard `session/close` only when the
+native initialization advertises its close capability. The request waits at most two seconds;
+cleanup failure cannot replace that result. The exact session key and history remain available
+for the next normal load. Transport cleanup closes stdin and allows up to half a second for EOF
+exit before the existing exact-process termination fallback. These waits are bounded cleanup
+costs and can delay final process completion; they do not gate the already emitted result.
 
 Controls use a private, run-and-attempt-scoped mailbox behind the ordinary owner-authorized control
 plane. Permission, question, elicitation and plan-exit requests require a response; absent or expired
@@ -151,6 +192,24 @@ The workspace UI displays native permission options, questions, plan approval an
 A queued interjection is an acknowledgement, not proof the model consumed it. Native cancellation
 requests are distinct from the existing interrupt/terminate lifecycle, which confirms process exit.
 Expired permission requests cancel; unknown controls and stale attempts fail explicitly.
+
+An observed mission permission request also publishes the existing attention callback with its
+exact run, attempt, native session, request fingerprint and expiry. Active Work presents the
+native options without changing the running compute state or releasing its lease. Owner responses
+reuse the signed work action and exact-attempt mailbox. An unconfirmed native response stays
+pending. Its retained acknowledgement can settle the same submitted operation after the question
+expires or disappears; recovery does not send another approval. A new response to an expired
+question, a changed choice, or a stale generation is rejected. The existing resolved event
+withdraws that question before publishing the next live permission request. If a previously
+submitted operation has lost its local acknowledgement, its exact reserved action remains
+confirmation pending; recovery never treats missing confirmation as consent or a rejection.
+
+An admitted mission's approval wait uses its exact run-local capability grant expiration. Every
+question shares that absolute deadline; opening another question does not renew it. This value
+comes from validated admission, not worker-supplied bootstrap data. Live conversations and runs
+without that admitted bound retain the 60-second wait. Stop still cancels immediately, and no
+approval choice or capability is granted by extending the wait. The callback-delivery retry
+horizon is separate from the mission authority and is not an execution deadline.
 
 Authorized broker MCP configuration is projected structurally into ACP `mcpServers`. Existing
 Library `claude_project_mcp` remote configuration is a compatible bootstrap representation for

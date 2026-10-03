@@ -2,6 +2,9 @@
 
 Use this playbook to rapidly test whether xPerfect is behaving like a real powerful workstation-sandbox runtime instead of a toy demo.
 
+Follow the [batch delivery and QA rule](00_Key_Principles.md#7-think-and-plan-then-complete-the-work).
+Select affected cases under the agreed QA scope; this catalog is not an automatic full-suite gate.
+
 ## 1. Core Project Flow
 
 1. Create a project with a real goal and success criteria.

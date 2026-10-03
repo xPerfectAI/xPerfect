@@ -86,11 +86,8 @@ def _indent_columns(line: str) -> int:
     return columns
 
 
-def final_report_marker(text: str) -> tuple[int, int] | None:
-    """Locate the report protocol's own marker: the first FINAL REPORT line that is Markdown body
-    text, not fenced or indented code or a block quote (CommonMark). A code-wrapped marker counts
-    only alone on its line. Anything after the marker, including literal FINAL REPORT text, is
-    report content."""
+def markdown_body_lines(text: str):
+    """Yield body lines and offsets, excluding code blocks and block quotes."""
     fence = ""
     offset = 0
     for line in str(text or "").splitlines(keepends=True):
@@ -105,11 +102,21 @@ def final_report_marker(text: str) -> tuple[int, int] | None:
         elif opener:
             fence = opener.group("fence")
         elif _indent_columns(content) < 4 and not content.lstrip().startswith(">"):
-            match = _FINAL_REPORT_RE.match(content)
-            wrap = match.group("wrap") if match else None
-            if match and not (wrap and wrap.startswith("`") and content[match.end():].strip()):
-                return offset + match.start(), offset + match.end()
+            yield offset, content
         offset += len(line)
+
+
+def final_report_marker(text: str) -> tuple[int, int] | None:
+    """Locate the report protocol's own marker in Markdown body text.
+
+    A code-wrapped marker counts only alone on its line. Anything after the
+    marker, including literal FINAL REPORT text, is report content.
+    """
+    for offset, content in markdown_body_lines(text):
+        match = _FINAL_REPORT_RE.match(content)
+        wrap = match.group("wrap") if match else None
+        if match and not (wrap and wrap.startswith("`") and content[match.end():].strip()):
+            return offset + match.start(), offset + match.end()
     return None
 
 

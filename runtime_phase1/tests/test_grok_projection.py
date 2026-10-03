@@ -179,3 +179,21 @@ def test_service_persists_grok_native_session_and_child_projection():
     assert updates[0]['native_session_id']=='native'
     assert json.loads(updates[0]['native_capabilities_json'])['provider']=='grok'
     assert len(events)==1
+
+
+def test_fresh_mcp_grok_effort_is_preserved_for_native_validation():
+    from workers_projects_runtime.mcp_server import _apply_effort_to_bundle
+    original = {"env": {"EXISTING": "value"}}
+    projected = _apply_effort_to_bundle(original, profile="grok-build", effort="high")
+    assert projected["env"] == {"EXISTING": "value", "WPR_GROK_REASONING_EFFORT": "high"}
+    assert original["env"] == {"EXISTING": "value"}
+    assert _apply_effort_to_bundle(original, profile="grok-build", effort="default") == original
+
+
+def test_current_grok_models_keep_effort_metadata_during_recovery():
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS, _configured_grok_conversation_model
+    for native in ("grok-4.7", "grok-4.7-build-fast"):
+        model = _configured_grok_conversation_model(native)
+        assert model is GLASSHIVE_MODELS[f"grok-build:{native}"]
+        assert model.recommended_effort == "high"
+        assert {"low", "medium", "high", "xhigh"} <= set(model.effort_choices)

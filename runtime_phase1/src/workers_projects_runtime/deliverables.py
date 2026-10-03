@@ -10,6 +10,8 @@ import stat
 import uuid
 import zipfile
 from pathlib import Path
+from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import quote
 
@@ -100,7 +102,7 @@ OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def is_user_deliverable_relative_path(
-    relative_path: Path | str, *, is_directory: bool = False
+    relative_path: Path | str, *, is_directory: bool = False, explicit_selection: bool = False
 ) -> bool:
     try:
         rel = Path(str(relative_path))
@@ -114,7 +116,9 @@ def is_user_deliverable_relative_path(
     lowered_parts = [part.lower() for part in parts]
     if any(part in NON_DELIVERABLE_DIR_NAMES for part in lowered_parts):
         return False
-    if any(tuple(lowered_parts[: len(prefix)]) == prefix for prefix in NON_DELIVERABLE_PATH_PREFIXES):
+    # Operational origins are omitted from discovery, while an explicit file selection
+    # inside an admitted source root can intentionally return an existing input.
+    if not explicit_selection and any(tuple(lowered_parts[: len(prefix)]) == prefix for prefix in NON_DELIVERABLE_PATH_PREFIXES):
         return False
     if any(part.startswith(".") for part in lowered_parts):
         return False
@@ -383,7 +387,10 @@ def capture_native_media(workspace: Path, run_id: str, stdout: str) -> dict[str,
     return {"observations": observations, "omitted_count": omitted}
 
 
-def _native_media_snapshot(workspace: Path, relative: Path, max_bytes: int) -> bytes:
+@contextmanager
+def _native_file_reader(workspace: Path, relative: Path):
+    if relative.is_absolute() or not relative.parts or any(p in {".", ".."} for p in relative.parts):
+        raise ValueError("Native file path is outside the workspace")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptors = [os.open(workspace, directory_flags)]
     try:
@@ -392,16 +399,101 @@ def _native_media_snapshot(workspace: Path, relative: Path, max_bytes: int) -> b
         fd = os.open(relative.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), dir_fd=descriptors[-1])
         descriptors.append(fd)
         metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > max_bytes:
-            raise ValueError("Native media source is not a bounded regular file")
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("Native file source is not a private regular file")
         with os.fdopen(os.dup(fd), "rb") as handle:
-            data = handle.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise ValueError("Native media source exceeds byte limit")
-        return data
+            yield handle, metadata
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _native_media_snapshot(workspace: Path, relative: Path, max_bytes: int) -> bytes:
+    with _native_file_reader(workspace, relative) as (handle, metadata):
+        if metadata.st_size > max_bytes:
+            raise ValueError("Native media source exceeds byte limit")
+        data = handle.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("Native media source exceeds byte limit")
+        return data
+
+
+@dataclass(frozen=True)
+class NativeFileSnapshot:
+    """Exact run-owned bytes, carried by reference rather than held in memory."""
+
+    root: Path
+    relative: Path
+    sha256: str
+    size_bytes: int
+
+
+def native_output_sha256(value: bytes | NativeFileSnapshot) -> str:
+    return value.sha256 if isinstance(value, NativeFileSnapshot) else hashlib.sha256(value).hexdigest()
+
+
+def _stream_native_file(handle, metadata, destination=None) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    remaining = metadata.st_size
+    while remaining:
+        chunk = handle.read(min(256 * 1024, remaining))
+        if not chunk:
+            raise ValueError("Native file changed during capture")
+        remaining -= len(chunk)
+        digest.update(chunk)
+        if destination is not None:
+            destination.write(chunk)
+    after = os.fstat(handle.fileno())
+    if handle.read(1) or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
+    ):
+        raise ValueError("Native file changed during capture")
+    return digest.hexdigest(), metadata.st_size
+
+
+def verified_native_file(root: Path, relative: Path, sha256: str, size_bytes: int) -> NativeFileSnapshot:
+    with _native_file_reader(root, relative) as (handle, metadata):
+        if metadata.st_size != size_bytes:
+            raise ValueError("Native output artifact size changed")
+        digest, size = _stream_native_file(handle, metadata)
+    if digest != sha256:
+        raise ValueError("Native output artifact bytes changed")
+    return NativeFileSnapshot(root, relative, digest, size)
+
+
+def copy_native_file(
+    root: Path, relative: Path, destination: Path, *,
+    target: Path | None = None, expected: NativeFileSnapshot | None = None,
+) -> NativeFileSnapshot:
+    """Atomically stream a selected file through the existing no-follow boundary.
+
+    Inline images retain their protocol limits. Ordinary files have no implicit
+    image-size or batch limit; storage quotas remain owned by workspace storage.
+    """
+    from .bootstrap import _sandbox_parent_descriptor
+
+    target = target or Path("output-files/pending")
+    with _native_file_reader(root, relative) as (source, metadata):
+        with _sandbox_parent_descriptor(destination, target) as (parent_fd, filename):
+            temporary = ".native-file-" + uuid.uuid4().hex
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
+            try:
+                with os.fdopen(fd, "wb") as output:
+                    digest, size = _stream_native_file(source, metadata, output)
+                    if expected is not None and (digest, size) != (expected.sha256, expected.size_bytes):
+                        raise ValueError("Native output artifact bytes changed")
+                    output.flush()
+                    os.fsync(output.fileno())
+                if expected is None:
+                    filename = digest + relative.suffix.lower()
+                    target = target.parent / filename
+                os.replace(temporary, filename, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                return NativeFileSnapshot(destination, target, digest, size)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
 
 
 def native_media_observations(worker: dict, run: dict) -> dict[str, object]:
@@ -553,7 +645,11 @@ def deliverable_payload(
     # A common workspace can change while any member runs. Directory scans and
     # mtimes cannot establish which member authored a file; present the run's
     # own text and the shared Files list instead of attributing a sibling file.
-    shared = worker.get("_execution_workspace_mode") == "shared"
+    # A legacy host worker can point at an existing working directory. Its
+    # files are not run-owned merely because its membership is isolated.
+    shared = worker.get("_execution_workspace_mode") == "shared" or (
+        execution_mode == "host" and worker.get("workspace_kind") == "legacy"
+    )
     artifact_candidates = [] if shared else candidate_artifact_paths(worker)
     valid_artifact_candidates = [
         path

@@ -291,7 +291,11 @@ def _harden_sqlite_state_path(db_path: Path) -> None:
     db_path.parent.chmod(0o700)
     for candidate in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
         if candidate.exists() and not candidate.is_symlink():
-            candidate.chmod(0o600)
+            try:
+                candidate.chmod(0o600)
+            except FileNotFoundError:
+                if candidate == db_path:
+                    raise
 
 
 def _shared_link_ref_group_gid() -> int | None:

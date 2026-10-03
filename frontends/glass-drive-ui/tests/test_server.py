@@ -2655,6 +2655,37 @@ def test_launch_respects_explicit_terminal_surface_override():
     assert runtime.desktop_actions == []
 
 
+def test_launch_runs_the_users_fields_and_never_picks_a_surface_from_task_text(monkeypatch):
+    runtime = FakeRuntimeClient()
+    client = TestClient(create_app(runtime_client=runtime))
+    options = client.get('/api/bootstrap').json()['launch_surface_options']
+    assert [option['value'] for option in options] == ['desktop', 'terminal']
+    launch = client.post('/api/launch', json={
+        'description': 'Build a landing page and open it in the browser at https://example.com',
+        'success_criteria': 'It renders HELLO',
+        'context': 'Use plain HTML',
+        'workspace_option': 'new:codex-cli',
+        'launch_surface': 'auto',
+    })
+    assert launch.status_code == 200
+    assert runtime.assign_requests[-1]['instruction'] == (
+        'Build a landing page and open it in the browser at https://example.com\n\n'
+        'Success criteria:\nIt renders HELLO\n\n'
+        'Background:\nUse plain HTML'
+    )
+    assert 'surface=desktop' in launch.json()['watch_url']
+
+    monkeypatch.setenv('GLASSHIVE_DEFAULT_LAUNCH_SURFACE', 'terminal')
+    launch = client.post('/api/launch', json={
+        'description': 'Open the browser to https://example.com',
+        'workspace_option': 'new:codex-cli',
+        'launch_surface': 'auto',
+    })
+    assert launch.status_code == 200
+    assert runtime.assign_requests[-1]['instruction'] == 'Open the browser to https://example.com'
+    assert 'surface=terminal' in launch.json()['watch_url']
+
+
 def test_launch_failure_marks_new_worker_failed():
     runtime = FakeRuntimeClient()
     runtime.fail_assign = True

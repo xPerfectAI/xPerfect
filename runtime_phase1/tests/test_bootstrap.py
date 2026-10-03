@@ -57,7 +57,12 @@ def test_bootstrap_materializes_canonical_worker_operating_contract(tmp_path):
     assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in agents_text
     assert GLASSHIVE_SAFETY_CHECKPOINT_RULE in agents_text
     assert "FINAL REPORT:" in agents_text
-    assert "polished ordinary end-user artifact" in agents_text
+    # Output format and verification depth belong to the user's request and the model's judgment.
+    assert "polished ordinary end-user artifact" not in agents_text
+    assert "open or render the final artifact itself" not in agents_text
+    assert "PROPORTIONAL VERIFICATION" in agents_text
+    assert "join every spawned child" in agents_text
+    assert "`glasshive-run/` is reserved for internal harness support evidence" in agents_text
     assert "source/date/auth/scope constraints" in agents_text
     assert "do not use that item to support facts, scoring, or deliverables" in agents_text
     assert "source publication/evidence dates distinct from retrieval/access timestamps" in agents_text
@@ -1793,24 +1798,73 @@ def test_all_agents_feeling_projection_rejects_forged_prompt_field_duplicate(tmp
         )
 
 
-def test_legacy_conversation_accepts_exact_feeling_authority_mirrors():
+@pytest.mark.parametrize("tail_prefix,tail_suffix", [
+    ("", ""),
+    ("Trusted current-attempt context.\n\n", ""),
+    ("", "\n\nTrusted current-attempt facts."),
+])
+def test_legacy_conversation_accepts_exact_feeling_authority_mirrors(tail_prefix, tail_suffix):
+    capsule = (
+        "<viventium_feeling_state>\n"
+        "synthetic request-pinned state\n"
+        "</viventium_feeling_state>"
+    )
+    tail = f"{tail_prefix}{capsule}{tail_suffix}"
+    application_authority = f"Stable application authority.\n\n{tail}"
+    developer_authority = f"Structural broker authority.\n\n{application_authority}"
+    bundle = {
+        "run_mode": "conversation",
+        "application_developer_instructions": application_authority,
+        "developer_instructions": developer_authority,
+        "declared_developer_instruction_tail": tail,
+    }
+
+    assert (
+        bootstrap_module.canonicalize_viventium_feeling_projection(bundle) == bundle
+    )
+
+    for changed in (
+        {**bundle, "application_developer_instructions": application_authority + " altered"},
+        {**bundle, "developer_instructions": developer_authority.replace("synthetic request-pinned", "different")},
+        {**bundle, "agents_md": capsule},
+        {**bundle, "run_mode": "direct"},
+    ):
+        with pytest.raises(ValueError, match="Conflicting"):
+            bootstrap_module.canonicalize_viventium_feeling_projection(changed)
+
+
+def test_legacy_conversation_accepts_two_field_feeling_mirror_without_declared_tail():
     capsule = (
         "<viventium_feeling_state>\n"
         "synthetic request-pinned state\n"
         "</viventium_feeling_state>"
     )
     application_authority = f"Stable application authority.\n\n{capsule}"
-    developer_authority = f"Structural broker authority.\n\n{application_authority}"
+    # The native producer merges the application authority first, then structural parts.
+    developer_authority = f"{application_authority}\n\nStructural broker authority."
     bundle = {
         "run_mode": "conversation",
         "application_developer_instructions": application_authority,
         "developer_instructions": developer_authority,
-        "declared_developer_instruction_tail": capsule,
+        "declared_developer_instruction_tail": "",
     }
 
     assert (
         bootstrap_module.canonicalize_viventium_feeling_projection(bundle) == bundle
     )
+
+    other = capsule.replace("synthetic request-pinned", "different")
+    for changed in (
+        # A developer capsule that is not the merged application authority.
+        {**bundle, "developer_instructions": f"Structural broker authority.\n\n{capsule}"},
+        {**bundle, "developer_instructions": developer_authority.replace(capsule, other)},
+        {**bundle, "application_developer_instructions": f"{application_authority}\n\n{capsule}"},
+        {**bundle, "agents_md": capsule},
+        {**bundle, "run_mode": "direct"},
+        {**bundle, "declared_developer_instruction_tail": "Trusted current-attempt facts."},
+    ):
+        with pytest.raises(ValueError, match="Conflicting"):
+            bootstrap_module.canonicalize_viventium_feeling_projection(changed)
 
 
 def test_direct_worker_rejects_enabled_conscious_agent_feeling_projection(tmp_path):

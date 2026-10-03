@@ -138,6 +138,93 @@ def test_unanswered_request_expires_truthfully_and_rejects_a_late_answer(tmp_pat
         mailbox.close();thread.join(2)
 
 
+@pytest.mark.parametrize('finish', ['answer', 'stop', 'expire'])
+def test_mission_absolute_permission_deadline_preserves_answer_stop_and_expiry(tmp_path, monkeypatch, finish):
+    import time
+    import workers_projects_runtime.grok_control as module
+    clock = {'elapsed': 0.0}
+    monkeypatch.setattr(module.time, 'time', lambda: 1000 + clock['elapsed'])
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 500 + clock['elapsed'])
+    session = Session()
+    events, result = [], {}
+    seen = Event()
+    def emit(event):
+        events.append(event)
+        if event['type'] == 'grok.permission.requested':
+            seen.set()
+    mailbox = ControlMailbox(tmp_path, run_id='run-1', attempt_id='attempt-1',
+                             session=session, event=emit, permission_deadline_at=1120)
+    mailbox.start()
+    thread = Thread(target=lambda: result.update(option=mailbox.permission(_options('First'))))
+    thread.start()
+    try:
+        assert seen.wait(1)
+        pending_path = next(tmp_path.glob('*.pending'))
+        pending = json.loads(pending_path.read_text())
+        assert pending['expires_at'] == 1120
+        clock['elapsed'] = 65
+        time.sleep(.15)
+        assert thread.is_alive() and not mailbox.unanswered
+        if finish == 'answer':
+            reply = submit_control(tmp_path, control('permission', request_id=pending['request_id'], option_id='allow'))
+            assert reply['status'] == 'permission_submitted'
+        elif finish == 'stop':
+            assert submit_control(tmp_path, control('cancel'))['status'] == 'cancel_requested'
+        else:
+            clock['elapsed'] = 121
+        thread.join(2)
+        assert not thread.is_alive()
+        assert result['option'] == ('allow' if finish == 'answer' else None)
+        assert mailbox.unanswered == ([] if finish == 'answer' else ['turn_cancelled' if finish == 'stop' else 'expired'])
+        assert session.cancelled is (finish == 'stop')
+    finally:
+        mailbox.close(); thread.join(2)
+
+
+def test_mission_absolute_permission_deadline_never_refreshes_for_later_questions(tmp_path, monkeypatch):
+    import workers_projects_runtime.grok_control as module
+    clock = {'elapsed': 0.0}
+    monkeypatch.setattr(module.time, 'time', lambda: 1000 + clock['elapsed'])
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 500 + clock['elapsed'])
+    events, seen = [], Event()
+    def emit(event):
+        events.append(event)
+        if event['type'] == 'grok.permission.requested':
+            seen.set()
+    mailbox = ControlMailbox(tmp_path, run_id='run-1', attempt_id='attempt-1',
+                             session=Session(), event=emit, permission_deadline_at=1120)
+    mailbox.start()
+    threads = []
+    try:
+        for elapsed in (0, 80):
+            clock['elapsed'] = elapsed
+            seen.clear()
+            thread = Thread(target=lambda: mailbox.permission(_options('Question')))
+            threads.append(thread); thread.start()
+            assert seen.wait(1)
+            pending = json.loads(next(tmp_path.glob('*.pending')).read_text())
+            assert pending['expires_at'] == 1120
+            submit_control(tmp_path, control('permission', request_id=pending['request_id'], option_id='allow'))
+            thread.join(1); assert not thread.is_alive()
+        clock['elapsed'] = 121
+        requested_before = len([event for event in events if event['type'] == 'grok.permission.requested'])
+        assert mailbox.permission(_options('Too late')) is None
+        assert len([event for event in events if event['type'] == 'grok.permission.requested']) == requested_before
+        assert mailbox.unanswered == ['expired']
+        assert not list(tmp_path.glob('*.pending'))
+    finally:
+        mailbox.close()
+        for thread in threads:
+            thread.join(2)
+
+
+@pytest.mark.parametrize('value', [True, float('nan'), float('inf'), '1120'])
+def test_mission_absolute_permission_deadline_rejects_invalid_values(tmp_path, value):
+    with pytest.raises(ValueError, match='permission deadline'):
+        ControlMailbox(tmp_path, run_id='run-1', attempt_id='attempt-1',
+                       session=Session(), event=lambda _: None, permission_deadline_at=value)
+
+
 @pytest.mark.parametrize('action,reason',[('permission','dismissed'),('cancel','turn_cancelled')])
 def test_owner_cancellation_resolves_the_pending_request_at_once(tmp_path,action,reason):
     # ACP requires the client to answer pending requests after session/cancel.

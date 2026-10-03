@@ -6,7 +6,8 @@ user's problem and expected outcome in an issue or pull request. For a vulnerabi
 
 ## Set up
 
-Use Python 3.11 or later and `uv`. Read the repository's `AGENTS.md`, then follow the
+Read [the core principles](docs/00_Key_Principles.md) and `AGENTS.md`. Use Python 3.11 or later
+and `uv`, then follow the
 [local deployment guide](docs/deployment.md#local-development). Docker and a working provider
 connection are needed when exercising Docker-backed workers. Keep test data synthetic.
 
@@ -24,8 +25,9 @@ decisions; let the model interpret goals. Keep `GLASSHIVE_*`, `WPR_*`, Python pa
 on-disk state and existing MCP tool/skill IDs compatible unless an explicit migration is included.
 User-facing product text should say xPerfect; retained names identify compatibility interfaces.
 
-Add or update tests that prove the affected behavior. Run the relevant test file first. The
-component suite entrypoints are:
+Follow the [batch delivery and QA rule](docs/00_Key_Principles.md#7-think-and-plan-then-complete-the-work).
+Add or update tests for changed behavior; select cases by the agreed scope. These are suite
+entrypoints, not mandatory per-edit gates:
 
 ```bash
 uv run --project runtime_phase1 --group dev pytest runtime_phase1/tests -q

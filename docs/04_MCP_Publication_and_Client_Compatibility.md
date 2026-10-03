@@ -24,6 +24,12 @@ Current official guidance from Claude Code and modern MCP tooling points in the 
 - clients benefit from dynamic tool updates through `list_changed`
 - scope-aware MCP configuration matters for safety and portability
 
+An authorized automatic Parallel launch that cannot pass its selected runtime's readiness
+gate returns that snapshot's typed admission reason, such as `storage_pressure_critical`,
+through the account API and MCP adapter. Invalid launch authority keeps the existing isolation
+rejection. A missing readiness reason also keeps that rejection; no fallback, replay or weaker
+admission is implied.
+
 ## Frozen public compatibility baseline
 
 `runtime_phase1/tests/fixtures/public_compatibility_baseline_v1.json` is a frozen, synthetic
@@ -132,6 +138,53 @@ projected from the selected account home while the exact provider lease is held.
 container is removed before the lease is released. This lets a connector added once through the
 workspace-native harness remain visible on later missions without copying its authorization into
 xPerfect or another workspace.
+
+For conversation-provider file delivery, the existing selected-output publisher also records
+`glasshive.output_files` version 1 on the canonical response and on its terminal protocol chunk.
+The record binds the owner, conversation, message, stream, agent, logical turn and revision,
+request, run, attempt and invocation to selected basenames, MIME types, lengths, SHA-256 hashes
+and signed download URLs. Canonical storage and recovery retain the same immutable selection.
+Protocol chunks use the durable accepted request's creation timestamp on replay and reattachment.
+Selected file metadata also survives declared graph transfers with its emitting publisher identity. The host
+captures terminal metadata before SDK aggregation, verifies the exact selection and imports normal
+File attachments. It does not scan answer prose or the workspace for exports. An existing file
+intentionally selected for publication can be delivered to an external channel such as Telegram;
+unselected reads and references do not grant that export. Equal bytes with distinct selected names
+remain distinct attachments. Failed imports remain typed unavailable receipts without hiding the
+answer or creating a fake downloadable file.
+
+Host mission output uses the same immutable selected-file publisher. Codex, Claude and Grok capture
+links in the selected final assistant message before selecting its FINAL REPORT prose. Tool and
+reasoning events, literal paths, quoted text and code do not grant file publication.
+
+A terminal `run.completed` callback carries `output_files` version 1 with native-owned identity:
+owner, run, attempt, callback, origin and work references, result revision and digest, selected file
+descriptors and optional rejection receipts. It has no destination, Main agent or provider identity.
+The existing callback signature covers the carrier. Association verification returns the actual
+bound run and attempt; the host resolves its own trusted destination before importing attachments
+into its normal message store. Replay retains the accepted callback bytes and the immutable selection.
+Progress, failed and cancelled callbacks do not publish this completed-result carrier.
+
+Host native file selections may use the admitted workspace or the current worker's managed
+`TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes
+for replay; it does not grant the worker's whole home, another worker's temporary root, or an OS
+Downloads folder. Explicit selections keep ordinary existing files under operational input folders
+legal. Automatic discovery still omits those folders. Both paths reject traversal, hidden state,
+private profiles and reserved instruction or credential files, and selected sources must be
+ordinary files without symlinks or hardlinks.
+
+Host-native conversations consume the registered `worker.conversation_file_delivery` declaration
+once after the signed profile instructions and before the exact pinned Feeling tail. A local
+Markdown link selects delivery; a path in code is a citation. Authorized files outside the supported
+roots must be staged byte-for-byte into the current worker TMPDIR before selection. This declaration
+does not grant filesystem access, force files for chat answers, or change mission/Docker contracts.
+Existing conversation workers receive the current declaration through their normal authority refresh.
+
+Rejected explicit local selections travel in the same version 1 carrier as an optional
+`rejected` list of basenames and typed codes, without local paths. These records produce unavailable
+receipts, including when no selected file can be delivered. Public citations and ordinary answers
+do not become file selections. Native snapshots stream bytes without an inherited image count or
+batch limit; the host applies its configured attachment limits before importing files.
 
 For generated file delivery, `signed_download_url`/`default_url` is the default chat-facing artifact
 link and should be labeled `Download file`. The MCP payload should also preserve `signed_open_url`

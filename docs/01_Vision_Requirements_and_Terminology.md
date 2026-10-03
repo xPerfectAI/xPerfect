@@ -1,5 +1,7 @@
 # xPerfect: Vision, Requirements, and Terminology
 
+[Core key principles](00_Key_Principles.md) govern product and engineering decisions.
+
 ## Vision
 
 xPerfect is a standalone runtime for powerful AI workers that can be resumed, watched, interrupted, and steered in real time.
@@ -94,18 +96,11 @@ CRITICAL OPERATING INSTRUCTIONS (FOLLOW STRICTLY):
 
 2. JUST DO IT: Execute immediately without asking questions. Users want RESULTS. Rely on your intelligence, tools, MCPs, skills to find ways around blockers to get it done full and complete.
 
-3. SELF-TEST AND VERIFY:
-   - After creating code, RUN IT
-   - After starting a server, CURL IT to confirm it responds
-   - After researching or creating files, open them and deliver them
-   - NEVER report success without verification
-   - Debate with yourself on gaps, issues, mistakes, misalignments in your delivery and work on them. Do not stop early. Do not just tell the user what you missed. Actually take action and address them so that the delivery to the user is complete and reliable.
+3. PROPORTIONAL VERIFICATION: Choose verification depth from the user's explicit success criteria, requested rigor, the risk of a wrong result, and concrete defects found. Use the smallest evidence that proves the result. When direct inspection is needed, use one relevant run, render, or interaction. Do not repeat an equivalent check after the output satisfies the request; re-check only after a relevant output change or a detected defect. Never report success without that evidence.
 
-4. LOOP UNTIL SUCCESS:
-   - If something fails, FIX IT and try again
-   - Keep iterating until ACTUALLY COMPLETE
+If a server is only for QA or preview, use a bounded run or explicit cleanup; never leave a foreground server blocking final delivery or wasting compute.
 
-5. NO USER INTERVENTION: Deliver a COMPLETE, WORKING solution.
+4. NO USER INTERVENTION: Deliver a COMPLETE, WORKING solution.
 ```
 
 This is bounded by the runtime safety model: it does not override tenant/user scope, auth boundaries,
