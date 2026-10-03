@@ -733,7 +733,7 @@ def _apply_effort_to_bundle(bundle: dict[str, Any], *, profile: str, effort: str
         return bundle
     next_bundle = dict(bundle or {})
     if profile == "codex-cli":
-        if clean_effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+        if clean_effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
             raise ValueError("Codex effort must be none, minimal, low, medium, high, or xhigh")
         env = dict(next_bundle.get("env") or {})
         env["WPR_CODEX_CLI_REASONING_EFFORT"] = clean_effort
@@ -746,6 +746,13 @@ def _apply_effort_to_bundle(bundle: dict[str, Any], *, profile: str, effort: str
             return next_bundle
         env = dict(next_bundle.get("env") or {})
         env["WPR_CLAUDE_CODE_EFFORT"] = clean_effort
+        next_bundle["env"] = env
+        return next_bundle
+    elif profile == "grok-build":
+        if clean_effort == "default":
+            return next_bundle
+        env = dict(next_bundle.get("env") or {})
+        env["WPR_GROK_REASONING_EFFORT"] = clean_effort
         next_bundle["env"] = env
         return next_bundle
     elif profile == "openclaw-general":
@@ -5783,7 +5790,6 @@ def create_mcp_server(
                 "- Keep working until the user's request is satisfied or a real blocker appears.",
                 WORKER_HOST_SIDE_ORCHESTRATION_RULE,
                 "- Preserve files, browser state, and workspace continuity for follow-up work.",
-                "- If the result is visual or browser-visible, open it in the workspace browser before finishing.",
                 "- Before finishing, inspect the actual output, files/artifacts, tool results, or visible state; compare it with the user's request, explicit success criteria when supplied, constraints, and files; continue or fix if it does not match.",
                 "- Finish with a concise FINAL REPORT in the user's requested form; mention artifacts only when you intentionally created user-facing files, and mention blockers only when they remain.",
             ]

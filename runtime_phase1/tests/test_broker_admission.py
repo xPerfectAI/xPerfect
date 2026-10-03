@@ -19,7 +19,7 @@ from workers_projects_runtime.broker_admission import (
     revoke_capability_grant,
 )
 from workers_projects_runtime.openclaw_runtime import RuntimeInfo, StubRuntime
-from workers_projects_runtime.service import WorkersProjectsService
+from workers_projects_runtime.service import WorkersProjectsService, merge_bootstrap_bundle
 from workers_projects_runtime.store import Store
 
 BODY = {
@@ -40,6 +40,33 @@ SCHEDULED_PREPARE_BODY = {
     "runId": "run_scheduled_synthetic_0001",
     "containerGenerationId": SCHEDULED_GENERATION,
 }
+
+
+def test_admitted_broker_overlay_keeps_core_exact_read_rules_and_denials():
+    read_rule = "mcp__glasshive-user-capabilities__file_search"
+    settings = {
+        "permissions": {"allow": ["Read", read_rule], "deny": [read_rule]},
+        "autoMemoryEnabled": False,
+    }
+    pending = {
+        "glasshive_capability_broker": {
+            "name": "glasshive-user-capabilities",
+            "status": "pending_admission",
+            "allowed_host_tools": ["file_search"],
+        },
+        "claude_settings_local": settings,
+    }
+    admitted = merge_bootstrap_bundle(
+        pending,
+        {"glasshive_capability_broker": {
+            "grant_id": "synthetic-grant",
+            "allowed_host_tools": ["file_search"],
+        }},
+    )
+    assert admitted["claude_settings_local"] == settings
+    assert admitted["glasshive_capability_broker"]["allowed_host_tools"] == ["file_search"]
+    assert "mcp__glasshive-user-capabilities__active_work_action" not in settings["permissions"]["allow"]
+    assert "GLASSHIVE_CAPABILITY_BROKER_TOKEN" not in pending.get("env", {})
 
 
 def _scheduled_prepare_success(**overrides):
@@ -617,7 +644,10 @@ def test_clean_room_deferred_admission_keeps_exact_run_grant_in_memory_only(
         assert bootstrap_env_for(admitted) == {
             "GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-local-grant"
         }
+        assert admitted["_native_input_deadline_at"] == _success_body()["grant"]["expiresAt"]
+        assert "_native_input_deadline_at" not in admitted["bootstrap_bundle_json"]
         persisted = store.get_worker(record["worker_id"])
+        assert "_native_input_deadline_at" not in persisted
         assert "synthetic-run-local-grant" not in str(persisted["bootstrap_bundle_json"])
     finally:
         service.shutdown()

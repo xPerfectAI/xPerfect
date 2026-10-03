@@ -133,6 +133,104 @@ def test_host_needs_input_release_without_lease_clears_only_proven_dead_exact_se
 
 
 
+def _idle_release_worker(worker_id: str, terminal_run_id: str) -> dict[str, object]:
+    # The service names the worker's completed run as `_terminal_run_id`; no run is active.
+    return {
+        "worker_id": worker_id,
+        "profile": "codex-cli",
+        "runtime": "codex-cli",
+        "model": "test",
+        "execution_mode": "host",
+        "trusted_run_lane": "conversation",
+        "compute_release_kind": "idle",
+        "_terminal_run_id": terminal_run_id,
+    }
+
+
+@pytest.mark.parametrize("death_proof", ["absent", "pid_reused"])
+def test_host_idle_release_clears_the_completed_runs_proven_dead_exact_session(
+    tmp_path, monkeypatch, death_proof
+):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / f"runtime-idle-{death_proof}"))
+    worker_id = f"wrk-host-idle-{death_proof}"
+    run_id = f"run_host_idle_{death_proof}"
+    _write_exact_finished_host_session(
+        runtime, worker_id=worker_id, run_id=run_id, suffix=f"idle-{death_proof}"
+    )
+    signals: list[tuple[str, int, int]] = []
+
+    def probe_or_signal(pid: int, sig: int) -> None:
+        if sig != 0:
+            signals.append(("pid", pid, sig))
+            return
+        if death_proof == "absent" or pid == 43102:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(os, "kill", probe_or_signal)
+    _ProcessGroups(runtime, monkeypatch, {}, signals=signals)
+    monkeypatch.setattr(runtime, "_pid_is_zombie", lambda _pid: False)
+    monkeypatch.setattr(
+        runtime,
+        "_process_start_identity",
+        lambda pid: {
+            43101: "ps-lstart:replacement-process",
+            43103: "ps-lstart:replacement-lease",
+        }.get(pid, ""),
+    )
+
+    released = runtime.terminate_worker(_idle_release_worker(worker_id, run_id))
+
+    assert released.pid is None
+    assert runtime._read_active_session(worker_id) is None
+    assert signals == []
+
+
+@pytest.mark.parametrize("case", ["other_run", "live_process"])
+def test_host_idle_release_keeps_a_session_it_cannot_prove_is_the_completed_runs_dead_one(
+    tmp_path, monkeypatch, case
+):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / f"runtime-idle-{case}"))
+    worker_id = f"wrk-host-idle-{case}"
+    completed_run_id = "run_host_idle_completed"
+    session_run_id = "run_host_idle_replacement" if case == "other_run" else completed_run_id
+    original = _write_exact_finished_host_session(
+        runtime, worker_id=worker_id, run_id=session_run_id, suffix=f"idle-{case}"
+    )
+    signals: list[tuple[str, int, int]] = []
+
+    def probe_or_signal(pid: int, sig: int) -> None:
+        if sig != 0:
+            signals.append(("pid", pid, sig))
+            return
+        if case == "other_run":
+            raise ProcessLookupError
+
+    monkeypatch.setattr(os, "kill", probe_or_signal)
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda process_group, sig: signals.append(("group", process_group, sig)),
+    )
+    monkeypatch.setattr(runtime, "_pid_is_zombie", lambda _pid: False)
+    monkeypatch.setattr(
+        runtime,
+        "_process_start_identity",
+        lambda pid: "ps-lstart:recorded-process" if pid == 43101 else "",
+    )
+
+    rejected = False
+    try:
+        runtime.terminate_worker(_idle_release_worker(worker_id, completed_run_id))
+    except RuntimeErrorBase:
+        rejected = True
+
+    assert rejected is True
+    assert runtime._active_session_fingerprint(
+        runtime._read_active_session(worker_id)
+    ) == runtime._active_session_fingerprint(original)
+    assert signals == []
+
+
 @pytest.mark.parametrize("observed_identity", ["ps-lstart:recorded-process", ""])
 def test_host_needs_input_release_without_lease_never_signals_live_or_uncertain_exact_session(
     tmp_path, monkeypatch, observed_identity

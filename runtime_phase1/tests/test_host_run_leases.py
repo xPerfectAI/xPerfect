@@ -40,6 +40,110 @@ from workers_projects_runtime.store import (
 REAL_HOST_RESOURCE_USAGE = service_module.host_resource_usage
 
 
+@pytest.mark.parametrize(
+    ("lane", "override", "expected_delay"),
+    [
+        ("conversation", None, 1.0),
+        ("mission", None, 5.0),
+        ("conversation", ("GLASSHIVE_HOST_BUSY_RETRY_BASE_DELAY_S", "7"), 7.0),
+        ("conversation", ("GLASSHIVE_RETRY_BASE_DELAY_S", "9"), 9.0),
+    ],
+)
+def test_preflight_capacity_retry_uses_trusted_lane_default_and_preserves_override(
+    tmp_path, monkeypatch, lane, override, expected_delay
+):
+    monkeypatch.delenv("GLASSHIVE_HOST_BUSY_RETRY_BASE_DELAY_S", raising=False)
+    monkeypatch.delenv("GLASSHIVE_RETRY_BASE_DELAY_S", raising=False)
+    if override:
+        monkeypatch.setenv(*override)
+    store = Store(str(tmp_path / "preflight-delay.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    pressure = HostCapacityError("Synthetic capacity refusal", capacity_class="family_lane")
+    monkeypatch.setattr(service, "_host_resource_capacity_error", lambda *_args, **_kwargs: (pressure, {}))
+    monkeypatch.setattr(service, "_relieve_docker_resource_pressure", lambda *_args: (pressure, None))
+    try:
+        with pytest.raises(HostCapacityError) as blocked:
+            with service._durable_preflight_capacity(
+                "codex-cli", "host", tenant_id="synthetic", owner_id="synthetic", lane=lane
+            ):
+                pytest.fail("A full lane cannot bypass admission")
+        assert blocked.value.retry_after_s == expected_delay
+        assert blocked.value.next_retry_at
+        assert blocked.value.capacity_class == "family_lane"
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("lane,expected_delay", [("conversation", 1.0), ("mission", 5.0)])
+@pytest.mark.parametrize("method", ["_requeue_retryable_run_parallel", "_requeue_retryable_run_legacy"])
+def test_durable_capacity_requeue_uses_worker_lane_with_bounded_jitter(
+    tmp_path, monkeypatch, lane, expected_delay, method
+):
+    monkeypatch.delenv("GLASSHIVE_HOST_BUSY_RETRY_BASE_DELAY_S", raising=False)
+    monkeypatch.delenv("GLASSHIVE_RETRY_BASE_DELAY_S", raising=False)
+    store = Store(str(tmp_path / "durable-lane-retry.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = store.create_project("synthetic-owner", "Capacity", "Synthetic", "codex-cli")
+    worker = store.create_worker(
+        project_id=project["project_id"], owner_id="synthetic-owner", name="Capacity worker",
+        role="worker", profile="codex-cli", backend="codex-cli", runtime="codex-cli",
+        model="synthetic", execution_mode="host", trusted_run_lane=lane,
+    )
+    run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic capacity work")
+    run = _invoke_run_attempt(store, worker, run, suffix="durable-lane")
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(service, "_now_datetime", lambda: now)
+    try:
+        queued = getattr(service, method)(
+            worker, run, HostCapacityError("Synthetic full lane", capacity_class="family_lane"),
+            failure_fields={"failure_class": "host_capacity", "failure_retryable": 1,
+                            "failure_structured": 1, "failure_user_message": "Waiting for capacity."},
+        )
+        assert queued is not None
+        delay = (datetime.fromisoformat(queued["retry_after"]) - now).total_seconds()
+        assert expected_delay <= delay <= expected_delay * 1.10
+        assert queued["state"] == "queued"
+        assert queued["retry_attempts"] == 0
+        assert queued["failure_class"] == "host_capacity"
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("lane,expected_delay", [("conversation", 1.0), ("mission", 5.0)])
+def test_durable_capacity_reservation_uses_worker_lane_clock(
+    tmp_path, monkeypatch, lane, expected_delay
+):
+    monkeypatch.delenv("GLASSHIVE_HOST_BUSY_RETRY_BASE_DELAY_S", raising=False)
+    monkeypatch.delenv("GLASSHIVE_RETRY_BASE_DELAY_S", raising=False)
+    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", "0")
+    store = Store(str(tmp_path / "reservation-lane-retry.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    monkeypatch.setattr(service, "_host_resource_capacity_error", lambda *_args, **_kwargs: (None, {}))
+    # Only the atomic reservation result is replaced; exercise its owning lane and retry clock.
+    def full_lane(**kwargs):
+        raise HostRunLeaseCapacityError("Synthetic full lane", capacity_class="family_lane",
+                                      next_retry_at=kwargs["capacity_next_retry_at"])
+    monkeypatch.setattr(store, "acquire_host_run_lease", full_lane)
+    before = datetime.now(timezone.utc)
+    try:
+        with pytest.raises(HostCapacityError) as blocked:
+            service._acquire_host_run_lease(
+                {"worker_id": "synthetic-worker", "profile": "codex-cli", "execution_mode": "host",
+                 "trusted_run_lane": lane, "owner_id": "synthetic-owner", "tenant_id": "synthetic"},
+                {"run_id": "synthetic-run", "state": "claimed"},
+            )
+        delay = (datetime.fromisoformat(blocked.value.next_retry_at) - before).total_seconds()
+        assert expected_delay <= delay < expected_delay + 0.5
+        assert blocked.value.capacity_class == "family_lane"
+    finally:
+        service.shutdown()
+        store.close()
+
+
 @pytest.fixture(autouse=True)
 def _synthetic_healthy_storage_probe(monkeypatch):
     monkeypatch.setattr(
@@ -1770,6 +1874,32 @@ def test_persisted_host_leases_enforce_independent_lane_and_account_caps(tmp_pat
     assert account_blocked.value.dimension == "accountMissionSlots"
     assert account_blocked.value.configured == {"accountMissionSlots": 4}
     assert account_blocked.value.used == {"accountMissionSlots": 4}
+
+
+def test_tenant_mission_limit_is_independent_of_conversation_dispatch(tmp_path):
+    store = Store(str(tmp_path / "tenant-mission-cap.sqlite3"))
+    for index in range(12):
+        _lease(
+            store, f"tenant-{index}", owner_id=f"owner-{index}",
+            mission_limit=20,
+        )
+    with pytest.raises(HostRunLeaseCapacityError) as blocked:
+        _lease(store, "tenant-overflow", owner_id="another-owner", mission_limit=20)
+    assert blocked.value.capacity_class == "tenant"
+    assert blocked.value.configured == {"tenantMissionSlots": 12}
+    _lease(store, "independent-conversation", lane="conversation", family="grok")
+
+
+def test_four_configured_conversation_slots_keep_family_admission_bound(tmp_path):
+    store = Store(str(tmp_path / "four-conversation-slots.sqlite3"))
+    for index in range(4):
+        _lease(store, f"conversation-{index}", lane="conversation", conversation_limit=4)
+    with pytest.raises(HostRunLeaseCapacityError) as blocked:
+        _lease(store, "conversation-overflow", lane="conversation", conversation_limit=4)
+    assert blocked.value.capacity_class == "family_lane"
+    assert blocked.value.configured == {"codexConversationSlots": 4}
+    assert blocked.value.used == {"codexConversationSlots": 4}
+    _lease(store, "another-family", lane="conversation", family="grok", conversation_limit=4)
 
 
 def test_model_bootstrap_cannot_forge_the_reserved_conversation_lane(tmp_path):
@@ -5024,19 +5154,22 @@ def test_host_resource_probe_counts_macos_process_trees_without_unsupported_thco
     assert usage.threads == 3
 
 
-def test_conversation_executor_uses_the_typed_account_capacity_limit(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("max_workers", [1, 2, 8])
+def test_conversation_executor_preserves_service_dispatch_budget(
+    tmp_path, monkeypatch, max_workers
 ):
     monkeypatch.delenv("GLASSHIVE_CONVERSATION_EXECUTOR_WORKERS", raising=False)
     monkeypatch.setenv("WPR_HOST_ACCOUNT_ACTIVE_LIMIT", "3")
     service = WorkersProjectsService(
         Store(str(tmp_path / "conversation-slots.sqlite3")),
         StubRuntime(),
-        max_workers=8,
+        max_workers=max_workers,
         reconcile_on_startup=False,
     )
     try:
-        assert service.conversation_executor._max_workers == 3
+        assert service.conversation_executor._max_workers == max_workers
+        assert service.executor._max_workers == max_workers
+        assert service._host_capacity_policy()["account_mission_limit"] == 3
     finally:
         service.shutdown()
 
@@ -5064,8 +5197,127 @@ def test_host_capacity_policy_has_one_configured_three_four_source_of_truth(
             "account_mission_limit": 4,
             "tenant_mission_limit": 12,
         }
-        assert service.conversation_executor._max_workers == 4
+        assert service.conversation_executor._max_workers == 8
     finally:
+        service.shutdown()
+
+
+def test_other_conversation_family_dispatches_while_four_turns_are_running(
+    tmp_path, monkeypatch
+):
+    """The account mission cap cannot queue an independently admitted conversation."""
+    monkeypatch.setenv("WPR_HOST_CONVERSATION_SLOTS_PER_CLI", "4")
+    monkeypatch.setenv("WPR_HOST_ACCOUNT_ACTIVE_LIMIT", "4")
+    store = Store(str(tmp_path / "conversation-dispatch.sqlite3"))
+    release = Event()
+    started = {}
+
+    class HeldRuntime(StubRuntime):
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            result = super().run_task(worker, instruction, timeout_sec=timeout_sec, run_id=run_id)
+            started[str(worker["worker_id"])].set()
+            if worker["profile"] == "codex-cli":
+                assert release.wait(timeout=10)
+            return result
+
+    service = WorkersProjectsService(
+        store, HeldRuntime(), reconcile_on_startup=False, start_background_consumers=False
+    )
+    monkeypatch.setattr(service, "_emit_callback", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service_module, "host_resource_usage",
+        lambda _leases: HostResourceUsage(
+            child_processes=0, threads=0, available_memory_bytes=32 * 1024**3,
+            available_disk_bytes=64 * 1024**3,
+        ),
+    )
+    subjects = []
+    for index, profile in enumerate(["codex-cli"] * 4 + ["grok-build"]):
+        project = store.create_project("synthetic-owner", f"Dispatch {index}", "Dispatch", profile)
+        worker = store.create_worker(
+            project_id=project["project_id"], owner_id="synthetic-owner",
+            name=f"Conversation {index}", role="conversation-agent", profile=profile,
+            backend=profile, runtime=profile, model="test", execution_mode="host",
+            trusted_run_lane="conversation", bootstrap_bundle={"run_mode": "conversation"},
+        )
+        store.update_worker_state(worker["worker_id"], "ready")
+        run = service.assign_run(worker["worker_id"], "Continue.", start_processor=False)
+        started[str(worker["worker_id"])] = Event()
+        subjects.append((worker, run))
+    try:
+        for worker, _run in subjects[:4]:
+            service.start_assigned_run(worker["worker_id"])
+            assert started[str(worker["worker_id"])].wait(timeout=2)
+        assert len(store.list_active_host_run_leases()) == 4
+        # All four holders remain live: this cannot pass by waiting for their completion.
+        worker, run = subjects[4]
+        service.start_assigned_run(worker["worker_id"])
+        assert started[str(worker["worker_id"])].wait(timeout=1), (
+            "A free conversation family waited behind the unrelated account mission cap"
+        )
+        assert not release.is_set()
+        assert store.get_run(run["run_id"])["runtime_invoked_at"]
+        for holder, holder_run in subjects[:4]:
+            assert store.get_run(holder_run["run_id"])["state"] == "running"
+            assert store.get_active_host_run_lease_for_run(holder_run["run_id"])["lane"] == "conversation"
+    finally:
+        release.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and any(
+            store.get_run(run["run_id"])["state"] not in {"completed", "failed"}
+            for _worker, run in subjects
+        ):
+            time.sleep(0.01)
+        service.shutdown()
+    assert all(store.get_run(run["run_id"])["state"] == "completed" for _worker, run in subjects)
+    assert store.list_active_host_run_leases() == []
+
+
+def test_cancelled_conversation_cannot_invoke_after_dispatch_wait(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "cancelled-dispatch.sqlite3"))
+    calls = []
+    release = Event()
+    holder_started = Event()
+
+    class CountingRuntime(StubRuntime):
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            calls.append(run_id)
+            return super().run_task(worker, instruction, timeout_sec=timeout_sec, run_id=run_id)
+
+    service = WorkersProjectsService(
+        store, CountingRuntime(), max_workers=1, reconcile_on_startup=False,
+        start_background_consumers=False,
+    )
+    monkeypatch.setattr(service, "_emit_callback", lambda *_args, **_kwargs: None)
+    project = store.create_project("synthetic-owner", "Cancelled dispatch", "Dispatch", "codex-cli")
+    worker = store.create_worker(
+        project_id=project["project_id"], owner_id="synthetic-owner", name="Conversation",
+        role="conversation-agent", profile="codex-cli", backend="codex-cli",
+        runtime="codex-cli", model="test", execution_mode="host",
+        trusted_run_lane="conversation", bootstrap_bundle={"run_mode": "conversation"},
+    )
+    store.update_worker_state(worker["worker_id"], "ready")
+    run = service.assign_run(worker["worker_id"], "Continue.", start_processor=False)
+
+    def hold_dispatch():
+        holder_started.set()
+        assert release.wait(timeout=5)
+
+    holder = service.conversation_executor.submit(hold_dispatch)
+    try:
+        assert holder_started.wait(timeout=1)
+        service.start_assigned_run(worker["worker_id"])
+        assert store.get_run(run["run_id"])["state"] == "queued"
+        service.cancel_run(worker["worker_id"], run["run_id"])
+        release.set()
+        holder.result(timeout=2)
+        service.conversation_executor.submit(lambda: None).result(timeout=2)
+        assert store.get_run(run["run_id"])["state"] == "cancelled"
+        assert calls == []
+        assert store.list_run_attempts(run["run_id"]) == []
+        assert store.list_active_host_run_leases() == []
+    finally:
+        release.set()
         service.shutdown()
 
 

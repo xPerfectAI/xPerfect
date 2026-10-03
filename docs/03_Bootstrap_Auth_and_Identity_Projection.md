@@ -138,12 +138,43 @@ metadata. Initial admission attaches the durable provider request and run atomic
 compute. An exact retry can refresh the lost bearer only after the stored request authority matches;
 changed authority requires a new logical turn. Refresh keeps the accepted run and instructions.
 
+Restricted Codex setup renders its broker descriptor without a bearer. The existing launch policy
+check requires the current run's bearer and an exact match to the restricted configuration before
+building the command. Setup does not persist the bearer or expose other native tools.
+
 If restart loses that bearer, the affected run remains `needs_input` and its provider request reports
 `failed` with the structured cause. For an explicitly stateless request, a failed grant-required turn
 with no active lease may stop blocking queued siblings. Persistent sessions remain ordered behind
 that input boundary. Operator Pause, paused runs, Work Stop, compute-release claims and active leases
 remain admission fences. Explicit Stop still cancels the exact resumable run after its request has
 reported failure, and a repeated Stop finishes an interrupted cancellation handoff.
+
+### Codex resumed developer authority
+
+Updating the worker config alone does not update an existing Codex session's developer messages.
+For admitted host conversation runs, the runtime splits the exact composer output into stable
+instructions and the entire declared dynamic tail (saved memory, fact guard and Feeling capsule).
+Fresh sessions use ordinary exec. Unchanged, native-acknowledged units also use ordinary exec.
+Changed units use the native `thread/inject_items` developer channel before ordinary exec resume;
+stable changes inject the exact dynamic tail after stable instructions to retain tail-last order.
+the preflight runs in the existing supervised child process group and then execs in the same PID.
+The current model, effort, history, permissions and inference transport remain unchanged.
+
+The existing provider-session manifest records delivered digests and a bounded native-ledger
+checkpoint for the exact session and context epoch. Config materialization is not delivery proof.
+An acknowledged inject must also persist in the native ledger and close cleanly. Compaction
+revalidates replacement history; an uncertain prior write can reconcile without duplicate injection.
+Unconfirmed updates fail with a typed recoverable result rather than running with stale authority.
+Before model output, the existing once-only recovery fence can rebind using the authenticated
+complete canonical source in the exact request/run's ephemeral bundle. A delta is never used as
+that complete seed. Missing source, failed recovery, Stop and the deadline retain truthful results.
+The public rollout path returned by native resume is preferred; the internal database is a fallback.
+Content-free receipts distinguish preflight phases from inference. Their timing must be measured on
+the loaded path; a loopback protocol fixture does not prove live latency or model quality.
+
+Append-only developer messages cannot remove a prior unit. A declared dynamic-tail removal or a
+Feeling present-to-absent transition uses the existing session-rebind and admitted-history seed path.
+Ordinary active-tail updates keep the native session; no off-state instructions are fabricated.
 
 ## Source-Specific Best Practice
 
@@ -160,6 +191,13 @@ CLI profile/family lane, 3 active missions per CLI profile/family lane, 4 active
 account, and 12 active missions per tenant by default. Repository mutation scope is an additional
 one-owner exclusion only when a host mission declares that exact scope; it is not a general
 "one worker per family" rule. Host resource headroom is a separate measured vector.
+
+The conversation processor pool uses the existing service dispatch budget. Account and tenant
+mission limits cannot cap that pool across CLI families. Dispatch still requires the exact
+configured conversation lane and measured resource reservation; a full service pool can still queue
+work. This does not give Main priority over another admitted conversation.
+The legacy generated `GLASSHIVE_CONVERSATION_EXECUTOR_WORKERS` value is not read by this runtime;
+it does not set the service dispatch budget.
 
 Every host CLI version/help/auth/readiness subprocess runs only after a durable provisional capacity
 reservation is live. A failed or expired preflight releases that reservation and cannot create or
@@ -192,6 +230,35 @@ errors and other MCP traffic. The private child command and tool policy are hash
 or unreadable policy closes the transport. Declared environment and native stderr are retained; the
 adapter owns its child process group through cancellation and exit. Claude's managed permissions,
 hooks and explicit per-run settings remain unchanged: disabling hooks cannot disable this filter.
+
+An explicit `provider_capabilities.native_tools: false` is a restriction on the selected native
+conversation harness. The host conveys it in its existing signed bootstrap bundle, after removing
+inherited workspace and broker grants. Native verifies that signature before admission and forces
+stateless execution. A missing host signer fails the request. This does not change voice participant
+authorization or grant authority to an unverified participant.
+
+Grok restrictions use a fresh session and an empty private child directory, with no MCP servers,
+workflow child lanes, workspace instructions, or discovered skills. The ACP inline profile combines
+the recognized `ToolSearch` allowlist with `search_tool` and `use_tool` exclusions; an empty
+allowlist would inherit native tools. Native requires an explicit empty tool inventory for the exact
+session before a prompt. After model, effort, and developer authority setup, it refreshes and checks
+the inventory again. Missing, malformed, nonempty, or later native tool traffic closes the turn.
+Preopen inventory notifications are retained in a bounded buffer keyed by the native session ID.
+The selected model and effort remain unchanged. Ordinary unrestricted conversations retain their
+existing session and tool behavior.
+
+Claude restrictions use the advertised safe mode, an empty native tool list and strict empty MCP
+configuration. The selected account, model, effort and explicit developer authority stay intact.
+Automatic workspace instructions, skills, hooks, memory and browser access are disabled. Native
+structured output may expose its `StructuredOutput` formatter; it grants no general action or file
+tool. The fresh private workspace and stateless execution remain required.
+
+Codex restrictions without a declared broker use strict configuration, empty MCP, a fresh private
+workspace, ephemeral execution and disabled native action features and goals. Its native
+`request_user_input` remains in the manifest but rejects calls in Default execution mode. A declared
+broker retains its existing signed descriptor and current-grant requirements; a malformed broker
+does not become an absent broker.
+
 A server with a
 Codex-only working directory remains omitted with a diagnostic. Actual Computer/app execution is a
 separate parity gate; metadata connection or screen capture alone is insufficient. No user MCP
@@ -292,10 +359,35 @@ C. Keep the xPerfect runtime independently usable by any client that can supply 
 
 ## Grok private native state
 
+Optional Grok 4.7 Fast availability comes from the selected worker account's ACP session model
+options. A service-account catalog is discovery only and cannot choose a turn's effective model.
+If that account offers standard Grok 4.7 but not Fast, the existing ACP model control selects
+standard4.7 before prompting and checks the selected effort on its actual options. The admitted
+owner/account, access, workspace, grants, native session and absolute deadline stay unchanged.
+Other unsupported models and efforts remain errors. Stop during session setup prevents prompting.
+
+The worker/session and completion contract retain the configured Fast choice and input-authority
+digest. The owned native `session.started` event records both requested and effective model before
+the prompt. Public content chunks, final responses, Responses and replay name the actual model,
+with the original requested model when it differs. An elected quota fallback uses its existing
+fallback model and current owned session/run as selection authority; the original request contract
+remains unchanged and public output names the actual fallback model. A later turn resumes the same binding: it keeps
+Standard while Fast is absent, or selects Fast if the account offers it again. No sticky model
+cache, extra recovery worker, acknowledgement transport or service-catalog subprocess is used.
+Resume and authority reload use native `noReplay`, so old transcript updates are not projected as
+new progress or response previews. The ephemeral full source used for Codex authority recovery is
+excluded from dispatched quota fallback bundles; permitted run-local grants remain intact.
+
 Grok uses a worker-private `home/.grok` outside shared project files. The adapter pins `GROK_HOME`
-and removes any projected `GROK_AUTH_PATH` override. It never copies a host home or discovers ambient
-provider keys. Supply an explicitly authorized `XAI_API_KEY` through existing bootstrap environment
-projection, or provision the selected native account in that private Grok home. Conflicting cached
+and removes any unvalidated `GROK_AUTH_PATH` override. In the existing local current-account lane,
+it supplies the canonical OS-owned Grok `auth.json` through native `GROK_AUTH_PATH`, without copying
+credential bytes. Native token reads, atomic refresh writes and the refresh lock use that same path,
+so subsequent workers retain refreshed login state. The credential file must be owner-only, and
+its canonical owner-owned directory must not permit writes by another user. Worker session history,
+configuration and authority remain private. This lane does not import login state for installed-owner,
+multi-user, enterprise, selected-account or explicit-key boundaries. It never copies a host home or
+discovers ambient provider keys. Supply an explicitly authorized `XAI_API_KEY` through existing
+bootstrap environment projection, or provision the selected native account in that private Grok home. Conflicting cached
 subscription/API-key identities fail before launch. A cached copy of the same API key written by the
 native agent is permitted on subsequent turns.
 

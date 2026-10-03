@@ -5,29 +5,12 @@ examples usable without another application. When this checkout is nested in a h
 `viventium_v0_4/xPerfect` is in Viventium, and `../../AGENTS.md` exists, read it before work that
 affects the host; it owns the host's scope, safety, delivery, and verification rules.
 
-## Product Standard
+## Core Principles
 
-- Own the whole user result, not one file. Trace the real trigger, runtime, and output first, and
-  judge a change by what a new user gets: output quality, wait, and actions needed, not code or
-  test volume.
-- A new user should reach the main value on first use, with no learning curve, in the fewest
-  actions, with their exact choices and safety kept. Say what cannot work before asking for input.
-- Reuse existing project mechanisms and current established practice before adding one. Never
-  hardcode or overfit to one example.
-- QA scope: follow the latest explicit or approved mode (`skip`, `critical-path`, `blast-radius`,
-  or `full`) and pass it unchanged to every delegated agent. Skipped is not passed.
-
-## Worker Runtime Boundary
-
-- Workers are general intelligent
-  workers: give them the real goal, constraints, files, capabilities, and tool results, then let
-  them choose the path.
-- Do not predict or hardcode the provider, account, tool, artifact, or workflow unless the user
-  explicitly selected it or verified structured evidence requires it.
-- Harness/runtime owns reliable data in/out, prerequisite recovery, authorization boundaries,
-  cancellation, persistence, and observable completion. Model judgment owns planning and tool choice.
-- Solve reliability with typed contracts, capability metadata, receipts, logs, and tests. Never route
-  from prompt text, human-facing names, tool substrings, provider labels, or one user's wording.
+Read and follow [xPerfect AI Key Principles](docs/00_Key_Principles.md) before product work.
+That document is the canonical owner of model judgment, parity, single sources of truth,
+separation of concerns, reuse and research, simple UX, batch delivery, QA and learning discipline.
+Feature contracts and narrower user instructions still govern the specific task.
 
 ## Component Safety
 

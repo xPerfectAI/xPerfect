@@ -602,6 +602,7 @@ def test_runtime_client_create_delegation_sends_atomic_headers(monkeypatch):
 
 @pytest.mark.parametrize("status,code,retryable", [
     (503, "host_capacity", True),
+    (409, "storage_pressure_critical", False),
     (429, "provider_rate_limit", True),
     (409, "delegation_idempotency_conflict", False),
     (403, "owner_scope_denied", False),
@@ -4697,6 +4698,11 @@ def test_workspace_launch_uses_documented_ui_fields_without_low_level_chain(monk
     assert "Satisfy the user's request as stated, preserving explicit constraints." not in minimal_instruction
     assert "Treat explicit success criteria as hard acceptance gates." not in minimal_instruction
     assert "No distinct acceptance criteria were supplied." in minimal_instruction
+    for instruction in (explicit_instruction, minimal_instruction):
+        # How to verify or show a result is the worker's judgment; the data-out rules stay.
+        assert "open it in the workspace browser" not in instruction
+        assert "Before finishing, inspect the actual output" in instruction
+        assert "Finish with a concise FINAL REPORT" in instruction
 
 
 def test_workspace_launch_can_favorite_the_created_workspace_in_the_same_call(monkeypatch):

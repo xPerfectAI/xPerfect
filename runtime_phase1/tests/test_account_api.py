@@ -563,7 +563,53 @@ def test_native_parallel_requires_existing_host_authority(account_client, monkey
         json=native_orchestrator_payload("Use the local desktop"),
     )
     assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "native_parallel_not_authorized"
     assert account_client.app.state.store.list_all_workers() == []
+
+
+@pytest.mark.parametrize(
+    "execution_mode,readiness_reason",
+    [
+        ("host", "storage_pressure_critical"),
+        ("host", "storage_pressure_unavailable"),
+        ("docker", "isolated_runtime_readiness_unavailable"),
+        ("docker", ""),
+    ],
+)
+def test_conversation_orchestrator_preserves_selected_readiness_rejection_before_rows(
+    account_client, monkeypatch, execution_mode, readiness_reason
+):
+    enable_native_orchestration(monkeypatch)
+    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", "true")
+    service = account_client.app.state.service
+    capabilities = service.orchestration_capabilities()
+    prefix = "native" if execution_mode == "host" else "isolated"
+    capabilities[f"{prefix}ParallelReady"] = False
+    capabilities[f"{prefix}ParallelReason"] = readiness_reason
+    reads = []
+
+    def selected_snapshot():
+        reads.append(True)
+        return capabilities
+
+    monkeypatch.setattr(service, "orchestration_capabilities", selected_snapshot)
+    payload = native_orchestrator_payload("Readiness cause")
+    payload["executionMode"] = execution_mode
+    payload["bootstrapBundle"]["viventium_launch_authority"]["execution_mode"] = execution_mode
+    rejected = account_client.post(
+        "/v1/delegations",
+        headers=account_headers(idempotency_key="selected-readiness-cause"),
+        json=payload,
+    )
+
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == (
+        readiness_reason or "parallel_execution_isolation_required"
+    )
+    assert reads == [True]
+    with sqlite3.connect(service.store.db_path) as conn:
+        for table in ("delegations", "projects", "workers", "runs", "host_run_leases"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 
 
 
@@ -978,7 +1024,7 @@ def test_conversation_orchestrator_launch_fails_closed_when_isolation_policy_is_
     )
 
     assert rejected.status_code == 409
-    assert rejected.json()["detail"]["code"] == "parallel_execution_isolation_required"
+    assert rejected.json()["detail"]["code"] == "isolated_parallel_policy_disabled"
     assert account_client.app.state.store.list_all_workers() == []
 
 
@@ -1019,7 +1065,7 @@ def test_conversation_orchestrator_launch_fails_closed_while_a_host_mission_exis
     )
 
     assert rejected.status_code == 409
-    assert rejected.json()["detail"]["code"] == "parallel_execution_isolation_required"
+    assert rejected.json()["detail"]["code"] == "host_missions_active"
     assert len(store.list_all_workers()) == 1
 
 
@@ -6084,6 +6130,8 @@ def test_callback_association_is_authoritative_owner_scoped_and_non_oracular(acc
         "valid": True,
         "originRef": "ghi_synthetic_origin_0001",
         "workRef": accepted.json()["workRef"],
+        "runId": initial_run_id,
+        "attemptId": str(store.get_run(initial_run_id).get("active_attempt_id") or ""),
     }
 
     linked_run = store.create_run(
@@ -6095,6 +6143,8 @@ def test_callback_association_is_authoritative_owner_scoped_and_non_oracular(acc
         json={**request_body, "runId": linked_run["run_id"]},
     )
     assert linked.status_code == 200
+    assert linked.json()["runId"] == linked_run["run_id"]
+    assert linked.json()["attemptId"] == str(store.get_run(linked_run["run_id"]).get("active_attempt_id") or "")
 
     mismatches = [
         {**request_body, "originRef": "ghi_synthetic_origin_wrong"},

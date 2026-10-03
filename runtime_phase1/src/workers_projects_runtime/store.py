@@ -1814,11 +1814,18 @@ def settle_closed_worker_work_conn(
 
 
 class Store:
+    # Opening a connection makes SQLite parse this store's large schema again, and concurrent
+    # parses serialize on SQLite's process-wide allocator mutex. Operations therefore reuse idle
+    # connections that are back in their opened state instead of paying that parse every time.
+    MAX_IDLE_CONNECTIONS = 32
+
     def __init__(self, db_path: str) -> None:
         self.db_path = Path(db_path)
         self._lifetime_lock = Lock()
         self._lifetime_connection: sqlite3.Connection | None = None
         self._lifetime_finalizer: weakref.finalize | None = None
+        self._idle_connections_lock = Lock()
+        self._idle_connections: list[sqlite3.Connection] = []
         ensure_state_directory(self.db_path.parent)
         try:
             self._init_db()
@@ -1907,11 +1914,47 @@ class Store:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = self._open_connection()
+        """Run one operation in its own transaction on an exclusively held connection."""
+        with self._idle_connections_lock:
+            conn = self._idle_connections.pop() if self._idle_connections else None
+        if conn is None:
+            conn = self._open_connection(check_same_thread=False)
+        reusable = False
         try:
             with conn:
                 yield conn
+            reusable = True
         finally:
+            self._release_connection(conn, reusable=reusable)
+
+    def _release_connection(self, conn: sqlite3.Connection, *, reusable: bool) -> None:
+        if reusable and self._connection_in_opened_state(conn):
+            with self._idle_connections_lock:
+                if len(self._idle_connections) < self.MAX_IDLE_CONNECTIONS:
+                    self._idle_connections.append(conn)
+                    return
+        conn.close()
+
+    @staticmethod
+    def _connection_in_opened_state(conn: sqlite3.Connection) -> bool:
+        """A failed, open-transaction or reconfigured connection is closed, never reused."""
+        try:
+            if (
+                conn.in_transaction
+                or conn.row_factory is not sqlite3.Row
+                or conn.isolation_level != ""
+            ):
+                return False
+            enabled = conn.execute("PRAGMA foreign_keys").fetchone()
+            temporary = conn.execute("SELECT 1 FROM temp.sqlite_master LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return False
+        return enabled is not None and int(enabled[0]) == 1 and temporary is None
+
+    def _close_idle_connections(self) -> None:
+        with self._idle_connections_lock:
+            idle, self._idle_connections = self._idle_connections, []
+        for conn in idle:
             conn.close()
 
     def open(self) -> None:
@@ -1934,6 +1977,7 @@ class Store:
     def close(self) -> None:
         """Release the process-lifetime WAL owner after all store users stop."""
 
+        self._close_idle_connections()
         with self._lifetime_lock:
             conn = self._lifetime_connection
             self._lifetime_connection = None
@@ -7660,7 +7704,9 @@ class Store:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM workers
+                SELECT worker_id, profile, runtime, execution_mode,
+                       workspace_id, tenant_id, owner_id
+                FROM workers
                 WHERE execution_mode = 'host'
                   AND trusted_run_lane = 'mission'
                 ORDER BY created_at ASC, worker_id ASC
@@ -19200,7 +19246,8 @@ class Store:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT delegations.origin_ref, delegations.work_ref
+                SELECT delegations.origin_ref, delegations.work_ref,
+                       runs.run_id, runs.active_attempt_id
                 FROM delegations
                 JOIN runs
                   ON runs.run_id = ?
@@ -19943,6 +19990,7 @@ class Store:
         response: dict[str, Any],
         current_run_id: str | None = None,
         executor_id: str = "",
+        retain_pending: bool = False,
     ) -> dict[str, Any] | None:
         now = utc_now()
         with self._connect() as conn:
@@ -19998,14 +20046,18 @@ class Store:
             cursor = conn.execute(
                 """
                 UPDATE active_work_action_uses
-                SET status = 'completed', response_json = ?, last_error = '', updated_at = ?
+                SET status = ?, response_json = ?, last_error = '', updated_at = ?,
+                    executor_id = ?, lease_expires_at = ?
                 WHERE action_use_id = ? AND status = 'pending'
                 """,
                 (
+                    "pending" if retain_pending else "completed",
                     json.dumps(
                         canonical_response, sort_keys=True, separators=(",", ":")
                     ),
                     now,
+                    "" if retain_pending else str(row["executor_id"] or ""),
+                    now if retain_pending else str(row["lease_expires_at"] or ""),
                     action_use_id,
                 ),
             )

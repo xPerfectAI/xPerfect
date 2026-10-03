@@ -335,3 +335,26 @@ def test_response_deadline_after_session_rebind_stops_only_original_run(tmp_path
     assert interrupts == [(original["worker_id"], record["run_id"])]
     assert sum(event["event_type"] == "failed" for event in
                store.list_provider_activity(record["request_id"])) == 1
+
+
+@pytest.mark.parametrize("failure_class", [
+    "native_input_declined", "native_input_expired", "native_input_cancelled", "native_turn_cancelled",
+    "private provider prose",
+])
+def test_saved_result_preserves_only_public_failure_code(tmp_path, monkeypatch, failure_class):
+    client = _client(tmp_path, monkeypatch)
+    response, digest = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200
+    store = client.app.state.store
+    record = store.get_provider_request(response.json()["id"])
+    store.update_run(record["run_id"], state="failed", failure_class=failure_class,
+                     error_text="private provider prose")
+    store.update_provider_request(record["request_id"], state="failed")
+    result = _result(client, digest).json()
+    if failure_class == "private provider prose":
+        assert "failure_class" not in result
+    else:
+        assert result["failure_class"] == failure_class
+    assert "private provider prose" not in json.dumps(result)
+    assert "response" not in result
+    assert _result(client, digest, headers={"X-Viventium-User-Id": "owner-b"}).status_code == 404

@@ -111,7 +111,12 @@ def test_api_service_background_threads_are_owned_by_lifespan(
         assert client.get("/health").status_code == 200
         owned_threads = _service_background_threads(service)
         assert owned_threads
-        assert all(thread.is_alive() for thread in owned_threads)
+        # Startup recovery is a one-shot replay and may already have finished; the loops persist.
+        assert all(
+            thread.is_alive()
+            for thread in owned_threads
+            if thread is not service._startup_recovery_thread
+        )
 
     assert all(not thread.is_alive() for thread in owned_threads)
     assert {

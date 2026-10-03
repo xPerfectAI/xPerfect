@@ -10632,6 +10632,41 @@ def test_provider_activity_log_reads_only_the_bound_native_attempt(tmp_path):
     assert second == ("codex-cli", "second")
 
 
+@pytest.mark.parametrize("primed", [False, True])
+def test_provider_activity_log_append_during_read_never_replays_native_tokens(tmp_path, monkeypatch, primed):
+    runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
+    worker = {"worker_id": "wrk_log_race", "profile": "codex-cli", "execution_mode": "host"}
+    run_id = "run-log-race"
+    root = runtime.host_codex._run_root(worker["worker_id"], run_id)
+    root.mkdir(parents=True)
+    stdout = root / "stdout.log"
+    event = lambda text: json.dumps({"type": "native.text", "text": text}) + "\n"
+    stdout.write_text(event("twenty"))
+    if primed:
+        runtime.provider_activity_log(worker, run_id)
+        with stdout.open("a") as handle:
+            handle.write(event(""))
+    original_open = Path.open
+    append_once = True
+
+    def append_after_stat(path, mode="r", *args, **kwargs):
+        nonlocal append_once
+        if path == stdout and mode == "rb" and append_once:
+            append_once = False
+            with original_open(stdout, "a") as writer:
+                writer.write(event("-"))
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", append_after_stat)
+    _, snapshot = runtime.provider_activity_log(worker, run_id)
+    with original_open(stdout, "a") as writer:
+        writer.write(event("one"))
+    _, completed = runtime.provider_activity_log(worker, run_id)
+    rendered = "".join(json.loads(line)["text"] for line in completed.splitlines())
+    assert rendered == "twenty-one"
+    assert '"text": "-"' not in snapshot
+
+
 def _host_attempt_launcher(tmp_path, monkeypatch):
     """Launch host conversation attempts of one run through the real writer and read them back."""
     runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path / "private-state"))
@@ -11313,6 +11348,25 @@ def test_host_codex_conversation_mode_honors_each_declared_effort(tmp_path, effo
     )
 
     assert f'model_reasoning_effort="{effort}"' in command
+
+
+def test_host_codex_read_only_access_has_no_write_or_approval_bypass(tmp_path):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    worker = {
+        "worker_id": "wrk_codex_read_only", "profile": "codex-cli",
+        "execution_mode": "host", "trusted_run_lane": "conversation",
+        "workspace_root": str(workspace),
+        "bootstrap_bundle_json": json.dumps({
+            "run_mode": "conversation", "provider_model": "gpt-5.6-sol", "access_mode": "read_only",
+        }),
+    }
+    command, _ = runtime._build_command(worker, "Summarize the input.", runtime._host_runtime_info(worker))
+    assert 'sandbox_mode="read-only"' in command
+    assert 'approval_policy="never"' in command
+    assert '--dangerously-bypass-approvals-and-sandbox' not in command
+    assert not any('workspace-write' in item for item in command)
 
 
 def test_host_codex_workspace_access_limits_writes_without_full_bypass(tmp_path):
@@ -12009,10 +12063,86 @@ def test_host_claude_expired_keychain_token_uses_managed_auth_without_stale_over
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
     assert "CLAUDE_CODE_OAUTH_REFRESH_TOKEN" not in env
     assert ("--resume" in command) is bool(session_key)
+
     assert status_envs == ([] if use_api_key else [env])
     assert (env.get("ANTHROPIC_API_KEY") == "synthetic-anthropic-key") is use_api_key
     assert env["CLAUDE_CONFIG_DIR"].startswith(str(tmp_path / "private-state"))
     assert ("ANTHROPIC_API_KEY" in env) is use_api_key
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("web_locked", [False, True])
+def test_host_claude_read_only_exposes_native_reads_without_writes_or_chrome(tmp_path, monkeypatch, resume, web_locked):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "1")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_EFFORT", "high")
+    monkeypatch.setenv("GLASSHIVE_HOST_NATIVE_WEB_ACCESS", "disabled" if web_locked else "inherit")
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path / "state"))
+    monkeypatch.setattr(runtime, "_help_text", lambda: "--tools --permission-mode dontAsk --no-chrome --strict-mcp-config --setting-sources --json-schema --effort")
+    monkeypatch.setattr(runtime, "_inject_private_subscription_auth", lambda env: None)
+    monkeypatch.setattr(runtime, "_read_session_key", lambda _worker: "synthetic-session" if resume else None)
+    worker = {
+        "worker_id": "wrk_claude_read_only", "profile": "claude-code", "execution_mode": "host",
+        "trusted_run_lane": "conversation", "workspace_root": str(tmp_path / "workspace"), "model": "opus",
+        "bootstrap_bundle_json": json.dumps({
+            "run_mode": "conversation", "provider_model": "opus", "access_mode": "read_only",
+            "claude_settings_local": {"permissions": {"allow": ["mcp__declared_broker__read"]}},
+        }),
+    }
+    command, _ = runtime._build_command(worker, "Read the declared fixture.", runtime._host_runtime_info(worker))
+    expected = {"Read", "Glob", "Grep"} | (set() if web_locked else {"WebSearch", "WebFetch"})
+    assert set(command[command.index("--tools") + 1].split(",")) == expected
+    assert command[command.index("--permission-mode") + 1] == "dontAsk"
+    assert "--chrome" not in command and "--no-chrome" in command
+    assert "--strict-mcp-config" in command
+    assert command[command.index("--setting-sources") + 1] == ""
+    assert ("--resume" in command) is resume
+    assert command[command.index("--effort") + 1] == "high"
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings["permissions"]["defaultMode"] == "dontAsk"
+    assert set(settings["permissions"]["allow"]) == expected | {"mcp__declared_broker__read"}
+    assert not expected.intersection({"Bash", "Write", "Edit", "CronCreate", "CronDelete", "Agent"})
+
+
+def test_host_claude_read_only_refuses_missing_native_controls(tmp_path, monkeypatch):
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path / "state"))
+    monkeypatch.setattr(runtime, "_help_text", lambda: "--effort --chrome")
+    worker = {"worker_id": "wrk_read_only_unsupported", "profile": "claude-code", "trusted_run_lane": "conversation",
+              "bootstrap_bundle_json": json.dumps({"run_mode": "conversation", "access_mode": "read_only"})}
+    with pytest.raises(RuntimeDependencyMissingError, match="read-only tool controls"):
+        runtime._build_command(worker, "Read.", runtime._host_runtime_info(worker))
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_host_claude_workspace_explicitly_disables_ambient_chrome(tmp_path, monkeypatch, resume):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "1")
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path / "state"))
+    monkeypatch.setattr(runtime, "_inject_private_subscription_auth", lambda env: None)
+    monkeypatch.setattr(runtime, "_read_session_key", lambda _worker: "synthetic-session" if resume else None)
+    worker = {"worker_id": "wrk_claude_workspace_chrome", "profile": "claude-code", "trusted_run_lane": "conversation",
+              "workspace_root": str(tmp_path / "workspace"),
+              "bootstrap_bundle_json": json.dumps({"run_mode": "conversation", "access_mode": "workspace"})}
+    command, _ = runtime._build_command(worker, "Work in this workspace.", runtime._host_runtime_info(worker))
+    assert "--chrome" not in command and "--no-chrome" in command
+    assert "--tools" not in command
+    assert command[command.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_host_claude_help_cache_follows_the_exact_installed_binary(tmp_path, monkeypatch):
+    binary = tmp_path / "synthetic-claude"
+    binary.write_text("binary version one")
+    binary.chmod(0o700)
+    calls = []
+    def help_result(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=binary.read_text(), stderr="")
+    monkeypatch.setattr(profile_runtime_module.subprocess, "run", help_result)
+    profile_runtime_module._claude_binary_help.cache_clear()
+    first = profile_runtime_module._host_claude_help_text(str(binary))
+    assert profile_runtime_module._host_claude_help_text(str(binary)) == first
+    assert len(calls) == 1
+    binary.write_text("binary version two, changed")
+    assert profile_runtime_module._host_claude_help_text(str(binary)) != first
+    assert len(calls) == 2
 
 
 
@@ -12768,3 +12898,65 @@ def test_packaged_account_reconcile_seals_volume_home_without_host_bind(tmp_path
     runtime.codex = SimpleNamespace(reconcile_provider_account_binding=lambda path: pytest.fail("Host bind path used"))
     runtime.reconcile_provider_account_binding(account_home)
     assert events == [("quiescent", account_home), ("sealed", account_home)]
+
+
+@pytest.mark.parametrize("failure_class", [
+    "native_input_declined", "native_input_expired", "native_input_cancelled", "native_turn_cancelled",
+])
+def test_host_conversation_preserves_typed_native_stop(tmp_path, monkeypatch, failure_class):
+    from workers_projects_runtime.grok_runtime import HostGrokBuildRuntime
+    from workers_projects_runtime.failure_classification import classify_runtime_error
+    runtime = HostGrokBuildRuntime(base_dir=str(tmp_path / "private-state"))
+    life = tmp_path / "Life"
+    life.mkdir()
+    worker = {
+        "worker_id": "wrk_grok_conversation_stop", "name": "Synthetic agent",
+        "profile": "grok-build", "execution_mode": "host", "trusted_run_lane": "conversation",
+        "workspace_root": str(life), "model": "grok-4.7",
+        "bootstrap_bundle_json": json.dumps({"run_mode": "conversation", "access_mode": "workspace"}),
+    }
+
+    class StoppedProcess:
+        pid = 12345
+        returncode = 2
+        def __init__(self, command, **kwargs):
+            _mark_fake_host_supervisor_ready(list(command), self.pid)
+            kwargs["stdout"].write(json.dumps({"type": "grok.error", "failure_class": failure_class,
+                                               "message": "private provider prose"}) + "\n")
+            kwargs["stdout"].flush()
+            kwargs["stderr"].write("private provider prose")
+            kwargs["stderr"].flush()
+        def wait(self, timeout=None): return self.returncode
+        def poll(self): return self.returncode
+
+    runtime.ensure_worker_ready = lambda _worker: runtime._host_runtime_info(worker)
+    runtime._build_command = lambda *_args: (["grok"], {})
+    monkeypatch.setattr(runtime, "_process_identity_sha256", lambda _pid: "1" * 64)
+    monkeypatch.setattr(runtime, "_process_group_identity", lambda pid: pid)
+    monkeypatch.setattr(runtime, "_process_start_identity", lambda _pid: "ps-lstart:Mon Jan 01 00:00:00 2024")
+    monkeypatch.setattr("workers_projects_runtime.profile_runtime.subprocess.Popen", StoppedProcess)
+    with pytest.raises(RuntimeErrorBase) as caught:
+        runtime.run_task(worker, "Synthetic action", timeout_sec=5, run_id="run_native_stop")
+    result = classify_runtime_error(caught.value, runtime_name="grok-build")
+    assert result.failure_class == failure_class
+    assert result.structured is True
+    assert result.retryable is False
+    assert "private provider prose" not in result.user_message
+
+
+@pytest.mark.parametrize("session_key", [None, "synthetic-resume-session"])
+@pytest.mark.parametrize("supported", [False, True])
+def test_host_claude_conversation_refreshes_system_authority_when_snapshot_flag_exists(tmp_path, monkeypatch, session_key, supported):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "0")
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path / "state"))
+    monkeypatch.setattr(runtime, "_help_supports", lambda flag: supported if flag == "--system-prompt-snapshot" else False)
+    monkeypatch.setattr(runtime, "_read_session_key", lambda _worker_id: session_key)
+    monkeypatch.setattr(runtime, "_host_env", lambda _worker: {})
+    monkeypatch.setattr(runtime, "_inject_private_subscription_auth", lambda _env: "projected_access_token")
+    worker = {"worker_id": "wrk_snapshot", "trusted_run_lane": "conversation",
+        "profile": "claude-code", "execution_mode": "host", "workspace_root": str(tmp_path / "workspace"),
+        "model": "opus", "bootstrap_bundle_json": json.dumps({"run_mode": "conversation"})}
+    command, _ = runtime._build_command(worker, "Synthetic continuation", runtime._host_runtime_info(worker))
+    assert ("--system-prompt-snapshot" in command) is supported
+    if supported: assert command[command.index("--system-prompt-snapshot") + 1] == "off"
+    assert ("--resume" in command) is bool(session_key)

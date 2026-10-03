@@ -136,6 +136,46 @@ def test_runtime_signed_link_sqlite_state_is_private(tmp_path, monkeypatch):
                 assert os.stat(candidate).st_mode & 0o077 == 0
 
 
+@pytest.mark.parametrize("sidecar", ["-wal", "-shm"])
+def test_signed_link_permissions_tolerate_only_vanished_optional_sidecar(tmp_path, monkeypatch, sidecar):
+    state = tmp_path / "links.sqlite3"
+    state.write_bytes(b"test")
+    transient = Path(str(state) + sidecar)
+    transient.write_bytes(b"test")
+    original_chmod = Path.chmod
+
+    def chmod(path, mode, *args, **kwargs):
+        if path == transient:
+            path.unlink(missing_ok=True)
+            raise FileNotFoundError(str(path))
+        return original_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", chmod)
+    signed_links_module._harden_sqlite_state_path(state)
+    assert state.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("failed,error", [
+    ("primary", FileNotFoundError), ("primary", PermissionError), ("sidecar", PermissionError),
+])
+def test_signed_link_permissions_keep_primary_and_other_errors_strict(tmp_path, monkeypatch, failed, error):
+    state = tmp_path / "links.sqlite3"
+    state.write_bytes(b"test")
+    sidecar = Path(str(state) + "-wal")
+    sidecar.write_bytes(b"test")
+    original_chmod = Path.chmod
+    target = state if failed == "primary" else sidecar
+
+    def chmod(path, mode, *args, **kwargs):
+        if path == target:
+            raise error(str(path))
+        return original_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", chmod)
+    with pytest.raises(error):
+        signed_links_module._harden_sqlite_state_path(state)
+
+
 def test_signed_link_helpers_close_sqlite_connections_deterministically(
     tmp_path, monkeypatch
 ):
@@ -9831,6 +9871,21 @@ def test_shared_workspace_never_attributes_scanned_files_to_one_run(tmp_path):
     # Separate workspaces retain their useful automatic file preview.
     assert deliverable_payload({**worker, "_execution_workspace_mode": "isolated"},
                                {"state": "completed"}, "Completed") is not None
+
+
+def test_legacy_host_does_not_claim_existing_files_as_a_new_run_result(tmp_path):
+    (tmp_path / "existing.pdf").write_bytes(b"%PDF-1.4\nExisting unrelated document")
+    (tmp_path / "index.html").write_text("<h1>Existing unrelated page</h1>")
+    worker = {"worker_id": "wrk_legacy", "workspace_dir": str(tmp_path),
+              "execution_mode": "host", "workspace_kind": "legacy",
+              "_execution_workspace_mode": "isolated"}
+    assert deliverable_payload(worker, {"run_id": "run_text", "state": "completed"},
+                               "The cheaper offer saves USD 8.50.") is None
+    # Explicit Files access is unchanged; only the inferred result is withheld.
+    assert (tmp_path / "existing.pdf").read_bytes().startswith(b"%PDF-")
+    # A managed isolated directory keeps its existing file preview.
+    assert deliverable_payload({**worker, "workspace_kind": "managed"},
+                               {"state": "completed"}, "Result") is not None
 
 
 def test_incidental_external_url_is_not_a_deliverable(tmp_path):

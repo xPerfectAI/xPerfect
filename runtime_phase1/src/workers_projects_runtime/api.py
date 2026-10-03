@@ -690,11 +690,15 @@ def create_app(
 
     @app.exception_handler(RuntimeDependencyMissingError)
     async def runtime_dependency_missing_handler(request: Request, exc: RuntimeDependencyMissingError) -> JSONResponse:
-        _ = request
         failure = classify_runtime_error(
             exc,
             runtime_name=str(getattr(exc, "runtime_name", "") or "worker"),
         )
+        if _is_provider_path(request.url.path):
+            # Provider clients read the OpenAI error contract; the typed class is its code.
+            return _openai_error(
+                409, failure.user_message, failure.failure_class or "runtime_dependency_missing"
+            )
         return JSONResponse(
             status_code=409,
             content={
@@ -3774,6 +3778,8 @@ def create_app(
             "valid": True,
             "originRef": str(association.get("origin_ref") or ""),
             "workRef": str(association.get("work_ref") or ""),
+            "runId": str(association.get("run_id") or ""),
+            "attemptId": str(association.get("active_attempt_id") or ""),
         }
 
     @app.post("/v1/callback-associations/recover")
@@ -4140,6 +4146,7 @@ def create_app(
                     else None
                 ),
                 executor_id=service.executor_id,
+                retain_pending=native_input is not None and response["confirmationPending"],
             )
             if not finished_action:
                 raise RuntimeError("active_work_action_ownership_changed")

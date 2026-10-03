@@ -123,6 +123,55 @@ def test_graph_control_schema_and_native_choice_fail_closed():
         )
 
 
+@pytest.mark.parametrize(
+    "with_graph,with_delivery",
+    [(True, False), (False, True), (True, True), (False, False)],
+)
+def test_conversation_schema_declares_final_work_and_async_receipt_boundary(
+    with_graph, with_delivery
+):
+    graph = graph_transfer_control(_payload().tools) if with_graph else None
+    delivery = messaging_delivery_control(audio_eligible=True) if with_delivery else None
+    schema = conversation_output_schema(graph, delivery)
+    if not with_graph and not with_delivery:
+        assert schema is None
+        return
+
+    description = schema["description"]
+    assert "Returning type=assistant_response ends your work for this turn." in description
+    assert "complete authorized work you can do now, or report its actual blocker" in description
+    assert "a promise is not a result" in description
+    assert (
+        "A real accepted asynchronous work receipt may be acknowledged without waiting for completion."
+        in description
+    )
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["type"]["enum"] == (
+        ["assistant_response", "tool_call"] if with_graph else ["assistant_response"]
+    )
+    accepted = {
+        "type": "assistant_response",
+        "content": "The work was accepted. Its result will follow.",
+        "tool_name": None,
+    }
+    if with_delivery:
+        accepted["voice"] = "eligible"
+    assert parse_conversation_output(json.dumps(accepted), graph, delivery)["content"] == accepted["content"]
+    if with_graph:
+        transfer = {
+            "type": "tool_call",
+            "content": "",
+            "tool_name": "lc_transfer_to_specialist",
+        }
+        if with_delivery:
+            transfer["voice"] = "eligible"
+        assert parse_conversation_output(json.dumps(transfer), graph, delivery) == {
+            "type": "tool_call",
+            "content": "",
+            "tool_name": "lc_transfer_to_specialist",
+        }
+
+
 def test_audio_eligible_messaging_schema_requires_model_owned_voice_disposition():
     delivery = messaging_delivery_control(audio_eligible=True)
     schema = conversation_output_schema(None, delivery)
@@ -368,3 +417,46 @@ def test_non_streaming_graph_choice_returns_one_openai_tool_call(monkeypatch):
         }
     ]
     assert json.loads(provider.store.response_json) == response
+
+
+def test_public_prefix_requires_controls_first_and_decodes_split_json_strings():
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    delivery = messaging_delivery_control(audio_eligible=True)
+    text = 'A "quoted" word, newline\n and café 😀 with \\ slash.'
+    envelope = json.dumps({"type": "assistant_response", "tool_name": None,
+                           "voice": "eligible", "content": text}, ensure_ascii=True)
+    content_start = envelope.index('"content"')
+    prefixes = [public_conversation_prefix(envelope[:end], None, delivery)
+                for end in range(len(envelope) + 1)]
+    assert all(prefix is None for prefix in prefixes[:content_start])
+    assert any(prefix and prefix["text"] and not prefix["complete"] for prefix in prefixes)
+    for prefix in prefixes:
+        if prefix:
+            assert text.startswith(prefix["text"])
+            assert not any(0xD800 <= ord(char) <= 0xDFFF for char in prefix["text"])
+    assert prefixes[-1]["text"] == text
+    assert prefixes[-1]["complete"] is True
+    assert prefixes[-1]["delivery_disposition"]["audio"] == "eligible"
+    assert list(conversation_output_schema(None, delivery)["properties"]) == [
+        "type", "tool_name", "voice", "content"]
+
+
+@pytest.mark.parametrize("envelope", [
+    '{"content":"Private until controls", "type":"assistant_response", "tool_name":null, "voice":"eligible"}',
+    '{"type":"assistant_response", "tool_name":null, "voice":"skip", "content":"Text only"}',
+    '{"type":"tool_call", "tool_name":"lc_transfer_to_specialist", "voice":"eligible", "content":"Internal"}',
+    '{"type":"assistant_response", "tool_name":null, "voice":"eligible", "extra":true, "content":"Unknown field"}',
+    '{"type":"assistant_response", "tool_name":null, "voice":"skip", "voice":"eligible", "content":"Duplicate"}',
+    '{"type":"assistant_response", "tool_name":null, "voice":"eligible", "content":"Malformed \\q"}',
+    '{"type":"assistant_response", "tool_name":null, "voice":"eligible", "content":"Duplicate tail", "voice":"skip"}',
+])
+def test_public_prefix_withholds_invalid_skip_and_graph_envelopes(envelope):
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    assert public_conversation_prefix(envelope, None, messaging_delivery_control(audio_eligible=True)) is None
+
+
+def test_duplicate_terminal_control_is_rejected_instead_of_last_field_winning():
+    with pytest.raises(ValueError, match="Duplicate"):
+        parse_conversation_output('{"type":"assistant_response","tool_name":null,"voice":"skip",'
+                                  '"voice":"eligible","content":"Do not publish"}', None,
+                                  messaging_delivery_control(audio_eligible=True))

@@ -144,6 +144,7 @@ desktop tools and shared execution are configuration-dependent.
 
 Technical contracts:
 
+0. [Key principles](docs/00_Key_Principles.md)
 1. [Vision and terminology](docs/01_Vision_Requirements_and_Terminology.md)
 2. [Architecture and components](docs/02_Architecture_and_Components.md)
 3. [Bootstrap, auth and identity](docs/03_Bootstrap_Auth_and_Identity_Projection.md)

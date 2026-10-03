@@ -77,7 +77,22 @@ def test_unsupported_harness_restriction_fails_closed():
     payload = ChatCompletionRequest(model='synthetic', messages=[{'role': 'user', 'content': 'Synthetic.'}],
         metadata={'bootstrap_bundle': bundle()})
     with pytest.raises(HTTPException, match='unsupported'):
-        ConversationProvider._native_bundle(None, payload, SimpleNamespace(harness_profile='claude-code'), 'medium')
+        ConversationProvider._native_bundle(None, payload, SimpleNamespace(harness_profile='openclaw'), 'medium')
+
+
+@pytest.mark.parametrize('profile,effort_env', [
+    ('grok-build', 'WPR_GROK_REASONING_EFFORT'),
+    ('claude-code', 'WPR_CLAUDE_CODE_EFFORT'),
+])
+def test_restriction_preserves_exact_model_effort_and_forces_stateless(profile, effort_env):
+    payload = ChatCompletionRequest(model='synthetic', messages=[{'role': 'user', 'content': 'Synthetic context.'}],
+        metadata={'bootstrap_bundle': {'provider_capabilities': {'native_tools': False}}})
+    model = SimpleNamespace(harness_profile=profile, native_model='selected-native-model')
+    result = ConversationProvider._native_bundle(None, payload, model, 'high')
+    assert result['provider_capabilities']['native_tools'] is False
+    assert result['provider_model'] == 'selected-native-model'
+    assert result['env']['GLASSHIVE_PROVIDER_SESSION_MODE'] == 'stateless'
+    assert result['env'][effort_env] == 'high'
 
 
 def test_sealed_config_keeps_only_signed_broker_and_developer_authority(runtime, tmp_path, monkeypatch):
@@ -131,12 +146,62 @@ def test_changed_seal_refuses_launch(runtime, tmp_path):
         runtime._build_command(candidate, 'Synthetic.', runtime._host_runtime_info(candidate))
 
 
-@pytest.mark.parametrize('missing', ['glasshive_capability_broker', 'env'])
-def test_missing_signed_broker_fails_closed(runtime, missing):
+def test_absent_broker_descriptor_keeps_zero_host_authority(runtime):
     authority = bundle()
-    authority.pop(missing)
+    authority.pop('glasshive_capability_broker')
+    config = tomllib.loads(runtime._host_codex_worker_config('', capability_bundle=authority))
+    assert config.get('mcp_servers', {}) == {}
+    assert config['features']['code_mode_host'] is False
+    assert config['features']['goals'] is False
+
+
+@pytest.mark.parametrize('grant_env', [None, {}, {'GLASSHIVE_CAPABILITY_BROKER_TOKEN': ''}])
+def test_restricted_launch_requires_current_run_grant(runtime, tmp_path, grant_env):
+    authority = bundle()
+    if grant_env is None:
+        authority.pop('env')
+    else:
+        authority['env'] = grant_env
+    candidate = worker(tmp_path, authority)
+    runtime._write_conversation_runtime_files(candidate, authority)
     with pytest.raises(RuntimeErrorBase, match='requires its signed'):
-        runtime._host_codex_worker_config('', capability_bundle=authority)
+        runtime._build_command(candidate, 'Synthetic.', runtime._host_runtime_info(candidate))
+
+
+def test_restricted_provider_static_setup_then_exact_run_local_launch(runtime, tmp_path):
+    incoming = bundle()
+    incoming['env']['WPR_CODEX_CLI_REASONING_EFFORT'] = 'high'
+    payload = ChatCompletionRequest(
+        model='synthetic',
+        messages=[{'role': 'user', 'content': 'Remember the synthetic fact.'}],
+        metadata={'bootstrap_bundle': incoming},
+    )
+    model = SimpleNamespace(harness_profile='codex-cli', native_model='gpt-6.1-sol')
+    provider = object.__new__(ConversationProvider)
+    stable = provider._native_bundle(payload, model, 'high')
+    assert 'GLASSHIVE_CAPABILITY_BROKER_TOKEN' not in stable['env']
+    candidate = worker(tmp_path, stable)
+    candidate['model'] = model.native_model
+    runtime._write_conversation_runtime_files(candidate, stable)
+    path = runtime._host_codex_home(candidate) / 'config.toml'
+    sealed_config = path.read_text()
+    assert 'synthetic-grant' not in sealed_config
+    assert list(tomllib.loads(sealed_config)['mcp_servers']) == ['glasshive-user-capabilities']
+    with pytest.raises(RuntimeErrorBase, match='requires its signed'):
+        runtime._build_command(candidate, 'Synthetic.', runtime._host_runtime_info(candidate))
+
+    local = provider._run_local_native_bundle(payload, model, 'high')
+    assert local['env']['GLASSHIVE_CAPABILITY_BROKER_TOKEN'] == 'synthetic-grant'
+    admitted = {**candidate, 'bootstrap_bundle_json': json.dumps(local)}
+    command, env = runtime._build_command(admitted, 'Synthetic.', runtime._host_runtime_info(admitted))
+    assert command[command.index('-m') + 1] == model.native_model
+    assert 'model_reasoning_effort="high"' in command
+    assert command[command.index('-s') + 1] == 'read-only'
+    assert '--add-dir' not in command
+    assert '--dangerously-bypass-approvals-and-sandbox' not in command
+    assert path.read_text() == sealed_config
+    assert 'GLASSHIVE_CAPABILITY_BROKER_TOKEN' not in stable['env']
+    assert env['GLASSHIVE_CAPABILITY_BROKER_TOKEN'] == 'synthetic-grant'
 
 
 def test_normal_configuration_still_inherits_native_capabilities(runtime):

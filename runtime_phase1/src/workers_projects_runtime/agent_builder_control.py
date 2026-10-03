@@ -188,6 +188,7 @@ def conversation_output_schema(
     description_parts = [
         "Return one structured result for the current conversation turn.",
         "Put only the complete user-facing answer in content.",
+        "Returning type=assistant_response ends your work for this turn. First complete authorized work you can do now, or report its actual blocker; a promise is not a result. A real accepted asynchronous work receipt may be acknowledged without waiting for completion.",
     ]
     if normalized_graph:
         description_parts.extend(
@@ -225,7 +226,6 @@ def conversation_output_schema(
             "type": "string",
             "enum": type_choices,
         },
-        "content": {"type": "string"},
         "tool_name": {
             "type": ["string", "null"],
             "enum": [None, *names],
@@ -238,6 +238,9 @@ def conversation_output_schema(
             "enum": ["eligible", "skip"],
         }
         required.append("voice")
+    # Native providers may preserve property order. Streaming still validates the
+    # actual typed controls before decoding content; ordering is not authority.
+    properties["content"] = {"type": "string"}
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -246,6 +249,152 @@ def conversation_output_schema(
         "properties": properties,
         "required": required,
     }
+
+
+
+def conversation_controls_from_schema(schema: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Recover the same typed delivery/graph contract in the standalone ACP bridge."""
+    if not isinstance(schema, dict) or schema.get("additionalProperties") is not False:
+        return None, None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or set(properties) != {"type", "tool_name", "voice", "content"}:
+        return None, None
+    if set(schema.get("required") or []) != set(properties):
+        return None, None
+    if properties.get("voice", {}).get("enum") != ["eligible", "skip"]:
+        return None, None
+    names = properties.get("tool_name", {}).get("enum")
+    if not isinstance(names, list) or not names or names[0] is not None:
+        return None, None
+    graph = normalized_graph_transfer_control({"version": CONTROL_VERSION, "tools": [
+        {"name": name, "description": "Transfer in the current graph."} for name in names[1:]
+    ]}) if len(names) > 1 else None
+    if len(names) > 1 and graph is None:
+        return None, None
+    return graph, messaging_delivery_control(audio_eligible=True)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate conversation control field")
+        result[key] = value
+    return result
+
+
+def public_conversation_prefix(output: str, graph_control: Any, delivery_control: Any) -> dict[str, Any] | None:
+    """Decode only a public string after every required audio/graph control.
+
+    Content-first envelopes remain valid terminal results, but cannot stream early.
+    JSON escapes and surrogate pairs stay buffered until structurally complete.
+    """
+    if not normalized_messaging_delivery_control(delivery_control):
+        return None
+    source = str(output or "").lstrip()
+    if not source.startswith("{"):
+        return None
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_json_object)
+    offset = 1
+    controls: dict[str, Any] = {}
+    while offset < len(source):
+        while offset < len(source) and source[offset].isspace():
+            offset += 1
+        try:
+            key, offset = decoder.raw_decode(source, offset)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(key, str) or key in controls or key not in {"type", "tool_name", "voice", "content"}:
+            return None
+        while offset < len(source) and source[offset].isspace():
+            offset += 1
+        if offset >= len(source) or source[offset] != ":":
+            return None
+        offset += 1
+        while offset < len(source) and source[offset].isspace():
+            offset += 1
+        if key == "content":
+            if (set(controls) != {"type", "tool_name", "voice"}
+                    or controls != {"type": "assistant_response", "tool_name": None, "voice": "eligible"}
+                    or offset >= len(source) or source[offset] != '"'):
+                return None
+            start = offset
+            offset += 1
+            safe_end = offset
+            closed = False
+            while offset < len(source):
+                char = source[offset]
+                if char == '"':
+                    closed = True
+                    break
+                if ord(char) < 0x20 or 0xD800 <= ord(char) <= 0xDFFF:
+                    return None
+                if char == "\\":
+                    if offset + 1 >= len(source):
+                        break
+                    escape = source[offset + 1]
+                    if escape == "u":
+                        if offset + 6 > len(source):
+                            break
+                        try:
+                            code = int(source[offset + 2:offset + 6], 16)
+                        except ValueError:
+                            return None
+                        if 0xD800 <= code <= 0xDBFF:
+                            if offset + 12 > len(source):
+                                break
+                            try:
+                                low = int(source[offset + 8:offset + 12], 16)
+                            except ValueError:
+                                return None
+                            if source[offset + 6:offset + 8] != "\\u" or not 0xDC00 <= low <= 0xDFFF:
+                                return None
+                            offset += 12
+                        elif 0xDC00 <= code <= 0xDFFF:
+                            return None
+                        else:
+                            offset += 6
+                    elif escape in '\"\\/bfnrt':
+                        offset += 2
+                    else:
+                        return None
+                else:
+                    offset += 1
+                safe_end = offset
+            if closed and source[offset + 1:].strip() != "}":
+                return None
+            try:
+                content = json.loads(source[start:safe_end] + '"')
+            except ValueError:
+                return None
+            return {"text": content, "complete": closed, "delivery_disposition": {
+                "version": MESSAGING_DELIVERY_CONTROL_VERSION, "audio": "eligible",
+                "required": True, "valid": True, "source": "model",
+            }}
+        try:
+            value, offset = decoder.raw_decode(source, offset)
+        except (ValueError, TypeError):
+            return None
+        controls[key] = value
+        while offset < len(source) and source[offset].isspace():
+            offset += 1
+        if offset >= len(source) or source[offset] != ",":
+            return None
+        offset += 1
+    return None
+
+
+def ordered_conversation_output(parts: list[str], output: str, graph_control: Any, delivery_control: Any) -> str:
+    """Keep accepted model-authored narration in the same native terminal answer."""
+    if not parts:
+        return output
+    payload = json.loads(output, object_pairs_hook=_unique_json_object)
+    decision = parse_conversation_output(output, graph_control, delivery_control)
+    disposition = decision.get("delivery_disposition")
+    if isinstance(disposition, dict) and disposition.get("valid") is not True:
+        raise ValueError("Invalid terminal conversation delivery control")
+    payload["content"] = "\n\n".join([*parts, str(payload["content"])])
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def graph_transfer_output_schema(control: Any) -> dict[str, Any] | None:
@@ -263,7 +412,7 @@ def parse_conversation_output(
         return {"type": "assistant_response", "content": str(output or "")}
     raw_output = str(output or "")
     try:
-        payload = json.loads(raw_output.strip())
+        payload = json.loads(raw_output.strip(), object_pairs_hook=_unique_json_object)
     except json.JSONDecodeError as exc:
         if normalized_delivery:
             visible_fallback = raw_output

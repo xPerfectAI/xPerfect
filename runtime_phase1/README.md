@@ -168,6 +168,19 @@ Conversation streams never expose hidden chain-of-thought. Claude stream-json cu
 assistant-text deltas. Codex exec JSON currently provides safe activity while running and the
 assistant message on completion; this is declared as `incremental_text: false` in model metadata.
 
+Grok audio-eligible conversation turns can stream the model's public response before terminal
+completion. The existing output schema puts graph and audio controls before `content`; the decoder
+checks the actual controls and JSON string boundaries. Content-first, skipped and graph-transfer
+envelopes stay terminal-only. Invalid headers never authorize early text; a malformed later
+suffix produces a typed failure. Credentials and local paths remain
+redacted. Early text uses the same public sanitation as terminal text; unresolved private citations
+wait for their native source receipt. Complete eligible narration before native tools remains in the same native terminal
+answer, in order, so saved-message evidence does not erase spoken text. An accepted public part
+also fences replay by fallback or context recovery. Terminal evidence and source/digest checks
+remain unchanged; a changing accepted prefix fails without replaying a replacement answer.
+Native activity reads use the observed file size as their byte boundary, so concurrent writes
+remain for the next read and cannot replay a text delta already delivered.
+
 ## Curated Library Registry
 
 Library items are versioned, non-secret bootstrap extensions for native Codex and Claude workers.

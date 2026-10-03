@@ -4,7 +4,7 @@ from .native_context_projection import apply_claude_context, prepare_private_com
 from .worker_configuration import contextual_instruction, enforce_context_tools
 
 from .secret_redaction import CREDENTIAL_REDACTIONS, RedactionRule
-from . import native_input
+from . import native_input, codex_authority
 from .account_native_launch import GuardedAccountLauncher
 
 import json
@@ -33,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 compatibility
     import tomli as tomllib
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Callable
@@ -63,8 +64,10 @@ from .bootstrap import (
 from .profile_registry import require_worker_profile, UnsupportedWorkerProfileError
 from .docker_sandbox import DockerSandboxManager
 from .deliverables import (
-    capture_native_media, _native_media_snapshot, NATIVE_IMAGE_SUFFIXES,
+    capture_native_media, _native_media_snapshot, _native_file_reader, NATIVE_IMAGE_SUFFIXES,
     NATIVE_MEDIA_MAX_ITEMS, NATIVE_MEDIA_MAX_BYTES, NATIVE_MEDIA_MAX_TOTAL_BYTES,
+    NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256,
+    is_user_deliverable_relative_path,
 )
 from .failure_classification import (
     FailureClassification,
@@ -112,6 +115,7 @@ from .provider_accounts import ProviderAccountHomeManager
 from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, host_runtime_requirement_issue
 from .run_evidence import (
     final_report_text,
+    markdown_body_lines,
     build_constraint_ledger,
     build_run_evidence,
     write_constraint_ledger,
@@ -923,6 +927,51 @@ def _claude_effort_help_supports(help_text: str, effort: str) -> bool:
     if effort != "xhigh":
         return True
     return re.search(r"\bxhigh\b", help_text[marker : marker + 320], flags=re.IGNORECASE) is not None
+
+
+@lru_cache(maxsize=16)
+def _claude_binary_help(resolved: str, identity: tuple[int, ...]) -> str:
+    # Help is a property of the installed binary, not a per-turn provider call.
+    # Exceptions are not cached; an unavailable probe can recover on retry.
+    completed = subprocess.run(
+        [resolved, "--help"], check=False, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, timeout=5,
+    )
+    if completed.returncode:
+        raise RuntimeError("Claude Code capability probe failed")
+    return f"{completed.stdout}\n{completed.stderr}"
+
+
+def _host_claude_help_text(binary: str) -> str:
+    resolved = shutil.which(binary)
+    if not resolved:
+        return ""
+    try:
+        info = Path(resolved).stat()
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        return _claude_binary_help(resolved, identity)
+    except Exception:
+        return ""
+
+
+def _claude_read_only_help_supports(help_text: str) -> bool:
+    return all(flag in help_text for flag in (
+        "--tools", "--permission-mode", "dontAsk", "--no-chrome",
+        "--strict-mcp-config", "--setting-sources", "--json-schema",
+    ))
+
+
+def _claude_restricted_help_supports(help_text: str) -> bool:
+    return _claude_read_only_help_supports(help_text) and all(
+        flag in help_text for flag in (
+            "--safe-mode", "--disable-slash-commands", "--no-session-persistence",
+        )
+    )
+
+
+def _host_claude_read_only_supported() -> bool:
+    binary = os.environ.get("WPR_CLAUDE_CODE_BIN", "claude")
+    return _claude_read_only_help_supports(_host_claude_help_text(binary))
 
 
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -3190,6 +3239,11 @@ class ProfiledWorkerRuntime:
         resolver = getattr(runtime, "provider_native_image_output", None)
         return resolver(worker, run, output) if callable(resolver) else (output, [])
 
+    def provider_native_output_file_rejections(self, worker: dict, run: dict):
+        runtime = self._runtime_for_worker(worker)
+        resolver = getattr(runtime, "provider_native_output_file_rejections", None)
+        return resolver(worker, run) if callable(resolver) else []
+
     def provider_tool_evidence_log(self, worker: dict, run_id: str, *, instruction_sha256: str = "") -> tuple[str, str]:
         profile, stdout = self.provider_activity_log(worker, run_id)
         runtime = self._runtime_for_worker(worker)
@@ -3246,11 +3300,11 @@ class ProfiledWorkerRuntime:
             ):
                 with stdout_path.open("rb") as handle:
                     handle.seek(previous_size)
-                    data = previous_data + handle.read()
+                    data = previous_data + handle.read(stat.st_size - previous_size)
             else:
                 with stdout_path.open("rb") as handle:
                     handle.seek(max(0, stat.st_size - max_bytes))
-                    data = handle.read(max_bytes)
+                    data = handle.read(min(max_bytes, stat.st_size))
 
             if len(data) > max_bytes:
                 data = data[-max_bytes:]
@@ -4394,22 +4448,21 @@ class BaseCliWorkerRuntime:
     def _write_session_key(self, worker_id: str, session_key: str, *, context_epoch: str | None = None) -> None:
         path = self._session_meta_path(worker_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        previous = codex_authority.read_json(path)
         if context_epoch is None:
-            try:
-                context_epoch = str(json.loads(path.read_text()).get("context_epoch") or "")
-            except (OSError, ValueError, AttributeError):
-                context_epoch = ""
-        _atomic_write_private_text(
-            path,
-            json.dumps(
-                {
-                    "session_key": session_key,
-                    "context_epoch": context_epoch,
-                    "runtime": self.runtime_name,
-                },
-                indent=2,
-            ),
+            context_epoch = str(previous.get("context_epoch") or "")
+        preserved = (
+            {"codex_authority": previous["codex_authority"]}
+            if previous.get("session_key") == session_key
+            and previous.get("context_epoch", "") == context_epoch
+            and previous.get("runtime") == self.runtime_name
+            and isinstance(previous.get("codex_authority"), dict)
+            else {}
         )
+        _atomic_write_private_text(path, json.dumps({
+            "session_key": session_key, "context_epoch": context_epoch,
+            "runtime": self.runtime_name, **preserved,
+        }, indent=2))
 
     def _read_provider_session_key(self, worker: dict) -> str | None:
         epoch = self._bootstrap_env_value(worker, GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV)
@@ -4723,10 +4776,12 @@ class BaseCliWorkerRuntime:
 
     def _read_native_image_scope(self, worker_id: str, run_id: str) -> dict:
         try:
-            data = _native_media_snapshot(
-                self._run_root(worker_id, run_id), Path("native-image-scope.json"), 128 * 1024
-            )
-            scope = json.loads(data)
+            # This run-owned manifest also describes ordinary output files. An
+            # image metadata byte limit would become an implicit file-count cap.
+            with _native_file_reader(
+                self._run_root(worker_id, run_id), Path("native-image-scope.json")
+            ) as (handle, _metadata):
+                scope = json.load(handle)
             return scope if isinstance(scope, dict) else {}
         except (OSError, ValueError):
             return {}
@@ -5478,6 +5533,13 @@ class BaseCliWorkerRuntime:
     def _parse_output(self, worker: dict, stdout: str, stderr: str, info: RuntimeInfo) -> tuple[str | None, str]:
         raise NotImplementedError
 
+    def _select_native_agent_output(self, worker: dict, info: RuntimeInfo, output_parts: list[str]) -> str:
+        capture = getattr(self, "_capture_final_native_output_files", None)
+        return _select_user_facing_agent_output(
+            output_parts,
+            on_selected_output=(lambda output: capture(worker, info, output)) if callable(capture) else None,
+        )
+
     def _bootstrap_env_value(self, worker: dict, name: str) -> str:
         try:
             bundle = json.loads(str(worker.get("bootstrap_bundle_json") or "{}"))
@@ -5865,7 +5927,9 @@ class BaseCliWorkerRuntime:
             return recovered
         info = self.reconcile_worker(worker)
         try:
-            session_key, output = self._parse_output(worker, stdout, stderr, info)
+            session_key, output = self._parse_output(
+                {**worker, "_active_run_id": effective_run_id}, stdout, stderr, info
+            )
         except RuntimeErrorBase as exc:
             return {
                 "state": "failed",
@@ -5881,7 +5945,9 @@ class BaseCliWorkerRuntime:
         conversation_recovery = run_mode == "conversation" or bool(
             getattr(self, "_conversation_mode_from_worker", lambda _worker: False)(worker)
         )
-        if conversation_recovery and isinstance(self, HostNativeCliMixin):
+        native_scope = active_session.get("native_image_scope")
+        file_recovery = isinstance(native_scope, dict) and native_scope.get("file_output_transport") == "artifact_sha256"
+        if isinstance(self, HostNativeCliMixin) and (conversation_recovery or file_recovery):
             output = _redact_text(self._project_native_image_output(
                 worker, info, output, active_session.get("native_image_scope"), effective_run_id
             ))
@@ -7294,6 +7360,7 @@ class BaseCliWorkerRuntime:
                         {
                             "worker_id": worker_id,
                             "run_id": effective_run_id,
+                            "attempt_id": effective_attempt_id,
                             "provider": provider,
                             "event": event,
                         }
@@ -9028,7 +9095,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
                 str(session_key),
             )
         if output_parts:
-            return session_key, _select_user_facing_agent_output(output_parts)
+            return session_key, self._select_native_agent_output(worker, info, output_parts)
         if getattr(self, "_conversation_mode_from_worker", lambda _worker: False)(worker):
             return session_key, "The harness completed without a user-facing response."
         fallback = self._extract_plain_output(stdout, stderr)
@@ -9458,7 +9525,7 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
             return info.session_key, ""
         session_key = str(payload.get("session_id") or info.session_key or "").strip() or None
         result = str(payload.get("result") or "")
-        return session_key, _select_user_facing_agent_output([result])
+        return session_key, self._select_native_agent_output(worker, info, [result])
 
     @staticmethod
     def _terminal_result_payload(stdout: str) -> dict:
@@ -9879,7 +9946,9 @@ _SECRET_REDACTIONS: tuple[RedactionRule, ...] = (
 _HOST_RUN_OUTPUT_MAX_CHARS = 64000
 
 
-def _select_user_facing_agent_output(output_parts: list[str]) -> str:
+def _select_user_facing_agent_output(
+    output_parts: list[str], *, on_selected_output: Callable[[str], None] | None = None,
+) -> str:
     """The run's user-facing text, settled once when the native transcript is read: the latest
     part's FINAL REPORT (empty when the report is empty), otherwise the latest assistant result.
     Stored output is final; callbacks and views use it as written."""
@@ -9891,7 +9960,11 @@ def _select_user_facing_agent_output(output_parts: list[str]) -> str:
     for part in reversed(cleaned):
         report = final_report_text(part)
         if report is not None:
+            if on_selected_output is not None:
+                on_selected_output(part)
             return report
+    if on_selected_output is not None:
+        on_selected_output(cleaned[-1])
     return cleaned[-1].strip()
 
 
@@ -10453,6 +10526,16 @@ def _safe_slug(value: str) -> str:
 class HostNativeCliMixin:
     execution_mode = "host"
     worker_root_name = "host_cli_runtime"
+
+    def _capture_final_native_output_files(self, worker: dict, info: RuntimeInfo, output: str) -> None:
+        """Capture the selected final assistant message before report text selection."""
+        if self._conversation_mode_from_worker(worker):
+            return  # Conversation output already uses its canonical selected-file projection.
+        run_id = str(worker.get("_active_run_id") or "")
+        if not run_id or not worker.get("_run_attempt_id"):
+            return
+        scope = self._read_native_image_scope(str(worker.get("worker_id") or ""), run_id)
+        self._capture_native_output_files(worker, str(info.workspace_dir or ""), scope, run_id, output)
 
     def _release_run_transcript(self, run_root: Path) -> None:
         """End every earlier launch's claim on the run root, then its exit code and start permit,
@@ -11095,7 +11178,7 @@ raise SystemExit(exit_code)
             and scope.get("file_output_transport") == "artifact_sha256"
         )
         if (
-            not self._conversation_mode_from_worker(worker)
+            (not self._conversation_mode_from_worker(worker) and not file_transport)
             or not isinstance(scope, dict) or not run_id or scope.get("run_id") != run_id
             or not (image_transport or file_transport)
             or scope.get("worker_id") != worker.get("worker_id")
@@ -11105,10 +11188,9 @@ raise SystemExit(exit_code)
         ):
             return []
         if file_transport:
-            result: list[tuple[Path, str, bytes]] = []
-            total_bytes = 0
+            result: list[tuple[Path, str, NativeFileSnapshot]] = []
             records = scope.get("output_files", [])
-            if not isinstance(records, list) or len(records) > NATIVE_MEDIA_MAX_ITEMS:
+            if not isinstance(records, list):
                 return []
             run_root = self._run_root(str(worker["worker_id"]), run_id)
             workspace = Path(workspace_dir)
@@ -11117,35 +11199,30 @@ raise SystemExit(exit_code)
                     if not isinstance(item, dict):
                         raise ValueError("Invalid output artifact descriptor")
                     digest = item.get("sha256")
-                    relative = Path(str(item.get("workspace_path") or ""))
+                    source_kind = item.get("source_root", "workspace")
+                    source_root = (workspace if source_kind == "workspace" else
+                                   self._home_dir(str(worker["worker_id"])) / ".tmp"
+                                   if source_kind == "managed_tmp" else None)
+                    relative = Path(str(item.get("root_path") or item.get("workspace_path") or ""))
                     snapshot = Path(str(item.get("snapshot_path") or ""))
                     mime_type = item.get("mime_type")
                     if (
                         not isinstance(digest, str)
                         or not re.fullmatch(r"[a-f0-9]{64}", digest)
                         or relative.is_absolute()
-                        or ".." in relative.parts
-                        or any(part.startswith(".") for part in relative.parts)
+                        or source_root is None
+                        or not is_user_deliverable_relative_path(relative, explicit_selection=True)
                         or snapshot.parent != Path("output-files")
                         or snapshot.stem != digest
                         or not isinstance(mime_type, str)
                         or not mime_type
                         or not isinstance(item.get("bytes"), int)
                         or isinstance(item.get("bytes"), bool)
+                        or item["bytes"] < 0
                     ):
                         raise ValueError("Invalid output artifact identity")
-                    data = _native_media_snapshot(
-                        run_root, snapshot, NATIVE_MEDIA_MAX_BYTES
-                    )
-                    if (
-                        len(data) != item["bytes"]
-                        or hashlib.sha256(data).hexdigest() != digest
-                    ):
-                        raise ValueError("Output artifact snapshot changed")
-                    total_bytes += len(data)
-                    if total_bytes > NATIVE_MEDIA_MAX_TOTAL_BYTES:
-                        raise ValueError("Output artifacts exceed byte limit")
-                    result.append((workspace / relative, mime_type, data))
+                    data = verified_native_file(run_root, snapshot, digest, item["bytes"])
+                    result.append((source_root / relative, mime_type, data))
                 except (OSError, ValueError, TypeError):
                     return []
             return result
@@ -11165,10 +11242,10 @@ raise SystemExit(exit_code)
         scope: dict,
         run_id: str,
         output: str,
-    ) -> list[tuple[Path, str, bytes]]:
+    ) -> list[tuple[Path, str, NativeFileSnapshot]]:
         """Snapshot only files the model explicitly selected in Markdown output."""
         if (
-            not self._conversation_mode_from_worker(worker)
+            scope.get("file_output_transport") != "artifact_sha256"
             or scope.get("run_id") != run_id
             or scope.get("worker_id") != worker.get("worker_id")
             or not worker.get("owner_id")
@@ -11181,84 +11258,84 @@ raise SystemExit(exit_code)
         ):
             return []
         workspace = Path(workspace_dir)
-        selected: list[tuple[Path, str, bytes]] = []
+        managed_tmp = self._home_dir(str(worker["worker_id"])) / ".tmp"
+        selected: list[tuple[Path, str, NativeFileSnapshot]] = []
         records: list[dict[str, object]] = []
-        seen: set[Path] = set()
-        total_bytes = 0
+        rejected: list[dict[str, str]] = []
+        seen: set[tuple[str, Path]] = set()
+
+        def reject(candidate: Path, code: str):
+            name = candidate.name
+            if not name or len(name) > 255 or any(ord(c) < 32 or c in "/\\" for c in name):
+                name = "File"
+            item = {"name": name, "code": code}
+            if item not in rejected:
+                rejected.append(item)
+        body = "\n".join(
+            re.sub(r"(`+)(?!`)(.*?)\1(?!`)", "", line)
+            for _offset, line in markdown_body_lines(output)
+        )
         for match in re.finditer(
             r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)",
-            output,
+            body,
         ):
             destination = match.group(2).strip()
             if destination.startswith("<") and destination.endswith(">"):
                 destination = destination[1:-1]
             destination = unquote(destination)
-            if destination.startswith("file://"):
-                try:
-                    parsed = urlsplit(destination)
-                except ValueError:
-                    continue
+            try:
+                parsed = urlsplit(destination)
+            except ValueError:
+                continue
+            if parsed.scheme == "file":
                 if parsed.netloc not in {"", "localhost"} or parsed.query or parsed.fragment:
+                    reject(Path(parsed.path), "source_root_unsupported")
                     continue
                 destination = parsed.path
+            elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+                continue  # Public references and already-projected artifacts are not local selections.
             candidate = Path(destination)
+            source_kind, source_root = "workspace", workspace
             if candidate.is_absolute():
                 try:
                     relative = candidate.relative_to(workspace)
                 except ValueError:
-                    continue
+                    try:
+                        relative = candidate.relative_to(managed_tmp)
+                        source_kind, source_root = "managed_tmp", managed_tmp
+                    except ValueError:
+                        reject(candidate, "source_root_unsupported")
+                        continue
             else:
                 relative = candidate
-            if (
-                not relative.parts
-                or ".." in relative.parts
-                or any(part.startswith(".") for part in relative.parts)
-                or relative.parts[0] == "glasshive-run"
-                or relative in seen
-            ):
+            if not is_user_deliverable_relative_path(relative, explicit_selection=True):
+                reject(candidate, "not_deliverable")
                 continue
+            key = (source_kind, relative)
+            if key in seen:
+                continue
+            seen.add(key)
             try:
-                data = _native_media_snapshot(
-                    workspace, relative, NATIVE_MEDIA_MAX_BYTES
-                )
+                run_root = self._run_root(str(worker["worker_id"]), run_id)
+                data = copy_native_file(source_root, relative, run_root)
             except (OSError, ValueError):
+                reject(candidate, "unreadable")
                 continue
-            if len(selected) >= NATIVE_MEDIA_MAX_ITEMS:
-                break
-            total_bytes += len(data)
-            if total_bytes > NATIVE_MEDIA_MAX_TOTAL_BYTES:
-                break
-            digest = hashlib.sha256(data).hexdigest()
-            suffix = relative.suffix.lower()
-            snapshot = Path("output-files") / f"{digest}{suffix}"
-            run_root = self._run_root(str(worker["worker_id"]), run_id)
-            snapshot_path = run_root / snapshot
-            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            snapshot_path.parent.chmod(0o700)
-            temporary = snapshot_path.with_name(
-                f".{snapshot_path.name}.{secrets.token_hex(8)}.tmp"
-            )
-            try:
-                temporary.write_bytes(data)
-                temporary.chmod(0o600)
-                os.replace(temporary, snapshot_path)
-                snapshot_path.chmod(0o600)
-            finally:
-                temporary.unlink(missing_ok=True)
+            digest = data.sha256
             mime_type = mimetypes.guess_type(relative.name)[0] or "application/octet-stream"
             records.append(
                 {
-                    "workspace_path": relative.as_posix(),
-                    "snapshot_path": snapshot.as_posix(),
+                    "source_root": source_kind,
+                    "root_path": relative.as_posix(),
+                    "snapshot_path": data.relative.as_posix(),
                     "mime_type": mime_type,
-                    "bytes": len(data),
+                    "bytes": data.size_bytes,
                     "sha256": digest,
                 }
             )
-            selected.append((workspace / relative, mime_type, data))
-            seen.add(relative)
-        if records:
-            durable_scope = {**scope, "output_files": records}
+            selected.append((source_root / relative, mime_type, data))
+        if records or rejected:
+            durable_scope = {**scope, "output_files": records, "rejected_output_files": rejected}
             _atomic_write_private_text(
                 self._run_root(str(worker["worker_id"]), run_id)
                 / "native-image-scope.json",
@@ -11267,6 +11344,28 @@ raise SystemExit(exit_code)
             scope.clear()
             scope.update(durable_scope)
         return selected
+
+    def provider_native_output_file_rejections(self, worker: dict, run: dict):
+        run_id = str(run.get("run_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", run_id) or run.get("worker_id") != worker.get("worker_id"):
+            return []
+        scope = self._read_native_image_scope(str(worker["worker_id"]), run_id)
+        if (scope.get("file_output_transport") != "artifact_sha256"
+                or scope.get("run_id") != run_id
+                or scope.get("worker_id") != worker.get("worker_id")
+                or not worker.get("owner_id") or scope.get("owner_id") != worker.get("owner_id")
+                or scope.get("workspace_dir") != str(worker.get("workspace_dir") or "")
+                or str(scope.get("attempt_id") or "") != str(run.get("active_attempt_id") or "")):
+            return []
+        rejected = scope.get("rejected_output_files", [])
+        if not isinstance(rejected, list):
+            return []
+        return [dict(item) for item in rejected if isinstance(item, dict)
+                and set(item) == {"name", "code"}
+                and isinstance(item["code"], str)
+                and item["code"] in {"source_root_unsupported", "not_deliverable", "unreadable"}
+                and isinstance(item["name"], str) and 0 < len(item["name"]) <= 255
+                and not any(ord(c) < 32 or c in "/\\" for c in item["name"])]
 
     def provider_native_image_output(self, worker: dict, run: dict, output: str):
         run_id = str(run.get("run_id") or "")
@@ -11285,11 +11384,19 @@ raise SystemExit(exit_code)
         """Resolve only selected destinations when this provider owns the ref transport."""
         if "](" not in output:
             return output
+        if isinstance(scope, dict) and scope.get("file_output_transport") == "artifact_sha256":
+            durable_scope = self._read_native_image_scope(str(worker.get("worker_id") or ""), run_id)
+            if durable_scope.get("run_id") == run_id and all(
+                durable_scope.get(key) == scope.get(key)
+                for key in ("worker_id", "owner_id", "workspace_dir", "attempt_id", "file_output_transport")
+            ):
+                scope = durable_scope
         images = self._native_image_output_files(worker, str(info.workspace_dir or ""), scope, run_id)
         if (
             not images
             and isinstance(scope, dict)
             and scope.get("file_output_transport") == "artifact_sha256"
+            and "output_files" not in scope
         ):
             images = self._capture_native_output_files(
                 worker,
@@ -11305,9 +11412,12 @@ raise SystemExit(exit_code)
         workspace = Path(workspace_dir)
         references: dict[str, str] = {}
         for path, _mime_type, data in images:
-            reference = "artifact_sha256:" + hashlib.sha256(data).hexdigest()
-            relative = path.relative_to(workspace).as_posix()
-            for alias in (str(path), relative, "./" + relative):
+            reference = "artifact_sha256:" + native_output_sha256(data)
+            aliases = [str(path)]
+            if path.is_relative_to(workspace):
+                relative = path.relative_to(workspace).as_posix()
+                aliases.extend((relative, "./" + relative))
+            for alias in aliases:
                 references[alias] = reference
 
         def render(match: re.Match[str]) -> str:
@@ -11899,11 +12009,10 @@ raise SystemExit(exit_code)
     ) -> str:
         if _native_tools_disabled(capability_bundle or {}):
             broker = capability_bundle.get("glasshive_capability_broker")
-            env = capability_bundle.get("env")
-            if (not isinstance(broker, dict) or broker.get("version") != 1
+            has_broker = "glasshive_capability_broker" in capability_bundle
+            if has_broker and (not isinstance(broker, dict) or broker.get("version") != 1
                 or not isinstance(broker.get("name"), str) or not broker["name"].strip()
-                or not isinstance(broker.get("url"), str) or not broker["url"].strip()
-                or not isinstance(env, dict) or not env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN")):
+                or not isinstance(broker.get("url"), str) or not broker["url"].strip()):
                 raise RuntimeErrorBase("Restricted native execution requires its signed capability broker")
             return _render_toml_document({
                 "developer_instructions": developer_instructions or "",
@@ -11912,15 +12021,16 @@ raise SystemExit(exit_code)
                 "web_search": "disabled",
                 "project_doc_max_bytes": 0,
                 # The tool engine forwards the signed broker's calls; it does not grant host tools.
-                "features": {"code_mode_host": True,
-                    **{name: False for name in _CODEX_RESTRICTED_NATIVE_FEATURES}},
+                "features": {"code_mode_host": has_broker,
+                    **{name: False for name in _CODEX_RESTRICTED_NATIVE_FEATURES},
+                    **({} if has_broker else {"goals": False})},
                 "mcp_servers": {broker["name"]: {
                     "url": broker["url"],
                     # The signed broker owns the admitted operation's authorization.
                     # Codex's annotation-based "auto" still prompts under read-only.
                     "default_tools_approval_mode": "approve",
                     "bearer_token_env_var": "GLASSHIVE_CAPABILITY_BROKER_TOKEN",
-                }},
+                }} if has_broker else {},
             })
         append = codex_config_append.strip()
         append_names = _codex_mcp_server_names(append)
@@ -11990,6 +12100,11 @@ raise SystemExit(exit_code)
             else None
         )
         if _native_tools_disabled(bundle):
+            env = bundle.get("env")
+            if "glasshive_capability_broker" in bundle and (
+                not isinstance(env, dict) or not env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN")
+            ):
+                raise RuntimeErrorBase("Restricted native execution requires its signed capability broker")
             config_path = self._host_codex_home(worker) / "config.toml"
             expected = self._host_codex_worker_config(
                 "", developer_instructions=developer_instructions, capability_bundle=bundle,
@@ -12026,6 +12141,8 @@ raise SystemExit(exit_code)
     ) -> tuple[dict[str, object], dict[str, object]]:
         from .native_mcp_tool_filter import selected_filter
 
+        if _native_tools_disabled(bundle):
+            return {"mcpServers": {}}, {}
         payload = claude_project_mcp_payload_for_bundle(bundle, project_mcp)
         filters: dict[str, object] = {}
         if (_native_tools_disabled(bundle)
@@ -12197,7 +12314,8 @@ raise SystemExit(exit_code)
         claude_home = self._home_dir(str(worker["worker_id"])) / ".claude"
         claude_home.mkdir(parents=True, exist_ok=True)
         claude_home.chmod(0o700)
-        self._project_host_claude_capability_roots(claude_home)
+        if not _native_tools_disabled(bundle):
+            self._project_host_claude_capability_roots(claude_home)
         project_mcp = bundle.get("claude_project_mcp")
         state_dir = self._state_dir(str(worker["worker_id"]))
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -12883,6 +13001,9 @@ raise SystemExit(exit_code)
 
     def terminate_worker(self, worker: dict) -> RuntimeInfo:
         run_id = str(worker.get("_active_run_id") or "").strip()
+        # An idle release names the worker's completed run. A host session retained for that
+        # exact run is cleared only through the same proven-dead cleanup as an active run.
+        terminal_run_id = str(worker.get("_terminal_run_id") or "").strip()
         operation = str(worker.get("compute_release_kind") or "").strip() or "terminate_worker"
         active_session = self._read_active_session(worker["worker_id"])
         expected_session: dict[str, object] | None = (
@@ -12894,7 +13015,8 @@ raise SystemExit(exit_code)
                 worker, run_id=run_id, operation=operation
             )
             control_session = active_session
-        elif run_id:
+        elif run_id or (terminal_run_id and active_session):
+            exact_run_id = run_id or terminal_run_id
             active_status = self.host_active_process_status(worker)
             if not active_session:
                 if active_status.get("state") != "absent":
@@ -12902,8 +13024,8 @@ raise SystemExit(exit_code)
                         "The exact host process identity is not confirmed"
                     )
             elif (
-                str(active_session.get("run_id") or "").strip() != run_id
-                or str(active_status.get("run_id") or "").strip() != run_id
+                str(active_session.get("run_id") or "").strip() != exact_run_id
+                or str(active_status.get("run_id") or "").strip() != exact_run_id
                 or active_status.get("state") != "absent"
             ):
                 raise RuntimeErrorBase(
@@ -13785,6 +13907,31 @@ raise SystemExit(exit_code)
                 ) from exc
             materialized = str(parsed.get("developer_instructions") or "")
             placement = "codex_developer_instructions"
+        elif self.runtime_name == "grok-build":
+            flag = "--system-prompt-file"
+            try:
+                rules_path = Path(command[command.index(flag) + 1])
+                expected_path = self._home_dir(str(worker["worker_id"])) / ".xperfect-grok" / "developer-instructions.txt"
+                if rules_path != expected_path:
+                    raise ValueError("Grok rules placement changed")
+                materialized = rules_path.read_text()
+            except (ValueError, IndexError, OSError) as exc:
+                raise RuntimeErrorBase(
+                    "Native Grok developer instruction authority is unavailable; refusing to launch"
+                ) from exc
+            output_schema = self._conversation_output_schema(worker)
+            if output_schema:
+                try:
+                    schema_path = Path(command[command.index('--output-schema-file') + 1])
+                    if schema_path != expected_path.parent / 'conversation-output-schema.json':
+                        raise ValueError('Grok schema placement changed')
+                    if json.loads(schema_path.read_text()) != output_schema:
+                        raise ValueError('Grok output schema changed')
+                except (ValueError, IndexError, OSError) as exc:
+                    raise RuntimeErrorBase(
+                        "Native Grok output schema differs from the request-pinned contract; refusing to launch"
+                    ) from exc
+            placement = "grok_system_prompt_override"
         else:
             raise RuntimeErrorBase(
                 "Native conversation runtime cannot receive developer instruction authority"
@@ -13841,6 +13988,8 @@ raise SystemExit(exit_code)
             "feeling_capsule_count",
             "placement",
             "materialized",
+            "delivered_stable_sha256", "delivered_dynamic_sha256", "preflight",
+            "authority_preflight_ms", "authority_preflight_phases_ms", "injected_units",
         }
         return {key: parsed[key] for key in allowed if key in parsed}
 
@@ -13892,6 +14041,12 @@ raise SystemExit(exit_code)
             expected_session=session, expected_slot_token=slot_token,
             clear_session=clear_session,
         )
+
+    def _prepare_conversation_authority_command(
+        self, worker: dict, command: list[str], *, run_root: Path,
+        timeout_sec: float | None,
+    ) -> list[str]:
+        return command
 
     def _run_conversation_task(
         self,
@@ -13968,8 +14123,11 @@ raise SystemExit(exit_code)
                 raw_stderr.chmod(0o600)
                 # Only the fresh transcript is this launch's; its attempt may read it from here.
                 self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
+                prepared_command = self._prepare_conversation_authority_command(
+                    worker, command, run_root=run_root, timeout_sec=run_timeout_sec,
+                )
                 process_command = self._durable_host_process_command(
-                    command,
+                    prepared_command,
                     run_root=run_root,
                     exit_path=exit_path,
                     timeout_sec=run_timeout_sec,
@@ -14036,9 +14194,6 @@ raise SystemExit(exit_code)
                     daemon=True,
                 )
                 native_session_thread.start()
-                with runtime_start_boundary(worker):
-                    self._release_durable_host_process(active_session)
-                    notify_runtime_started(worker)
                 if authority_receipt is not None:
                     _atomic_write_private_text(
                         run_root / "native-provider-authority-receipt.json",
@@ -14053,6 +14208,9 @@ raise SystemExit(exit_code)
                             "native_provider_authority_receipt": authority_receipt,
                         },
                     )
+                with runtime_start_boundary(worker):
+                    self._release_durable_host_process(active_session)
+                    notify_runtime_started(worker)
                 try:
                     exit_code = process.wait()
                 except subprocess.TimeoutExpired as exc:
@@ -14105,13 +14263,28 @@ raise SystemExit(exit_code)
                     "detail": detail,
                 },
             )
-            raise RuntimeErrorBase(f"{self.runtime_name} exited with code {exit_code}: {detail}")
+            error = RuntimeErrorBase(f"{self.runtime_name} exited with code {exit_code}: {detail}")
+            error.failure_classification = _private_cli_failure_classification(
+                classify_cli_failure(stdout=stdout, stderr=stderr,
+                                     runtime_name=self.runtime_name, exit_code=exit_code),
+                exit_code=exit_code, stdout=stdout, stderr=stderr,
+            )
+            authority_failure = codex_authority.read_json(run_root / "native-authority-failure.json")
+            if authority_failure.get("code") == "authority_update_unconfirmed":
+                error.failure_classification = FailureClassification(
+                    failure_class="authority_update_unconfirmed", retryable=True,
+                    user_message="The current assistant context could not be confirmed. Please retry.",
+                    recommended_recovery="retry", diagnostic_summary="Native developer authority was not confirmed",
+                    structured=True, provider_event_source="native_authority_preflight",
+                )
+            raise error
 
         session_key, output = self._parse_output(worker, stdout, stderr, info)
         self._remember_native_session_key(worker, session_key)
         output = self._project_native_image_output(
             worker, info, str(output or ""), native_image_scope, effective_run_id
         )
+        authority_receipt = self.native_provider_authority_receipt(worker, effective_run_id) or authority_receipt
         redacted_output = _redact_text(str(output or "").strip())
         if len(redacted_output) > _HOST_RUN_OUTPUT_MAX_CHARS:
             redacted_output = f"{redacted_output[: _HOST_RUN_OUTPUT_MAX_CHARS - 3].rstrip()}..."
@@ -14160,6 +14333,12 @@ raise SystemExit(exit_code)
         stdin_text = self._command_stdin_text(worker, instruction, info)
         env["GLASSHIVE_RUN_ID"] = effective_run_id
         workspace = Path(str(info.workspace_dir or self._host_workspace_dir(worker)))
+        native_image_scope = {
+            "run_id": effective_run_id, "worker_id": worker["worker_id"],
+            "owner_id": worker.get("owner_id"), "workspace_dir": str(workspace),
+            "attempt_id": str(worker.get("_run_attempt_id") or ""),
+            "file_output_transport": "artifact_sha256",
+        }
         constraint_ledger, constraint_ledger_path = _write_constraint_ledger_for_run(
             worker=worker,
             instruction=instruction,
@@ -14171,6 +14350,9 @@ raise SystemExit(exit_code)
         run_root = self._run_root(worker["worker_id"], effective_run_id)
         run_root.mkdir(parents=True, exist_ok=True)
         run_root.chmod(0o700)
+        _atomic_write_private_text(
+            run_root / "native-image-scope.json", json.dumps(native_image_scope, sort_keys=True)
+        )
         raw_stdout = run_root / "stdout.log"
         raw_stderr = run_root / "stderr.log"
         host_stdin = run_root / "instruction.stdin"
@@ -14272,6 +14454,7 @@ raise SystemExit(exit_code)
                         "heartbeat_path": str(heartbeat_path),
                         "timeout_seconds": run_timeout_sec,
                         "instruction": instruction,
+                        "native_image_scope": native_image_scope,
                     },
                     publish_run_start=callable(self._run_start_observer),
                     worker=worker,
@@ -14531,6 +14714,9 @@ raise SystemExit(exit_code)
 
         session_key, output = self._parse_output(worker, stdout, stderr, info)
         self._remember_native_session_key(worker, session_key)
+        output = self._project_native_image_output(
+            worker, info, str(output or ""), native_image_scope, effective_run_id
+        )
         redacted_output = _redact_text(output.strip())
         if len(redacted_output) > _HOST_RUN_OUTPUT_MAX_CHARS:
             redacted_output = f"{redacted_output[: _HOST_RUN_OUTPUT_MAX_CHARS - 3].rstrip()}..."
@@ -15061,6 +15247,83 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
             tuple[str, str], tuple[float, tuple[dict[str, object], dict[str, object]]]
         ] = {}
 
+    def _authority_units(self, worker: dict) -> dict[str, str]:
+        bundle = self._bootstrap_bundle_for_worker(worker)
+        return codex_authority.units(
+            str(bundle.get("developer_instructions") or ""),
+            str(bundle.get("declared_developer_instruction_tail") or ""),
+        )
+
+    def _prepare_conversation_authority_command(
+        self, worker: dict, command: list[str], *, run_root: Path,
+        timeout_sec: float | None,
+    ) -> list[str]:
+        # A recovered attempt must not inherit an earlier preflight failure classification.
+        (run_root / "native-authority-failure.json").unlink(missing_ok=True)
+        session = (
+            None
+            if self._provider_session_starts_fresh(worker)
+            else self._resumable_codex_session_key(worker)
+        )
+        if not session:
+            return command
+        manifest_path = self._session_meta_path(str(worker["worker_id"]))
+        epoch = self._bootstrap_env_value(worker, GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV)
+        try:
+            current = self._authority_units(worker)
+            state = codex_authority.session_state(codex_authority.read_json(manifest_path), session, epoch)
+            state = codex_authority.reconcile(self._host_codex_home(worker), session, current, state,
+                full_authority=str(self._bootstrap_bundle_for_worker(worker).get("developer_instructions") or ""))
+            if not codex_authority.missing_units(current, state):
+                codex_authority.save_state(manifest_path, session, epoch, state)
+                return command
+        except (codex_authority.AuthorityUnconfirmed, OSError, ValueError) as exc:
+            raise RuntimeErrorBase("Native developer authority cannot be reconciled") from exc
+        deadline = time.monotonic() + (timeout_sec if timeout_sec else 8)
+        response_deadline = str(worker.get("_provider_response_deadline_at") or "")
+        if response_deadline:
+            deadline = min(deadline, time.monotonic() + (
+                datetime.fromisoformat(response_deadline).timestamp() - time.time()))
+        context_path = run_root / "native-authority-context.json"
+        _atomic_write_private_text(context_path, json.dumps({
+            "authority": str(self._bootstrap_bundle_for_worker(worker).get("developer_instructions") or ""),
+            "declared_tail": current["dynamic"], "session": session, "epoch": epoch,
+            "manifest_path": str(manifest_path), "codex_home": str(self._host_codex_home(worker)),
+            "binary": self.binary, "command": command, "deadline_monotonic": deadline,
+            "receipt_path": str(run_root / "native-provider-authority-receipt.json"),
+            "failure_path": str(run_root / "native-authority-failure.json"),
+        }))
+        helper_path = run_root / "native-authority-preflight.py"
+        _atomic_write_private_text(helper_path, Path(codex_authority.__file__).read_text())
+        return [sys.executable, str(helper_path), str(context_path)]
+
+    def _remember_native_session_key(self, worker: dict, session_key: str | None) -> None:
+        super()._remember_native_session_key(worker, session_key)
+        if not session_key or self._provider_session_is_stateless(worker) or not self._conversation_mode_from_worker(worker):
+            return
+        path = self._session_meta_path(str(worker["worker_id"]))
+        epoch = self._bootstrap_env_value(worker, GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV)
+        try:
+            current = self._authority_units(worker)
+            state = codex_authority.session_state(codex_authority.read_json(path), session_key, epoch)
+            state = codex_authority.reconcile(self._host_codex_home(worker), session_key, current, state,
+                full_authority=str(self._bootstrap_bundle_for_worker(worker).get("developer_instructions") or ""))
+            if codex_authority.missing_units(current, state):
+                return  # thread.started can precede the persisted initial developer frame
+            codex_authority.save_state(path, session_key, epoch, state)
+            run_id = str(worker.get("_active_run_id") or "")
+            receipt_path = self._run_root(str(worker["worker_id"]), run_id) / "native-provider-authority-receipt.json"
+            receipt = codex_authority.read_json(receipt_path)
+            if receipt and receipt.get("run_id") == run_id:
+                codex_authority.write_json(receipt_path, {**receipt,
+                    "preflight": receipt.get("preflight", "none"),
+                    "delivered_stable_sha256": state["delivered"]["stable"],
+                    "delivered_dynamic_sha256": state["delivered"]["dynamic"],
+                })
+        except (codex_authority.AuthorityUnconfirmed, OSError, ValueError):
+            # The next serialized turn must reconcile or inject; never claim delivery here.
+            return
+
     def _native_openai_provider_configured(self, worker: dict) -> bool:
         config_path = self._host_codex_home(worker) / "config.toml"
         if not config_path.is_file():
@@ -15345,7 +15608,7 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
         existing_session = (
             None
             if restricted or self._provider_session_starts_fresh(worker)
-            else self._read_provider_session_key(worker)
+            else self._resumable_codex_session_key(worker)
         )
         model = self._codex_model_for_worker(worker, "WPR_MODEL_HOST_CODEX_CLI")
         is_resume = bool(
@@ -15396,9 +15659,13 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
         self._append_codex_reasoning_effort_config(command, worker)
         native_web_locked = _host_native_web_access() == "disabled"
         if restricted:
-            command.extend(["--strict-config", "--ignore-rules", "--enable", "code_mode_host", "-s", "read-only",
+            has_broker = "glasshive_capability_broker" in self._bootstrap_bundle_for_worker(worker)
+            command.extend(["--strict-config", "--ignore-rules",
+                "--enable" if has_broker else "--disable", "code_mode_host", "-s", "read-only",
                 "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
                 "-c", "project_doc_max_bytes=0"])
+            if not has_broker:
+                command.extend(["--disable", "goals", "--ephemeral"])
             for feature in _CODEX_RESTRICTED_NATIVE_FEATURES:
                 command.extend(["--disable", feature])
         elif native_web_locked:
@@ -15480,6 +15747,14 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
     worker_root_name = "host_claude_code_runtime"
     binary_env_var = "WPR_CLAUDE_CODE_BIN"
 
+    def _host_workspace_dir(self, worker: dict) -> Path:
+        if _native_tools_disabled(self._bootstrap_bundle_for_worker(worker)):
+            workspace = self._state_dir(str(worker["worker_id"])) / "conversation-workspace"
+            workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+            workspace.chmod(0o700)
+            return workspace
+        return super()._host_workspace_dir(worker)
+
     def _conversation_output_schema(self, worker: dict) -> dict[str, object] | None:
         schema = super()._conversation_output_schema(worker)
         if not schema:
@@ -15525,21 +15800,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         return bool(help_text) and _claude_effort_help_supports(help_text, effort)
 
     def _help_text(self) -> str:
-        resolved = shutil.which(self.binary)
-        if not resolved:
-            return ""
-        try:
-            completed = subprocess.run(
-                [resolved, "--help"],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,
-            )
-        except Exception:
-            return ""
-        return f"{completed.stdout}\n{completed.stderr}"
+        return _host_claude_help_text(self.binary)
 
     def _help_supports(self, flag: str) -> bool:
         return flag in self._help_text()
@@ -15699,23 +15960,41 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 "runId": str(worker["_active_run_id"]), "contextToken": secrets.token_hex(32)}
 
     def _build_command(self, worker: dict, instruction: str, info: RuntimeInfo) -> tuple[list[str], dict[str, str]]:
+        bundle = self._bootstrap_bundle_for_worker(worker)
+        restricted = _native_tools_disabled(bundle)
         session_key = (
             None
-            if self._provider_session_starts_fresh(worker)
+            if restricted or self._provider_session_starts_fresh(worker)
             else self._read_provider_session_key(worker)
         )
         model = self._provider_model_for_worker(worker)
         native_web_locked = _host_native_web_access() == "disabled"
         permission_mode = os.environ.get("WPR_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions")
-        bundle = self._bootstrap_bundle_for_worker(worker)
-        selectors = prepare_private_command(self, worker, bundle)
-        if self._conversation_mode_from_worker(worker):
-            permission_mode = (
-                "bypassPermissions"
-                if str(bundle.get("access_mode") or "full").strip().lower() == "full"
-                else "acceptEdits"
+        selectors = None if restricted else prepare_private_command(self, worker, bundle)
+        access_mode = (
+            str(bundle.get("access_mode") or "full").strip().lower()
+            if self._conversation_mode_from_worker(worker) else "full"
+        )
+        read_only = access_mode == "read_only"
+        if restricted and not _claude_restricted_help_supports(self._help_text()):
+            raise RuntimeDependencyMissingError(
+                "Claude Code does not advertise the required zero-tool controls.",
+                binary=self.binary, runtime_name=self.runtime_name,
+                profile=str(worker.get("profile") or "claude-code"), execution_mode="host",
+                dependency_label="Claude Code", recovery_hint="Update Claude Code, then retry the same request.",
             )
-        if native_web_locked:
+        if read_only and not _claude_read_only_help_supports(self._help_text()):
+            raise RuntimeDependencyMissingError(
+                "Claude Code does not advertise the required native read-only tool controls.",
+                binary=self.binary, runtime_name=self.runtime_name,
+                profile=str(worker.get("profile") or "claude-code"), execution_mode="host",
+                dependency_label="Claude Code", recovery_hint="Update Claude Code, then retry the same request.",
+            )
+        if self._conversation_mode_from_worker(worker):
+            permission_mode = "dontAsk" if read_only else "bypassPermissions" if access_mode == "full" else "acceptEdits"
+        if restricted:
+            permission_mode = "dontAsk"
+        elif native_web_locked and not read_only:
             permission_mode = "acceptEdits"
         output_format = "stream-json"
         command = [
@@ -15728,13 +16007,38 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             "--model",
             model,
         ]
+        if restricted:
+            # Safe mode suppresses automatic context and customizations without
+            # changing the selected native account, model, or explicit authority.
+            command.extend([
+                "--tools", "", "--setting-sources", "", "--safe-mode",
+                "--disable-slash-commands", "--no-session-persistence",
+            ])
+        elif read_only:
+            tools = ["Read", "Glob", "Grep"]
+            if not native_web_locked:
+                tools.extend(["WebSearch", "WebFetch"])
+            command.extend(["--tools", ",".join(tools), "--setting-sources", ""])
+        if self._conversation_mode_from_worker(worker) and self._help_supports("--system-prompt-snapshot"):
+            # Request-time authority (including Feelings) changes per turn, also on resume.
+            command.extend(["--system-prompt-snapshot", "off"])
         if not self._conversation_mode_from_worker(worker):
             command.extend(["--input-format", "stream-json", "--verbose"])
         elif self._native_input_image_files(worker, info):
             command.extend(["--input-format", "stream-json"])
         # Only explicit per-run settings cross the managed-login boundary.
-        settings: dict[str, object] = json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
-        if self._conversation_mode_from_worker(worker):
+        settings: dict[str, object] = (
+            {"autoMemoryEnabled": False, "disableAllHooks": True,
+             "permissions": {"defaultMode": "dontAsk"}}
+            if restricted else json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
+        )
+        if read_only and not restricted:
+            permissions = settings.setdefault("permissions", {})
+            if not isinstance(permissions, dict):
+                raise RuntimeErrorBase("Claude Code read-only permissions are invalid")
+            allowed = permissions.get("allow") if isinstance(permissions.get("allow"), list) else []
+            permissions.update(defaultMode="dontAsk", allow=[*allowed, *tools])
+        if self._conversation_mode_from_worker(worker) and not restricted:
             auto_memory = _host_claude_conversation_auto_memory()
             if auto_memory is not None:
                 settings["autoMemoryEnabled"] = auto_memory
@@ -15775,7 +16079,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             mcp_config = str(mcp_path) if mcp_path.is_file() else '{"mcpServers":{}}'
             command.extend(["--mcp-config", mcp_config, "--strict-mcp-config"])
             bundle = self._bootstrap_bundle_for_worker(worker)
-            if str(bundle.get("access_mode") or "full").strip().lower() == "workspace":
+            if not restricted and str(bundle.get("access_mode") or "full").strip().lower() == "workspace":
                 workspace = str(Path(str(info.workspace_dir or ".")).resolve())
                 settings.update(
                     {
@@ -15832,6 +16136,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             )
         if native_web_locked:
             command.extend(["--disallowedTools", "WebSearch", "WebFetch"])
+        if restricted or native_web_locked or access_mode != "full":
             command.insert(2, "--no-chrome")
         elif self._chrome_enabled():
             command.insert(2, "--chrome")
@@ -15850,7 +16155,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             command.extend(
                 [
                     "--json-schema",
-                    json.dumps(output_schema, separators=(",", ":"), sort_keys=True),
+                    json.dumps(output_schema, separators=(",", ":")),
                 ]
             )
         if session_key and not session_key.startswith("claude-worker:"):

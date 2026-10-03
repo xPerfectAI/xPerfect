@@ -40,6 +40,7 @@ from .deliverables import (
     is_valid_professional_artifact,
     native_media_observations,
     NATIVE_MEDIA_PREFIX, NATIVE_IMAGE_SUFFIXES, _publish_native_media, _native_media_snapshot,
+    NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256,
 )
 from .control_plane import (
     PROFILE_ACCOUNT_PROVIDERS,
@@ -55,7 +56,8 @@ from .models import (
     normalize_workspace_tags,
     utc_now,
 )
-from .native_model_selection import ModelConfigurationRequired, selected_grok_model
+from .native_model_selection import (ModelConfigurationRequired, selected_grok_model,
+                                     native_timing_enabled, native_timing_event, native_timing_hash)
 from .mission_provider_accounts import (
     ProviderAccountBusyError,
     deployment_provider_readiness,
@@ -1838,13 +1840,9 @@ class WorkersProjectsService:
         # Interactive provider turns have a separate dispatch lane so autonomous mission workers
         # cannot occupy every service thread before a conversation reaches the host CLI's own
         # profile-isolated capacity lane.
-        conversation_workers = max(
-            1,
-            min(
-                max_workers,
-                self._configured_host_capacity["account_mission_limit"],
-            ),
-        )
+        # Account/tenant mission limits do not constrain conversation dispatch.
+        # Exact CLI lane and measured resource limits remain owned by run admission.
+        conversation_workers = max(1, max_workers)
         self.conversation_executor = ThreadPoolExecutor(
             max_workers=conversation_workers,
             thread_name_prefix="wpr-conversation",
@@ -3743,7 +3741,9 @@ class WorkersProjectsService:
             ),
             **(worker or {}),
         }
-        retry_after_s = self._retry_base_delay_s("host_capacity")
+        retry_after_s = self._retry_base_delay_s(
+            "host_capacity", lane=str(prospective_worker["trusted_run_lane"])
+        )
         next_retry_at = (
             datetime.now(timezone.utc) + timedelta(seconds=retry_after_s)
         ).isoformat()
@@ -4298,9 +4298,13 @@ class WorkersProjectsService:
     def _signed_artifact_download_url(self, worker: dict, workspace_path: str) -> str:
         return self._signed_artifact_url(worker, workspace_path, kind="artifact_download", action="download")
 
-    def render_provider_native_images(self, request: dict, run: dict, output: str) -> str:
-        """Resolve model-selected input images through the existing owner artifact boundary."""
-        if "](" not in output:
+    def render_provider_native_images(
+        self, request: dict, run: dict, output: str, *, output_files: list[dict] | None = None,
+        output_rejections: list[dict] | None = None,
+        include_captured_files: bool = False,
+    ) -> str:
+        """Resolve model-selected files through the existing owner artifact boundary."""
+        if "](" not in output and output_rejections is None and not include_captured_files:
             return output
         run_id = str(run.get("run_id") or "")
         worker = self.store.get_worker(str(run.get("worker_id") or ""))
@@ -4317,9 +4321,66 @@ class WorkersProjectsService:
         ):
             raise RuntimeErrorBase("Native image output does not match the request owner and run")
         projected, images = resolver(worker, run, output)
-        authorized = {"artifact_sha256:" + hashlib.sha256(data).hexdigest(): (mime, data)
-                      for _path, mime, data in images}
+        rejection_reader = getattr(self.runtime, "provider_native_output_file_rejections", None)
+        if output_rejections is not None and callable(rejection_reader):
+            output_rejections.extend(rejection_reader(worker, run))
+        authorized_groups: dict[str, list] = {}
+        for item in images:
+            authorized_groups.setdefault("artifact_sha256:" + native_output_sha256(item[2]), []).append(item)
+        authorized = {reference: items[-1] for reference, items in authorized_groups.items()}
         selected_urls: dict[str, str] = {}
+        published_urls: dict[tuple[str, str], str] = {}
+        described: set[tuple[str, str, str]] = set()
+
+        def publish(path, mime, data, reference: str) -> str:
+            # Reuse the same immutable artifact publisher for each selected file type.
+            suffix = NATIVE_IMAGE_SUFFIXES.get(mime) or Path(path).suffix or ".bin"
+            relative = NATIVE_MEDIA_PREFIX / run_id / (reference.split(":", 1)[1] + suffix)
+            key = (relative.as_posix(), mime)
+            if key in published_urls:
+                return published_urls[key]
+            workspace = Path(str(worker.get("workspace_dir") or ""))
+            if isinstance(data, NativeFileSnapshot):
+                try:
+                    verified_native_file(workspace, relative, data.sha256, data.size_bytes)
+                except (OSError, ValueError):
+                    copy_native_file(data.root, data.relative, workspace, target=relative, expected=data)
+            else:
+                try:
+                    published = _native_media_snapshot(workspace, relative, len(data))
+                except (OSError, ValueError):
+                    published = None
+                if published != data:
+                    _publish_native_media(workspace, relative, data)
+            url = self._signed_artifact_download_url(worker, relative.as_posix())
+            if not url:
+                raise RuntimeErrorBase("Selected native image download is unavailable")
+            published_urls[key] = url
+            return url
+
+        def describe(reference: str) -> str:
+            if reference not in selected_urls:
+                path, mime, data = authorized[reference]
+                selected_urls[reference] = publish(path, mime, data, reference)
+                if output_files is not None:
+                    # Distinct model-selected filenames can contain identical bytes. Retain the
+                    # durable selected-file names; a legacy input-image scope retains one match.
+                    selected = authorized_groups[reference]
+                    if not isinstance(data, NativeFileSnapshot):
+                        selected = [(path, mime, data)]
+                    for file_path, file_mime, file_data in selected:
+                        filename = Path(file_path).name
+                        digest = reference.split(":", 1)[1]
+                        identity = (filename, file_mime, digest)
+                        if identity in described:
+                            continue
+                        described.add(identity)
+                        output_files.append({
+                            "filename": filename, "mime_type": file_mime,
+                            "bytes": file_data.size_bytes if isinstance(file_data, NativeFileSnapshot) else len(file_data),
+                            "sha256": digest, "download_url": publish(file_path, file_mime, file_data, reference),
+                        })
+            return selected_urls[reference]
 
         def render(match: re.Match[str]) -> str:
             reference = match.group(2).strip().removeprefix("<").removesuffix(">")
@@ -4327,23 +4388,13 @@ class WorkersProjectsService:
                 return match.group(0)
             if reference not in authorized:
                 raise RuntimeErrorBase("Selected native image is unavailable for this request")
-            if reference not in selected_urls:
-                mime, data = authorized[reference]
-                relative = NATIVE_MEDIA_PREFIX / run_id / (reference.split(":", 1)[1] + NATIVE_IMAGE_SUFFIXES[mime])
-                workspace = Path(str(worker.get("workspace_dir") or ""))
-                try:
-                    published = _native_media_snapshot(workspace, relative, len(data))
-                except (OSError, ValueError):
-                    published = None
-                if published != data:
-                    _publish_native_media(workspace, relative, data)
-                url = self._signed_artifact_download_url(worker, relative.as_posix())
-                if not url:
-                    raise RuntimeErrorBase("Selected native image download is unavailable")
-                selected_urls[reference] = url
-            return f"{match.group(1)}({selected_urls[reference]})"
+            return f"{match.group(1)}({describe(reference)})"
 
-        return re.sub(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", render, projected)
+        rendered = re.sub(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", render, projected)
+        if include_captured_files:
+            for reference in authorized:
+                describe(reference)
+        return rendered
 
     def _native_media_callback_observations(self, worker: dict, run: dict) -> dict[str, object]:
         media = native_media_observations(worker, run)
@@ -4442,6 +4493,7 @@ class WorkersProjectsService:
         insert_once: bool = False,
         submit_delivery: bool = True,
         persist_callback: bool = True,
+        pending_native_input: dict | None = None,
     ) -> dict | None:
         requested_callback_id = str(callback_id or "").strip()
         callbacks = self._callback_config_for_event(worker, run)
@@ -4487,6 +4539,12 @@ class WorkersProjectsService:
                 return None
         durable_state = str((durable_run or {}).get("state") or "").strip()
         durable_ended_at = str((durable_run or {}).get("ended_at") or "").strip()
+        if pending_native_input is not None and (
+            event_type != "run.needs_input" or durable_state != "running"
+            or pending_native_input.get("runId") != run_id
+            or pending_native_input.get("attemptId") != durable_run.get("active_attempt_id")
+        ):
+            return None
         delegation_work_state = ""
         delegation_work_terminal = False
         if delegation:
@@ -4650,7 +4708,50 @@ class WorkersProjectsService:
                 if replay_callback_timestamp is not None
                 else int(time.time())
             )
+        if terminal_generation:
+            retained_callback = self.store.get_callback_outbox(resolved_callback_id)
+            if retained_callback is not None:
+                # A terminal replay uses the accepted bytes, including its file
+                # selection. Revalidate the same generation through the existing
+                # CAS before returning or submitting the existing delivery.
+                retained_intent = {key: retained_callback[key] for key in (
+                    "callback_id", "project_id", "worker_id", "run_id",
+                    "attempt_number", "event_type", "url", "payload_json",
+                )}
+                record = self.store.insert_terminal_callback_outbox_if_current(
+                    **retained_intent,
+                    expected_state=durable_state,
+                    expected_ended_at=durable_ended_at,
+                    expected_attempt_id=str((durable_run or {}).get("active_attempt_id") or ""),
+                    expected_result_revision=terminal_result_revision,
+                    expected_result_digest=terminal_result_digest,
+                )
+                if record is None:
+                    return None
+                if not persist_callback:
+                    return {**retained_intent, "tenant_id": str(worker.get("tenant_id") or "local")}
+                if submit_delivery:
+                    self.executor.submit(self._deliver_callback_record, dict(worker), record, callbacks)
+                return record
         link_safe = event_type != "worker.terminated"
+        # Model-selected file refs use the same immutable, owner/run/attempt-bound
+        # delivery as conversation output. Resolve before public path redaction.
+        callback_output_files: list[dict] = []
+        callback_output_rejections: list[dict] = []
+        capture_completed_files = (
+            event_type == "run.completed" and bool(terminal_result_digest) and bool(delegation)
+        )
+        if run and (capture_completed_files or "artifact_sha256:" in message or "artifact_sha256:" in full_message):
+            request = {"run_id": run_id, "owner_id": worker.get("owner_id"),
+                       "tenant_id": worker.get("tenant_id")}
+            message = self.render_provider_native_images(
+                request, run, message,
+                output_files=callback_output_files if capture_completed_files else None,
+                output_rejections=callback_output_rejections if capture_completed_files else None,
+                include_captured_files=capture_completed_files,
+            )
+            if full_message:
+                full_message = self.render_provider_native_images(request, run, full_message)
         operator_url = self._signed_watch_url(worker, callbacks) if link_safe else ""
         include_watch_link = link_safe and (
             event_type in ACTIONABLE_CALLBACK_LINK_EVENTS
@@ -4664,6 +4765,7 @@ class WorkersProjectsService:
             "project_id": worker.get("project_id"),
             "worker_id": worker.get("worker_id"),
             "run_id": run_id or None,
+            "attempt_id": str((durable_run or run or {}).get("active_attempt_id") or ""),
             "run_state": callback_run_state(event_type, run),
             "message": self._callback_message_with_links(
                 worker,
@@ -4751,6 +4853,21 @@ class WorkersProjectsService:
             payload["work_ref"] = str(delegation.get("work_ref") or "")
             payload["work_state"] = delegation_work_state
             payload["work_terminal"] = delegation_work_terminal
+        if capture_completed_files and (callback_output_files or callback_output_rejections):
+            payload["output_files"] = {
+                "version": 1,
+                "owner_id": str(worker.get("owner_id") or ""),
+                "run_id": run_id,
+                "attempt_id": payload["attempt_id"],
+                "callback_id": resolved_callback_id,
+                "origin_ref": payload["origin_ref"],
+                "work_ref": payload["work_ref"],
+                "result_revision": terminal_result_revision,
+                "result_digest": terminal_result_digest,
+                "files": callback_output_files,
+            }
+            if callback_output_rejections:
+                payload["output_files"]["rejected"] = callback_output_rejections
         failure_class = str((run or {}).get("failure_class") or "").strip()
         if failure_class:
             payload["failure_code"] = failure_class
@@ -4776,6 +4893,28 @@ class WorkersProjectsService:
                 }
         if deliverable:
             payload["deliverable"] = deliverable
+        if pending_native_input is not None:
+            method = getattr(self.runtime, "pending_native_input", None)
+            current_input = method(
+                {**self._runtime_worker_for_run(worker, durable_run),
+                 "_run_attempt_id": str(durable_run.get("active_attempt_id") or "")},
+                run_id=run_id,
+            ) if callable(method) else None
+            if pending_native_input is not None and (
+                not isinstance(current_input, dict) or any(
+                    current_input.get(key) != pending_native_input.get(key) for key in (
+                        "requestId", "requestFingerprint", "runId", "attemptId", "sessionId",
+                    )
+                )
+            ):
+                return None
+            if isinstance(current_input, dict) and current_input.get("kind") == "permission":
+                payload["pending_native_input"] = {
+                    key: current_input[key] for key in (
+                        "version", "requestId", "requestFingerprint", "runId",
+                        "attemptId", "sessionId", "expiresAt", "kind", "state", "mode",
+                    )
+                }
         if terminal_result_state and durable_ended_at:
             retained_callback = self.store.get_callback_outbox(resolved_callback_id)
             if retained_callback is None:
@@ -5797,11 +5936,14 @@ class WorkersProjectsService:
                 return
             self._scheduler_wake_event.wait(wait_s)
 
-    def _retry_base_delay_s(self, failure_class: str) -> float:
+    def _retry_base_delay_s(self, failure_class: str, *, lane: str = "mission") -> float:
         if failure_class in {"host_worker_busy", "host_capacity"}:
+            # Conversation capacity recovery uses its trusted interactive lane, not mission backoff.
+            # One second is the smallest valid Retry-After delay; explicit deployment settings win.
+            default_delay = 1.0 if lane == "conversation" else 5.0
             return _bounded_float_env(
                 "GLASSHIVE_HOST_BUSY_RETRY_BASE_DELAY_S",
-                _bounded_float_env("GLASSHIVE_RETRY_BASE_DELAY_S", 5.0, min_value=0.1, max_value=3600.0),
+                _bounded_float_env("GLASSHIVE_RETRY_BASE_DELAY_S", default_delay, min_value=0.1, max_value=3600.0),
                 min_value=0.1,
                 max_value=3600.0,
             )
@@ -5817,8 +5959,8 @@ class WorkersProjectsService:
             )
         return _bounded_float_env("GLASSHIVE_RETRY_MAX_DELAY_S", 300.0, min_value=0.1, max_value=86400.0)
 
-    def _retry_delay_s(self, failure_class: str, attempts: int) -> float:
-        base = self._retry_base_delay_s(failure_class)
+    def _retry_delay_s(self, failure_class: str, attempts: int, *, lane: str = "mission") -> float:
+        base = self._retry_base_delay_s(failure_class, lane=lane)
         max_delay = self._retry_max_delay_s(failure_class)
         exponent = min(max(0, attempts - 1), 8)
         return min(max_delay, base * (2**exponent))
@@ -5941,7 +6083,7 @@ class WorkersProjectsService:
                 message=message,
             )
             return failed_run
-        delay_s = self._retry_delay_s(failure_class, attempts)
+        delay_s = self._retry_delay_s(failure_class, attempts, lane=self._host_run_lane(worker))
         if capacity_wait:
             # One durable capacity episode owns one stable retry clock. The
             # bounded jitter spreads probes without creating attempt records.
@@ -6139,7 +6281,7 @@ class WorkersProjectsService:
                 message=message,
             )
             return failed_run
-        delay_s = self._retry_delay_s(failure_class, attempts)
+        delay_s = self._retry_delay_s(failure_class, attempts, lane=self._host_run_lane(worker))
         if capacity_wait:
             # One durable capacity episode owns one stable retry clock. The
             # bounded jitter spreads probes without creating attempt records.
@@ -7217,17 +7359,20 @@ class WorkersProjectsService:
                 )
             )
             capabilities = self.orchestration_capabilities()
-            if (
-                not valid_launch_authority
-                or (
-                    execution_mode == "docker"
-                    and capabilities["isolatedParallelReady"] is not True
+            if not valid_launch_authority:
+                raise ParallelExecutionIsolationError(
+                    "Automatic Parallel work requires an authorized ready worker runtime."
                 )
-                or (
-                    execution_mode == "host"
-                    and capabilities["nativeParallelReady"] is not True
-                )
-            ):
+            readiness_prefix = "isolated" if execution_mode == "docker" else "native"
+            if capabilities[f"{readiness_prefix}ParallelReady"] is not True:
+                readiness_reason = str(
+                    capabilities.get(f"{readiness_prefix}ParallelReason") or ""
+                ).strip()
+                if readiness_reason:
+                    raise WorkAdmissionError(
+                        readiness_reason,
+                        "Automatic Parallel work requires an authorized ready worker runtime.",
+                    )
                 raise ParallelExecutionIsolationError(
                     "Automatic Parallel work requires an authorized ready worker runtime."
                 )
@@ -7672,9 +7817,13 @@ class WorkersProjectsService:
             method = getattr(self.runtime, "respond_native_input", None)
             if not callable(method):
                 raise RuntimeError("native_input_unavailable")
+            prior_response = self._json_object(action_record.get("response_json"))
+            prior_pending = (prior_response.get("status") == "pending"
+                             and prior_response.get("confirmationPending") is True)
             try:
                 result = method(
-                    worker,
+                    {**self._runtime_worker_for_run(worker, run),
+                     "_run_attempt_id": str(run.get("active_attempt_id") or "")},
                     run_id=run_id,
                     request_id=str(native_input.get("request_id") or ""),
                     request_fingerprint=str(
@@ -7682,14 +7831,20 @@ class WorkersProjectsService:
                     ),
                     action=str(native_input.get("action") or ""),
                     content=native_input.get("content"),
-                    allow_new=run_state in {"running", "paused"},
+                    allow_new=not prior_pending and run_state in {"running", "paused"},
                 )
             except RuntimeErrorBase as exc:
                 if str(exc) == "native_input_invalid":
                     raise ValueError(
                         "Native input does not match the requested form"
                     ) from exc
-                raise
+                if str(exc) == "native_input_confirmation_unavailable":
+                    if not prior_pending:
+                        raise RuntimeError("native_input_stale") from exc
+                    # The same reserved operation was submitted; absent IPC is not a rejection.
+                    result = {"status": "pending"}
+                else:
+                    raise
             if result["status"] == "accepted":
                 self.store.add_event(
                     project_id,
@@ -7706,7 +7861,7 @@ class WorkersProjectsService:
                 "status": result["status"],
                 "state": run_state,
                 "run_id": run_id,
-                "confirmation_pending": False,
+                "confirmation_pending": result["status"] == "pending",
             }
         allowed_actions = self._active_work_service_actions(live_delegation, public_state)
         if action not in allowed_actions:
@@ -14127,6 +14282,8 @@ class WorkersProjectsService:
             if str(bundle.get("run_mode") or "mission").strip().lower() == "conversation"
             else self.executor
         )
+        if native_timing_enabled():
+            native_timing_event("executor_submit", workerHash=native_timing_hash("worker", worker_id), generation=generation)
         executor.submit(self._process_worker_queue, worker_id, generation)
 
     def _wake_host_capacity_waiters(self, released_worker: dict) -> None:
@@ -15349,6 +15506,8 @@ class WorkersProjectsService:
                 )
 
     def _process_worker_queue(self, worker_id: str, generation: int) -> None:
+        if native_timing_enabled():
+            native_timing_event("executor_entry", workerHash=native_timing_hash("worker", worker_id), generation=generation)
         return self._process_worker_queue_parallel(worker_id, generation)
 
     def _process_worker_queue_legacy(self, worker_id: str, generation: int) -> None:
@@ -18649,6 +18808,8 @@ class WorkersProjectsService:
             **worker,
             "bootstrap_bundle_json": json.dumps(run_bundle, ensure_ascii=False),
             "_run_local_capability_binding": revocation_binding,
+            # Exact admitted expiry is invocation-local, never caller bootstrap authority.
+            "_native_input_deadline_at": grant.expires_at,
             "_run_local_capability_revocation_id": str(
                 revocation_id
             ),
@@ -19394,7 +19555,7 @@ class WorkersProjectsService:
             raise pressure
         capacity_next_retry_at = (
             datetime.now(timezone.utc)
-            + timedelta(seconds=self._retry_base_delay_s("host_capacity"))
+            + timedelta(seconds=self._retry_base_delay_s("host_capacity", lane=lane))
         ).isoformat()
         capacity_policy = self._host_capacity_policy()
         try:
@@ -19646,6 +19807,31 @@ class WorkersProjectsService:
             "Native provider lifecycle updated",
             payload=payload,
         )
+
+        if event_type in {"provider.native.input.requested", "provider.native.input.resolved"}:
+            attempt_id = str(observation.get("attempt_id") or "")
+            if (not attempt_id or attempt_id != str(run.get("active_attempt_id") or "")
+                    or str(run.get("state") or "") != "running"):
+                return
+            pending = self.active_work_pending_native_input({
+                "run_id": run_id, "worker_id": worker_id,
+            })
+            if (not isinstance(pending, dict) or pending.get("kind") != "permission"
+                    or pending.get("runId") != run_id or pending.get("attemptId") != attempt_id
+                    or (event_type == "provider.native.input.requested"
+                        and pending.get("requestId") != payload.get("requestId"))
+                    or pending.get("sessionId") != payload.get("sessionId")):
+                return
+            callback_id = "cb_native_input_" + hashlib.sha256(json.dumps(
+                [run_id, attempt_id, pending["requestFingerprint"]],
+                separators=(",", ":"),
+            ).encode()).hexdigest()
+            self._emit_callback_parallel(
+                worker, "run.needs_input", run=run,
+                message="The native harness is waiting for your response.",
+                callback_id=callback_id, insert_once=True,
+                pending_native_input=pending,
+            )
 
     def _provider_internal_retry_limit(self) -> int:
         return _bounded_int_env(
@@ -20739,7 +20925,9 @@ class WorkersProjectsService:
         if not run or not worker or str(run.get("state") or "") not in {"running", "paused"}:
             return None
         method = getattr(self.runtime, "pending_native_input", None)
-        return method(worker, run_id=run_id) if callable(method) else None
+        return method({**self._runtime_worker_for_run(worker, run),
+                       "_run_attempt_id": str(run.get("active_attempt_id") or "")},
+                      run_id=run_id) if callable(method) else None
 
 
 
@@ -21020,6 +21208,9 @@ class WorkersProjectsService:
             if isinstance(replay_decision, dict)
             else "persistent"
         )
+        capabilities = bundle.get("provider_capabilities")
+        if isinstance(capabilities, dict) and capabilities.get("native_tools") is False:
+            provider_session_mode = "stateless"
         exact_bundle = dict(bundle)
         exact_env = dict(exact_bundle.get("env") or {})
         exact_env.pop(GLASSHIVE_PROVIDER_SESSION_MODE_ENV, None)

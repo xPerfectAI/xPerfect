@@ -248,23 +248,19 @@ still apply.
 - If the product later supports alias editing, that must be a separate explicit flow because it can
   affect parent-side auto-reuse behavior.
 
-## Derived Operator Brief Template
+## Operator Brief
 
-A canonical master prompt template was not found in the current repo search.
+The launch brief is the user's own input, in the order entered:
 
-For this UI, the phase-1 operator brief should be:
+- the goal, verbatim
+- `Success criteria:` followed by the user's text, only when supplied
+- `Background:` followed by the user's text, only when supplied
 
-- project description
-- success criteria
-- optional context
-- execution rules:
-  - treat success criteria as hard acceptance gates
-  - keep working and researching until criteria are satisfied or a real blocker appears
-  - keep asking: have I achieved this successfully?
-  - inspect the actual output, artifact, browser-visible result, or tool evidence before final report
-  - pause before risky or irreversible external actions
-  - if the deliverable is a webpage or app, open the final result in the sandbox browser and leave it visible
-  - if the result is a simple static page, prefer opening the final HTML file directly instead of relying on a temporary localhost server
+The brief adds no rules. Authority comes from the workspace's typed access mode. The runtime worker
+contract supplies the safety checkpoint, proportional verification and the `FINAL REPORT:` protocol.
+The output format is the one the user asked for, or the worker's own choice. The initial Watch surface
+is the user's explicit choice or the configured default (`GLASSHIVE_DEFAULT_LAUNCH_SURFACE`, desktop
+unless set); task text never selects it.
 
 ## Architecture Decision
 

@@ -3,6 +3,12 @@
 Choose a configured route, then check its readiness. A running service, authenticated account
 and completed useful result are different things.
 
+Native host workers publish files they explicitly select in their result through the existing
+owner-, run- and attempt-scoped artifact route. This applies to conversations and delegated work.
+The runtime snapshots the selected bytes before redacting local paths; completion callbacks carry
+download links to those bytes. Unselected files are not inferred as new results from a shared or
+legacy host folder. A later edit to the working file does not change the delivered snapshot.
+
 ## Working on several goals
 
 ![Several goals in one conversation](assets/parallel-work.png)
@@ -40,7 +46,7 @@ built-in tools stay available; these settings choose connections, not the harnes
 | Shared workspaces | Let authorized workers, including different AI tools, use one execution workspace. | Needs xPerfect on a configured Linux host with the required permissions and capacity; not available with `./xperfect start` on a Mac. |
 | Common project files | Workers use a shared working area. | This does not share sign-ins or sessions. |
 | Private files per member | Each worker has its own working area within a shared workspace. | Its access to the common file area is read-only. |
-| Files | Attach input, inspect output and download original bytes. | A file reference must be authorized and attached; a name in a prompt is not an upload. Dragging files into or out of the browser has not been verified yet, and drag-out is off by default. |
+| Files | Attach input, inspect output and download original bytes. | A file reference must be authorized and attached; a name in a prompt is not an upload. Shared workspaces and legacy host folders do not infer a new run result from pre-existing files; use Files for explicit access. Dragging files into or out of the browser has not been verified yet, and drag-out is off by default. |
 | Duplicate workspace | Copy a workspace's files into a new workspace. | Copies every byte, with no default size cap. The owner's storage limit and a 30-second default copy time apply. A refused copy keeps none of its bytes and names its cause, such as storage or host capacity. Retry the same request after freeing storage or restoring the limit. Continuing the copy with a personal account needs that account confirmed for the copy; this has not been verified end to end yet. |
 | Watch and controls | Inspect, steer, interrupt or continue the selected worker. | Controls are provider-dependent and target one worker, not its siblings. |
 | Desktop and terminal | View a workstation through noVNC or take over its terminal through the WebSocket bridge. | These surfaces require a configured workstation profile and authorized access. |
@@ -58,6 +64,13 @@ built-in tools stay available; these settings choose connections, not the harnes
 
 Local storage is not local-only AI processing. Connected providers can receive task content and
 tool results needed for their requests. Check the selected provider's terms and your access policy.
+
+The conversation provider accepts explicit `read_only` access for host Codex's native read-only sandbox
+and host Claude Code's native tool allowlist, when the installed CLI advertises the required controls.
+Claude exposes Read, Glob and Grep, plus native web tools when allowed by policy, uses `dontAsk`, and
+disables Chrome. Its declared MCP authority remains explicit. Claude workspace access also disables
+Chrome. Session storage and fallback preserve access; unsupported routes return
+`unsupported_access_mode` and never substitute write access.
 
 For named Claude subscription accounts on macOS, use the current-account native sign-in route
 or an offered API-key route; named subscription isolation needs a supported host. Other routes

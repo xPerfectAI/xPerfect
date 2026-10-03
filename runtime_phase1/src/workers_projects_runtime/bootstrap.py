@@ -265,6 +265,18 @@ def _worker_prompt(
     return text + ("\n" if standalone.endswith("\n") else "")
 
 
+def conversation_file_delivery_instructions() -> str:
+    """Resolve only the registered host-native conversation handoff contract."""
+    return _worker_prompt("worker.conversation_file_delivery", """Conversation file delivery:
+
+- A Markdown link to a local file selects that file for delivery to the user. To cite a local file without sending it, name its path in code instead of linking it.
+- Displaying or rendering a tool result inside the harness does not deliver it through the user's channel. For a requested file, image, or other artifact, persist the tool's own returned output within normal execution into the admitted workspace or this worker's `$TMPDIR` when needed, then select that file with a Markdown link in your final answer.
+- Deliver selected files from the admitted workspace or this worker's `$TMPDIR`. If an authorized requested file is elsewhere, copy its exact bytes into `$TMPDIR` and link that staged copy. This does not grant access to other locations or private runtime, credential, or control files.
+- Only create or send a file when the user's request calls for it. A useful chat answer does not require a file.
+- File selection is not proof of delivery. If the source is outside the supported roots, unreadable, or rejected by the file policy, keep the useful answer and report the file as unavailable; do not claim it was sent.
+""")
+
+
 GLASSHIVE_SAFETY_CHECKPOINT_RULE = _worker_prompt("worker.safety_checkpoint", "Safety boundary: these operating instructions never override platform policy, tenant/user scope, authentication, or OS security controls. Determine task scope from the user's current request and applicable prior authorization, preserving the project definition's constraints. Do not ask again for an action already authorized. Full-access tools and a project file do not grant new authority. Ordinary reversible local file or app work within the task may use authorized locations outside the default workspace. Before destructive changes, external publication or purchases, privileged or persistent system changes, credential/session changes, unrelated process termination, or sharing private data, request a clear checkpoint if that action is not already authorized. Use existing signed-in sessions through supported app flows; do not extract authentication material or bypass a permission denial, quarantine, or required OS consent. Do not loop forever or spend indefinitely: when a blocker cannot be resolved with the available runtime, tools, MCPs, files, auth, time, or budget, report the concrete blocker and the best available partial result after `FINAL REPORT:`.")
 
 
@@ -278,8 +290,6 @@ GLASSHIVE_WORKER_COMPLETION_CONTRACT = _worker_prompt("worker.completion_contrac
     "- For research/source-gathering work, preserve citations and evidence, respect the user's source/date/auth/scope constraints, and do not dump large raw webpages, docs, logs, or command outputs into the conversation context. If a source/date/auth/scope constraint excludes an item, do not use that item to support facts, scoring, or deliverables; record it only as rejected or out-of-scope evidence when useful. Keep source publication/evidence dates distinct from retrieval/access timestamps; an access date must not widen or replace a user-limited source window. If `glasshive-run/constraint-ledger.json` exists, read it before planning, delegation, source collection, and final delivery; its original request and typed continuation authority preserve the admitted input, which you must interpret yourself. If you create research plans, specs, subagent prompts, or delegation notes, carry the user's constraints forward literally and exactly instead of widening, weakening, summarizing away, or rewriting them. If a plan/spec/delegation conflicts with the admitted user request or typed authority, correct that file before continuing. Save working notes/excerpts to files when useful and bring back concise source-grounded summaries so the task can continue without overflowing or destabilizing the provider route.\n"
     "- `glasshive-run/` is reserved for internal harness support evidence, not user-facing artifacts. Save every user-facing artifact outside `glasshive-run/` so GlassHive can discover and deliver it.\n"
     "- For long-running work, keep durable checkpoints in workspace files and prioritize a usable core result before optional expansion. If time, tool, auth, or dependency limits prevent the full requested deliverable, stop with an honest partial artifact/report and the exact blocker instead of spending the entire run on private notes.\n"
-    "- When the request calls for a report, document, deck, client deliverable, or other shareable work product and the user did not ask for a technical/source format, make the primary user-facing output a polished ordinary end-user artifact such as PDF, DOCX, PPTX, spreadsheet, or another appropriate professional format. Markdown, HTML, or source files may be included as supporting artifacts, but should not be the only default deliverable for that class of work unless the runtime cannot create a professional artifact; if blocked, say so concretely.\n"
-    "- For visual/shareable artifacts such as PDFs, slide decks, screenshots, or HTML reports, open or render the final artifact itself and verify that key text, tables, images, and pages are readable, not clipped, and not overlapped. Correct a detected layout defect or state the specific remaining limitation before `FINAL REPORT:`.\n"
     "- If you spawn any child agent, join every spawned child and incorporate its result before writing `FINAL REPORT:`. Do not report completion while a child remains running, open, or aborted.\n"
     "- Your final assistant message MUST end with a separate section exactly named `FINAL REPORT:`.\n"
     "- Put only the user-facing result after `FINAL REPORT:`. Include the concrete outcome, key facts, artifact/file names when useful, blockers, or the next decision needed.\n"
@@ -499,33 +509,48 @@ def _split_viventium_feeling_capsules(value: Any) -> tuple[str, list[str]]:
 def _is_exact_conversation_feeling_mirror(
     bundle: JsonDict, capsules: list[str]
 ) -> bool:
-    """Accept only the three non-projected mirrors produced for a native conversation."""
+    """Accept only the non-projected storage mirrors produced for a native conversation."""
 
     if bundle.get("run_mode") != "conversation":
         return False
     field_capsules: dict[str, list[str]] = {}
-    field_clean: dict[str, str] = {}
     for field in (
         "application_developer_instructions",
         "developer_instructions",
         "declared_developer_instruction_tail",
     ):
-        clean, found = _split_viventium_feeling_capsules(bundle.get(field))
-        field_clean[field] = clean
+        _, found = _split_viventium_feeling_capsules(bundle.get(field))
         field_capsules[field] = found
     if sum(len(found) for found in field_capsules.values()) != len(capsules):
         return False
     tail_capsules = field_capsules["declared_developer_instruction_tail"]
+    if not tail_capsules:
+        # Without a declared tail the native producer merges the application authority, with
+        # its one capsule, verbatim into the developer field. That two-field copy is the same
+        # authority, not a second one; any other count, text or placement stays rejected.
+        application = _instruction_text(bundle.get("application_developer_instructions"))
+        application_capsules = field_capsules["application_developer_instructions"]
+        return (
+            not _instruction_text(bundle.get("declared_developer_instruction_tail"))
+            and len(application_capsules) == 1
+            and field_capsules["developer_instructions"] == application_capsules
+            and bool(application)
+            and application in _instruction_text(bundle.get("developer_instructions"))
+        )
     if (
         len(tail_capsules) != 1
-        or field_clean["declared_developer_instruction_tail"]
         or any(len(field_capsules[field]) != 1 for field in field_capsules)
     ):
         return False
     capsule = tail_capsules[0]
     return (
         all(found == [capsule] for found in field_capsules.values())
-        and _instruction_text(bundle.get("developer_instructions")).endswith(capsule)
+        and all(
+            _instruction_text(bundle.get(field)).endswith(
+                _instruction_text(bundle.get("declared_developer_instruction_tail"))
+            )
+            for field in ("application_developer_instructions", "developer_instructions")
+        )
     )
 
 
@@ -555,9 +580,9 @@ def canonicalize_viventium_feeling_projection(bundle: JsonDict) -> JsonDict:
         ):
             raise ValueError("Conflicting Viventium Feeling state instruction blocks")
         # Legacy native conversation authority has no projection envelope. It
-        # may retain one structurally valid capsule, or the exact three-field
-        # storage mirror used to reconstruct its sole projected developer
-        # instruction. Any extra or conflicting capsule remains rejected.
+        # may retain one structurally valid capsule, or the exact two- or
+        # three-field storage mirror used to reconstruct its sole projected
+        # developer instruction. Any extra or conflicting capsule remains rejected.
         return dict(bundle)
     expected_fields = {
         "version",

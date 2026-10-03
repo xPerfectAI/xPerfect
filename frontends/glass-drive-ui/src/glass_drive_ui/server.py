@@ -32,7 +32,6 @@ from starlette.concurrency import run_in_threadpool
 from .prompt_template import (
     build_operator_brief,
     build_project_title,
-    initial_watch_surface_for_launch,
     normalize_launch_surface,
 )
 from .runtime_client import RuntimeClient
@@ -1003,11 +1002,6 @@ def _launch_surface_options() -> list[dict[str, str]]:
             "value": "terminal",
             "label": "Exact live session",
             "description": "Open the raw live terminal session first instead of the desktop.",
-        },
-        {
-            "value": "auto",
-            "label": "Auto",
-            "description": "Let GlassHive choose the initial surface from the task type.",
         },
     ]
 
@@ -4229,11 +4223,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     pass
             raise HTTPException(status_code=502, detail=reason) from exc
 
-        surface = initial_watch_surface_for_launch(
-            profile,
-            payload.description,
-            launch_surface=payload.launch_surface or _default_launch_surface(),
-        )
+        surface = normalize_launch_surface(payload.launch_surface, _default_launch_surface())
         watch_url = f"/watch/{worker_id}?project_id={project_id}&surface={surface}"
         try:
             launch_watch_url = _append_signed_worker_token(

@@ -644,7 +644,7 @@ def _candidate_chat_completion() -> dict[str, Any]:
     provider = ConversationProvider.__new__(ConversationProvider)
     provider.store = _CaptureStore()
     provider.service = SimpleNamespace(runtime=SimpleNamespace())
-    provider._conversation_output = lambda _request_record, _run: "Synthetic answer."
+    provider._conversation_output = lambda _request_record, _run, **_kwargs: "Synthetic answer."
     provider._native_usage_snapshot = lambda _request_record, _run: {
         "prompt_tokens": 3,
         "completion_tokens": 4,
@@ -727,7 +727,7 @@ async def _candidate_chat_stream() -> list[dict[str, Any] | str]:
     provider.service = SimpleNamespace(runtime=SimpleNamespace())
     provider._sync = lambda record: record
     provider._native_output_snapshot = lambda _record, _run: ""
-    provider._conversation_output = lambda _record, _run: "Synthetic answer."
+    provider._conversation_output = lambda _record, _run, **_kwargs: "Synthetic answer."
     provider._native_usage_snapshot = lambda _record, _run: {
         "prompt_tokens": 3,
         "completion_tokens": 4,
