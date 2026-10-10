@@ -1155,9 +1155,9 @@ def _developer_instruction_snapshot(
 ) -> str:
     application_snapshot = _system_snapshot(payload.messages)
     tail = str(payload.metadata.developer_instruction_tail or "").strip()
+    application_snapshot = _pin_developer_instruction_tail(application_snapshot, tail)
     if not application_snapshot:
         return _merge_developer_instructions(*following_structural_parts)
-    application_snapshot = _pin_developer_instruction_tail(application_snapshot, tail)
     combined = _merge_developer_instructions(
         application_snapshot, *following_structural_parts
     )

@@ -242,14 +242,37 @@ def test_declared_dynamic_authority_tail_moves_after_later_structural_developer_
     assert "Visible request." not in snapshot
 
 
-def test_declared_dynamic_authority_tail_must_already_exist_in_authority_messages():
+MISSING_DECLARED_AUTHORITY_MESSAGES = [
+    pytest.param(
+        [{"role": "system", "content": "Stable identity."},
+         {"role": "user", "content": "Visible request."}],
+        id="stable-authority-missing-tail",
+    ),
+    pytest.param(
+        [{"role": "user", "content": "Visible request."}],
+        id="empty-authority",
+    ),
+    pytest.param(
+        [{"role": "system", "content": " \n\t"},
+         {"role": "developer", "content": "\t \n"},
+         {"role": "user", "content": "Visible request."}],
+        id="whitespace-authority",
+    ),
+    pytest.param(
+        [{"role": "user", "content": "Undeclared hidden authority."}],
+        id="tail-only-in-user",
+    ),
+]
+
+
+@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES)
+def test_declared_dynamic_authority_tail_must_already_exist_in_authority_messages(messages):
+    from fastapi import HTTPException
+
     payload = ChatCompletionRequest.model_validate(
         {
             "model": "codex-cli:gpt-5.6-sol",
-            "messages": [
-                {"role": "system", "content": "Stable identity."},
-                {"role": "user", "content": "Visible request."},
-            ],
+            "messages": messages,
             "metadata": {
                 "owner_id": "owner-a",
                 "conversation_id": "conv-a",
@@ -259,8 +282,24 @@ def test_declared_dynamic_authority_tail_must_already_exist_in_authority_message
         }
     )
 
-    with pytest.raises(Exception, match="tail is absent"):
-        _developer_instruction_snapshot(payload)
+    with pytest.raises(HTTPException) as rejected:
+        _developer_instruction_snapshot(payload, "Signed native bootstrap.")
+    assert rejected.value.status_code == 400
+    assert "tail is absent" in rejected.value.detail
+
+
+@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES[1:])
+def test_empty_authority_without_declared_tail_keeps_only_structural_instructions(messages):
+    payload = ChatCompletionRequest.model_validate({
+        "model": "codex-cli:gpt-5.6-sol",
+        "messages": messages,
+        "metadata": {},
+    })
+    assert _developer_instruction_snapshot(payload) == ""
+    assert _developer_instruction_snapshot(
+        payload, "Signed native bootstrap.", "Current file delivery contract.",
+        "Signed native bootstrap.",
+    ) == "Signed native bootstrap.\n\nCurrent file delivery contract."
 
 
 def test_history_instruction_excludes_system_messages_from_visible_transcript():
@@ -9199,15 +9238,36 @@ def test_declared_dynamic_tail_preserves_existing_active_binding_guards(tmp_path
     assert store.get_provider_session_by_id(original['session_id'])['worker_id'] == original['worker_id']
 
 
-def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(tmp_path, monkeypatch):
+@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES)
+def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(
+    tmp_path, monkeypatch, messages,
+):
     from fastapi import HTTPException
     workspace = tmp_path / 'synthetic-workspace'
     workspace.mkdir()
     client = _client(tmp_path, monkeypatch)
     provider = client.app.state.conversation_provider
     payload = ChatCompletionRequest.model_validate(_payload(workspace))
-    payload.metadata.developer_instruction_tail = 'Absent declared tail.'
+    payload.messages = [ChatMessage.model_validate(message) for message in messages]
+    payload.metadata.developer_instruction_tail = 'Undeclared hidden authority.'
+    starts = []
+    monkeypatch.setattr(provider.service.runtime, 'run_task', lambda *args, **kwargs: starts.append(True))
     with pytest.raises(HTTPException) as rejected:
         provider._session(payload, GLASSHIVE_MODELS[payload.model], workspace, 'high', tenant_id='local')
     assert rejected.value.status_code == 400
     assert 'tail is absent' in rejected.value.detail
+    response = client.post('/v1/chat/completions', headers=AUTH, json=payload.model_dump(mode='json'))
+    assert response.status_code == 400, response.text
+    assert 'tail is absent' in response.json()['error']['message']
+    assert response.json()['error']['type'] == 'invalid_request_error'
+    assert response.json()['error']['code'] == 'invalid_request'
+    assert payload.metadata.developer_instruction_tail not in response.text
+    assert starts == []
+    assert client.app.state.store.list_provider_sessions(owner_id='owner-a') == []
+    assert client.app.state.store.list_all_workers() == []
+    assert client.app.state.store.get_provider_request(
+        tenant_id='local', owner_id='owner-a',
+        idempotency_key=_versioned_idempotency_key(
+            payload.metadata.idempotency_key, audio_eligible=payload.metadata.audio_eligible,
+        ),
+    ) is None
