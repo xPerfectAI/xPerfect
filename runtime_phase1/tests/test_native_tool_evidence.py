@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import hashlib
 from types import SimpleNamespace
 import pytest
 from workers_projects_runtime.conversation_provider import ConversationProvider, CONVERSATION_TOOL_RESULT_MAX_BYTES
@@ -94,7 +95,7 @@ def test_aggregate_bound_and_unrepresentable_identity_are_explicit():
                          'aggregated_output': 'x' * CONVERSATION_TOOL_RESULT_MAX_BYTES, 'exit_code': 0}) for i in range(40)]
     events.append(completed({'id': 'x' * 257, 'type': 'command_execution', 'command': 'read', 'exit_code': 0}))
     result = _native_tool_evidence('codex-cli', log(*events))
-    assert len(json.dumps(result['results']).encode()) <= module.CONVERSATION_REPLAY_MAX_BYTES_DEFAULT
+    assert len(json.dumps(result['results'], ensure_ascii=False).encode()) <= module.CONVERSATION_REPLAY_MAX_BYTES_DEFAULT
     assert len(result['results']) + result['omitted_results'] == 41
 
 
@@ -175,3 +176,155 @@ def test_graph_journal_query_rejects_other_owner_attempt_source_revision_and_sna
     assert [row['request_id'] for row in actual] == ['before', 'after']
     assert omitted == 0
     conn.close()
+
+
+def event(kind, call_id='call', session='session', **fields):
+    return {'type': 'grok.session.update', 'session_id': session,
+            'update': {'sessionUpdate': kind, 'toolCallId': call_id, **fields}}
+
+
+def start():
+    return {'type': 'grok.session.started', 'session_id': 'session'}
+
+
+def invocation(name='use_tool', call_id='call', **arguments):
+    return event('tool_call', call_id, _meta={'x.ai/tool': {'name': name}}, rawInput=arguments)
+
+
+def log(*records):
+    return '\n'.join(json.dumps(value) for value in records)
+
+
+def project(*records):
+    return module._native_tool_evidence('grok-build', log(start(), *records))
+
+
+def typed_mcp(status='ok'):
+    return {'type': 'MCP', 'output': {'OkayOutput': json.dumps({'status': status, 'workRef': 'owned-work'})}}
+
+
+def test_grok_pairs_refinement_and_terminal_without_title_or_thought_content():
+    result = project(invocation(tool_name='worker_delegate_once', tool_input={'goal': 'synthetic'}),
+        event('agent_thought_chunk', content={'type': 'text', 'text': 'private-thought-marker'}),
+        event('tool_call_update', rawInput={'tool_name': 'worker_delegate_once', 'tool_input': {'goal': 'synthetic'}, 'variant': 'UseTool'}),
+        event('tool_call_update', status='completed', rawOutput=typed_mcp()))
+    assert len(result['results']) == 1 and result['omitted_results'] == 0
+    item = result['results'][0]
+    assert item['name'] == 'use_tool' and item['status'] == 'completed'
+    assert json.loads(item['arguments']['text'])['variant'] == 'UseTool'
+    assert json.loads(item['output']['text']) == typed_mcp()
+    assert 'private-thought-marker' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('status', ['blocked', 'cancelled', 'denied', 'error', 'failed', 'rejected'])
+def test_grok_completed_mcp_transport_keeps_typed_operation_failure(status):
+    result = project(invocation(), event('tool_call_update', status='completed', rawOutput=typed_mcp(status)))
+    assert result['results'][0]['status'] == 'failed'
+    assert json.loads(json.loads(result['results'][0]['output']['text'])['output']['OkayOutput'])['status'] == status
+
+
+@pytest.mark.parametrize('output,status', [
+    ({'type': 'MCP', 'output': {'ErrorOutput': 'error'}}, 'failed'),
+    ({'type': 'Bash', 'exit_code': 1, 'output_for_prompt': 'command failed'}, 'failed'),
+    ({'type': 'Bash', 'exit_code': 0, 'timed_out': True}, 'failed'),
+    ({'type': 'Bash', 'exit_code': 0, 'timed_out': False}, 'completed'),
+    ({'type': 'MCP', 'output': {'OkayOutput': 'ordinary text containing the word failed'}}, 'completed'),
+])
+def test_grok_typed_result_status_has_no_prose_rule(output, status):
+    result = project(invocation(), event('tool_call_update', status='completed', rawOutput=output))
+    assert result['results'][0]['status'] == status
+
+
+@pytest.mark.parametrize('records', [
+    [event('tool_call_update', status='completed', rawOutput={})],
+    [invocation(), event('tool_call_update', status='completed')],
+    [invocation(), event('tool_call_update', status='in_progress', rawOutput={})],
+    [event('tool_call', rawInput={}), event('tool_call_update', status='completed', rawOutput={})],
+    [invocation(), event('tool_call_update', _meta={'x.ai/tool': {'name': 'foreign'}}, status='completed', rawOutput={})],
+])
+def test_grok_incomplete_or_conflicting_records_are_omitted(records):
+    result = project(*records)
+    assert result['results'] == [] and result['omitted_results'] == 1
+
+
+def test_grok_foreign_session_and_duplicate_terminal_cannot_add_evidence():
+    terminal = event('tool_call_update', status='completed', rawOutput={})
+    result = project(invocation(), event('tool_call_update', session='foreign', status='completed', rawOutput={'foreign': True}), terminal, terminal)
+    assert len(result['results']) == 1 and 'foreign' not in json.dumps(result)
+    assert module._native_tool_evidence('grok-build', log(invocation(), terminal))['results'] == []
+    result = project(invocation(), terminal, start())
+    assert result['results'] == [] and result['omitted_results'] > 0
+
+
+def test_grok_cancelled_terminal_and_pending_are_not_success():
+    result = project(invocation(), event('tool_call_update', status='cancelled', rawOutput={'cancelled': True}))
+    assert result['results'][0]['status'] == 'cancelled'
+    assert project(invocation())['omitted_results'] == 1
+
+
+def test_grok_uses_existing_bounds_secret_path_redaction_and_utf8_hashes():
+    result = project(invocation(file_path=('/U' + 'sers/synthetic/private.txt'), api_key='sk-testsecretmarker'),
+        event('tool_call_update', status='completed', rawOutput={'type': 'ReadFile', 'FileContent': {'absolute_path': ('/U' + 'sers/synthetic/private.txt'), 'content': 'é' * 16000}}))
+    item = result['results'][0]
+    assert '/Users/synthetic' not in json.dumps(item) and 'sk-testsecretmarker' not in json.dumps(item)
+    for field in ['arguments', 'output']:
+        value = item[field]
+        assert len(value['text'].encode()) <= module.CONVERSATION_TOOL_RESULT_MAX_BYTES
+        assert value['bytes'] == len(value['text'].encode()) + value['omitted_bytes']
+        if not value['omitted_bytes']:
+            assert hashlib.sha256(value['text'].encode()).hexdigest() == value['sha256']
+    assert item['output']['omitted_bytes'] > 0
+
+
+def test_grok_canonical_carrier_keeps_exact_owner_run_invocation_checks():
+    session = {'worker_id': 'worker', 'conversation_id': 'conversation'}
+    worker = {'worker_id': 'worker', 'owner_id': 'owner'}
+    provider = module.ConversationProvider.__new__(module.ConversationProvider)
+    provider.store = SimpleNamespace(get_provider_session_by_id=lambda _: session, get_worker=lambda _: worker)
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=lambda *_: ('grok-build', log(start(), invocation(), event('tool_call_update', status='completed', rawOutput=typed_mcp())))))
+    provider._conversation_output = lambda *_, **kwargs: 'Complete.'
+    provider._native_usage_snapshot = lambda *_: None
+    request = {'request_id': 'request', 'session_id': 'session', 'run_id': 'run', 'owner_id': 'owner', 'message_id': 'answer', 'native_invocation_id': 'invocation'}
+    response = provider._build_canonical_response(request, {'run_id': 'run'}, {'model': 'configured'})
+    assert response['glasshive']['tool_evidence']['results'][0]['name'] == 'use_tool'
+    assert 'tool_evidence' not in provider._build_canonical_response(request, {'run_id': 'foreign'}, {'model': 'configured'})['glasshive']
+    worker['owner_id'] = 'foreign'
+    assert 'tool_evidence' not in provider._build_canonical_response(request, {'run_id': 'run'}, {'model': 'configured'})['glasshive']
+
+
+def test_grok_graph_carrier_preserves_handoff_and_exact_source_scope():
+    provider, anchor, _, _ = graph_fixture()
+    provider.service.runtime.provider_activity_log = lambda *_: ('grok-build', log(start(), invocation(), event('tool_call_update', status='completed', rawOutput=typed_mcp('blocked'))))
+    result = provider.graph_tool_evidence(anchor)
+    assert len(result['requests']) == 2 and all(r['evidence_available'] for r in result['requests'])
+    assert all(r['results'][0]['status'] == 'failed' for r in result['requests'])
+    provider.store.get_run = lambda _: {'run_id': 'foreign', 'worker_id': 'first'}
+    assert provider.graph_tool_evidence(anchor)['omitted_requests'] == 2
+
+
+@pytest.mark.parametrize('with_tool', [False, True])
+def test_grok_native_epoch_guard_stays_conservative_without_replayed_tool_carrier(with_tool):
+    provider = module.ConversationProvider.__new__(module.ConversationProvider)
+    session = {'session_id': 'session', 'worker_id': 'worker', 'owner_id': 'owner', 'tenant_id': 'local'}
+    decision = {'native_context_epoch': 'epoch', 'instruction_sha256': 'a' * 64, 'advancement_key': 'key'}
+    previous = {**session, 'request_id': 'request', 'run_id': 'run', 'state': 'completed', 'replay_decision_json': json.dumps(decision)}
+    provider.store = SimpleNamespace(get_provider_request=lambda _: previous,
+        list_provider_session_requests_for_native_coverage=lambda *_, **kwargs: ([previous], True),
+        get_worker=lambda *_, **kwargs: {'worker_id': 'worker', 'owner_id': 'owner'},
+        get_run=lambda _: {'run_id': 'run', 'worker_id': 'worker', 'state': 'completed'})
+    records = [start(), event('agent_message_chunk', content={'type': 'text', 'text': 'Complete.'})]
+    if with_tool:
+        records += [invocation(), event('tool_call_update', status='completed', rawOutput=typed_mcp())]
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=lambda *_: ('grok-build', log(*records))))
+    assert provider._native_tool_evidence_coverage_proven(session, {'last_accepted_request_id': 'request', 'native_context_epoch': 'epoch', 'accepted_advancement_keys': ['key']}) is False
+
+
+
+def test_grok_aggregate_bounds_and_invalid_name_are_explicit():
+    records = []
+    for i in range(40):
+        records.extend([invocation(call_id=str(i)), event('tool_call_update', call_id=str(i), status='completed', rawOutput='é' * 16000)])
+    records.extend([invocation(name='x' * 257, call_id='invalid'), event('tool_call_update', call_id='invalid', status='completed', rawOutput={})])
+    result = project(*records)
+    assert len(json.dumps(result['results'], ensure_ascii=False).encode()) <= module.CONVERSATION_REPLAY_MAX_BYTES_DEFAULT
+    assert len(result['results']) + result['omitted_results'] == 41

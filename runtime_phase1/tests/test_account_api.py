@@ -6418,27 +6418,17 @@ def test_public_view_ref_is_absolute_read_only_and_cannot_control_workspace(acco
     assert "Worker state" in view.text
     assert "Mission state describes this result" in view.text
     assert "Worker state describes the reusable workspace" in view.text
-    assert "artifacts/result.html" in view.text
-    assert "Open" in view.text
-    assert "Download" in view.text
-    assert 'aria-label="Open artifacts/result.html"' in view.text
-    assert 'aria-label="Download artifacts/result.html"' in view.text
+    # A workspace file is not a model-selected completed mission output.
+    result_files = view.text.split('<section aria-labelledby="results-title">', 1)[1].split("</section>", 1)[0]
+    assert "artifacts/result.html" not in result_files
+    assert "No result files are available." in result_files
+    workspace_files = view.text.split('<section aria-label="Workspace files">', 1)[1].split("</section>", 1)[0]
+    assert "<details><summary>Workspace files</summary>" in workspace_files
+    assert "artifacts/result.html" in workspace_files
+    assert "Files in this reusable workspace may come from other work." in workspace_files
     assert "Terminate" not in view.text
     assert "Pause" not in view.text
     assert str(worker["workspace_dir"]) not in view.text
-    artifact_hrefs = re.findall(r'href="([^\"]*/v1/link-refs/[^\"]+)"', view.text)
-    assert len(artifact_hrefs) == 2
-    opened = account_client.get(urlsplit(artifact_hrefs[0]).path)
-    downloaded = account_client.get(urlsplit(artifact_hrefs[1]).path)
-    assert opened.status_code == 200
-    assert "Synthetic mission result" in opened.text
-    assert " sandbox" in opened.text
-    assert "allow-scripts" not in opened.text
-    assert "allow-same-origin" not in opened.text
-    assert "default-src 'none'" in opened.headers["content-security-policy"]
-    assert "&lt;script&gt;window.parent.syntheticArtifactEscape" in opened.text
-    assert downloaded.status_code == 200
-    assert "attachment" in downloaded.headers["content-disposition"]
     assert terminate.status_code == 403
     assert desktop_action.status_code == 403
 
@@ -7083,3 +7073,243 @@ def test_background_preferences_reject_unknown_or_incompatible_before_admission(
     assert response.status_code == 400, response.text
     with sqlite3.connect(account_client.app.state.store.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM delegations").fetchone()[0] == 0
+
+
+def _completed_mission_with_selected_files(account_client, monkeypatch, *, selected=True):
+    monkeypatch.setenv("GLASSHIVE_OPERATOR_BASE_URL", "https://glasshive.example.test")
+    accepted = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="selected-mission-files"),
+        json=delegation_payload_with_origin(title="Typed mission files"),
+    ).json()
+    store, service = account_client.app.state.store, account_client.app.state.service
+    delegation = store.get_delegation(accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    worker_id, run_id = delegation["worker_id"], delegation["current_run_id"]
+    workspace = Path(store.db_path).parent / "selected-mission-workspace"
+    workspace.mkdir()
+    (workspace / "prior-work.txt").write_text("A previous unrelated mission", encoding="utf-8")
+    store.update_worker(worker_id, workspace_dir=str(workspace))
+    worker = store.get_worker(worker_id)
+    _truthfully_invoke_run(store, run_id, suffix="selected-files")
+    terminal = store.finalize_run_if_state(
+        run_id, "running", "completed", output_text="Current mission result.",
+        **_exact_terminal_generation(store, run_id),
+    )
+    assert terminal is not None
+    source = workspace / "selected.txt"
+    source.write_bytes(b"Selected result only.\n")
+    monkeypatch.setattr(service.runtime, "provider_native_image_output",
+        lambda _worker, _run, output: (output, [(source, "text/plain", source.read_bytes())] if selected else []),
+        raising=False)
+    callback = service._emit_callback(
+        store.get_worker(worker_id), "run.completed", run=terminal,
+        message="Current mission result.", submit_delivery=False,
+    )
+    assert callback is not None
+    return accepted, delegation, callback, source
+
+
+def test_mission_result_files_excludes_unselected_workspace_and_all_old_runs(account_client, monkeypatch):
+    accepted, delegation, callback, source = _completed_mission_with_selected_files(account_client, monkeypatch, selected=False)
+    assert "output_files" not in json.loads(callback["payload_json"])
+    view = account_client.get(urlsplit(accepted["viewRef"]).path)
+    assert view.status_code == 200
+    assert "Current mission result." in view.text
+    result_section = view.text.split('aria-labelledby="results-title"', 1)[1].split("</section>", 1)[0]
+    assert "prior-work.txt" not in result_section
+    assert "selected.txt" not in result_section
+    assert "No result files are available." in result_section
+    assert '<summary>Workspace files</summary>' in view.text
+    assert "prior-work.txt" in view.text
+    assert "selected.txt" in view.text
+
+
+def test_mission_result_files_uses_completed_callback_and_existing_immutable_actions(account_client, monkeypatch):
+    accepted, delegation, callback, source = _completed_mission_with_selected_files(account_client, monkeypatch)
+    payload = json.loads(callback["payload_json"])
+    selected = payload["output_files"]["files"][0]
+    assert selected["filename"] == "selected.txt"
+    assert selected["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    # Mutable workspace contents cannot replace the publisher's selected snapshot.
+    source.write_bytes(b"Later workspace version.")
+    view = account_client.get(urlsplit(accepted["viewRef"]).path)
+    assert view.status_code == 200
+    assert "selected.txt" in view.text
+    result_section = view.text.split('aria-labelledby="results-title"', 1)[1].split("</section>", 1)[0]
+    assert "prior-work.txt" not in result_section
+    assert "prior-work.txt" in view.text
+    assert "More files exist in this mission workspace" not in view.text
+    hrefs = re.findall(r'href="([^\"]*/v1/link-refs/[^\"]+)"', result_section)
+    assert len(hrefs) == 2
+    opened, downloaded = (account_client.get(urlsplit(href).path) for href in hrefs)
+    assert opened.status_code == downloaded.status_code == 200
+    assert "Selected result only." in opened.text
+    assert downloaded.content == b"Selected result only.\n"
+    workspace_section = view.text.split('aria-label="Workspace files"', 1)[1].split("</section>", 1)[0]
+    workspace_actions = re.findall(r'href="([^"]*/v1/link-refs/[^"]+)"', workspace_section)
+    assert len(workspace_actions) == 6
+    workspace_downloads = [account_client.get(urlsplit(href).path).content for href in workspace_actions[1::2]]
+    assert b"A previous unrelated mission" in workspace_downloads
+    assert b"Selected result only.\n" in workspace_downloads
+    assert b"Later workspace version." in workspace_downloads
+    assert "attachment" in downloaded.headers["content-disposition"]
+    assert "default-src 'none'" in opened.headers["content-security-policy"]
+    assert "allow-scripts" not in opened.text
+
+
+@pytest.mark.parametrize("field", ["owner_id", "run_id", "attempt_id", "callback_id", "origin_ref", "work_ref", "result_revision", "result_digest"])
+def test_mission_result_files_rejects_mismatched_callback_envelope(account_client, monkeypatch, field):
+    accepted, delegation, callback, source = _completed_mission_with_selected_files(account_client, monkeypatch)
+    original = account_client.app.state.store.list_callback_outbox_for_run
+    def records(*args, **kwargs):
+        rows = original(*args, **kwargs)
+        for row in rows:
+            if row["event_type"] == "run.completed":
+                payload = json.loads(row["payload_json"])
+                payload["output_files"][field] = 999 if field == "result_revision" else "unrelated-identity"
+                row["payload_json"] = json.dumps(payload)
+        return rows
+    monkeypatch.setattr(account_client.app.state.store, "list_callback_outbox_for_run", records)
+    view = account_client.get(urlsplit(accepted["viewRef"]).path)
+    assert view.status_code == 200
+    result_section = view.text.split('aria-labelledby="results-title"', 1)[1].split("</section>", 1)[0]
+    assert "selected.txt" not in result_section
+    assert "prior-work.txt" not in result_section
+
+
+def test_mission_result_files_rejects_changed_immutable_snapshot(account_client, monkeypatch):
+    accepted, delegation, callback, source = _completed_mission_with_selected_files(account_client, monkeypatch)
+    item = json.loads(callback["payload_json"])["output_files"]["files"][0]
+    published = source.parent / "artifacts" / "native-media" / delegation["current_run_id"] / (item["sha256"] + ".txt")
+    published.write_bytes(b"Changed snapshot.")
+    view = account_client.get(urlsplit(accepted["viewRef"]).path)
+    assert view.status_code == 200
+    result_section = view.text.split('aria-labelledby="results-title"', 1)[1].split("</section>", 1)[0]
+    assert "selected.txt" not in result_section
+    assert "prior-work.txt" not in result_section
+
+
+def test_mission_result_files_refreshes_only_selected_expired_links(account_client, monkeypatch):
+    accepted, delegation, callback, source = _completed_mission_with_selected_files(account_client, monkeypatch)
+    link_db = os.environ["GLASSHIVE_LINK_REF_STATE_PATH"]
+    with sqlite3.connect(link_db) as conn:
+        conn.execute("UPDATE signed_link_refs SET expires_at=1 WHERE kind='artifact_download'")
+    view = account_client.get(urlsplit(accepted["viewRef"]).path)
+    assert view.status_code == 200
+    result_section = view.text.split('aria-labelledby="results-title"', 1)[1].split("</section>", 1)[0]
+    assert "prior-work.txt" not in result_section
+    hrefs = re.findall(r'href="([^\"]*/v1/link-refs/[^\"]+)"', result_section)
+    assert len(hrefs) == 2
+    assert account_client.get(urlsplit(hrefs[1]).path).content == b"Selected result only.\n"
+
+
+def test_core_asserted_upload_keeps_owner_through_message_manifest_and_bytes(account_client, monkeypatch):
+    from workers_projects_runtime.workspace_files import materialize_managed_file
+    accepted, delegation, _, _ = _completed_mission_with_selected_files(account_client, monkeypatch, selected=False)
+    store, service = account_client.app.state.store, account_client.app.state.service
+    monkeypatch.setenv('WPR_BOOTSTRAP_SOURCE_ROOTS', str(Path(store.db_path).parent))
+    original_worker = store.get_worker(delegation['worker_id'])
+    root = Path(original_worker['workspace_dir'])
+    sentinel = root / 'existing.txt'; sentinel.write_bytes(b'Existing work remains.')
+    payload = b'Exact selected note.\nOrder: 2.\nScope: selected mission only.'
+    created = account_client.post('/v1/file-uploads', headers=account_headers(), json={
+        'draft_id':'selected-action','name':'updated-note.txt','size_bytes':len(payload),'idempotency_key':'exact-upload-owner'})
+    assert created.status_code == 201, created.text
+    upload_id = created.json()['upload_id']
+    uploaded = account_client.put('/v1/file-uploads/'+upload_id+'/content', content=payload, headers=account_headers())
+    assert uploaded.status_code == 200, uploaded.text
+    ready = uploaded.json()
+    with sqlite3.connect(store.db_path) as db:
+        owner = db.execute('SELECT tenant_id,owner_id,state,sha256 FROM workspace_file_uploads WHERE upload_id=?',(upload_id,)).fetchone()
+    assert owner == ('tenant-a','owner-a','ready',hashlib.sha256(payload).hexdigest())
+    response = account_client.post('/v1/work/'+accepted['workRef']+'/actions', headers=account_headers(), json={
+        'action':'message','instruction':'Use the selected note and keep the original work.','idempotencyKey':'exact-action-owner',
+        'sourceContext':{'version':1,'originRef':'ghi_synthetic_origin_0001','sourceEventId':'event-selected-owner','sourceRevision':1,'surface':'web','outputContract':{'mode':'inherit'}},
+        'fileInputs':[{'uploadId':upload_id,'revision':ready['revision'],'sha256':ready['sha256'],'sizeBytes':len(payload),'filename':ready['name'],'sourceFileId':'synthetic-current-file','inputKind':'extracted_text','mediaGroupIndex':1}]})
+    assert response.status_code == 202, response.text
+    current = store.get_delegation(accepted['workRef'],tenant_id='tenant-a',owner_id='owner-a')
+    next_run = store.get_run(current['current_run_id'])
+    assert next_run['run_id'] != delegation['current_run_id']
+    manifest = store.get_run_file_manifest(next_run['run_id'],worker_id=original_worker['worker_id'],tenant_id='tenant-a',owner_id='owner-a')
+    assert len(manifest) == 1
+    assert (manifest[0]['upload_id'],manifest[0]['sha256'],manifest[0]['source_file_id'],manifest[0]['input_kind'],manifest[0]['media_group_index']) == (upload_id,hashlib.sha256(payload).hexdigest(),'synthetic-current-file','extracted_text',1)
+    worker = service._run_local_worker(store.get_worker(original_worker['worker_id']), next_run)
+    bundle = json.loads(worker['bootstrap_bundle_json'])
+    selected = [f for f in bundle['files'] if f.get('source_path')]
+    assert len(selected) == 1
+    materialize_managed_file(root, selected[0], worker)
+    assert (root/selected[0]['path']).read_bytes() == payload
+    assert sentinel.read_bytes() == b'Existing work remains.'
+    with pytest.raises(ValueError,match='owner'):
+        store.get_run_file_manifest(next_run['run_id'],worker_id=original_worker['worker_id'],tenant_id='tenant-a',owner_id='other-owner')
+
+
+def test_core_asserted_upload_fences_signature_nonce_and_other_owner(account_client):
+    body={'draft_id':'auth-fences','name':'note.txt','size_bytes':3,'idempotency_key':'owner-guard-upload'}
+    invalid=account_client.post('/v1/file-uploads',json=body,headers=account_headers(assertion='invalid.signed.assertion'))
+    assert invalid.status_code == 401
+    headers=account_headers(nonce='synthetic-file-owner-once')
+    first=account_client.post('/v1/file-uploads',json=body,headers=headers)
+    assert first.status_code == 201, first.text
+    replay=account_client.post('/v1/file-uploads',json=body,headers=headers)
+    assert replay.status_code == 409
+    assert replay.json()['detail']['code'] == 'service_assertion_replayed'
+    upload_id=first.json()['upload_id']
+    foreign=account_client.put('/v1/file-uploads/'+upload_id+'/content',content=b'abc',headers=account_headers(owner_id='other-owner'))
+    assert foreign.status_code == 404
+    accepted=account_client.put('/v1/file-uploads/'+upload_id+'/content',content=b'abc',headers=account_headers())
+    assert accepted.status_code == 200, accepted.text
+    assert account_client.get('/v1/file-uploads/'+upload_id,headers=account_headers(owner_id='other-owner')).status_code == 404
+
+
+def test_core_assertion_absent_upload_preserves_local_human_file_path(account_client):
+    headers={'Authorization':'Bearer '+API_TOKEN}
+    first=account_client.post('/v1/file-uploads',json={'draft_id':'human-existing','name':'note.txt','size_bytes':3,'idempotency_key':'human-file-existing'},headers=headers)
+    assert first.status_code == 201, first.text
+    ready=account_client.put('/v1/file-uploads/'+first.json()['upload_id']+'/content',content=b'abc',headers=headers)
+    assert ready.status_code == 200, ready.text
+    with sqlite3.connect(account_client.app.state.store.db_path) as db:
+        owner=db.execute('SELECT tenant_id,owner_id FROM workspace_file_uploads WHERE upload_id=?',(first.json()['upload_id'],)).fetchone()
+    assert owner == ('local','demo-owner')
+
+
+def test_action_projection_keeps_current_actions_without_history_or_artifact_writes(
+    account_client, monkeypatch,
+):
+    accepted = account_client.post("/v1/delegations",
+        headers=account_headers(idempotency_key="lean-current-action"),
+        json=delegation_payload())
+    assert accepted.status_code == 202
+    work_ref = accepted.json()["workRef"]
+    before = account_client.get(f"/v1/work/{work_ref}", headers=account_headers())
+    assert before.status_code == 200
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Action preflight must not prepare history or artifact links")
+
+    store = account_client.app.state.store
+    monkeypatch.setattr(store, "work_trace_detail", forbidden)
+    monkeypatch.setattr(account_client.app.state.service.files, "artifact_worker", forbidden)
+    actual = account_client.get(f"/v1/work/{work_ref}", headers=account_headers(),
+        params={"projection": "actions"})
+    assert actual.status_code == 200
+    assert actual.json() == {key: before.json()[key] for key in ("workRef", "state", "actions")}
+    foreign = account_client.get(f"/v1/work/{work_ref}",
+        headers=account_headers(owner_id="owner-b"), params={"projection": "actions"})
+    assert foreign.status_code == 404
+    invalid = account_client.get(f"/v1/work/{work_ref}", headers=account_headers(),
+        params={"projection": "unknown"})
+    assert invalid.status_code == 422
+
+
+def test_action_projection_preserves_pending_native_input_restrictions(account_client, monkeypatch):
+    accepted = account_client.post("/v1/delegations",
+        headers=account_headers(idempotency_key="lean-pending-native-input"),
+        json=delegation_payload())
+    assert accepted.status_code == 202
+    monkeypatch.setattr(account_client.app.state.service, "active_work_pending_native_input",
+        lambda _record: {"requestId": "native-input", "state": "pending"})
+    actual = account_client.get(f"/v1/work/{accepted.json()['workRef']}",
+        headers=account_headers(), params={"projection": "actions"})
+    assert actual.status_code == 200
+    assert actual.json() == {"workRef": accepted.json()["workRef"],
+        "state": "needs_input", "actions": ["resume", "stop"]}

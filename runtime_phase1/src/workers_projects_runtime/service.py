@@ -231,6 +231,48 @@ RUN_STATE_BY_EVENT = {
 }
 _UNSET = object()
 
+_NATIVE_ADMISSION_TIMING_STAGES = frozenset({
+    "admission_claim", "admission_health", "admission_lease_generation",
+    "admission_context", "admission_scoped_authority", "admission_invocation_grant",
+    "admission_bundle", "admission_files", "admission_workspace",
+    "admission_provider_deadline", "admission_commit",
+})
+
+
+@contextmanager
+def _native_admission_timing(stage: str, worker_id: object, run_id: object = ""):
+    """Observe existing admission calls without changing their result or authority."""
+    enabled, started = False, 0
+    try:
+        enabled = (isinstance(stage, str) and stage in _NATIVE_ADMISSION_TIMING_STAGES
+                   and native_timing_enabled())
+        if enabled:
+            started = time.monotonic_ns()
+    except Exception:
+        enabled = False
+    identity = {"worker": worker_id, "run": run_id}
+    status = "completed"
+    try:
+        yield identity
+    except BaseException:
+        status = "failed"
+        raise
+    finally:
+        if enabled:
+            try:
+                duration = (time.monotonic_ns() - started) / 1_000_000
+                if math.isfinite(duration) and duration >= 0:
+                    fields = {"durationMs": duration, "status": status}
+                    for kind, value in identity.items():
+                        if kind not in {"worker", "run"}:
+                            continue
+                        if isinstance(value, str) and 0 < len(value) <= 256:
+                            fields[kind + "Hash"] = native_timing_hash(kind, value)
+                    native_timing_event(stage, **fields)
+            except Exception:
+                pass
+
+
 WORK_TRACE_SCHEMA_DIGEST = (
     "sha256:ba9b15e022a451c62be0c0f30a02d6615bea83e868b2ffdd349beff75002e790"
 )
@@ -291,6 +333,7 @@ def worker_prompt_layer_actual_producers() -> tuple[object, ...]:
         glasshive_project_claude_md,
         glasshive_project_codex_md,
         merge_glasshive_worker_instructions,
+        native_profile_tool_access_instructions,
     )
     from .mcp_server import create_mcp_server, glasshive_workers_server_instructions
     from .coordinator import prompt_manifest
@@ -307,6 +350,7 @@ def worker_prompt_layer_actual_producers() -> tuple[object, ...]:
         glasshive_project_claude_md,
         glasshive_project_codex_md,
         merge_glasshive_worker_instructions,
+        native_profile_tool_access_instructions,
         glasshive_workers_server_instructions,
         create_mcp_server,
         _apply_codex_developer_instructions,
@@ -7759,6 +7803,25 @@ class WorkersProjectsService:
             "output": output_contract,
         }
 
+    def _active_work_action_file_manifest(self, worker, action_record):
+        try:
+            context = json.loads(str(action_record.get("source_context_json") or "{}"))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeErrorBase("active_work_source_context_invalid") from exc
+        inputs = context.get("file_inputs", []) if isinstance(context, dict) else None
+        if not isinstance(inputs, list):
+            raise RuntimeErrorBase("active_work_file_input_invalid")
+        if not inputs:
+            return None
+        if str(action_record.get("tenant_id") or "") != str(worker.get("tenant_id") or "") or str(action_record.get("owner_id") or "") != str(worker.get("owner_id") or ""):
+            raise RuntimeErrorBase("active_work_file_input_owner_unconfirmed")
+        manifest = self.files.manifest(str(worker["tenant_id"]), str(worker["owner_id"]),
+            [item["upload_id"] for item in inputs], [item["revision"] for item in inputs])
+        if len(manifest) != len(inputs) or any((entry["upload_id"], entry["revision"], entry["sha256"], entry["size_bytes"], entry["name"]) !=
+            (item["upload_id"], item["revision"], item["sha256"], item["size_bytes"], item["filename"]) for entry, item in zip(manifest, inputs)):
+            raise RuntimeErrorBase("active_work_file_input_changed")
+        return [{**entry, "source_file_id": item["source_file_id"], "input_kind": item["input_kind"], "media_group_index": item["media_group_index"]} for entry, item in zip(manifest, inputs)]
+
     def execute_active_work_action(
         self,
         delegation: dict,
@@ -7898,6 +7961,7 @@ class WorkersProjectsService:
             origin_trace, continuation_contract = (
                 self._active_work_follow_up_authority(action_record)
             )
+            action_files = self._active_work_action_file_manifest(worker, action_record)
             if action == "queue":
                 queue_context = build_workspace_continuation_context(
                     previous_run=run,
@@ -7912,6 +7976,7 @@ class WorkersProjectsService:
                     origin_trace=origin_trace,
                     continuation_contract=continuation_contract,
                     continuation_context=queue_context,
+                    file_manifest=action_files,
                 )
             elif action == "message":
                 # Current host adapters have no proven live-message primitive.
@@ -7961,6 +8026,7 @@ class WorkersProjectsService:
                                     else None
                                 ),
                                 continuation_context=message_context,
+                                file_manifest=action_files,
                             )
                         )
                     if created is not None:
@@ -7996,6 +8062,7 @@ class WorkersProjectsService:
                         origin_trace=origin_trace,
                         continuation_contract=continuation_contract,
                         continuation_context=message_context,
+                        file_manifest=action_files,
                     )
             else:
                 created = self.steer_worker(
@@ -8006,6 +8073,7 @@ class WorkersProjectsService:
                     action_use_id=action_use_id,
                     origin_trace=origin_trace,
                     continuation_contract=continuation_contract,
+                    file_manifest=action_files,
                 )
                 if str(created.get("_control_outcome") or "") == "terminal_won":
                     authoritative = dict(created.get("_control_run") or created)
@@ -11443,8 +11511,11 @@ class WorkersProjectsService:
         origin_trace: dict[str, object] | None = None,
         continuation_contract: dict[str, object] | None = None,
         continuation_context: dict[str, object] | None = None,
+        file_manifest: list[dict] | None = None,
     ) -> dict:
         normalized_key = str(idempotency_key or "").strip()
+        if file_manifest and (not normalized_key or provider_request_id):
+            raise ValueError("active_work_file_reservation_identity_required")
         while True:
             needs_resume = False
             with self._worker_compute_release_lock(worker_id):
@@ -11502,46 +11573,75 @@ class WorkersProjectsService:
                     self._ensure_execution_allowed(worker)
                     allowed_ai_admission = self._ensure_allowed_ai(worker)
                     created = True
-                    if str(provider_request_id or "").strip():
-                        run, created = self.store.create_and_attach_provider_run(
-                            request_id=str(provider_request_id).strip(),
-                            worker_id=worker_id,
-                            project_id=str(worker["project_id"]),
-                            instruction=instruction,
+                    provider_request_key = str(provider_request_id or "").strip()
+                    if provider_request_key:
+                        request = self.store.get_provider_request(provider_request_key) or {}
+                        run_id = (
+                            str(request.get("run_id") or "").strip()
+                            or self.store.provider_run_id_for_request(provider_request_key)
                         )
                     elif normalized_key:
                         run_id = self._idempotent_run_id(worker_id, normalized_key)
-                        stored_continuation = (
-                            {**continuation_contract, "run_id": run_id}
-                            if isinstance(continuation_contract, dict)
-                            else None
-                        )
-                        run, created = self.store.create_idempotent_run(
-                            run_id=run_id,
-                            worker_id=worker_id,
-                            project_id=str(worker["project_id"]),
-                            instruction=instruction,
-                            origin_trace=origin_trace,
-                            continuation_contract=stored_continuation,
-                            continuation_context=continuation_context,
-                        )
                     else:
                         run_id = f"run_{uuid.uuid4().hex[:10]}"
-                        stored_continuation = (
-                            {**continuation_contract, "run_id": run_id}
-                            if isinstance(continuation_contract, dict)
-                            else None
-                        )
-                        run = self.store.create_run(
-                            worker_id,
-                            worker["project_id"],
-                            instruction,
-                            state="queued",
-                            run_id=run_id,
-                            origin_trace=origin_trace,
-                            continuation_contract=stored_continuation,
-                            continuation_context=continuation_context,
-                        )
+                    staged_bundle = None
+                    if run_local_bundle is not None and self.store.get_run(run_id) is None:
+                        staged_bundle = dict(run_local_bundle)
+                        # Release the memory condition before the queued row is
+                        # published. Reused processors must receive this exact bundle.
+                        with self._run_local_bundles_lock:
+                            self._run_local_bundles[run_id] = staged_bundle
+                    try:
+                        if provider_request_key:
+                            run, created = self.store.create_and_attach_provider_run(
+                                request_id=provider_request_key,
+                                worker_id=worker_id,
+                                project_id=str(worker["project_id"]),
+                                instruction=instruction,
+                            )
+                        elif normalized_key:
+                            stored_continuation = (
+                                {**continuation_contract, "run_id": run_id}
+                                if isinstance(continuation_contract, dict)
+                                else None
+                            )
+                            run, created = self.store.create_idempotent_run(
+                                run_id=run_id,
+                                worker_id=worker_id,
+                                project_id=str(worker["project_id"]),
+                                instruction=instruction,
+                                origin_trace=origin_trace,
+                                continuation_contract=stored_continuation,
+                                continuation_context=continuation_context,
+                                file_manifest=file_manifest,
+                            )
+                        else:
+                            stored_continuation = (
+                                {**continuation_contract, "run_id": run_id}
+                                if isinstance(continuation_contract, dict)
+                                else None
+                            )
+                            run = self.store.create_run(
+                                worker_id,
+                                worker["project_id"],
+                                instruction,
+                                state="queued",
+                                run_id=run_id,
+                                origin_trace=origin_trace,
+                                continuation_contract=stored_continuation,
+                                continuation_context=continuation_context,
+                            )
+                    except Exception:
+                        if staged_bundle is not None:
+                            with self._run_local_bundles_lock:
+                                if self._run_local_bundles.get(run_id) is staged_bundle:
+                                    self._run_local_bundles.pop(run_id, None)
+                        raise
+                    if staged_bundle is not None and not created:
+                        with self._run_local_bundles_lock:
+                            if self._run_local_bundles.get(run_id) is staged_bundle:
+                                self._run_local_bundles.pop(run_id, None)
+                        staged_bundle = None
                     if created:
                         self._record_run_allowed_ai_admission(
                             run,
@@ -11571,10 +11671,16 @@ class WorkersProjectsService:
             # its startup handshake own the next generation; only after it
             # succeeds do we retry the run reservation under a fresh guard.
             self.resume_worker(worker_id)
-        if run_local_bundle is not None and str(run.get("state") or "") == "queued":
-            with self._run_local_bundles_lock:
-                self._run_local_bundles[str(run["run_id"])] = dict(run_local_bundle)
-                self._run_local_bundles_lock.notify_all()
+        if (
+            run_local_bundle is not None
+            and staged_bundle is None
+            and str(run.get("state") or "") == "queued"
+        ):
+            # Existing reservations use the native current-state/consumer gate.
+            # Never restore a new run's bundle after its processor consumed it.
+            self.attach_run_local_bundle(
+                str(run["run_id"]), run_local_bundle, allow_needs_input_reopen=False
+            )
         if not created:
             if start_processor and str(run.get("state") or "") == "queued":
                 self._ensure_worker_processor(worker_id)
@@ -11601,6 +11707,7 @@ class WorkersProjectsService:
         origin_trace: dict[str, object] | None = None,
         continuation_contract: dict[str, object] | None = None,
         continuation_context: dict[str, object] | None = None,
+        file_manifest: list[dict] | None = None,
     ) -> dict:
         existing_worker = self.store.get_worker(worker_id)
         existing_bundle = (
@@ -11625,6 +11732,7 @@ class WorkersProjectsService:
                 origin_trace is not None,
                 continuation_contract is not None,
                 continuation_context is not None,
+                file_manifest is not None,
             )
         ):
             return self._assign_run_parallel(
@@ -11640,6 +11748,7 @@ class WorkersProjectsService:
                 origin_trace=origin_trace,
                 continuation_contract=continuation_contract,
                 continuation_context=continuation_context,
+                file_manifest=file_manifest,
             )
         worker = self.require_worker(worker_id)
         self._ensure_execution_allowed(worker)
@@ -11999,6 +12108,7 @@ class WorkersProjectsService:
         _replacement_run_id: str = "",
         origin_trace: dict[str, object] | None = None,
         continuation_contract: dict[str, object] | None = None,
+        file_manifest: list[dict] | None = None,
     ) -> dict:
         instruction = str(_prepared_instruction or "") or self._instruction_for_steer(
             message
@@ -12118,6 +12228,7 @@ class WorkersProjectsService:
                 target,
                 kind="steer_run",
                 replacement_run=replacement_data,
+                file_manifest=file_manifest,
                 action_use_id=action_use_id,
             )
             claimed_worker = dict(claim.get("worker") or worker)
@@ -12241,6 +12352,7 @@ class WorkersProjectsService:
         _replacement_run_id: str = "",
         origin_trace: dict[str, object] | None = None,
         continuation_contract: dict[str, object] | None = None,
+        file_manifest: list[dict] | None = None,
     ) -> dict:
         if run_id or idempotency_key or action_use_id:
             return self._steer_worker_parallel(
@@ -12253,6 +12365,7 @@ class WorkersProjectsService:
                 _replacement_run_id=_replacement_run_id,
                 origin_trace=origin_trace,
                 continuation_contract=continuation_contract,
+                file_manifest=file_manifest,
             )
         worker = self.require_worker(worker_id)
         self._ensure_execution_allowed(worker)
@@ -14428,11 +14541,14 @@ class WorkersProjectsService:
                         )
                         return
 
-                run = self.store.claim_next_queued_run(
-                    worker_id,
-                    executor_id=self._executor_id,
-                    lease_ttl_s=self._host_lease_ttl_s(),
-                )
+                with _native_admission_timing("admission_claim", worker_id) as admission_timing:
+                    run = self.store.claim_next_queued_run(
+                        worker_id,
+                        executor_id=self._executor_id,
+                        lease_ttl_s=self._host_lease_ttl_s(),
+                    )
+                    if isinstance(run, dict):
+                        admission_timing["run"] = run.get("run_id")
                 if not run:
                     self._schedule_worker_retry_after(
                         worker_id,
@@ -14501,58 +14617,62 @@ class WorkersProjectsService:
                         else "claimed_wait_generation_lost",
                     )
                     return
-                if self._handle_unhealthy_provider_route(worker, run):
+                with _native_admission_timing("admission_health", worker_id, run["run_id"]):
+                    unhealthy_route = self._handle_unhealthy_provider_route(worker, run)
+                if unhealthy_route:
                     self._clear_run_local_grant_waiter(
                         str(run["run_id"]), owner=grant_waiter_owner
                     )
                     return
                 try:
-                    lease = self._acquire_host_run_lease(worker, run)
-                    if not lease:
-                        raise RuntimeErrorBase(
-                            "GlassHive could not reserve the exact run startup generation."
+                    with _native_admission_timing("admission_lease_generation", worker_id, run["run_id"]):
+                        lease = self._acquire_host_run_lease(worker, run)
+                        if not lease:
+                            raise RuntimeErrorBase(
+                                "GlassHive could not reserve the exact run startup generation."
+                            )
+                        terminal_generation = self._terminal_generation_for_run(
+                            run, lease
                         )
-                    terminal_generation = self._terminal_generation_for_run(
-                        run, lease
-                    )
                     # The startup lease is the host generation. Keep its raw CAS
                     # token local; this digest already fences active-session identity.
-                    startup_token = str(lease.get("startup_token") or "")
-                    startup_token_digest = hashlib.sha256(
-                        startup_token.encode("utf-8")
-                    ).hexdigest()
-                    authority_context: dict[str, str] = {}
-                    if (
-                        self._deferred_capability_authorization(worker) is not None
-                        or self._prompt_workbench_scheduled_authority(worker)
-                        is not None
-                    ):
-                        if str(worker.get("execution_mode") or "docker") == "host":
-                            if not startup_token:
-                                raise BrokerAdmissionError(
-                                    "broker_admission_generation_unavailable",
-                                    "The exact mission startup lease is unavailable.",
-                                    retryable=True,
-                                )
-                            authority_context = {
-                                "host_startup_lease_id": startup_token_digest
-                            }
-                        else:
-                            prepare_authority = getattr(
-                                self.runtime, "prepare_run_authority_context", None
-                            )
-                            if not callable(prepare_authority):
-                                raise BrokerAdmissionError(
-                                    "broker_admission_generation_unavailable",
-                                    "The exact mission container generation is unavailable.",
-                                    retryable=True,
-                                )
-                            prepared = prepare_authority(worker, run_id=str(run["run_id"]))
-                            if isinstance(prepared, dict):
+                    with _native_admission_timing("admission_context", worker_id, run["run_id"]):
+                        startup_token = str(lease.get("startup_token") or "")
+                        startup_token_digest = hashlib.sha256(
+                            startup_token.encode("utf-8")
+                        ).hexdigest()
+                        authority_context: dict[str, str] = {}
+                        if (
+                            self._deferred_capability_authorization(worker) is not None
+                            or self._prompt_workbench_scheduled_authority(worker)
+                            is not None
+                        ):
+                            if str(worker.get("execution_mode") or "docker") == "host":
+                                if not startup_token:
+                                    raise BrokerAdmissionError(
+                                        "broker_admission_generation_unavailable",
+                                        "The exact mission startup lease is unavailable.",
+                                        retryable=True,
+                                    )
                                 authority_context = {
-                                    str(key): str(value)
-                                    for key, value in prepared.items()
+                                    "host_startup_lease_id": startup_token_digest
                                 }
+                            else:
+                                prepare_authority = getattr(
+                                    self.runtime, "prepare_run_authority_context", None
+                                )
+                                if not callable(prepare_authority):
+                                    raise BrokerAdmissionError(
+                                        "broker_admission_generation_unavailable",
+                                        "The exact mission container generation is unavailable.",
+                                        retryable=True,
+                                    )
+                                prepared = prepare_authority(worker, run_id=str(run["run_id"]))
+                                if isinstance(prepared, dict):
+                                    authority_context = {
+                                        str(key): str(value)
+                                        for key, value in prepared.items()
+                                    }
 
                     runtime_info_run_id = str(run["run_id"])
                     runtime_info_lease_id = str(lease.get("lease_id") or "")
@@ -14608,26 +14728,28 @@ class WorkersProjectsService:
                         # state. The raw startup CAS token remains in SQLite.
                         "_run_startup_token_digest": startup_token_digest,
                     }
-                    provider_request = self.store.get_provider_request_for_run(
-                        str(run["run_id"])
-                    )
-                    if (
-                        provider_request is not None
-                        and str(provider_request.get("run_id") or "")
-                        == str(run["run_id"])
-                    ):
-                        run_worker["_provider_response_deadline_at"] = str(
-                            provider_request.get("response_deadline_at") or ""
+                    with _native_admission_timing("admission_provider_deadline", worker_id, run["run_id"]):
+                        provider_request = self.store.get_provider_request_for_run(
+                            str(run["run_id"])
                         )
-                    admitted = self.store.admit_claimed_run(
-                        str(run["run_id"]),
-                        lease_id=str(lease.get("lease_id") or ""),
-                        executor_id=self._executor_id,
-                    )
-                    if admitted is None:
-                        raise RuntimeErrorBase(
-                            "GlassHive lost the exact claimed run before compute admission."
+                        if (
+                            provider_request is not None
+                            and str(provider_request.get("run_id") or "")
+                            == str(run["run_id"])
+                        ):
+                            run_worker["_provider_response_deadline_at"] = str(
+                                provider_request.get("response_deadline_at") or ""
+                            )
+                    with _native_admission_timing("admission_commit", worker_id, run["run_id"]):
+                        admitted = self.store.admit_claimed_run(
+                            str(run["run_id"]),
+                            lease_id=str(lease.get("lease_id") or ""),
+                            executor_id=self._executor_id,
                         )
+                        if admitted is None:
+                            raise RuntimeErrorBase(
+                                "GlassHive lost the exact claimed run before compute admission."
+                            )
                     run = {**run, **admitted}
                     qa_admitted_stall = self._consume_local_qa(
                         "admitted_queue_stall", worker, run
@@ -17675,6 +17797,7 @@ class WorkersProjectsService:
         *,
         kind: str,
         replacement_run: dict[str, object] | None = None,
+        file_manifest: list[dict] | None = None,
         action_use_id: str = "",
     ) -> dict[str, object]:
         target_run_id = str(run.get("run_id") or "")
@@ -17691,12 +17814,75 @@ class WorkersProjectsService:
             target_run_id=target_run_id,
             expected_target_started_at=str(run.get("started_at") or ""),
             replacement_run=replacement_run,
+            file_manifest=file_manifest,
             action_use_id=action_use_id,
             action_executor_id=self._executor_id if action_use_id else "",
         )
         if claim is None:
             raise RuntimeErrorBase("active_work_generation_changed")
         return claim
+
+    def _worker_for_provider_liveness_release(self, worker: dict, run_id: str) -> dict:
+        """Bind attention cleanup to the exact lease closed by provider liveness."""
+
+        if str(worker.get("execution_mode") or "docker") != "host":
+            return worker
+        if getattr(self.runtime, "requires_run_start_identity", True) is False:
+            return worker
+        run = self.store.get_run(run_id) or {}
+        if str(run.get("failure_class") or "") != "provider_progress_stalled":
+            return worker
+        attempt_id = str(run.get("active_attempt_id") or "")
+        attempt = self.store.get_run_attempt(attempt_id) or {}
+        lease = self.store.latest_host_run_lease_for_run(run_id) or {}
+        if (
+            str(worker.get("state") or "") != "needs_input"
+            or str(worker.get("last_run_id") or "") != run_id
+            or str(worker.get("compute_release_kind") or "") != "needs_input"
+            or str(worker.get("compute_release_scope") or "") != "compute_only"
+            or str(worker.get("compute_release_target_run_id") or "") != run_id
+            or not str(worker.get("compute_release_token") or "")
+            or not self.store.worker_compute_release_claim_matches(
+                str(worker["worker_id"]),
+                str(worker["compute_release_token"]),
+                int(worker.get("compute_release_epoch") or 0),
+            )
+            or str(run.get("worker_id") or "") != str(worker["worker_id"])
+            or str(run.get("state") or "") != "needs_input"
+            or not run.get("provider_liveness_route_locked")
+            or not str(run.get("started_at") or "")
+            or str(worker.get("compute_release_target_started_at") or "")
+            != str(run.get("started_at") or "")
+            or not attempt_id
+            or str(attempt.get("run_id") or "") != run_id
+            or str(attempt.get("state") or "") != "needs_input"
+            or str(attempt.get("terminal_reason") or "") != "provider_progress_stalled"
+            or not str(attempt.get("runtime_invoked_at") or "")
+            or str(attempt.get("runtime_invoked_at") or "")
+            != str(run.get("runtime_invoked_at") or "")
+            or not str(attempt.get("ended_at") or "")
+            or str(lease.get("lease_id") or "") != str(attempt.get("lease_id") or "")
+            or str(lease.get("worker_id") or "") != str(worker["worker_id"])
+            or str(lease.get("run_id") or "") != run_id
+            or str(lease.get("attempt_id") or "") != attempt_id
+            or str(lease.get("status") or "") != "released"
+            or str(lease.get("release_reason") or "") != "provider_progress_stalled"
+            or str(lease.get("released_at") or "") != str(attempt.get("ended_at") or "")
+            or not str(lease.get("startup_token") or "")
+        ):
+            raise RuntimeErrorBase(
+                "The exact provider-attention generation is not confirmed; control remains pending"
+            )
+        return {
+            **worker,
+            "_active_run_id": run_id,
+            "_host_run_lease": lease,
+            "_provider_liveness_release": {
+                "lease_id": str(lease["lease_id"]),
+                "attempt_id": attempt_id,
+                "target_started_at": str(run["started_at"]),
+            },
+        }
 
     def _restore_failed_resume_claim(
         self,
@@ -17891,6 +18077,8 @@ class WorkersProjectsService:
             claimed_runtime_worker = (
                 self._worker_with_host_lease(claimed_worker, requested_target)
                 if requested_kind == "max_duration" and requested_target
+                else self._worker_for_provider_liveness_release(claimed_worker, requested_target)
+                if requested_kind == "needs_input" and requested_target
                 else claimed_worker
             )
             runtime_worker = {
@@ -17905,6 +18093,8 @@ class WorkersProjectsService:
             if terminal_run and str(terminal_run.get("state") or "") in TERMINAL_RUN_STATES:
                 runtime_worker["_terminal_run_id"] = terminal_run_id
             info = self.runtime.terminate_worker(runtime_worker)
+            if not self._runtime_control_info_is_confirmed(info):
+                raise RuntimeErrorBase("Worker compute termination could not be confirmed")
             idle_state = str(current.get("state") or "")
             if idle_state not in TERMINAL_RUN_STATES:
                 idle_state = "paused"
@@ -21027,6 +21217,7 @@ class WorkersProjectsService:
         provider_request_id: str = "",
         response_timeout_s: float | None = None,
         response_deadline_at: str = "",
+        allow_needs_input_reopen: bool = True,
     ) -> bool:
         """Refresh one queued run's invocation-local authority after a retry.
 
@@ -21045,7 +21236,7 @@ class WorkersProjectsService:
             "admitted",
             "running",
             "needs_input",
-        }:
+        } or (str(run.get("state") or "") == "needs_input" and not allow_needs_input_reopen):
             return False
         with self._run_local_bundles_lock:
             current = self.store.get_run(str(run_id))
@@ -21056,7 +21247,7 @@ class WorkersProjectsService:
                 "admitted",
                 "running",
                 "needs_input",
-            }:
+            } or (current_state == "needs_input" and not allow_needs_input_reopen):
                 return False
             if (
                 current_state in {"claimed", "admitted", "running"}
@@ -21245,217 +21436,230 @@ class WorkersProjectsService:
                 "model": locked_model,
             }
         try:
-            run_worker = self._run_local_admitted_worker(
-                worker, run, authority_context=authority_context
-            )
+            with _native_admission_timing("admission_scoped_authority", worker.get("worker_id"), run.get("run_id")):
+                run_worker = self._run_local_admitted_worker(
+                    worker, run, authority_context=authority_context
+                )
         except Exception:
             self._clear_run_local_grant_waiter(
                 str(run["run_id"]), owner=grant_waiter_owner
             )
             raise
-        admission = run.get("allowed_ai_admission")
-        if not isinstance(admission, dict):
-            try:
-                parsed_admission = json.loads(
-                    str(run.get("allowed_ai_admission_json") or "{}")
-                )
-            except (TypeError, json.JSONDecodeError):
-                parsed_admission = {}
-            admission = parsed_admission if isinstance(parsed_admission, dict) else {}
-        if admission:
-            run_worker["_allowed_ai_admission"] = dict(admission)
-            run_worker["allowed_ai_admission"] = dict(admission)
-        admitted_bundle = self._bootstrap_bundle_for(run_worker) or {}
-        admitted_env = (
-            admitted_bundle.get("env")
-            if isinstance(admitted_bundle.get("env"), dict)
-            else {}
-        )
-        admitted_bearer = str(
-            admitted_env.get(PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV) or ""
-        ).strip()
-        requires_invocation_bearer = self._requires_conversation_invocation_bearer(
-            run_worker
-        )
-        run_id = str(run["run_id"])
-        with self._run_local_bundles_lock:
-            if requires_invocation_bearer:
-                self._run_local_grant_waiters.setdefault(run_id, set()).add(
-                    grant_waiter_owner
-                )
-            transient = self._run_local_bundles.pop(run_id, None)
-        transient_env = (
-            transient.get("env")
-            if isinstance(transient, dict) and isinstance(transient.get("env"), dict)
-            else {}
-        )
-        has_invocation_bearer = bool(
-            str(
-                transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or ""
-            ).strip()
-        )
-        if requires_invocation_bearer and not has_invocation_bearer:
-            deadline = time.monotonic() + 0.5
-            with self._run_local_bundles_lock:
+        with _native_admission_timing("admission_invocation_grant", worker.get("worker_id"), run.get("run_id")):
+            admission = run.get("allowed_ai_admission")
+            if not isinstance(admission, dict):
                 try:
-                    while not self._shutdown_event.is_set():
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        self._run_local_bundles_lock.wait(timeout=remaining)
-                        transient = self._run_local_bundles.pop(run_id, None)
-                        transient_env = (
-                            transient.get("env")
-                            if isinstance(transient, dict)
-                            and isinstance(transient.get("env"), dict)
-                            else {}
-                        )
-                        if str(
-                            transient_env.get(
-                                "GLASSHIVE_CAPABILITY_BROKER_TOKEN"
-                            )
-                            or ""
-                        ).strip():
-                            break
-                finally:
-                    self._discard_run_local_grant_waiter_locked(
-                        run_id, grant_waiter_owner
+                    parsed_admission = json.loads(
+                        str(run.get("allowed_ai_admission_json") or "{}")
                     )
+                except (TypeError, json.JSONDecodeError):
+                    parsed_admission = {}
+                admission = parsed_admission if isinstance(parsed_admission, dict) else {}
+            if admission:
+                run_worker["_allowed_ai_admission"] = dict(admission)
+                run_worker["allowed_ai_admission"] = dict(admission)
+            admitted_bundle = self._bootstrap_bundle_for(run_worker) or {}
+            admitted_env = (
+                admitted_bundle.get("env")
+                if isinstance(admitted_bundle.get("env"), dict)
+                else {}
+            )
+            admitted_bearer = str(
+                admitted_env.get(PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV) or ""
+            ).strip()
+            requires_invocation_bearer = self._requires_conversation_invocation_bearer(
+                run_worker
+            )
+            run_id = str(run["run_id"])
+            with self._run_local_bundles_lock:
+                if requires_invocation_bearer:
+                    self._run_local_grant_waiters.setdefault(run_id, set()).add(
+                        grant_waiter_owner
+                    )
+                transient = self._run_local_bundles.pop(run_id, None)
+            transient_env = (
+                transient.get("env")
+                if isinstance(transient, dict) and isinstance(transient.get("env"), dict)
+                else {}
+            )
             has_invocation_bearer = bool(
                 str(
                     transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or ""
                 ).strip()
             )
-        elif requires_invocation_bearer:
-            with self._run_local_bundles_lock:
-                self._discard_run_local_grant_waiter_locked(run_id, grant_waiter_owner)
-        if requires_invocation_bearer and not has_invocation_bearer:
-            raise BrokerAdmissionError(
-                "conversation_capability_grant_required",
-                "The conversation capability grant must be refreshed before this queued turn can start.",
-                needs_input=True,
-            )
-        try:
-            continuation_contract = json.loads(
-                str(run.get("continuation_contract_json") or "{}")
-            )
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("continuation_contract_invalid") from exc
-        if not isinstance(continuation_contract, dict):
-            raise RuntimeError("continuation_contract_invalid")
-        try:
-            continuation_context = json.loads(
-                str(run.get("continuation_context_json") or "{}")
-            )
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("continuation_context_invalid") from exc
-        if not isinstance(continuation_context, dict):
-            raise RuntimeError("continuation_context_invalid")
-        if continuation_context:
-            continuation_context = build_workspace_continuation_context(
-                previous_run=run,
-            )
-        continuation_projection: dict[str, object] = {}
-        if continuation_contract:
-            continuation_projection["viventium_continuation_contract"] = (
-                continuation_contract
-            )
-        if continuation_context:
-            continuation_projection["viventium_continuation_context"] = (
-                continuation_context
-            )
-        run_bundle = self._bootstrap_bundle_for(run_worker) or {}
-        if continuation_projection:
-            run_bundle = merge_bootstrap_bundle(
-                run_bundle,
-                continuation_projection,
-            ) or {}
-        if transient:
-            run_bundle = merge_bootstrap_bundle(run_bundle, transient) or {}
-        run_bundle = self._exact_provider_session_bundle_for_run(run_bundle, run_id)
-        # Clean-room canonicalization deliberately excludes per-run continuation
-        # state and bearer material from every durable/public merge. Apply only
-        # these exact server-owned facts after all canonical merges, on the
-        # in-memory run object that is handed directly to the runtime.
-        run_bundle.update(continuation_projection)
-        if continuation_context and "viventium_constraint_source" not in run_bundle:
-            run_bundle["viventium_constraint_source"] = {
-                "version": 1,
-                "instruction": str(continuation_context["base_instruction"]),
-            }
-        run_bundle.pop("viventium_run_liveness", None)
-        if str(run.get("liveness_mode") or "standard") == "declared_long":
-            run_bundle["viventium_run_liveness"] = {
-                "version": 1,
-                "long_mission": True,
-            }
-        if admitted_bearer:
-            run_bundle["env"] = {
-                **(
-                    run_bundle.get("env")
-                    if isinstance(run_bundle.get("env"), dict)
-                    else {}
-                ),
-                PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV: admitted_bearer,
-            }
+            if requires_invocation_bearer and not has_invocation_bearer:
+                deadline = time.monotonic() + 0.5
+                with self._run_local_bundles_lock:
+                    try:
+                        while not self._shutdown_event.is_set():
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            self._run_local_bundles_lock.wait(timeout=remaining)
+                            transient = self._run_local_bundles.pop(run_id, None)
+                            transient_env = (
+                                transient.get("env")
+                                if isinstance(transient, dict)
+                                and isinstance(transient.get("env"), dict)
+                                else {}
+                            )
+                            if str(
+                                transient_env.get(
+                                    "GLASSHIVE_CAPABILITY_BROKER_TOKEN"
+                                )
+                                or ""
+                            ).strip():
+                                break
+                    finally:
+                        self._discard_run_local_grant_waiter_locked(
+                            run_id, grant_waiter_owner
+                        )
+                has_invocation_bearer = bool(
+                    str(
+                        transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or ""
+                    ).strip()
+                )
+            elif requires_invocation_bearer:
+                with self._run_local_bundles_lock:
+                    self._discard_run_local_grant_waiter_locked(run_id, grant_waiter_owner)
+            if requires_invocation_bearer and not has_invocation_bearer:
+                raise BrokerAdmissionError(
+                    "conversation_capability_grant_required",
+                    "The conversation capability grant must be refreshed before this queued turn can start.",
+                    needs_input=True,
+                )
+        with _native_admission_timing("admission_bundle", worker.get("worker_id"), run.get("run_id")):
+            try:
+                continuation_contract = json.loads(
+                    str(run.get("continuation_contract_json") or "{}")
+                )
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("continuation_contract_invalid") from exc
+            if not isinstance(continuation_contract, dict):
+                raise RuntimeError("continuation_contract_invalid")
+            try:
+                continuation_context = json.loads(
+                    str(run.get("continuation_context_json") or "{}")
+                )
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("continuation_context_invalid") from exc
+            if not isinstance(continuation_context, dict):
+                raise RuntimeError("continuation_context_invalid")
+            if continuation_context:
+                continuation_context = build_workspace_continuation_context(
+                    previous_run=run,
+                )
+            continuation_projection: dict[str, object] = {}
+            if continuation_contract:
+                continuation_projection["viventium_continuation_contract"] = (
+                    continuation_contract
+                )
+            if continuation_context:
+                continuation_projection["viventium_continuation_context"] = (
+                    continuation_context
+                )
+            run_bundle = self._bootstrap_bundle_for(run_worker) or {}
+            if continuation_projection:
+                run_bundle = merge_bootstrap_bundle(
+                    run_bundle,
+                    continuation_projection,
+                ) or {}
+            if transient:
+                run_bundle = merge_bootstrap_bundle(run_bundle, transient) or {}
+            run_bundle = self._exact_provider_session_bundle_for_run(run_bundle, run_id)
+            # Clean-room canonicalization deliberately excludes per-run continuation
+            # state and bearer material from every durable/public merge. Apply only
+            # these exact server-owned facts after all canonical merges, on the
+            # in-memory run object that is handed directly to the runtime.
+            run_bundle.update(continuation_projection)
+            if continuation_context and "viventium_constraint_source" not in run_bundle:
+                run_bundle["viventium_constraint_source"] = {
+                    "version": 1,
+                    "instruction": str(continuation_context["base_instruction"]),
+                }
+            run_bundle.pop("viventium_run_liveness", None)
+            if str(run.get("liveness_mode") or "standard") == "declared_long":
+                run_bundle["viventium_run_liveness"] = {
+                    "version": 1,
+                    "long_mission": True,
+                }
+            if admitted_bearer:
+                run_bundle["env"] = {
+                    **(
+                        run_bundle.get("env")
+                        if isinstance(run_bundle.get("env"), dict)
+                        else {}
+                    ),
+                    PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV: admitted_bearer,
+                }
         # Attach server-owned accepted inputs after admission and transient
         # canonicalization, only to this invocation. Never mutate worker defaults.
-        file_manifest = self.store.get_run_file_manifest(
-            run_id,
-            worker_id=str(run_worker["worker_id"]),
-            tenant_id=str(run_worker.get("tenant_id") or "local"),
-            owner_id=str(run_worker.get("owner_id") or ""),
-        )
-        run_input_manifest_path = ""
-        if file_manifest:
-            self.files.register_run_input_versions(run_worker, file_manifest)
-            run_bundle["files"] = _merge_file_entries(
-                run_bundle.get("files"),
-                self.files.bootstrap_entries(
-                    str(run_worker.get("tenant_id") or "local"),
-                    str(run_worker.get("owner_id") or ""),
-                    file_manifest,
-                ),
-            )
-            # A reused workspace can contain another file with the same display
-            # name. Give the native worker one bounded, run-local index of the
-            # accepted paths instead of relying on filename search or expanding
-            # an arbitrarily large file list into the prompt.
-            run_input_manifest_path = (
-                ".xperfect/run-inputs/"
-                + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
-                + ".json"
-            )
-            run_bundle["files"] = _merge_file_entries(
-                run_bundle["files"],
-                [{
-                    "scope": "workspace",
-                    "path": run_input_manifest_path,
-                    "content": json.dumps({
-                        "version": 1,
-                        "files": [
-                            {
-                                "name": item["name"],
-                                "path": item["path"],
-                                "sha256": item["sha256"],
-                                "size_bytes": item["size_bytes"],
-                            }
-                            for item in file_manifest
-                        ],
-                    }, ensure_ascii=False, sort_keys=True),
-                    "allow_empty": False,
-                }],
-            )
-        return {
-            **self.files.artifact_worker(run_worker),
-            # The binder's native-start receipt must be tied to this durable
-            # run. Keep the identity on the in-memory runtime worker; it is
-            # never included in the public bootstrap bundle.
-            "_active_run_id": run_id,
-            "_run_attempt_id": str(run.get("active_attempt_id") or ""),
-            "_run_input_manifest_path": run_input_manifest_path,
-            "bootstrap_bundle_json": json.dumps(run_bundle, ensure_ascii=False),
-        }
+        with _native_admission_timing("admission_files", worker.get("worker_id"), run.get("run_id")):
+            from .workspace_files import FileAdmissionError
+            try:
+                file_manifest = self.store.get_run_file_manifest(
+                    run_id,
+                    worker_id=str(run_worker["worker_id"]),
+                    tenant_id=str(run_worker.get("tenant_id") or "local"),
+                    owner_id=str(run_worker.get("owner_id") or ""),
+                )
+                run_input_manifest_path = ""
+                if file_manifest:
+                    self.files.register_run_input_versions(run_worker, file_manifest)
+                    run_bundle["files"] = _merge_file_entries(
+                        run_bundle.get("files"),
+                        self.files.bootstrap_entries(
+                            str(run_worker.get("tenant_id") or "local"),
+                            str(run_worker.get("owner_id") or ""),
+                            file_manifest,
+                        ),
+                    )
+                    # A reused workspace can contain another file with the same display
+                    # name. Give the native worker one bounded, run-local index of the
+                    # accepted paths instead of relying on filename search or expanding
+                    # an arbitrarily large file list into the prompt.
+                    run_input_manifest_path = (
+                        ".xperfect/run-inputs/"
+                        + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+                        + ".json"
+                    )
+                    run_bundle["files"] = _merge_file_entries(
+                        run_bundle["files"],
+                        [{
+                            "scope": "workspace",
+                            "path": run_input_manifest_path,
+                            "content": json.dumps({
+                                "version": 1,
+                                "files": [
+                                    {
+                                        "name": item["name"],
+                                        "path": item["path"],
+                                        "sha256": item["sha256"],
+                                        "size_bytes": item["size_bytes"],
+                                        **{key: item[key] for key in ("source_file_id", "input_kind", "media_group_index") if key in item},
+                                    }
+                                    for item in file_manifest
+                                ],
+                            }, ensure_ascii=False, sort_keys=True),
+                            "allow_empty": False,
+                        }],
+                    )
+            except FileAdmissionError as exc:
+                raise BrokerAdmissionError(
+                    exc.code, str(exc), status_code=exc.status_code,
+                    retryable=exc.status_code == 429 or 500 <= exc.status_code < 600,
+                ) from exc
+        with _native_admission_timing("admission_workspace", worker.get("worker_id"), run.get("run_id")):
+            return {
+                **self.files.artifact_worker(run_worker),
+                # The binder's native-start receipt must be tied to this durable
+                # run. Keep the identity on the in-memory runtime worker; it is
+                # never included in the public bootstrap bundle.
+                "_active_run_id": run_id,
+                "_run_attempt_id": str(run.get("active_attempt_id") or ""),
+                "_run_input_manifest_path": run_input_manifest_path,
+                "bootstrap_bundle_json": json.dumps(run_bundle, ensure_ascii=False),
+            }
 
     @staticmethod
     def _run_inputs_prompt() -> dict:

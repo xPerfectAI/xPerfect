@@ -7,6 +7,7 @@ explicit reviewed artifact flag; ACP initialization does not advertise interject
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import time
 from concurrent.futures import Future, TimeoutError
@@ -15,11 +16,9 @@ from typing import Callable
 
 
 try:
-    from .agent_builder_control import (conversation_controls_from_schema,
-        public_conversation_prefix, ordered_conversation_output, parse_conversation_output)
+    from .agent_builder_control import conversation_controls_from_schema, conversation_interjection_supported, NativeConversationParts
 except ImportError:
-    from agent_builder_control import (conversation_controls_from_schema,
-        public_conversation_prefix, ordered_conversation_output, parse_conversation_output)
+    from agent_builder_control import conversation_controls_from_schema, conversation_interjection_supported, NativeConversationParts
 
 
 class AcpError(RuntimeError):
@@ -65,20 +64,32 @@ class AcpClient:
         self._reader = Thread(target=self._read, daemon=True, name='grok-acp-reader')
         self._reader.start()
 
-    def _send(self, message):
+    def _send(self, message, *, send_guard=None):
         encoded = (json.dumps(message, separators=(',', ':'), ensure_ascii=False) + '\n').encode()
         if len(encoded) > self.max_frame_bytes:
             raise AcpError('ACP outgoing frame exceeds the configured limit')
         with self._write_lock:
+            if send_guard is not None:
+                send_guard()
             try:
                 self.process.stdin.write(encoded)
                 self.process.stdin.flush()
             except (OSError, ValueError) as exc:
                 raise AcpError('Grok ACP transport closed') from exc
 
-    def request(self, method, params, timeout=30):
+    def request(self, method, params, timeout=30, *, send_guard=None):
         started = time.monotonic()
         outcome = 'error'
+        schema_sha256 = None
+        if self.request_timing and method == 'session/prompt' and isinstance(params, dict):
+            meta = params.get('_meta')
+            schema = meta.get('outputSchema') if isinstance(meta, dict) else None
+            if isinstance(schema, dict):
+                try:
+                    schema_sha256 = hashlib.sha256(json.dumps(schema, sort_keys=True,
+                        separators=(',', ':'), ensure_ascii=False).encode('utf-8')).hexdigest()
+                except (TypeError, ValueError):
+                    pass
         future = Future()
         with self._lock:
             if self._failure:
@@ -89,7 +100,8 @@ class AcpClient:
             request_id = self._next_id
             self._pending[request_id] = future
         try:
-            self._send({'jsonrpc':'2.0','id':request_id,'method':method,'params':params})
+            message = {'jsonrpc':'2.0','id':request_id,'method':method,'params':params}
+            self._send(message, **({'send_guard': send_guard} if send_guard is not None else {}))
             result = future.result(timeout=timeout)
             outcome = 'ok'
             return result
@@ -100,11 +112,12 @@ class AcpClient:
             with self._lock:
                 self._pending.pop(request_id, None)
             if self.request_timing:
-                # Observe only protocol method, duration and outcome, never request/response data.
+                # Observe protocol timing and the declared schema hash, never request/response text.
                 # An observation failure must not replace the native result or its real error.
                 try:
                     self.request_timing({'method': method, 'outcome': outcome,
-                                         'duration_ms': round((time.monotonic() - started) * 1000, 3)})
+                                         'duration_ms': round((time.monotonic() - started) * 1000, 3),
+                                         **({'output_schema_sha256': schema_sha256} if schema_sha256 else {})})
                 except Exception:
                     pass
 
@@ -254,12 +267,10 @@ class GrokSession:
         self._model_changed = False
         self._prompt_lock = Lock()
         self._collecting = False
-        self._parts = []
-        self._public_parts = []
-        self._stream_controls = (None, None)
-        self._public_prefix_seen = False
         self._chars = 0
         self._output_error = None
+        self._conversation_parts = NativeConversationParts(None, None)
+        self._interject_schema_supported = True
         self.cancel_requested = False
         self._native_tools_disabled = False
         self._native_tools_verified = False
@@ -332,19 +343,11 @@ class GrokSession:
                 self._model_changed = True
                 if self._collecting:
                     self.client.notify('session/cancel', {'sessionId': self.session_id})
-        # Only typed eligible public narration joins the terminal answer.
-        # Raw progress and graph-transfer controls remain private native evidence.
-        if self._collecting and update.get('sessionUpdate') == 'tool_call':
-            prefix = public_conversation_prefix(''.join(self._parts), *self._stream_controls)
-            if prefix and prefix['text']:
-                if prefix['complete']:
-                    self._public_parts.append(prefix['text'])
-                else:
-                    self._output_error = AcpError('Grok interrupted an incomplete public response envelope')
-            elif self._public_prefix_seen:
-                self._output_error = AcpError('Grok changed an accepted public response envelope')
-            self._parts = []
-            self._public_prefix_seen = False
+        if self._collecting and not self._output_error:
+            try:
+                self._conversation_parts.update(update, params.get('_meta'))
+            except ValueError as exc:
+                self._output_error = AcpError(str(exc))
         content = update.get('content')
         if self._collecting and update.get('sessionUpdate') == 'agent_message_chunk' and isinstance(content, dict) and content.get('type') == 'text':
             text = content.get('text')
@@ -353,10 +356,7 @@ class GrokSession:
             elif self._chars + len(text) > self.max_output_chars:
                 self._output_error = AcpError('Grok output exceeds the configured limit')
             else:
-                self._parts.append(text)
                 self._chars += len(text)
-                if public_conversation_prefix(''.join(self._parts), *self._stream_controls):
-                    self._public_prefix_seen = True
 
     @staticmethod
     def _options(state, config_id):
@@ -424,7 +424,9 @@ class GrokSession:
             params['sessionId'] = session_id
             params.setdefault('_meta', {})['noReplay'] = True
         self.session_id = session_id  # Fence load-history notifications too.
-        state = self.client.request('session/load' if session_id else 'session/new', params)
+        opening_params = params if session_id else {
+            **params, '_meta': {**params.get('_meta', {}), 'modelId': model}}
+        state = self.client.request('session/load' if session_id else 'session/new', opening_params)
         actual_id = state.get('sessionId') or session_id
         if not isinstance(actual_id, str) or not actual_id or (session_id and actual_id != session_id):
             raise AcpError('Grok native session identity mismatch')
@@ -442,16 +444,21 @@ class GrokSession:
         if model == 'grok-4.7-build-fast' and model not in offered_ids and 'grok-4.7' in offered_ids:
             model = 'grok-4.7'
         if actual_model != model:
-            if model not in offered_ids:
-                raise AcpError('Grok native model does not match the exact configured model')
+            # Native selection owns its bounded catalog readiness and refusal.
+            # The initial session catalog can precede an auth/catalog refresh.
             configured = self.client.request('session/set_config_option', {
                 'sessionId': self.session_id, 'configId': 'model', 'value': model})
             if (self._options(configured, 'model') or {}).get('currentValue') != model:
                 raise AcpError('Grok did not retain the exact configured model')
             state.update(configured)
-            if system_prompt_override:
+            if system_prompt_override and (
+                not native_tools_disabled
+                or (effort and self._options(configured, 'reasoning_effort') is None)
+            ):
                 # A model change can rebuild Grok's native system head. Reapply
-                # the pinned authority after the change, before any user turn.
+                # the pinned authority before any user turn. Restricted setup
+                # already does that in its final inventory reload; retain this
+                # reload when the selection response omits effort options.
                 reloaded = self.client.request('session/load', {
                     **params, 'sessionId': self.session_id,
                     '_meta': {**params.get('_meta', {}), 'noReplay': True}})
@@ -518,10 +525,9 @@ class GrokSession:
         try:
             if self._native_tools_disabled and self._native_tools_invalid:
                 raise AcpError('Restricted Grok exposed native tools')
-            self._parts, self._chars, self._output_error = [], 0, None
-            self._public_parts = []
-            self._public_prefix_seen = False
-            self._stream_controls = conversation_controls_from_schema(output_schema)
+            self._chars, self._output_error = 0, None
+            self._conversation_parts = NativeConversationParts(*conversation_controls_from_schema(output_schema))
+            self._interject_schema_supported = conversation_interjection_supported(output_schema)
             self._collecting = True
             params = {'sessionId':self.session_id, 'prompt':[{'type':'text','text':instruction}]}
             if output_schema is not None:
@@ -538,13 +544,8 @@ class GrokSession:
             if result.get('stopReason') != 'end_turn':
                 raise AcpError('Grok turn ended with stop reason: ' + str(result.get('stopReason', 'missing')),
                                stop_reason=result.get('stopReason'))
-            output = ''.join(self._parts)
             try:
-                if self._public_prefix_seen:
-                    decision = parse_conversation_output(output, *self._stream_controls)
-                    if decision.get('delivery_disposition', {}).get('valid') is not True:
-                        raise ValueError('Invalid public response envelope')
-                return ordered_conversation_output(self._public_parts, output, *self._stream_controls)
+                return self._conversation_parts.finish()
             except ValueError as exc:
                 raise AcpError('Grok returned an invalid public response envelope') from exc
         finally:
@@ -577,10 +578,18 @@ class GrokSession:
     def interject(self, text, message_id):
         if not self.reviewed_interject:
             raise AcpError('Grok interject is not verified for the configured artifact')
-        if not self._collecting:
-            raise AcpError('Grok session has no active prompt to steer')
+        def current_turn():
+            if self.cancel_requested:
+                raise AcpError('Grok interjection turn was cancelled')
+            if not self._collecting:
+                raise AcpError('Grok session has no active prompt to steer')
+            if not self._interject_schema_supported:
+                raise AcpError('Grok interjection is unsupported for this declared output schema')
+            if self._conversation_parts.graph_transfer_selected():
+                raise AcpError('Grok interjection cannot replace a terminal graph transfer')
+        current_turn()
         result = self.client.request('_x.ai/interject', {'sessionId':self.session_id,
-            'text':text,'interjectionId':message_id})
+            'text':text,'interjectionId':message_id}, send_guard=current_turn)
         # Grok's to_ext_response wraps the handler payload in ExtMethodResult,
         # inside JSON-RPC's own result. A successful request alone is not a receipt.
         payload = result.get('result')

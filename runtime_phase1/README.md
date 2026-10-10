@@ -170,14 +170,19 @@ assistant message on completion; this is declared as `incremental_text: false` i
 
 Grok audio-eligible conversation turns can stream the model's public response before terminal
 completion. The existing output schema puts graph and audio controls before `content`; the decoder
-checks the actual controls and JSON string boundaries. Content-first, skipped and graph-transfer
-envelopes stay terminal-only. Invalid headers never authorize early text; a malformed later
+checks the actual controls and JSON string boundaries. Content-first and skipped envelopes
+stay terminal-only. Complete eligible narration for a declared graph transfer closes a public
+audio part before the separate transfer delta; this does not commit the graph action.
+Invalid headers never authorize early text; a malformed later
 suffix produces a typed failure. Credentials and local paths remain
 redacted. Early text uses the same public sanitation as terminal text; unresolved private citations
 wait for their native source receipt. Complete eligible narration before native tools remains in the same native terminal
 answer, in order, so saved-message evidence does not erase spoken text. An accepted public part
 also fences replay by fallback or context recovery. Terminal evidence and source/digest checks
 remain unchanged; a changing accepted prefix fails without replaying a replacement answer.
+Native tool events retire their completed public buffer. A later generation reuses the exact prompt
+and turn fence without parsing that retired empty buffer or deduplicating across intervening tools.
+Declared terminal graph decisions remain terminal; private reasoning and interjections add no public parts.
 Native activity reads use the observed file size as their byte boundary, so concurrent writes
 remain for the next read and cannot replay a text delta already delivered.
 
@@ -281,6 +286,18 @@ remains the native execution owner and LibreChat remains one optional conversati
 - `POST /v1/workers/{id}/files`: bind `upload_ids` with an `idempotency_key`, optionally within a visible `directory`.
 - Worker Files routes provide listing, directories, revision-checked move, trash/Undo, streamed download and ZIP export.
 - Schedule requests accept `file_upload_ids`; manifests and pins survive draft expiry and process restart.
+
+Core Main can select authorized `fileIds` for Message, Queue, or Steer. The host transfers only
+those selected files and supplies their accepted Native upload versions. Each follow-up uses the
+same queued-run input manifest, including source file ID, order, group index, and `input_kind`:
+`original` carries the original bytes; `extracted_text` carries the stored UTF-8 extraction.
+Steer pins that manifest with its queued replacement before stopping the target. The existing
+control fence prevents replacement admission until the exact stop is confirmed. Files are
+projected only for the admitted run, and a terminal winner publishes no replacement files.
+Accepted run pins and retained bytes remain after replacement cancellation, as for Message and
+Queue. Permanent file-admission failures settle the run; transient file-service failures use the
+existing admission retry path.
+
 
 All operations use the runtime owner/tenant and worker authorization boundary. File writes reject view-only identities. Managed source projection requires an explicitly trusted managed-storage root. API admission monitoring alone does not enforce a native disk quota. Standalone startup loads only an explicit `VIVENTIUM_ENV_FILE`, if provided.
 

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -37,9 +38,11 @@ from .provider_native_input import NativeInputResponse, native_input_state, subm
 from .agent_builder_control import (
     graph_transfer_control,
     messaging_delivery_control,
+    normalized_messaging_delivery_control,
     parse_conversation_output,
     public_conversation_prefix,
     _unique_json_object,
+    NativeConversationParts,
 )
 from .auth import GlassHiveAuthError, NativeOwnerUnavailableError, require_native_installed_owner
 from .bootstrap import (
@@ -54,6 +57,7 @@ from .profile_runtime import (
     _LOCAL_MARKDOWN_CITATION,
     _codex_usage_from_output,
     _native_cli_status_env,
+    _native_tools_disabled,
     _host_claude_conversation_auto_memory,
     _host_claude_read_only_supported,
     _host_codex_conversation_project_instructions,
@@ -75,7 +79,7 @@ import copy
 
 from datetime import datetime, timedelta, timezone
 
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from .agent_builder_control import (
     LC_TRANSFER_TO_PREFIX,
@@ -83,7 +87,7 @@ from .agent_builder_control import (
     parse_graph_transfer_output,
 )
 
-from .openclaw_runtime import RuntimeErrorBase
+from .openclaw_runtime import HostCapacityError, RuntimeErrorBase
 
 from .profile_runtime import (
     _claude_host_auth_available,
@@ -93,6 +97,8 @@ from .profile_runtime import (
     _host_plugin_denylist,
     _redact_text,
 )
+
+from .run_evidence import markdown_body_lines
 
 from .store import (
     ProviderAdmissionConflictError,
@@ -254,6 +260,7 @@ _PUBLIC_FAILURE_CODES = frozenset({
     "provider_quota_exhausted",
     "provider_temporarily_unavailable",
     "provider_response_failed",
+    "provider_progress_stalled",
     "host_capacity",
     "source_context_unavailable",
     "conversation_capability_grant_required",
@@ -304,7 +311,7 @@ class HarnessModel:
     recommended_effort: str
     context_window: int
 
-    def api_payload(self) -> dict[str, Any]:
+    def api_payload(self, *, readiness: dict[str, Any] | None = None) -> dict[str, Any]:
         # Preserve the established public ordering and append the native CLI
         # default choice so existing clients do not reinterpret index zero.
         effort_choices = [
@@ -322,7 +329,7 @@ class HarnessModel:
             "effort_choices": effort_choices,
             "recommended_effort": self.recommended_effort,
             "context_window": self.context_window,
-            "readiness": _harness_readiness(self.harness_profile),
+            "readiness": dict(readiness) if readiness is not None else _harness_readiness(self.harness_profile),
             "capabilities": {
                 "main_chat": True,
                 "cortex_execution": True,
@@ -600,13 +607,18 @@ class GlassHiveOptions(BaseModel):
     access: Literal["full", "workspace", "read_only"] = "workspace"
 
 
-def _require_native_access_support(access: str, model: HarnessModel, execution_mode: str = "host") -> None:
+def _require_native_access_support(
+    access: str, model: HarnessModel, execution_mode: str = "host", *,
+    native_tools_disabled: bool = False,
+) -> None:
     # Admission and command construction use the same native capability ceiling,
     # including serial fallback. Unsupported harnesses never gain write authority.
     if access != "read_only":
         return
     supported = execution_mode == "host" and (
         model.harness_profile == "codex-cli" or (
+            model.harness_profile == "grok-build" and native_tools_disabled
+        ) or (
             model.harness_profile == "claude-code" and _host_claude_read_only_supported()
         )
     )
@@ -632,6 +644,8 @@ class NativePredecessorSupersession(BaseModel):
     revision: int = Field(ge=2)
     disposition: Literal["partial_removed"]
     accepted_sources: list[SupersededAcceptedSource] = Field(min_length=1, max_length=512)
+    # Core proves every skipped revision was cancelled before native admission.
+    unadmitted_revisions: list[int] = Field(default_factory=list, max_length=8)
 
 
 class CompletionMetadata(BaseModel):
@@ -651,6 +665,7 @@ class CompletionMetadata(BaseModel):
     provider_session_mode: Literal["persistent", "stateless"] = "persistent"
     glasshive_options: GlassHiveOptions = Field(default_factory=GlassHiveOptions)
     bootstrap_bundle: dict[str, Any] = Field(default_factory=dict)
+    bootstrap_bundle_b64: str = ""
     allowed_ai_origin_scope: dict[str, Any] = Field(default_factory=dict)
     developer_instruction_tail: str = ""
 
@@ -703,6 +718,23 @@ class ChatMessage(BaseModel):
 
     role: str
     content: Any = ""
+
+
+class NativeInterjectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    stream_id: str = Field(min_length=1, max_length=512)
+    message_id: str = Field(min_length=1, max_length=512)
+    body_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    delivery_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    text: str = Field(min_length=1, max_length=65536)
+    text_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def exact_text_digest(self):
+        if not hmac.compare_digest(hashlib.sha256(self.text.encode("utf-8")).hexdigest(), self.text_sha256):
+            raise ValueError("Native interjection text digest does not match")
+        return self
 
 
 class ChatStreamOptions(BaseModel):
@@ -1074,6 +1106,9 @@ def _bootstrap_developer_instructions(
 def _conversation_file_delivery_instructions(
     bundle: dict[str, Any], origin_scope: Any,
 ) -> str:
+    capabilities = bundle.get("provider_capabilities")
+    if isinstance(capabilities, dict) and capabilities.get("native_tools") is False:
+        return ""
     # Match the existing conversation execution-mode decision. A selected personal
     # account can run in Docker; the host publisher's managed TMP contract cannot.
     selected_account = bundle.get("provider_account")
@@ -1152,7 +1187,9 @@ def _exact_viventium_feeling_capsules(authority: str) -> list[str]:
 def _stable_authority_sha256(payload: ChatCompletionRequest) -> str:
     metadata = payload.metadata
     declared = str(metadata.stable_authority_sha256 or "").strip() if metadata else ""
-    if declared:
+    # Only the authenticated Core protocol owns an externally declared stable digest.
+    # Other lanes derive it from their exact authority minus the declared dynamic tail.
+    if declared and metadata.main_context_protocol == "main_context_v1":
         return declared
     snapshot = _developer_instruction_snapshot(payload)
     dynamic_tail = (
@@ -1384,6 +1421,30 @@ def _protected_source_indices(
                         and payload.messages[index].role == item["role"]
                         and hashlib.sha256(_visible_authored_text(payload.messages[index].content).encode("utf-8")).hexdigest() == item["sha256"]), None)
         if matched is None:
+            if native_timing_enabled():
+                # Diagnose the rejected carrier at the actual admission boundary. Prose,
+                # tool names/arguments, source IDs and credentials never enter this event.
+                native_timing_event(
+                    "source_context_rejected",
+                    turnHash=native_timing_hash("turn", payload.metadata.message_id),
+                    streamHash=native_timing_hash("stream", payload.metadata.stream_id),
+                    invocationHash=native_timing_hash("invocation", payload.metadata.native_invocation_id),
+                    nativeBodySha256=payload.metadata.native_body_sha256,
+                    sourceHash=native_timing_hash("source", item["id"]),
+                    expectedRole=item["role"], expectedSha256=item["sha256"],
+                    currentInput=current_input,
+                    messageCount=len(payload.messages), observedLimit=128,
+                    observedMessages=[{
+                        "index": index,
+                        "role": message.role if message.role in {"user", "assistant", "tool", "function", "system", "developer"} else "other",
+                        "authoredBytes": len(_visible_authored_text(message.content).encode("utf-8")),
+                        "authoredSha256": hashlib.sha256(_visible_authored_text(message.content).encode("utf-8")).hexdigest(),
+                        "toolCallCount": len(message.tool_calls) if isinstance(getattr(message, "tool_calls", None), list) else 0,
+                        "hasToolCallId": bool(getattr(message, "tool_call_id", None)),
+                        "alreadyProtected": index in protected,
+                        "keyHash": native_timing_hash("visible_key", keys.get(index, "")),
+                    } for index, message in enumerate(payload.messages[:128])],
+                )
             raise HTTPException(status_code=413, detail={
                 "code": "source_context_unavailable",
                 "message": "A protected original source was removed or changed before native admission.",
@@ -1796,8 +1857,13 @@ def _decode_developer_instruction_tail(request: Request) -> str:
         ) from exc
 
 
-def _decode_bootstrap_bundle(request: Request) -> dict[str, Any]:
-    encoded = _header(request, "x-glasshive-bootstrap-bundle-b64")
+def _decode_bootstrap_bundle(request: Request, encoded_body: str = "") -> dict[str, Any]:
+    encoded_header = _header(request, "x-glasshive-bootstrap-bundle-b64")
+    if not isinstance(encoded_body, str):
+        raise HTTPException(status_code=400, detail="Invalid GlassHive bootstrap body carrier")
+    if encoded_header and encoded_body:
+        raise HTTPException(status_code=400, detail="GlassHive bootstrap must use one carrier")
+    encoded = encoded_header or encoded_body
     if not encoded:
         return {}
     signature_secret = str(
@@ -1967,6 +2033,7 @@ def _hydrate_metadata(
         request,
         "x-viventium-audio-eligible",
     )
+    encoded_bootstrap_body = incoming.pop("bootstrap_bundle_b64", "")
     metadata = {
         **incoming,
         **authoring_scope,
@@ -1999,7 +2066,7 @@ def _hydrate_metadata(
             request, "x-glasshive-provider-session-mode"
         )
         or "persistent",
-        "bootstrap_bundle": _decode_bootstrap_bundle(request),
+        "bootstrap_bundle": _decode_bootstrap_bundle(request, encoded_bootstrap_body),
         "turn_context": _decode_turn_context(request)
         or str(incoming.get("turn_context") or "").strip(),
         # The trusted transport declares the optional serial fallback route for this turn.
@@ -2312,7 +2379,8 @@ def _native_authored_preview(profile: str, stdout: str, graph_control: Any,
                              delivery_control: Any) -> dict[str, Any] | None:
     """A complete typed public answer is a replaceable preview, never final authority."""
     latest = None
-    grok_parts: list[str] = []
+    grok_parts = NativeConversationParts(graph_control, delivery_control)
+    grok_session_id = ""
     for sequence, line in enumerate(str(stdout or "").splitlines(), 1):
         try:
             event = json.loads(line)
@@ -2321,6 +2389,11 @@ def _native_authored_preview(profile: str, stdout: str, graph_control: Any,
         if not isinstance(event, dict):
             continue
         text = None
+        if profile == "grok-build" and event.get("type") == "grok.session.started":
+            if grok_session_id or not isinstance(event.get("session_id"), str) or not event["session_id"]:
+                return None
+            grok_session_id = event["session_id"]
+            continue
         if profile == "codex-cli" and event.get("type") == "item.completed":
             item = event.get("item")
             if isinstance(item, dict) and item.get("type") == "agent_message":
@@ -2336,15 +2409,27 @@ def _native_authored_preview(profile: str, stdout: str, graph_control: Any,
             update = event.get("update")
             if not isinstance(update, dict):
                 continue
+            if grok_session_id and event.get("session_id") != grok_session_id:
+                continue
+            if event.get("meta") and not grok_session_id:
+                return None
+            try:
+                grok_parts.update(update, event.get("meta"))
+            except ValueError:
+                return None
             if update.get("sessionUpdate") == "tool_call":
-                grok_parts = []
                 latest = None
                 continue
             content = update.get("content")
             if (update.get("sessionUpdate") == "agent_message_chunk" and isinstance(content, dict)
                     and content.get("type") == "text" and isinstance(content.get("text"), str)):
-                grok_parts.append(content["text"])
-                text = "".join(grok_parts)
+                raw = "".join(grok_parts.current)
+                if not raw.rstrip().endswith("}"):
+                    continue
+                try:
+                    text = grok_parts.finish()
+                except ValueError:
+                    continue
         if not isinstance(text, str):
             continue
         # Parse only a possible complete envelope; incomplete chunks carry no public preview.
@@ -2380,15 +2465,40 @@ def _native_authored_preview(profile: str, stdout: str, graph_control: Any,
 
 
 
+def _mutable_native_file_link_start(text: str, *, incomplete: bool) -> int | None:
+    """Keep model-selected local references behind their canonical artifact projection."""
+    for offset, line in markdown_body_lines(text):
+        literals = [match.span() for match in re.finditer(r"(`+)(?!`)(.*?)\1(?!`)", line)]
+        links = list(re.finditer(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", line))
+        if incomplete:
+            pending = re.search(r"\[[^\]\n]*$|\[[^\]\n]*\](?:\([^\)\n]*$)?$", line)
+            if pending is not None:
+                links.append(pending)
+        for match in links:
+            if any(start <= match.start() < end for start, end in literals):
+                continue
+            if match.re.groups < 2:
+                return offset + match.start()
+            destination = unquote(match.group(2).strip().removeprefix("<").removesuffix(">"))
+            try:
+                parsed = urlsplit(destination)
+            except ValueError:
+                continue
+            if (parsed.scheme in {"file", "artifact_sha256"}
+                    or not (parsed.scheme or parsed.netloc or parsed.query or parsed.fragment)):
+                return offset + match.start()
+    return None
+
+
 def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
                            delivery_control: Any) -> dict[str, Any] | None:
     """Project ordered public ACP parts, with exact native session identity."""
     if profile != "grok-build" or not delivery_control:
         return None
     session_id = ""
-    parts: list[str] = []
-    current: list[str] = []
+    parts = NativeConversationParts(graph_control, delivery_control)
     candidate = None
+    completed_parts: dict[int, int] = {}
     for sequence, line in enumerate(str(stdout or "").splitlines(), 1):
         try:
             event = json.loads(line)
@@ -2407,34 +2517,51 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
         update = event.get("update")
         if not isinstance(update, dict):
             continue
+        try:
+            parts.update(update, event.get("meta"))
+        except ValueError:
+            return None
         if update.get("sessionUpdate") == "tool_call":
-            prefix = public_conversation_prefix("".join(current), graph_control, delivery_control)
-            if prefix and prefix["text"]:
-                if not prefix["complete"]:
-                    return None
-                parts.append(prefix["text"])
-            current = []
             continue
         content = update.get("content")
         if (update.get("sessionUpdate") != "agent_message_chunk" or not isinstance(content, dict)
                 or content.get("type") != "text" or not isinstance(content.get("text"), str)):
             continue
-        current.append(content["text"])
-        prefix = public_conversation_prefix("".join(current), graph_control, delivery_control)
+        try:
+            prefix = parts.prefix()
+        except ValueError:
+            return None
         if prefix is None:
             continue
-        text = "\n\n".join([*parts, prefix["text"]])
+        text = "\n\n".join([*parts.parts, *([] if prefix.get("duplicate") else [prefix["text"]])])
         # Terminal sanitation is the public projection owner. A citation suffix
         # needs its native source receipt, so only the preceding prose is stable
         # before terminal reconciliation. Do not emit provider-private markers.
+        full_text = text
         artifact = _PRIVATE_CITATION_WRAPPER_RE.search(text)
         if artifact:
             text = text[:artifact.start()]
+        file_link_start = _mutable_native_file_link_start(text, incomplete=not prefix["complete"])
+        if file_link_start is not None:
+            text = text[:file_link_start]
         word_boundary = bool(text and text[-1].isspace()) or prefix["complete"]
         text = _sanitize_user_visible_text(text).strip()
         if text:
+            # Completion belongs to this validated public envelope, not a sentence
+            # or the entire run. A mutable file/citation projection cannot seal it.
+            if (prefix["complete"] and artifact is None and file_link_start is None
+                    and text == _sanitize_user_visible_text(full_text).strip()):
+                try:
+                    envelope = json.loads("".join(parts.current))
+                except (TypeError, ValueError):
+                    envelope = None
+                if (isinstance(envelope, dict) and envelope.get("type") in {"assistant_response", "tool_call"}
+                        and not prefix.get("duplicate")):
+                    completed_parts[parts.part_index] = len(text)
             candidate = {"sequence": sequence, "text": text, "part_complete": prefix["complete"],
                          "word_boundary": word_boundary,
+                         "completed_parts": [{"part_index": index, "text_end": end}
+                             for index, end in completed_parts.items() if end <= len(text)],
                          "delivery_disposition": prefix["delivery_disposition"]}
     return candidate
 
@@ -2899,6 +3026,7 @@ def _native_tool_evidence(profile: str, stdout: str) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     pending: dict[str, dict[str, Any]] = {}
+    grok_session_id = ""
     remaining = CONVERSATION_REPLAY_MAX_BYTES_DEFAULT
     omitted_results = 0
 
@@ -2939,7 +3067,73 @@ def _native_tool_evidence(profile: str, stdout: str) -> dict[str, Any]:
             continue
         if not isinstance(event, dict):
             continue
-        if profile == "codex-cli" and event.get("type") == "item.completed":
+        if profile == "grok-build":
+            if event.get("type") == "grok.session.started":
+                supplied = event.get("session_id")
+                if grok_session_id or not isinstance(supplied, str) or not supplied:
+                    return {"results": [], "omitted_results": len(results) + len(pending) + 1,
+                            "excluded_log_prefix_bytes": _native_log_excluded_prefix_bytes(stdout)}
+                grok_session_id = supplied
+                continue
+            if event.get("type") != "grok.session.update":
+                continue
+            update = event.get("update")
+            if not isinstance(update, dict) or update.get("sessionUpdate") not in {"tool_call", "tool_call_update"}:
+                continue
+            if not grok_session_id:
+                if update.get("status") in {"completed", "failed", "cancelled"}:
+                    omitted_results += 1
+                continue
+            if event.get("session_id") != grok_session_id:
+                continue
+            call_id = update.get("toolCallId")
+            if not isinstance(call_id, str) or not call_id or len(call_id) > 256:
+                if update.get("status") in {"completed", "failed", "cancelled"}:
+                    omitted_results += 1
+                continue
+            if call_id in seen:
+                continue
+            call = pending.setdefault(call_id, {})
+            meta = update.get("_meta")
+            tool = meta.get("x.ai/tool") if isinstance(meta, dict) else None
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+                name = tool["name"]
+                if "name" in call and call["name"] != name:
+                    call["identity_conflict"] = True
+                call["name"] = name
+            if "rawInput" in update:
+                call["arguments"] = update["rawInput"]
+            elif isinstance(tool, dict) and "input" in tool:
+                call["arguments"] = tool["input"]
+            status = update.get("status")
+            if status not in {"completed", "failed", "cancelled"}:
+                continue
+            pending.pop(call_id)
+            if (call.get("identity_conflict") or not call.get("name")
+                    or "arguments" not in call or "rawOutput" not in update):
+                seen.add(call_id)
+                omitted_results += 1
+                continue
+            output = update["rawOutput"]
+            observed_result = output
+            if isinstance(output, dict) and output.get("type") == "MCP":
+                native_result = output.get("output")
+                if isinstance(native_result, dict) and "ErrorOutput" in native_result:
+                    status = "failed"
+                elif isinstance(native_result, dict) and "OkayOutput" in native_result:
+                    observed_result = native_result["OkayOutput"]
+                    if isinstance(observed_result, str):
+                        try:
+                            observed_result = json.loads(observed_result)
+                        except (ValueError, TypeError):
+                            pass
+            exit_code = output.get("exit_code") if isinstance(output, dict) else None
+            exit_code = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+            if status == "completed" and (_native_tool_result_failed(observed_result)
+                    or exit_code not in (None, 0) or isinstance(output, dict) and output.get("timed_out") is True):
+                status = "failed"
+            append(call_id, call["name"], call["arguments"], output, status, exit_code)
+        elif profile == "codex-cli" and event.get("type") == "item.completed":
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             kind = item.get("type")
             call_id = str(item.get("call_id") or item.get("id") or "")
@@ -3007,6 +3201,12 @@ def _native_tool_evidence(profile: str, stdout: str) -> dict[str, Any]:
                                block.get("content", ""), "failed" if block.get("is_error") else "completed")
     return {"results": results, "omitted_results": omitted_results + len(pending),
             "excluded_log_prefix_bytes": _native_log_excluded_prefix_bytes(stdout)}
+
+
+def _is_transient_store_contention(error: BaseException) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    return (isinstance(error, sqlite3.OperationalError) and isinstance(code, int)
+            and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
 
 
 class ConversationProvider:
@@ -3192,7 +3392,14 @@ class ConversationProvider:
         models = list(GLASSHIVE_MODELS.values())
         if configured_grok is not None and configured_grok.id not in GLASSHIVE_MODELS:
             models.append(configured_grok)
-        return {"object": "list", "data": [model.api_payload() for model in models]}
+        # Readiness belongs to a harness; check it once per catalog request.
+        readiness = {
+            profile: _harness_readiness(profile)
+            for profile in dict.fromkeys(model.harness_profile for model in models)
+        }
+        return {"object": "list", "data": [
+            model.api_payload(readiness=readiness[model.harness_profile]) for model in models
+        ]}
 
     def _model(self, model_id: str, *, tenant_id: str = "local", owner_id: str = "",
                trusted_history: bool = False) -> HarnessModel:
@@ -3269,8 +3476,11 @@ class ConversationProvider:
         graph_control: Any = _GRAPH_CONTROL_UNSET,
         project_completed_graph: bool = True,
     ) -> dict[str, Any]:
-        _require_native_access_support(payload.metadata.glasshive_options.access, model)
         incoming = dict(payload.metadata.bootstrap_bundle or {})
+        _require_native_access_support(
+            payload.metadata.glasshive_options.access, model,
+            native_tools_disabled=_native_tools_disabled(incoming),
+        )
         incoming_env = (
             dict(incoming.get("env"))
             if isinstance(incoming.get("env"), dict)
@@ -3886,7 +4096,10 @@ class ConversationProvider:
                 status_code=409,
                 detail="Selected container account cannot use a server-side workspace path; attach files through Files",
             )
-        _require_native_access_support(metadata.glasshive_options.access, model, execution_mode)
+        _require_native_access_support(
+            metadata.glasshive_options.access, model, execution_mode,
+            native_tools_disabled=_native_tools_disabled(bundle),
+        )
         project = self.service.create_project(
             metadata.owner_id,
             f"xPerfect conversation {metadata.conversation_id}",
@@ -3987,7 +4200,8 @@ class ConversationProvider:
                 or decision.get("logical_turn_id") != proof.logical_turn_id
                 or proof.logical_turn_id != payload.metadata.logical_turn_id
                 or decision.get("logical_turn_revision") != proof.previous_revision
-                or proof.revision != proof.previous_revision + 1
+                or not (0 < proof.revision - proof.previous_revision <= 9)
+                or proof.unadmitted_revisions != list(range(proof.previous_revision + 1, proof.revision))
                 or proof.revision != payload.metadata.logical_turn_revision
                 or decision.get("context_epoch") != payload.metadata.main_context_epoch
                 or decision.get("native_context_epoch", "") != manifest.get("native_context_epoch", "")):
@@ -4078,6 +4292,8 @@ class ConversationProvider:
                 str(existing_manifest.get("stable_authority_sha256") or "")
                 != _stable_authority_sha256(payload)
                 if metadata.main_context_protocol == "main_context_v1"
+                or metadata.developer_instruction_tail
+                or previous_bundle.get("declared_developer_instruction_tail")
                 else previous_system_sha256 != current_system_sha256
             )
         )
@@ -4259,6 +4475,9 @@ class ConversationProvider:
             str(getattr(metadata, "actor_kind", "") or ""),
             str(getattr(metadata, "origin", "") or ""),
         )
+        return self._session_identity_lock(key)
+
+    def _session_identity_lock(self, key: tuple[str, ...]):
         with self._session_start_locks_guard:
             lock = self._session_start_locks.setdefault(key, threading.RLock())
         return lock
@@ -4392,8 +4611,30 @@ class ConversationProvider:
                     {"failure_class": type(exc).__name__},
                 )
             raise
-        self._remember_request_local_bundle(request_id, str(run["run_id"]), run_local_bundle)
-        self.service.reconcile_restart_authority_backlog_once()
+        preparation_started = time.monotonic_ns() if native_timing_enabled() else None
+        preparation_status = "failed"
+        try:
+            self._remember_request_local_bundle(request_id, str(run["run_id"]), run_local_bundle)
+            preparation_status = "completed"
+        finally:
+            if preparation_started is not None:
+                native_timing_event(
+                    "request_local_bundle_copy", requestHash=native_timing_hash("request", request_id),
+                    runHash=native_timing_hash("run", run["run_id"]), status=preparation_status,
+                    durationMs=(time.monotonic_ns() - preparation_started) / 1_000_000,
+                )
+        preparation_started = time.monotonic_ns() if native_timing_enabled() else None
+        preparation_status = "failed"
+        try:
+            self.service.reconcile_restart_authority_backlog_once()
+            preparation_status = "completed"
+        finally:
+            if preparation_started is not None:
+                native_timing_event(
+                    "restart_authority_reconcile", requestHash=native_timing_hash("request", request_id),
+                    runHash=native_timing_hash("run", run["run_id"]), status=preparation_status,
+                    durationMs=(time.monotonic_ns() - preparation_started) / 1_000_000,
+                )
         self._start_assigned_run_before_deadline(
             request_id, run_id=str(run["run_id"]), worker_id=str(run["worker_id"]),
         )
@@ -4525,22 +4766,43 @@ class ConversationProvider:
                     "code": PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS,
                     "message": "The turn reached its response deadline before native execution started",
                 })
+            keys = _visible_message_keys(payload.messages, payload.metadata.visible_message_chain)
+            protected = _protected_source_indices(payload, keys)
+            current_input = _protected_source_indices(payload, keys, current_input=True)
             workspace = _resolve_workspace(payload.metadata.glasshive_options)
-            session, new_native_session = self._session(
-                payload,
-                model,
-                workspace,
-                effort,
-                tenant_id=tenant_id,
-            )
+            try:
+                session, new_native_session = self._session(
+                    payload,
+                    model,
+                    workspace,
+                    effort,
+                    tenant_id=tenant_id,
+                )
+            except HostCapacityError as exc:
+                metadata = payload.metadata
+                if (metadata.native_invocation_id and metadata.native_body_sha256
+                        and metadata.stream_id and metadata.message_id):
+                    try:
+                        accepted = self.store.get_provider_request(
+                            tenant_id=tenant_id, owner_id=metadata.owner_id,
+                            native_invocation_id=metadata.native_invocation_id,
+                        )
+                    except Exception:
+                        accepted = True
+                    if accepted is None:
+                        exc.native_admission = {
+                            "version": 1, "accepted": False,
+                            "invocation_id": metadata.native_invocation_id,
+                            "body_sha256": metadata.native_body_sha256,
+                            "stream_id": metadata.stream_id,
+                            "message_id": metadata.message_id,
+                        }
+                raise
             turn_context = str(getattr(payload.metadata, "turn_context", "") or "")
             attachment_context = self._request_attachment_context(payload)
             # Bounded admission: the same durable decision (ReplayDecisionV1) and the admitted
             # instruction are created atomically with the request row, so a rapid second turn or
             # a restart never observes a request without its admitted context.
-            keys = _visible_message_keys(payload.messages, payload.metadata.visible_message_chain)
-            protected = _protected_source_indices(payload, keys)
-            current_input = _protected_source_indices(payload, keys, current_input=True)
             source_ordinals_by_index = {
                 index: list(item["source_ordinals"])
                 for item in payload.metadata.visible_message_chain if "source_ordinals" in item
@@ -4927,9 +5189,14 @@ class ConversationProvider:
             self.service.reconcile_restart_authority_backlog_once()
             return updated
         if run_state not in TERMINAL_RUN_STATES:
+            desired_state = "running" if run_state == "running" else "queued"
+            if str(request_record.get("state") or "") == desired_state:
+                # Polls do not renew a request/control clock. Refresh at this boundary so a
+                # concurrent Stop, deadline or restore hold wins over the observed run state.
+                return self.store.get_provider_request(request_id) or request_record
             return self.store.update_provider_request_if_state(
                 request_id, ("queued", "running"),
-                state="running" if run_state == "running" else "queued",
+                state=desired_state,
             ) or self.store.get_provider_request(request_id) or request_record
 
         fallback_state = str(request_record.get("fallback_state") or "")
@@ -5211,7 +5478,7 @@ class ConversationProvider:
                                 "error_type": type(error).__name__,
                             },
                         )
-                        keep = False
+                        keep = _is_transient_store_contention(error)
                     if not keep:
                         with self._detached_reconciliation_lock:
                             self._detached_reconciliations.discard(request_id)
@@ -5420,16 +5687,87 @@ class ConversationProvider:
         return {"version": 1, "invocation_id": record["native_invocation_id"],
                 "message_id": record["message_id"], **preview}
 
+    def _accepted_spoken_family(self, record: dict[str, Any]) -> bool:
+        """Reuse the current Core reservation's accepted native family without inventing an invocation."""
+        def decision(value: dict[str, Any]) -> dict[str, Any]:
+            try:
+                parsed = json.loads(str(value.get("replay_decision_json") or "{}"))
+            except (TypeError, ValueError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+
+        def accepted(value: dict[str, Any]) -> bool:
+            return (value.get("admission_state") == "accepted"
+                    and value.get("main_context_protocol") == "main_context_v1"
+                    and value.get("main_context_owner") == "core")
+
+        current = decision(record)
+        if (current.get("admission_state") != "reserved"
+                or current.get("main_context_protocol") != "main_context_v1"
+                or current.get("main_context_owner") != "core"
+                or current.get("family_continuation_v1") is not True
+                or not record.get("request_id")):
+            return False
+        fresh = self.store.get_provider_request(str(record["request_id"]))
+        if (not fresh or fresh.get("state") not in {"queued", "running"}
+                or fresh.get("run_id") != record.get("run_id")
+                or fresh.get("replay_decision_json") != record.get("replay_decision_json")
+                or fresh.get("restore_hold")):
+            return False
+        session = self.store.get_provider_session_by_id(str(record.get("session_id") or "")) or {}
+        manifest = self._session_manifest(session)
+        if (session.get("owner_id") != record.get("owner_id")
+                or manifest.get("last_native_admission_request_id") != record["request_id"]
+                or type(current.get("admission_sequence")) is not int
+                or current["admission_sequence"] <= 0
+                or manifest.get("admission_sequence") != current["admission_sequence"]):
+            return False
+        record_keys = ("tenant_id", "owner_id", "session_id", "message_id", "stream_id")
+        decision_keys = ("logical_turn_id", "logical_turn_revision", "context_epoch",
+                         "main_context_snapshot_sha256", "advancement_key", "response_message_key")
+        if (any(not record.get(key) for key in record_keys)
+                or any(not current.get(key) for key in decision_keys)
+                or type(current["logical_turn_revision"]) is not int
+                or current["logical_turn_revision"] <= 0
+                or current["response_message_key"] != f"msg:{record['message_id']}"):
+            return False
+        seen = {str(record.get("request_id") or "")}
+        while current.get("family_continuation_v1") is True:
+            parent_id = str(current.get("family_continuation_of_request_id") or "")
+            if not parent_id or parent_id in seen:
+                return False
+            seen.add(parent_id)
+            parent = self.store.get_provider_request(parent_id)
+            if (not parent or parent.get("request_id") != parent_id
+                    or parent.get("state") != "completed" or not parent.get("response_json")
+                    or any(parent.get(key) != record.get(key) for key in record_keys)):
+                return False
+            prior = decision(parent)
+            if (not accepted(prior)
+                    or any(prior.get(key) != current.get(key) for key in decision_keys)):
+                return False
+            if parent.get("native_invocation_id") and parent.get("native_body_sha256"):
+                return True
+            current = prior
+        return False
+
     def _native_spoken_snapshot(self, record: dict[str, Any], run: dict[str, Any],
                                 payload: ChatCompletionRequest, graph_control: Any,
                                 delivery_control: Any) -> dict[str, Any] | None:
         metadata = payload.metadata
         if (not delivery_control or not metadata or metadata.actor_kind != "external_user"
-                or metadata.origin != "interactive" or not record.get("native_invocation_id")
+                or metadata.origin != "interactive"
                 or not record.get("message_id") or record.get("state") in TERMINAL_REQUEST_STATES
                 or str(record.get("run_id") or "") != str(run.get("run_id") or "")):
             return None
-        return self._native_spoken_content_snapshot(record, run, graph_control, delivery_control)
+        family = not record.get("native_invocation_id")
+        if family and not self._accepted_spoken_family(record):
+            return None
+        spoken = self._native_spoken_content_snapshot(record, run, graph_control, delivery_control)
+        # The transcript projection may race newer input; recheck its existing admission owner.
+        if spoken and family and not self._accepted_spoken_family(record):
+            return None
+        return spoken
 
     def _native_spoken_content_snapshot(self, record: dict[str, Any], run: dict[str, Any],
                                         graph_control: Any, delivery_control: Any) -> dict[str, Any] | None:
@@ -5672,12 +6010,12 @@ class ConversationProvider:
                 "content": visible_output,
                 "reasoning_content": "",
             }
-            delivery_disposition = decision.get("delivery_disposition")
-            if isinstance(delivery_disposition, dict):
-                message["provider_specific_fields"] = {
-                    "viventium": {"delivery_disposition": delivery_disposition}
-                }
             finish_reason = "stop"
+        delivery_disposition = decision.get("delivery_disposition")
+        if isinstance(delivery_disposition, dict):
+            message["provider_specific_fields"] = {
+                "viventium": {"delivery_disposition": delivery_disposition}
+            }
         effective_model = self._native_effective_model(request_record, run, contract)
         if effective_model is None:
             raise HTTPException(status_code=502, detail="Native model selection is not yet available")
@@ -5746,7 +6084,7 @@ class ConversationProvider:
                 kwargs = {"instruction_sha256": str(admission.get("instruction_sha256") or "")} if callable(
                     getattr(self.service.runtime, "provider_tool_evidence_log", None)) else {}
                 profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]), **kwargs)
-                if profile not in {"codex-cli", "claude-code"} or not stdout:
+                if profile not in {"codex-cli", "claude-code", "grok-build"} or not stdout:
                     return response
                 evidence = _native_tool_evidence(str(profile), str(stdout))
                 response["glasshive"]["tool_evidence"] = {
@@ -5802,7 +6140,7 @@ class ConversationProvider:
                     kwargs = {"instruction_sha256": str(decision["instruction_sha256"])} if callable(
                         getattr(self.service.runtime, "provider_tool_evidence_log", None)) else {}
                     profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]), **kwargs)
-                    if profile in {"codex-cli", "claude-code"} and stdout:
+                    if profile in {"codex-cli", "claude-code", "grok-build"} and stdout:
                         evidence = _native_tool_evidence(profile, stdout)
                         available = True
                 except (OSError, RuntimeError, ValueError):
@@ -5891,6 +6229,7 @@ class ConversationProvider:
         emitted_preview_sequence = 0
         redactor = StreamingRedactor(overlap=0 if delivery_control else 64)
         native_snapshot = ""
+        emitted_public_parts: set[tuple[str, int]] = set()
         emitted_content = ""
         execution_started_seen = False
         last_heartbeat = time.monotonic()
@@ -5902,7 +6241,19 @@ class ConversationProvider:
             record = await asyncio.to_thread(self.store.get_provider_request, request_id)
             if not record:
                 break
-            record = await asyncio.to_thread(self._sync, record)
+            try:
+                record = await asyncio.to_thread(self._sync, record)
+            except sqlite3.OperationalError as error:
+                if not _is_transient_store_contention(error):
+                    raise
+                # Observation contention does not end the admitted inference or authorize a
+                # new invocation. The next existing loop pass rechecks its original deadline.
+                logger.warning("GlassHive native observation deferred for local store contention",
+                    extra={"sqlite_errorcode": error.sqlite_errorcode})
+                yield ": heartbeat\n\n"
+                last_heartbeat = time.monotonic()
+                await asyncio.sleep(0.2)
+                continue
             model_contract = self._saved_completion_contract(record) or {"model": payload.model}
             run = await asyncio.to_thread(
                 self.store.get_run,
@@ -5920,23 +6271,60 @@ class ConversationProvider:
                                               agent_builder_control, delivery_control)
                       if selected_model is not None else None)
             if spoken and spoken["text"].startswith(native_snapshot):
-                raw_delta = spoken["text"][len(native_snapshot):]
-                native_snapshot = spoken["text"]
-                visible_delta = redactor.feed(raw_delta, word_boundary=spoken["word_boundary"])
+                # Preserve word streaming, then seal each complete public part in
+                # order, including a completion-only observation on the next poll.
+                cursor = len(native_snapshot)
+                pending_redactor = copy.copy(redactor)
+                pending_public_parts: set[tuple[str, int]] = set()
+                pieces: list[tuple[str, dict[str, Any] | None]] = []
+                for part in (spoken.get("completed_parts", [])
+                             if record.get("message_id") and record.get("stream_id") else []):
+                    end = part["text_end"]
+                    key = (str(run["run_id"]), part["part_index"])
+                    if key in emitted_public_parts or end < cursor:
+                        continue
+                    visible = pending_redactor.feed(spoken["text"][cursor:end], word_boundary=True)
+                    visible += pending_redactor.flush()
+                    cursor = end
+                    pending_public_parts.add(key)
+                    completion = {"version": 1, "complete": True,
+                        "request_id": request_id, "run_id": str(run["run_id"]),
+                        "part_id": f"{run['run_id']}:{part['part_index']}",
+                        "message_id": str(record["message_id"]), "stream_id": str(record["stream_id"])}
+                    pieces.append((visible, completion))
+                visible = pending_redactor.feed(spoken["text"][cursor:], word_boundary=spoken["word_boundary"])
                 if spoken["part_complete"]:
-                    visible_delta += redactor.flush()
-                if visible_delta:
-                    if not emitted_content:
+                    visible += pending_redactor.flush()
+                if visible:
+                    pieces.append((visible, None))
+                if not emitted_content and any(visible_delta for visible_delta, _ in pieces):
+                    try:
                         await asyncio.to_thread(self.store.add_provider_activity_once, request_id,
                             "authored-response", "The model authored public response text.",
                             {"run_id": run["run_id"], "sequence": spoken["sequence"]})
+                    except sqlite3.OperationalError as error:
+                        if not _is_transient_store_contention(error):
+                            raise
+                        # The durable authoring receipt fences fallback. Commit no public
+                        # cursor or redactor state until it succeeds on this same request.
+                        logger.warning("GlassHive public authoring observation deferred for local store contention",
+                            extra={"sqlite_errorcode": error.sqlite_errorcode})
+                        yield ": heartbeat\n\n"
+                        last_heartbeat = time.monotonic()
+                        await asyncio.sleep(0.2)
+                        continue
+                redactor = pending_redactor
+                emitted_public_parts.update(pending_public_parts)
+                native_snapshot = spoken["text"]
+                for visible_delta, completion in pieces:
                     emitted_content += visible_delta
                     yield "data: " + json.dumps({
                         "id": request_id, "object": "chat.completion.chunk", "created": created,
                         **model_metadata,
                         "model": effective_model, "choices": [{"index": 0,
                             "delta": {"content": visible_delta, "provider_specific_fields": {"viventium": {
-                                "delivery_disposition": spoken["delivery_disposition"]}}},
+                                "delivery_disposition": spoken["delivery_disposition"],
+                                **({"public_part_complete": completion} if completion else {})}}},
                             "finish_reason": None}],
                     }, separators=(",", ":")) + "\n\n"
                     last_heartbeat = time.monotonic()
@@ -5957,7 +6345,7 @@ class ConversationProvider:
                 self._native_output_snapshot,
                 record,
                 run,
-            ) if selected_model is not None else "")
+            ) if selected_model is not None and not agent_builder_control and not delivery_control else "")
             if record["state"] == "completed" and record.get("response_json"):
                 latest_native = str(json.loads(record["response_json"])["choices"][0]["message"].get("content") or "")
             if (
@@ -6088,16 +6476,17 @@ class ConversationProvider:
                     }
                     yield f"data: {json.dumps(error_chunk, separators=(',', ':'))}\n\n"
                     finish_reason = "stop"
-                usage, usage_source = await asyncio.to_thread(
-                    self._completion_usage,
-                    record,
-                    run,
-                    payload,
-                    output if record["state"] == "completed" else "",
-                )
                 if record["state"] == "completed":
                     usage = canonical["usage"]
                     usage_source = canonical["glasshive"]["usage_source"]
+                else:
+                    usage, usage_source = await asyncio.to_thread(
+                        self._completion_usage,
+                        record,
+                        run,
+                        payload,
+                        "",
+                    )
                 terminal_fields = {}
                 if delivery_disposition is not None:
                     terminal_fields["delivery_disposition"] = delivery_disposition
@@ -6754,9 +7143,14 @@ class ConversationProvider:
 
     @classmethod
     def _request_attachment_context(cls, payload: ChatCompletionRequest) -> str:
+        projected = cls._projected_request_uploads(payload)
+        ledger = [
+            {**item, "inputKind": "extracted_text" if item.get("source") == "text" else "original"}
+            for item in public_upload_ledger(projected)
+        ]
         paths = [
             str(item.get("path") or "").strip().lstrip("/")
-            for item in cls._projected_request_uploads(payload)
+            for item in projected
             if isinstance(item, dict) and str(item.get("path") or "").strip()
         ]
         if not paths:
@@ -6764,6 +7158,7 @@ class ConversationProvider:
         return "\n".join(
             [
                 '<viventium_attached_workspace_files version="1">',
+                json.dumps({"selected_uploads": ledger}, ensure_ascii=False, separators=(",", ":")),
                 "Read each original attachment directly from its ordered workspace path:",
                 *(f"{index}. {path}" for index, path in enumerate(paths, 1)),
                 "</viventium_attached_workspace_files>",
@@ -6945,6 +7340,7 @@ class ConversationProvider:
             bundle = {}
         _require_native_access_support(
             str(bundle.get("access_mode") or "full"), model, str(worker.get("execution_mode") or "host"),
+            native_tools_disabled=_native_tools_disabled(bundle),
         )
         incoming_env = bundle.get("env") if isinstance(bundle.get("env"), dict) else {}
         env = dict(incoming_env)
@@ -7982,7 +8378,8 @@ def _is_provider_path(path: str) -> bool:
     )
 
 
-def _openai_error(status_code: int, message: str, code: str, *, param: str | None = None) -> JSONResponse:
+def _openai_error(status_code: int, message: str, code: str, *, param: str | None = None,
+                  native_admission: dict[str, str | int | bool] | None = None) -> JSONResponse:
     error_type = "invalid_request_error" if status_code < 500 else "server_error"
     if status_code == 401:
         error_type = "authentication_error"
@@ -7998,6 +8395,7 @@ def _openai_error(status_code: int, message: str, code: str, *, param: str | Non
                 "type": error_type,
                 "param": param,
                 "code": code,
+                **({"native_admission": native_admission} if native_admission is not None else {}),
             }
         },
     )
@@ -8171,6 +8569,79 @@ def install_conversation_provider_routes(
         record, run = await asyncio.to_thread(provider.wait, str(record["request_id"]))
         chat_response = provider.response_payload(record, run, chat_payload)
         return JSONResponse(_responses_from_chat(chat_response, payload))
+
+    @app.post("/v1/requests/by-invocation/{invocation_id}/interject")
+    def glasshive_interject(invocation_id: str, payload: NativeInterjectionRequest, request: Request):
+        auth = require_provider_auth(request)
+        owner = owner_for_request(request, auth)
+        record = store.get_provider_request(tenant_id=auth.tenant_id, owner_id=owner,
+                                            native_invocation_id=invocation_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Native invocation not found")
+        if (record["stream_id"] != payload.stream_id or record["message_id"] != payload.message_id
+                or record["native_body_sha256"] != payload.body_sha256):
+            raise HTTPException(status_code=409, detail="Native interjection identity conflict")
+        envelope = {"version": 1, "invocation_id": invocation_id,
+                    "delivery_id": payload.delivery_id, "text_sha256": payload.text_sha256}
+        session = store.get_provider_session_by_id(str(record["session_id"])) or {}
+        session_key = tuple(str(session.get(key) or "") for key in
+                            ("tenant_id", "owner_id", "conversation_id", "agent_id", "actor_kind", "origin"))
+        # Same admission/Stop locks; control reads never reconcile or start a fallback.
+        with provider._session_identity_lock(session_key), provider._start_lock:
+            current = store.get_provider_request(tenant_id=auth.tenant_id, owner_id=owner,
+                                                native_invocation_id=invocation_id) or {}
+            if (current.get("stream_id") != payload.stream_id or current.get("message_id") != payload.message_id
+                    or current.get("native_body_sha256") != payload.body_sha256):
+                raise HTTPException(status_code=409, detail="Native interjection identity conflict")
+            session = store.get_provider_session_by_id(str(current.get("session_id") or "")) or {}
+            latest = store.get_latest_provider_session_request(str(current.get("session_id") or ""),
+                                                               tenant_id=auth.tenant_id, owner_id=owner) or {}
+            run = store.get_run(str(current.get("run_id") or ""), tenant_id=auth.tenant_id) or {}
+            worker = store.get_worker(str(run.get("worker_id") or ""),
+                                      tenant_id=auth.tenant_id, owner_id=owner) or {}
+            active = store.get_active_run(str(worker.get("worker_id") or "")) or {}
+            if (current.get("state") != "running" or current.get("restore_hold")
+                    or latest.get("request_id") != current.get("request_id")
+                    or session.get("tenant_id") != auth.tenant_id or session.get("owner_id") != owner
+                    or not worker or session.get("worker_id") != worker.get("worker_id")
+                    or run.get("state") != "running" or active.get("run_id") != run.get("run_id")
+                    or not active.get("active_attempt_id")
+                    or store.is_provider_stop_tombstone_active(tenant_id=auth.tenant_id, owner_id=owner,
+                        idempotency_keys=(str(current.get("base_idempotency_key") or ""),
+                                          str(current.get("idempotency_key") or "")))):
+                return {**envelope, "status": "not_running"}
+            # This endpoint is the automatic Core cohort courier. Its exact
+            # admitted contract must support framed generations; ordinary
+            # operator/worker native controls retain their existing behaviour.
+            contract = provider._saved_completion_contract(current) or {}
+            if not normalized_messaging_delivery_control(contract.get("delivery_control")):
+                return {**envelope, "status": "unsupported"}
+            runtime_worker = service._runtime_worker_for_run(worker, run)
+            run_id, attempt_id = str(active["run_id"]), str(active["active_attempt_id"])
+            probe = getattr(service.runtime, "supports_native_control", None)
+            if (not callable(getattr(service.runtime, "native_control", None))
+                    or (callable(probe) and not probe(runtime_worker, "interject", run_id=run_id, attempt_id=attempt_id))):
+                return {**envelope, "status": "unsupported"}
+            identity = ["native-interjection-v1", auth.tenant_id, owner, invocation_id,
+                        payload.body_sha256, payload.delivery_id]
+            control_id = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+            fingerprint = hashlib.sha256(json.dumps({**payload.model_dump(), "invocation_id": invocation_id},
+                                        separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+            try:
+                result = service.native_worker_control(str(worker["worker_id"]), run_id=run_id,
+                    attempt_id=attempt_id, action="interject", payload={"text": payload.text,
+                        "message_id": control_id, "request_fingerprint": fingerprint})
+            except ValueError as exc:
+                now = store.get_active_run(str(worker["worker_id"])) or {}
+                if (now.get("state") != "running" or now.get("run_id") != run_id
+                        or now.get("active_attempt_id") != attempt_id):
+                    return {**envelope, "status": "not_running"}
+                raise HTTPException(status_code=409, detail="Native interjection refused") from exc
+            if (not isinstance(result, dict) or result.get("status") not in {"queued", "pending"}
+                    or result.get("message_id", control_id) != control_id):
+                raise HTTPException(status_code=409, detail="Native interjection was not acknowledged")
+            return {**envelope, "status": result["status"], "run_id": run_id,
+                    "attempt_id": attempt_id, "message_id": control_id}
 
     @app.get("/v1/requests/by-invocation/{invocation_id}/result")
     def glasshive_saved_result(

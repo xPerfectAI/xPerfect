@@ -1931,6 +1931,13 @@ class ProfiledWorkerRuntime:
             raise UnsupportedWorkerProfileError("Worker profile adapter is not installed")
         return runtime
 
+    def supports_native_control(self, worker: dict, action: str, *, run_id: str = "", attempt_id: str = "") -> bool:
+        runtime = self._runtime_for_worker(worker)
+        if not callable(getattr(runtime, "native_control", None)):
+            return False
+        probe = getattr(runtime, "supports_native_control", None)
+        return bool(probe(worker, action, run_id=run_id, attempt_id=attempt_id)) if callable(probe) else True
+
     def native_control(self, worker: dict, **kwargs):
         runtime = self._runtime_for_worker(worker)
         handler = getattr(runtime, "native_control", None)
@@ -4535,6 +4542,10 @@ class BaseCliWorkerRuntime:
             "run_mode": str(data.get("run_mode") or "").strip(),
             "native_session_id": str(data.get("native_session_id") or "").strip(),
             "instruction_redacted": bool(data.get("instruction_redacted")),
+            "native_control_capabilities": {
+                "interject": data["native_control_capabilities"]["interject"]
+            } if (isinstance(data.get("native_control_capabilities"), dict)
+                  and type(data["native_control_capabilities"].get("interject")) is bool) else {},
             "workspace_dir": str(data.get("workspace_dir") or "").strip(),
             "run_mode": str(data.get("run_mode") or "").strip(),
             "native_session_id": str(data.get("native_session_id") or "").strip(),
@@ -5218,7 +5229,7 @@ class BaseCliWorkerRuntime:
         closing_without_run = bool(
             worker
             and not run_id
-            and str(worker.get("state") or "") in {"terminating", "termination_failed"}
+            and str(worker.get("state") or "") in {"terminating", "termination_failed", "gc_claimed"}
         )
         if closing_without_run:
             # The confirmed container teardown below owns every process in an
@@ -7264,6 +7275,8 @@ class BaseCliWorkerRuntime:
                 active_session = self._read_active_session(worker_id)
                 if active_session and run_id and active_session.get("run_id") != run_id:
                     return
+                if active_session and attempt_id and active_session.get("attempt_id") != attempt_id:
+                    return
                 effective_receipt_run = str(
                     run_id or (active_session or {}).get("run_id") or ""
                 ).strip()
@@ -7299,10 +7312,20 @@ class BaseCliWorkerRuntime:
                     self._write_session_key(worker_id, session_id)
                 else:
                     self._remember_native_session_key(worker, session_id)
-                if active_session and active_session.get("native_session_id") != session_id:
+                session_update = {"native_session_id": session_id}
+                try:
+                    native_event = json.loads(line)
+                except json.JSONDecodeError:
+                    native_event = {}
+                if native_event.get("type") == "grok.session.started":
+                    capabilities = native_event.get("native_control_capabilities")
+                    session_update["native_control_capabilities"] = {
+                        "interject": isinstance(capabilities, dict) and capabilities.get("interject") is True
+                    }
+                if active_session and any(active_session.get(key) != value for key, value in session_update.items()):
                     self._write_active_session(
                         worker_id,
-                        {**active_session, "native_session_id": session_id},
+                        {**active_session, **session_update},
                         expected_session=active_session,
                     )
                 if pending_receipt is not None:
@@ -8619,7 +8642,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
             return
         subprocess.run(["git", "init", "-q"], cwd=workspace_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(
-            ["git", "config", "user.email", "worker@glasshive.local"],
+            ["git", "config", "user.email", ('worker@' + 'glasshive.local')],
             cwd=workspace_dir,
             check=False,
             stdout=subprocess.DEVNULL,
@@ -10692,6 +10715,8 @@ class HostNativeCliMixin:
             raise RuntimeErrorBase(
                 "The exact host process identity is not confirmed"
             )
+        if str(lease.get("status") or "") == "released" and operation != "needs_input":
+            raise RuntimeErrorBase("The released host generation only permits attention cleanup")
         worker_id = str(worker["worker_id"])
         with self._active_session_file_lock(worker_id):
             active_session = self._read_active_session(worker_id)
@@ -12846,12 +12871,39 @@ raise SystemExit(exit_code)
             lease_group = int(lease.get("process_group") or 0)
             session_pid = int(session.get("process_pid") or 0)
             session_group = int(session.get("process_group") or 0)
+            release_epoch = int(worker.get("compute_release_epoch") or 0)
         except (TypeError, ValueError):
             return False
+        attention = worker.get("_provider_liveness_release")
+        released_attention = bool(
+            isinstance(attention, dict)
+            and str(worker.get("state") or "") == "needs_input"
+            and str(worker.get("last_run_id") or "") == run_id
+            and str(worker.get("compute_release_kind") or "") == "needs_input"
+            and str(worker.get("compute_release_scope") or "") == "compute_only"
+            and str(worker.get("compute_release_target_run_id") or "") == run_id
+            and str(worker.get("compute_release_token") or "")
+            and release_epoch > 0
+            and str(attention.get("target_started_at") or "")
+            and str(attention.get("target_started_at") or "")
+            == str(worker.get("compute_release_target_started_at") or "")
+            and str(lease.get("status") or "") == "released"
+            and str(lease.get("release_reason") or "") == "provider_progress_stalled"
+            and str(lease.get("released_at") or "")
+            and str(lease.get("startup_token") or "")
+            and hmac.compare_digest(
+                hashlib.sha256(str(lease.get("startup_token") or "").encode()).hexdigest(),
+                str(session.get("startup_token_digest") or ""),
+            )
+            and str(attention.get("lease_id") or "") == str(lease.get("lease_id") or "")
+            and str(attention.get("attempt_id") or "")
+            and str(attention.get("attempt_id") or "") == str(lease.get("attempt_id") or "")
+            and str(attention.get("attempt_id") or "") == str(session.get("attempt_id") or "")
+        )
         return bool(
             str(lease.get("worker_id") or "") == str(worker["worker_id"])
             and str(lease.get("run_id") or "") == run_id
-            and str(lease.get("status") or "") == "active"
+            and (str(lease.get("status") or "") == "active" or released_attention)
             and str(lease.get("startup_state") or "") == "confirmed"
             and str(lease.get("startup_identity_kind") or "") == "host_process"
             and str(session.get("run_id") or "") == run_id
@@ -13908,6 +13960,21 @@ raise SystemExit(exit_code)
             materialized = str(parsed.get("developer_instructions") or "")
             placement = "codex_developer_instructions"
         elif self.runtime_name == "grok-build":
+            from .bootstrap import native_profile_tool_access_instructions
+            from .grok_projection import mcp_servers_for_bundle
+
+            projected_bundle = bootstrap_bundle_for(worker)
+            try:
+                servers = [] if _native_tools_disabled(projected_bundle) else mcp_servers_for_bundle(
+                    projected_bundle,
+                    self._native_environment(worker, host=True)
+                    if projected_bundle.get("claude_project_mcp") else {},
+                )
+            except ValueError as exc:
+                raise RuntimeErrorBase(str(exc)) from exc
+            expected = native_profile_tool_access_instructions(
+                str(worker.get("profile") or self.runtime_name), bundle, servers,
+            )
             flag = "--system-prompt-file"
             try:
                 rules_path = Path(command[command.index(flag) + 1])

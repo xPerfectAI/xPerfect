@@ -15,6 +15,7 @@ class WorkerProfile:
     native_transport: Literal['cli', 'gateway', 'acp']
     model_environment: str
     primary: bool = True
+    mcp_tool_access_prompt_id: str | None = None
 
     def runtime_for(self, execution_mode: str) -> str:
         if execution_mode not in {'host', 'docker'}:
@@ -30,7 +31,8 @@ PROFILES = (
     WorkerProfile('openclaw-codex', 'OpenClaw Codex', 'openclaw', 'gateway', 'WPR_MODEL_OPENCLAW_CODEX', False),
     WorkerProfile('openclaw-claude', 'OpenClaw Claude', 'openclaw', 'gateway', 'WPR_MODEL_OPENCLAW_CLAUDE', False),
     WorkerProfile('openclaw-desktop', 'OpenClaw Desktop', 'openclaw', 'gateway', 'WPR_MODEL_OPENCLAW_DESKTOP', False),
-    WorkerProfile('grok-build', 'Grok Build', 'grok', 'acp', 'WPR_MODEL_GROK_BUILD'),
+    WorkerProfile('grok-build', 'Grok Build', 'grok', 'acp', 'WPR_MODEL_GROK_BUILD',
+                  mcp_tool_access_prompt_id='worker.grok_mcp_tool_access'),
 )
 _PROFILE_BY_ID = {item.profile: item for item in PROFILES}
 

@@ -32,6 +32,26 @@ assertion, derives `tenant_id` and `owner_id` server-side, and scopes project, w
 UI, watch, and artifact queries by tenant plus user. The deployment tenant is pinned by server
 configuration; a mismatched inbound tenant assertion fails closed.
 
+Signed Core file couriers use the same verified account owner as worker actions.
+Upload routes validate the existing service assertion and each request's nonce;
+file receipts and manifests retain their owner, revision, size, and hash checks.
+Human file requests without an assertion keep their existing authentication path.
+Local runtime source roots include Core uploads and the owning database's managed
+file store. File projection keeps the existing source, owner, size, hash, and
+symlink checks. Enterprise deployments retain their explicit source roots.
+Selected-file action preparation reads fresh action availability through the existing
+owner-scoped work route's `projection=actions` view. It keeps pending native-input
+restrictions and rejects unavailable actions before file transfer, while omitting
+artifact-link writes and history materialization. Native execution rechecks the
+current owner, action state, generation and immutable file receipts before binding.
+
+A native conversation's stream and detached observer retain the same admitted request
+during typed SQLite BUSY or LOCKED contention. The first public-text receipt must persist
+before public cursors, redactor state, or bytes advance; contention leaves those pending
+so exact prefixes and public-part completion markers are emitted once. They use the existing heartbeat, pending
+observer and original absolute deadline; observation does not replay inference or revoke
+the author. Other database failures retain their existing error behavior.
+
 ## 2. Worker Runtime
 
 This layer decides how a worker actually executes tasks.
@@ -148,7 +168,16 @@ scheduler or requires Viventium/LibreChat.
 The bridge uses `grok agent --no-leader --model <exact-model> stdio`, ACP v1 initialization,
 explicit advertised noninteractive authentication, exact native session new/load, prompt/update,
 and cancellation. It verifies the returned model and requested reasoning option before prompting.
-`WPR_MODEL_GROK_BUILD` must contain the configured model; there is no model substitution.
+Fresh sessions also receive the exact configured model through native `session/new._meta.modelId`.
+The first session model menu is a snapshot. If the returned model differs, the bridge asks
+the native model selector to apply the exact selection; native selection owns its bounded first-catalog
+wait and refusal. The bridge still verifies the returned exact model before any user prompt.
+Exact resume and later authority reload parameters remain unchanged. A native hint does not replace
+the returned-model, requested-effort or native-tool-inventory checks. The existing authorized
+catalog fallback remains: when `grok-4.7-build-fast` is absent and native `grok-4.7` is offered,
+the bridge selects `grok-4.7` and verifies the requested effort and pinned authority. Other
+unsupported selections fail before a user prompt.
+`WPR_MODEL_GROK_BUILD` must contain the configured model; other model substitutions are refused.
 `WPR_GROK_BIN` selects the host executable (`WPR_GROK_CONTAINER_BIN` selects the container executable) and `WPR_GROK_REASONING_EFFORT` selects an optional
 native-advertised effort. Source protocol reference: [official Grok agent-mode guide](https://github.com/xai-org/grok-build/blob/4247f661689354b831191f11eeeac8424993fe3d/crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md).
 
@@ -181,6 +210,16 @@ interject extension requires a reviewed executable SHA-256 in `WPR_GROK_REVIEWED
 or `WPR_GROK_CONTAINER_REVIEWED_BINARY_SHA256` for the container artifact. The bridge checks the actual executable bytes on its substrate; initialization alone does not advertise that extension. Stop continues to use the existing exact
 process-generation stop path.
 
+Artifact mismatch disables only optional interject; ordinary generation still uses the selected
+native model and authority. The runner hashes the executable once at startup with a bounded buffer,
+then publishes effective interject capability in `grok.session.started`. The existing active-session
+receipt preserves that boolean with its exact run, attempt and native session. Missing, stale or
+unreviewed capability is unsupported; a cohort probe never rehashes the executable. Pending controls
+cannot pass a canceled/stopped mailbox or the final ACP transport write guard.
+Current-turn interjection uses that exact active native session, including stateless or restricted
+turns that intentionally do not save continuity. It neither saves that session for later reuse nor
+changes the existing saved-session binding for permission and cancel controls.
+
 These source contracts do not establish installed Grok readiness. Each advertised deployment must
 prove its exact executable, native account/model/tool flow, container image, control UI, and restart
 journey. Fixture-process tests establish only deterministic protocol and supervisor behavior.
@@ -192,6 +231,21 @@ The workspace UI displays native permission options, questions, plan approval an
 A queued interjection is an acknowledgement, not proof the model consumed it. Native cancellation
 requests are distinct from the existing interrupt/terminate lifecycle, which confirms process exit.
 Expired permission requests cancel; unknown controls and stale attempts fail explicitly.
+
+An authenticated host may send context to its exact running conversation invocation through
+`POST /v1/requests/by-invocation/{invocation_id}/interject`. Its strict body binds `stream_id`,
+`message_id`, admitted `body_sha256`, stable `delivery_id`, exact `text` and `text_sha256`.
+The provider resolves the current owned session, worker, run and attempt itself. Foreign or changed
+identity is refused; terminal, stopped, restored-held or superseded requests return `not_running`.
+It does not reconcile, launch, cancel or replace a run. Unsupported native controls, including an
+unreviewed interject extension, return `unsupported`. Selected runtime capability owns support;
+the host must not infer it from a provider label.
+
+The response binds the invocation, delivery and text digest with `queued` or `pending` and the exact
+run, attempt and native mailbox message ID. Stable controls reuse the private retained mailbox
+receipt and reject a changed body for the same delivery identity. A pending control remains pending;
+transport retries must replay its identity. Neither response means consumed or publicly presented.
+The host retains its accepted contribution and normal model-owned follow-up decision as fallback.
 
 An observed mission permission request also publishes the existing attention callback with its
 exact run, attempt, native session, request fingerprint and expiry. Active Work presents the

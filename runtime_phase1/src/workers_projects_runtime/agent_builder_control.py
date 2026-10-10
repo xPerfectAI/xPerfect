@@ -187,7 +187,7 @@ def conversation_output_schema(
     )
     description_parts = [
         "Return one structured result for the current conversation turn.",
-        "Put only the complete user-facing answer in content.",
+        "For type=assistant_response, put the complete user-facing answer in content.",
         "Returning type=assistant_response ends your work for this turn. First complete authorized work you can do now, or report its actual blocker; a promise is not a result. A real accepted asynchronous work receipt may be acknowledged without waiting for completion.",
     ]
     if normalized_graph:
@@ -198,29 +198,35 @@ def conversation_output_schema(
                     "the host graph will execute it with shared state."
                 ),
                 (
-                    "When starting a consult, use empty content; the shared graph already carries "
-                    "the request and context."
+                    "When starting a consult, content may carry a concise, useful public update "
+                    "about your actual next action; leave it empty when no update is useful. "
+                    "The shared graph already carries the request and context."
                 ),
                 (
-                    "Only when returning completed specialist work, put that result in content so "
-                    "the receiving agent can judge it from shared state."
+                    "Only when returning completed specialist work, put that result in content as "
+                    "evidence for the receiving agent to judge from shared state, not as public speech."
                 ),
-                f"Available transfers: {descriptions}",
             ]
         )
     if normalized_delivery:
         description_parts.extend(
             [
                 (
-                    "For an assistant response, set voice=skip when optional audio would reduce "
-                    "usefulness or the user requires text-only delivery; otherwise set "
-                    "voice=eligible."
+                    "For any public content, follow the current surface and participant-role "
+                    "delivery instructions. In a live call, ordinary public content from the "
+                    "current speaking agent is voice=eligible unless the user explicitly requests "
+                    "text-only or silent delivery. Where messaging audio is optional, set "
+                    "voice=skip when audio would reduce usefulness; otherwise set voice=eligible."
                 ),
                 "A user request to hear, read aloud, speak, or receive audio takes precedence.",
                 "Do not put transport-control tokens in content.",
-                "For a tool call, set voice=eligible; the final speaking agent owns delivery.",
+                "When returning completed specialist work, set voice=skip for its receiving-agent evidence. "
+                "The current speaking agent owns delivery of its public content; the receiving "
+                "agent owns its later response.",
             ]
         )
+    if normalized_graph:
+        description_parts.append(f"Available transfers: {descriptions}")
     properties: dict[str, Any] = {
         "type": {
             "type": "string",
@@ -274,6 +280,19 @@ def conversation_controls_from_schema(schema: Any) -> tuple[dict[str, Any] | Non
     return graph, messaging_delivery_control(audio_eligible=True)
 
 
+def conversation_interjection_supported(schema: Any) -> bool:
+    """Decline the existing strict graph-only contract this framing cannot recover."""
+    if not isinstance(schema, dict) or schema.get("additionalProperties") is not False:
+        return True
+    properties = _mapping(schema.get("properties"))
+    required = schema.get("required")
+    types = _mapping(properties.get("type")).get("enum")
+    return not (set(properties) == {"type", "tool_name", "content"}
+                and isinstance(required, list) and all(isinstance(field, str) for field in required)
+                and set(required) == set(properties)
+                and isinstance(types, list) and "tool_call" in types)
+
+
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -291,6 +310,8 @@ def public_conversation_prefix(output: str, graph_control: Any, delivery_control
     """
     if not normalized_messaging_delivery_control(delivery_control):
         return None
+    normalized_graph = normalized_graph_transfer_control(graph_control)
+    allowed = {tool["name"] for tool in (normalized_graph or {}).get("tools", [])}
     source = str(output or "").lstrip()
     if not source.startswith("{"):
         return None
@@ -315,7 +336,13 @@ def public_conversation_prefix(output: str, graph_control: Any, delivery_control
             offset += 1
         if key == "content":
             if (set(controls) != {"type", "tool_name", "voice"}
-                    or controls != {"type": "assistant_response", "tool_name": None, "voice": "eligible"}
+                    or controls.get("voice") != "eligible"
+                    or not (
+                        (controls.get("type") == "assistant_response" and controls.get("tool_name") is None)
+                        or (controls.get("type") == "tool_call"
+                            and isinstance(controls.get("tool_name"), str)
+                            and controls["tool_name"] in allowed)
+                    )
                     or offset >= len(source) or source[offset] != '"'):
                 return None
             start = offset
@@ -395,6 +422,155 @@ def ordered_conversation_output(parts: list[str], output: str, graph_control: An
         raise ValueError("Invalid terminal conversation delivery control")
     payload["content"] = "\n\n".join([*parts, str(payload["content"])])
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+class NativeConversationParts:
+    """The existing ordered public parts, framed by exact native generation metadata.
+
+    Callers must first bind notifications to their exact active native session.
+    A later generation is buffered to distinguish complete envelope duplicates;
+    Silent assistant predecessors add no public narration. A declared terminal
+    graph transfer remains terminal; optional context cannot replace its controls.
+    """
+
+    def __init__(self, graph_control: Any, delivery_control: Any):
+        self.controls = (graph_control, delivery_control)
+        self.current: list[str] = []
+        self.parts: list[str] = []
+        self.part_index = 1
+        self.generation: tuple[str, int, int] | None = None
+        self.completed = False
+        self.buffered_generation = False
+        self.previous_envelope: dict[str, Any] | None = None
+        self.generation_base_parts = 0
+        self.prefix_seen = False
+        self.terminal_graph = False
+
+    def _envelope(self) -> dict[str, Any]:
+        raw = "".join(self.current)
+        payload = json.loads(raw, object_pairs_hook=_unique_json_object)
+        decision = parse_conversation_output(raw, *self.controls)
+        if decision.get("delivery_disposition", {}).get("valid") is not True:
+            raise ValueError("Invalid native generation delivery controls")
+        return payload
+
+    def graph_transfer_selected(self) -> bool:
+        """A strict declared handoff closes optional current-turn interjection."""
+        try:
+            decision = parse_conversation_output("".join(self.current), *self.controls)
+        except ValueError:
+            return False
+        disposition = decision.get("delivery_disposition")
+        return (decision.get("type") == "tool_call"
+                and (disposition is None or disposition.get("valid") is True))
+
+    def update(self, update: Mapping[str, Any], meta: Any = None) -> None:
+        kind = update.get("sessionUpdate")
+        if kind == "response_completed":
+            metadata = _mapping(meta)
+            if self.generation and any(
+                    key in metadata and metadata[key] != expected
+                    for key, expected in zip(("promptId", "turnStartMs", "streamStartMs"), self.generation)):
+                raise ValueError("Native completion changed its active generation identity")
+            if self.buffered_generation:
+                self._envelope()
+            self.completed = self.generation is not None
+            return
+        if kind == "tool_call":
+            if self.terminal_graph:
+                return
+            if self.graph_transfer_selected():
+                self.terminal_graph = True
+                return
+            prefix = self.prefix()
+            if prefix and prefix["text"]:
+                if not prefix["complete"]:
+                    raise ValueError("Native tool interrupted an incomplete public response envelope")
+                if not prefix.get("duplicate"):
+                    self.parts.append(prefix["text"])
+            elif self.prefix_seen:
+                raise ValueError("Native tool changed an accepted public response envelope")
+            self.current = []
+            self.prefix_seen = False
+            self.buffered_generation = False
+            self.part_index += 1
+            return
+        content = update.get("content")
+        if kind != "agent_message_chunk" or not isinstance(content, Mapping) or content.get("type") != "text":
+            return
+        text = content.get("text")
+        if not isinstance(text, str):
+            raise ValueError("Malformed native message content")
+        if normalized_messaging_delivery_control(self.controls[1]):
+            metadata = _mapping(meta)
+            keys = ("promptId", "turnStartMs", "streamStartMs")
+            if any(key in metadata for key in keys):
+                prompt, turn, stream = (metadata.get(key) for key in keys)
+                if (not isinstance(prompt, str) or not prompt
+                        or type(turn) is not int or type(stream) is not int
+                        or turn < 0 or stream < turn):
+                    raise ValueError("Invalid native generation identity")
+                generation = (prompt, turn, stream)
+                if self.generation is not None and generation != self.generation:
+                    if generation[:2] != self.generation[:2] or stream <= self.generation[2]:
+                        raise ValueError("Native generation changed its active prompt or turn")
+                    if not self.completed:
+                        raise ValueError("Native generation changed before response completion")
+                    # A native tool retires its public buffer. A later completed generation
+                    # keeps the same prompt fence without parsing that retired empty buffer.
+                    envelope = self._envelope() if self.current else None
+                    if envelope and envelope["type"] == "tool_call":
+                        # The graph decision already ends this native host step.
+                        # A previously queued optional interjection cannot replace
+                        # its exact declared transfer or fail valid Main output.
+                        self.terminal_graph = True
+                        self.generation = generation
+                        self.completed = False
+                        return
+                    if envelope and envelope["voice"] == "eligible" and envelope != self.previous_envelope:
+                        self.parts.append(envelope["content"])
+                    self.previous_envelope = envelope
+                    self.generation_base_parts = len(self.parts)
+                    self.current = []
+                    self.prefix_seen = False
+                    self.part_index += 1
+                    self.buffered_generation = True
+                    self.completed = False
+                self.generation = generation
+            elif self.generation is not None:
+                raise ValueError("Missing native generation identity")
+        if self.terminal_graph:
+            return
+        self.current.append(text)
+        prefix = public_conversation_prefix("".join(self.current), *self.controls)
+        if prefix:
+            self.prefix_seen = True
+
+    def prefix(self) -> dict[str, Any] | None:
+        prefix = public_conversation_prefix("".join(self.current), *self.controls)
+        if self.buffered_generation:
+            if not prefix or not prefix["complete"]:
+                return None
+            payload = self._envelope()
+            prefix = {**prefix, "duplicate": self._is_duplicate(payload)}
+        return prefix
+
+    def _is_duplicate(self, payload: dict[str, Any]) -> bool:
+        return (payload == self.previous_envelope and payload["type"] == "assistant_response"
+                and payload["voice"] == "eligible" and len(self.parts) == self.generation_base_parts)
+
+    def finish(self) -> str:
+        raw = "".join(self.current)
+        parts = self.parts
+        if self.buffered_generation:
+            payload = self._envelope()
+            if self._is_duplicate(payload):
+                parts = parts[:-1]
+        if self.prefix_seen:
+            decision = parse_conversation_output(raw, *self.controls)
+            if decision.get("delivery_disposition", {}).get("valid") is not True:
+                raise ValueError("Invalid public response envelope")
+        return ordered_conversation_output(parts, raw, *self.controls)
 
 
 def graph_transfer_output_schema(control: Any) -> dict[str, Any] | None:
@@ -489,9 +665,14 @@ def parse_conversation_output(
         raise ValueError("Native harness returned an invalid graph transfer envelope")
     if not isinstance(tool_name, str) or tool_name not in allowed:
         raise ValueError("Native harness selected an unavailable graph transfer tool")
-    # A graph transfer never delivers audio. Ignore either schema-valid value and
-    # let the eventual final speaking agent own the delivery decision.
+    if normalized_delivery and voice not in {"eligible", "skip"}:
+        raise ValueError("Native harness returned an invalid graph transfer delivery control")
     result = {"type": action, "content": content, "tool_name": tool_name}
+    if normalized_delivery:
+        result["delivery_disposition"] = {
+            "version": MESSAGING_DELIVERY_CONTROL_VERSION,
+            "audio": voice, "required": True, "valid": True, "source": "model",
+        }
     return result
 
 

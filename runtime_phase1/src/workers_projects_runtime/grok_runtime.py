@@ -11,7 +11,7 @@ import stat
 import sys
 import tempfile
 
-from .bootstrap import bootstrap_env_for, bootstrap_bundle_for
+from .bootstrap import bootstrap_env_for, bootstrap_bundle_for, native_profile_tool_access_instructions
 from .agent_builder_control import conversation_output_schema
 from .mission_provider_accounts import apply_bound_provider_account_environment, native_current_account_allowed
 from .auth import _env_bool, multi_user_security_enabled, native_installed_owner_id
@@ -214,7 +214,14 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
                 and str(worker.get('trusted_run_lane') or '').strip().lower() == 'conversation'
                 and bundle.get('run_mode') == 'conversation'):
             command += ['--yolo-mode', 'true' if bundle.get('access_mode') == 'full' else 'false']
-        rules = str(bundle.get('developer_instructions') or '')
+        from .grok_projection import mcp_servers_for_bundle
+        try:
+            servers = [] if restricted else mcp_servers_for_bundle(bundle, self._native_environment(worker, host=host) if bundle.get('claude_project_mcp') else {})
+        except ValueError as exc:
+            raise RuntimeErrorBase(str(exc)) from exc
+        if servers is not None and (not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers)):
+            raise RuntimeErrorBase('grok_mcp_servers must contain native ACP MCP server objects')
+        rules = native_profile_tool_access_instructions(str(worker.get('profile') or self.runtime_name), bundle, servers)
         if rules:
             path = target / 'developer-instructions.txt'
             _atomic_write_private_text(path, rules)
@@ -226,14 +233,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             schema_path = target / 'conversation-output-schema.json'
             _atomic_write_private_text(schema_path, json.dumps(output_schema, separators=(',', ':')))
             command += ['--output-schema-file', str(schema_path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/conversation-output-schema.json']
-        from .grok_projection import mcp_servers_for_bundle
-        try:
-            servers = [] if restricted else mcp_servers_for_bundle(bundle, self._native_environment(worker, host=host) if bundle.get('claude_project_mcp') else {})
-        except ValueError as exc:
-            raise RuntimeErrorBase(str(exc)) from exc
         if servers is not None:
-            if not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers):
-                raise RuntimeErrorBase('grok_mcp_servers must contain native ACP MCP server objects')
             path = target / 'mcp-servers.json'
             _atomic_write_private_text(path, json.dumps(servers))
             command += ['--mcp-file', str(path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/mcp-servers.json']
@@ -370,18 +370,41 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             return {'status': 'pending'}
         raise RuntimeErrorBase('native_input_stale')
 
+    def supports_native_control(self, worker, action, *, run_id='', attempt_id=''):
+        if action != 'interject':
+            return action in {'cancel', 'permission'}
+        active = self._read_active_session(worker['worker_id']) or {}
+        capabilities = active.get('native_control_capabilities')
+        return bool(run_id and attempt_id and active.get('run_id') == run_id
+                    and active.get('attempt_id') == attempt_id
+                    and active.get('native_session_id')
+                    and isinstance(capabilities, dict) and capabilities.get('interject') is True)
+
     def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
         from .grok_control import submit_control
         active = self._read_active_session(worker['worker_id']) or {}
         if not run_id or not attempt_id or active.get('run_id') != run_id or active.get('attempt_id') != attempt_id:
             raise RuntimeErrorBase('Grok control does not match the active run attempt')
-        session_id = self._read_session_key(worker['worker_id'])
+        # Current-turn context also applies to stateless/restricted sessions. Their
+        # exact active receipt is not a persisted continuity or permission key.
+        session_id = (active.get('native_session_id') if action == 'interject'
+                      else self._read_session_key(worker['worker_id']))
         if not session_id:
             raise RuntimeErrorBase('Grok native session is not yet ready for controls')
         body = dict(payload or {})
+        message_id = body.pop('message_id', None) if action == 'interject' else None
+        if message_id is not None:
+            fingerprint = body.get('request_fingerprint')
+            if (not isinstance(fingerprint, str) or len(fingerprint) != 64
+                    or any(c not in '0123456789abcdef' for c in fingerprint)):
+                raise ValueError('Retained Grok interjection requires an exact request fingerprint')
         body.update(run_id=run_id, attempt_id=attempt_id, session_id=session_id, action=action)
+        # Automatic retained context only writes the guarded mailbox. Native ACK
+        # arrives independently; it must not hold admission/Stop locks while waiting.
+        submit_options = {'timeout': 0} if message_id is not None else {}
         return submit_control(self._control_dir(worker, run_id, attempt_id), body,
-            managed_acl=getattr(self.sandbox, 'box', None) is not None)
+            managed_acl=getattr(self.sandbox, 'box', None) is not None, message_id=message_id,
+            **submit_options)
 
     def _build_command(self, worker, instruction, info):
         return self._grok_command(worker, info, host=False), self._native_environment(worker, host=False)

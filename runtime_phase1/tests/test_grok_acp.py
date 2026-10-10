@@ -10,6 +10,206 @@ import pytest
 from workers_projects_runtime.grok_acp import AcpClient, AcpError, GrokSession
 
 
+@pytest.mark.parametrize('second', ['The answer.', 'A useful addition.'])
+def test_prompt_frames_complete_same_turn_native_generations(second):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    def envelope(text):
+        return json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': text})
+    class GenerationPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            for stream, text in [(100, 'The answer.'), (200, second)]:
+                self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                    'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream},
+                    'update': {'sessionUpdate': 'agent_message_chunk',
+                               'content': {'type': 'text', 'text': envelope(text)}}})
+                self.notification('_x.ai/session_notification', {'sessionId': 'native-exact',
+                    'update': {'sessionUpdate': 'response_completed'}})
+            return {'stopReason': 'end_turn'}
+    session = GrokSession(GenerationPeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    result = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
+        None, messaging_delivery_control(audio_eligible=True))))
+    assert result['content'] == ('The answer.' if second == 'The answer.' else 'The answer.\n\nA useful addition.')
+    assert result['voice'] == 'eligible'
+
+
+@pytest.mark.parametrize('change', ['prompt', 'turn', 'unfinished', 'invalid_voice', 'unavailable_graph'])
+def test_prompt_rejects_unsupported_native_generation_controls(change):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    class GenerationPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            for index, stream in enumerate([100, 200]):
+                text = json.dumps({'type': 'tool_call' if index and change == 'unavailable_graph' else 'assistant_response',
+                    'tool_name': 'unavailable_transfer' if index and change == 'unavailable_graph' else None,
+                    'voice': 'invalid' if index and change == 'invalid_voice' else 'eligible', 'content': 'Synthetic answer.'})
+                self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                    'promptId': 'foreign' if index and change == 'prompt' else 'prompt-exact',
+                    'turnStartMs': 51 if index and change == 'turn' else 50, 'streamStartMs': stream},
+                    'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': text}}})
+                if change != 'unfinished':
+                    self.notification('_x.ai/session_notification', {'sessionId': 'native-exact',
+                        'update': {'sessionUpdate': 'response_completed'}})
+            return {'stopReason': 'end_turn'}
+    session = GrokSession(GenerationPeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    with pytest.raises(AcpError):
+        session.prompt('Synthetic request', output_schema=conversation_output_schema(
+            graph, messaging_delivery_control(audio_eligible=True)))
+
+
+@pytest.mark.parametrize('first_voice', ['eligible', 'skip'])
+@pytest.mark.parametrize('final_voice', ['eligible', 'skip'])
+def test_prompt_keeps_native_tool_retirement_separate_from_new_generation(first_voice, final_voice):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    class ToolGenerationPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            def emit(kind, text='', stream=100):
+                self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                    'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream},
+                    'update': {'sessionUpdate': kind, 'content': {'type': 'text', 'text': text}}})
+            envelope = lambda voice: json.dumps({'type': 'assistant_response', 'tool_name': None,
+                                                 'voice': voice, 'content': 'Same public text.'})
+            emit('agent_message_chunk', envelope(first_voice))
+            emit('response_completed')
+            for _ in range(2):
+                emit('tool_call')
+                emit('agent_thought_chunk', 'Private reasoning.')
+                emit('response_completed')
+            emit('agent_message_chunk', envelope(final_voice), 200)
+            emit('response_completed', stream=200)
+            return {'stopReason': 'end_turn'}
+    session = GrokSession(ToolGenerationPeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    result = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
+        None, messaging_delivery_control(audio_eligible=True))))
+    assert result == {'type': 'assistant_response', 'tool_name': None, 'voice': final_voice,
+                      'content': ('Same public text.\n\n' if first_voice == 'eligible' else '') + 'Same public text.'}
+
+
+@pytest.mark.parametrize('boundary', ['tool', 'generation'])
+@pytest.mark.parametrize('kind,voice', [('assistant_response', 'skip'), ('tool_call', 'eligible'), ('tool_call', 'skip')])
+def test_prompt_native_generation_terminal_preserves_existing_part_controls(boundary, kind, voice):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    first = json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': 'I will check.'})
+    final = {'type': kind, 'tool_name': 'lc_transfer_to_specialist' if kind == 'tool_call' else None,
+             'voice': voice, 'content': 'The final contribution.'}
+    class GenerationPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            def emit(kind, text='', stream=100):
+                self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                    'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream},
+                    'update': {'sessionUpdate': kind, 'content': {'type': 'text', 'text': text}}})
+            emit('agent_message_chunk', first)
+            emit('tool_call' if boundary == 'tool' else 'response_completed')
+            emit('agent_message_chunk', json.dumps(final), 200 if boundary == 'generation' else 100)
+            emit('response_completed', stream=200 if boundary == 'generation' else 100)
+            return {'stopReason': 'end_turn'}
+    session = GrokSession(GenerationPeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    output = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
+        graph, messaging_delivery_control(audio_eligible=True))))
+    assert output == {**final, 'content': 'I will check.\n\nThe final contribution.'}
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+def test_prompt_silent_predecessor_does_not_fail_optional_generation(voice):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    class GenerationPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            for stream, audio, text in [(100, 'skip', 'Silent body.'), (200, voice, 'Later contribution.')]:
+                self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                    'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}, 'update': {
+                    'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps({
+                        'type': 'assistant_response', 'tool_name': None, 'voice': audio, 'content': text})}}})
+                self.notification('_x.ai/session_notification', {'sessionId': 'native-exact', 'update': {
+                    'sessionUpdate': 'response_completed'}})
+            return {'stopReason': 'end_turn'}
+    session = GrokSession(GenerationPeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    output = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
+        None, messaging_delivery_control(audio_eligible=True))))
+    assert output == {'type': 'assistant_response', 'tool_name': None, 'voice': voice, 'content': 'Later contribution.'}
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+def test_graph_terminal_declines_pending_interject_and_preserves_main(voice, tmp_path):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    from workers_projects_runtime.grok_control import ControlMailbox, submit_control
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    terminal = {'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'voice': voice, 'content': 'Consulting.'}
+    controls = {'run_id': 'run-exact', 'attempt_id': 'attempt-exact', 'session_id': 'native-exact',
+                'action': 'interject', 'text': 'Owned background context.', 'request_fingerprint': 'b' * 64}
+    class GenerationPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            self.calls.append((method, params))
+            mailbox = ControlMailbox(tmp_path, run_id='run-exact', attempt_id='attempt-exact', session=session, event=lambda _: None)
+            assert submit_control(tmp_path, controls, message_id='a' * 64, timeout=0)['status'] == 'pending'
+            def emit(payload, stream):
+                self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                    'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}, 'update': {
+                    'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(payload)}}})
+                self.notification('_x.ai/session_notification', {'sessionId': 'native-exact', 'update': {
+                    'sessionUpdate': 'response_completed'}})
+            emit(terminal, 100)
+            mailbox.start()
+            try:
+                receipt = submit_control(tmp_path, controls, message_id='a' * 64)
+                assert receipt['status'] == 'rejected' and 'graph transfer' in receipt['error']
+                assert not any(method == '_x.ai/interject' for method, _ in self.calls)
+                # A native interjection already queued before selection can still race
+                # this terminal graph choice. It must not replace or fail valid Main.
+                emit({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': 'Late addition.'}, 200)
+                self.notification('session/update', {'sessionId': 'native-exact', 'update': {'sessionUpdate': 'tool_call'}})
+            finally:
+                mailbox.close()
+            return {'stopReason': 'end_turn'}
+    client = GenerationPeer()
+    session = GrokSession(client, reviewed_interject=True)
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    output = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
+        graph, messaging_delivery_control(audio_eligible=True))))
+    assert output == terminal
+    assert session._output_error is None and session.cancel_requested is False
+    assert len([method for method, _ in client.calls if method == 'session/prompt']) == 1
+
+
+def test_graph_only_prompt_declines_interject_without_failing_normal_main():
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    terminal = {'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'content': 'Consulting.'}
+    class GraphPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            self.calls.append((method, params))
+            # Decline before the first native output, not by inspecting its content.
+            with pytest.raises(AcpError, match='output schema'):
+                session.interject('Owned background input.', 'stable-input')
+            self.notification('session/update', {'sessionId': 'native-exact', 'update': {
+                'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(terminal)}}})
+            return {'stopReason': 'end_turn'}
+    client = GraphPeer();session = GrokSession(client, reviewed_interject=True)
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    assert json.loads(session.prompt('Synthetic task.', output_schema=conversation_output_schema(graph, None))) == terminal
+    assert not any(method in ('_x.ai/interject', 'session/cancel') for method, _ in client.calls)
+    assert len([method for method, _ in client.calls if method == 'session/prompt']) == 1
+    assert session._output_error is None
+
+
 def peer(script):
     return subprocess.Popen([sys.executable, '-u', '-c', script], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -95,7 +295,9 @@ class ProtocolPeer:
         self.calls = []
         self.model = model
         self.notification = None
-    def request(self, method, params, timeout=30):
+    def request(self, method, params, timeout=30, *, send_guard=None):
+        if send_guard is not None:
+            send_guard()
         self.calls.append((method, params))
         if method == 'initialize':
             return {'protocolVersion':1, 'agentCapabilities':{'loadSession':True},
@@ -167,6 +369,139 @@ def test_restricted_open_buffers_pre_response_manifest_then_verifies_final_exact
     assert session._options(session.session_state, 'reasoning_effort')['currentValue'] == 'high'
     assert next(event for event in events if event['type'] == 'grok.native_tools.verified')['function_tool_count'] == 0
     assert session.prompt('Use only this supplied synthetic context.') == 'native output'
+
+
+class SwitchingRestrictedProtocolPeer(RestrictedProtocolPeer):
+    def __init__(self, *, restricted=True):
+        super().__init__(() if restricted else ('read_file',),
+                         () if restricted else ('read_file',))
+        self.model = 'old-model'
+        self.authority = None
+        self.restricted = restricted
+
+    def request(self, method, params, timeout=30):
+        if method == 'session/set_config_option' and params['configId'] == 'model':
+            self.model = params['value']
+            self.authority = None  # Native model selection can rebuild its system head.
+        if method in ('session/new', 'session/load'):
+            self.authority = params.get('_meta', {}).get('systemPromptOverride')
+        result = super().request(method, params, timeout)
+        if method in ('session/new', 'session/load', 'session/set_config_option'):
+            # The config-option owner returns current options for the selected model.
+            result['configOptions'] = [
+                {'id': 'model', 'currentValue': self.model,
+                 'options': [{'value': 'old-model'}, {'value': 'grok-selected'}]},
+                {'id': 'reasoning_effort', 'currentValue': self.effort,
+                 'options': [{'value': 'medium'}, {'value': 'high'}]},
+            ]
+            result['models'] = {'currentModelId': self.model}
+        if method == 'session/prompt':
+            assert self.authority == 'Exact current synthetic authority.'
+            assert self.model == 'grok-selected' and self.effort == 'high'
+            if self.restricted:
+                assert self.final_tools == ()
+        return result
+
+
+@pytest.mark.parametrize('restricted', [True, False])
+def test_model_and_effort_selection_reapply_authority_once_before_prompt(restricted):
+    client = SwitchingRestrictedProtocolPeer(restricted=restricted)
+    session = GrokSession(client)
+    session.open(cwd='/synthetic-native', model='grok-selected', effort='high',
+                 system_prompt_override='Exact current synthetic authority.',
+                 native_tools_disabled=restricted)
+    selections = [(method, params.get('configId')) for method, params in client.calls
+                  if method in ('session/set_config_option', 'session/load')]
+    expected = [('session/set_config_option', 'model'),
+                ('session/set_config_option', 'reasoning_effort'), ('session/load', None)]
+    assert selections == (expected if restricted else [expected[0], expected[2], expected[1]])
+    loads = [params for method, params in client.calls if method == 'session/load']
+    assert len(loads) == 1
+    assert loads[0]['sessionId'] == session.session_id == 'native-exact'
+    assert loads[0]['_meta']['systemPromptOverride'] == 'Exact current synthetic authority.'
+    assert loads[0]['_meta']['noReplay'] is True
+    if restricted:
+        assert loads[0]['mcpServers'] == []
+        assert loads[0]['_meta']['agentProfile']['agentsMd'] is False
+        assert loads[0]['_meta']['yoloMode'] is False
+        assert session._native_tools_verified
+    else:
+        assert 'agentProfile' not in loads[0]['_meta']
+    assert session.configured_model == 'grok-selected'
+    assert session._options(session.session_state, 'reasoning_effort')['currentValue'] == 'high'
+    assert session.prompt('Exact synthetic user task.') == 'native output'
+
+
+def test_restricted_model_selection_keeps_intermediate_reload_for_missing_effort_options():
+    class IncompletePeer(SwitchingRestrictedProtocolPeer):
+        def request(self, method, params, timeout=30):
+            result = super().request(method, params, timeout)
+            if method == 'session/set_config_option' and params['configId'] == 'model':
+                result['configOptions'] = [result['configOptions'][0]]
+            return result
+    client = IncompletePeer()
+    session = GrokSession(client)
+    session.open(cwd='/synthetic-native', model='grok-selected', effort='high',
+                 system_prompt_override='Exact current synthetic authority.', native_tools_disabled=True)
+    assert len([method for method, _ in client.calls if method == 'session/load']) == 2
+    assert session._native_tools_verified
+    assert session.prompt('Exact synthetic user task.') == 'native output'
+
+
+@pytest.mark.parametrize('drift', ['model', 'effort', 'session', 'tools'])
+def test_restricted_deferred_reload_drift_never_prompts(drift):
+    class DriftPeer(SwitchingRestrictedProtocolPeer):
+        def request(self, method, params, timeout=30):
+            if method == 'session/load' and drift == 'tools':
+                self.final_tools = ('read_file',)
+            result = super().request(method, params, timeout)
+            if method == 'session/load':
+                if drift == 'model':
+                    result['models']['currentModelId'] = 'other-model'
+                elif drift == 'effort':
+                    result['configOptions'][1]['currentValue'] = 'medium'
+                elif drift == 'session':
+                    result['sessionId'] = 'other-session'
+            return result
+    client = DriftPeer()
+    session = GrokSession(client)
+    with pytest.raises(AcpError):
+        session.open(cwd='/synthetic-native', model='grok-selected', effort='high',
+                     system_prompt_override='Exact current synthetic authority.', native_tools_disabled=True)
+    assert not session._native_tools_verified
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+    with pytest.raises(AcpError):
+        session.prompt('Exact synthetic user task.')
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+
+
+@pytest.mark.parametrize('failure', ['rejected', 'effort', 'models', 'option', 'notification'])
+def test_restricted_effort_failure_after_model_selection_never_prompts(failure):
+    class FailedEffortPeer(SwitchingRestrictedProtocolPeer):
+        def request(self, method, params, timeout=30):
+            result = super().request(method, params, timeout)
+            if method == 'session/set_config_option' and params['configId'] == 'reasoning_effort':
+                if failure == 'rejected':
+                    raise AcpError('Synthetic native effort rejection')
+                if failure == 'effort':
+                    result['configOptions'][1]['currentValue'] = 'medium'
+                elif failure == 'models':
+                    result['models']['currentModelId'] = 'other-model'
+                elif failure == 'option':
+                    result.pop('models')
+                    result['configOptions'][0]['currentValue'] = 'other-model'
+                elif failure == 'notification':
+                    self.notification('session/update', {'sessionId': 'native-exact', 'update': {
+                        'sessionUpdate': 'config_option_update',
+                        'configOptions': [{'id': 'model', 'currentValue': 'other-model'}]}})
+            return result
+    client = FailedEffortPeer()
+    session = GrokSession(client)
+    with pytest.raises(AcpError):
+        session.open(cwd='/synthetic-native', model='grok-selected', effort='high',
+                     system_prompt_override='Exact current synthetic authority.', native_tools_disabled=True)
+    assert not session._native_tools_verified
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
 
 
 @pytest.mark.parametrize('initial,final', [
@@ -480,7 +815,7 @@ def test_pinned_conversation_authority_replaces_the_native_system_prompt_without
     method, params = next((m, p) for m, p in client.calls if m in ('session/new', 'session/load'))
     assert method == ('session/load' if session_id else 'session/new')
     assert params['_meta'] == {'systemPromptOverride': authority,
-                              **({'noReplay': True} if session_id else {})}
+                              **({'noReplay': True} if session_id else {'modelId': 'grok-selected'})}
     assert params['mcpServers'] == servers
     assert 'rules' not in params['_meta']
     assert not any('Synthetic current authority.' in str(p.get('prompt', [])) for _, p in client.calls)
@@ -547,7 +882,13 @@ def test_blank_override_never_falls_back_to_vendor_authority(authority):
 
 
 def test_model_mismatch_never_silently_substitutes():
-    client = ProtocolPeer('other-model')
+    class RefusingPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30):
+            if method == 'session/set_config_option' and params['configId'] == 'model':
+                self.calls.append((method, params))
+                raise AcpError('Native model is unavailable', code=-32602)
+            return super().request(method, params, timeout)
+    client = RefusingPeer('other-model')
     with pytest.raises(AcpError, match='model'):
         GrokSession(client).open(cwd='/workspace', model='grok-selected')
     assert not any(method == 'session/prompt' for method, _ in client.calls)
@@ -560,6 +901,9 @@ class ActualAccountPeer(ProtocolPeer):
         self.high = high
     def request(self, method, params, timeout=30):
         if method == 'session/set_config_option' and params['configId'] == 'model':
+            if params['value'] not in self.offered:
+                self.calls.append((method, params))
+                raise AcpError('Native model is unavailable', code=-32602)
             self.model = params['value']
         result = super().request(method, params, timeout)
         if method in ('session/new', 'session/load'):
@@ -782,7 +1126,9 @@ def test_extended_native_updates_keep_event_identity(method):
 
 def test_interject_partial_error_is_not_reported_as_queued():
     class PartialError(ProtocolPeer):
-        def request(self, method, params, timeout=30):
+        def request(self, method, params, timeout=30, *, send_guard=None):
+            if send_guard is not None:
+                send_guard()
             if method=='_x.ai/interject':
                 return {'result':{'status':'queued'},'error':{'code':'failed'}}
             return super().request(method,params,timeout)
@@ -840,7 +1186,7 @@ def test_system_rules_use_native_session_authority_not_user_prompt(session_id):
     session.open(cwd='/workspace', model='grok-selected', session_id=session_id, rules='Synthetic system authority.')
     method, params = next((m, p) for m, p in client.calls if m in ('session/new', 'session/load'))
     assert params['_meta'] == {'rules': 'Synthetic system authority.',
-                              **({'noReplay': True} if session_id else {})}
+                              **({'noReplay': True} if session_id else {'modelId': 'grok-selected'})}
     assert session.prompt('Synthetic user request') == 'native output'
     assert client.calls[-1][1]['prompt'] == [{'type': 'text', 'text': 'Synthetic user request'}]
 
@@ -942,6 +1288,8 @@ def test_native_permission_mode_preserves_exact_new_and_resumed_authority(sessio
     expected_meta = {'systemPromptOverride': authority}
     if session_id:
         expected_meta['noReplay'] = True
+    else:
+        expected_meta['modelId'] = 'grok-selected'
     if yolo_mode is not None:
         expected_meta['yoloMode'] = yolo_mode
         if yolo_mode is False:
@@ -985,6 +1333,274 @@ def test_model_reconfiguration_retains_native_permission_mode_on_authority_reloa
     opens = [params for method, params in client.calls if method in ('session/new', 'session/load')]
     assert len(opens) == 2
     assert all(params['_meta'] == {**expected_meta,
-               **({'noReplay': True} if 'sessionId' in params else {})} for params in opens)
+               **({'noReplay': True} if 'sessionId' in params else {'modelId': 'grok-selected'})} for params in opens)
     assert opens[-1]['sessionId'] == 'native-exact'
     assert session.configured_model == 'grok-selected'
+
+
+@pytest.mark.parametrize("method,meta,expected", [
+    ("session/prompt", {"outputSchema": {"type":"object", "description":"Synthetic private schema"}}, True),
+    ("initialize", {"outputSchema": {"type":"object"}}, False),
+    ("session/prompt", {"outputSchema": "unsupported"}, False),
+    ("session/prompt", {"systemPromptOverride": "Synthetic private authority"}, False),
+])
+def test_rpc_timing_binds_only_actual_prompt_output_schema_hash(method, meta, expected):
+    import hashlib
+    process = peer('''
+import sys,json
+r=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True)
+''')
+    events=[]
+    with AcpClient(process, request_timing=events.append) as client:
+        assert client.request(method, {"prompt":[{"type":"text","text":"Synthetic private request"}],
+                                       "_meta":meta}, timeout=2)=={"ok":True}
+    assert len(events)==1
+    assert ("output_schema_sha256" in events[0]) is expected
+    if expected:
+        assert events[0]["output_schema_sha256"]==hashlib.sha256(json.dumps(meta["outputSchema"],
+            sort_keys=True,separators=(',', ':'),ensure_ascii=False).encode()).hexdigest()
+    assert "Synthetic" not in json.dumps(events)
+
+
+def test_rpc_schema_hash_observation_remains_optional():
+    process = peer('''
+import sys,json
+r=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True)
+''')
+    with AcpClient(process) as client:
+        assert client.request("session/prompt", {"_meta":{"outputSchema":{"type":"object"}}},timeout=2)=={"ok":True}
+
+
+class FreshModelHintProtocolPeer(SwitchingRestrictedProtocolPeer):
+    def __init__(self, *, honor=True, restricted=False):
+        super().__init__(restricted=restricted)
+        self.honor = honor
+
+    def request(self, method, params, timeout=30):
+        if method == 'session/new' and self.honor:
+            hint = params.get('_meta', {}).get('modelId')
+            if hint:
+                self.model = hint
+        return super().request(method, params, timeout)
+
+
+def test_fresh_exact_model_hint_avoids_external_switch_and_authority_reload():
+    client = FreshModelHintProtocolPeer()
+    session = GrokSession(client)
+    authority = 'Exact current synthetic authority.'
+    servers = [{'name': 'synthetic-broker', 'command': 'synthetic', 'args': [], 'env': []}]
+    session.open(cwd='/workspace', model='grok-selected', effort='high',
+                 system_prompt_override=authority, mcp_servers=servers, yolo_mode=False)
+    opening = next(params for method, params in client.calls if method == 'session/new')
+    assert opening['_meta'] == {'modelId': 'grok-selected', 'systemPromptOverride': authority,
+                               'yoloMode': False, 'autoMode': False}
+    assert opening['mcpServers'] == servers
+    assert not any(method == 'session/load' for method, params in client.calls)
+    assert not any(method == 'session/set_config_option' and params['configId'] == 'model'
+                   for method, params in client.calls)
+    assert client.authority == authority and client.effort == 'high'
+    assert session.configured_model == 'grok-selected'
+    assert session.prompt('Synthetic user task.') == 'native output'
+
+
+def test_ignored_fresh_hint_keeps_model_selection_and_exact_authority_reload():
+    client = FreshModelHintProtocolPeer(honor=False)
+    session = GrokSession(client)
+    authority = 'Exact current synthetic authority.'
+    session.open(cwd='/workspace', model='grok-selected', effort='high',
+                 system_prompt_override=authority, yolo_mode=False)
+    assert any(method == 'session/set_config_option' and params['configId'] == 'model'
+               for method, params in client.calls)
+    reloads = [params for method, params in client.calls if method == 'session/load']
+    assert len(reloads) == 1
+    assert reloads[0]['_meta'] == {'systemPromptOverride': authority, 'noReplay': True,
+                                 'yoloMode': False, 'autoMode': False}
+    assert client.authority == authority and client.effort == 'high'
+    assert session.prompt('Synthetic user task.') == 'native output'
+
+
+def test_resume_has_no_model_hint_and_retains_exact_current_authority():
+    client = FreshModelHintProtocolPeer()
+    client.model = 'grok-selected'
+    session = GrokSession(client)
+    authority = 'Exact synthetic refreshed authority. Pinned tail.'
+    session.open(cwd='/workspace', model='grok-selected', session_id='native-exact', effort='high',
+                 system_prompt_override=authority, yolo_mode=False)
+    opening = next(params for method, params in client.calls if method == 'session/load')
+    assert opening['sessionId'] == 'native-exact'
+    assert opening['_meta'] == {'systemPromptOverride': authority, 'noReplay': True,
+                               'yoloMode': False, 'autoMode': False}
+    assert client.authority == authority and client.effort == 'high'
+    assert session.session_id == 'native-exact'
+
+
+def test_restricted_fresh_hint_keeps_final_empty_inventory_and_authority_guards():
+    client = FreshModelHintProtocolPeer(restricted=True)
+    session = GrokSession(client)
+    authority = 'Exact synthetic restricted authority.'
+    session.open(cwd='/workspace', model='grok-selected', effort='high',
+                 system_prompt_override=authority, native_tools_disabled=True)
+    openings = [params for method, params in client.calls if method in ('session/new', 'session/load')]
+    assert len(openings) == 2
+    assert openings[0]['_meta']['modelId'] == 'grok-selected'
+    assert 'modelId' not in openings[1]['_meta']
+    for params in openings:
+        assert params['_meta']['agentProfile'] == {
+            'name': 'native-tools-disabled', 'description': 'Native tools disabled',
+            'tools': ['ToolSearch'], 'disallowedTools': ['search_tool', 'use_tool'],
+            'agentsMd': False, 'discoverSkills': False}
+        assert params['_meta']['systemPromptOverride'] == authority
+        assert params['_meta']['yoloMode'] is False and params['_meta']['autoMode'] is False
+        assert params['mcpServers'] == []
+    assert session._native_tools_verified and not session._native_tools_invalid
+    assert client.authority == authority and client.effort == 'high'
+
+
+def test_unsupported_fresh_model_hint_still_refuses_before_prompt():
+    class UnsupportedHintPeer(FreshModelHintProtocolPeer):
+        def request(self, method, params, timeout=30):
+            if method == 'session/set_config_option' and params['configId'] == 'model':
+                self.calls.append((method, params))
+                raise AcpError('Native rejected exact configured model', code=-32602)
+            result = super().request(method, params, timeout)
+            if method == 'session/new':
+                result['configOptions'][0]['options'] = [{'value': 'old-model'}]
+            return result
+    client = UnsupportedHintPeer(honor=False)
+    with pytest.raises(AcpError, match='exact configured model'):
+        GrokSession(client).open(cwd='/workspace', model='grok-selected', effort='high',
+                                system_prompt_override='Exact synthetic authority.')
+    assert not any(method == 'session/prompt' for method, params in client.calls)
+
+
+@pytest.mark.parametrize('session_id', [None, 'native-exact'])
+def test_initial_catalog_snapshot_does_not_veto_native_exact_model_recovery(session_id):
+    class DelayedCatalogPeer(ActualAccountPeer):
+        def request(self, method, params, timeout=30):
+            result = super().request(method, params, timeout)
+            if method == ('session/load' if session_id else 'session/new') and not any(
+                m == 'session/set_config_option' and p['configId'] == 'model'
+                for m, p in self.calls
+            ):
+                # The native account refresh has not reached this first snapshot.
+                result['configOptions'][-1]['options'] = [{'value': 'account-default'}]
+            return result
+    client = DelayedCatalogPeer('account-default', ['grok-4.7-build-fast'])
+    session = GrokSession(client)
+    authority = 'Exact synthetic authority.'
+    session.open(cwd='/workspace', model='grok-4.7-build-fast', session_id=session_id,
+                 effort='high', system_prompt_override=authority, yolo_mode=False)
+    assert session.configured_model == 'grok-4.7-build-fast'
+    changes = [p for m, p in client.calls if m == 'session/set_config_option' and p['configId'] == 'model']
+    assert len(changes) == 1 and changes[0]['value'] == 'grok-4.7-build-fast'
+    assert session._options(session.session_state, 'reasoning_effort')['currentValue'] == 'high'
+    reloads = [p for m, p in client.calls if m == 'session/load']
+    assert reloads[-1]['_meta']['systemPromptOverride'] == authority
+    assert reloads[-1]['_meta']['yoloMode'] is False
+    assert not any(m == 'session/prompt' for m, p in client.calls)
+    assert session.prompt('Synthetic task.') == 'native output'
+
+
+def test_fresh_model_hint_keeps_effort_model_drift_fence():
+    class EffortDriftPeer(FreshModelHintProtocolPeer):
+        def request(self, method, params, timeout=30):
+            result = super().request(method, params, timeout)
+            if method == 'session/set_config_option' and params['configId'] == 'reasoning_effort':
+                result['models']['currentModelId'] = 'other-model'
+            return result
+    client = EffortDriftPeer()
+    with pytest.raises(AcpError, match='reasoning effort changed'):
+        GrokSession(client).open(cwd='/workspace', model='grok-selected', effort='high',
+                                system_prompt_override='Exact synthetic authority.')
+    assert not any(method == 'session/prompt' for method, params in client.calls)
+
+
+def test_ignored_fresh_fast_hint_preserves_authorized_catalog_fallback_and_authority():
+    class MissingFastHintPeer(ActualAccountPeer):
+        def request(self, method, params, timeout=30):
+            if method in ('session/new', 'session/load'):
+                self.authority = params.get('_meta', {}).get('systemPromptOverride')
+            if method == 'session/set_config_option' and params['configId'] == 'model':
+                self.authority = None
+            return super().request(method, params, timeout)
+    client = MissingFastHintPeer('account-default', ['grok-4.7'])
+    session = GrokSession(client)
+    authority = 'Exact current synthetic fallback authority.'
+    session.open(cwd='/workspace', model='grok-4.7-build-fast', effort='high',
+                 system_prompt_override=authority, yolo_mode=False)
+    opening = next(params for method, params in client.calls if method == 'session/new')
+    assert opening['_meta']['modelId'] == 'grok-4.7-build-fast'
+    changes = [params for method, params in client.calls
+               if method == 'session/set_config_option' and params['configId'] == 'model']
+    assert len(changes) == 1 and changes[0]['value'] == 'grok-4.7'
+    reloads = [params for method, params in client.calls if method == 'session/load']
+    assert len(reloads) == 1
+    assert reloads[0]['_meta'] == {'systemPromptOverride': authority, 'noReplay': True,
+                                 'yoloMode': False, 'autoMode': False}
+    assert client.authority == authority
+    assert session.configured_model == 'grok-4.7'
+    assert session.requested_model == 'grok-4.7-build-fast'
+    assert session._options(session.session_state, 'reasoning_effort')['currentValue'] == 'high'
+    assert session.prompt('Synthetic user task.') == 'native output'
+
+
+def test_cancelled_collecting_session_cannot_interject():
+    client = ProtocolPeer()
+    session = GrokSession(client, reviewed_interject=True)
+    session.open(cwd='/workspace', model='grok-selected')
+    session._collecting = True
+    session.cancel()
+    with pytest.raises(AcpError, match='cancelled'):
+        session.interject('Completed context', 'stable-1')
+    assert not any(method == '_x.ai/interject' for method, _ in client.calls)
+
+
+def test_cancel_overtakes_interjection_waiting_for_transport_write():
+    from threading import Event, Lock, Thread
+    from types import SimpleNamespace
+    entered, cancel_entered = Event(), Event()
+    wire, result = [], {}
+    client = object.__new__(AcpClient)
+    client._lock, client._write_lock = Lock(), Lock()
+    client._pending, client._next_id, client._failure = {}, 0, None
+    client.request_timing, client.max_frame_bytes = None, 1024 * 1024
+    class Pipe:
+        def write(self, encoded):
+            message = json.loads(encoded)
+            wire.append(message)
+            if message.get('method') == '_x.ai/interject':
+                client._pending[message['id']].set_result({'result': {'status': 'queued'}})
+        def flush(self):
+            pass
+    client.process = SimpleNamespace(stdin=Pipe())
+    def send(message, **kwargs):
+        if message['method'] == '_x.ai/interject':
+            entered.set()
+        if message['method'] == 'session/cancel':
+            cancel_entered.set()
+        return AcpClient._send(client, message, **kwargs)
+    client._send = send
+    session = GrokSession(client, reviewed_interject=True)
+    session.session_id, session._collecting = 'native-a', True
+    def interject():
+        try:
+            result['receipt'] = session.interject('Context', 'stable-1')
+        except AcpError as error:
+            result['error'] = str(error)
+    client._write_lock.acquire()
+    operation = Thread(target=interject)
+    cancellation = Thread(target=session.cancel)
+    try:
+        operation.start()
+        assert entered.wait(1)
+        cancellation.start()
+        assert cancel_entered.wait(1)
+    finally:
+        client._write_lock.release()
+        operation.join(2)
+        cancellation.join(2)
+    assert not operation.is_alive() and not cancellation.is_alive()
+    assert 'cancelled' in result.get('error', '')
+    assert [message['method'] for message in wire] == ['session/cancel']

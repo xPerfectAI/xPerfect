@@ -254,6 +254,9 @@ class ControlMailbox:
             text = request.get('text')
             if not isinstance(text, str) or not text:
                 raise ValueError('Grok interjection text is required')
+            with self._lock:
+                if self._turn_cancelled or self.stopped.is_set():
+                    raise ValueError('Grok interjection turn is cancelled or stopped')
             return self.session.interject(text, request['message_id'])
         if action == 'permission':
             with self._lock:

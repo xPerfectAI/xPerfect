@@ -436,6 +436,19 @@ class NativeInputResponseRequest(BaseModel):
     content: dict[str, object] | None = None
 
 
+class ActiveWorkActionFileInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    upload_id: str = Field(alias="uploadId", min_length=5, max_length=160, pattern=r"^fil_[A-Za-z0-9]+$")
+    revision: str = Field(min_length=1, max_length=256)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    size_bytes: int = Field(alias="sizeBytes", ge=0)
+    filename: str = Field(min_length=1, max_length=512)
+    source_file_id: str = Field(alias="sourceFileId", min_length=1, max_length=256)
+    input_kind: Literal["original", "extracted_text"] = Field(alias="inputKind")
+    media_group_index: int | None = Field(default=None, alias="mediaGroupIndex", ge=0)
+
+
 class ActiveWorkActionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -464,8 +477,16 @@ class ActiveWorkActionRequest(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:@-]+$",
     )
 
+    file_inputs: list[ActiveWorkActionFileInput] = Field(default_factory=list, alias="fileInputs")
+
     @model_validator(mode="after")
     def validate_source_context_action(self) -> "ActiveWorkActionRequest":
+        if self.file_inputs:
+            if self.action not in {"steer", "queue", "message"} or self.source_context is None:
+                raise ValueError("Selected files require an exact source-owned follow-up")
+            if (len({item.upload_id for item in self.file_inputs}) != len(self.file_inputs)
+                or len({item.source_file_id for item in self.file_inputs}) != len(self.file_inputs)):
+                raise ValueError("Selected files must contain each ready upload once")
         if self.native_input is not None and (
             self.action != "resume" or self.capability_reauthorization is not None or self.source_context is not None
         ):

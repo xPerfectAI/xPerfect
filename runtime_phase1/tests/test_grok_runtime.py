@@ -227,6 +227,71 @@ def test_restricted_command_uses_fresh_empty_workspace_no_resume_or_mcp(tmp_path
     assert runtime._host_runtime_info(authorized).session_key == 'ordinary-saved-session'
 
 
+@pytest.mark.parametrize('restricted', [False, True])
+@pytest.mark.parametrize('saved_session', [None, 'ordinary-saved-session'])
+def test_ephemeral_turn_interject_uses_exact_live_session_without_persisting_continuity(
+    tmp_path, monkeypatch, restricted, saved_session
+):
+    import workers_projects_runtime.grok_control as controls
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    bundle = {'env': {'GLASSHIVE_PROVIDER_SESSION_MODE': 'stateless'}}
+    if restricted:
+        bundle['provider_capabilities'] = {'native_tools': False}
+    record = {**worker(tmp_path), 'bootstrap_bundle_json': json.dumps(bundle)}
+    if saved_session:
+        runtime._write_session_key(record['worker_id'], saved_session)
+    runtime._write_active_session(record['worker_id'], {
+        'session_name': 'synthetic-running-session', 'run_id': 'run-live',
+        'attempt_id': 'attempt-live', 'native_session_id': 'native-ephemeral',
+        'native_control_capabilities': {'interject': True}})
+    runtime._remember_native_session_key(record, 'native-ephemeral')
+    assert runtime._read_session_key(record['worker_id']) == saved_session
+    calls = []
+    def submit(directory, body, **options):
+        calls.append((body, options))
+        return {'status': 'pending', 'message_id': options['message_id']}
+    monkeypatch.setattr(controls, 'submit_control', submit)
+    assert runtime.supports_native_control(record, 'interject', run_id='run-live',
+                                           attempt_id='attempt-live')
+    result = runtime.native_control(record, run_id='run-live', attempt_id='attempt-live',
+        action='interject', payload={'text': 'Exact accepted contribution.', 'message_id': 'e' * 64,
+            'request_fingerprint': 'f' * 64, 'session_id': 'caller-forged-session'})
+    assert result == {'status': 'pending', 'message_id': 'e' * 64}
+    assert calls[0][0]['session_id'] == 'native-ephemeral'
+    assert calls[0][0]['run_id'] == 'run-live' and calls[0][0]['attempt_id'] == 'attempt-live'
+    assert calls[0][1]['timeout'] == 0
+    assert runtime._read_session_key(record['worker_id']) == saved_session
+    assert not runtime.supports_native_control(record, 'interject', run_id='run-old',
+                                               attempt_id='attempt-live')
+    assert not runtime.supports_native_control(record, 'interject', run_id='run-live',
+                                               attempt_id='attempt-old')
+    with pytest.raises(RuntimeErrorBase, match='active run attempt'):
+        runtime.native_control(record, run_id='run-live', attempt_id='attempt-old',
+                               action='interject', payload={'text': 'Refused stale contribution.'})
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('action', ['permission', 'cancel'])
+def test_ephemeral_interject_does_not_change_persistent_permission_or_cancel_binding(
+    tmp_path, monkeypatch, action
+):
+    import workers_projects_runtime.grok_control as controls
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    record = worker(tmp_path)
+    runtime._write_session_key(record['worker_id'], 'ordinary-saved-session')
+    runtime._write_active_session(record['worker_id'], {
+        'session_name': 'synthetic-running-session', 'run_id': 'run-live',
+        'attempt_id': 'attempt-live', 'native_session_id': 'native-ephemeral',
+        'native_control_capabilities': {'interject': True}})
+    calls = []
+    monkeypatch.setattr(controls, 'submit_control', lambda directory, body, **options:
+        calls.append((body, options)) or {'status': 'pending'})
+    assert runtime.native_control(record, run_id='run-live', attempt_id='attempt-live',
+                                  action=action) == {'status': 'pending'}
+    assert calls[0][0]['session_id'] == 'ordinary-saved-session'
+    assert 'timeout' not in calls[0][1]
+
+
 @pytest.mark.parametrize('lane,host', [('mission', True), ('mission', False), ('conversation', True)])
 def test_mission_permission_deadline_uses_only_exact_admitted_runtime_binding(tmp_path, lane, host):
     runtime = HostGrokBuildRuntime(str(tmp_path))
@@ -499,16 +564,101 @@ def test_container_command_does_not_reuse_host_binary_path(tmp_path, monkeypatch
     assert '/host-only/grok' not in command
 
 
-def test_reviewed_artifact_mismatch_fails_before_native_launch(tmp_path, monkeypatch):
-    runtime=HostGrokBuildRuntime(str(tmp_path/'data'))
-    runtime.binary=sys.executable
-    monkeypatch.setenv('WPR_GROK_REVIEWED_BINARY_SHA256','0'*64)
-    command=runtime._grok_command(worker(tmp_path),info(tmp_path),host=True)
-    result=subprocess.run(command,input='task',text=True,capture_output=True,
-                          env={**os.environ,'GROK_HOME':str(tmp_path/'private-grok')},timeout=5)
-    assert result.returncode==2
-    assert 'does not match' in result.stderr
-    assert not result.stdout
+@pytest.mark.parametrize('review', ['absent', 'mismatch', 'matched'])
+def test_optional_interject_artifact_review_preserves_ordinary_native_generation(tmp_path, monkeypatch, review):
+    import hashlib
+    fake = tmp_path / 'native-fixture'
+    fake.write_text('\n'.join([
+        '#!' + sys.executable, 'import json,sys',
+        'for line in sys.stdin:',
+        " r=json.loads(line);method=r['method']",
+        " if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True},'authMethods':[{'id':'cached_token'}],'_meta':{'grokShell':True,'defaultAuthMethodId':'cached_token'}}",
+        " elif method=='authenticate': result={}",
+        " elif method in ('session/new','session/load'): result={'sessionId':'native-a','models':{'currentModelId':'grok-selected'}}",
+        " elif method=='session/prompt':",
+        "  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-a','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Ordinary generation remains available.'}}}}),flush=True)",
+        "  result={'stopReason':'end_turn'}",
+        " else: raise AssertionError(method)",
+        " print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)",
+    ]) + '\n')
+    fake.chmod(0o700)
+    monkeypatch.delenv('WPR_GROK_REVIEWED_BINARY_SHA256', raising=False)
+    if review != 'absent':
+        monkeypatch.setenv('WPR_GROK_REVIEWED_BINARY_SHA256',
+            hashlib.sha256(fake.read_bytes()).hexdigest() if review == 'matched' else '0' * 64)
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'data'))
+    runtime.binary = str(fake)
+    result = subprocess.run(runtime._grok_command(worker(tmp_path), info(tmp_path), host=True),
+        input='Exact task', text=True, capture_output=True, timeout=5,
+        env={**os.environ, 'GROK_HOME': str(tmp_path / 'private-grok')})
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    started = next(event for event in events if event['type'] == 'grok.session.started')
+    assert started['native_control_capabilities'] == {'interject': review == 'matched'}
+    assert next(event for event in events if event['type'] == 'grok.result')['output'] == 'Ordinary generation remains available.'
+
+
+@pytest.mark.parametrize('schema_kind', ['freeform', 'voice', 'graph_only'])
+def test_runner_effective_interject_declines_graph_only_not_ordinary_generation(tmp_path, monkeypatch, schema_kind):
+    import hashlib
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    schema = (conversation_output_schema(graph, messaging_delivery_control(audio_eligible=True)) if schema_kind == 'voice'
+              else conversation_output_schema(graph, None) if schema_kind == 'graph_only' else None)
+    answer = (json.dumps({'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'content': 'Consulting.'})
+              if schema_kind == 'graph_only' else json.dumps({'type': 'assistant_response', 'tool_name': None,
+              'voice': 'eligible', 'content': 'Ordinary generation.'}) if schema_kind == 'voice' else 'Ordinary generation.')
+    fake = tmp_path / 'native-fixture'
+    fake.write_text('\n'.join([
+        '#!' + sys.executable, 'import json,sys',
+        'for line in sys.stdin:', " r=json.loads(line);method=r['method']",
+        " if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True},'authMethods':[{'id':'cached_token'}],'_meta':{'grokShell':True,'defaultAuthMethodId':'cached_token'}}",
+        " elif method=='authenticate': result={}",
+        " elif method in ('session/new','session/load'): result={'sessionId':'native-a','models':{'currentModelId':'grok-selected'}}",
+        " elif method=='session/prompt':",
+        "  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-a','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':" + repr(answer) + "}}}}),flush=True)",
+        "  result={'stopReason':'end_turn'}", " else: raise AssertionError(method)",
+        " print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)",
+    ]) + '\n');fake.chmod(0o700)
+    monkeypatch.setenv('WPR_GROK_REVIEWED_BINARY_SHA256', hashlib.sha256(fake.read_bytes()).hexdigest())
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'data'));runtime.binary = str(fake)
+    command = runtime._grok_command(worker(tmp_path), info(tmp_path), host=True)
+    if schema:
+        schema_file = tmp_path / 'typed-schema.json';schema_file.write_text(json.dumps(schema))
+        command += ['--output-schema-file', str(schema_file)]
+    result = subprocess.run(command, input='Synthetic task.', text=True, capture_output=True, timeout=5,
+        env={**os.environ, 'GROK_HOME': str(tmp_path / 'private-grok')})
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    started = next(event for event in events if event['type'] == 'grok.session.started')
+    supported = schema_kind != 'graph_only'
+    assert started['native_control_capabilities'] == {'interject': supported}
+    assert next(event for event in events if event['type'] == 'grok.result')['output'] == answer
+    runtime._write_active_session('worker-grok', {'session_name': 'terminal-exact', 'run_id': 'run-exact', 'attempt_id': 'attempt-exact',
+        'native_session_id': started['session_id'], 'native_control_capabilities': started['native_control_capabilities']})
+    assert runtime.supports_native_control(worker(tmp_path), 'interject', run_id='run-exact', attempt_id='attempt-exact') is supported
+
+
+@pytest.mark.parametrize('attempt,capability', [('attempt-a', True), ('attempt-a', False), ('old-attempt', True)])
+def test_native_session_event_persists_effective_interject_only_for_exact_attempt(tmp_path, attempt, capability):
+    from threading import Event
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'runtime'))
+    runtime._write_active_session('worker-a', {'session_name': 'terminal-a', 'run_id': 'run-a',
+        'attempt_id': 'attempt-a', 'native_session_id': 'native-old'})
+    stdout = tmp_path / 'native-events.jsonl'
+    stdout.write_text(json.dumps({'type': 'grok.session.started', 'session_id': 'native-a',
+                                 'native_control_capabilities': {'interject': capability}}) + '\n')
+    stopped = Event(); stopped.set()
+    runtime._observe_native_session_events('worker-a', stdout, stopped, run_id='run-a', attempt_id=attempt)
+    active = runtime._read_active_session('worker-a')
+    if attempt == 'old-attempt':
+        assert active['native_session_id'] == 'native-old'
+        assert active.get('native_control_capabilities', {}) == {}
+    else:
+        assert active['native_session_id'] == 'native-a'
+        assert active['native_control_capabilities'] == {'interject': capability}
+        assert runtime.supports_native_control({'worker_id': 'worker-a'}, 'interject',
+            run_id='run-a', attempt_id='attempt-a') is capability
 
 
 def test_docker_launch_preserves_private_grok_selectors_and_discovery_policy():
@@ -844,6 +994,8 @@ def test_materialized_runner_maps_only_native_session_permission_mode(
                      'yoloMode': access == 'full'}
     if session_id:
         expected_meta['noReplay'] = True
+    else:
+        expected_meta['modelId'] = 'grok-selected'
     if access != 'full':
         expected_meta['autoMode'] = False
     fake.write_text('#!' + sys.executable + '\n' + '''
@@ -885,3 +1037,223 @@ for line in sys.stdin:
                             env={**os.environ, **env}, timeout=5)
     assert result.returncode == 0, result.stderr
     assert runtime._parse_output(record, result.stdout, result.stderr, info(tmp_path, session_id)) == ('native-id', 'answer')
+
+
+# The registered text is synthetic; these cases prove native projection/composition,
+# not provider tool choice or user-level completion.
+def _registered_native_tool_access(monkeypatch, *, body="Synthetic registered MCP tool access."):
+    from workers_projects_runtime import bootstrap as source
+    shared = next((parent / "shared" for parent in Path(source.__file__).resolve().parents
+                   if (parent / "shared/compiled_prompt_contract.py").is_file()), None)
+    if shared is None:
+        pytest.skip("Managed Viventium prompt contract is unavailable")
+    monkeypatch.syspath_prepend(str(shared))
+    monkeypatch.setattr(source, "_VIVENTIUM_WORKER_PROMPTS", {
+        "worker.grok_mcp_tool_access": {"body": body, "metadata": {"includes": []}},
+    })
+    return body
+
+
+@pytest.mark.parametrize("host", [True, False])
+@pytest.mark.parametrize("lane", ["conversation", "mission"])
+def test_registered_grok_tool_access_reaches_worker_and_conversation_once(tmp_path, monkeypatch, host, lane):
+    from types import SimpleNamespace
+    fact = _registered_native_tool_access(monkeypatch)
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    runtime.sandbox = SimpleNamespace(home_mount="/workspace/home", box=None)
+    tail = "Fact guard\n<viventium_feeling_state>Synthetic state.</viventium_feeling_state>"
+    authority = "Exact signed authority.\n\n" + tail
+    bundle = {"run_mode": lane, "developer_instructions": authority,
+              "declared_developer_instruction_tail": tail,
+              "provider_capabilities": {"native_tools": True},
+              "env": {"WPR_GROK_REASONING_EFFORT": "high"},
+              "grok_mcp_servers": [{"name": "synthetic-tools", "type": "http", "url": "https://example.test/mcp"}]}
+    if lane == "conversation":
+        bundle["application_developer_instructions"] = authority
+    encoded = json.dumps(bundle)
+    record = {**worker(tmp_path), "trusted_run_lane": lane, "bootstrap_bundle_json": encoded}
+    for _ in range(2):
+        command = runtime._grok_command(record, info(tmp_path, "native-id"), host=host)
+        rules = (runtime._home_dir(record["worker_id"]) / ".xperfect-grok/developer-instructions.txt").read_text()
+        assert rules.count(fact) == 1
+        assert rules == "Exact signed authority.\n\n" + fact + "\n\n" + tail
+        assert rules.endswith(tail) and rules.count(tail) == 1
+        assert command[command.index("--model") + 1] == "grok-selected"
+        assert command[command.index("--effort") + 1] == "high"
+        assert command[command.index("--session-id") + 1] == "native-id"
+        assert ("--system-prompt-file" in command) is (lane == "conversation")
+        assert ("--rules-file" in command) is (lane != "conversation")
+        assert record["bootstrap_bundle_json"] == encoded
+
+
+@pytest.mark.parametrize("mode", ["disabled_native", "empty_mcp", "disabled_mcp", "removed_mcp"])
+def test_registered_grok_tool_access_does_not_expand_absent_authority(tmp_path, monkeypatch, mode):
+    fact = _registered_native_tool_access(monkeypatch)
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    bundle = {"run_mode": "conversation", "developer_instructions": "  Exact signed authority.\n",
+              "provider_capabilities": {"native_tools": mode != "disabled_native"},
+              "grok_mcp_servers": [{"name": "synthetic-tools", "type": "http", "url": "https://example.test/mcp"}]}
+    if mode == "empty_mcp": bundle["grok_mcp_servers"] = []
+    if mode == "disabled_mcp": bundle["grok_mcp_servers"][0]["disabled"] = True
+    if mode == "removed_mcp": bundle["_configured_removed_mcp_servers"] = ["synthetic-tools"]
+    record = {**worker(tmp_path), "bootstrap_bundle_json": json.dumps(bundle)}
+    runtime._grok_command(record, info(tmp_path), host=True)
+    rules = (runtime._home_dir(record["worker_id"]) / ".xperfect-grok/developer-instructions.txt").read_text()
+    assert rules == bundle["developer_instructions"] and fact not in rules
+
+
+@pytest.mark.parametrize("profile", ["codex-cli", "claude-code", "openclaw-general"])
+def test_registered_native_tool_access_is_profile_metadata_only(monkeypatch, profile):
+    from workers_projects_runtime.bootstrap import native_profile_tool_access_instructions
+    _registered_native_tool_access(monkeypatch)
+    bundle = {"developer_instructions": "  Exact authority.\n", "provider_capabilities": {"native_tools": True}}
+    assert native_profile_tool_access_instructions(profile, bundle, [{"name": "synthetic"}]) == bundle["developer_instructions"]
+
+
+@pytest.mark.parametrize("tail_mode", ["declared", "legacy_capsule", "none"])
+def test_registered_native_tool_access_preserves_tail_and_exact_dedupe(monkeypatch, tail_mode):
+    from workers_projects_runtime.bootstrap import native_profile_tool_access_instructions
+    fact = _registered_native_tool_access(monkeypatch)
+    capsule = "<viventium_feeling_state>Synthetic state.</viventium_feeling_state>"
+    tail = "Fact guard\n" + capsule if tail_mode == "declared" else capsule if tail_mode == "legacy_capsule" else ""
+    instructions = "Exact authority." + ("\n\n" + tail if tail else "")
+    bundle = {"developer_instructions": instructions, "provider_capabilities": {"native_tools": True}}
+    if tail_mode == "declared": bundle["declared_developer_instruction_tail"] = tail
+    first = native_profile_tool_access_instructions("grok-build", bundle, [{"name": "synthetic"}])
+    assert first == "Exact authority.\n\n" + fact + ("\n\n" + tail if tail else "")
+    assert not tail or first.endswith(tail)
+    assert native_profile_tool_access_instructions("grok-build", {**bundle, "developer_instructions": first}, [{"name": "synthetic"}]) == first
+
+
+def test_registered_native_tool_access_source_refresh_and_no_inline_fallback(monkeypatch):
+    from workers_projects_runtime import bootstrap as source
+    bundle = {"developer_instructions": "Exact authority."}
+    _registered_native_tool_access(monkeypatch, body="Changed registered mechanism.")
+    assert source.native_profile_tool_access_instructions("grok-build", bundle, [{"name": "synthetic"}]) == "Exact authority.\n\nChanged registered mechanism."
+    monkeypatch.setattr(source, "_VIVENTIUM_WORKER_PROMPTS", None)
+    assert source.native_profile_tool_access_instructions("grok-build", bundle, [{"name": "synthetic"}]) == "Exact authority."
+
+
+@pytest.mark.parametrize("failure", ["missing", "empty", "unknown_variable"])
+def test_registered_native_tool_access_managed_missing_source_fails_closed(tmp_path, monkeypatch, failure):
+    from workers_projects_runtime import bootstrap as source
+    _registered_native_tool_access(monkeypatch)
+    if failure == "missing": source._VIVENTIUM_WORKER_PROMPTS.clear()
+    elif failure == "empty": source._VIVENTIUM_WORKER_PROMPTS["worker.grok_mcp_tool_access"]["body"] = ""
+    else: source._VIVENTIUM_WORKER_PROMPTS["worker.grok_mcp_tool_access"]["body"] = "{{missing}}"
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    bundle = {"developer_instructions": "Exact authority.",
+              "grok_mcp_servers": [{"name": "synthetic", "type": "http", "url": "https://example.test/mcp"}]}
+    with pytest.raises(ValueError, match="required_prompt_invalid"):
+        runtime._grok_command({**worker(tmp_path), "bootstrap_bundle_json": json.dumps(bundle)}, info(tmp_path), host=True)
+    assert not (runtime._home_dir("worker-grok") / ".xperfect-grok/developer-instructions.txt").exists()
+
+
+def test_registered_native_tool_access_invalid_mcp_fails_before_fact(tmp_path, monkeypatch):
+    from workers_projects_runtime import bootstrap as source
+    _registered_native_tool_access(monkeypatch)
+    source._VIVENTIUM_WORKER_PROMPTS.clear()
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    bundle = {"developer_instructions": "Exact authority.", "grok_mcp_servers": "invalid"}
+    with pytest.raises(RuntimeErrorBase, match="grok_mcp_servers must contain"):
+        runtime._grok_command({**worker(tmp_path), "bootstrap_bundle_json": json.dumps(bundle)}, info(tmp_path), host=True)
+    assert not (runtime._home_dir("worker-grok") / ".xperfect-grok/developer-instructions.txt").exists()
+
+
+def test_registered_native_tool_access_tail_mismatch_preserves_exact_authority(tmp_path, monkeypatch, caplog):
+    fact = _registered_native_tool_access(monkeypatch)
+    authority = "  Exact signed authority.\n"
+    bundle = {"run_mode": "conversation", "developer_instructions": authority,
+              "declared_developer_instruction_tail": "Absent ordinary tail.",
+              "provider_capabilities": {"native_tools": True},
+              "env": {"WPR_GROK_REASONING_EFFORT": "high"},
+              "grok_mcp_servers": [{"name": "synthetic-tools", "type": "http",
+                                     "url": "https://example.test/mcp"}]}
+    encoded = json.dumps(bundle)
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    record = {**worker(tmp_path), "trusted_run_lane": "conversation",
+              "_active_run_id": "run-owned", "_run_attempt_id": "attempt-owned",
+              "bootstrap_bundle_json": encoded}
+    command = runtime._grok_command(record, info(tmp_path, "native-id"), host=True)
+    rules = Path(command[command.index("--system-prompt-file") + 1]).read_text()
+    assert rules == authority and fact not in rules
+    assert command[command.index("--model") + 1] == "grok-selected"
+    assert command[command.index("--effort") + 1] == "high"
+    assert command[command.index("--session-id") + 1] == "native-id"
+    assert record["bootstrap_bundle_json"] == encoded
+    assert [record.getMessage() for record in caplog.records] == [
+        "native_profile_tool_access_skipped=true",
+    ]
+    assert caplog.records[0].name == "workers_projects_runtime.bootstrap"
+    assert caplog.records[0].levelname == "WARNING"
+
+
+@pytest.mark.parametrize("mode", ["configured", "projected_broker", "restricted", "empty", "tail_mismatch"])
+def test_registered_grok_conversation_receipt_checks_final_composed_authority(tmp_path, monkeypatch, mode):
+    import hashlib
+    fact = _registered_native_tool_access(monkeypatch)
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    capsule = "<viventium_feeling_state>Synthetic state.</viventium_feeling_state>"
+    tail = "Fact guard\n" + capsule
+    authority = "Exact signed authority.\n\n" + tail
+    bundle = {"run_mode": "conversation", "developer_instructions": authority,
+              "application_developer_instructions": authority,
+              "declared_developer_instruction_tail": tail,
+              "provider_capabilities": {"native_tools": mode != "restricted"},
+              "grok_mcp_servers": [{"name": "synthetic-tools", "type": "http", "url": "https://example.test/mcp"}]}
+    if mode in {"empty", "projected_broker"}:
+        bundle["grok_mcp_servers"] = []
+    if mode == "projected_broker":
+        bundle["claude_project_mcp"] = {"mcpServers": {"synthetic-broker": {
+            "type": "http", "url": "${SYNTHETIC_MCP_URL}"}}}
+        monkeypatch.setattr(runtime, "_native_environment", lambda *_args, **_kwargs: {
+            "SYNTHETIC_MCP_URL": "https://example.test/broker"})
+    if mode == "tail_mismatch":
+        # An ordinary absent tail is not a conflicting Feeling capsule.
+        bundle["developer_instructions"] = "  Exact signed authority.\n"
+        bundle["application_developer_instructions"] = bundle["developer_instructions"]
+        bundle["declared_developer_instruction_tail"] = "Absent ordinary tail."
+        authority = bundle["developer_instructions"]
+    encoded = json.dumps(bundle)
+    record = {**worker(tmp_path), "trusted_run_lane": "conversation",
+              "bootstrap_bundle_json": encoded}
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    final = Path(command[command.index("--system-prompt-file") + 1]).read_text()
+    emitted = mode in {"configured", "projected_broker"}
+    expected = "Exact signed authority.\n\n" + fact + "\n\n" + tail if emitted else authority
+    assert final == expected
+    receipt = runtime._native_provider_authority_receipt(
+        record, command=command, run_id="run-composed-authority", model="grok-selected")
+    assert receipt["authority_sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+    assert receipt["placement"] == "grok_system_prompt_override"
+    assert receipt["feeling_capsule_count"] == (0 if mode == "tail_mismatch" else 1)
+    assert record["bootstrap_bundle_json"] == encoded
+    assert bundle["developer_instructions"] == authority
+
+
+@pytest.mark.parametrize("tamper", ["authority", "fact", "tail"])
+def test_registered_grok_conversation_receipt_rejects_any_composed_authority_tamper(tmp_path, monkeypatch, tamper):
+    fact = _registered_native_tool_access(monkeypatch)
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    capsule = "<viventium_feeling_state>Synthetic state.</viventium_feeling_state>"
+    tail = "Fact guard\n" + capsule
+    authority = "Exact signed authority.\n\n" + tail
+    bundle = {"run_mode": "conversation", "developer_instructions": authority,
+              "application_developer_instructions": authority,
+              "declared_developer_instruction_tail": tail,
+              "provider_capabilities": {"native_tools": True},
+              "grok_mcp_servers": [{"name": "synthetic-tools", "type": "http", "url": "https://example.test/mcp"}]}
+    encoded = json.dumps(bundle)
+    record = {**worker(tmp_path), "trusted_run_lane": "conversation", "bootstrap_bundle_json": encoded}
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    path = Path(command[command.index("--system-prompt-file") + 1])
+    runtime._native_provider_authority_receipt(
+        record, command=command, run_id="run-composed-authority", model="grok-selected")
+    original = path.read_text()
+    fragment = "Exact signed authority." if tamper == "authority" else fact if tamper == "fact" else tail
+    assert fragment in original
+    path.write_text(original.replace(fragment, "Changed synthetic component.", 1))
+    with pytest.raises(RuntimeErrorBase, match="differs from the request-pinned"):
+        runtime._native_provider_authority_receipt(
+            record, command=command, run_id="run-composed-authority", model="grok-selected")
+    assert record["bootstrap_bundle_json"] == encoded

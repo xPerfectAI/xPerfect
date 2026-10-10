@@ -23,9 +23,11 @@ from threading import Lock
 try:
     from .grok_acp import AcpClient, AcpError, GrokSession
     from .grok_control import ControlMailbox
+    from .agent_builder_control import conversation_interjection_supported
 except ImportError:  # Private, materialized standalone runtime copy.
     from grok_acp import AcpClient, AcpError, GrokSession
     from grok_control import ControlMailbox
+    from agent_builder_control import conversation_interjection_supported
 
 
 def main(argv=None):
@@ -117,12 +119,18 @@ def run(args):
     if output_schema is not None and not isinstance(output_schema, dict):
         raise ValueError('Grok output schema must be an object')
     reviewed_interject = False
+    interject_reason = 'artifact_unreviewed'
     if args.reviewed_binary_sha256:
         binary_path = shutil.which(args.binary)
-        if not binary_path or hashlib.sha256(Path(binary_path).read_bytes()).hexdigest() != args.reviewed_binary_sha256:
-            print('Grok executable does not match the reviewed artifact SHA-256', file=sys.stderr)
-            return 2
-        reviewed_interject = True
+        try:
+            with Path(binary_path).open('rb') if binary_path else open(os.devnull, 'rb') as artifact:
+                reviewed_interject = bool(binary_path and hashlib.file_digest(artifact, 'sha256').hexdigest()
+                                          == args.reviewed_binary_sha256)
+        except OSError:
+            reviewed_interject = False
+        interject_reason = 'reviewed_artifact' if reviewed_interject else 'artifact_mismatch'
+    emit({'type': 'grok.native_control.capability', 'action': 'interject',
+          'enabled': reviewed_interject, 'reason': interject_reason})
     emit({'type':'grok.runtime.phase','phase':'runner_started'})
     try:
         process = subprocess.Popen([args.binary, 'agent', '--no-leader', '--model', args.model, 'stdio'],
@@ -167,6 +175,7 @@ def run(args):
                 mailbox.start()
             emit({'type':'grok.session.started','session_id':session.session_id,
                   'model':session.configured_model, 'requested_model':args.model, 'protocol_version':1,
+                  'native_control_capabilities': {'interject': reviewed_interject and conversation_interjection_supported(output_schema)},
                   'agent_version':session.initialization.get('_meta', {}).get('agentVersion'),
                   'config_options':session.session_state.get('configOptions', []),
                   **({'input_authority_remaining_seconds':round(mailbox.permission_timeout, 3)}

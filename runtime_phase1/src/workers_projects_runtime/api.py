@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -70,7 +70,10 @@ from .control_plane_models import (
     UpdateWorkspaceRequest,
     WorkspaceCatalogResponse,
 )
-from .deliverables import deliverable_payload, is_user_deliverable_relative_path, is_unmodified_user_input
+from .deliverables import (
+    NATIVE_IMAGE_SUFFIXES, NATIVE_MEDIA_PREFIX, deliverable_payload,
+    is_user_deliverable_relative_path, is_unmodified_user_input, verified_native_file,
+)
 from .failure_classification import classify_runtime_error
 from .inference_broker import GlassHiveInferenceBroker, InferenceBrokerError
 from .models import (
@@ -134,6 +137,7 @@ from .scheduling_owner import (
     verify_scheduling_cortex_workspace_assertion,
 )
 from .service import (
+    PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES,
     GlassHiveProfileNotAllowedError,
     GlassHiveQuotaExceededError,
     HostWorkersDisabledError,
@@ -533,7 +537,10 @@ def create_app(
         _ = request
         detail, retry_after = _host_capacity_http_contract(exc)
         if _is_provider_path(request.url.path):
-            response = _openai_error(503, str(detail["message"]), str(detail["code"]))
+            response = _openai_error(
+                503, str(detail["message"]), str(detail["code"]),
+                native_admission=exc.native_admission,
+            )
             response.headers["Retry-After"] = str(retry_after)
             return response
         return JSONResponse(
@@ -910,7 +917,13 @@ def create_app(
     @app.middleware("http")
     async def optional_bearer_auth(request: Request, call_next):
         request.state.auth_context = AuthContext()
-        if _is_account_api_path(request.url.path):
+        # Core file couriers carry the same signed owner assertion as work actions.
+        # Human file clients keep their existing authentication path when it is absent.
+        asserted_file_upload = bool(request.headers.get(SERVICE_ASSERTION_HEADER)) and (
+            request.url.path == "/v1/file-uploads"
+            or request.url.path.startswith("/v1/file-uploads/")
+        )
+        if _is_account_api_path(request.url.path) or asserted_file_upload:
             assertion_secret = str(
                 os.environ.get("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET") or ""
             ).strip()
@@ -1212,8 +1225,8 @@ def create_app(
             normalized["default_worker_profile"] = profile
         if payload.codex_reasoning_effort is not None:
             effort = payload.codex_reasoning_effort.strip().lower()
-            if effort and effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
-                raise HTTPException(status_code=400, detail="codex_reasoning_effort must be none, minimal, low, medium, high, or xhigh")
+            if effort and effort not in PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES["WPR_CODEX_CLI_REASONING_EFFORT"]:
+                raise HTTPException(status_code=400, detail="codex_reasoning_effort must be none, minimal, low, medium, high, xhigh, max, or ultra")
             normalized["codex_reasoning_effort"] = effort
         if payload.claude_effort is not None:
             effort = payload.claude_effort.strip().lower()
@@ -1241,8 +1254,8 @@ def create_app(
             return None
         profile = str(worker.get("profile") or "").strip()
         if profile == "codex-cli":
-            if effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
-                raise HTTPException(status_code=400, detail="Codex effort must be none, minimal, low, medium, high, or xhigh")
+            if effort not in PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES["WPR_CODEX_CLI_REASONING_EFFORT"]:
+                raise HTTPException(status_code=400, detail="Codex effort must be none, minimal, low, medium, high, xhigh, max, or ultra")
             return {"env": {"WPR_CODEX_CLI_REASONING_EFFORT": effort}}
         if profile == "claude-code":
             if effort not in CLAUDE_CODE_EFFORT_LEVELS:
@@ -1773,6 +1786,7 @@ def create_app(
 
     def _artifact_download_response(worker: dict, relative_path: str, request: Request) -> Response:
         from .workspace_file_exports import CHUNK_BYTES, _identity
+        display_name = _artifact_display_name(worker, relative_path)
         name, parent_fd, file_fd, metadata = _open_artifact_descriptor(worker, relative_path)
         closed = False
         def close():
@@ -1789,9 +1803,9 @@ def create_app(
             except OSError:
                 raise HTTPException(status_code=409, detail="Artifact changed during download; retry") from None
         headers = dict(ARTIFACT_DOWNLOAD_SECURITY_HEADERS)
-        ascii_name = "".join(character if 32 <= ord(character) < 127 and character not in {'"', '\\'} else "_" for character in name.name)
+        ascii_name = "".join(character if 32 <= ord(character) < 127 and character not in {'"', '\\'} else "_" for character in display_name)
         headers["Content-Disposition"] = (
-            f"attachment; filename=\"{ascii_name or 'artifact'}\"; filename*=UTF-8''{quote(name.name)}"
+            f"attachment; filename=\"{ascii_name or 'artifact'}\"; filename*=UTF-8''{quote(display_name)}"
         )
         headers["Accept-Ranges"] = "bytes"
         size = metadata.st_size
@@ -2041,6 +2055,7 @@ def create_app(
         relative_path: str,
         request: Request,
     ) -> HTMLResponse:
+        display_name = _artifact_display_name(worker, relative_path)
         download_url = _signed_artifact_action_url(
             worker,
             relative_path,
@@ -2063,7 +2078,7 @@ def create_app(
             else:
                 preview = (
                     '<iframe class="html-preview" sandbox credentialless referrerpolicy="no-referrer" '
-                    f'title="Rendered preview of {escape(target.name, quote=True)}" '
+                    f'title="Rendered preview of {escape(display_name, quote=True)}" '
                     f'srcdoc="{escape(text, quote=True)}"></iframe>'
                 )
         elif _is_text_preview_artifact(target, media_type):
@@ -2100,7 +2115,7 @@ def create_app(
                 """
         elif media_type.startswith("image/") and media_type != "image/svg+xml" and size <= 2 * 1024 * 1024:
             encoded = base64.b64encode(content).decode("ascii")
-            preview = f'<img class="image-preview" src="data:{escape(media_type, quote=True)};base64,{encoded}" alt="{escape(target.name, quote=True)}" />'
+            preview = f'<img class="image-preview" src="data:{escape(media_type, quote=True)};base64,{encoded}" alt="{escape(display_name, quote=True)}" />'
         else:
             preview = (
                 "<div class=\"no-preview\">"
@@ -2113,7 +2128,7 @@ def create_app(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>xPerfect file - {escape(target.name)}</title>
+  <title>xPerfect file - {escape(display_name)}</title>
   <style>
     :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     body {{ margin: 0; background: #07090d; color: #eef2f7; }}
@@ -2140,7 +2155,7 @@ def create_app(
         <a class="button secondary" href="{escape(workspace_url, quote=True)}" target="_top" rel="noopener noreferrer">View workspace</a>
       </div>
     </div>
-    <h1>{escape(target.name)}</h1>
+    <h1>{escape(display_name)}</h1>
     <div class="meta">{escape(media_type)} &middot; {size:,} bytes</div>
     {preview}
   </main>
@@ -3282,6 +3297,7 @@ def create_app(
         request: Request,
         *,
         detail: bool = False,
+        actions_only: bool = False,
         history_cursor: str | None = None,
         history_limit: int = 16,
     ) -> dict[str, object]:
@@ -3341,6 +3357,10 @@ def create_app(
             payload["state"] = "needs_input"
             payload["statusSummary"] = "Waiting for your response"
             payload["actions"] = ["resume", "stop"]
+        if actions_only:
+            # File preflight consumes fresh owner-scoped action truth, not artifact or history
+            # projections. Action execution rechecks this state before binding selected files.
+            return {key: payload[key] for key in ("workRef", "state", "actions")}
         first_queued_at = str(
             record.get("run_first_queued_at")
             or record.get("run_queued_at")
@@ -3838,6 +3858,7 @@ def create_app(
         request: Request,
         historyCursor: str | None = None,
         historyLimit: int = 16,
+        projection: Literal["detail", "actions"] = "detail",
     ) -> dict[str, object]:
         tenant_id, owner_id = _account_scope(request)
         record = store.get_delegation(work_ref, tenant_id=tenant_id, owner_id=owner_id)
@@ -3846,7 +3867,8 @@ def create_app(
         return _active_work_payload(
             record,
             request,
-            detail=True,
+            detail=projection == "detail",
+            actions_only=projection == "actions",
             history_cursor=historyCursor,
             history_limit=historyLimit,
         )
@@ -3891,6 +3913,11 @@ def create_app(
             if source_context is not None
             else None
         )
+        if payload.file_inputs:
+            # The immutable selection enters the existing reservation. Service
+            # validates ready inputs before execution; durable replay is read first.
+            source_context_receipt = {**(source_context_receipt or {}),
+                                      "file_inputs": [item.model_dump() for item in payload.file_inputs]}
         if capability_reauthorization is not None and payload.action != "resume":
             raise HTTPException(
                 status_code=400,
@@ -3904,6 +3931,8 @@ def create_app(
             "instruction": instruction,
             "capabilityReauthorization": capability_reauthorization,
         }
+        if payload.file_inputs:
+            action_request["fileInputs"] = [item.model_dump() for item in payload.file_inputs]
         if native_input is not None:
             action_request["nativeInput"] = native_input
         if source_context is not None:
@@ -4071,6 +4100,9 @@ def create_app(
                             reconciled["control_outcome"]
                         )
                         prior["runId"] = reconciled_run_id
+                    if payload.file_inputs:
+                        prior["fileInputs"] = [item.model_dump(by_alias=True, exclude_none=True) for item in payload.file_inputs]
+                        prior["fileDisposition"] = "not_bound_target_finished" if prior.get("controlOutcome") == "terminal_won" else "accepted_for_run"
                     finished_action = store.finish_active_work_action(
                         str(reservation.get("action_use_id") or ""),
                         response={**prior, "idempotentReplay": False},
@@ -4136,6 +4168,9 @@ def create_app(
             if result.get("control_outcome"):
                 response["controlOutcome"] = str(result["control_outcome"])
                 response["runId"] = new_run_id
+            if payload.file_inputs:
+                response["fileInputs"] = [item.model_dump(by_alias=True, exclude_none=True) for item in payload.file_inputs]
+                response["fileDisposition"] = "not_bound_target_finished" if response.get("controlOutcome") == "terminal_won" else "accepted_for_run"
             finished_action = store.finish_active_work_action(
                 action_use_id,
                 response=response,
@@ -4157,6 +4192,16 @@ def create_app(
                 reservation.get("idempotent_replay")
             )
             return persisted_response
+        except FileAdmissionError as exc:
+            failure_response = {"statusCode": exc.status_code,
+                                "detail": {"code": exc.code, "message": str(exc)}}
+            store.fail_active_work_action(action_use_id, str(exc), executor_id=service.executor_id,
+                                          failure_response=failure_response)
+            failed = store.get_active_work_action(action_use_id) or {}
+            if str(failed.get("status") or "") == "failed" and str(failed.get("response_json") or ""):
+                failure_response = json.loads(str(failed["response_json"]))
+            raise HTTPException(status_code=int(failure_response["statusCode"]),
+                                detail=failure_response["detail"]) from exc
         except ValueError as exc:
             code = str(exc)
             detail = {"code": code, "message": code.replace("_", " ")}
@@ -6502,6 +6547,103 @@ def create_app(
             )
         )
 
+    def _mission_result_file_metadata(worker: dict, run: dict | None, delegation: dict) -> list[dict]:
+        """Read the exact completed selection without opening files or creating links."""
+        if (not run or run.get("state") != "completed"
+                or run.get("worker_id") != worker.get("worker_id")
+                or run.get("run_id") != delegation.get("current_run_id")):
+            return []
+        run_id = str(run["run_id"])
+        result_digest = store.terminal_result_digest(run)
+        result_revision = int(run.get("terminal_result_revision") or 0)
+        for record in reversed(store.list_callback_outbox_for_run(
+            run_id, tenant_id=str(worker["tenant_id"]), owner_id=str(worker["owner_id"]),
+        )):
+            if (record.get("event_type") != "run.completed"
+                    or record.get("run_id") != run_id
+                    or record.get("worker_id") != worker["worker_id"]
+                    or record.get("tenant_id") != worker["tenant_id"]
+                    or record.get("result_digest") != result_digest
+                    or record.get("result_revision") != result_revision):
+                continue
+            try:
+                payload = json.loads(record["payload_json"])
+            except (TypeError, ValueError):
+                continue
+            envelope = payload.get("output_files") if isinstance(payload, dict) else None
+            expected = {
+                "owner_id": worker["owner_id"], "run_id": run_id,
+                "attempt_id": str(run.get("active_attempt_id") or ""),
+                "callback_id": record["callback_id"],
+                "work_ref": delegation["work_ref"], "origin_ref": delegation["origin_ref"],
+                "result_revision": result_revision, "result_digest": result_digest,
+            }
+            if (not isinstance(envelope, dict) or envelope.get("version") != 1
+                    or payload.get("event") != "run.completed"
+                    or payload.get("worker_id") != worker["worker_id"]
+                    or any(envelope.get(key) != value for key, value in expected.items())
+                    or any(payload.get(key) != value for key, value in expected.items() if key != "owner_id")
+                    or not isinstance(envelope.get("files"), list)):
+                continue
+            items = []
+            for file in envelope["files"]:
+                if not isinstance(file, dict):
+                    continue
+                name, mime, digest, size = (file.get(key) for key in ("filename", "mime_type", "sha256", "bytes"))
+                if (not isinstance(name, str) or not name or len(name) > 255
+                        or any(ord(char) < 32 or char in "/\\" for char in name)
+                        or not isinstance(mime, str) or not mime
+                        or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or isinstance(size, bool) or not isinstance(size, int) or size < 0):
+                    continue
+                relative = NATIVE_MEDIA_PREFIX / run_id / (digest + (NATIVE_IMAGE_SUFFIXES.get(mime) or Path(name).suffix or ".bin"))
+                items.append({
+                    "path": name, "size": size, "sha256": digest,
+                    "artifact_path": relative,
+                })
+            return items
+        return []
+
+    def _mission_result_files(worker: dict, run: dict | None, delegation: dict) -> list[dict]:
+        """Read only this mission's immutable, model-selected completed files."""
+        items = []
+        for file in _mission_result_file_metadata(worker, run, delegation):
+            relative = file["artifact_path"]
+            try:
+                verified_native_file(Path(worker["workspace_dir"]), relative, file["sha256"], file["size"])
+            except (OSError, ValueError):
+                continue
+            items.append({
+                "path": file["path"], "size": file["size"],
+                "open_url": _signed_artifact_action_url(worker, relative.as_posix(), kind="artifact_open", fallback_action="open"),
+                "download_url": _signed_artifact_action_url(worker, relative.as_posix(), kind="artifact_download", fallback_action="download"),
+            })
+        return items
+
+    def _artifact_display_name(worker: dict, relative_path: str) -> str:
+        relative = Path(relative_path.strip().lstrip("/"))
+        fallback = relative.name
+        if relative.parent.parent != NATIVE_MEDIA_PREFIX:
+            return fallback
+        delegation = store.get_delegation_for_worker(
+            str(worker.get("worker_id") or ""),
+            tenant_id=str(worker.get("tenant_id") or "local"),
+            owner_id=str(worker.get("owner_id") or ""),
+        )
+        if not delegation:
+            return fallback
+        run = store.get_run(relative.parent.name, tenant_id=str(worker.get("tenant_id") or "local"))
+        selected = [file for file in _mission_result_file_metadata(worker, run, delegation)
+                    if file["artifact_path"] == relative]
+        if len({file["path"] for file in selected}) != 1:
+            return fallback
+        file = selected[0]
+        try:
+            verified_native_file(Path(worker["workspace_dir"]), relative, file["sha256"], file["size"])
+        except (OSError, ValueError):
+            return fallback
+        return file["path"]
+
     def _read_only_mission_view(worker: dict) -> HTMLResponse:
         worker_id = str(worker.get("worker_id") or "")
         runtime_details = _runtime_details(worker)
@@ -6550,46 +6692,50 @@ def create_app(
         runtime_mode = str(
             runtime_details.get("mode") or worker.get("runtime") or "worker"
         ).replace("_", " ")
-        workspace_items, workspace_truncated = _workspace_items_with_status(
-            worker,
-            max_entries=21,
-            max_depth=8,
-        )
-        artifact_items = _artifact_items_with_action_urls(
-            worker,
-            workspace_items,
-            max_entries=20,
-        )
-        artifact_rows: list[str] = []
-        for item in artifact_items:
-            relative_path = str(item.get("path") or "").strip()
-            open_url = str(item.get("open_url") or "").strip()
-            download_url = str(item.get("download_url") or "").strip()
-            if (
-                not relative_path
-                or "/v1/link-refs/" not in open_url
-                or "/v1/link-refs/" not in download_url
-            ):
-                continue
-            size = item.get("size")
-            size_label = f"{int(size):,} bytes" if isinstance(size, int) else "File"
-            artifact_rows.append(
-                "<li>"
-                f"<div><strong>{escape(relative_path)}</strong><span>{escape(size_label)}</span></div>"
-                '<nav aria-label="Artifact actions">'
-                f'<a href="{escape(open_url, quote=True)}" aria-label="Open {escape(relative_path, quote=True)}" target="_blank" rel="noopener noreferrer">Open</a>'
-                f'<a href="{escape(download_url, quote=True)}" aria-label="Download {escape(relative_path, quote=True)}">Download</a>'
-                "</nav>"
-                "</li>"
-            )
+        artifact_items = _mission_result_files(worker, run, delegation or {})
+        def artifact_rows_for(items: list[dict]) -> list[str]:
+            artifact_rows: list[str] = []
+            for item in items:
+                relative_path = str(item.get("path") or "").strip()
+                open_url = str(item.get("open_url") or "").strip()
+                download_url = str(item.get("download_url") or "").strip()
+                if (
+                    not relative_path
+                    or "/v1/link-refs/" not in open_url
+                    or "/v1/link-refs/" not in download_url
+                ):
+                    continue
+                size = item.get("size")
+                size_label = f"{int(size):,} bytes" if isinstance(size, int) else "File"
+                artifact_rows.append(
+                    "<li>"
+                    f"<div><strong>{escape(relative_path)}</strong><span>{escape(size_label)}</span></div>"
+                    '<nav aria-label="Artifact actions">'
+                    f'<a href="{escape(open_url, quote=True)}" aria-label="Open {escape(relative_path, quote=True)}" target="_blank" rel="noopener noreferrer">Open</a>'
+                    f'<a href="{escape(download_url, quote=True)}" aria-label="Download {escape(relative_path, quote=True)}">Download</a>'
+                    "</nav>"
+                    "</li>"
+                )
+            return artifact_rows
+
+        artifact_rows = artifact_rows_for(artifact_items)
         if artifact_rows:
             artifact_content = f'<ul class="artifacts">{"".join(artifact_rows)}</ul>'
-            if workspace_truncated or len(artifact_items) > len(artifact_rows):
-                artifact_content += (
-                    '<p class="muted">More files exist in this mission workspace.</p>'
-                )
         else:
             artifact_content = '<p class="empty">No result files are available.</p>'
+        workspace_items, workspace_truncated = _workspace_items_with_status(
+            worker, max_entries=21, max_depth=8,
+        )
+        workspace_files = _artifact_items_with_action_urls(
+            worker, workspace_items, max_entries=20,
+        )
+        workspace_rows = artifact_rows_for(workspace_files)
+        workspace_content = (
+            f'<ul class="artifacts">{"".join(workspace_rows)}</ul>'
+            if workspace_rows else '<p class="empty">No workspace files are available.</p>'
+        )
+        if workspace_truncated or len(workspace_files) > len(workspace_rows):
+            workspace_content += '<p class="muted">More files exist in this workspace.</p>'
         return HTMLResponse(
             f"""
             <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>{escape(worker['name'])} mission view</title>
@@ -6621,6 +6767,7 @@ def create_app(
               <p class="state-note">Mission state describes this result. Worker state describes the reusable workspace after the mission.</p>
               <section aria-labelledby="result-title"><h2 id="result-title">{result_title}</h2>{result_content}</section>
               <section aria-labelledby="results-title"><h2 id="results-title">Result files</h2>{artifact_content}</section>
+              <section aria-label="Workspace files"><details><summary>Workspace files</summary><p class="muted">Files in this reusable workspace may come from other work.</p>{workspace_content}</details></section>
               <p class="notice">To change this work, return to your chat or open Active work.</p>
             </div></main></body></html>
             """,

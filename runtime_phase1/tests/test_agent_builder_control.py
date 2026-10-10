@@ -11,7 +11,200 @@ from workers_projects_runtime.agent_builder_control import (
     messaging_delivery_control,
     parse_conversation_output,
     parse_graph_transfer_output,
+    NativeConversationParts,
 )
+
+
+@pytest.mark.parametrize('terminal', [
+    {'type': 'assistant_response', 'tool_name': None, 'voice': 'skip', 'content': 'Silent result.'},
+    {'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'voice': 'eligible', 'content': 'Consulting.'},
+    {'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'voice': 'skip', 'content': 'Silent handoff.'},
+])
+def test_native_generation_terminal_controls_match_existing_tool_parts(terminal):
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    delivery = messaging_delivery_control(audio_eligible=True)
+    first = json.dumps({'type': 'assistant_response', 'tool_name': None,
+                        'voice': 'eligible', 'content': 'I will check.'})
+    outputs = []
+    for boundary in ['tool', 'generation']:
+        parts = NativeConversationParts(graph, delivery)
+        def chunk(raw, stream):
+            parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': raw}},
+                         {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream})
+        chunk(first, 100)
+        if boundary == 'tool':
+            parts.update({'sessionUpdate': 'tool_call'})
+        else:
+            parts.update({'sessionUpdate': 'response_completed'})
+        raw = json.dumps(terminal)
+        stream = 200 if boundary == 'generation' else 100
+        chunk(raw[:-2], stream)
+        if boundary == 'generation':
+            assert parts.prefix() is None
+        chunk(raw[-2:], stream)
+        parts.update({'sessionUpdate': 'response_completed'})
+        prefix = parts.prefix()
+        assert bool(prefix) is (terminal['voice'] == 'eligible')
+        if prefix:
+            assert prefix['text'] == terminal['content']
+        outputs.append(json.loads(parts.finish()))
+        if boundary == 'generation':
+            chunk(first, 300)
+            if terminal['type'] == 'tool_call':
+                assert json.loads(parts.finish()) == outputs[-1]
+            else:
+                assert json.loads(parts.finish())['content'] == 'I will check.\n\nI will check.'
+    assert outputs == [{**terminal, 'content': 'I will check.\n\n' + terminal['content']}] * 2
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+@pytest.mark.parametrize('earlier_public', [False, True])
+def test_native_silent_predecessor_keeps_later_part_controls_without_erasing_public(voice, earlier_public):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    def put(text, voice, stream):
+        raw = json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': voice, 'content': text})
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': raw}},
+                     {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream})
+        parts.update({'sessionUpdate': 'response_completed'})
+    if earlier_public:
+        put('Accepted narration.', 'eligible', 75)
+    put('Silent body.', 'skip', 100)
+    put('Silent body.' if voice == 'skip' else 'Useful addition.', voice, 200)
+    payload = json.loads(parts.finish())
+    assert payload['voice'] == voice
+    assert payload['content'] == ('Accepted narration.\n\n' if earlier_public else '') + (
+        'Silent body.' if voice == 'skip' else 'Useful addition.')
+    assert parts.parts == (['Accepted narration.'] if earlier_public else [])
+    assert bool(parts.prefix()) is (voice == 'eligible')
+
+
+def test_graph_only_output_declines_optional_interject_without_changing_voice_or_freeform():
+    from workers_projects_runtime.agent_builder_control import conversation_interjection_supported
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    assert conversation_interjection_supported(None) is True
+    assert conversation_interjection_supported({'type': 'string'}) is True
+    assert conversation_interjection_supported(conversation_output_schema(graph, messaging_delivery_control(audio_eligible=True))) is True
+    assert conversation_interjection_supported(conversation_output_schema(graph, None)) is False
+
+
+def test_native_generation_parts_deduplicate_only_complete_envelopes():
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    def put(text, stream, complete=True):
+        raw = json.dumps({'type': 'assistant_response', 'tool_name': None,
+                          'voice': 'eligible', 'content': text})
+        meta = {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {
+            'type': 'text', 'text': raw if complete else raw[:-2]}}, meta)
+        if complete:
+            parts.update({'sessionUpdate': 'response_completed'})
+        return meta, raw
+    put('First answer.', 100)
+    meta, raw = put('First answer.', 200, False)
+    assert parts.prefix() is None
+    parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': raw[-2:]}}, meta)
+    assert parts.prefix()['duplicate'] is True
+    parts.update({'sessionUpdate': 'response_completed'})
+    put('Useful addition.', 300)
+    assert json.loads(parts.finish())['content'] == 'First answer.\n\nUseful addition.'
+    assert parts.part_index == 3
+
+
+@pytest.mark.parametrize('metadata', [
+    {}, {'promptId': 'other', 'turnStartMs': 50, 'streamStartMs': 200},
+    {'promptId': 'prompt-exact', 'turnStartMs': 51, 'streamStartMs': 200},
+    {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': 99},
+    {'promptId': 'prompt-exact', 'turnStartMs': True, 'streamStartMs': 200},
+])
+def test_native_generation_parts_keep_exact_identity(metadata):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    update = {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text':
+        '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Answer."}'}}
+    parts.update(update, {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': 100})
+    parts.update({'sessionUpdate': 'response_completed'})
+    with pytest.raises(ValueError, match='identity|prompt or turn'):
+        parts.update(update, metadata)
+
+
+def test_native_generation_parts_do_not_erase_intervening_tool_narration():
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    def chunk(text, stream):
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text':
+            json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': text})}},
+            {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream})
+    chunk('First answer.', 100)
+    parts.update({'sessionUpdate': 'response_completed'})
+    chunk('I will check.', 200)
+    parts.update({'sessionUpdate': 'tool_call'})
+    chunk('First answer.', 200)
+    assert json.loads(parts.finish())['content'] == 'First answer.\n\nI will check.\n\nFirst answer.'
+
+
+def test_native_generation_completion_cannot_rebind_another_prompt():
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text':
+        '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Answer."}'}},
+        {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': 100})
+    with pytest.raises(ValueError, match='completion.*identity'):
+        parts.update({'sessionUpdate': 'response_completed'}, {'promptId': 'foreign'})
+
+
+@pytest.mark.parametrize('first_voice', ['eligible', 'skip'])
+@pytest.mark.parametrize('final_voice', ['eligible', 'skip'])
+@pytest.mark.parametrize('buffered', [False, True])
+def test_native_tools_retire_public_buffer_before_later_completed_generation(first_voice, final_voice, buffered):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    def chunk(text, voice, stream):
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text':
+            json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': voice, 'content': text})}},
+            {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream})
+    chunk('Same public text.', first_voice, 100)
+    parts.update({'sessionUpdate': 'response_completed'})
+    if buffered:
+        chunk('Intervening narration.', first_voice, 200)
+        parts.update({'sessionUpdate': 'response_completed'})
+    parts.update({'sessionUpdate': 'tool_call'})
+    parts.update({'sessionUpdate': 'response_completed'})
+    parts.update({'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': 'Private reasoning.'}})
+    parts.update({'sessionUpdate': 'interjected', 'content': {'type': 'text', 'text': 'Background evidence.'}})
+    parts.update({'sessionUpdate': 'tool_call'})
+    parts.update({'sessionUpdate': 'response_completed'})
+    chunk('Same public text.', final_voice, 300)
+    parts.update({'sessionUpdate': 'response_completed'})
+    payload = json.loads(parts.finish())
+    earlier = (['Same public text.'] + (['Intervening narration.'] if buffered else [])) if first_voice == 'eligible' else []
+    assert payload == {'type': 'assistant_response', 'tool_name': None, 'voice': final_voice,
+                       'content': '\n\n'.join([*earlier, 'Same public text.'])}
+
+
+@pytest.mark.parametrize('change', ['prompt', 'turn', 'stream', 'unfinished'])
+def test_retired_native_buffer_keeps_generation_identity_fences(change):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    raw = '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Accepted narration."}'
+    parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': raw}},
+                 {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': 100})
+    if change != 'unfinished':
+        parts.update({'sessionUpdate': 'response_completed'})
+    parts.update({'sessionUpdate': 'tool_call'})
+    with pytest.raises(ValueError, match='prompt or turn|before response completion'):
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': raw}},
+                     {'promptId': 'foreign' if change == 'prompt' else 'prompt-exact',
+                      'turnStartMs': 51 if change == 'turn' else 50,
+                      'streamStartMs': 99 if change == 'stream' else 200})
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+def test_native_tool_event_cannot_erase_declared_terminal_graph_envelope(voice):
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    parts = NativeConversationParts(graph, messaging_delivery_control(audio_eligible=True))
+    terminal = {'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'voice': voice, 'content': 'Consulting.'}
+    parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(terminal)}},
+                 {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': 100})
+    parts.update({'sessionUpdate': 'response_completed'})
+    parts.update({'sessionUpdate': 'tool_call'})
+    parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text':
+        '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Later optional text."}'}},
+        {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': 200})
+    assert json.loads(parts.finish()) == terminal
 from workers_projects_runtime.conversation_provider import (
     GLASSHIVE_MODELS,
     ChatCompletionRequest,
@@ -165,11 +358,11 @@ def test_conversation_schema_declares_final_work_and_async_receipt_boundary(
         }
         if with_delivery:
             transfer["voice"] = "eligible"
-        assert parse_conversation_output(json.dumps(transfer), graph, delivery) == {
-            "type": "tool_call",
-            "content": "",
-            "tool_name": "lc_transfer_to_specialist",
-        }
+        expected = {"type": "tool_call", "content": "", "tool_name": "lc_transfer_to_specialist"}
+        if with_delivery:
+            expected["delivery_disposition"] = {"version": 1, "audio": "eligible",
+                "required": True, "valid": True, "source": "model"}
+        assert parse_conversation_output(json.dumps(transfer), graph, delivery) == expected
 
 
 def test_audio_eligible_messaging_schema_requires_model_owned_voice_disposition():
@@ -251,6 +444,8 @@ def test_audio_eligible_messaging_schema_composes_with_graph_transfer_control():
         "type": "tool_call",
         "content": "",
         "tool_name": "lc_transfer_to_specialist",
+        "delivery_disposition": {"version": 1, "audio": "eligible",
+                                 "required": True, "valid": True, "source": "model"},
     }
     assert parse_conversation_output(
         json.dumps(
@@ -267,6 +462,8 @@ def test_audio_eligible_messaging_schema_composes_with_graph_transfer_control():
         "type": "tool_call",
         "content": "",
         "tool_name": "lc_transfer_to_specialist",
+        "delivery_disposition": {"version": 1, "audio": "skip",
+                                 "required": True, "valid": True, "source": "model"},
     }
 
 
@@ -354,7 +551,8 @@ def test_conversation_bundle_projects_audio_eligibility_as_structural_output_con
     }
 
 
-def test_non_streaming_graph_choice_returns_one_openai_tool_call(monkeypatch):
+@pytest.mark.parametrize("voice", [None, "eligible", "skip"])
+def test_non_streaming_graph_choice_returns_one_openai_tool_call(monkeypatch, voice):
     class RecordingStore:
         response_json = ""
 
@@ -377,14 +575,16 @@ def test_non_streaming_graph_choice_returns_one_openai_tool_call(monkeypatch):
     provider.store = RecordingStore()
     provider.service = SimpleNamespace(runtime=SimpleNamespace())
     payload = _payload()
+    payload.metadata.audio_eligible = voice is not None
     monkeypatch.setattr(
         provider,
         "_conversation_output",
-        lambda request_record, run: json.dumps(
+        lambda request_record, run, **_output_contract: json.dumps(
             {
                 "type": "tool_call",
                 "content": "",
                 "tool_name": "lc_transfer_to_specialist",
+                **({"voice": voice} if voice else {}),
             }
         ),
     )
@@ -416,6 +616,11 @@ def test_non_streaming_graph_choice_returns_one_openai_tool_call(monkeypatch):
             },
         }
     ]
+    if voice:
+        assert choice["message"]["provider_specific_fields"]["viventium"]["delivery_disposition"] == {
+            "version": 1, "audio": voice, "required": True, "valid": True, "source": "model"}
+    else:
+        assert "provider_specific_fields" not in choice["message"]
     assert json.loads(provider.store.response_json) == response
 
 
@@ -460,3 +665,76 @@ def test_duplicate_terminal_control_is_rejected_instead_of_last_field_winning():
         parse_conversation_output('{"type":"assistant_response","tool_name":null,"voice":"skip",'
                                   '"voice":"eligible","content":"Do not publish"}', None,
                                   messaging_delivery_control(audio_eligible=True))
+
+
+@pytest.mark.parametrize("voice", ["eligible", "skip"])
+def test_declared_transfer_public_content_has_model_owned_delivery(voice):
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    graph = graph_transfer_control(_payload().tools)
+    delivery = messaging_delivery_control(audio_eligible=True)
+    text = 'I will check the current source before recommending a change.'
+    envelope = json.dumps({"type":"tool_call", "tool_name":"lc_transfer_to_specialist",
+                           "voice":voice, "content":text})
+    result = parse_conversation_output(envelope, graph, delivery)
+    assert result["content"] == text and result["tool_name"] == "lc_transfer_to_specialist"
+    assert result["delivery_disposition"]["audio"] == voice
+    prefixes = [public_conversation_prefix(envelope[:end], graph, delivery)
+                for end in range(len(envelope)+1)]
+    if voice == "skip":
+        assert all(prefix is None for prefix in prefixes)
+    else:
+        assert any(prefix and prefix["text"] and not prefix["complete"] for prefix in prefixes)
+        assert prefixes[-1]["text"] == text
+        assert prefixes[-1]["delivery_disposition"] == result["delivery_disposition"]
+        assert all(text.startswith(prefix["text"]) for prefix in prefixes if prefix)
+
+
+@pytest.mark.parametrize("patch", [
+    {"tool_name":"lc_transfer_to_foreign"}, {"tool_name":None}, {"voice":"maybe"},
+    {"type":"unknown"}, {"extra":True},
+])
+def test_transfer_public_prefix_never_precedes_declared_control_validation(patch):
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    graph = graph_transfer_control(_payload().tools)
+    delivery = messaging_delivery_control(audio_eligible=True)
+    envelope = {"type":"tool_call", "tool_name":"lc_transfer_to_specialist",
+                "voice":"eligible", "content":"Do not publish."}
+    envelope.update(patch)
+    raw = json.dumps(envelope)
+    assert public_conversation_prefix(raw, graph, delivery) is None
+    with pytest.raises(ValueError): parse_conversation_output(raw, graph, delivery)
+
+
+def test_transfer_schema_describes_optional_truthful_public_content():
+    schema = conversation_output_schema(graph_transfer_control(_payload().tools),
+                                        messaging_delivery_control(audio_eligible=True))
+    assert "leave it empty when no update is useful" in schema["description"]
+    assert "use empty content" not in schema["description"]
+    assert "For any public content" in schema["description"]
+    assert "set voice=skip for its receiving-agent evidence" in schema["description"]
+    assert "not as public speech" in schema["description"]
+    assert list(schema["properties"]) == ["type", "tool_name", "voice", "content"]
+
+
+@pytest.mark.parametrize("with_graph", [False, True])
+def test_public_audio_schema_defers_to_surface_and_participant_role(with_graph):
+    graph = graph_transfer_control(_payload().tools) if with_graph else None
+    schema = conversation_output_schema(graph, messaging_delivery_control(audio_eligible=True))
+    description = schema["description"]
+    assert "follow the current surface and participant-role delivery instructions" in description
+    assert "In a live call, ordinary public content from the current speaking agent is voice=eligible" in description
+    assert "unless the user explicitly requests text-only or silent delivery" in description
+    assert "Where messaging audio is optional" in description
+    assert "set voice=skip when audio would reduce usefulness" in description
+    assert "set voice=skip for its receiving-agent evidence" in description
+    assert "For any public content, set voice=skip when optional audio" not in description
+    if with_graph:
+        assert description.endswith("Available transfers: lc_transfer_to_specialist: Transfer through the current graph.")
+        assert description.index("For any public content") < description.index("Available transfers:")
+    assert schema["properties"]["voice"] == {"type": "string", "enum": ["eligible", "skip"]}
+    assert "voice" in schema["required"]
+    # The model owns the choice; the schema/parser does not rewrite a valid skip to eligible.
+    result = parse_conversation_output(json.dumps({"type": "assistant_response", "tool_name": None,
+        "voice": "skip", "content": "Requested silent text."}), graph,
+        messaging_delivery_control(audio_eligible=True))
+    assert result["delivery_disposition"]["audio"] == "skip"

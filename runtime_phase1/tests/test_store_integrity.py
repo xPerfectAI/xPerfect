@@ -1206,3 +1206,121 @@ def test_store_connection_context_closes_file_descriptors_without_gc(tmp_path):
         if garbage_collection_was_enabled:
             gc.enable()
         gc.collect()
+
+
+@pytest.mark.parametrize("legacy_not_null", [False, True])
+def test_provider_run_lookup_index_survives_reopen_and_legacy_table_rebuild(tmp_path, legacy_not_null):
+    db_path = tmp_path / "runtime.db"
+    store = Store(str(db_path))
+    project = _project(store, "provider run lookup")
+    worker = store.create_worker(
+        project_id=project["project_id"], owner_id="owner", name="Conversation worker",
+        role="conversation-agent", profile="codex-cli", backend="", runtime="codex-cli", model="stub",
+    )
+    session = store.upsert_provider_session(
+        tenant_id="local", owner_id="owner", conversation_id="conversation-a", agent_id="agent-a",
+        model_id="synthetic", project_id=project["project_id"], worker_id=worker["worker_id"],
+        workspace_dir=str(tmp_path), access_mode="workspace",
+    )
+    run = store.create_run(worker["worker_id"], project["project_id"], "Preserve the admitted turn.", state="queued")
+    request, _ = store.create_provider_request(
+        tenant_id="local", owner_id="owner", session_id=session["session_id"], idempotency_key="retained",
+        message_id="message-a", stream_id="stream-a", requested_history_count=0,
+        replay_decision={"provider_session_mode": "stateless"},
+        admitted_instruction="Retain exact synthetic context.", response_timeout_s=30,
+        response_deadline_at="2026-01-01T00:00:30+00:00",
+    )
+    store.update_provider_request(request["request_id"], run_id=run["run_id"])
+    retained = store.get_provider_request_for_run(run["run_id"])
+    store.close()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_provider_requests_run")
+        if legacy_not_null:
+            schema = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='provider_requests'").fetchone()[0]
+            assert "run_id TEXT," in schema
+            schema = schema.replace("CREATE TABLE provider_requests", "CREATE TABLE provider_requests_legacy", 1)
+            schema = schema.replace("run_id TEXT,", "run_id TEXT NOT NULL,", 1)
+            conn.execute(schema)
+            conn.execute("INSERT INTO provider_requests_legacy SELECT * FROM provider_requests")
+            conn.execute("DROP TABLE provider_requests")
+            conn.execute("ALTER TABLE provider_requests_legacy RENAME TO provider_requests")
+    for _ in range(2):
+        reopened = Store(str(db_path))
+        try:
+            assert reopened.get_provider_request_for_run(run["run_id"]) == retained
+            with reopened._connect() as conn:
+                indexes = {row["name"]: row for row in conn.execute("PRAGMA index_list(provider_requests)")}
+                assert "idx_provider_requests_run" in indexes
+                assert indexes["idx_provider_requests_run"]["unique"] == 0
+                assert [row["name"] for row in conn.execute("PRAGMA index_info(idx_provider_requests_run)")] == ["run_id"]
+                plan = [row["detail"] for row in conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT * FROM provider_requests WHERE run_id = ? LIMIT 1", (run["run_id"],)
+                )]
+                assert any("SEARCH provider_requests USING INDEX idx_provider_requests_run (run_id=?)" in row for row in plan)
+                assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+                assert conn.execute("PRAGMA table_info(provider_requests)").fetchall()[4]["notnull"] == 0
+        finally:
+            reopened.close()
+
+
+def test_provider_run_lookup_preserves_duplicate_selection_fallback_and_fresh_stop_deadline(tmp_path):
+    store = Store(str(tmp_path / "runtime.db"))
+    try:
+        project = _project(store, "exact provider reads")
+        worker = store.create_worker(
+            project_id=project["project_id"], owner_id="owner", name="Conversation worker",
+            role="conversation-agent", profile="codex-cli", backend="", runtime="codex-cli", model="stub",
+        )
+        session = store.upsert_provider_session(
+            tenant_id="local", owner_id="owner", conversation_id="conversation-a", agent_id="agent-a",
+            model_id="synthetic", project_id=project["project_id"], worker_id=worker["worker_id"],
+            workspace_dir=str(tmp_path), access_mode="workspace",
+        )
+        primary = store.create_run(worker["worker_id"], project["project_id"], "Primary turn.", state="queued")
+        fallback = store.create_run(worker["worker_id"], project["project_id"], "Same turn fallback.", state="queued")
+        requests = []
+        for ordinal in range(2):
+            request, _ = store.create_provider_request(
+                tenant_id="local", owner_id="owner", session_id=session["session_id"],
+                idempotency_key=f"attempt-{ordinal}", message_id=f"message-{ordinal}", stream_id=f"stream-{ordinal}",
+                requested_history_count=0, replay_decision={"provider_session_mode": "stateless"},
+                admitted_instruction=f"Exact synthetic context {ordinal}.", response_timeout_s=30,
+                response_deadline_at="2026-01-01T00:00:30+00:00",
+            )
+            requests.append(store.update_provider_request(request["request_id"], run_id=primary["run_id"]))
+        # Existing LIMIT 1 selects the first row, not the latest timestamp or request ID.
+        store.update_provider_request(requests[0]["request_id"], created_at="2026-02-01T00:00:00Z")
+        store.update_provider_request(requests[1]["request_id"], created_at="2026-01-01T00:00:00Z")
+        for enabled in [False, True]:
+            with store._connect() as conn:
+                if enabled:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_provider_requests_run ON provider_requests(run_id)")
+                else:
+                    conn.execute("DROP INDEX IF EXISTS idx_provider_requests_run")
+            assert store.get_provider_request_for_run(primary["run_id"])["request_id"] == requests[0]["request_id"]
+            assert store.get_provider_request_for_run("absent-run") is None
+            assert store.get_provider_request_for_run("") is None
+            assert store.get_provider_request_for_run(fallback["run_id"]) is None
+        claimed = store.claim_provider_request_fallback(requests[0]["request_id"], expected_run_id=primary["run_id"])
+        assert claimed is not None
+        started = store.start_provider_request_fallback(
+            requests[0]["request_id"], expected_run_id=primary["run_id"], fallback_run_id=fallback["run_id"], session_id=session["session_id"],
+        )
+        assert started is not None
+        assert store.get_provider_request_for_run(primary["run_id"])["request_id"] == requests[1]["request_id"]
+        current = store.get_provider_request_for_run(fallback["run_id"])
+        assert current["fallback_from_run_id"] == primary["run_id"]
+        assert current["fallback_state"] == "started"
+        refreshed_deadline = "2026-01-01T00:00:45+00:00"
+        store.update_provider_request(requests[0]["request_id"], response_deadline_at=refreshed_deadline,
+                                      replay_decision_json=json.dumps({"provider_session_mode": "persistent"}))
+        current = store.get_provider_request_for_run(fallback["run_id"])
+        assert current["response_deadline_at"] == refreshed_deadline
+        assert json.loads(current["replay_decision_json"])["provider_session_mode"] == "persistent"
+        assert store.claim_provider_request_cancel(requests[0]["request_id"]) is not None
+        assert store.get_provider_request_for_run(fallback["run_id"])["state"] == "cancelled"
+        assert store.get_run(fallback["run_id"])["state"] == "cancelled"
+        assert store.claim_provider_request_fallback(requests[0]["request_id"], expected_run_id=fallback["run_id"]) is None
+        assert store.get_provider_request_for_run(primary["run_id"])["state"] == "queued"
+    finally:
+        store.close()

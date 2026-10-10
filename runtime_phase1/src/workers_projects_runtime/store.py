@@ -4397,6 +4397,10 @@ class Store:
                 "WHERE native_invocation_id <> ''"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_provider_requests_run "
+                "ON provider_requests(run_id)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_provider_requests_missing_response "
                 "ON provider_requests(created_at) "
                 "WHERE state = 'completed' AND response_json = ''"
@@ -5163,6 +5167,18 @@ class Store:
                 [*clean_states, bounded_limit],
             ).fetchall()
         return self._rows(rows)
+
+    def get_latest_provider_session_request(
+        self, session_id: str, *, tenant_id: str, owner_id: str,
+    ) -> dict[str, Any] | None:
+        """Read the newest admitted request without reconciling or starting work."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM provider_requests WHERE session_id = ? AND tenant_id = ? "
+                "AND owner_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (session_id, tenant_id, owner_id),
+            ).fetchone()
+        return self._row(row)
 
     def list_provider_session_requests_for_native_coverage(
         self,
@@ -7188,6 +7204,80 @@ class Store:
             str(item["name"])
             for item in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
+        # These dependencies are retained history, not disposable workspace metadata.
+        # Refuse before compute teardown; claim and finalize recheck this same boundary.
+        retained_worker_refs = {
+            "host_run_leases": ("worker_id",),
+            "lifecycle_operation_effects": ("worker_id",),
+            "capability_grant_revocations": ("worker_id",),
+            "delegations": ("worker_id",),
+            "allowed_ai_start_fences": ("worker_id",),
+            "worker_configurations": ("worker_id",),
+            "peer_grants": ("source_worker_id", "target_worker_id"),
+            "peer_messages": ("source_worker_id", "target_worker_id"),
+            "peer_native_sessions": ("worker_id",),
+        }
+        retained_run_refs = {
+            "run_attempts": ("run_id",),
+            "capacity_attempts": ("run_id",),
+            "work_trace_events": ("run_id",),
+            "callback_trace_events": ("run_id",),
+            "terminal_callback_reconciliations": ("run_id",),
+            "provider_liveness_events": ("run_id",),
+            "host_run_leases": ("run_id",),
+            "capability_grant_revocations": ("run_id",),
+            "allowed_ai_start_fences": ("run_id",),
+            "delegations": ("initial_run_id", "current_run_id"),
+            "provider_account_run_fences": ("run_id",),
+            "peer_native_sessions": ("run_id",),
+        }
+        for table, columns in retained_worker_refs.items():
+            if table not in tables:
+                continue
+            for column in columns:
+                if conn.execute(
+                    f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
+                    (worker_id,),
+                ).fetchone() is not None:
+                    return True
+        for table, columns in retained_run_refs.items():
+            if table not in tables:
+                continue
+            for column in columns:
+                if conn.execute(
+                    f"SELECT 1 FROM {table} WHERE {column} IN "
+                    "(SELECT run_id FROM runs WHERE worker_id = ?) LIMIT 1",
+                    (worker_id,),
+                ).fetchone() is not None:
+                    return True
+
+        # The finalizer deletes owned action uses and owned-session provider metadata.
+        # References owned by another worker/session must survive that cleanup.
+        if "run_action_uses" in tables and conn.execute(
+            """
+            SELECT 1 FROM run_action_uses
+            WHERE worker_id <> ? AND (
+                source_run_id IN (SELECT run_id FROM runs WHERE worker_id = ?)
+                OR new_run_id IN (SELECT run_id FROM runs WHERE worker_id = ?)
+            ) LIMIT 1
+            """,
+            (worker_id, worker_id, worker_id),
+        ).fetchone() is not None:
+            return True
+        if {"provider_sessions", "provider_requests"}.issubset(tables) and conn.execute(
+            """
+            SELECT 1 FROM provider_requests AS request
+            WHERE request.run_id IN (SELECT run_id FROM runs WHERE worker_id = ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM provider_sessions AS session
+                  WHERE session.session_id = request.session_id AND session.worker_id = ?
+              )
+            LIMIT 1
+            """,
+            (worker_id, worker_id),
+        ).fetchone() is not None:
+            return True
+
         if "provider_account_leases" in tables and conn.execute(
             """
             SELECT 1 FROM provider_account_leases
@@ -7372,7 +7462,7 @@ class Store:
             )
             if changed.rowcount != 1:
                 raise RuntimeError("Ephemeral workspace changed before its GC claim was recorded")
-        return worker
+        return {**worker, "state": "gc_claimed"}
 
     def release_ephemeral_workspace_gc_claim(self, worker_id: str, *, claim_token: str) -> bool:
         with self._connect() as conn:
@@ -10484,10 +10574,9 @@ class Store:
                               ) = 'stateless'
                         )
                   )
-                  AND EXISTS (
-                      SELECT 1 FROM runs AS sibling
-                      WHERE sibling.worker_id = workers.worker_id
-                        AND sibling.state = 'queued'
+                  AND workers.worker_id IN (
+                      SELECT sibling.worker_id FROM runs AS sibling
+                      WHERE sibling.state = 'queued'
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM runs AS paused
@@ -14370,7 +14459,16 @@ class Store:
         result_revision = int(callback["result_revision"] or 0)
         result_digest = str(callback["result_digest"] or "")
         if not callback_id.startswith("cb_terminal_"):
-            return result_revision == 0 and not result_digest
+            if result_revision != 0 or result_digest:
+                return False
+            if str(callback["event_type"] or "") not in {"run.needs_input", "run.blocked"}:
+                return True
+            run_id = str(callback["run_id"] or "")
+            run = conn.execute(
+                "SELECT * FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            return bool(run is not None and str(run["state"] or "") not in TERMINAL_RUN_STATES)
         if result_revision < 1 or not result_digest.startswith("sha256:"):
             return False
         run_id = str(callback["run_id"] or "")
@@ -22967,6 +23065,7 @@ class Store:
         expected_target_started_at: str = "",
         expected_session_fingerprint: str = "",
         replacement_run: dict[str, Any] | None = None,
+        file_manifest: list[dict[str, Any]] | None = None,
         action_use_id: str = "",
         action_executor_id: str = "",
         now: datetime | None = None,
@@ -23393,6 +23492,7 @@ class Store:
                     conn.execute("COMMIT")
                     return None
                 self._insert_run_row(conn, replacement_data)
+                self._accept_run_file_manifest(conn, worker, requested_replacement, file_manifest)
             operation_id = "op_" + uuid.uuid4().hex
             cursor = conn.execute(
                 """
@@ -25780,6 +25880,16 @@ class Store:
         )
         self._append_follow_up_origin_trace_conn(conn, data=data)
 
+    @staticmethod
+    def provider_run_id_for_request(request_id: str) -> str:
+        """Return the existing stable run identity for one provider request."""
+        clean_request_id = str(request_id or "").strip()
+        if not clean_request_id:
+            raise ValueError("Provider run attachment requires a request ID")
+        return "run_" + hashlib.sha256(
+            f"provider-request\n{clean_request_id}".encode("utf-8")
+        ).hexdigest()[:10]
+
     def create_and_attach_provider_run(
         self,
         *,
@@ -25793,12 +25903,7 @@ class Store:
         clean_request_id = str(request_id or "").strip()
         if not clean_request_id:
             raise ValueError("Provider run attachment requires a request ID")
-        run_id = (
-            "run_"
-            + hashlib.sha256(
-                f"provider-request\n{clean_request_id}".encode("utf-8")
-            ).hexdigest()[:10]
-        )
+        run_id = self.provider_run_id_for_request(clean_request_id)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             request = conn.execute(
@@ -25902,6 +26007,38 @@ class Store:
             conn.execute("COMMIT")
         return self._row(row) or data, created
 
+    def _accept_run_file_manifest(self, conn, worker, run_id, file_manifest):
+        """Pin selected immutable inputs in the existing queued-run transaction."""
+        if file_manifest is None:
+            return
+        accepted = [dict(item) for item in file_manifest]
+        row = conn.execute("SELECT manifest_json FROM workspace_file_run_inputs WHERE run_id = ?", (run_id,)).fetchone()
+        identity = lambda items: [(item.get("upload_id"), item.get("revision"), item.get("sha256"), item.get("size_bytes"),
+            item.get("name"), item.get("source_file_id"), item.get("input_kind"), item.get("media_group_index")) for item in items]
+        if row is not None:
+            if identity(json.loads(row["manifest_json"])) != identity(accepted):
+                raise ValueError("Active-work retry selected different run inputs")
+            return
+        if not accepted:
+            return
+        from .workspace_files import WorkspaceFiles, FileAdmissionError
+        from .workspace_file_drafts import draft_revision
+        adapter = getattr(self, "_workspace_files_adapter", None) or WorkspaceFiles(self)
+        run = conn.execute("SELECT state,started_at,runtime_invoked_at,active_attempt_id FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        if run is None or str(run["state"]) != "queued" or run["started_at"] or run["runtime_invoked_at"] or run["active_attempt_id"]:
+            raise ValueError("Run input admission is no longer pending")
+        for item in accepted:
+            upload = adapter._upload(conn, str(worker["tenant_id"]), str(worker["owner_id"]), str(item["upload_id"]))
+            if (upload["state"] != "ready" or draft_revision(upload) != item["revision"] or
+                (upload["sha256"], upload["size_bytes"], upload["name"]) != (item["sha256"], item["size_bytes"], item["name"])):
+                raise FileAdmissionError("Selected run input changed before admission", 409)
+            item["path"] = f"inputs/{run_id}/{item['upload_id']}/{item.get('relative_path') or item['name']}"
+        adapter.scope_manifest(dict(worker), accepted, connection=conn)
+        adapter.reserve_projection_manifest(conn, str(worker["tenant_id"]), str(worker["owner_id"]), accepted)
+        pin_file_manifest(conn, kind="run", reference_id=run_id, tenant_id=str(worker["tenant_id"]),
+            owner_id=str(worker["owner_id"]), manifest=accepted)
+        conn.execute("INSERT INTO workspace_file_run_inputs (run_id,manifest_json) VALUES (?,?)", (run_id, json.dumps(accepted, sort_keys=True)))
+
     def create_idempotent_run(
         self,
         *,
@@ -25912,6 +26049,7 @@ class Store:
         origin_trace: dict[str, Any] | None = None,
         continuation_contract: dict[str, Any] | None = None,
         continuation_context: dict[str, Any] | None = None,
+        file_manifest: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Return an existing reservation or atomically guard and create it."""
 
@@ -25922,7 +26060,6 @@ class Store:
                 "SELECT * FROM runs WHERE run_id = ?", (run_id,)
             ).fetchone()
             if existing is not None:
-                conn.execute("COMMIT")
                 if (
                     str(existing["worker_id"] or "") != str(worker_id)
                     or str(existing["project_id"] or "") != str(project_id)
@@ -25931,6 +26068,10 @@ class Store:
                     raise ValueError(
                         "GlassHive idempotency key was reused with a different instruction"
                     )
+                if file_manifest is not None:
+                    worker = self._require_worker_work_admission(conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone(), project_id=project_id)
+                    self._accept_run_file_manifest(conn, worker, run_id, file_manifest)
+                conn.execute("COMMIT")
                 return self._row(existing) or {}, False
             worker = self._require_worker_work_admission(
                 conn.execute(
@@ -25978,6 +26119,7 @@ class Store:
                 ),
             }
             self._insert_run_row(conn, data)
+            self._accept_run_file_manifest(conn, worker, run_id, file_manifest)
             conn.execute(
                 "UPDATE workers SET last_run_id = ?, updated_at = ? WHERE worker_id = ?",
                 (run_id, now, worker_id),
@@ -25999,6 +26141,7 @@ class Store:
         origin_trace: dict[str, Any] | None = None,
         continuation_contract: dict[str, Any] | None = None,
         continuation_context: dict[str, Any] | None = None,
+        file_manifest: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Replace one not-yet-started run without creating a live sibling.
 
@@ -26020,7 +26163,6 @@ class Store:
                 "SELECT * FROM runs WHERE run_id = ?", (clean_replacement,)
             ).fetchone()
             if existing is not None:
-                conn.execute("COMMIT")
                 if (
                     str(existing["worker_id"] or "") != str(worker_id)
                     or str(existing["project_id"] or "") != str(project_id)
@@ -26029,6 +26171,10 @@ class Store:
                     raise ValueError(
                         "GlassHive idempotency key was reused with a different instruction"
                     )
+                if file_manifest is not None:
+                    worker = self._require_worker_work_admission(conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone(), project_id=project_id)
+                    self._accept_run_file_manifest(conn, worker, clean_replacement, file_manifest)
+                conn.execute("COMMIT")
                 return self._row(existing), False
 
             worker = self._require_worker_work_admission(
@@ -26110,6 +26256,7 @@ class Store:
                 ),
             }
             self._insert_run_row(conn, data)
+            self._accept_run_file_manifest(conn, worker, clean_replacement, file_manifest)
             if transferable_preaccept:
                 transferred = conn.execute(
                     """

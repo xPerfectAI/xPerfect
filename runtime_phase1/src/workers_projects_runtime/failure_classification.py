@@ -830,7 +830,10 @@ def classify_runtime_error(
             diagnostic_summary=message,
             structured=True,
         )
-    if _looks_like_sandbox_lifecycle_failure(lowered):
+    if (
+        structured_failure_class != "runtime_dependency_missing"
+        and _looks_like_sandbox_lifecycle_failure(lowered)
+    ):
         return FailureClassification(
             failure_class="runtime_sandbox_unavailable",
             retryable=True,
@@ -844,7 +847,13 @@ def classify_runtime_error(
             ),
             diagnostic_summary=message,
         )
-    if required_version or "not installed" in lowered or "not on path" in lowered or _looks_like_runtime_dependency_or_version_failure(lowered):
+    if (
+        structured_failure_class == "runtime_dependency_missing"
+        or required_version
+        or "not installed" in lowered
+        or "not on path" in lowered
+        or _looks_like_runtime_dependency_or_version_failure(lowered)
+    ):
         binary_hint = f" (`{binary_label}`)" if binary_label else ""
         profile_hint = f" for `{profile}`" if profile else ""
         version_hint = ""
@@ -867,6 +876,7 @@ def classify_runtime_error(
                 "operator to change the host service runtime only when no configured recovery path is available."
             ),
             diagnostic_summary=message,
+            structured=structured_failure_class == "runtime_dependency_missing",
         )
     if "host-native workers are disabled" in lowered:
         return FailureClassification(

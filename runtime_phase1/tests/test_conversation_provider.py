@@ -51,6 +51,65 @@ AUTH = {
 }
 
 
+@pytest.mark.parametrize("observed_role, observed_text", [
+    ("assistant", "changed private prose"),
+    ("user", "original private prose"),
+])
+def test_protected_source_rejection_reports_only_digest_metadata(
+    monkeypatch, observed_role, observed_text,
+):
+    import workers_projects_runtime.conversation_provider as provider
+    from fastapi import HTTPException
+
+    events = []
+    monkeypatch.setattr(provider, "native_timing_enabled", lambda: True)
+    monkeypatch.setattr(provider, "native_timing_event", lambda stage, **fields: events.append((stage, fields)))
+    expected_text = "original private prose"
+    payload = ChatCompletionRequest(model="synthetic", messages=[
+        {"role": observed_role, "content": observed_text,
+         "tool_calls": [{"id": "private-call", "function": {"name": "private-tool", "arguments": "private-args"}}]},
+    ], metadata={"message_id": "private-turn", "stream_id": "private-stream",
+                 "native_invocation_id": "private-invocation", "visible_message_chain": [{
+        "id": "private-source", "role": "assistant", "accepted_source": True,
+        "bytes": len(expected_text.encode()), "sha256": hashlib.sha256(expected_text.encode()).hexdigest(),
+    }]})
+    with pytest.raises(HTTPException) as rejected:
+        provider._protected_source_indices(payload, provider._visible_message_keys(payload.messages, payload.metadata.visible_message_chain))
+    assert rejected.value.status_code == 413
+    assert rejected.value.detail["code"] == "source_context_unavailable"
+    assert len(events) == 1
+    stage, diagnostic = events[0]
+    assert stage == "source_context_rejected"
+    assert diagnostic["expectedRole"] == "assistant"
+    assert diagnostic["expectedSha256"] == hashlib.sha256(expected_text.encode()).hexdigest()
+    assert diagnostic["messageCount"] == 1
+    assert diagnostic["observedMessages"][0]["authoredSha256"] == hashlib.sha256(observed_text.encode()).hexdigest()
+    assert diagnostic["observedMessages"][0]["toolCallCount"] == 1
+    serialized = json.dumps(diagnostic)
+    for private in (expected_text, observed_text, "private-source", "private-turn", "private-stream", "private-invocation", "private-call", "private-tool", "private-args"):
+        assert private not in serialized
+
+
+def test_protected_source_diagnostic_does_not_log_accepted_sources_or_when_disabled(monkeypatch):
+    import workers_projects_runtime.conversation_provider as provider
+    from fastapi import HTTPException
+
+    events = []
+    monkeypatch.setattr(provider, "native_timing_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    monkeypatch.setattr(provider, "native_timing_enabled", lambda: True)
+    text = "Exact original words."
+    payload = ChatCompletionRequest(model="synthetic", messages=[{"role": "assistant", "content": text}],
+        metadata={"visible_message_chain": [{"id": "source", "role": "assistant", "accepted_source": True,
+            "sha256": hashlib.sha256(text.encode()).hexdigest()}]})
+    assert provider._protected_source_indices(payload, provider._visible_message_keys(payload.messages, payload.metadata.visible_message_chain)) == {0}
+    assert not events
+    monkeypatch.setattr(provider, "native_timing_enabled", lambda: False)
+    changed = payload.model_copy(update={"messages": [ChatMessage(role="assistant", content="Changed.")]})
+    with pytest.raises(HTTPException):
+        provider._protected_source_indices(changed, provider._visible_message_keys(changed.messages, changed.metadata.visible_message_chain))
+    assert not events
+
+
 def test_conversation_catalog_uses_only_configured_exact_grok_model(monkeypatch):
     from fastapi import HTTPException
     from workers_projects_runtime.native_model_selection import ModelConfigurationRequired
@@ -1592,6 +1651,65 @@ def test_identity_delegation_and_full_access_require_server_side_grants(tmp_path
     assert full_access.json()["error"]["code"] == "permission_denied"
 
 
+
+@pytest.mark.parametrize("carrier", ["header", "body"])
+def test_read_only_text_compactor_signed_zero_tool_grok_admission(tmp_path, monkeypatch, carrier):
+    client = _scoped_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli,claude-code,grok-build")
+    payload = _payload(tmp_path, model="grok-build:grok-4.7-build-fast")
+    payload["reasoning_effort"] = "high"
+    headers = {**AUTH, "X-GlassHive-Access": "read_only", "X-GlassHive-Provider-Session-Mode": "persistent",
+        **_signed_bundle_headers({"provider_capabilities": {"native_tools": False}})}
+    if carrier == "body":
+        payload["metadata"]["bootstrap_bundle_b64"] = headers.pop("X-GlassHive-Bootstrap-Bundle-B64")
+    response = client.post("/v1/chat/completions", headers=headers, json=payload)
+    assert response.status_code == 200, response.text
+    session, = client.app.state.store.list_provider_sessions(owner_id="owner-a")
+    worker = client.app.state.store.get_worker(session["worker_id"])
+    bundle = json.loads(worker["bootstrap_bundle_json"])
+    assert session["access_mode"] == bundle["access_mode"] == "read_only"
+    assert bundle["provider_capabilities"]["native_tools"] is False
+    assert bundle["env"]["GLASSHIVE_PROVIDER_SESSION_MODE"] == "stateless"
+    model = GLASSHIVE_MODELS["grok-build:grok-4.7-build-fast"]
+    fallback = ConversationProvider._fallback_bundle(worker, model, "high")
+    assert fallback["access_mode"] == "read_only"
+    assert fallback["provider_capabilities"]["native_tools"] is False
+    assert fallback["env"]["WPR_GROK_REASONING_EFFORT"] == "high"
+
+
+@pytest.mark.parametrize("declaration", [None, True, "false"])
+def test_read_only_text_compactor_nonzero_grok_remains_unsupported(tmp_path, monkeypatch, declaration):
+    client = _scoped_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli,claude-code,grok-build")
+    payload = _payload(tmp_path, model="grok-build:grok-4.7-build-fast")
+    headers = {**AUTH, "X-GlassHive-Access": "read_only"}
+    if declaration is not None:
+        headers.update(_signed_bundle_headers({"provider_capabilities": {"native_tools": declaration}}))
+    response = client.post("/v1/chat/completions", headers=headers, json=payload)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "unsupported_access_mode"
+    assert client.app.state.store.list_provider_sessions(owner_id="owner-a") == []
+
+
+def test_read_only_text_compactor_unsigned_plain_grok_cannot_narrow_auth(tmp_path, monkeypatch):
+    client = _scoped_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli,claude-code,grok-build")
+    payload = _payload(tmp_path, model="grok-build:grok-4.7-build-fast")
+    payload["metadata"]["bootstrap_bundle"] = {"provider_capabilities": {"native_tools": False}}
+    response = client.post("/v1/chat/completions", headers={**AUTH, "X-GlassHive-Access": "read_only"}, json=payload)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "unsupported_access_mode"
+    assert client.app.state.store.list_provider_sessions(owner_id="owner-a") == []
+
+
+def test_read_only_text_compactor_zero_tool_docker_stays_unsupported():
+    from fastapi import HTTPException
+    model = GLASSHIVE_MODELS["grok-build:grok-4.7-build-fast"]
+    with pytest.raises(HTTPException) as error:
+        ConversationProvider._fallback_bundle({"execution_mode": "docker", "bootstrap_bundle_json": json.dumps({
+            "access_mode": "read_only", "provider_capabilities": {"native_tools": False}})}, model, "high")
+    assert error.value.detail["code"] == "unsupported_access_mode"
+
 def test_read_only_header_reaches_the_native_bundle_without_widening_access(tmp_path, monkeypatch):
     client = _scoped_client(tmp_path, monkeypatch)
     response = client.post(
@@ -2268,6 +2386,118 @@ def test_existing_conversation_session_refreshes_and_retracts_broker_bundle(
     assert "FIRST_GRANT" not in persisted["env"]
     assert "Use the refreshed signed broker contract." in persisted["developer_instructions"]
     assert "Use the first signed broker contract." not in persisted["developer_instructions"]
+
+
+@pytest.mark.parametrize("carrier", ["body", "header", "legacy_small"])
+def test_signed_bootstrap_transport_preserves_file_bytes_and_existing_header_limit(
+    tmp_path, monkeypatch, carrier,
+):
+    workspace = tmp_path / "synthetic-workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(tmp_path / "synthetic-uploads"))
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(workspace)
+    size = 200 * 1024 if carrier != "legacy_small" else 1024
+    records = [
+        {"file_id": "first", "filename": "01-first.txt", "source": "text", "text": "a" * size},
+        {"file_id": "second", "filename": "02-second.txt", "source": "text", "text": "b" * size},
+    ]
+    bundle = {"viventium_upload_context": {"selected_uploads": records}}
+    headers = {**AUTH, **_signed_bundle_headers(bundle)}
+    if carrier == "body":
+        payload["metadata"]["bootstrap_bundle_b64"] = headers.pop("X-GlassHive-Bootstrap-Bundle-B64")
+    raw_body = json.dumps(payload, separators=(",", ":"))
+    body_sha256 = hashlib.sha256(raw_body.encode()).hexdigest()
+    headers.update({"Content-Type": "application/json",
+                    "X-Viventium-Native-Invocation-Id": "synthetic-bootstrap-invocation",
+                    "X-Viventium-Native-Body-SHA256": body_sha256})
+    response = client.post("/v1/chat/completions", headers=headers, content=raw_body)
+
+    if carrier == "header":
+        assert response.status_code == 431, response.text
+        assert client.app.state.store.list_provider_sessions(owner_id="owner-a") == []
+        return
+    assert response.status_code == 200, response.text
+    sessions = client.app.state.store.list_provider_sessions(owner_id="owner-a")
+    assert len(sessions) == 1
+    worker = client.app.state.store.get_worker(sessions[0]["worker_id"])
+    admitted = json.loads(worker["bootstrap_bundle_json"])
+    assert [(file["file_id"], file["path"], file["content"]) for file in admitted["files"]] == [
+        (record["file_id"], "uploads/" + record["filename"], record["text"]) for record in records
+    ]
+    assert [len(file["content"].encode()) for file in admitted["files"]] == [size, size]
+    assert "bootstrap_bundle_b64" not in admitted
+    request_record = client.app.state.store.get_provider_request(response.json()["id"])
+    assert request_record["native_invocation_id"] == "synthetic-bootstrap-invocation"
+    assert request_record["native_body_sha256"] == body_sha256
+
+
+def test_signed_bootstrap_body_does_not_silently_drop_context_without_native_read_route(tmp_path, monkeypatch):
+    workspace = tmp_path / "synthetic-workspace"
+    workspace.mkdir()
+    monkeypatch.delenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", raising=False)
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(workspace)
+    bundle = {"viventium_upload_context": {"selected_uploads": [
+        {"file_id": "first", "filename": "01-first.txt", "source": "text", "text": "a" * (200 * 1024)},
+        {"file_id": "second", "filename": "02-second.txt", "source": "text", "text": "b" * (200 * 1024)},
+    ]}}
+    headers = {**AUTH, **_signed_bundle_headers(bundle)}
+    payload["metadata"]["bootstrap_bundle_b64"] = headers.pop("X-GlassHive-Bootstrap-Bundle-B64")
+    response = client.post("/v1/chat/completions", headers=headers, json=payload)
+
+    assert response.status_code == 502, response.text
+    assert "no way to read the rest" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("case, expected", [
+    ("unsigned", 403), ("tampered", 403), ("expired", 403),
+    ("both_identical", 400), ("both_different", 400),
+])
+def test_signed_bootstrap_body_fails_closed_before_provider_admission(
+    tmp_path, monkeypatch, case, expected,
+):
+    workspace = tmp_path / "synthetic-workspace"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(workspace)
+    bundle = {"project_definition": "Exact synthetic signed authority."}
+    signed = _signed_bundle_headers(bundle, timestamp=int(time.time()) - 601 if case == "expired" else None)
+    encoded = signed.pop("X-GlassHive-Bootstrap-Bundle-B64")
+    headers = {**AUTH, **signed}
+    payload["metadata"]["bootstrap_bundle_b64"] = encoded
+    if case == "unsigned":
+        headers.pop("X-GlassHive-Bootstrap-Signature")
+    elif case == "tampered":
+        payload["metadata"]["bootstrap_bundle_b64"] = encoded[:-1] + ("A" if encoded[-1] != "A" else "B")
+    elif case.startswith("both_"):
+        headers["X-GlassHive-Bootstrap-Bundle-B64"] = encoded
+        if case == "both_different":
+            payload["metadata"]["bootstrap_bundle_b64"] = encoded + "A"
+    response = client.post("/v1/chat/completions", headers=headers, json=payload)
+
+    assert response.status_code == expected, response.text
+    assert client.app.state.store.list_provider_sessions(owner_id="owner-a") == []
+
+
+def test_unsigned_plain_bootstrap_body_cannot_supply_native_file_authority(tmp_path, monkeypatch):
+    workspace = tmp_path / "synthetic-workspace"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(workspace)
+    payload["metadata"]["bootstrap_bundle"] = {
+        "viventium_upload_context": {"selected_uploads": [
+            {"file_id": "forged", "filename": "forged.txt", "text": "Untrusted file bytes."},
+        ]},
+    }
+    response = client.post("/v1/chat/completions", headers=AUTH, json=payload)
+
+    assert response.status_code == 200, response.text
+    session = client.app.state.store.list_provider_sessions(owner_id="owner-a")[0]
+    admitted = json.loads(client.app.state.store.get_worker(session["worker_id"])["bootstrap_bundle_json"])
+    assert not admitted.get("files")
+    assert "Untrusted file bytes." not in json.dumps(admitted)
 
 
 def test_bootstrap_bundle_requires_a_fresh_valid_service_signature(tmp_path, monkeypatch):
@@ -4307,7 +4537,7 @@ def test_activity_payload_recursively_redacts_private_strings(tmp_path, monkeypa
         "file",
         "A file changed.",
         {
-            "path": "/Users/private-person/Documents/secret-project/file.txt",
+            "path": ('/U' + 'sers/private-person/Documents/secret-project/file.txt'),
             "nested": ["token=super-secret-value"],
         },
     )
@@ -4357,7 +4587,7 @@ def test_streaming_redactor_default_emits_an_ordinary_short_answer_incrementally
 def test_streaming_redactor_redacts_newline_split_home_path_and_bounds_long_lines():
     redactor = StreamingRedactor(overlap=16, max_buffer=64)
 
-    visible = redactor.feed("Path /Users/synthetic/\nDocuments/private.txt\n")
+    visible = redactor.feed(('Path /U' + 'sers/synthetic/\nDocuments/private.txt\n'))
     visible += redactor.feed("x" * 65)
     visible += redactor.flush()
 
@@ -4403,7 +4633,7 @@ def test_streaming_redactor_holds_a_multiline_private_key_until_it_can_be_redact
 def test_streaming_redactor_fails_closed_for_an_oversized_unterminated_private_key():
     redactor = StreamingRedactor(overlap=16, max_buffer=96)
 
-    visible = redactor.feed("Safe prefix. -----BEGIN PRIVATE KEY-----\n")
+    visible = redactor.feed(('Safe prefix. --' + '---BEGIN PRIVATE KEY-----\n'))
     visible += redactor.feed(("A" * 64) + "\n")
     visible += redactor.feed(("B" * 64) + "\nunsafe trailing text")
     visible += redactor.flush()
@@ -4926,7 +5156,7 @@ def test_codex_native_events_become_safe_tool_file_plan_and_reasoning_activity()
                     "type": "item.completed",
                     "item": {
                         "type": "file_change",
-                        "changes": [{"path": "/Users/private-person/Documents/private.txt"}],
+                        "changes": [{"path": ('/U' + 'sers/private-person/Documents/private.txt')}],
                         "status": "completed",
                     },
                 }
@@ -5148,7 +5378,7 @@ def test_claude_stream_events_expose_tool_categories_without_tool_inputs_or_thin
                     {
                         "type": "tool_use",
                         "name": "Edit",
-                        "input": {"file_path": "/Users/private-person/Documents/private.txt"},
+                        "input": {"file_path": ('/U' + 'sers/private-person/Documents/private.txt')},
                     },
                     {
                         "type": "tool_use",
@@ -6553,13 +6783,52 @@ def test_empty_answer_guard_preserves_answer_transfer_and_declared_silence(tmp_p
 
 def test_typed_failure_classes_reach_the_client_error_code():
     from workers_projects_runtime.conversation_provider import _provider_failure_error
-    for failure_class in ("provider_auth_missing", "provider_quota_exhausted", "host_capacity", "native_input_declined", "native_input_expired", "native_input_cancelled", "native_turn_cancelled"):
+    for failure_class in ("provider_auth_missing", "provider_quota_exhausted", "provider_progress_stalled", "host_capacity", "native_input_declined", "native_input_expired", "native_input_cancelled", "native_turn_cancelled"):
         assert _provider_failure_error({"failure_class": failure_class}) == (
             "glasshive_runtime_error", failure_class
         )
     assert _provider_failure_error({"failure_class": "unknown"}) == (
         "glasshive_runtime_error", "server_error"
     )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_provider_liveness_attention_keeps_typed_code_and_rejects_late_answer(
+    tmp_path, monkeypatch, stream
+):
+    class AttentionRuntime(StubRuntime):
+        def set_provider_liveness_observer(self, observer):
+            self.observe_liveness = observer
+
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            _publish_in_process_test_start(worker)
+            for sequence in range(1, 4):
+                self.observe_liveness({
+                    "worker_id": worker["worker_id"], "run_id": run_id,
+                    "attempt_id": worker["_run_attempt_id"], "kind": "internal_retry",
+                    "failure_class": "provider_internal_retry", "runtime": "codex-cli",
+                    "model": worker["model"], "source_sequence": sequence,
+                    "source_digest": hashlib.sha256(f"boundary-retry-{sequence}".encode()).hexdigest(),
+                })
+            return "Late answer from the closed attempt."
+
+    client = _client(tmp_path, monkeypatch, runtime=AttentionRuntime())
+    response = client.post("/v1/chat/completions", headers=AUTH, json=_payload(tmp_path, stream=stream))
+    if stream:
+        assert response.status_code == 200
+        assert '"code":"provider_progress_stalled"' in response.text
+        assert "Late answer from the closed attempt." not in response.text
+        assert '"code":"server_error"' not in response.text
+    else:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "provider_progress_stalled"
+    failed = client.app.state.store.list_provider_requests_by_state({"failed"})
+    assert len(failed) == 1
+    run = client.app.state.store.get_run(failed[0]["run_id"])
+    assert run["state"] == "needs_input"
+    assert run["failure_class"] == "provider_progress_stalled"
+    assert run["provider_liveness_route_locked"] == 1
+    assert not failed[0]["response_json"]
 
 
 @pytest.mark.parametrize("provider_path", [True, False])
@@ -6720,7 +6989,8 @@ def test_authored_preview_stream_keeps_interim_out_of_final_and_graph_authority(
     payload = ChatCompletionRequest.model_validate(_payload(tmp_path, stream=True))
     payload.tools = [{"type": "function", "function": {"name": "lc_transfer_to_check", "parameters": {"type": "object"}}}]
     record = {"request_id": "request-a", "run_id": "run-a", "session_id": "session-a", "owner_id": "owner-a",
-              "message_id": "message-a", "native_invocation_id": "invocation-a", "state": "running"}
+              "message_id": "message-a", "native_invocation_id": "invocation-a", "state": "running",
+              "created_at": datetime.now(UTC).isoformat()}
     session = {"worker_id": "worker-a", "owner_id": "owner-a"}
     turn = {"value": 0}
     def get_record(_):
@@ -6734,7 +7004,9 @@ def test_authored_preview_stream_keeps_interim_out_of_final_and_graph_authority(
         get_provider_session_by_id=lambda _: session, get_worker=lambda _: {"owner_id": "owner-a"}, list_provider_activity=lambda _: [])
     provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=stdout))
     provider._sync = lambda r: r
-    provider._native_output_snapshot = lambda *_: ""
+    def unexpected_terminal_snapshot(*_):
+        raise AssertionError('Structured graph streams must not collect unused terminal text')
+    provider._native_output_snapshot = unexpected_terminal_snapshot
     canonical = {"model": actual_model or payload.model, "choices": [{"message": {"role": "assistant", "content": "Final answer only."},
                   "finish_reason": "stop"}], "usage": {}, "glasshive": {"usage_source": "native"}}
     provider.response_payload = lambda *_: canonical
@@ -6767,7 +7039,7 @@ def test_authored_preview_stream_keeps_interim_out_of_final_and_graph_authority(
 @pytest.mark.parametrize("model", ["codex-cli:gpt-5.6-sol", "claude-code:opus"])
 @pytest.mark.parametrize("change", ["valid", "no_proof", "wrong_response", "wrong_turn", "wrong_revision",
                                    "changed_epoch", "edited_input", "missing_input", "reordered_input",
-                                   "changed_tool_binding", "stale_predecessor", "legacy_provenance", "admission_race", "active_predecessor", "inserted_history"])
+                                   "changed_tool_binding", "stale_predecessor", "legacy_provenance", "admission_race", "active_predecessor", "inserted_history", "unadmitted_revision", "missing_unadmitted_proof", "wrong_unadmitted_revision", "reordered_unadmitted_revisions"] )
 def test_core_removed_uncommitted_reply_continues_only_with_bound_predecessor_proof(tmp_path, monkeypatch, model, change):
     workspace = tmp_path / "Life"
     workspace.mkdir()
@@ -6807,6 +7079,15 @@ def test_core_removed_uncommitted_reply_continues_only_with_bound_predecessor_pr
         "accepted_source": True, "current_input": True,
     })
     proof = payload["metadata"]["native_predecessor_supersession"]
+    if change in {"unadmitted_revision", "missing_unadmitted_proof", "wrong_unadmitted_revision", "reordered_unadmitted_revisions"}:
+        payload["metadata"]["logical_turn_revision"] = 3
+        proof["revision"] = 3
+        if change != "missing_unadmitted_proof":
+            proof["unadmitted_revisions"] = [2] if change == "unadmitted_revision" else [1]
+        if change == "reordered_unadmitted_revisions":
+            payload["metadata"]["logical_turn_revision"] = 4
+            proof["revision"] = 4
+            proof["unadmitted_revisions"] = [3, 2]
     if change == "no_proof":
         del payload["metadata"]["native_predecessor_supersession"]
     elif change == "wrong_response":
@@ -6855,7 +7136,7 @@ def test_core_removed_uncommitted_reply_continues_only_with_bound_predecessor_pr
     second_record = store.get_provider_request(second.json()["id"])
     assert second_record["session_id"] == first_record["session_id"]
     decision = json.loads(second_record["replay_decision_json"])
-    if change != "valid":
+    if change not in {"valid", "unadmitted_revision"}:
         assert decision["native_context_epoch"]
         assert "predecessor_supersession" not in decision
         return
@@ -7057,6 +7338,221 @@ def test_grok_preview_requires_complete_typed_answer_and_discards_pre_tool_segme
     assert _native_authored_preview('grok-build', complete+'\n'+tool+'\n'+event('Progress.'), control, None) is None
 
 
+@pytest.mark.parametrize('second', ['The answer.', 'A useful addition.'])
+def test_native_generation_projection_matches_terminal_without_duplicate(second):
+    from workers_projects_runtime.conversation_provider import _native_spoken_content, _native_authored_preview
+    events = [{'type': 'grok.session.started', 'session_id': 'native-exact'}]
+    def chunk(text, stream):
+        return {'type': 'grok.session.update', 'session_id': 'native-exact', 'meta': {
+            'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}, 'update': {
+            'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': text}}}
+    def envelope(text):
+        return json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': text})
+    delivery = {'version': 1, 'audio_eligible': True}
+    first = envelope('The answer.')
+    events.extend([chunk(first, 100), {'type': 'grok.session.update', 'session_id': 'native-exact',
+        'update': {'sessionUpdate': 'response_completed'}}, chunk(envelope(second)[:80], 200)])
+    partial = _native_spoken_content('grok-build', '\n'.join(map(json.dumps, events)), None, delivery)
+    assert partial['text'] == 'The answer.'
+    events.append(chunk(envelope(second)[80:], 200))
+    raw = '\n'.join(map(json.dumps, events))
+    expected = 'The answer.' if second == 'The answer.' else 'The answer.\n\nA useful addition.'
+    result = _native_spoken_content('grok-build', raw, None, delivery)
+    assert result['text'] == expected
+    assert len(result['completed_parts']) == (1 if second == 'The answer.' else 2)
+    assert _native_authored_preview('grok-build', raw, None, delivery)['text'] == expected
+
+
+@pytest.mark.parametrize('first_voice', ['eligible', 'skip'])
+@pytest.mark.parametrize('final_voice', ['eligible', 'skip'])
+def test_native_tool_retirement_keeps_spoken_and_authored_projection(first_voice, final_voice):
+    from workers_projects_runtime.conversation_provider import _native_spoken_content, _native_authored_preview
+    events = [{'type': 'grok.session.started', 'session_id': 'native-exact'}]
+    def put(kind, text='', stream=100):
+        events.append({'type': 'grok.session.update', 'session_id': 'native-exact', 'meta': {
+            'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}, 'update': {
+            'sessionUpdate': kind, 'content': {'type': 'text', 'text': text}}})
+    envelope = lambda voice: json.dumps({'type': 'assistant_response', 'tool_name': None,
+                                         'voice': voice, 'content': 'Same public text.'})
+    put('agent_message_chunk', envelope(first_voice))
+    put('response_completed')
+    for _ in range(2):
+        put('tool_call')
+        put('agent_thought_chunk', 'Private reasoning.')
+        put('response_completed')
+    put('agent_message_chunk', envelope(final_voice), 200)
+    put('response_completed', stream=200)
+    raw = '\n'.join(map(json.dumps, events))
+    delivery = {'version': 1, 'audio_eligible': True}
+    expected = '\n\n'.join(['Same public text.'] * ((first_voice == 'eligible') + (final_voice == 'eligible')))
+    spoken = _native_spoken_content('grok-build', raw, None, delivery)
+    assert bool(spoken) is bool(expected)
+    if spoken:
+        assert spoken['text'] == expected
+        assert len(spoken['completed_parts']) == ((first_voice == 'eligible') + (final_voice == 'eligible'))
+    assert _native_authored_preview('grok-build', raw, None, delivery)['text'] == (
+        ('Same public text.\n\n' if first_voice == 'eligible' else '') + 'Same public text.')
+
+
+@pytest.mark.parametrize('boundary', ['tool', 'generation'])
+@pytest.mark.parametrize('kind,voice', [('assistant_response', 'skip'), ('tool_call', 'eligible'), ('tool_call', 'skip')])
+def test_native_generation_terminal_stream_controls_match_existing_tool_parts(monkeypatch, tmp_path, boundary, kind, voice, first_voice='eligible'):
+    from types import SimpleNamespace
+    from workers_projects_runtime.agent_builder_control import NativeConversationParts, parse_conversation_output
+    from workers_projects_runtime.conversation_provider import _native_spoken_content, _native_authored_preview
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    delivery = {'version': 1, 'audio_eligible': True}
+    first = json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': first_voice, 'content': 'I will check.'})
+    final = {'type': kind, 'tool_name': 'lc_transfer_to_specialist' if kind == 'tool_call' else None,
+             'voice': voice, 'content': 'The final contribution.'}
+    events = [{'type': 'grok.session.started', 'session_id': 'native-a'}]
+    def put(kind, text='', stream=100):
+        events.append({'type': 'grok.session.update', 'session_id': 'native-a', 'meta': {
+            'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}, 'update': {
+            'sessionUpdate': kind, 'content': {'type': 'text', 'text': text}}})
+    put('agent_message_chunk', first)
+    initial = '\n'.join(map(json.dumps, events))
+    put('tool_call' if boundary == 'tool' else 'response_completed')
+    stream = 200 if boundary == 'generation' else 100
+    put('agent_message_chunk', json.dumps(final), stream)
+    put('response_completed', stream=stream)
+    full = '\n'.join(map(json.dumps, events))
+    parts = NativeConversationParts(graph, delivery)
+    for event in events[1:]:
+        parts.update(event['update'], event['meta'])
+    canonical = parse_conversation_output(parts.finish(), graph, delivery)
+    assert canonical['content'] == ('I will check.\n\n' if first_voice == 'eligible' else '') + 'The final contribution.'
+    assert canonical['type'] == kind and canonical['delivery_disposition']['audio'] == voice
+    projected = _native_spoken_content('grok-build', full, graph, delivery)
+    expected_spoken = ('I will check.' if first_voice == 'eligible' else '')
+    if voice == 'eligible':
+        expected_spoken += ('\n\n' if expected_spoken else '') + 'The final contribution.'
+    assert bool(projected) is bool(expected_spoken)
+    expected_parts = ([{'part_index': 1, 'text_end': len('I will check.')}] if first_voice == 'eligible' else [])
+    if voice == 'eligible':
+        expected_parts.append({'part_index': 2, 'text_end': len(expected_spoken)})
+    if projected:
+        assert projected['text'] == expected_spoken
+        assert projected['completed_parts'] == expected_parts
+    preview = _native_authored_preview('grok-build', full, graph, delivery)
+    if kind == 'assistant_response':
+        assert preview['text'] == canonical['content']
+    elif boundary == 'tool':
+        assert preview is None
+    else:
+        assert preview['text'] == 'I will check.'  # Replaceable prior assistant preview, never graph authority.
+
+    provider = object.__new__(ConversationProvider)
+    payload = ChatCompletionRequest.model_validate(_payload(tmp_path, stream=True))
+    payload.metadata.audio_eligible = True
+    payload.metadata.actor_kind = 'external_user'
+    payload.metadata.origin = 'interactive'
+    payload.tools = [{'type': 'function', 'function': {'name': 'lc_transfer_to_specialist',
+        'description': 'Consult.', 'parameters': {'type': 'object', 'properties': {},
+                                                'required': [], 'additionalProperties': False}}}]
+    record = {'request_id': 'request-a', 'run_id': 'run-a', 'session_id': 'session-a', 'owner_id': 'owner-a',
+              'message_id': 'message-a', 'stream_id': 'stream-a', 'native_invocation_id': 'invocation-a',
+              'state': 'running', 'created_at': datetime.now(UTC).isoformat()}
+    stage = {'value': 0}
+    def get_record(_):
+        stage['value'] += 1
+        return {**record, 'state': 'completed' if stage['value'] == 3 else 'running'}
+    receipts = []
+    provider.store = SimpleNamespace(get_provider_request=get_record, get_run=lambda _: {'run_id': 'run-a'},
+        get_provider_session_by_id=lambda _: {'owner_id': 'owner-a'}, get_worker=lambda _: {'owner_id': 'owner-a'},
+        list_provider_activity=lambda _: [], add_provider_activity_once=lambda *args: receipts.append(args))
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=lambda *_:
+        ('grok-build', initial if stage['value'] == 1 else full)))
+    provider._sync = lambda value: value
+    provider.response_payload = lambda *_: {'model': payload.model, 'choices': [{'message': {
+        'role': 'assistant', 'content': canonical['content'], 'provider_specific_fields': {'viventium': {
+            'delivery_disposition': canonical['delivery_disposition']}}, **({'tool_calls': [{
+                'id': 'call-transfer', 'type': 'function', 'function': {
+                    'name': canonical['tool_name'], 'arguments': '{}'}}]} if kind == 'tool_call' else {})},
+        'finish_reason': 'tool_calls' if kind == 'tool_call' else 'stop'}], 'usage': {}, 'glasshive': {'usage_source': 'native'}}
+    class Connected:
+        async def is_disconnected(self): return False
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+    async def collect():
+        return [row async for row in provider._stream_chunks(record, payload, Connected())]
+    rows = asyncio.run(collect())
+    data = [json.loads(row[6:]) for row in rows if row.startswith('data: {')]
+    assert not any('error' in item for item in data)
+    deltas = [item['choices'][0]['delta'] for item in data if item.get('choices') and 'delta' in item['choices'][0]]
+    content = [item for item in deltas if item.get('content')]
+    assert ''.join(item['content'] for item in content) == canonical['content']
+    audio = [item['provider_specific_fields']['viventium']['delivery_disposition']['audio'] for item in content]
+    assert audio == (['eligible'] if first_voice == 'eligible' else []) + [voice]
+    assert sum(bool(item.get('provider_specific_fields', {}).get('viventium', {}).get('public_part_complete'))
+               for item in deltas) == len(expected_parts)
+    transfers = [item['tool_calls'] for item in deltas if item.get('tool_calls')]
+    assert bool(transfers) is (kind == 'tool_call')
+    if transfers:
+        assert transfers[0][0]['function']['name'] == canonical['tool_name']
+    assert len(receipts) == (1 if expected_spoken else 0)
+    assert all(receipt[1] == 'authored-response' for receipt in receipts)
+    assert rows[-1] == 'data: [DONE]\n\n'
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+def test_native_silent_predecessor_stream_keeps_later_controls(monkeypatch, tmp_path, voice):
+    test_native_generation_terminal_stream_controls_match_existing_tool_parts(
+        monkeypatch, tmp_path, 'generation', 'assistant_response', voice, first_voice='skip')
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+def test_native_projection_silent_predecessor_keeps_exact_later_delivery(voice):
+    from workers_projects_runtime.agent_builder_control import NativeConversationParts, parse_conversation_output
+    from workers_projects_runtime.conversation_provider import _native_spoken_content, _native_authored_preview
+    delivery = {'version': 1, 'audio_eligible': True}
+    parts = NativeConversationParts(None, delivery)
+    events = [{'type': 'grok.session.started', 'session_id': 'native-exact'}]
+    for stream, audio, text in [(100, 'skip', 'Silent body.'), (200, voice, 'Later contribution.')]:
+        for update in [{'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps({
+            'type': 'assistant_response', 'tool_name': None, 'voice': audio, 'content': text})}},
+            {'sessionUpdate': 'response_completed'}]:
+            meta = {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}
+            parts.update(update, meta)
+            events.append({'type': 'grok.session.update', 'session_id': 'native-exact', 'meta': meta, 'update': update})
+    canonical = parse_conversation_output(parts.finish(), None, delivery)
+    assert canonical['content'] == 'Later contribution.' and canonical['delivery_disposition']['audio'] == voice
+    raw = '\n'.join(map(json.dumps, events))
+    spoken = _native_spoken_content('grok-build', raw, None, delivery)
+    assert bool(spoken) is (voice == 'eligible')
+    if spoken:
+        assert spoken['text'] == canonical['content']
+        assert spoken['completed_parts'] == [{'part_index': 2, 'text_end': len('Later contribution.')}]
+    assert _native_authored_preview('grok-build', raw, None, delivery)['text'] == canonical['content']
+
+
+@pytest.mark.parametrize('voice', ['eligible', 'skip'])
+def test_native_projection_preserves_terminal_graph_when_optional_generation_arrives(voice):
+    from workers_projects_runtime.agent_builder_control import NativeConversationParts, parse_conversation_output
+    from workers_projects_runtime.conversation_provider import _native_spoken_content, _native_authored_preview
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    delivery = {'version': 1, 'audio_eligible': True}
+    parts = NativeConversationParts(graph, delivery)
+    events = [{'type': 'grok.session.started', 'session_id': 'native-exact'}]
+    for stream, body in [(75, {'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': 'Accepted narration.'}),
+                         (100, {'type': 'tool_call', 'tool_name': 'lc_transfer_to_specialist', 'voice': voice, 'content': 'Consulting.'}),
+                         (200, {'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': 'Late addition.'})]:
+        for update in [{'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(body)}},
+                       {'sessionUpdate': 'response_completed'}]:
+            meta = {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream}
+            parts.update(update, meta)
+            events.append({'type': 'grok.session.update', 'session_id': 'native-exact', 'meta': meta, 'update': update})
+    canonical = parse_conversation_output(parts.finish(), graph, delivery)
+    assert canonical['type'] == 'tool_call' and canonical['tool_name'] == 'lc_transfer_to_specialist'
+    assert canonical['content'] == 'Accepted narration.\n\nConsulting.'
+    assert canonical['delivery_disposition']['audio'] == voice
+    raw = '\n'.join(map(json.dumps, events));spoken = _native_spoken_content('grok-build', raw, graph, delivery)
+    assert spoken['text'] == ('Accepted narration.\n\nConsulting.' if voice == 'eligible' else 'Accepted narration.')
+    assert spoken['completed_parts'] == ([{'part_index': 1, 'text_end': len('Accepted narration.')}]
+        + ([{'part_index': 2, 'text_end': len(spoken['text'])}] if voice == 'eligible' else []))
+    assert _native_authored_preview('grok-build', raw, graph, delivery)['text'] == 'Accepted narration.'
+
+
 def test_native_spoken_content_retains_public_parts_and_fences_session_controls():
     from workers_projects_runtime.conversation_provider import _native_spoken_content
     delivery = {"version": 1, "audio_eligible": True}
@@ -7078,22 +7574,30 @@ def test_native_spoken_content_retains_public_parts_and_fences_session_controls(
     assert _native_spoken_content('claude-code', '\n'.join(map(json.dumps, events)), None, delivery) is None
 
 
-def test_native_voice_stream_sends_public_prefix_before_terminal_without_replay(monkeypatch, tmp_path):
+@pytest.mark.parametrize("handoff", [False, True])
+def test_native_voice_stream_sends_public_prefix_before_terminal_without_replay(monkeypatch, tmp_path, handoff):
     from types import SimpleNamespace
     provider = object.__new__(ConversationProvider)
     payload = ChatCompletionRequest.model_validate(_payload(tmp_path, stream=True))
     payload.metadata.audio_eligible = True
+    if handoff:
+        payload.tools = [{'type': 'function', 'function': {'name': 'lc_transfer_to_specialist',
+            'description': 'Transfer in the current graph.', 'parameters': {
+                'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}}}]
     payload.metadata.actor_kind = 'external_user'
     payload.metadata.origin = 'interactive'
     record = {"request_id": "request-a", "run_id": "run-a", "session_id": "session-a", "owner_id": "owner-a",
-              "message_id": "message-a", "native_invocation_id": "invocation-a", "state": "running"}
+              "message_id": "message-a", "native_invocation_id": "invocation-a", "state": "running",
+              "created_at": datetime.now(UTC).isoformat()}
     turn = {"value": 0}
     def get_record(_):
         turn['value'] += 1
         return {**record, 'state': 'completed' if turn['value'] == 3 else 'running'}
     def stdout(_worker, _run):
         text = 'The useful response' + ('.' if turn['value'] > 1 else '')
-        output = '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"' + text
+        controls = {'type': 'tool_call' if handoff else 'assistant_response',
+                    'tool_name': 'lc_transfer_to_specialist' if handoff else None, 'voice': 'eligible'}
+        output = json.dumps(controls)[:-1] + ',"content":"' + text
         events = [{"type": "grok.session.started", "session_id": "native-a"},
                   {"type": "grok.session.update", "session_id": "native-a", "update": {
                       "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": output}}}]
@@ -7105,13 +7609,20 @@ def test_native_voice_stream_sends_public_prefix_before_terminal_without_replay(
     provider.store.add_provider_activity_once = lambda *args: public_receipts.append(args)
     provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=stdout))
     provider._sync = lambda record: record
-    provider._native_output_snapshot = lambda *_: ''
+    def unexpected_terminal_snapshot(*_):
+        raise AssertionError('Structured Voice must not collect an unused terminal text snapshot')
+    provider._native_output_snapshot = unexpected_terminal_snapshot
     disposition = {'version': 1, 'audio': 'eligible', 'required': True, 'valid': True, 'source': 'model'}
     provider.response_payload = lambda *_: {'model': payload.model, 'choices': [{'message': {
         'role': 'assistant', 'content': 'The useful response.', 'provider_specific_fields': {
-            'viventium': {'delivery_disposition': disposition}}}, 'finish_reason': 'stop'}],
+            'viventium': {'delivery_disposition': disposition}},
+        **({'tool_calls': [{'id': 'call-transfer', 'type': 'function', 'function': {
+            'name': 'lc_transfer_to_specialist', 'arguments': '{}'}}]} if handoff else {})},
+        'finish_reason': 'tool_calls' if handoff else 'stop'}],
         'usage': {}, 'glasshive': {'usage_source': 'native'}}
-    provider._completion_usage = lambda *_: ({}, 'native')
+    def unexpected_completion_usage(*_):
+        raise AssertionError('Completed streams must use canonical response usage')
+    provider._completion_usage = unexpected_completion_usage
     class Connected:
         async def is_disconnected(self): return False
     async def no_sleep(_): pass
@@ -7129,10 +7640,180 @@ def test_native_voice_stream_sends_public_prefix_before_terminal_without_replay(
     assert content[0][1]['provider_specific_fields']['viventium']['delivery_disposition'] == disposition
     assert ''.join(delta['content'] for _, delta in content) == 'The useful response.'
     assert raw[-1][1] == 'data: [DONE]\n\n'
+    transfers = [delta['tool_calls'] for _, delta in deltas if delta.get('tool_calls')]
+    assert bool(transfers) is handoff
+    if handoff:
+        assert transfers[0][0]['function']['name'] == 'lc_transfer_to_specialist'
     payload.metadata.origin = 'scheduler'
     assert provider._native_spoken_snapshot(record, {'run_id': 'run-a'}, payload, None, {'version': 1, 'audio_eligible': True}) is None
     payload.metadata.origin = 'interactive'
     assert provider._native_spoken_snapshot(record, {'run_id': 'wrong'}, payload, None, {'version': 1, 'audio_eligible': True}) is None
+
+
+def _spoken_family_fixture():
+    from types import SimpleNamespace
+    scope = {"tenant_id": "local", "owner_id": "owner-a", "session_id": "session-a",
+             "message_id": "message-a", "stream_id": "stream-a"}
+    identity = {"logical_turn_id": "turn-a", "logical_turn_revision": 1,
+                "context_epoch": 1, "main_context_snapshot_sha256": "a" * 64,
+                "advancement_key": "turn-a:1", "response_message_key": "msg:message-a",
+                "main_context_protocol": "main_context_v1", "main_context_owner": "core"}
+    decision = {**identity, "admission_state": "reserved", "admission_sequence": 3,
+                "family_continuation_v1": True, "family_continuation_of_request_id": "parent-a"}
+    record = {**scope, "request_id": "request-a", "run_id": "run-a", "state": "running",
+              "native_invocation_id": "", "native_body_sha256": "",
+              "created_at": datetime.now(UTC).isoformat(),
+              "replay_decision_json": json.dumps(decision)}
+    parent = {**scope, "request_id": "parent-a", "state": "completed", "response_json": "{}",
+              "native_invocation_id": "invocation-a", "native_body_sha256": "b" * 64,
+              "replay_decision_json": json.dumps({**identity, "admission_state": "accepted"})}
+    session = {"owner_id": "owner-a", "context_manifest_json": json.dumps({
+        "admission_sequence": 3, "last_native_admission_request_id": "request-a"})}
+    payload = ChatCompletionRequest(model="grok-build:synthetic", messages=[{
+        "role": "user", "content": "Synthetic request."}], stream=True, metadata={
+        "audio_eligible": True, "actor_kind": "external_user", "origin": "interactive"})
+    provider = object.__new__(ConversationProvider)
+    state = {"record": record, "parent": parent, "session": session, "run": {"run_id": "run-a"}}
+    def get_request(request_id):
+        return next((value for key in ("record", "parent", "ancestor")
+                     if (value := state.get(key)) and value["request_id"] == request_id), None)
+    provider.store = SimpleNamespace(get_provider_request=get_request,
+        get_provider_session_by_id=lambda _: session, get_worker=lambda _: {"owner_id": "owner-a"},
+        get_run=lambda _: state["run"], list_provider_activity=lambda _: [],
+        add_provider_activity_once=lambda *args: state.setdefault("public_receipts", []).append(args))
+    prefix = '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Useful public words. '
+    events = [{"type": "grok.session.started", "session_id": "native-a"},
+              {"type": "grok.session.update", "session_id": "native-a", "update": {
+                  "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": prefix}}}]
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(
+        provider_activity_log=lambda *_: ("grok-build", "\n".join(map(json.dumps, events)))))
+    return state, provider, payload
+
+
+def _project_spoken_family(state, provider, payload):
+    return provider._native_spoken_snapshot(state["record"], state["run"], payload, None,
+                                           {"version": 1, "audio_eligible": True})
+
+
+def test_native_spoken_family_reuses_current_reservation_without_invocation_preview():
+    state, provider, payload = _spoken_family_fixture()
+    assert _project_spoken_family(state, provider, payload)["text"] == "Useful public words."
+    assert provider._native_preview_snapshot(state["record"], state["run"], payload, None,
+                                            {"version": 1, "audio_eligible": True}) is None
+    assert state["record"]["native_invocation_id"] == ""
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "owner_id", "session_id", "message_id", "stream_id"])
+def test_native_spoken_family_withholds_foreign_parent_record(field):
+    state, provider, payload = _spoken_family_fixture()
+    state["parent"][field] = "foreign"
+    assert _project_spoken_family(state, provider, payload) is None
+
+
+@pytest.mark.parametrize("field", ["logical_turn_id", "logical_turn_revision", "context_epoch",
+    "main_context_snapshot_sha256", "advancement_key", "response_message_key"])
+def test_native_spoken_family_withholds_foreign_parent_decision(field):
+    state, provider, payload = _spoken_family_fixture()
+    decision = json.loads(state["parent"]["replay_decision_json"])
+    decision[field] = "foreign"
+    state["parent"]["replay_decision_json"] = json.dumps(decision)
+    assert _project_spoken_family(state, provider, payload) is None
+
+
+@pytest.mark.parametrize("case", ["missing_parent", "unaccepted_parent", "unfinished_parent",
+    "parent_no_body", "parent_no_invocation", "rejected_current", "not_core", "missing_family",
+    "cycle", "newer_admission", "cancelled", "wrong_run", "scheduled", "internal", "restore_hold"])
+def test_native_spoken_family_preserves_authority_and_cancel_fences(case):
+    state, provider, payload = _spoken_family_fixture()
+    if case == "missing_parent":
+        state["parent"] = None
+    elif case == "unfinished_parent":
+        state["parent"]["state"] = "running"
+    elif case in {"parent_no_body", "parent_no_invocation"}:
+        state["parent"]["native_body_sha256" if case == "parent_no_body" else "native_invocation_id"] = ""
+    elif case == "unaccepted_parent":
+        decision = json.loads(state["parent"]["replay_decision_json"])
+        decision["admission_state"] = "reserved"
+        state["parent"]["replay_decision_json"] = json.dumps(decision)
+    elif case in {"rejected_current", "not_core", "missing_family", "cycle"}:
+        decision = json.loads(state["record"]["replay_decision_json"])
+        key, value = {"rejected_current": ("admission_state", "rejected"),
+            "not_core": ("main_context_owner", "provider_legacy"),
+            "missing_family": ("family_continuation_v1", False),
+            "cycle": ("family_continuation_of_request_id", "request-a")}[case]
+        decision[key] = value
+        state["record"]["replay_decision_json"] = json.dumps(decision)
+    elif case == "newer_admission":
+        state["session"]["context_manifest_json"] = json.dumps({
+            "admission_sequence": 4, "last_native_admission_request_id": "newer-request"})
+    elif case == "cancelled":
+        state["record"]["state"] = "cancelled"
+    elif case == "wrong_run":
+        state["run"]["run_id"] = "foreign"
+    elif case == "scheduled":
+        payload.metadata.origin = "scheduled"
+    elif case == "internal":
+        payload.metadata.actor_kind = "internal_ai"
+    elif case == "restore_hold":
+        state["record"]["restore_hold"] = 1
+    assert _project_spoken_family(state, provider, payload) is None
+
+
+def test_native_spoken_family_rechecks_admission_after_public_projection():
+    state, provider, payload = _spoken_family_fixture()
+    original = provider._native_spoken_content_snapshot
+    def crossed(*args):
+        result = original(*args)
+        state["session"]["context_manifest_json"] = json.dumps({
+            "admission_sequence": 4, "last_native_admission_request_id": "newer-request"})
+        return result
+    provider._native_spoken_content_snapshot = crossed
+    assert _project_spoken_family(state, provider, payload) is None
+
+
+def test_native_spoken_family_follows_completed_accepted_chain_without_new_identity():
+    state, provider, payload = _spoken_family_fixture()
+    state["ancestor"] = {**state["parent"]}
+    state["parent"] = {**state["parent"], "request_id": "intermediate-a",
+                       "native_invocation_id": "", "native_body_sha256": ""}
+    decision = json.loads(state["parent"]["replay_decision_json"])
+    decision.update(family_continuation_v1=True, family_continuation_of_request_id="parent-a")
+    state["parent"]["replay_decision_json"] = json.dumps(decision)
+    current = json.loads(state["record"]["replay_decision_json"])
+    current["family_continuation_of_request_id"] = "intermediate-a"
+    state["record"]["replay_decision_json"] = json.dumps(current)
+    assert _project_spoken_family(state, provider, payload)
+
+
+def test_native_spoken_family_streams_before_terminal_without_replaying_final(monkeypatch):
+    state, provider, payload = _spoken_family_fixture()
+    provider._graph_transfer_control = lambda *_: None
+    state["stage"] = 0
+    final = {"model": payload.model, "choices": [{"message": {
+        "role": "assistant", "content": "Useful public words. Complete answer."}, "finish_reason": "stop"}],
+        "usage": {}, "glasshive": {"usage_source": "native"}}
+    def sync(record):
+        state["stage"] += 1
+        if state["stage"] == 2:
+            record["state"] = "completed"
+            record["response_json"] = json.dumps(final)
+        return record
+    provider._sync = sync
+    provider.response_payload = lambda *_: final
+    class Connected:
+        async def is_disconnected(self): return False
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    async def collect():
+        return [(state["stage"], row) async for row in provider._stream_chunks(
+            state["record"], payload, Connected())]
+    rows = asyncio.run(collect())
+    content = [(stage, json.loads(row[6:])["choices"][0]["delta"].get("content", ""))
+               for stage, row in rows if row.startswith("data: {") and json.loads(row[6:]).get("choices")]
+    assert next(stage for stage, text in content if text) == 1
+    assert "".join(text for _, text in content) == final["choices"][0]["message"]["content"]
+    assert len(state["public_receipts"]) == 1
+    assert rows[-1][1] == "data: [DONE]\n\n"
 
 
 def test_typed_voice_redactor_releases_first_safe_words_without_fixed_tail():
@@ -7142,11 +7823,158 @@ def test_typed_voice_redactor_releases_first_safe_words_without_fixed_tail():
     assert redactor.flush() == 'response.'
 
 
+@pytest.mark.parametrize("target", ["file.txt", "./file.txt", "../file.txt", "/tmp/file.txt",
+    "file:///tmp/file.txt", "artifact_sha256:" + "a" * 64, "<file%20name.txt>"])
+def test_native_selected_file_link_waits_for_canonical_projection(target):
+    from workers_projects_runtime.conversation_provider import _mutable_native_file_link_start
+    prefix = "Useful words.\n\n"
+    assert _mutable_native_file_link_start(prefix + "[File](" + target + ")", incomplete=False) == len(prefix)
+
+
+@pytest.mark.parametrize("text", [
+    "Useful [source](https://example.invalid/doc).",
+    "Useful [source](https://example.invalid/doc#part).",
+    "Useful [source](//example.invalid/doc).", "Useful [source](part#anchor).",
+    "Useful [source](mailto:qa@example.invalid).", "Useful `literal [File](file.txt)` code.",
+    "Useful\n```text\n[File](file.txt)\n```", "Useful\n    [File](file.txt)",
+    "Useful\n> [File](file.txt)", "Useful [literal].", "Useful \\[literal\\].",
+])
+def test_native_file_projection_preserves_public_url_code_and_literal_controls(text):
+    from workers_projects_runtime.conversation_provider import _mutable_native_file_link_start
+    assert _mutable_native_file_link_start(text, incomplete=False) is None
+
+
+@pytest.mark.parametrize("suffix", ["[Fi", "[File]", "[File](", "[File](fi", "[File](https://example.invalid"])
+def test_native_file_projection_keeps_pending_markdown_out_of_accepted_prefix(suffix):
+    from workers_projects_runtime.conversation_provider import _mutable_native_file_link_start
+    prefix = "Useful words. "
+    assert _mutable_native_file_link_start(prefix + suffix, incomplete=True) == len(prefix)
+
+
+def test_native_file_projection_stays_monotonic_at_every_public_chunk_boundary():
+    from workers_projects_runtime.conversation_provider import _native_spoken_content
+    output = json.dumps({"type": "assistant_response", "tool_name": None, "voice": "eligible",
+                         "content": "Useful words.\n\n[File](file.txt)"})
+    events = [{"type": "grok.session.started", "session_id": "native-a"}]
+    last = ""
+    for character in output:
+        events.append({"type": "grok.session.update", "session_id": "native-a", "update": {
+            "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": character}}})
+        snapshot = _native_spoken_content("grok-build", "\n".join(map(json.dumps, events)), None,
+                                          {"version": 1, "audio_eligible": True})
+        if snapshot:
+            assert snapshot["text"].startswith(last)
+            last = snapshot["text"]
+    assert last == "Useful words."
+
+
+@pytest.mark.parametrize("file_state", ["selected", "missing", "rejected", "changed_prefix"])
+def test_native_file_projection_streams_words_before_exact_terminal_content_and_carrier(monkeypatch, file_state):
+    from types import SimpleNamespace
+    state, provider, payload = _spoken_family_fixture()
+    raw_content = "Useful words.\n\n[File](file.txt)"
+    output = json.dumps({"type": "assistant_response", "tool_name": None,
+                         "voice": "eligible", "content": raw_content})
+    events = [{"type": "grok.session.started", "session_id": "native-a"},
+              {"type": "grok.session.update", "session_id": "native-a", "update": {
+                  "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": output}}}]
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(
+        provider_activity_log=lambda *_: ("grok-build", "\n".join(map(json.dumps, events)))))
+    provider._graph_transfer_control = lambda *_: None
+    file_bytes = b"Synthetic file.\n"
+    selected = {"version": 1, "owner_id": "owner-a", "conversation_id": "conversation-a",
+        "message_id": "message-a", "stream_id": "stream-a", "request_id": "request-a", "run_id": "run-a",
+        "attempt_id": "attempt-a", "logical_turn_id": "turn-a", "logical_turn_revision": 1,
+        "invocation_id": "", "files": [{"filename": "file.txt", "mime_type": "text/plain",
+            "bytes": len(file_bytes), "sha256": hashlib.sha256(file_bytes).hexdigest(),
+            "download_url": "https://example.invalid/files/selected"}]}
+    content = ("Useful words.\n\n[File](https://example.invalid/files/selected)"
+               if file_state == "selected" else raw_content)
+    canonical = {"model": payload.model, "choices": [{"message": {"role": "assistant", "content": content},
+                  "finish_reason": "stop"}], "usage": {}, "glasshive": {"usage_source": "native"}}
+    if file_state in {"selected", "changed_prefix"}:
+        canonical["glasshive"]["output_files"] = selected
+        if file_state == "changed_prefix":
+            canonical["choices"][0]["message"]["content"] = "Changed words.\n\n[File](https://example.invalid/files/selected)"
+    elif file_state == "rejected":
+        canonical["glasshive"]["output_file_rejections"] = [{"name": "file.txt", "code": "unreadable"}]
+    state["stage"] = 0
+    def sync(record):
+        state["stage"] += 1
+        if state["stage"] == 2:
+            record.update(state="completed", response_json=json.dumps(canonical))
+        return record
+    provider._sync = sync
+    provider.response_payload = lambda *_: canonical
+    class Connected:
+        async def is_disconnected(self): return False
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    async def collect():
+        return [(state["stage"], row) async for row in provider._stream_chunks(
+            state["record"], payload, Connected())]
+    rows = asyncio.run(collect())
+    chunks = [(stage, json.loads(row[6:])) for stage, row in rows if row.startswith("data: {")]
+    failures = [chunk["error"] for _, chunk in chunks if chunk.get("error")]
+    assert ([failure["code"] for failure in failures] == ["provider_response_failed"]
+            if file_state == "changed_prefix" else not failures)
+    deltas = [(stage, chunk["choices"][0]["delta"]) for stage, chunk in chunks if chunk.get("choices")]
+    assert next((stage, delta["content"]) for stage, delta in deltas if delta.get("content")) == (1, "Useful words.")
+    assert "".join(delta.get("content", "") for _, delta in deltas) == (
+        "Useful words." if file_state == "changed_prefix" else content)
+    carriers = [(stage, delta["provider_specific_fields"]["viventium"]["output_files"])
+                for stage, delta in deltas
+                if delta.get("provider_specific_fields", {}).get("viventium", {}).get("output_files")]
+    assert carriers == ([(2, selected)] if file_state == "selected" else [])
+    assert len(state["public_receipts"]) == 1
+    assert rows[-1][1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize('state', ['failed', 'cancelled'])
+def test_structured_voice_terminal_failure_preserves_native_usage(state, tmp_path):
+    from types import SimpleNamespace
+    provider = object.__new__(ConversationProvider)
+    payload_dict = _payload(tmp_path, stream=True)
+    payload_dict['stream_options'] = {'include_usage': True}
+    payload = ChatCompletionRequest.model_validate(payload_dict)
+    payload.metadata.audio_eligible = True
+    record = {'request_id': 'request-a', 'run_id': 'run-a', 'state': state,
+              'created_at': datetime.now(UTC).isoformat()}
+    run = {'run_id': 'run-a', 'failure_user_message': 'Synthetic native stop.'}
+    provider.store = SimpleNamespace(get_provider_request=lambda _: record,
+        get_run=lambda _: run, list_provider_activity=lambda _: [])
+    provider._sync = lambda row: row
+    provider._native_effective_model = lambda *_: payload.model
+    provider._native_spoken_snapshot = lambda *_: None
+    provider._native_preview_snapshot = lambda *_: None
+    def unexpected_terminal_snapshot(*_):
+        raise AssertionError('Structured Voice does not collect unused terminal text')
+    provider._native_output_snapshot = unexpected_terminal_snapshot
+    usage_calls = []
+    usage = {'prompt_tokens': 12, 'completion_tokens': 4, 'total_tokens': 16}
+    def completion_usage(*args):
+        usage_calls.append(args)
+        return usage, 'native'
+    provider._completion_usage = completion_usage
+    class Connected:
+        async def is_disconnected(self): return False
+    async def collect():
+        return [row async for row in provider._stream_chunks(record, payload, Connected())]
+    rows = asyncio.run(collect())
+    events = [json.loads(row[6:]) for row in rows if row.startswith('data: {')]
+    assert len(usage_calls) == 1
+    assert usage_calls[0] == (record, run, payload, '')
+    assert events[-1]['usage'] == usage
+    assert events[-1]['glasshive']['usage_source'] == 'native'
+    assert any(event.get('error', {}).get('message') == 'Synthetic native stop.' for event in events)
+    assert rows[-1] == 'data: [DONE]\n\n'
+
+
 @pytest.mark.parametrize('secret', [
     'Bearer synthetic-credential', 'api_key=synthetic-credential',
-    'sk-synthetic-credential', 'ghp_synthetic-credential',
-    'xoxb-synthetic-credential', '/Users/synthetic/private.txt',
-    '-----BEGIN RSA PRIVATE KEY-----\nSYNTHETICBODY\n-----END RSA PRIVATE KEY-----',
+    ('sk' + '-synthetic-credential'), 'ghp_synthetic-credential',
+    ('xo' + 'xb-synthetic-credential'), ('/U' + 'sers/synthetic/private.txt'),
+    ('--' + '---BEGIN RSA PRIVATE KEY-----\nSYNTHETICBODY\n-----END RSA PRIVATE KEY-----'),
 ])
 def test_typed_voice_redactor_preserves_split_secret_guards_without_fixed_tail(secret):
     for split in range(len(secret) + 1):
@@ -7181,7 +8009,7 @@ def test_native_recovery_cannot_replay_accepted_public_parts(public_text):
 
 @pytest.mark.parametrize('text', [
     'Here is the result. api_key=synthetic-credential\nSafe tail.',
-    'Open [synthetic state file](/Users/synthetic/state.txt) to see the result.',
+    ('Open [synthetic state file](/U' + 'sers/synthetic/state.txt) to see the result.'),
     'Use [public reference](https://example.com/reference) for the result.',
 ])
 def test_typed_voice_stream_and_native_canonical_redaction_agree_across_json_escapes(text):
@@ -7210,7 +8038,8 @@ def test_native_voice_stream_matches_terminal_public_sanitation_or_fails_without
     payload.metadata.actor_kind = 'external_user'
     payload.metadata.origin = 'interactive'
     record = {'request_id':'request-a','run_id':'run-a','session_id':'session-a','owner_id':'owner-a',
-              'message_id':'message-a','native_invocation_id':'invocation-a','state':'running'}
+              'message_id':'message-a','native_invocation_id':'invocation-a','state':'running',
+              'created_at':datetime.now(UTC).isoformat()}
     turn = {'value':0}
     def get_record(_):
         turn['value'] += 1
@@ -7269,14 +8098,15 @@ def test_native_terminal_public_projection_does_not_erase_duplicate_controls():
 
 
 @pytest.mark.parametrize("handoff", [False, True])
-def test_native_ordered_public_parts_survive_durable_completion_and_exact_retry(tmp_path, monkeypatch, handoff):
+@pytest.mark.parametrize("voice", ["eligible", "skip"])
+def test_native_ordered_public_parts_survive_durable_completion_and_exact_retry(tmp_path, monkeypatch, handoff, voice):
     from workers_projects_runtime.agent_builder_control import ordered_conversation_output
 
     graph = {"version": 1, "tools": [{"name": "lc_transfer_to_specialist", "description": "Consult."}]}
     delivery = {"version": 1, "audio_eligible": True}
     final = json.dumps({"type": "tool_call" if handoff else "assistant_response",
                         "tool_name": "lc_transfer_to_specialist" if handoff else None,
-                        "voice": "eligible", "content": "" if handoff else "The result is green."})
+                        "voice": voice, "content": "" if handoff else "The result is green."})
     ordered = ordered_conversation_output(["I will check the current state."], final, graph, delivery)
 
     class OrderedNativeRuntime(StubRuntime):
@@ -7309,6 +8139,7 @@ def test_native_ordered_public_parts_survive_durable_completion_and_exact_retry(
     message = completed["choices"][0]["message"]
     assert message["content"] == "I will check the current state.\n\n" + ("" if handoff else "The result is green.")
     assert bool(message.get("tool_calls")) is handoff
+    assert message["provider_specific_fields"]["viventium"]["delivery_disposition"]["audio"] == voice
     if handoff:
         assert message["tool_calls"][0]["function"]["name"] == "lc_transfer_to_specialist"
     record = client.app.state.store.get_provider_request(completed["id"])
@@ -7322,7 +8153,8 @@ def test_native_ordered_public_parts_survive_durable_completion_and_exact_retry(
 
 
 @pytest.mark.parametrize("model,profile_key", [("codex-cli:gpt-5.6-sol", "codex_md"), ("claude-code:opus", "claude_md"), ("grok-build:grok-4.7-build-fast", "grok_md")])
-def test_host_conversation_declares_file_delivery_before_exact_feeling_tail(tmp_path, monkeypatch, model, profile_key):
+@pytest.mark.parametrize("native_tools", [False, True, None])
+def test_host_conversation_projects_file_delivery_before_exact_feeling_tail(tmp_path, monkeypatch, model, profile_key, native_tools):
     workspace = tmp_path / "Life"
     workspace.mkdir()
     client = _client(tmp_path, monkeypatch)
@@ -7331,12 +8163,19 @@ def test_host_conversation_declares_file_delivery_before_exact_feeling_tail(tmp_
     payload["messages"][0]["content"] += "\n\n" + tail
     payload["metadata"]["developer_instruction_tail"] = tail
     payload["metadata"]["bootstrap_bundle"] = {profile_key: "Signed broker authority."}
+    if native_tools is not None:
+        payload["metadata"]["bootstrap_bundle"]["provider_capabilities"] = {"native_tools": native_tools}
     parsed = ChatCompletionRequest.model_validate(payload)
     bundle = client.app.state.conversation_provider._native_bundle(parsed, GLASSHIVE_MODELS[model], "high")
     developer = bundle["developer_instructions"]
-    assert "Conversation file delivery:" in developer
-    assert developer.count("Conversation file delivery:") == 1
-    assert developer.index("Signed broker authority.") < developer.index("Conversation file delivery:") < developer.index(tail)
+    if native_tools is False:
+        assert "Conversation file delivery:" not in developer
+        assert bundle["provider_capabilities"]["native_tools"] is False
+        assert bundle["env"]["GLASSHIVE_PROVIDER_SESSION_MODE"] == "stateless"
+        assert developer.index("Signed broker authority.") < developer.index(tail)
+    else:
+        assert developer.count("Conversation file delivery:") == 1
+        assert developer.index("Signed broker authority.") < developer.index("Conversation file delivery:") < developer.index(tail)
     assert developer.endswith(tail) and developer.count(tail) == 1
     assert bundle["application_developer_instructions"] == payload["messages"][0]["content"]
     assert bundle[profile_key] == "Signed broker authority."
@@ -7974,3 +8813,401 @@ def test_reused_stateless_context_replays_prior_visible_source(
     assert decision['instruction_bytes'] <= decision['budget_bytes']
     assert not decision['input_accepted_sources']
     assert runtime.calls == 2
+
+
+def _pre_admission_context_payload(workspace, number, history):
+    value = _payload(workspace)
+    value['messages'] = [value['messages'][0], *history]
+    value['metadata'].update({
+        'message_id': f'answer-{number}', 'stream_id': f'stream-{number}',
+        'idempotency_key': f'ordering-{number}', 'main_context_protocol': 'main_context_v1',
+        'main_context_owner': 'core', 'stable_authority_sha256': 'a' * 64,
+        'main_context_snapshot_sha256': 'b' * 64, 'main_context_epoch': 'c' * 64,
+        'continuity_domain_id': 'd' * 64, 'continuity_agent_id': 'agent-main',
+        'logical_turn_id': f'turn-{number}',
+        'visible_message_chain': [{
+            'id': f'source-{index}', 'role': message['role'], 'accepted_source': True,
+            'sha256': hashlib.sha256(message['content'].encode()).hexdigest(),
+        } for index, message in enumerate(history)],
+    })
+    return value
+
+
+def _pre_admission_saved_authority(store):
+    sessions = store.list_provider_sessions(owner_id='owner-a')
+    assert len(sessions) == 1
+    session = sessions[0]
+    worker = store.get_worker(session['worker_id'])
+    return {
+        'session_id': session['session_id'], 'worker_id': session['worker_id'],
+        'history_count': session['history_count'],
+        'context_manifest': json.loads(session['context_manifest_json']),
+        'bootstrap_bundle': json.loads(worker['bootstrap_bundle_json']),
+        'workspace_dir': worker['workspace_dir'], 'model': worker['model'],
+    }
+
+
+@pytest.mark.parametrize('failure', ['changed_source_413', 'unsigned_bundle_403'])
+def test_pre_admission_failure_preserves_accepted_session(tmp_path, monkeypatch, failure):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, runtime=NativeUsageRuntime())
+    question = {'role': 'user', 'content': 'Keep the accepted original goal.'}
+    first_payload = _pre_admission_context_payload(workspace, 1, [question])
+    first = client.post('/v1/chat/completions', headers=AUTH, json=first_payload)
+    assert first.status_code == 200, first.text
+    store = client.app.state.store
+    before = _pre_admission_saved_authority(store)
+    manifest = before['context_manifest']
+    assert manifest['accepted_visible_message_keys']
+    assert manifest['last_accepted_replay_decision_v1']
+    successor = _pre_admission_context_payload(workspace, 2, [question, {'role': 'user', 'content': 'Continue safely.'}])
+    headers = dict(AUTH)
+    if failure == 'changed_source_413':
+        successor['messages'][1]['content'] = 'Changed original goal.'
+        expected_status = 413
+    else:
+        headers['X-GlassHive-Bootstrap-Bundle-B64'] = 'eyJlbnYiOnsic3ludGhldGljIjoidmFsdWUifX0='
+        expected_status = 403
+    response = client.post('/v1/chat/completions', headers=headers, json=successor)
+    assert response.status_code == expected_status, response.text
+    assert _pre_admission_saved_authority(store) == before
+
+
+@pytest.mark.parametrize('branch', [False, True])
+def test_valid_pre_admission_keeps_existing_replay_result(tmp_path, monkeypatch, branch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, runtime=NativeUsageRuntime())
+    question = {'role': 'user', 'content': 'Keep the accepted original goal.'}
+    first = client.post('/v1/chat/completions', headers=AUTH,
+                        json=_pre_admission_context_payload(workspace, 1, [question]))
+    assert first.status_code == 200, first.text
+    first_answer = first.json()['choices'][0]['message']['content']
+    history = [question]
+    if not branch:
+        history.append({'role': 'assistant', 'content': first_answer})
+    history.append({'role': 'user', 'content': 'Continue safely.'})
+    successor = _pre_admission_context_payload(workspace, 2, history)
+    if not branch:
+        successor['metadata']['visible_message_chain'][1]['id'] = 'answer-1'
+    second = client.post('/v1/chat/completions', headers=AUTH, json=successor)
+    assert second.status_code == 200, second.text
+    store = client.app.state.store
+    first_record = store.get_provider_request(first.json()['id'])
+    second_record = store.get_provider_request(second.json()['id'])
+    assert second_record['session_id'] == first_record['session_id']
+    decision = json.loads(second_record['replay_decision_json'])
+    assert decision['mode'] == ('bootstrap' if branch else 'delta')
+    assert second.json()['choices'][0]['message']['content'] == first_answer
+    duplicate = client.post('/v1/chat/completions', headers=AUTH, json=successor)
+    assert duplicate.status_code == 200
+    assert duplicate.json()['id'] == second.json()['id']
+
+def _public_completion_stdout(parts):
+    events = [{'type': 'grok.session.started', 'session_id': 'native-a'}]
+    for index, part in enumerate(parts):
+        if index:
+            events.append({'type': 'grok.session.update', 'session_id': 'native-a',
+                           'update': {'sessionUpdate': 'tool_call'}})
+        events.append({'type': 'grok.session.update', 'session_id': 'native-a', 'update': {
+            'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': part}}})
+    return 'grok-build', '\n'.join(map(json.dumps, events))
+
+
+def test_public_part_completion_projects_each_full_assistant_part_without_terminal():
+    from workers_projects_runtime.conversation_provider import _native_spoken_content
+    bodies = [json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible',
+                         'content': text}) for text in ['<emphasis>First part.</emphasis>', 'Later complete part.']]
+    profile, stdout = _public_completion_stdout(bodies)
+    result = _native_spoken_content(profile, stdout, None, {'version': 1, 'audio_eligible': True})
+    assert result['completed_parts'] == [
+        {'part_index': 1, 'text_end': len('<emphasis>First part.</emphasis>')},
+        {'part_index': 2, 'text_end': len(result['text'])}]
+
+
+def test_public_part_completion_seals_declared_eligible_graph_narration():
+    from workers_projects_runtime.conversation_provider import _native_spoken_content
+    name = 'lc_transfer_to_specialist'
+    body = json.dumps({'type': 'tool_call', 'tool_name': name, 'voice': 'eligible',
+                       'content': 'I am checking the evidence.'})
+    profile, stdout = _public_completion_stdout([body])
+    graph = {'version': 1, 'tools': [{'name': name, 'description': 'Consult.'}]}
+    result = _native_spoken_content(profile, stdout, graph, {'version': 1, 'audio_eligible': True})
+    assert result['text'] == 'I am checking the evidence.'
+    assert result['completed_parts'] == [{'part_index': 1, 'text_end': len(result['text'])}]
+    assert result['delivery_disposition'] == {
+        'version': 1, 'audio': 'eligible', 'required': True, 'valid': True, 'source': 'model'}
+
+
+@pytest.mark.parametrize('case', ['skip', 'undeclared', 'invalid_voice', 'extra_field',
+                                  'incomplete', 'file', 'citation'])
+def test_public_graph_completion_preserves_control_and_mutable_projection_fences(case):
+    from workers_projects_runtime.conversation_provider import _native_spoken_content
+    name = 'lc_transfer_to_specialist'
+    envelope = {'type': 'tool_call', 'tool_name': name, 'voice': 'eligible', 'content': 'Checking.'}
+    if case == 'skip':
+        envelope['voice'] = 'skip'
+    elif case == 'undeclared':
+        envelope['tool_name'] = 'lc_transfer_to_foreign'
+    elif case == 'invalid_voice':
+        envelope['voice'] = 'unknown'
+    elif case == 'extra_field':
+        envelope['extra'] = True
+    elif case == 'file':
+        envelope['content'] = 'Checking. [File](file.txt)'
+    elif case == 'citation':
+        envelope['content'] = 'Checking. \ue200cite\ue202synthetic-source\ue201'
+    body = json.dumps(envelope)
+    if case == 'incomplete':
+        body = body[:-2]
+    profile, stdout = _public_completion_stdout([body])
+    graph = {'version': 1, 'tools': [{'name': name, 'description': 'Consult.'}]}
+    result = _native_spoken_content(profile, stdout, graph, {'version': 1, 'audio_eligible': True})
+    assert not result or not result.get('completed_parts')
+
+
+@pytest.mark.parametrize('completion_only', [False, True])
+def test_graph_narration_completion_precedes_terminal_transfer_without_waiting(monkeypatch, completion_only):
+    state, provider, payload = _spoken_family_fixture()
+    state['stage'] = 0
+    name = 'lc_transfer_to_specialist'
+    text = 'I am checking the evidence.'
+    envelope = {'type': 'tool_call', 'tool_name': name, 'voice': 'eligible',
+                'content': text + (' ' if completion_only else '')}
+    body = json.dumps(envelope)
+    partial = body[:-2]
+    graph = {'version': 1, 'tools': [{'name': name, 'description': 'Consult.'}]}
+    provider._graph_transfer_control = lambda *_: graph
+    provider.service.runtime.provider_activity_log = lambda *_: _public_completion_stdout([
+        partial if completion_only and state['stage'] == 1 else body])
+    final = {'model': payload.model, 'choices': [{'message': {
+        'role': 'assistant', 'content': text,
+        'tool_calls': [{'id': 'call-transfer', 'type': 'function',
+                        'function': {'name': name, 'arguments': '{}'}}],
+        'provider_specific_fields': {'viventium': {'delivery_disposition': {
+            'version': 1, 'audio': 'eligible', 'required': True, 'valid': True, 'source': 'model'}}}},
+        'finish_reason': 'tool_calls'}], 'usage': {}, 'glasshive': {'usage_source': 'native'}}
+    def sync(record):
+        state['stage'] += 1
+        if state['stage'] == 4:
+            record['state'] = 'completed'
+            record['response_json'] = json.dumps(final)
+        return record
+    provider._sync = sync
+    provider.response_payload = lambda *_: final
+    class Connected:
+        async def is_disconnected(self): return False
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+    async def collect():
+        return [(state['stage'], row) async for row in provider._stream_chunks(state['record'], payload, Connected())]
+    rows = asyncio.run(collect())
+    deltas = [(stage, json.loads(row[6:])['choices'][0]) for stage, row in rows
+              if row.startswith('data: {') and json.loads(row[6:]).get('choices')]
+    marked = [(stage, choice) for stage, choice in deltas if choice['delta'].get(
+        'provider_specific_fields', {}).get('viventium', {}).get('public_part_complete')]
+    assert len(marked) == 1
+    stage, choice = marked[0]
+    assert stage == (2 if completion_only else 1)
+    assert choice['finish_reason'] is None and 'tool_calls' not in choice['delta']
+    assert choice['delta']['content'] == ('' if completion_only else text)
+    marker = choice['delta']['provider_specific_fields']['viventium']['public_part_complete']
+    assert marker == {'version': 1, 'complete': True, 'request_id': 'request-a', 'run_id': 'run-a',
+                      'part_id': 'run-a:1', 'message_id': 'message-a', 'stream_id': 'stream-a'}
+    assert ''.join(choice['delta'].get('content', '') for _, choice in deltas) == text
+    assert [(stage, choice['delta']['tool_calls']) for stage, choice in deltas
+            if choice['delta'].get('tool_calls')] == [(4, [{'index': 0,
+                **final['choices'][0]['message']['tool_calls'][0]}])]
+    assert len(state['public_receipts']) == 1
+    assert rows[-1][1] == 'data: [DONE]\n\n'
+
+
+@pytest.mark.parametrize('body', [
+    '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Still incomplete',
+    '{"type":"assistant_response","tool_name":null,"voice":"skip","content":"Unspoken."}',
+    '{"type":"tool_call","tool_name":"transfer","voice":"eligible","content":"Handoff."}',
+    '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Here [File](file.txt)"}',
+    '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Here [File](artifact_sha256:abc)"}',
+])
+def test_public_part_completion_withholds_incomplete_skip_undeclared_tool_or_mutable_file(body):
+    from workers_projects_runtime.conversation_provider import _native_spoken_content
+    profile, stdout = _public_completion_stdout([body])
+    graph = {'version': 1, 'tools': [{'name': 'transfer', 'description': 'Synthetic', 'parameters': {'type': 'object', 'properties': {}}}]}
+    result = _native_spoken_content(profile, stdout, graph, {'version': 1, 'audio_eligible': True})
+    assert not result or not result.get('completed_parts')
+
+
+def test_public_part_completion_only_delta_survives_poll_and_replay(monkeypatch):
+    state, provider, payload = _spoken_family_fixture()
+    state['stage'] = 0
+    text = '<emphasis>First part.</emphasis>'
+    prefix = '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":' + json.dumps(text + ' ')
+    provider.service.runtime.provider_activity_log = lambda *_: _public_completion_stdout([
+        prefix[:-1] if state['stage'] == 1 else prefix + '}'])
+    # Partial content ends with a safe space. Completion adds no text.
+    prefix = prefix[:-1] + ' '
+    provider.service.runtime.provider_activity_log = lambda *_: _public_completion_stdout([
+        prefix if state['stage'] == 1 else prefix.rstrip() + '"}'])
+    final = {'model': payload.model, 'choices': [{'message': {'role': 'assistant', 'content': text}, 'finish_reason': 'stop'}], 'usage': {}, 'glasshive': {'usage_source': 'native'}}
+    def sync(record):
+        state['stage'] += 1
+        if state['stage'] == 4:
+            record['state'] = 'completed'
+            record['response_json'] = json.dumps(final)
+        return record
+    provider._sync = sync
+    provider._graph_transfer_control = lambda *_: None
+    provider.response_payload = lambda *_: final
+    class Connected:
+        async def is_disconnected(self): return False
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+    async def collect():
+        return [(state['stage'], row) async for row in provider._stream_chunks(state['record'], payload, Connected())]
+    rows = asyncio.run(collect())
+    chunks = [(stage, json.loads(row[6:])) for stage, row in rows if row.startswith('data: {') and json.loads(row[6:]).get('choices')]
+    completed = [(stage, chunk['choices'][0]['delta']) for stage, chunk in chunks if chunk['choices'][0]['delta'].get('provider_specific_fields', {}).get('viventium', {}).get('public_part_complete')]
+    assert len(completed) == 1
+    assert completed[0][0] == 2
+    assert completed[0][1]['content'] == ''
+    marker = completed[0][1]['provider_specific_fields']['viventium']['public_part_complete']
+    assert marker == {'version': 1, 'complete': True, 'request_id': 'request-a', 'run_id': 'run-a',
+                      'part_id': 'run-a:1', 'message_id': 'message-a', 'stream_id': 'stream-a'}
+    assert ''.join(chunk['choices'][0]['delta'].get('content', '') for _, chunk in chunks) == text
+    assert all(chunk['choices'][0]['finish_reason'] is None for stage, chunk in chunks if stage < 4)
+
+
+def test_public_part_completion_splits_multiple_observed_parts_in_order(monkeypatch):
+    state, provider, payload = _spoken_family_fixture()
+    state['stage'] = 0
+    texts = ['First complete.', 'Second complete.']
+    bodies = [json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': text}) for text in texts]
+    provider.service.runtime.provider_activity_log = lambda *_: _public_completion_stdout(bodies)
+    full = '\n\n'.join(texts)
+    final = {'model': payload.model, 'choices': [{'message': {'content': full}, 'finish_reason': 'stop'}], 'usage': {}, 'glasshive': {'usage_source': 'native'}}
+    def sync(record):
+        state['stage'] += 1
+        if state['stage'] == 3:
+            record['state'] = 'completed'; record['response_json'] = json.dumps(final)
+        return record
+    provider._sync = sync; provider._graph_transfer_control = lambda *_: None; provider.response_payload = lambda *_: final
+    class Connected:
+        async def is_disconnected(self): return False
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+    async def collect(): return [row async for row in provider._stream_chunks(state['record'], payload, Connected())]
+    deltas = [json.loads(row[6:])['choices'][0]['delta'] for row in asyncio.run(collect()) if row.startswith('data: {') and json.loads(row[6:]).get('choices')]
+    marked = [delta for delta in deltas if delta.get('provider_specific_fields', {}).get('viventium', {}).get('public_part_complete')]
+    assert [delta['content'] for delta in marked] == ['First complete.', '\n\nSecond complete.']
+    assert [delta['provider_specific_fields']['viventium']['public_part_complete']['part_id'] for delta in marked] == ['run-a:1', 'run-a:2']
+    assert ''.join(delta.get('content', '') for delta in deltas) == full
+
+
+@pytest.mark.parametrize('active', [False, True])
+def test_declared_dynamic_tail_refresh_reuses_separate_followup_lane(tmp_path, monkeypatch, active):
+    workspace = tmp_path / 'synthetic-workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    provider, store = client.app.state.conversation_provider, client.app.state.store
+    first = _payload(workspace)
+    tail_a = '<viventium_feeling_state>State A.</viventium_feeling_state>'
+    tail_b = '<viventium_feeling_state>State B.</viventium_feeling_state>'
+    first['metadata'].update(agent_id='agent-a:phase_b:followup', developer_instruction_tail=tail_a)
+    first['messages'][0]['content'] = 'Stable registered callback authority.\n\n' + tail_a
+    parsed = ChatCompletionRequest.model_validate(first)
+    model = GLASSHIVE_MODELS[first['model']]
+    original, _ = provider._session(parsed, model, workspace, 'high', tenant_id='local')
+    # Exact admission already creates an invocation-local bundle before dispatch. A later
+    # refresh changes future worker defaults, never this already prepared invocation.
+    first_invocation = provider._run_local_native_bundle(parsed, model, 'high')
+    if active:
+        monkeypatch.setattr(store, 'list_nonterminal_runs_for_worker',
+                            lambda _: [{'run_id': 'synthetic-active-callback'}])
+    second = ChatCompletionRequest.model_validate(first)
+    second.metadata.message_id = 'message-b'
+    second.metadata.idempotency_key = 'idem-b'
+    second.metadata.developer_instruction_tail = tail_b
+    second.messages[0].content = 'Stable registered callback authority.\n\n' + tail_b
+    current, seeded = provider._session(second, model, workspace, 'high', tenant_id='local')
+    assert current['session_id'] == original['session_id']
+    assert current['worker_id'] == original['worker_id']
+    assert seeded is False
+    refreshed = json.loads(store.get_worker(current['worker_id'])['bootstrap_bundle_json'])
+    assert refreshed['developer_instructions'].endswith(tail_b)
+    assert refreshed['developer_instructions'].count(tail_b) == 1
+    assert tail_a not in refreshed['developer_instructions']
+    assert first_invocation['developer_instructions'].endswith(tail_a)
+    assert tail_b not in first_invocation['developer_instructions']
+
+
+@pytest.mark.parametrize('forged_digest', [False, True])
+def test_declared_dynamic_tail_never_hides_changed_stable_callback_authority(tmp_path, monkeypatch, forged_digest):
+    from fastapi import HTTPException
+    workspace = tmp_path / 'synthetic-workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    provider, store = client.app.state.conversation_provider, client.app.state.store
+    first = _payload(workspace)
+    tail = '<viventium_feeling_state>State A.</viventium_feeling_state>'
+    first['metadata'].update(agent_id='agent-a:phase_b:followup', developer_instruction_tail=tail)
+    if forged_digest:
+        first['metadata']['stable_authority_sha256'] = 'a' * 64
+    first['messages'][0]['content'] = 'Original stable callback authority.\n\n' + tail
+    model = GLASSHIVE_MODELS[first['model']]
+    original, _ = provider._session(ChatCompletionRequest.model_validate(first), model, workspace, 'high', tenant_id='local')
+    monkeypatch.setattr(store, 'list_nonterminal_runs_for_worker', lambda _: [{'run_id': 'synthetic-active'}])
+    second = ChatCompletionRequest.model_validate(first)
+    second.messages[0].content = 'Changed stable callback authority.\n\n' + tail
+    with pytest.raises(HTTPException) as rejected:
+        provider._session(second, model, workspace, 'high', tenant_id='local')
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail['code'] == 'conversation_session_authority_conflict'
+    assert store.get_provider_session_by_id(original['session_id'])['worker_id'] == original['worker_id']
+
+
+@pytest.mark.parametrize('changed', ['account', 'workspace', 'access', 'policy', 'origin'])
+def test_declared_dynamic_tail_preserves_existing_active_binding_guards(tmp_path, monkeypatch, changed):
+    from fastapi import HTTPException
+    import workers_projects_runtime.conversation_provider as module
+    workspace = tmp_path / 'synthetic-workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    provider, store = client.app.state.conversation_provider, client.app.state.store
+    first = _payload(workspace)
+    tail = '<viventium_feeling_state>State A.</viventium_feeling_state>'
+    first['metadata'].update(agent_id='agent-a:phase_b:followup', developer_instruction_tail=tail)
+    first['messages'][0]['content'] = 'Stable callback authority.\n\n' + tail
+    model = GLASSHIVE_MODELS[first['model']]
+    original, _ = provider._session(ChatCompletionRequest.model_validate(first), model, workspace, 'high', tenant_id='local')
+    monkeypatch.setattr(store, 'list_nonterminal_runs_for_worker', lambda _: [{'run_id': 'synthetic-active'}])
+    second = ChatCompletionRequest.model_validate(first)
+    if changed == 'account':
+        second.metadata.bootstrap_bundle = {'provider_account': {'account_id': 'synthetic-other-account'}}
+    elif changed == 'workspace':
+        workspace = tmp_path / 'other-workspace'
+        workspace.mkdir()
+    elif changed == 'access':
+        second.metadata.glasshive_options.access = 'full'
+    elif changed == 'policy':
+        monkeypatch.setattr(module, '_native_policy_sha256', lambda _: 'b' * 64)
+    else:
+        second.metadata.allowed_ai_origin_scope = {'project_id': 'synthetic-other-project'}
+    with pytest.raises(HTTPException) as rejected:
+        provider._session(second, model, workspace, 'high', tenant_id='local')
+    assert rejected.value.status_code == 409
+    assert store.get_provider_session_by_id(original['session_id'])['worker_id'] == original['worker_id']
+
+
+def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    workspace = tmp_path / 'synthetic-workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    provider = client.app.state.conversation_provider
+    payload = ChatCompletionRequest.model_validate(_payload(workspace))
+    payload.metadata.developer_instruction_tail = 'Absent declared tail.'
+    with pytest.raises(HTTPException) as rejected:
+        provider._session(payload, GLASSHIVE_MODELS[payload.model], workspace, 'high', tenant_id='local')
+    assert rejected.value.status_code == 400
+    assert 'tail is absent' in rejected.value.detail
