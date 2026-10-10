@@ -1165,6 +1165,7 @@ def test_prompt_layer_inventory_is_derived_from_actual_registered_producers():
         "workers_projects_runtime.bootstrap.glasshive_project_claude_md",
         "workers_projects_runtime.bootstrap.glasshive_project_codex_md",
         "workers_projects_runtime.bootstrap.merge_glasshive_worker_instructions",
+        "workers_projects_runtime.bootstrap.native_profile_tool_access_instructions",
         "workers_projects_runtime.coordinator.prompt_manifest",
         "workers_projects_runtime.mcp_server.create_mcp_server",
         "workers_projects_runtime.mcp_server.glasshive_workers_server_instructions",
@@ -1188,6 +1189,43 @@ def test_prompt_layer_inventory_is_derived_from_actual_registered_producers():
         "viventium_feeling_state",
     )
 
+
+
+def test_registered_native_profile_prompt_is_in_live_orchestration_capability(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VIVENTIUM_PARALLEL_WORK_EXECUTION_MODE", "host")
+    monkeypatch.delenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", raising=False)
+    monkeypatch.setenv("GLASSHIVE_HOST_WORKERS_ENABLED", "true")
+    monkeypatch.setenv("GLASSHIVE_PROVIDER_ALLOW_FULL_ACCESS", "true")
+    monkeypatch.setattr(
+        service_module.shutil,
+        "disk_usage",
+        lambda _path: service_module.shutil._ntuple_diskusage(100, 50, 50),
+    )
+    producer = bootstrap_module.native_profile_tool_access_instructions
+    producer_ref = producer.__glasshive_worker_prompt_producer_ref__
+    assert bootstrap_module.WORKER_PROMPT_LAYER_PRODUCER_BINDINGS[producer_ref] == (
+        "developer_instructions",
+    )
+    assert producer in service_module.worker_prompt_layer_actual_producers()
+    store = Store(str(tmp_path / "native-profile-prompt.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    try:
+        result = service.orchestration_capabilities()
+        trace = service.worker_prompt_layer_trace()
+    finally:
+        service.shutdown()
+    assert result["promptLayers"] == {
+        "contractVersion": 1,
+        "producerScope": "glasshive.worker_prompt_registry",
+        "unknownLayerNames": [],
+    }
+    assert service_module.valid_worker_prompt_layer_capability(result["promptLayers"]) is True
+    assert result["nativeParallelReady"] is True
+    assert result["nativeParallelReason"] == ""
+    assert trace["unknownLayerNames"] == []
+    assert "developer_instructions" in trace["layerNames"]
 
 def test_actual_prompt_output_carries_each_nested_producer_identity():
     emitted = bootstrap_module.glasshive_project_agents_md({})

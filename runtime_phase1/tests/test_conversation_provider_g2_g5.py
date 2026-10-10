@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -66,6 +67,104 @@ def test_sync_starts_one_context_recovery(failed_request, monkeypatch):
     monkeypatch.setattr(provider, "_start_context_recovery", lambda *args, **kwargs: reached.append(True) or request)
     provider._sync(request)
     assert reached == [True]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failure", [None, "copy", "reconcile"])
+@pytest.mark.parametrize("sink_throws", [False, True])
+def test_request_preparation_timing_preserves_admission_and_failure(
+    failed_request, monkeypatch, caplog, enabled, failure, sink_throws,
+):
+    store, service, provider, previous = failed_request
+    monkeypatch.setenv("VIVENTIUM_VOICE_LOG_LATENCY", "true" if enabled else "false")
+    caplog.set_level(logging.INFO, logger="workers_projects_runtime.native_model_selection")
+    request, _ = store.create_provider_request(
+        tenant_id="local", owner_id="owner-a", session_id=previous["session_id"],
+        idempotency_key="synthetic-preparation", message_id="synthetic-message",
+        stream_id="synthetic-stream", requested_history_count=1,
+        admitted_instruction="Synthetic private admitted goal",
+    )
+    worker_id = store.get_provider_session_by_id(previous["session_id"])["worker_id"]
+    project_id = store.get_worker(worker_id)["project_id"]
+    reached = []
+    original_error = RuntimeError("Synthetic private preparation failure")
+
+    def assign(worker, instruction, **options):
+        reached.append("assign")
+        assert worker == worker_id
+        assert instruction == request["admitted_instruction"]
+        run, _ = store.create_and_attach_provider_run(
+            request_id=options["provider_request_id"], worker_id=worker,
+            project_id=project_id, instruction=instruction,
+        )
+        return run
+
+    remember = provider._remember_request_local_bundle
+
+    def copy_bundle(*args):
+        reached.append("copy")
+        if failure == "copy":
+            raise original_error
+        return remember(*args)
+
+    def reconcile():
+        reached.append("reconcile")
+        if failure == "reconcile":
+            raise original_error
+
+    monkeypatch.setattr(service, "assign_run", assign)
+    monkeypatch.setattr(provider, "_remember_request_local_bundle", copy_bundle)
+    monkeypatch.setattr(service, "reconcile_restart_authority_backlog_once", reconcile)
+    monkeypatch.setattr(provider, "_start_assigned_run_before_deadline", lambda *args, **kwargs: reached.append("start"))
+    if sink_throws:
+        import workers_projects_runtime.native_model_selection as timing
+
+        def rejected_sink(*args, **kwargs):
+            raise RuntimeError("Synthetic private sink failure")
+
+        monkeypatch.setattr(timing._logger, "info", rejected_sink)
+    if failure:
+        with pytest.raises(RuntimeError) as raised:
+            provider._assign_pre_run_request(
+                request, worker_id=worker_id,
+                run_local_bundle={"synthetic_private": "Synthetic private bundle"},
+            )
+        assert raised.value is original_error
+    else:
+        result = provider._assign_pre_run_request(
+            request, worker_id=worker_id,
+            run_local_bundle={"synthetic_private": "Synthetic private bundle"},
+        )
+        assert result["run_id"]
+    expected = ["assign", "copy"]
+    if failure != "copy":
+        expected.append("reconcile")
+    if not failure:
+        expected.append("start")
+    assert reached == expected
+    persisted = store.get_provider_request(request["request_id"])
+    assert persisted["admitted_instruction"] == request["admitted_instruction"]
+    assert persisted["run_id"]
+    stages = ["request_local_bundle_copy", "restart_authority_reconcile"]
+    records = [json.loads(record.getMessage().removeprefix("[NativeP0] "))
+               for record in caplog.records if record.getMessage().startswith("[NativeP0] ")]
+    records = [record for record in records if record["stage"] in stages]
+    if not enabled or sink_throws:
+        assert records == []
+        return
+    expected_stages = stages[:1] if failure == "copy" else stages
+    assert [record["stage"] for record in records] == expected_stages
+    for record in records:
+        assert record["durationMs"] >= 0
+        assert len(record["requestHash"]) == len(record["runHash"]) == 64
+        assert record["status"] == (
+            "failed" if record["stage"] == {"copy": stages[0], "reconcile": stages[1]}.get(failure)
+            else "completed"
+        )
+        serialized = json.dumps(record)
+        assert "Synthetic private" not in serialized
+        assert request["request_id"] not in serialized
+        assert persisted["run_id"] not in serialized
 
 
 def test_stale_fallback_claim_is_terminal(failed_request, monkeypatch):

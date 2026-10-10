@@ -358,3 +358,47 @@ def test_saved_result_preserves_only_public_failure_code(tmp_path, monkeypatch, 
     assert "private provider prose" not in json.dumps(result)
     assert "response" not in result
     assert _result(client, digest, headers={"X-Viventium-User-Id": "owner-b"}).status_code == 404
+
+
+# VIVENTIUM START: only a proven refusal before the provider journal releases host recovery.
+@pytest.mark.parametrize("branch", ["fresh", "uncertain_journal", "accepted_queued"])
+def test_capacity_no_acceptance_proof_preserves_queued_authority(tmp_path, monkeypatch, branch):
+    from workers_projects_runtime.openclaw_runtime import HostCapacityError
+
+    client = _client(tmp_path, monkeypatch)
+    provider = client.app.state.conversation_provider
+    store = client.app.state.store
+    payload = _payload(tmp_path)
+    def reject(*_args, **_kwargs):
+        raise HostCapacityError("Host is busy.", capacity_class="resource_pressure", retry_after_s=1)
+    if branch == "accepted_queued":
+        monkeypatch.setattr(provider.service, "assign_run", reject)
+    else:
+        monkeypatch.setattr(provider, "_session", reject)
+        if branch == "uncertain_journal":
+            original = store.get_provider_request
+            def unknown(*args, **kwargs):
+                if kwargs.get("native_invocation_id"):
+                    raise OSError("Journal unavailable")
+                return original(*args, **kwargs)
+            monkeypatch.setattr(store, "get_provider_request", unknown)
+    response, digest = _post_bound(client, payload)
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "host_capacity"
+    proof = response.json()["error"].get("native_admission")
+    if branch == "fresh":
+        assert proof == {"version": 1, "accepted": False, "invocation_id": "invocation-a",
+                         "body_sha256": digest, "stream_id": "stream-a", "message_id": "message-a"}
+        assert store.get_provider_request(tenant_id="local", owner_id="owner-a", native_invocation_id="invocation-a") is None
+    else:
+        assert proof is None
+    if branch == "accepted_queued":
+        record = store.get_provider_request(tenant_id="local", owner_id="owner-a", native_invocation_id="invocation-a")
+        assert record["state"] == "queued" and not record["run_id"]
+        retry, retry_digest = _post_bound(client, payload)
+        assert retry_digest == digest and retry.status_code == 503
+        assert "native_admission" not in retry.json()["error"]
+        retained = store.get_provider_request(record["request_id"])
+        assert retained["state"] == "queued" and retained["request_id"] == record["request_id"]
+        assert not retained["run_id"]
+# VIVENTIUM END

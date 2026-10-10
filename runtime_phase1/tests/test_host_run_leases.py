@@ -5,6 +5,8 @@ import hashlib
 import logging
 import os
 import sqlite3
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -1242,6 +1244,230 @@ def test_provider_liveness_attention_recovers_compute_and_callback_after_restart
     )
     assert len(callbacks) == 1
     assert callbacks[0]["event_type"] == "run.needs_input"
+
+
+@pytest.fixture
+def held_provider_liveness_host(tmp_path):
+    """Use the real host supervisor, child, session and identity-validating control."""
+    store = Store(str(tmp_path / "attention-host.sqlite3"))
+    _project, worker, run = _active_worker_and_run(
+        store, "attention-host", execution_mode="host", run_state="running"
+    )
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "host-state"))
+    run_id = str(run["run_id"])
+    worker_id = str(worker["worker_id"])
+    lease = store.get_active_host_run_lease_for_run(run_id)
+    assert lease is not None
+    run_root = runtime._run_root(worker_id, run_id)
+    run_root.mkdir(parents=True, exist_ok=True)
+    child_pid_path = run_root / "child.pid"
+    command = runtime._durable_host_process_command(
+        [sys.executable, "-c",
+         "import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+         str(child_pid_path)],
+        run_root=run_root, exit_path=run_root / "exit_code",
+        child_record_path=runtime._native_child_record_path(run_root, run["active_attempt_id"]),
+    )
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    service = None
+    child_pid = 0
+    try:
+        runtime._wait_for_durable_host_supervisor(process, run_root=run_root)
+        runtime._write_active_session(worker_id, {
+            "session_name": lease["startup_session_id"], "run_id": run_id,
+            "attempt_id": run["active_attempt_id"], "process_pid": process.pid,
+            "stdout_path": str(run_root / "stdout.log"),
+            "stderr_path": str(run_root / "stderr.log"),
+            "exit_path": str(run_root / "exit_code"), "model": worker["model"],
+            "started_at": run["runtime_invoked_at"],
+            "startup_token_digest": hashlib.sha256(str(lease["startup_token"]).encode()).hexdigest(),
+        })
+        session = runtime._read_active_session(worker_id)
+        assert session is not None
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute(
+                "UPDATE host_run_leases SET pid = ?, process_group = ?, process_start_identity = ? WHERE lease_id = ?",
+                (process.pid, session["process_group"], session["process_start_identity"], lease["lease_id"]),
+            )
+        runtime._register_process(worker_id, process)
+        runtime._release_durable_host_process(session)
+        deadline = time.monotonic() + 3
+        while not child_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child_pid_path.exists()
+        child_pid = int(child_pid_path.read_text())
+        runtime._write_session_key(worker_id, "synthetic-preserved-native-session")
+        workspace = tmp_path / "workspace.txt"
+        workspace.write_text("Preserve this work.")
+        service = WorkersProjectsService(store, runtime, reconcile_on_startup=False,
+                                        start_background_consumers=False)
+        service._emit_callback = lambda *_args, **_kwargs: None
+        yield {"store": store, "runtime": runtime, "service": service, "worker": worker,
+               "run": run, "lease": lease, "process": process, "child_pid": child_pid,
+               "workspace": workspace, "state_dir": tmp_path / "host-state"}
+    finally:
+        if service is not None:
+            service.shutdown()
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+        if child_pid and not runtime._recorded_pid_is_proven_gone(child_pid):
+            os.kill(child_pid, 9)
+        store.close()
+
+
+def _observe_three_host_retries(case, *, through_service=False):
+    store, run = case["store"], case["run"]
+    for sequence in range(1, 4):
+        observation = {
+            "worker_id": case["worker"]["worker_id"], "run_id": run["run_id"],
+            "attempt_id": run["active_attempt_id"], "kind": "internal_retry",
+            "failure_class": "provider_internal_retry", "runtime": "codex-cli", "model": "test",
+            "source_sequence": sequence,
+            "source_digest": hashlib.sha256(f"held-host-{sequence}".encode()).hexdigest(),
+        }
+        if through_service:
+            attention = case["service"]._observe_provider_liveness(observation)
+        else:
+            observation.pop("worker_id")
+            observation["expected_attempt_id"] = observation.pop("attempt_id")
+            attention = store.observe_provider_liveness(**observation)
+    assert attention is not None
+    assert attention["state"] == "needs_input"
+    return attention
+
+
+@pytest.mark.parametrize("recovery", ["direct", "before_stop_restart", "after_ack_restart"])
+def test_provider_liveness_attention_stops_exact_host_child_and_recovers_claim(
+    held_provider_liveness_host, monkeypatch, recovery
+):
+    case = held_provider_liveness_host
+    store, service, runtime = case["store"], case["service"], case["runtime"]
+    run_id, worker_id = str(case["run"]["run_id"]), str(case["worker"]["worker_id"])
+    generation = _exact_terminal_generation(store, run_id)
+    if recovery == "direct":
+        _observe_three_host_retries(case, through_service=True)
+    else:
+        attention = _observe_three_host_retries(case)
+        with monkeypatch.context() as fault:
+            if recovery == "before_stop_restart":
+                fault.setattr(runtime, "_stop_active_process", lambda *_args, **_kwargs: False)
+            else:
+                def crash_before_finalize(*_args, **_kwargs):
+                    raise RuntimeErrorBase("Synthetic interruption after process ACK")
+                fault.setattr(store, "finalize_worker_compute_release", crash_before_finalize)
+            assert service._release_needs_input_compute(store.get_worker(worker_id), attention) is None
+        pending = store.get_worker(worker_id)
+        assert pending["compute_release_kind"] == "needs_input"
+        assert pending["compute_release_target_run_id"] == run_id
+        assert pending["compute_release_token"]
+        assert not pending["compute_released_at"]
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute("UPDATE workers SET compute_release_expires_at = ? WHERE worker_id = ?",
+                         ("2000-01-01T00:00:00+00:00", worker_id))
+        service.shutdown()
+        runtime = HostCodexCliRuntime(base_dir=str(case["state_dir"]))
+        service = WorkersProjectsService(store, runtime, reconcile_on_startup=False,
+                                        start_background_consumers=False)
+        try:
+            assert len(service.recover_expired_compute_release_claims_once()) == 1
+            assert service.recover_expired_compute_release_claims_once() == []
+        finally:
+            service.shutdown()
+    case["process"].wait(timeout=5)
+    assert runtime._recorded_pid_is_proven_gone(case["child_pid"])
+    assert runtime._read_active_session(worker_id) is None
+    receipt = runtime._read_host_control_receipt(worker_id)
+    assert receipt["status"] == "confirmed"
+    assert receipt["operation"] == "needs_input"
+    assert receipt["session"]["attempt_id"] == case["run"]["active_attempt_id"]
+    worker = store.get_worker(worker_id)
+    assert worker["state"] == "needs_input"
+    assert worker["compute_released_at"]
+    assert not worker["compute_release_token"]
+    assert worker["model"] == "test"
+    assert store.get_run(run_id)["provider_liveness_route_locked"] == 1
+    assert store.get_run(run_id)["state"] == "needs_input"
+    assert runtime._read_session_key(worker_id) == "synthetic-preserved-native-session"
+    assert case["workspace"].read_text() == "Preserve this work."
+    assert store.get_host_run_lease(case["lease"]["lease_id"])["release_reason"] == "provider_progress_stalled"
+    assert service._finalize_run_if_state(run_id, "running", state="completed",
+                                          output_text="Late stale result", **generation) is None
+    events = [event["event_type"] for event in store.list_events(worker_id)]
+    assert events.count("worker.needs_input_compute_terminated") == 1
+    assert events.count("run.needs_input") == 1
+
+
+@pytest.mark.parametrize("mismatch", ["worker", "attempt", "current_attempt", "lease_id", "release_reason", "started_at",
+                                      "session", "session_run", "session_attempt", "process_pid", "process_group",
+                                      "process_start", "startup_token"])
+def test_provider_liveness_release_rejects_changed_host_generation(
+    held_provider_liveness_host, mismatch
+):
+    case = held_provider_liveness_host
+    store, runtime, service = case["store"], case["runtime"], case["service"]
+    attention = _observe_three_host_retries(case)
+    worker_id = str(case["worker"]["worker_id"])
+    lease_id = str(case["lease"]["lease_id"])
+    if mismatch in {"worker", "attempt", "current_attempt", "lease_id", "release_reason", "started_at"}:
+        with sqlite3.connect(store.db_path) as conn:
+            if mismatch == "started_at":
+                conn.execute("UPDATE run_attempts SET runtime_invoked_at = ? WHERE attempt_id = ?",
+                             ("changed-start", attention["active_attempt_id"]))
+            elif mismatch == "current_attempt":
+                conn.execute("UPDATE runs SET active_attempt_id = ? WHERE run_id = ?",
+                             ("changed-attempt", attention["run_id"]))
+            elif mismatch == "lease_id":
+                conn.execute("UPDATE run_attempts SET lease_id = ? WHERE attempt_id = ?",
+                             ("changed-lease", attention["active_attempt_id"]))
+            else:
+                field = {"worker": "worker_id", "attempt": "attempt_id",
+                         "release_reason": "release_reason"}[mismatch]
+                conn.execute(f"UPDATE host_run_leases SET {field} = ? WHERE lease_id = ?",
+                             ("changed-generation", lease_id))
+    else:
+        session = runtime._read_active_session(worker_id)
+        field = {"session": "session_name", "session_run": "run_id", "session_attempt": "attempt_id",
+                 "process_pid": "process_pid", "process_group": "process_group",
+                 "process_start": "process_start_identity", "startup_token": "startup_token_digest"}[mismatch]
+        session[field] = "changed-generation"
+        runtime._write_active_session(worker_id, session)
+    assert service._release_needs_input_compute(store.get_worker(worker_id), attention) is None
+    assert case["process"].poll() is None
+    assert not runtime._recorded_pid_is_proven_gone(case["child_pid"])
+    assert store.get_worker(worker_id)["compute_release_token"]
+    assert not store.get_worker(worker_id)["compute_released_at"]
+    assert store.get_run(str(attention["run_id"]))["state"] == "needs_input"
+
+
+@pytest.mark.parametrize("mismatch", ["operation", "target", "target_start", "token", "epoch", "other_control"])
+def test_released_attention_host_lease_only_authorizes_exact_owned_cleanup(
+    held_provider_liveness_host, mismatch
+):
+    case = held_provider_liveness_host
+    service, store, runtime = case["service"], case["store"], case["runtime"]
+    attention = _observe_three_host_retries(case)
+    worker_id = str(case["worker"]["worker_id"])
+    claim = service._claim_exact_run_control(store.get_worker(worker_id), attention, kind="needs_input")
+    scoped = service._worker_for_provider_liveness_release(claim["worker"], str(attention["run_id"]))
+    if mismatch != "other_control":
+        field, value = {
+            "operation": ("compute_release_kind", "stop_run"),
+            "target": ("compute_release_target_run_id", "newer-run"),
+            "target_start": ("compute_release_target_started_at", "newer-start"),
+            "token": ("compute_release_token", ""),
+            "epoch": ("compute_release_epoch", "invalid-generation"),
+        }[mismatch]
+        scoped[field] = value
+    with pytest.raises(RuntimeErrorBase):
+        if mismatch == "other_control":
+            runtime.pause_worker(scoped)
+        else:
+            runtime.terminate_worker(scoped)
+    assert case["process"].poll() is None
+    assert not runtime._recorded_pid_is_proven_gone(case["child_pid"])
+    assert not store.get_worker(worker_id)["compute_released_at"]
 
 
 def test_managed_shutdown_release_keeps_run_out_of_provider_attention_and_requeues_same_run(
@@ -5321,6 +5547,125 @@ def test_cancelled_conversation_cannot_invoke_after_dispatch_wait(tmp_path, monk
         service.shutdown()
 
 
+def test_other_conversation_family_dispatches_while_four_turns_are_running(
+    tmp_path, monkeypatch
+):
+    """The account mission cap cannot queue an independently admitted conversation."""
+    monkeypatch.setenv("WPR_HOST_CONVERSATION_SLOTS_PER_CLI", "4")
+    monkeypatch.setenv("WPR_HOST_ACCOUNT_ACTIVE_LIMIT", "4")
+    store = Store(str(tmp_path / "conversation-dispatch.sqlite3"))
+    release = Event()
+    started = {}
+
+    class HeldRuntime(StubRuntime):
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            result = super().run_task(worker, instruction, timeout_sec=timeout_sec, run_id=run_id)
+            started[str(worker["worker_id"])].set()
+            if worker["profile"] == "codex-cli":
+                assert release.wait(timeout=10)
+            return result
+
+    service = WorkersProjectsService(
+        store, HeldRuntime(), reconcile_on_startup=False, start_background_consumers=False
+    )
+    monkeypatch.setattr(service, "_emit_callback", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service_module, "host_resource_usage",
+        lambda _leases: HostResourceUsage(
+            child_processes=0, threads=0, available_memory_bytes=32 * 1024**3,
+            available_disk_bytes=64 * 1024**3,
+        ),
+    )
+    subjects = []
+    for index, profile in enumerate(["codex-cli"] * 4 + ["grok-build"]):
+        project = store.create_project("synthetic-owner", f"Dispatch {index}", "Dispatch", profile)
+        worker = store.create_worker(
+            project_id=project["project_id"], owner_id="synthetic-owner",
+            name=f"Conversation {index}", role="conversation-agent", profile=profile,
+            backend=profile, runtime=profile, model="test", execution_mode="host",
+            trusted_run_lane="conversation", bootstrap_bundle={"run_mode": "conversation"},
+        )
+        store.update_worker_state(worker["worker_id"], "ready")
+        run = service.assign_run(worker["worker_id"], "Continue.", start_processor=False)
+        started[str(worker["worker_id"])] = Event()
+        subjects.append((worker, run))
+    try:
+        for worker, _run in subjects[:4]:
+            service.start_assigned_run(worker["worker_id"])
+            assert started[str(worker["worker_id"])].wait(timeout=2)
+        assert len(store.list_active_host_run_leases()) == 4
+        # All four holders remain live: this cannot pass by waiting for their completion.
+        worker, run = subjects[4]
+        service.start_assigned_run(worker["worker_id"])
+        assert started[str(worker["worker_id"])].wait(timeout=1), (
+            "A free conversation family waited behind the unrelated account mission cap"
+        )
+        assert not release.is_set()
+        assert store.get_run(run["run_id"])["runtime_invoked_at"]
+        for holder, holder_run in subjects[:4]:
+            assert store.get_run(holder_run["run_id"])["state"] == "running"
+            assert store.get_active_host_run_lease_for_run(holder_run["run_id"])["lane"] == "conversation"
+    finally:
+        release.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and any(
+            store.get_run(run["run_id"])["state"] not in {"completed", "failed"}
+            for _worker, run in subjects
+        ):
+            time.sleep(0.01)
+        service.shutdown()
+    assert all(store.get_run(run["run_id"])["state"] == "completed" for _worker, run in subjects)
+    assert store.list_active_host_run_leases() == []
+
+
+def test_cancelled_conversation_cannot_invoke_after_dispatch_wait(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "cancelled-dispatch.sqlite3"))
+    calls = []
+    release = Event()
+    holder_started = Event()
+
+    class CountingRuntime(StubRuntime):
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            calls.append(run_id)
+            return super().run_task(worker, instruction, timeout_sec=timeout_sec, run_id=run_id)
+
+    service = WorkersProjectsService(
+        store, CountingRuntime(), max_workers=1, reconcile_on_startup=False,
+        start_background_consumers=False,
+    )
+    monkeypatch.setattr(service, "_emit_callback", lambda *_args, **_kwargs: None)
+    project = store.create_project("synthetic-owner", "Cancelled dispatch", "Dispatch", "codex-cli")
+    worker = store.create_worker(
+        project_id=project["project_id"], owner_id="synthetic-owner", name="Conversation",
+        role="conversation-agent", profile="codex-cli", backend="codex-cli",
+        runtime="codex-cli", model="test", execution_mode="host",
+        trusted_run_lane="conversation", bootstrap_bundle={"run_mode": "conversation"},
+    )
+    store.update_worker_state(worker["worker_id"], "ready")
+    run = service.assign_run(worker["worker_id"], "Continue.", start_processor=False)
+
+    def hold_dispatch():
+        holder_started.set()
+        assert release.wait(timeout=5)
+
+    holder = service.conversation_executor.submit(hold_dispatch)
+    try:
+        assert holder_started.wait(timeout=1)
+        service.start_assigned_run(worker["worker_id"])
+        assert store.get_run(run["run_id"])["state"] == "queued"
+        service.cancel_run(worker["worker_id"], run["run_id"])
+        release.set()
+        holder.result(timeout=2)
+        service.conversation_executor.submit(lambda: None).result(timeout=2)
+        assert store.get_run(run["run_id"])["state"] == "cancelled"
+        assert calls == []
+        assert store.list_run_attempts(run["run_id"]) == []
+        assert store.list_active_host_run_leases() == []
+    finally:
+        release.set()
+        service.shutdown()
+
+
 def test_shared_target_repository_mutation_scope_serializes_host_missions(tmp_path):
     store = Store(str(tmp_path / "leases.sqlite3"))
     _first_project, first_worker, first_run = _active_worker_and_run(
@@ -8624,6 +8969,375 @@ def test_managed_shutdown_retains_exact_lease_until_generation_absence_is_proven
         assert service.release_owned_host_run_leases() == 0
         assert store.reconcile_invalid_running_runs() == 1
         assert store.get_run(run["run_id"])["state"] == "queued"
+    finally:
+        service.shutdown()
+        store.close()
+
+# Normal Core conversation broker descriptors do not carry authority_kind.
+def _normal_host_broker_turn(tmp_path, suffix, *, grant=""):
+    store, service, runtime, worker_id, run_id = _queued_conversation_turn(
+        tmp_path, suffix, grant=grant
+    )
+    broker = {
+        "version": 1,
+        "name": "glasshive-user-capabilities",
+        "allowed_servers": ["synthetic-reviewed-server"],
+        "allowed_host_tools": ["active_work"],
+        "scopes": {"content_read": True},
+        "projection": "all_user_enabled_policy_gated",
+    }
+    bundle = {
+        "version": 1,
+        "run_mode": "conversation",
+        "access_mode": "full",
+        "env": {},
+        "glasshive_capability_broker": broker,
+        "claude_project_mcp": {
+            "glasshive-user-capabilities": {
+                "type": "http",
+                "url": "https://broker.invalid/mcp",
+                "headers": {"Authorization": "Bearer ${GLASSHIVE_CAPABILITY_BROKER_TOKEN}"},
+            },
+        },
+        "provider_capabilities": {"native_tools": True, "self_delegation": False},
+    }
+    store.update_worker(worker_id, execution_mode="host", bootstrap_bundle_json=json.dumps(bundle))
+    return store, service, runtime, worker_id, run_id, bundle
+
+
+@pytest.mark.parametrize("publication", ["provider-request", "uuid", "idempotent"])
+def test_normal_host_conversation_waits_for_bundle_published_after_queued_run(tmp_path, monkeypatch, publication):
+    """A reused queue may see the durable row before assign_run attaches its private bundle."""
+    from threading import Thread
+
+    store, service, runtime, worker_id, initial_run_id, stable = _normal_host_broker_turn(
+        tmp_path, "normal-host-attach-race", grant="first-synthetic-grant"
+    )
+    published = Event()
+    consumed_empty = Event()
+    processor_done = Event()
+    target = {"run_id": ""}
+    original_record = service._record_run_allowed_ai_admission
+
+    class ObservedBundles(dict):
+        def pop(self, key, default=None):
+            value = super().pop(key, default)
+            if key == target["run_id"]:
+                consumed_empty.set()
+            return value
+
+    def held_after_publication(run, *args, **kwargs):
+        original_record(run, *args, **kwargs)
+        target["run_id"] = str(run["run_id"])
+        published.set()
+        assert consumed_empty.wait(timeout=5), "consumer did not reach exact run bundle boundary"
+
+    def process():
+        try:
+            service._process_worker_queue(worker_id, 1)
+        finally:
+            processor_done.set()
+
+    try:
+        # The first accepted turn establishes the same worker's native conversation.
+        service.start_assigned_run(worker_id)
+        deadline = time.monotonic() + 5
+        while worker_id in service._active_processors and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert store.get_run(initial_run_id)["state"] == "completed"
+        assert worker_id not in service._active_processors
+        service._run_local_bundles = ObservedBundles(service._run_local_bundles)
+        monkeypatch.setattr(service, "_record_run_allowed_ai_admission", held_after_publication)
+        with service._processors_lock:
+            service._active_processors.add(worker_id)
+            service._processor_generations[worker_id] = 1
+        options = {}
+        if publication == "provider-request":
+            session = store.upsert_provider_session(
+                tenant_id="local", owner_id="owner-a", conversation_id="synthetic-publication",
+                agent_id="agent-a", model_id="codex-cli:test", project_id=store.get_worker(worker_id)["project_id"],
+                worker_id=worker_id, workspace_dir=str(tmp_path), access_mode="full",
+            )
+            request, _ = store.create_provider_request(
+                tenant_id="local", owner_id="owner-a", session_id=session["session_id"],
+                idempotency_key="synthetic-provider-publication", message_id="message-a", stream_id="stream-a",
+                requested_history_count=1, admitted_instruction="Second synthetic turn.",
+            )
+            options["provider_request_id"] = request["request_id"]
+        elif publication == "idempotent":
+            options["idempotency_key"] = "synthetic-second-turn"
+        with ThreadPoolExecutor(max_workers=1) as producer:
+            assigned = producer.submit(
+                service.assign_run, worker_id, "Second synthetic turn.",
+                start_processor=False,
+                run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "second-synthetic-grant"}},
+                **options,
+            )
+            assert published.wait(timeout=5)
+            consumer = Thread(target=process, daemon=True)
+            consumer.start()
+            second = assigned.result(timeout=5)
+            assert processor_done.wait(timeout=5)
+            consumer.join(timeout=1)
+        assert runtime.bearers == ["first-synthetic-grant", "second-synthetic-grant"]
+        assert store.get_run(second["run_id"])["state"] == "completed"
+        assert runtime.late_grants == [False, False]
+        persisted = json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"])
+        assert persisted == stable
+        assert not service._run_local_grant_waiters
+        assert not service._run_local_grant_claimants
+        assert not service._run_local_bundles
+        if publication == "provider-request":
+            assert store.get_provider_request(request["request_id"])["run_id"] == second["run_id"]
+    finally:
+        consumed_empty.set()
+        service.shutdown()
+        store.close()
+
+
+
+@pytest.mark.parametrize("publication", ["provider-request", "uuid", "idempotent"])
+def test_invocation_bundle_publication_failure_removes_only_its_stage(tmp_path, monkeypatch, publication):
+    store, service, runtime, worker_id, initial_run_id, stable = _normal_host_broker_turn(tmp_path, "failed-" + publication)
+    options = {}
+    method = "create_run"
+    if publication == "idempotent":
+        options["idempotency_key"] = "synthetic-failed-publication"
+        method = "create_idempotent_run"
+    elif publication == "provider-request":
+        session = store.upsert_provider_session(
+            tenant_id="local", owner_id="owner-a", conversation_id="synthetic-failed",
+            agent_id="agent-a", model_id="codex-cli:test", project_id=store.get_worker(worker_id)["project_id"],
+            worker_id=worker_id, workspace_dir=str(tmp_path), access_mode="full",
+        )
+        request, _ = store.create_provider_request(
+            tenant_id="local", owner_id="owner-a", session_id=session["session_id"],
+            idempotency_key="synthetic-failed-publication", message_id="message-a", stream_id="stream-a",
+            requested_history_count=1, admitted_instruction="Synthetic failed publication.",
+        )
+        options["provider_request_id"] = request["request_id"]
+        method = "create_and_attach_provider_run"
+    unaffected = {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "unrelated-synthetic-grant"}}
+    service._run_local_bundles["unrelated-synthetic-run"] = unaffected
+    seen = []
+    def fail(*args, **kwargs):
+        staged = [v for k, v in service._run_local_bundles.items() if k != "unrelated-synthetic-run"]
+        seen.append(staged)
+        raise RuntimeError("Synthetic store publication failure")
+    monkeypatch.setattr(store, method, fail)
+    try:
+        with pytest.raises(RuntimeError, match="Synthetic store publication failure"):
+            service.assign_run(
+                worker_id, "Synthetic failed publication.", start_processor=False,
+                run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "staged-synthetic-grant"}}, **options,
+            )
+        assert seen == [[{"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "staged-synthetic-grant"}}]]
+        assert service._run_local_bundles == {"unrelated-synthetic-run": unaffected}
+        assert runtime.bearers == []
+        assert json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"]) == stable
+        assert len(store.list_runs_for_worker(worker_id)) == 1
+    finally:
+        service.shutdown()
+        store.close()
+
+
+def test_existing_queued_invocation_refresh_uses_same_run_without_persisting_grant(tmp_path):
+    store, service, runtime, worker_id, initial_run_id, stable = _normal_host_broker_turn(tmp_path, "queued-refresh")
+    try:
+        first = service.assign_run(
+            worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-queued",
+            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "old-synthetic-grant"}},
+        )
+        refreshed = service.assign_run(
+            worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-queued",
+            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "fresh-synthetic-grant"}},
+        )
+        assert refreshed["run_id"] == first["run_id"]
+        assert service._run_local_bundles[first["run_id"]]["env"]["GLASSHIVE_CAPABILITY_BROKER_TOKEN"] == "fresh-synthetic-grant"
+        assert json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"]) == stable
+        assert runtime.bearers == []
+    finally:
+        service.shutdown()
+        store.close()
+
+
+def test_existing_queued_invocation_claim_cannot_restore_a_consumed_grant(tmp_path, monkeypatch):
+    from threading import Thread
+
+    store, service, runtime, worker_id, initial_run_id, stable = _normal_host_broker_turn(tmp_path, "claimed-refresh")
+    store.update_run(initial_run_id, state="completed", output_text="Earlier synthetic turn.")
+    first = service.assign_run(
+        worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-claimed",
+        run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "accepted-synthetic-grant"}},
+    )
+    consumed = Event()
+    done = Event()
+    class ObservedBundles(dict):
+        def pop(self, key, default=None):
+            value = super().pop(key, default)
+            if key == first["run_id"]:
+                consumed.set()
+            return value
+    service._run_local_bundles = ObservedBundles(service._run_local_bundles)
+    original = store.create_idempotent_run
+    with service._processors_lock:
+        service._active_processors.add(worker_id)
+        service._processor_generations[worker_id] = 1
+    def process():
+        try:
+            service._process_worker_queue(worker_id, 1)
+        finally:
+            done.set()
+    def existing(*args, **kwargs):
+        result = original(*args, **kwargs)
+        consumer = Thread(target=process, daemon=True)
+        consumer.start()
+        assert consumed.wait(timeout=5)
+        return result
+    monkeypatch.setattr(store, "create_idempotent_run", existing)
+    try:
+        same = service.assign_run(
+            worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-claimed",
+            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "late-synthetic-replacement"}},
+        )
+        assert done.wait(timeout=5)
+        assert same["run_id"] == first["run_id"]
+        assert runtime.bearers == ["accepted-synthetic-grant"]
+        assert runtime.late_grants == [False]
+        assert first["run_id"] not in service._run_local_bundles
+        assert json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"]) == stable
+    finally:
+        consumed.set()
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("state", ["needs_input", "completed"])
+def test_existing_nonqueued_invocation_assignment_keeps_its_admission_boundary(tmp_path, state):
+    store, service, runtime, worker_id, initial_run_id, stable = _normal_host_broker_turn(tmp_path, "existing-" + state)
+    try:
+        first = service.assign_run(
+            worker_id, "Synthetic existing turn.", start_processor=False, idempotency_key="synthetic-existing",
+        )
+        store.update_run(first["run_id"], state=state)
+        same = service.assign_run(
+            worker_id, "Synthetic existing turn.", start_processor=False, idempotency_key="synthetic-existing",
+            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "unrequested-synthetic-grant"}},
+        )
+        assert same["run_id"] == first["run_id"]
+        assert store.get_run(first["run_id"])["state"] == state
+        assert first["run_id"] not in service._run_local_bundles
+        assert runtime.bearers == []
+        assert json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"]) == stable
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("transition", ["before-attachment", "inside-condition"])
+def test_duplicate_cached_queued_run_does_not_reopen_current_needs_input(tmp_path, monkeypatch, transition):
+    store, service, runtime, worker_id, initial_run_id, stable = _normal_host_broker_turn(tmp_path, "needs-input-race-" + transition)
+    first = service.assign_run(
+        worker_id, "Synthetic existing turn.", start_processor=False, idempotency_key="synthetic-needs-input-race",
+    )
+    original_create = store.create_idempotent_run
+    def create(*args, **kwargs):
+        result = original_create(*args, **kwargs)
+        assert result[0]["state"] == "queued"
+        if transition == "before-attachment":
+            store.update_run(first["run_id"], state="needs_input")
+        return result
+    monkeypatch.setattr(store, "create_idempotent_run", create)
+    original_condition = service._run_local_bundles_lock
+    armed = [transition == "inside-condition"]
+    class TransitionCondition:
+        def __enter__(self):
+            original_condition.__enter__()
+            if armed[0]:
+                armed[0] = False
+                store.update_run(first["run_id"], state="needs_input")
+            return self
+        def __exit__(self, *args):
+            return original_condition.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(original_condition, name)
+    service._run_local_bundles_lock = TransitionCondition()
+    try:
+        same = service.assign_run(
+            worker_id, "Synthetic existing turn.", start_processor=False, idempotency_key="synthetic-needs-input-race",
+            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-no-implicit-reopen"}},
+        )
+        assert same["run_id"] == first["run_id"]
+        assert store.get_run(first["run_id"])["state"] == "needs_input"
+        assert runtime.bearers == []
+        assert json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"]) == stable
+    finally:
+        service._run_local_bundles_lock = original_condition
+        service.shutdown()
+        store.close()
+
+
+def test_assignment_keeps_existing_claimed_legacy_grant_waiter_refresh(tmp_path, monkeypatch):
+    from threading import Thread
+
+    store, service, runtime, worker_id, initial_run_id = _queued_conversation_turn(tmp_path, "claimed-legacy-refresh")
+    store.update_worker(worker_id, execution_mode="host")
+    store.update_run(initial_run_id, state="completed", output_text="Earlier synthetic turn.")
+    first = service.assign_run(
+        worker_id, "Synthetic waiting turn.", start_processor=False, idempotency_key="synthetic-legacy-refresh",
+    )
+    consumed = Event()
+    done = Event()
+    class ObservedBundles(dict):
+        def pop(self, key, default=None):
+            value = super().pop(key, default)
+            if key == first["run_id"]:
+                consumed.set()
+            return value
+    service._run_local_bundles = ObservedBundles(service._run_local_bundles)
+    original = store.create_idempotent_run
+    with service._processors_lock:
+        service._active_processors.add(worker_id)
+        service._processor_generations[worker_id] = 1
+    def process():
+        try:
+            service._process_worker_queue(worker_id, 1)
+        finally:
+            done.set()
+    def existing(*args, **kwargs):
+        result = original(*args, **kwargs)
+        Thread(target=process, daemon=True).start()
+        assert consumed.wait(timeout=5)
+        return result
+    monkeypatch.setattr(store, "create_idempotent_run", existing)
+    try:
+        service.assign_run(
+            worker_id, "Synthetic waiting turn.", start_processor=False, idempotency_key="synthetic-legacy-refresh",
+            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-claimed-fresh-grant"}},
+        )
+        assert done.wait(timeout=5)
+        assert runtime.bearers == ["synthetic-claimed-fresh-grant"]
+        assert runtime.late_grants == [False]
+        assert store.get_run(first["run_id"])["state"] == "completed"
+        assert not service._run_local_bundles
+    finally:
+        consumed.set()
+        service.shutdown()
+        store.close()
+
+
+
+def test_explicit_invocation_grant_retry_keeps_default_needs_input_reopen(tmp_path):
+    store, service, runtime, worker_id, run_id = _queued_conversation_turn(tmp_path, "explicit-grant-retry")
+    try:
+        store.update_run(run_id, state="needs_input")
+        assert service.attach_run_local_bundle(
+            run_id, {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-explicit-retry"}},
+        ) is True
+        assert store.get_run(run_id)["state"] == "queued"
+        assert service._run_local_bundles[run_id]["env"]["GLASSHIVE_CAPABILITY_BROKER_TOKEN"] == "synthetic-explicit-retry"
+        assert "synthetic-explicit-retry" not in store.get_worker(worker_id)["bootstrap_bundle_json"]
+        assert runtime.bearers == []
     finally:
         service.shutdown()
         store.close()

@@ -139,6 +139,27 @@ container is removed before the lease is released. This lets a connector added o
 workspace-native harness remain visible on later missions without copying its authorization into
 xPerfect or another workspace.
 
+Native Grok Build sessions discover authorized MCP tools through `search_tool` and call them
+through `use_tool` using the returned qualified name. Native built-in tools remain directly
+callable. A connected MCP catalog can be usable through discovery without listing every tool
+as a direct model declaration. A late ACP inventory notification is not a readiness timestamp.
+
+Managed Viventium records this access mechanism as one registered native-profile fact for
+Grok Worker and conversation authority, only when native tools are enabled and the existing
+authorized MCP projection is nonempty. The host's deferred capability-server fields retain
+their separate meaning and grants stay unchanged. The host's prompt architecture owner,
+`docs/requirements_and_learnings/49_Prompt_Architecture_and_Token_Efficiency.md`
+(section "Native Profile MCP Access Facts"), owns registration, Workbench visibility,
+publication and final authority checks.
+
+Canonical conversation tool evidence uses the existing owner-, message-, invocation-, request-
+and run-bound version 1 carrier for Codex, Claude and Grok. Grok evidence pairs typed ACP tool
+IDs with machine tool names, refined arguments and terminal outputs from the same native session.
+Incomplete or conflicting records remain explicit omissions. Typed operation failures remain
+failures even when the native transport completed. Existing byte bounds and redaction apply;
+thought events are excluded. Tool evidence does not select files or grant publication. Native
+epoch recovery remains conservative when tool evidence has no replay carrier.
+
 For conversation-provider file delivery, the existing selected-output publisher also records
 `glasshive.output_files` version 1 on the canonical response and on its terminal protocol chunk.
 The record binds the owner, conversation, message, stream, agent, logical turn and revision,
@@ -164,6 +185,15 @@ The existing callback signature covers the carrier. Association verification ret
 bound run and attempt; the host resolves its own trusted destination before importing attachments
 into its normal message store. Replay retains the accepted callback bytes and the immutable selection.
 Progress, failed and cancelled callbacks do not publish this completed-result carrier.
+
+Native file previews and downloads use the selected filename only when the exact completed
+run, owner, callback, revision, digest and stored bytes identify one unique name for that artifact.
+Missing, invalid, stale or ambiguous metadata keeps the storage basename. This presentation rule
+does not change signed-link scope, file access, immutable bytes or range downloads.
+A mission view lists only model-selected completed outputs under Result files. Other
+authorized files remain in the separate collapsed Workspace files section, labeled as
+reusable workspace content that may come from other work. Neither section grants new
+file access or worker controls.
 
 Host native file selections may use the admitted workspace or the current worker's managed
 `TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes

@@ -2031,3 +2031,151 @@ def test_direct_worker_rejects_feeling_projection_type_confusion_before_writes(
 
     assert not home.exists()
     assert not workspace.exists()
+
+
+PRIOR_OUTPUT_ID='native_'+'a'*64
+PRIOR_OUTPUT_DATA=b'voice parity check\n'
+
+def prior_output_ledger(id=PRIOR_OUTPUT_ID):
+ return {'selected_uploads':[{'file_id':id,'filename':'selected.txt','type':'text/plain','bytes':19,'source':'local','context':'message_attachment'}]}
+
+def prior_output_setup(tmp_path,monkeypatch):
+ uploads=tmp_path/'uploads';uploads.mkdir();monkeypatch.setenv('WPR_LIBRECHAT_UPLOADS_ROOT',str(uploads));monkeypatch.delenv('WPR_BOOTSTRAP_SOURCE_ROOTS',raising=False)
+ return uploads
+
+@pytest.mark.parametrize('storage_name',[PRIOR_OUTPUT_ID,PRIOR_OUTPUT_ID+'__selected.txt',PRIOR_OUTPUT_ID+'.txt'])
+def test_prior_output_original_imported_bytes_resolve_by_exact_owner_storage_identity(tmp_path,monkeypatch,storage_name):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();saved=owner/storage_name;saved.write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert result[0].get('source_path')==str(saved)
+ assert result[0]['path']=='uploads/selected.txt'
+ assert saved.read_bytes()==PRIOR_OUTPUT_DATA and 'upload_blocker' not in result[0]
+
+def test_prior_output_same_display_filename_is_not_identity(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();(owner/'selected.txt').write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_foreign_owner_file_is_not_resolved(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-b';owner.mkdir();(owner/(PRIOR_OUTPUT_ID+'.txt')).write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_deleted_original_keeps_existing_unavailable_metadata(tmp_path,monkeypatch):
+ prior_output_setup(tmp_path,monkeypatch);result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_ambiguous_exact_id_storage_stays_unavailable(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir()
+ for name in [PRIOR_OUTPUT_ID+'.txt',PRIOR_OUTPUT_ID+'__selected.txt']:(owner/name).write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+@pytest.mark.parametrize('id',['../'+PRIOR_OUTPUT_ID,PRIOR_OUTPUT_ID+'/child','.', '..'])
+def test_prior_output_malformed_identity_has_no_original_bytes(tmp_path,monkeypatch,id):
+ prior_output_setup(tmp_path,monkeypatch);result=project_upload_files(prior_output_ledger(id),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0]
+
+def test_prior_output_unrelated_suffix_is_not_identity(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();(owner/(PRIOR_OUTPUT_ID+'-other.txt')).write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_existing_attachment_context_and_copier_receive_exact_published_original(tmp_path,monkeypatch):
+ from workers_projects_runtime import conversation_provider as cp
+ from workers_projects_runtime.bootstrap import apply_bootstrap
+ import json
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();(owner/(PRIOR_OUTPUT_ID+'.txt')).write_bytes(PRIOR_OUTPUT_DATA)
+ monkeypatch.setenv('WPR_BOOTSTRAP_SOURCE_ROOTS',str(root))
+ monkeypatch.setattr(cp,'project_upload_files',project_upload_files)
+ payload=cp.ChatCompletionRequest.model_validate({'model':'codex-cli:gpt-6.1-sol','messages':[{'role':'user','content':'Read the prior delivered file.'}],
+  'metadata':{'owner_id':'owner-a','bootstrap_bundle':{'viventium_upload_context':prior_output_ledger()}}})
+ context=cp.ConversationProvider._request_attachment_context(payload)
+ assert '1. uploads/selected.txt\n' in context and '.metadata.json' not in context
+ projected=cp.ConversationProvider._projected_request_uploads(payload)
+ workspace=tmp_path/'workspace'
+ apply_bootstrap(home_dir=tmp_path/'home',workspace_dir=workspace,runtime_name='codex-cli',
+  worker={'bootstrap_profile':'none','bootstrap_bundle_json':json.dumps({'files':projected})},
+  copy_file=lambda source,target:target.write_bytes(source.read_bytes()),copy_tree=lambda source,target:None)
+ assert (workspace/'uploads/selected.txt').read_bytes()==PRIOR_OUTPUT_DATA
+
+def test_prior_output_same_stem_multiple_extensions_remains_unavailable(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir()
+ for suffix in ['.txt','.md']:(owner/(PRIOR_OUTPUT_ID+suffix)).write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+@pytest.mark.parametrize('name',[PRIOR_OUTPUT_ID,PRIOR_OUTPUT_ID+'__selected.txt',PRIOR_OUTPUT_ID+'.txt'])
+def test_prior_output_foreign_owner_file_symlink_is_not_projected(tmp_path,monkeypatch,name):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();foreign=root/'owner-b';foreign.mkdir()
+ target=foreign/'private.txt';target.write_bytes(b'foreign-private');(owner/name).symlink_to(target)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_symlinked_owner_directory_is_not_projected(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);foreign=root/'owner-b';foreign.mkdir();(foreign/(PRIOR_OUTPUT_ID+'.txt')).write_bytes(PRIOR_OUTPUT_DATA)
+ (root/'owner-a').symlink_to(foreign,target_is_directory=True)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_nested_directory_symlink_is_not_projected(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();foreign=root/'owner-b';foreign.mkdir()
+ (foreign/(PRIOR_OUTPUT_ID+'.txt')).write_bytes(PRIOR_OUTPUT_DATA);(owner/'nested').symlink_to(foreign,target_is_directory=True)
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in result[0] and result[0]['upload_blocker']
+
+def test_prior_output_valid_path_stays_lexical_for_copier_recheck(tmp_path,monkeypatch):
+ from workers_projects_runtime.bootstrap import resolve_bootstrap_source_path
+ actual=tmp_path/'real-uploads';owner=actual/'owner-a';owner.mkdir(parents=True);(owner/(PRIOR_OUTPUT_ID+'.txt')).write_bytes(PRIOR_OUTPUT_DATA)
+ alias=tmp_path/'trusted-upload-alias';alias.symlink_to(actual,target_is_directory=True)
+ monkeypatch.setenv('WPR_LIBRECHAT_UPLOADS_ROOT',str(alias));monkeypatch.setenv('WPR_BOOTSTRAP_SOURCE_ROOTS',str(alias))
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert result[0]['source_path']==str(alias/'owner-a'/(PRIOR_OUTPUT_ID+'.txt'))
+ saved=owner/(PRIOR_OUTPUT_ID+'.txt');saved.unlink();outside=tmp_path/'outside.txt';outside.write_bytes(PRIOR_OUTPUT_DATA);saved.symlink_to(outside)
+ with pytest.raises(PermissionError):resolve_bootstrap_source_path(result[0]['source_path'])
+
+def test_prior_output_one_request_local_tree_walk_for_64_selected_ids(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();ids=['native_'+f'{n:064x}' for n in range(64)]
+ for id in ids:(owner/(id+'.txt')).write_bytes(PRIOR_OUTPUT_DATA)
+ normal=Path.rglob;walks=[]
+ def track(path,pattern):
+  walks.append(path);return normal(path,pattern)
+ monkeypatch.setattr(Path,'rglob',track)
+ records=[prior_output_ledger(id)['selected_uploads'][0] for id in ids]
+ result=project_upload_files({'selected_uploads':records},owner_id='owner-a',storage_owner_id='owner-a')
+ assert len(walks)==1
+ assert all(row.get('source_path') for row in result)
+
+def test_prior_output_source_index_is_not_reused_on_a_later_projection(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();saved=owner/(PRIOR_OUTPUT_ID+'.txt');saved.write_bytes(PRIOR_OUTPUT_DATA)
+ assert project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')[0].get('source_path')
+ (owner/(PRIOR_OUTPUT_ID+'.md')).write_bytes(PRIOR_OUTPUT_DATA)
+ later=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert 'source_path' not in later[0] and later[0]['upload_blocker']
+
+def test_prior_output_direct_virtual_file_source_does_not_scan(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();(owner/'direct.txt').write_bytes(PRIOR_OUTPUT_DATA)
+ def deny_scan(*args):raise AssertionError('direct source should not scan')
+ monkeypatch.setattr(Path,'rglob',deny_scan)
+ record={**prior_output_ledger()['selected_uploads'][0],'filepath':'/uploads/owner-a/direct.txt'}
+ result=project_upload_files({'selected_uploads':[record]},owner_id='owner-a',storage_owner_id='owner-a')
+ assert result[0]['source_path']==str(owner/'direct.txt')
+
+@pytest.mark.parametrize('delimiter',['__','___','____','_____'])
+def test_prior_output_existing_id_delimiter_with_leading_filename_underscores_keeps_bytes(tmp_path,monkeypatch,delimiter):
+ from workers_projects_runtime.bootstrap import apply_bootstrap
+ import json
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();saved=owner/(PRIOR_OUTPUT_ID+delimiter+'selected.txt');saved.write_bytes(PRIOR_OUTPUT_DATA)
+ monkeypatch.setenv('WPR_BOOTSTRAP_SOURCE_ROOTS',str(root))
+ result=project_upload_files(prior_output_ledger(),owner_id='owner-a',storage_owner_id='owner-a')
+ assert result[0]['source_path']==str(saved)
+ workspace=tmp_path/'workspace'
+ apply_bootstrap(home_dir=tmp_path/'home',workspace_dir=workspace,runtime_name='grok-cli',
+  worker={'bootstrap_profile':'none','bootstrap_bundle_json':json.dumps({'files':result})},
+  copy_file=lambda source,target:target.write_bytes(source.read_bytes()),copy_tree=lambda source,target:None)
+ assert (workspace/'uploads/selected.txt').read_bytes()==PRIOR_OUTPUT_DATA
+
+def test_prior_output_file_id_with_embedded_delimiter_preserves_original_prefix_identity(tmp_path,monkeypatch):
+ root=prior_output_setup(tmp_path,monkeypatch);owner=root/'owner-a';owner.mkdir();ident='synthetic__opaque';saved=owner/(ident+'___selected.txt');saved.write_bytes(PRIOR_OUTPUT_DATA)
+ result=project_upload_files(prior_output_ledger(ident),owner_id='owner-a',storage_owner_id='owner-a')
+ assert result[0]['source_path']==str(saved)

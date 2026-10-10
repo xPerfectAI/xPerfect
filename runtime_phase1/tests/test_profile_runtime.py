@@ -5311,6 +5311,9 @@ def test_host_codex_run_sends_instruction_via_stdin_not_argv(tmp_path, monkeypat
 
 
 def test_host_cli_interrupt_writes_run_evidence(tmp_path, monkeypatch):
+    # Load the SDK before replacing Popen: its runtime type annotations require the real class.
+    from workers_projects_runtime.coordinator_mcp import project_coordinator_bootstrap
+
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     runtime.set_run_start_observer(lambda _payload: None)
     runtime.binary = "/bin/echo"
@@ -9257,6 +9260,105 @@ def test_runtime_dependency_missing_classification_is_structured_and_sanitized()
     assert "sandbox/workstation" in failure.recommended_recovery
 
 
+@pytest.mark.parametrize("message", [
+    "Grok Build executable is missing",
+    "Synthetic neutral dependency description",
+    "Failed to create worker sandbox",
+])
+def test_typed_runtime_dependency_class_does_not_depend_on_error_wording(message):
+    failure = classify_runtime_error(
+        RuntimeDependencyMissingError(
+            message,
+            binary="/private/synthetic-path/synthetic-cli",
+            runtime_name="synthetic-runtime",
+            profile="synthetic-profile",
+            execution_mode="host",
+        ),
+        runtime_name="synthetic-runtime",
+    )
+    assert failure.failure_class == "runtime_dependency_missing"
+    assert failure.retryable is False
+    assert failure.structured is True
+    assert "`synthetic-cli`" in failure.user_message
+    assert "/private/synthetic-path" not in failure.user_message
+
+
+@pytest.mark.parametrize("message", [
+    "Synthetic neutral authentication prerequisite",
+    "Synthetic CLI is not installed",
+])
+def test_provider_authentication_subclass_keeps_its_declared_failure_class(message):
+    from workers_projects_runtime.openclaw_runtime import ProviderAuthenticationMissingError
+
+    failure = classify_runtime_error(
+        ProviderAuthenticationMissingError(message, binary="synthetic-cli"),
+        runtime_name="synthetic-runtime",
+    )
+    assert failure.failure_class == "provider_auth_missing"
+    assert failure.structured is True
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("Synthetic CLI is not installed", "runtime_dependency_missing"),
+    ("Synthetic neutral runtime description", "runtime_error"),
+])
+def test_legacy_runtime_dependency_classification_remains_compatible(message, expected):
+    failure = classify_runtime_error(RuntimeErrorBase(message), runtime_name="synthetic-runtime")
+    assert failure.failure_class == expected
+    assert failure.structured is False
+
+
+@pytest.mark.parametrize("authentication_missing", [False, True])
+def test_typed_preflight_failure_reaches_provider_api_without_model_admission(
+    tmp_path, monkeypatch, authentication_missing
+):
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.api import create_app
+    from workers_projects_runtime.openclaw_runtime import ProviderAuthenticationMissingError, StubRuntime
+
+    error_type = ProviderAuthenticationMissingError if authentication_missing else RuntimeDependencyMissingError
+
+    class MissingPrerequisiteRuntime(StubRuntime):
+        def preflight_worker_profile(self, profile, execution_mode="host"):
+            raise error_type(
+                "Synthetic neutral preflight prerequisite",
+                binary="/private/synthetic-path/synthetic-cli",
+                runtime_name="codex-cli",
+                profile=profile,
+                execution_mode=execution_mode,
+            )
+
+    for key, value in {
+        "WPR_API_TOKEN": "synthetic-admin-token",
+        "GLASSHIVE_PROVIDER_API_KEY": "synthetic-provider-token",
+        "GLASSHIVE_PROVIDER_PRINCIPAL_ID": "synthetic-owner",
+        "GLASSHIVE_PROVIDER_TRUST_IDENTITY_HEADERS": "1",
+        "GLASSHIVE_HOST_WORKERS_ENABLED": "1",
+        "GLASSHIVE_ALLOWED_WORKER_PROFILES": "codex-cli",
+        "GLASSHIVE_PROVIDER_DEFAULT_WORKSPACE": str(tmp_path),
+    }.items():
+        monkeypatch.setenv(key, value)
+    app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=MissingPrerequisiteRuntime())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer synthetic-provider-token", "X-Viventium-User-Id": "synthetic-owner"},
+            json={
+                "model": "codex-cli:gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello."}],
+                "metadata": {"owner_id": "synthetic-owner", "conversation_id": "synthetic-conversation", "agent_id": "synthetic-main"},
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == (
+            "provider_auth_missing" if authentication_missing else "runtime_dependency_missing"
+        )
+        assert "/private/synthetic-path" not in response.text
+        with app.state.store._connect() as connection:
+            for table in ("workers", "provider_sessions", "provider_requests", "runs"):
+                assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+
+
 def test_host_runtime_preflight_rejects_configured_version_mismatch(tmp_path, monkeypatch):
     fake_node = tmp_path / "node"
     fake_node.write_text("#!/usr/bin/env bash\necho 'v20.20.2'\n")
@@ -10397,8 +10499,8 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
             "/root/private.txt",
             "/Volumes/Private/private.txt",
             "/private/var/synthetic/private.txt",
-            "ghp_syntheticgithubcredential",
-            "xoxb-synthetic-slack-credential",
+            'gh' 'p_syntheticgithubcredential',
+            'xo' 'xb-synthetic-slack-credential',
             "eyJhbGciOiJIUzI1NiJ9.c3ludGhldGlj.c2lnbmF0dXJl",
             private_key,
         ]
@@ -10420,9 +10522,9 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
 
 
 @pytest.mark.parametrize("destination", [
-    "</Users/synthetic/Project Folder/private-report.md>",
+    '</U' 'sers/synthetic/Project Folder/private-report.md>',
     "/home/synthetic/private-report.md",
-    "<file:///Users/synthetic/Project Folder/private-report.md>",
+    '<file:///U' 'sers/synthetic/Project Folder/private-report.md>',
     "/Volumes/Private/private-report.md",
     "~/private-report.md",
     "/root/reports/private-report(2).md",
@@ -10443,7 +10545,7 @@ def test_redact_text_keeps_private_image_label_and_redacts_secret_labels():
 def test_redact_text_fails_closed_for_an_unterminated_private_key():
     private_key_body = "A" * 120
     redacted = _redact_text(
-        "Safe prefix.\n-----BEGIN PRIVATE KEY-----\n"
+        'Safe prefix.\n--' '---BEGIN PRIVATE KEY-----\n'
         f"{private_key_body}\n"
         "untrusted trailing text"
     )

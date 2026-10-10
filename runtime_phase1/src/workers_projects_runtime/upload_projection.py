@@ -8,7 +8,9 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from .bootstrap import BOOTSTRAP_SOURCE_TOKEN_KEY, sign_bootstrap_source_path
+from .bootstrap import (
+    BOOTSTRAP_SOURCE_TOKEN_KEY, sign_bootstrap_source_path, _path_has_symlink_component,
+)
 
 
 def project_inline_image_files(messages: Iterable[Any]) -> list[dict[str, Any]]:
@@ -155,47 +157,54 @@ def _trusted_virtual_source(
     return ""
 
 
-def _owner_source_for_file_id(
-    file_id: str,
+def _owner_sources_for_file_ids(
+    file_ids: Iterable[str],
     *,
     owner_id: str | None,
     storage_owner_id: str | None,
-) -> str:
-    """Resolve one owner-scoped upload by its durable file identity.
+) -> dict[str, str]:
+    """Resolve this projection's exact owner file IDs in one filesystem walk."""
 
-    Multiple Telegram album items commonly share the same display filename.  The
-    file id, not that name, is the stable link to the original bytes.
-    """
-
-    clean_id = str(file_id or "").strip()
-    if (
-        not clean_id
-        or clean_id in {".", ".."}
-        or "\x00" in clean_id
-        or "/" in clean_id
-        or "\\" in clean_id
-        or ".." in clean_id
-    ):
-        return ""
-    matches: dict[str, Path] = {}
+    selected = {
+        clean for value in file_ids
+        if (clean := str(value or "").strip())
+        and clean not in {".", ".."}
+        and not any(part in clean for part in ("\0", "/", "\\", ".."))
+    }
+    if not selected:
+        return {}
+    matches: dict[str, dict[str, Path]] = {}
     for root in _upload_root_candidates():
+        lexical_root = Path(os.path.abspath(os.fspath(root)))
         for owner in _owner_components(owner_id, storage_owner_id):
-            owner_root = root / owner
-            if not owner_root.is_dir():
+            owner_root = lexical_root / owner
+            if not owner_root.is_dir() or _path_has_symlink_component(owner_root, lexical_root):
                 continue
             try:
+                resolved_owner = owner_root.resolve(strict=True)
                 for item in owner_root.rglob("*"):
-                    if not item.is_file():
+                    identities = {item.name, item.stem}
+                    boundary = item.name.find("__")
+                    while boundary >= 0:
+                        identities.add(item.name[:boundary])
+                        boundary = item.name.find("__", boundary + 1)
+                    identities.intersection_update(selected)
+                    if not identities or not item.is_file():
                         continue
-                    if item.name != clean_id and not item.name.startswith(f"{clean_id}__"):
+                    if _path_has_symlink_component(item, lexical_root):
                         continue
-                    resolved = os.fspath(item.resolve())
-                    matches[resolved] = item
+                    resolved = item.resolve(strict=True)
+                    if not resolved.is_relative_to(resolved_owner):
+                        continue
+                    for identity in identities:
+                        # Retain the lexical path so the existing copier rechecks symlinks.
+                        matches.setdefault(identity, {})[os.fspath(resolved)] = item
             except OSError:
                 continue
-    if len(matches) != 1:
-        return ""
-    return next(iter(matches))
+    return {
+        identity: os.fspath(next(iter(paths.values())))
+        for identity, paths in matches.items() if len(paths) == 1
+    }
 
 
 def _iter_uploads(value: Any) -> Iterable[dict[str, Any]]:
@@ -399,7 +408,9 @@ def project_upload_files(
     result: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     used_paths: set[str] = set()
-    for upload_index, file_obj in enumerate(_iter_uploads(upload_context)):
+    records = list(_iter_uploads(upload_context))
+    owner_sources: dict[str, str] | None = None
+    for upload_index, file_obj in enumerate(records):
         file_id = str(file_obj.get("file_id") or file_obj.get("id") or "").strip()
         source_ref = next(
             (
@@ -448,11 +459,13 @@ def project_upload_files(
             storage_owner_id=storage_owner_id,
         )
         if not source and file_id:
-            source = _owner_source_for_file_id(
-                file_id,
-                owner_id=owner_id,
-                storage_owner_id=storage_owner_id,
-            )
+            if owner_sources is None:
+                owner_sources = _owner_sources_for_file_ids(
+                    (str(record.get("file_id") or record.get("id") or "") for record in records),
+                    owner_id=owner_id,
+                    storage_owner_id=storage_owner_id,
+                )
+            source = owner_sources.get(file_id, "")
         if source:
             token = sign_bootstrap_source_path(source, tenant_id=tenant_id, owner_id=owner_id)
             result.append(

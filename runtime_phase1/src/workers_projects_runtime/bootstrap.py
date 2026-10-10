@@ -5,6 +5,7 @@ import errno
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import shlex
@@ -265,10 +266,41 @@ def _worker_prompt(
     return text + ("\n" if standalone.endswith("\n") else "")
 
 
+@worker_prompt_layer_producer("developer_instructions")
+def native_profile_tool_access_instructions(
+    harness_profile: str, bundle: JsonDict, mcp_servers: list[JsonDict],
+) -> str:
+    """Describe only the registered profile's configured native MCP access mechanism."""
+    instructions = str(bundle.get("developer_instructions") or "")
+    capabilities = bundle.get("provider_capabilities")
+    if not mcp_servers or (
+        isinstance(capabilities, dict) and capabilities.get("native_tools") is False
+    ):
+        return instructions
+    from .profile_registry import require_worker_profile
+    prompt_id = require_worker_profile(harness_profile).mcp_tool_access_prompt_id
+    if not prompt_id or _VIVENTIUM_WORKER_PROMPTS is None:
+        return instructions
+    fact = _worker_prompt(prompt_id, "").strip()
+    if fact in instructions:
+        return instructions
+    tail = _instruction_text(bundle.get("declared_developer_instruction_tail"))
+    if tail:
+        if not instructions.rstrip().endswith(tail):
+            logging.getLogger(__name__).warning("native_profile_tool_access_skipped=true")
+            return instructions
+        return "\n\n".join(_unique_instruction_parts(
+            instructions.rstrip()[:-len(tail)], fact, tail,
+        ))
+    stable, capsules = _split_viventium_feeling_capsules(instructions)
+    return "\n\n".join(_unique_instruction_parts(stable, fact, *capsules))
+
+
 def conversation_file_delivery_instructions() -> str:
     """Resolve only the registered host-native conversation handoff contract."""
     return _worker_prompt("worker.conversation_file_delivery", """Conversation file delivery:
 
+- For turn-local child agents, wait for their terminal results before your final answer or handoff. Use their results and report any failure truthfully.
 - A Markdown link to a local file selects that file for delivery to the user. To cite a local file without sending it, name its path in code instead of linking it.
 - Displaying or rendering a tool result inside the harness does not deliver it through the user's channel. For a requested file, image, or other artifact, persist the tool's own returned output within normal execution into the admitted workspace or this worker's `$TMPDIR` when needed, then select that file with a Markdown link in your final answer.
 - Deliver selected files from the admitted workspace or this worker's `$TMPDIR`. If an authorized requested file is elsewhere, copy its exact bytes into `$TMPDIR` and link that staged copy. This does not grant access to other locations or private runtime, credential, or control files.

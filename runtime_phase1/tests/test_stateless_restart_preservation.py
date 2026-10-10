@@ -328,3 +328,74 @@ def test_restart_backlog_preserves_other_admission_fences(
         assert (store.get_run(str(queued["run_id"])) or {})["state"] == "queued"
     finally:
         service.shutdown()
+
+
+def _queued_restart_recovery_worker(store, project, *, label, queued_siblings):
+    worker = store.create_worker(
+        project_id=project["project_id"], owner_id="owner-a", name=label,
+        role="conversation-agent", profile="codex-cli", backend="",
+        runtime="codex-cli", model="gpt-5.6-sol",
+    )
+    session = store.upsert_provider_session(
+        tenant_id="local", owner_id="owner-a", conversation_id=label,
+        agent_id="agent-a", model_id="codex-cli:gpt-5.6-sol",
+        project_id=project["project_id"], worker_id=worker["worker_id"],
+        workspace_dir=project["workspace_dir"], access_mode="workspace",
+    )
+    blocked = store.create_run(
+        worker["worker_id"], project["project_id"], "Synthetic accepted turn", state="queued",
+    )
+    assert store.mark_run_needs_input(
+        blocked["run_id"], expected_state="queued", error_text="Refresh exact authority",
+        failure_class="conversation_capability_grant_required",
+        failure_user_message="Refresh exact authority",
+    )
+    request, _ = store.create_provider_request(
+        tenant_id="local", owner_id="owner-a", session_id=session["session_id"],
+        idempotency_key=label, message_id=label, stream_id=label,
+        requested_history_count=1, replay_decision={"provider_session_mode": "stateless"},
+    )
+    store.update_provider_request(request["request_id"], run_id=blocked["run_id"], state="failed")
+    for _ in range(queued_siblings):
+        store.create_run(worker["worker_id"], project["project_id"], "Synthetic queued sibling", state="queued")
+    store.update_worker_state(worker["worker_id"], "needs_input")
+    return worker["worker_id"], blocked["run_id"]
+
+
+@pytest.mark.parametrize("queued_siblings", [0, 1, 2])
+def test_restart_recovery_preserves_unrelated_waiting_identities(tmp_path, queued_siblings):
+    store = Store(str(tmp_path / "runtime.db"))
+    project = store.create_project("owner-a", "Synthetic restart", "Exact recovery", "codex-cli")
+    project["workspace_dir"] = str(tmp_path)
+    try:
+        protected = [
+            _queued_restart_recovery_worker(store, project, label=f"protected-{index}", queued_siblings=0)
+            for index in range(44)
+        ]
+        target, _ = _queued_restart_recovery_worker(
+            store, project, label="queued-target", queued_siblings=queued_siblings,
+        )
+        expected = [target] if queued_siblings else []
+        assert store.reconcile_restart_authority_blocked_workers() == expected
+        assert store.get_worker(target)["state"] == ("ready" if queued_siblings else "needs_input")
+        for worker_id, run_id in protected:
+            assert store.get_worker(worker_id)["state"] == "needs_input"
+            assert store.get_run(run_id)["state"] == "needs_input"
+    finally:
+        store.close()
+
+
+def test_restart_recovery_keeps_worker_order_and_limit(tmp_path):
+    store = Store(str(tmp_path / "runtime.db"))
+    project = store.create_project("owner-a", "Synthetic ordering", "Exact recovery", "codex-cli")
+    project["workspace_dir"] = str(tmp_path)
+    try:
+        targets = sorted(
+            _queued_restart_recovery_worker(store, project, label=f"target-{index}", queued_siblings=2)[0]
+            for index in range(3)
+        )
+        assert store.reconcile_restart_authority_blocked_workers(limit=2) == targets[:2]
+        assert store.get_worker(targets[2])["state"] == "needs_input"
+        assert store.reconcile_restart_authority_blocked_workers(limit=2) == targets[2:]
+    finally:
+        store.close()

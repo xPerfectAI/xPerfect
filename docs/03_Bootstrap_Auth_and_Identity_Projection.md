@@ -137,6 +137,12 @@ Conversation broker bearer authority is run-local memory, not persisted worker b
 metadata. Initial admission attaches the durable provider request and run atomically before starting
 compute. An exact retry can refresh the lost bearer only after the stored request authority matches;
 changed authority requires a new logical turn. Refresh keeps the accepted run and instructions.
+The exact invocation bundle is staged in memory before a new queued run is published, including
+provider-request and idempotent run identities. The memory condition is released before store
+publication. Failed creation removes only its staged bundle; a consumed bundle is not reattached.
+Existing reservations use the current-state grant attachment gate, so an active provider invocation
+cannot have its authority replaced by a duplicate assignment. Assignment does not reopen a current
+`needs_input` run; explicit authorization retries retain their existing reopen policy.
 
 Restricted Codex setup renders its broker descriptor without a bearer. The existing launch policy
 check requires the current run's bearer and an exact match to the restricted configuration before

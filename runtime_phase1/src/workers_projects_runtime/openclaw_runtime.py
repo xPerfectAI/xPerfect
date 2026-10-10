@@ -120,6 +120,8 @@ class ProviderRateLimitError(RuntimeErrorBase):
 class HostCapacityError(RuntimeErrorBase):
     """Structured, retryable host admission pressure; never a terminal run failure."""
 
+    native_admission: dict[str, str | int | bool] | None = None
+
     code = "host_capacity"
     failure_class = "host_capacity"
     retryable = True
@@ -142,6 +144,8 @@ class HostCapacityError(RuntimeErrorBase):
         self.used = dict(used or {})
 
 class RuntimeDependencyMissingError(RuntimeErrorBase):
+    failure_class = "runtime_dependency_missing"
+
     def __init__(
         self,
         message: str,

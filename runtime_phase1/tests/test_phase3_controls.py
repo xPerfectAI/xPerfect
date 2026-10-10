@@ -1655,3 +1655,467 @@ def test_host_control_recovery_requires_matching_receipt_and_proven_exact_genera
     mismatched = {**worker, "_active_run_id": "run_other"}
     with pytest.raises(RuntimeErrorBase, match="identity is not confirmed"):
         runtime.pause_worker(mismatched)
+
+# Model-selected follow-up files use existing queued-run admission. No provider or network.
+import asyncio
+import hashlib
+import ast
+from dataclasses import replace
+from pathlib import Path
+from fastapi import HTTPException
+from workers_projects_runtime.workspace_files import FileAdmissionError, materialize_managed_file
+from workers_projects_runtime.broker_admission import BrokerAdmissionError
+class _FileInputPrivateRuntime(StubRuntime):
+    def __init__(self, root, *, block=False, crash=False):
+        self.root=Path(root);self.block=block;self.crash=crash
+        self.entered=Event();self.release=Event()
+    def _runtime_info(self, worker, *, pid):
+        base=super()._runtime_info(worker,pid=pid)
+        workspace=self.root/worker['worker_id']/'workspace';state=workspace.parent/'state'
+        workspace.mkdir(parents=True,exist_ok=True);state.mkdir(exist_ok=True)
+        return replace(base,workspace_dir=str(workspace),state_dir=str(state))
+    def interrupt_worker(self,worker,run_id=None):
+        self.entered.set()
+        if self.block:assert self.release.wait(5)
+        if self.crash:raise RuntimeErrorBase('synthetic steer control crash')
+        return self._runtime_info(worker,pid=None)
+    def run_task(self,*args,**kwargs):
+        raise AssertionError('Integration fixture must not execute a provider task')
+
+
+def _file_input_fixture(tmp_path, monkeypatch, *, block=False,crash=False):
+    monkeypatch.setenv('WPR_BOOTSTRAP_SOURCE_ROOTS',str(tmp_path))
+    runtime=_FileInputPrivateRuntime(tmp_path/'runtime',block=block,crash=crash)
+    store,service,work,worker,run=_delegation_with_running_run(tmp_path,runtime,start_background_consumers=False)
+    info=runtime._runtime_info(worker,pid=None)
+    worker=store.update_worker(worker['worker_id'],workspace_dir=info.workspace_dir,state_dir=info.state_dir)
+    service._ensure_worker_processor=lambda _id:None
+    return store,service,work,worker,run,runtime
+
+
+def _file_input_uploads(service):
+    payloads=[('selection.csv',b'mode,cost\nwalking,0\ncycling,0\nbus,2.75\n','original'),
+              ('selected-notes.txt','Exact extracted text. Café.\n'.encode('utf-8'),'extracted_text')]
+    inputs=[]
+    for index,(name,body,kind) in enumerate(payloads):
+        upload=service.files.create_upload('tenant-a','owner-a',draft_id='synthetic-action-draft',name=name,size_bytes=len(body),idempotency_key='synthetic-upload-'+str(index))
+        async def chunks():
+            yield body[:3];yield body[3:]
+        ready=asyncio.run(service.files.receive('tenant-a','owner-a',upload['upload_id'],chunks()))
+        assert ready['state']=='ready' and ready['sha256']==hashlib.sha256(body).hexdigest()
+        manifest=service.files.manifest('tenant-a','owner-a',[upload['upload_id']])[0]
+        inputs.append({'upload_id':manifest['upload_id'],'revision':manifest['revision'],'sha256':manifest['sha256'],
+          'size_bytes':manifest['size_bytes'],'filename':manifest['name'],'source_file_id':'synthetic-core-file-'+str(index),
+          'input_kind':kind,'media_group_index':index})
+    return inputs,payloads
+
+
+def _file_input_reserve(store,service,work,inputs,*,action='queue',key='synthetic-file-action',executor=None,digest=None):
+    context={'version':1,'origin_ref':'synthetic-followup-origin','source_event_id':'synthetic-followup-event','source_revision':1,
+             'surface':'web','output_contract':{'mode':'inherit'},'prompt_layers':service.worker_prompt_layer_trace(),'file_inputs':inputs}
+    payload_digest=digest or hashlib.sha256(json.dumps({'action':action,'instruction':'Use exactly these selected inputs','file_inputs':inputs},sort_keys=True).encode()).hexdigest()
+    return store.reserve_active_work_action(tenant_id='tenant-a',owner_id='owner-a',work_ref=work['work_ref'],
+       idempotency_key=key,action=action,payload_digest=payload_digest,source_context=context,
+       executor_id=executor or service.executor_id,lease_seconds=30)
+
+
+def _file_input_manifest(store,worker,run_id):
+    return store.get_run_file_manifest(run_id,worker_id=worker['worker_id'],tenant_id='tenant-a',owner_id='owner-a')
+
+
+def _file_input_complete(store,run):
+    assert store.finalize_run_if_state(run['run_id'],'running','completed',output_text='Synthetic original draft',
+       **_exact_terminal_generation(store,run['run_id']))
+    store.update_worker_state(run['worker_id'],'ready')
+
+
+def _file_input_admit_next(store,worker):
+    executor='file-input-next-admission'
+    run=store.claim_next_queued_run(worker['worker_id'],executor_id=executor);assert run is not None
+    lease=store.acquire_host_run_lease(runtime_family='openclaw',lane='mission',tenant_id='tenant-a',owner_id='owner-a',
+       worker_id=worker['worker_id'],run_id=run['run_id'],executor_id=executor,conversation_limit=2,mission_limit=64,
+       account_mission_limit=64,tenant_mission_limit=64,lease_ttl_s=300)
+    admitted=store.admit_claimed_run(run['run_id'],lease_id=lease['lease_id'],executor_id=executor)
+    assert admitted is not None
+    return admitted
+
+
+@pytest.mark.parametrize('action',['queue','message'])
+@pytest.mark.parametrize('source_state',['running','completed'])
+def test_active_work_file_real_next_boundary_and_restart(tmp_path,monkeypatch,action,source_state):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,payloads=_file_input_uploads(service)
+    old_workspace=Path(worker['workspace_dir']);sentinel=old_workspace/'existing-draft.txt';sentinel.write_bytes(b'Original ongoing workspace')
+    old_bundle=store.get_worker(worker['worker_id'])['bootstrap_bundle_json']
+    if source_state=='completed':_file_input_complete(store,run)
+    reservation=_file_input_reserve(store,service,work,inputs,action=action)
+    try:
+        result=service.execute_active_work_action(work,action=action,instruction='Use exactly these selected inputs',
+          idempotency_key='synthetic-file-action',action_use_id=reservation['action_use_id'],start_processor=False)
+        next_id=result['run_id'];assert next_id!=run['run_id']
+        accepted=_file_input_manifest(store,worker,next_id)
+        assert [(x['upload_id'],x['revision'],x['name'],x['sha256'],x['size_bytes'],x['source_file_id'],x['input_kind'],x['media_group_index']) for x in accepted]==[(x['upload_id'],x['revision'],x['filename'],x['sha256'],x['size_bytes'],x['source_file_id'],x['input_kind'],x['media_group_index']) for x in inputs]
+        assert list(old_workspace.rglob('*'))==[sentinel]
+        assert store.get_worker(worker['worker_id'])['bootstrap_bundle_json']==old_bundle
+        assert sentinel.read_bytes()==b'Original ongoing workspace'
+        assert store.finish_active_work_action(reservation['action_use_id'],response=result,current_run_id=next_id,executor_id=service.executor_id)
+    finally:service.shutdown()
+    # Actual SQLite reopen, not a copied dictionary or mock Store.
+    restarted=Store(store.db_path);again=WorkersProjectsService(restarted,runtime,reconcile_on_startup=False,start_background_consumers=False)
+    again._ensure_worker_processor=lambda _id:None
+    try:
+        assert _file_input_manifest(restarted,worker,next_id)==accepted
+        replay=_file_input_reserve(restarted,again,work,inputs,action=action)
+        assert replay['idempotent_replay'] and not replay['should_execute']
+        assert len(restarted.list_runs_for_worker(worker['worker_id']))==2
+        assert _file_input_manifest(restarted,worker,run['run_id'])==[]
+        if source_state=='running':
+            assert restarted.claim_next_queued_run(worker['worker_id']) is None
+            _file_input_complete(restarted,run)
+        admitted=_file_input_admit_next(restarted,worker);assert admitted['run_id']==next_id
+        projected=again._run_local_worker(restarted.get_worker(worker['worker_id']),admitted)
+        bundle=json.loads(projected['bootstrap_bundle_json'])
+        selected=[x for x in bundle['files'] if x.get('source_path')]
+        assert [(x['path'].split('/')[-1],x['sha256']) for x in selected]==[(name,hashlib.sha256(body).hexdigest()) for name,body,_ in payloads]
+        assert list(old_workspace.rglob('*'))==[sentinel]
+        for entry in selected:materialize_managed_file(old_workspace,entry,projected)
+        for entry,(_,body,_) in zip(selected,payloads):assert (old_workspace/entry['path']).read_bytes()==body
+        index=json.loads(next(x['content'] for x in bundle['files'] if x['path']==projected['_run_input_manifest_path']))
+        assert [x['source_file_id'] for x in index['files']]==[x['source_file_id'] for x in inputs]
+        assert [x['input_kind'] for x in index['files']]==['original','extracted_text']
+        assert sentinel.read_bytes()==b'Original ongoing workspace'
+        with pytest.raises(ValueError,match='owner'):
+            restarted.get_run_file_manifest(next_id,worker_id=worker['worker_id'],tenant_id='tenant-a',owner_id='foreign-owner')
+    finally:again.shutdown()
+
+
+@pytest.mark.parametrize('drift',['not_ready','sha256','name','revision','foreign'])
+def test_active_work_file_real_transaction_rechecks_ready_receipt(tmp_path,monkeypatch,drift):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service)
+    manifest=service._active_work_action_file_manifest(worker, _file_input_reserve(store,service,work,inputs))
+    uid=inputs[0]['upload_id']
+    if drift=='revision':manifest[0]['revision']='changed-revision'
+    else:
+        field,value={'not_ready':('state','created'),'sha256':('sha256','0'*64),'name':('name','renamed.csv'),'foreign':('owner_id','foreign-owner')}[drift]
+        with store._connect() as conn:conn.execute(f'UPDATE workspace_file_uploads SET {field}=? WHERE upload_id=?',(value,uid))
+    try:
+        with pytest.raises((FileAdmissionError,ValueError)):
+            store.create_idempotent_run(run_id='run-receipt-drift',worker_id=worker['worker_id'],project_id=worker['project_id'],instruction='Selected followup',file_manifest=manifest)
+        assert store.get_run('run-receipt-drift') is None
+        with store._connect() as conn:
+            assert conn.execute('SELECT COUNT(*) FROM workspace_file_run_inputs WHERE run_id=?',('run-receipt-drift',)).fetchone()[0]==0
+    finally:service.shutdown()
+
+
+def test_active_work_file_real_retry_identity_and_collision_rollback(tmp_path,monkeypatch):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,payloads=_file_input_uploads(service);reservation=_file_input_reserve(store,service,work,inputs)
+    manifest=service._active_work_action_file_manifest(worker,reservation)
+    args=dict(run_id='run-immutable-inputs',worker_id=worker['worker_id'],project_id=worker['project_id'],instruction='Selected followup')
+    try:
+        first,new=store.create_idempotent_run(**args,file_manifest=manifest);assert new
+        second,new=Store(store.db_path).create_idempotent_run(**args,file_manifest=manifest);assert not new and first==second
+        accepted=_file_input_manifest(store,worker,args['run_id'])
+        with pytest.raises(ValueError,match='different run inputs'):store.create_idempotent_run(**args,file_manifest=list(reversed(manifest)))
+        with pytest.raises(ValueError,match='different instruction'):store.create_idempotent_run(**{**args,'instruction':'Changed'},file_manifest=manifest)
+        with pytest.raises(ActiveWorkActionConflictError):_file_input_reserve(store,service,work,list(reversed(inputs)))
+        with pytest.raises(KeyError):store.reserve_active_work_action(tenant_id='tenant-a',owner_id='foreign-owner',work_ref=work['work_ref'],idempotency_key='synthetic-file-action',action='queue',payload_digest='different')
+        assert _file_input_manifest(store,worker,args['run_id'])==accepted
+        for index,(name,body,_) in enumerate(payloads):
+            replay=service.files.create_upload('tenant-a','owner-a',draft_id='synthetic-action-draft',name=name,size_bytes=len(body),idempotency_key='synthetic-upload-'+str(index))
+            assert replay['upload_id']==inputs[index]['upload_id'] and replay['state']=='ready'
+        with pytest.raises(FileAdmissionError):service.files.create_upload('tenant-a','owner-a',draft_id='synthetic-action-draft',name='changed.csv',size_bytes=inputs[0]['size_bytes'],idempotency_key='synthetic-upload-0')
+    finally:service.shutdown()
+
+
+def test_active_work_file_real_message_running_race_does_not_publish_inputs(tmp_path,monkeypatch):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service);manifest=service._active_work_action_file_manifest(worker,_file_input_reserve(store,service,work,inputs,action='message'))
+    try:
+        result,created=store.replace_queued_run_idempotently(source_run_id=run['run_id'],replacement_run_id='run-message-race',worker_id=worker['worker_id'],project_id=worker['project_id'],instruction='New guidance',file_manifest=manifest)
+        assert result is None and not created and store.get_run('run-message-race') is None
+        assert _file_input_manifest(store,worker,run['run_id'])==[]
+        assert list(Path(worker['workspace_dir']).rglob('*'))==[]
+    finally:service.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def _file_input_no_network(request, monkeypatch):
+    if not request.node.name.startswith("test_active_work_file_real_"):
+        return
+    import httpx, socket
+    def denied(*args,**kwargs):raise AssertionError('Private integration cannot use a network or API')
+    monkeypatch.setattr(httpx.Client,'request',denied)
+    monkeypatch.setattr(httpx.AsyncClient,'request',denied)
+    monkeypatch.setattr(socket.socket,'connect',denied)
+
+
+def test_active_work_file_real_concurrent_action_reservation_has_one_executor(tmp_path,monkeypatch):
+    from threading import Barrier
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service);barrier=Barrier(2);results=[];errors=[]
+    def reserve(executor):
+        try:
+            other=Store(store.db_path);barrier.wait(3)
+            results.append(_file_input_reserve(other,service,work,inputs,executor=executor))
+        except BaseException as exc:errors.append(exc)
+    threads=[Thread(target=reserve,args=('synthetic-executor-'+str(i),)) for i in range(2)]
+    try:
+        for thread in threads:thread.start()
+        for thread in threads:thread.join(5)
+        assert not errors and all(not x.is_alive() for x in threads),errors
+        assert len(results)==2 and len({x['action_use_id'] for x in results})==1
+        assert sum(bool(x['should_execute']) for x in results)==1
+        assert len(store.list_runs_for_worker(worker['worker_id']))==1
+        with store._connect() as conn:
+            assert conn.execute('SELECT COUNT(*) FROM active_work_action_uses').fetchone()[0]==1
+            assert conn.execute('SELECT COUNT(*) FROM workspace_file_bindings').fetchone()[0]==0
+    finally:service.shutdown()
+
+
+def _file_input_owning_endpoint(store,service):
+    import workers_projects_runtime.service as service_module
+    from workers_projects_runtime.auth import AuthContext
+    from workers_projects_runtime.models import ActiveWorkActionRequest
+    from workers_projects_runtime.store import ActiveWorkActionConflictError
+    from workers_projects_runtime.openclaw_runtime import HostCapacityError
+    from fastapi import Request
+    from hashlib import sha256
+    tree=ast.parse(Path(service_module.__file__).with_name('api.py').read_text())
+    names={'_auth_context','_account_scope','_canonical_digest','_active_work_state','active_work_action'}
+    nodes=[n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name in names]
+    assert {n.name for n in nodes}==names
+    for node in nodes:node.decorator_list=[]
+    namespace={'store':store,'service':service,'AuthContext':AuthContext,'Request':Request,
+               'ActiveWorkActionRequest':ActiveWorkActionRequest,'ActiveWorkActionConflictError':ActiveWorkActionConflictError,
+               'FileAdmissionError':FileAdmissionError,'HostCapacityError':HostCapacityError,'HTTPException':HTTPException,'json':json,'sha256':sha256,'os':__import__('os')}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),'actual-owning-active-work-endpoint','exec'),namespace)
+    request=Request({'type':'http','method':'POST','path':'/private-pure-function','headers':[]})
+    request.state.auth_context=AuthContext(tenant_id='tenant-a',user_id='owner-a',auth_mode='service_assertion')
+    return namespace['active_work_action'],request,ActiveWorkActionRequest
+
+
+def test_active_work_file_real_configured_file_count_policy_owns_admission(tmp_path,monkeypatch):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    try:
+        with store._connect() as conn:assert service.files._policy(conn,'tenant-a','owner-a')['max_batch_files'] is None
+        inputs=[]
+        for i in range(65):
+            upload=service.files.create_upload('tenant-a','owner-a',draft_id='synthetic-many-files',name='item-'+str(i)+'.txt',size_bytes=0,idempotency_key='many-file-'+str(i))
+            async def empty():yield b''
+            ready=asyncio.run(service.files.receive('tenant-a','owner-a',upload['upload_id'],empty()))
+            assert ready['state']=='ready'
+            item=service.files.manifest('tenant-a','owner-a',[ready['upload_id']])[0]
+            inputs.append({'upload_id':item['upload_id'],'revision':item['revision'],'sha256':item['sha256'],'size_bytes':0,'filename':item['name'],
+                           'source_file_id':'synthetic-many-source-'+str(i),'input_kind':'original'})
+        from workers_projects_runtime.models import ActiveWorkActionRequest
+        payload=ActiveWorkActionRequest(action='queue',instruction='Use the selected files',idempotency_key='synthetic-many-action',file_inputs=inputs,
+            source_context={'version':1,'origin_ref':'synthetic-many-origin','source_event_id':'synthetic-many-event','source_revision':1,'surface':'web','output_contract':{'mode':'inherit'}})
+        assert len(payload.file_inputs)==65
+        with store._connect() as conn:conn.execute('INSERT INTO workspace_file_policies(tenant_id,owner_id,max_batch_files) VALUES(?,?,?)',('tenant-a','owner-a',2))
+        for i in range(2):service.files.create_upload('tenant-a','owner-a',draft_id='synthetic-configured-batch',name='limited-'+str(i)+'.txt',size_bytes=0,idempotency_key='limited-file-'+str(i))
+        with pytest.raises(FileAdmissionError) as limit:
+            service.files.create_upload('tenant-a','owner-a',draft_id='synthetic-configured-batch',name='limited-2.txt',size_bytes=0,idempotency_key='limited-file-2')
+        assert limit.value.status_code==413 and 'configured file count' in str(limit.value)
+    finally:service.shutdown()
+
+
+@pytest.mark.parametrize('invalid',['hash','not_ready','foreign_upload'])
+def test_active_work_file_real_endpoint_denied_selection_has_no_control_or_file_changes(tmp_path,monkeypatch,invalid):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service)
+    if invalid=='hash':inputs[0]['sha256']='0'*64
+    elif invalid=='not_ready':service.files.cancel('tenant-a','owner-a',inputs[0]['upload_id'])
+    else:
+        with store._connect() as conn:conn.execute('UPDATE workspace_file_uploads SET owner_id=? WHERE upload_id=?',('synthetic-foreign-owner',inputs[0]['upload_id']))
+    endpoint,request,Payload=_file_input_owning_endpoint(store,service)
+    payload=Payload(action='steer',instruction='Use these files',idempotency_key='synthetic-invalid-action',file_inputs=inputs,
+        source_context={'version':1,'origin_ref':'synthetic-origin','source_event_id':'synthetic-event','source_revision':1,'surface':'web','output_contract':{'mode':'inherit'}})
+    try:
+        with pytest.raises(HTTPException) as failure:endpoint(work['work_ref'],payload,request)
+        assert failure.value.status_code==(404 if invalid=='foreign_upload' else 409)
+        assert not runtime.entered.is_set()
+        assert store.get_worker(worker['worker_id'])['compute_release_token']=='' and store.get_run(run['run_id'])['state']=='running'
+        assert len(store.list_runs_for_worker(worker['worker_id']))==1
+        with store._connect() as conn:assert conn.execute('SELECT COUNT(*) FROM workspace_file_bindings').fetchone()[0]==0
+        assert list(Path(worker['workspace_dir']).rglob('*'))==[]
+    finally:service.shutdown()
+
+
+@pytest.mark.parametrize('drift',['revoked','revision_stale','scope_lost'])
+def test_active_work_file_real_claim_pin_rejection_rolls_back_before_stop(tmp_path,monkeypatch,drift):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service);endpoint,request,Payload=_file_input_owning_endpoint(store,service)
+    payload=Payload(action='steer',instruction='Use exactly these selected inputs',idempotency_key='synthetic-claim-pin-action',file_inputs=inputs,
+        source_context={'version':1,'origin_ref':'synthetic-origin','source_event_id':'synthetic-event','source_revision':1,'surface':'web','output_contract':{'mode':'inherit'}})
+    original=store.try_claim_worker_compute_release;entered=Event();release=Event();errors=[]
+    def gate(*args,**kwargs):entered.set();assert release.wait(5);return original(*args,**kwargs)
+    store.try_claim_worker_compute_release=gate
+    def invoke():
+        try:endpoint(work['work_ref'],payload,request)
+        except BaseException as exc:errors.append(exc)
+    thread=Thread(target=invoke);thread.start()
+    try:
+        assert entered.wait(3)
+        if drift=='revoked':service.files.cancel('tenant-a','owner-a',inputs[0]['upload_id'])
+        else:
+            field,value=('metadata_revision',1) if drift=='revision_stale' else ('owner_id','synthetic-foreign-owner')
+            with store._connect() as conn:conn.execute(f'UPDATE workspace_file_uploads SET {field}=? WHERE upload_id=?',(value,inputs[0]['upload_id']))
+    finally:release.set();thread.join(5)
+    try:
+        assert not thread.is_alive() and len(errors)==1 and isinstance(errors[0],HTTPException)
+        assert errors[0].status_code==(404 if drift=='scope_lost' else 409)
+        assert errors[0].detail['code']=='file_operation_failed'
+        assert not runtime.entered.is_set() and store.get_run(run['run_id'])['state']=='running'
+        assert store.get_worker(worker['worker_id'])['compute_release_token']==''
+        assert len(store.list_runs_for_worker(worker['worker_id']))==1
+        with store._connect() as conn:
+            assert conn.execute('SELECT COUNT(*) FROM workspace_file_run_inputs').fetchone()[0]==0
+            assert conn.execute('SELECT COUNT(*) FROM workspace_file_pins').fetchone()[0]==0
+            action=dict(conn.execute('SELECT * FROM active_work_action_uses').fetchone())
+            assert action['status']=='failed'
+            assert conn.execute('SELECT COUNT(*) FROM workspace_file_bindings').fetchone()[0]==0
+        assert list(Path(worker['workspace_dir']).rglob('*'))==[]
+    finally:service.shutdown()
+
+
+@pytest.mark.parametrize('terminal_wins',[False,True])
+def test_active_work_file_real_steer_queued_inputs_never_publish_before_stop(tmp_path,monkeypatch,terminal_wins):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch,block=True)
+    inputs,payloads=_file_input_uploads(service);endpoint,request,Payload=_file_input_owning_endpoint(store,service)
+    payload=Payload(action='steer',instruction='Use exactly these selected inputs',idempotency_key='synthetic-steer-queued-action',file_inputs=inputs,
+        source_context={'version':1,'origin_ref':'synthetic-origin','source_event_id':'synthetic-event','source_revision':1,'surface':'web','output_contract':{'mode':'inherit'}})
+    results=[];errors=[]
+    def invoke():
+        try:results.append(endpoint(work['work_ref'],payload,request))
+        except BaseException as exc:errors.append(exc)
+    thread=Thread(target=invoke);thread.start()
+    try:
+        assert runtime.entered.wait(3);claimed=store.get_worker(worker['worker_id']);replacement=claimed['compute_release_replacement_run_id'];assert replacement
+        manifest=_file_input_manifest(store,worker,replacement)
+        assert [(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in manifest]==[(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in inputs]
+        assert store.claim_next_queued_run(worker['worker_id']) is None
+        with pytest.raises(FileAdmissionError):service.files.cancel('tenant-a','owner-a',inputs[0]['upload_id'])
+        with store._connect() as conn:assert conn.execute('SELECT COUNT(*) FROM workspace_file_bindings').fetchone()[0]==0
+        assert list(Path(worker['workspace_dir']).rglob('*'))==[]
+        if terminal_wins:_file_input_complete(Store(store.db_path),run)
+    finally:runtime.release.set();thread.join(5)
+    try:
+        assert not thread.is_alive() and not errors,errors
+        assert store.get_worker(worker['worker_id'])['compute_release_token']==''
+        assert _file_input_manifest(store,worker,replacement)==manifest
+        if terminal_wins:
+            assert results[0]['controlOutcome']=='terminal_won' and results[0]['fileDisposition']=='not_bound_target_finished'
+            assert store.get_run(replacement)['state']=='cancelled' and store.get_run(run['run_id'])['output_text']=='Synthetic original draft'
+            assert store.claim_next_queued_run(worker['worker_id']) is None
+        else:assert store.get_run(run['run_id'])['state']=='interrupted' and store.get_run(replacement)['state']=='queued'
+        assert list(Path(worker['workspace_dir']).rglob('*'))==[]
+        with store._connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM workspace_file_pins WHERE kind='run' AND reference_id=?",(replacement,)).fetchone()[0]==2
+            assert conn.execute('SELECT COUNT(*) FROM workspace_file_bindings').fetchone()[0]==0
+        replay=endpoint(work['work_ref'],payload,request);assert replay['idempotentReplay']
+        changed=payload.model_copy(update={'file_inputs':list(reversed(payload.file_inputs))})
+        with pytest.raises(HTTPException) as conflict:endpoint(work['work_ref'],changed,request)
+        assert conflict.value.status_code==409 and conflict.value.detail['code']=='active_work_idempotency_conflict'
+        assert len(store.list_runs_for_worker(worker['worker_id']))==2
+    finally:service.shutdown()
+    reopened=Store(store.db_path);assert _file_input_manifest(reopened,worker,replacement)==manifest
+    if not terminal_wins:
+        again=WorkersProjectsService(reopened,runtime,reconcile_on_startup=False,start_background_consumers=False);again._ensure_worker_processor=lambda _id:None
+        try:
+            admitted=_file_input_admit_next(reopened,worker);assert admitted['run_id']==replacement
+            selected=again._run_local_worker(reopened.get_worker(worker['worker_id']),admitted);bundle=json.loads(selected['bootstrap_bundle_json'])
+            index=json.loads(next(x['content'] for x in bundle['files'] if x['path']==selected['_run_input_manifest_path']))['files']
+            assert [(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in index]==[(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in inputs]
+            assert [x['name'] for x in index]==[name for name,_,_ in payloads]
+            assert selected['_run_input_manifest_path'] in again._runtime_instruction_for_run(selected,'Use the selected files')
+            entries=[x for x in bundle['files'] if x.get('managed_upload_id')];assert len(entries)==2
+            for entry,(_,body,_) in zip(entries,payloads):materialize_managed_file(Path(worker['workspace_dir']),entry,selected);assert (Path(worker['workspace_dir'])/entry['path']).read_bytes()==body
+        finally:again.shutdown()
+
+
+@pytest.mark.parametrize('recovery',['interrupted','expired'])
+def test_active_work_file_real_steer_pinned_inputs_restart_exact_fence(tmp_path,monkeypatch,recovery):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch,crash=True)
+    inputs,_=_file_input_uploads(service);reservation=_file_input_reserve(store,service,work,inputs,action='steer')
+    try:
+        with pytest.raises(RuntimeErrorBase,match='synthetic steer control crash'):
+            service.execute_active_work_action(work,action='steer',instruction='Use exactly these selected inputs',idempotency_key='synthetic-file-action',action_use_id=reservation['action_use_id'],start_processor=False)
+        claimed=store.get_worker(worker['worker_id']);replacement=claimed['compute_release_replacement_run_id'];manifest=_file_input_manifest(store,worker,replacement);assert len(manifest)==2
+        assert store.claim_next_queued_run(worker['worker_id']) is None
+        if recovery=='interrupted':
+            assert store.confirm_worker_control_runtime_effect(worker['worker_id'],claimed['compute_release_token'],claimed['compute_release_epoch'],kind='steer_run',target_run_id=run['run_id'])
+            assert store.finalize_run_if_state(run['run_id'],'running','interrupted',error_text='Exact provider stopped',**_exact_terminal_generation(store,run['run_id']))
+        else:
+            with store._connect() as conn:conn.execute('UPDATE workers SET compute_release_expires_at=? WHERE worker_id=?',('2000-01-01T00:00:00+00:00',worker['worker_id']))
+    finally:service.shutdown()
+    reopened=Store(store.db_path);again=WorkersProjectsService(reopened,_FileInputPrivateRuntime(tmp_path/'runtime'),reconcile_on_startup=False,start_background_consumers=False);again._ensure_worker_processor=lambda _id:None
+    try:
+        if recovery=='interrupted':assert again._settle_interrupted_steer_claim(worker['worker_id'],run['run_id']) is not None
+        else:assert [x['kind'] for x in again.recover_expired_compute_release_claims_once()]==['steer_run']
+        assert _file_input_manifest(reopened,worker,replacement)==manifest
+        assert reopened.get_worker(worker['worker_id'])['compute_release_token']==''
+        assert reopened.get_run(run['run_id'])['state']=='interrupted'
+        admitted=_file_input_admit_next(reopened,worker);assert admitted['run_id']==replacement
+        assert reopened.claim_next_queued_run(worker['worker_id']) is None
+        selected=again._run_local_worker(reopened.get_worker(worker['worker_id']),admitted)
+        index=json.loads(next(x['content'] for x in json.loads(selected['bootstrap_bundle_json'])['files'] if x['path']==selected['_run_input_manifest_path']))['files']
+        assert [x['input_kind'] for x in index]==['original','extracted_text']
+        assert [x['source_file_id'] for x in index]==[x['source_file_id'] for x in inputs]
+    finally:again.shutdown()
+
+
+@pytest.mark.parametrize('state',['claimed','admitted','running','settling','paused','needs_input'])
+def test_active_work_file_real_replacement_scheduler_rejects_old_blocking_source(tmp_path,monkeypatch,state):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    try:
+        store.create_run(worker['worker_id'],worker['project_id'],'Never run ahead')
+        with store._connect() as conn:conn.execute('UPDATE runs SET state=? WHERE run_id=?',(state,run['run_id']))
+        assert store.claim_next_queued_run(worker['worker_id']) is None
+    finally:service.shutdown()
+
+
+def _file_input_process_one(service,worker_id):
+    with service._processors_lock:service._active_processors.add(worker_id);service._processor_generations[worker_id]=1
+    service._process_worker_queue_parallel(worker_id,1)
+
+
+def test_active_work_file_real_scope_loss_after_pin_settles_typed_failed_run(tmp_path,monkeypatch):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service);reservation=_file_input_reserve(store,service,work,inputs,action='steer')
+    try:
+        result=service.execute_active_work_action(work,action='steer',instruction='Use exactly these selected inputs',idempotency_key='synthetic-file-action',action_use_id=reservation['action_use_id'],start_processor=False)
+        replacement=result['run_id'];assert len(_file_input_manifest(store,worker,replacement))==2
+        with store._connect() as conn:conn.execute('UPDATE workspace_file_uploads SET owner_id=? WHERE upload_id=?',('synthetic-foreign-owner',inputs[0]['upload_id']))
+        _file_input_process_one(service,worker['worker_id'])
+        failed=store.get_run(replacement);assert failed['state']=='failed',failed
+        assert failed['failure_class']=='file_operation_failed' and failed['failure_structured'] and not failed['failure_retryable']
+        assert failed['failure_class']!='service_processor_unexpected'
+        assert store.get_worker(worker['worker_id'])['compute_release_token']==''
+        assert store.claim_next_queued_run(worker['worker_id']) is None
+        assert list(Path(worker['workspace_dir']).rglob('*'))==[]
+    finally:service.shutdown()
+    reopened=Store(store.db_path);assert reopened.get_run(replacement)['state']=='failed'
+
+
+@pytest.mark.parametrize('status',[429,503])
+def test_active_work_file_real_transient_file_admission_requeues_then_recovers(tmp_path,monkeypatch,status):
+    store,service,work,worker,run,runtime=_file_input_fixture(tmp_path,monkeypatch)
+    inputs,_=_file_input_uploads(service);reservation=_file_input_reserve(store,service,work,inputs,action='steer')
+    try:
+        result=service.execute_active_work_action(work,action='steer',instruction='Use exactly these selected inputs',idempotency_key='synthetic-file-action',action_use_id=reservation['action_use_id'],start_processor=False);replacement=result['run_id']
+        original=service.files.register_run_input_versions
+        def unavailable(*args,**kwargs):raise FileAdmissionError('Synthetic file admission unavailable',status,code='synthetic_file_unavailable')
+        service.files.register_run_input_versions=unavailable
+        _file_input_process_one(service,worker['worker_id'])
+        queued=store.get_run(replacement);assert queued['state']=='queued',queued
+        assert queued['failure_class']=='synthetic_file_unavailable' and queued['failure_retryable'] and queued['failure_structured']
+        assert queued['retry_attempts']==1
+        assert store.get_worker(worker['worker_id'])['compute_release_token']==''
+        service.files.register_run_input_versions=original
+        with store._connect() as conn:conn.execute('UPDATE runs SET retry_after=NULL WHERE run_id=?',(replacement,))
+        admitted=_file_input_admit_next(store,worker);assert admitted['run_id']==replacement
+        selected=service._run_local_worker(store.get_worker(worker['worker_id']),admitted);assert selected['_run_input_manifest_path']
+        assert store.get_run(replacement)['state']=='admitted'
+    finally:service.shutdown()
