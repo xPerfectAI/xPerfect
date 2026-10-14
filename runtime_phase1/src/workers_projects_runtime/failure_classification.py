@@ -16,6 +16,7 @@ USER_RESUMABLE_FAILURE_CLASSES = frozenset(
         "provider_unauthorized",
         "provider_context_limit_exceeded",
         "native_input_expired",
+        "native_input_unanswered",
         "native_input_declined",
         "native_input_cancelled",
     }
@@ -264,6 +265,8 @@ def _failure_record_text(value: Any, *, key: str = "") -> list[str]:
 # Typed stops recorded by the Grok runner when a native request ends the turn.
 # The user text is fixed here; runner or provider prose never becomes the message.
 GROK_NATIVE_INPUT_STOPS = {
+    "native_mcp_unavailable": "The configured tool connection was not ready before the model turn.",
+    "native_input_unanswered": "Grok ended before an owner response was recorded.",
     "native_input_expired": "Grok stopped because its request for your response expired without an answer.",
     "native_input_declined": "Grok stopped after you declined its request.",
     "native_input_cancelled": "Grok stopped because you cancelled its request.",
@@ -316,6 +319,8 @@ def classify_cli_failure(
             retryable=False,
             user_message=GROK_NATIVE_INPUT_STOPS[native_stop],
             recommended_recovery=(
+                "Check the configured tool connection and retry this work; its files are kept."
+                if native_stop == "native_mcp_unavailable" else
                 "Send a new instruction to continue in this workspace; its files are kept."
             ),
             diagnostic_summary=diagnostic_summary,
@@ -558,7 +563,7 @@ def classify_cli_failure(
                 "The worker process was terminated before it could finish and report a result."
             ),
             recommended_recovery=(
-                "Open the View / Steer page to inspect any partial workspace state. Use "
+                "Inspect the existing partial workspace state. Use "
                 "workspace_continue only if the work should resume from that state."
             ),
             diagnostic_summary=diagnostic_summary,
@@ -588,7 +593,7 @@ def classify_cli_failure(
         retryable=False,
         user_message=f"The {runtime_name}{suffix}, but xPerfect could not classify the provider failure safely.",
         recommended_recovery=(
-            "Open the View / Steer page for details, then use workspace_continue only if the partial "
+            "Inspect existing run details, then use workspace_continue only if the partial "
             "workspace state is worth preserving."
         ),
         diagnostic_summary=diagnostic_summary,
@@ -929,7 +934,7 @@ def classify_runtime_error(
                 "that the result did not satisfy the generic completion or constraint contract."
             ),
             recommended_recovery=(
-                "Open the View / Steer page and inspect the artifacts/evidence. Use workspace_continue "
+                "Inspect the existing artifacts/evidence. Use workspace_continue "
                 "to ask the same worker to repair the missing or invalid deliverables while preserving "
                 "the original request and constraints."
             ),
@@ -941,7 +946,7 @@ def classify_runtime_error(
         retryable=False,
         user_message=f"The {runtime_label} worker failed before xPerfect could complete the task.",
         recommended_recovery=(
-            "Open the View / Steer page for details, then use workspace_continue only if the partial "
+            "Inspect existing run details, then use workspace_continue only if the partial "
             "workspace state is worth preserving."
         ),
         diagnostic_summary=message,

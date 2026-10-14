@@ -42,6 +42,314 @@ from workers_projects_runtime.store import (
 REAL_HOST_RESOURCE_USAGE = service_module.host_resource_usage
 
 
+@pytest.mark.parametrize("guard", ["none", "stop", "pause", "active_run", "unconfirmed_start"])
+@pytest.mark.parametrize("claim_owner", ["current", "previous"])
+def test_authorized_resume_wakes_queue_without_obsolete_attention_cleanup(tmp_path, monkeypatch, guard, claim_owner):
+    store = Store(str(tmp_path / "attention-resume.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    _project, worker, run = _active_worker_and_run(
+        store, "attention-resume", execution_mode="host", run_state="needs_input",
+        owner_id="synthetic-owner",
+    )
+    worker = store.update_worker_state(worker["worker_id"], "needs_input")
+    claim = store.try_claim_worker_compute_release(
+        worker["worker_id"], expected_updated_at=worker["updated_at"],
+        expected_last_run_id=worker.get("last_run_id") or "", expected_state="needs_input",
+        expected_container_id="", owner=service._executor_id if claim_owner == "current" else "previous-synthetic-executor", ttl_s=600,
+        kind="needs_input", target_run_id=run["run_id"],
+    )
+    assert claim is not None
+    store.transition_run_if_state(run["run_id"], "needs_input", "queued",
+                                  ended_at=None, error_text="", retry_after=None)
+    store.update_worker_state(worker["worker_id"], "starting")
+    if guard == "stop":
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("UPDATE workers SET compute_release_kind = 'stop_run', "
+                               "compute_release_scope = 'work' WHERE worker_id = ?", (worker["worker_id"],))
+    elif guard == "pause":
+        store.update_worker_state(worker["worker_id"], "paused")
+    elif guard == "active_run":
+        monkeypatch.setattr(store, "get_active_run", lambda _: {
+            "worker_id": worker["worker_id"], "run_id": "synthetic-active", "state": "running",
+        })
+    elif guard == "unconfirmed_start":
+        monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda _: True)
+    submitted = []
+    monkeypatch.setattr(service.executor, "submit", lambda *args: submitted.append(args))
+    try:
+        service._ensure_worker_processor(worker["worker_id"])
+        service._ensure_worker_processor(worker["worker_id"])
+        current = store.get_worker(worker["worker_id"])
+        preserved = store.get_run(run["run_id"])
+        assert len(submitted) == (1 if guard == "none" else 0)
+        assert bool(current["compute_release_token"]) is (guard != "none")
+        assert preserved["run_id"] == run["run_id"]
+        assert preserved["state"] == "queued"
+        assert not preserved["started_at"] and not preserved["runtime_invoked_at"]
+        assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
+        assert not current["compute_released_at"]
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("observation", ["absent", "active", "uncertain", "foreign", "malformed"])
+@pytest.mark.parametrize("pending_claim,terminal_target", [(False, False), (True, False), (True, True)])
+def test_never_started_attention_cleanup_binds_exact_retained_terminal_run(tmp_path, observation, pending_claim, terminal_target):
+    store = Store(str(tmp_path / "retained-attention.sqlite3"))
+    project, worker, terminal = _active_worker_and_run(
+        store, "retained-attention", execution_mode="host", run_state="running",
+        owner_id="synthetic-owner",
+    )
+    store.transition_run_if_state(terminal["run_id"], "running", "completed", ended_at=store_module.utc_now())
+    pending = store.create_run(worker["worker_id"], project["project_id"], "Synthetic continuation")
+    store.transition_run_if_state(pending["run_id"], "queued", "needs_input")
+    worker = store.update_worker_state(worker["worker_id"], "needs_input")
+    observed_run_id = terminal["run_id"]
+    if observation == "foreign":
+        _other_project, _other_worker, foreign = _active_worker_and_run(
+            store, "foreign-retained", execution_mode="host", run_state="completed",
+            owner_id="another-synthetic-owner",
+        )
+        observed_run_id = foreign["run_id"]
+
+    class RetainedNativeRuntime(StubRuntime):
+        requires_run_start_identity = True
+        retained = True
+        cleaned = []
+
+        def host_active_process_status(self, _worker):
+            if not self.retained:
+                return {"state": "absent"}
+            if observation == "malformed":
+                return None
+            return {"state": "absent" if observation == "foreign" else observation,
+                    "run_id": observed_run_id}
+
+        def terminate_worker(self, requested):
+            if self.retained:
+                if (observation != "absent" or requested.get("_terminal_run_id") != terminal["run_id"]):
+                    raise RuntimeErrorBase("Exact retained process identity is not confirmed")
+                self.cleaned.append(requested["_terminal_run_id"])
+                self.retained = False
+            return self._runtime_info(requested, pid=None)
+
+    runtime = RetainedNativeRuntime()
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    if pending_claim:
+        claim = store.try_claim_worker_compute_release(
+            worker["worker_id"], expected_updated_at=worker["updated_at"],
+            expected_last_run_id=worker.get("last_run_id") or "", expected_state="needs_input",
+            expected_container_id="", owner="previous-synthetic-executor", ttl_s=600,
+            kind="needs_input", target_run_id=pending["run_id"],
+        )
+        assert claim is not None
+    if terminal_target:
+        store.transition_run_if_state(pending["run_id"], "needs_input", "failed",
+                                      ended_at=store_module.utc_now(), failure_class="queue_wait_timeout")
+        worker = store.update_worker_state(worker["worker_id"], "ready")
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("UPDATE workers SET compute_release_expires_at = ? WHERE worker_id = ?",
+                               ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), worker["worker_id"]))
+    try:
+        result = (service.recover_expired_compute_release_claims_once() if terminal_target
+                  else service._release_needs_input_compute(worker, store.get_run(pending["run_id"])))
+        current = store.get_worker(worker["worker_id"])
+        assert bool(result) is (observation == "absent")
+        assert bool(current["compute_release_token"]) is (observation != "absent")
+        assert runtime.cleaned == ([terminal["run_id"]] if observation == "absent" else [])
+        assert store.get_run(terminal["run_id"])["state"] == "completed"
+        assert store.get_run(pending["run_id"])["state"] == ("failed" if terminal_target else "needs_input")
+        assert not store.get_run(pending["run_id"])["runtime_invoked_at"]
+        if observation == "absent":
+            assert current["compute_released_at"]
+            assert service.terminate_worker(worker["worker_id"])["state"] == "terminated"
+            assert store.get_run(pending["run_id"])["state"] == ("failed" if terminal_target else "cancelled")
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("fault", ["busy_acquisition", "store_body"])
+def test_queued_resume_busy_cleanup_waits_for_normal_wake_without_false_failure(tmp_path, monkeypatch, fault):
+    store = Store(str(tmp_path / "busy-attention-resume.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    _project, worker, run = _active_worker_and_run(
+        store, "busy-attention-resume", execution_mode="host", run_state="needs_input",
+        owner_id="synthetic-owner",
+    )
+    worker = store.update_worker_state(worker["worker_id"], "needs_input")
+    claim = store.try_claim_worker_compute_release(
+        worker["worker_id"], expected_updated_at=worker["updated_at"],
+        expected_last_run_id=worker.get("last_run_id") or "", expected_state="needs_input",
+        expected_container_id="", owner=service._executor_id, ttl_s=600,
+        kind="needs_input", target_run_id=run["run_id"],
+    )
+    assert claim is not None
+    store.transition_run_if_state(run["run_id"], "needs_input", "queued",
+                                  ended_at=None, error_text="", retry_after=None)
+    store.update_worker_state(worker["worker_id"], "starting")
+    submitted, attempted_waits = [], []
+    monkeypatch.setattr(service.executor, "submit", lambda *args: submitted.append(args))
+
+    def busy_acquisition(_worker_id, **kwargs):
+        attempted_waits.append(kwargs.get("timeout_s"))
+        raise RuntimeErrorBase("Worker lifecycle control is busy; retry shortly")
+
+    def body_failure(_run_id):
+        raise RuntimeErrorBase("Synthetic Store body failure")
+
+    try:
+        with monkeypatch.context() as fault_patch:
+            if fault == "busy_acquisition":
+                fault_patch.setattr(service, "_acquire_worker_lifecycle_guard", busy_acquisition)
+                service._ensure_worker_processor(worker["worker_id"])
+                assert attempted_waits == [0.0]
+            else:
+                fault_patch.setattr(store, "get_run", body_failure)
+                with pytest.raises(RuntimeErrorBase, match="Synthetic Store body failure"):
+                    service._ensure_worker_processor(worker["worker_id"])
+        preserved = store.get_worker(worker["worker_id"])
+        assert preserved["compute_release_token"] == claim["token"]
+        assert preserved["compute_release_epoch"] == claim["epoch"]
+        assert store.get_run(run["run_id"])["state"] == "queued"
+        assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+        assert submitted == []
+        assert worker["worker_id"] in store.list_due_retry_worker_ids()
+        service.process_due_worker_retries_once()
+        service.process_due_worker_retries_once()
+        assert len(submitted) == 1
+        assert not store.get_worker(worker["worker_id"])["compute_release_token"]
+        assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+    finally:
+        service.shutdown()
+        store.close()
+
+
+
+@pytest.mark.parametrize("continuation", ["resume", "retry", "message"])
+@pytest.mark.parametrize("worker_state", ["ready", "starting"])
+def test_terminal_attention_target_does_not_block_fresh_queued_work(tmp_path, monkeypatch, continuation, worker_state):
+    store = Store(str(tmp_path / "terminal-attention-queue.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project, worker, old = _active_worker_and_run(
+        store, "terminal-attention-queue", execution_mode="host", run_state="needs_input",
+        owner_id="synthetic-owner",
+    )
+    worker = store.update_worker_state(worker["worker_id"], "needs_input")
+    claim = store.try_claim_worker_compute_release(
+        worker["worker_id"], expected_updated_at=worker["updated_at"],
+        expected_last_run_id=worker.get("last_run_id") or "", expected_state="needs_input",
+        expected_container_id="", owner="previous-synthetic-executor", ttl_s=600,
+        kind="needs_input", target_run_id=old["run_id"],
+    )
+    assert claim is not None
+    store.transition_run_if_state(old["run_id"], "needs_input", "failed",
+                                  ended_at=store_module.utc_now(), failure_class="queue_wait_timeout",
+                                  failure_retryable=1)
+    store.update_worker_state(worker["worker_id"], "ready")
+    if continuation == "retry":
+        queued = store.create_retry_run_action(
+            capability_id="synthetic-retry-capability", idempotency_key="synthetic-retry-key",
+            project_id=project["project_id"], worker_id=worker["worker_id"],
+            source_run_id=old["run_id"], tenant_id=worker["tenant_id"], owner_id=worker["owner_id"],
+            instruction="Continue the original work",
+        )["run"]
+    else:
+        queued = store.create_run(worker["worker_id"], project["project_id"], "Continue the original work")
+        if continuation == "message":
+            queued, created = store.replace_queued_run_idempotently(
+                source_run_id=queued["run_id"], replacement_run_id="synthetic-message-replacement",
+                worker_id=worker["worker_id"], project_id=project["project_id"],
+                instruction="Continue the original work with updated guidance",
+            )
+            if queued is None:
+                # The active-work Message owner uses its existing next-boundary
+                # queue path when replacement cannot prove an unfenced source.
+                queued = store.create_run(worker["worker_id"], project["project_id"],
+                                          "Continue the original work with updated guidance")
+    store.update_worker_state(worker["worker_id"], worker_state)
+    submitted = []
+    monkeypatch.setattr(service.executor, "submit", lambda *args: submitted.append(args))
+    try:
+        assert worker["worker_id"] in store.list_due_retry_worker_ids()
+        service.process_due_worker_retries_once()
+        service.process_due_worker_retries_once()
+        current = store.get_worker(worker["worker_id"])
+        assert len(submitted) == 1
+        assert not current["compute_release_token"] and not current["compute_released_at"]
+        assert store.get_run(old["run_id"])["state"] == "failed"
+        preserved = store.get_run(queued["run_id"])
+        assert preserved["state"] == "queued"
+        assert not preserved["started_at"] and not preserved["runtime_invoked_at"]
+        assert store.get_active_host_run_lease_for_run(queued["run_id"]) is None
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("guard", ["stop", "pause", "active_run", "unconfirmed_start",
+                                   "unknown_target", "foreign_target", "pending_question", "deferred_queue"])
+def test_terminal_attention_replacement_preserves_unproven_or_live_fences(tmp_path, monkeypatch, guard):
+    store = Store(str(tmp_path / "terminal-attention-fence.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project, worker, old = _active_worker_and_run(
+        store, "terminal-attention-fence", execution_mode="host", run_state="needs_input",
+        owner_id="synthetic-owner",
+    )
+    worker = store.update_worker_state(worker["worker_id"], "needs_input")
+    claim = store.try_claim_worker_compute_release(
+        worker["worker_id"], expected_updated_at=worker["updated_at"],
+        expected_last_run_id=worker.get("last_run_id") or "", expected_state="needs_input",
+        expected_container_id="", owner="previous-synthetic-executor", ttl_s=600,
+        kind="needs_input", target_run_id=old["run_id"],
+    )
+    assert claim is not None
+    if guard != "pending_question":
+        store.transition_run_if_state(old["run_id"], "needs_input", "failed",
+                                      ended_at=store_module.utc_now(), failure_class="queue_wait_timeout")
+    store.update_worker_state(worker["worker_id"], "ready")
+    queued = store.create_run(worker["worker_id"], project["project_id"], "Continue existing work")
+    if guard == "stop":
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("UPDATE workers SET compute_release_kind = 'stop_run', "
+                               "compute_release_scope = 'work' WHERE worker_id = ?", (worker["worker_id"],))
+    elif guard == "pause":
+        store.update_worker_state(worker["worker_id"], "paused")
+    elif guard == "active_run":
+        monkeypatch.setattr(store, "get_active_run", lambda _: {"state": "running", "worker_id": worker["worker_id"]})
+    elif guard == "unconfirmed_start":
+        monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda _: True)
+    elif guard in {"unknown_target", "foreign_target"}:
+        target_id = "synthetic-missing-target"
+        if guard == "foreign_target":
+            _, _, foreign = _active_worker_and_run(store, "foreign-attention-target", run_state="failed")
+            target_id = foreign["run_id"]
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("UPDATE workers SET compute_release_target_run_id = ? WHERE worker_id = ?",
+                               (target_id, worker["worker_id"]))
+    elif guard == "deferred_queue":
+        store.update_run(queued["run_id"], retry_after=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+    submitted = []
+    monkeypatch.setattr(service.executor, "submit", lambda *args: submitted.append(args))
+    try:
+        service._ensure_worker_processor(worker["worker_id"])
+        preserved = store.get_worker(worker["worker_id"])
+        assert preserved["compute_release_token"] == claim["token"]
+        assert preserved["compute_release_epoch"] == claim["epoch"]
+        assert submitted == []
+        assert store.get_run(queued["run_id"])["state"] == "queued"
+        assert not store.get_run(queued["run_id"])["runtime_invoked_at"]
+    finally:
+        service.shutdown()
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("lane", "override", "expected_delay"),
     [
@@ -337,6 +645,158 @@ def test_closing_paused_worker_settles_exact_run_and_lease_after_compute_stop(tm
         "worker_compute_terminated", "run_terminal:cancelled"
     }
     assert released == [("terminated", "cancelled", "released")]
+
+
+@pytest.mark.parametrize('recovery', [False, True])
+def test_exact_stop_reuses_confirmed_host_pause_generation(tmp_path, monkeypatch, recovery):
+    store = Store(str(tmp_path / 'confirmed-pause-stop.sqlite3'))
+    _project, worker, run = _active_worker_and_run(store, 'confirmed-pause-stop', execution_mode='host', run_state='running')
+    lease = store.get_active_host_run_lease_for_run(run['run_id'])
+    store.transition_run_if_state(run['run_id'], 'running', 'paused')
+    store.update_worker_state(worker['worker_id'], 'paused')
+    store.release_host_run_lease(lease['lease_id'], executor_id=lease['executor_id'], reason='pause_run_confirmed')
+    queued = store.create_run(worker['worker_id'], worker['project_id'], 'Pending same work')
+    failed = store.create_run(worker['worker_id'], worker['project_id'], 'Existing failed result')
+    store.update_run(failed['run_id'], state='failed', failure_class='queue_wait_timeout', error_text='queue_wait_timeout')
+    sibling = store.create_worker(worker['project_id'], worker['owner_id'], 'Sibling', 'worker', 'codex-cli', 'codex-cli', 'codex-cli', 'test', execution_mode='host')
+    sibling_run = store.create_run(sibling['worker_id'], worker['project_id'], 'Sibling pending work')
+    store.update_worker_state(worker['worker_id'], 'paused')
+    interrupts = []
+    class UnknownIdentityRuntime(StubRuntime):
+        def interrupt_worker(self, worker, *, run_id=None):
+            interrupts.append(run_id)
+            raise RuntimeErrorBase('The exact host process identity is not confirmed')
+    service = WorkersProjectsService(store, UnknownIdentityRuntime(), reconcile_on_startup=False, start_background_consumers=False)
+    try:
+        if recovery:
+            with monkeypatch.context() as before:
+                before.setattr(store, 'get_confirmed_host_pause_marker_for_run', lambda *args, **kwargs: None)
+                pending = service.stop_run(worker['worker_id'], run['run_id'])
+            assert pending['confirmation_pending'] and store.get_run(run['run_id'])['state'] == 'paused'
+            with store._connect() as conn:
+                conn.execute("UPDATE workers SET compute_release_expires_at='2000-01-01T00:00:00+00:00' WHERE worker_id=?", (worker['worker_id'],))
+            interrupts.clear()
+        stopped = service.stop_run(worker['worker_id'], run['run_id'])
+        assert stopped['accepted'] and not stopped['confirmation_pending']
+        assert store.get_run(run['run_id'])['state'] == 'cancelled'
+        assert store.get_run(queued['run_id'])['state'] == 'cancelled'
+        assert store.get_run(failed['run_id'])['state'] == 'failed'
+        assert store.get_run(failed['run_id'])['failure_class'] == 'queue_wait_timeout'
+        assert store.get_run(sibling_run['run_id'])['state'] == 'queued'
+        assert interrupts == []
+        assert store.get_worker(worker['worker_id'])['work_stop_settled_at']
+        assert store.get_host_run_lease(lease['lease_id'])['release_reason'] == 'pause_run_confirmed'
+    finally:
+        service.shutdown();store.close()
+
+
+@pytest.mark.parametrize("previous_compute_released", [False, True])
+def test_exact_stop_finishes_host_work_paused_before_first_start(tmp_path, previous_compute_released):
+    store = Store(str(tmp_path / 'never-started-pause-stop.sqlite3'))
+    _project, worker, run = _active_worker_and_run(store, 'never-started-pause-stop', execution_mode='host', run_state='queued')
+    if previous_compute_released:
+        store.update_worker(worker['worker_id'], compute_released_at='2026-01-01T00:00:00+00:00')
+        store.update_worker_state(worker['worker_id'], 'paused')
+    interrupts = []
+    class UnknownIdentityRuntime(StubRuntime):
+        def interrupt_worker(self, worker, *, run_id=None):
+            interrupts.append(run_id)
+            raise RuntimeErrorBase('The exact host process identity is not confirmed')
+    service = WorkersProjectsService(store, UnknownIdentityRuntime(), reconcile_on_startup=False, start_background_consumers=False)
+    try:
+        service.pause_worker(worker['worker_id'], run_id=run['run_id'])
+        paused = store.get_run(run['run_id'])
+        assert paused['state'] == 'paused' and not paused['started_at']
+        assert store.latest_host_run_lease_for_run(run['run_id']) is None
+        stopped = service.stop_run(worker['worker_id'], run['run_id'])
+        assert stopped['accepted'] and not stopped['confirmation_pending']
+        assert store.get_run(run['run_id'])['state'] == 'cancelled'
+        assert interrupts == []
+    finally:
+        service.shutdown();store.close()
+
+
+@pytest.mark.parametrize("generation", ["active_target", "released_target", "other_active", "started_target"])
+def test_released_worker_queued_pause_rejects_compute_generation(tmp_path, generation):
+    store = Store(str(tmp_path / 'released-queued-pause-negative.sqlite3'))
+    project, worker, run = _active_worker_and_run(store, 'released-queued-pause-negative', execution_mode='host', run_state='queued')
+    store.update_worker(worker['worker_id'], compute_released_at='2026-01-01T00:00:00+00:00')
+    store.update_worker_state(worker['worker_id'], 'paused')
+    if generation == 'started_target':
+        with store._connect() as conn:
+            conn.execute("UPDATE runs SET started_at='2026-01-01T00:00:00+00:00' WHERE run_id=?", (run['run_id'],))
+    else:
+        lease_run = run
+        if generation == 'other_active':
+            lease_run = store.create_run(worker['worker_id'], project['project_id'], 'Other reserved generation')
+        lease = store.acquire_host_run_lease(runtime_family='codex', lane='mission', tenant_id='local', owner_id=worker['owner_id'], worker_id=worker['worker_id'], run_id=lease_run['run_id'], executor_id='other-executor', conversation_limit=2, mission_limit=64, account_mission_limit=64, tenant_mission_limit=64, lease_ttl_s=300)
+        if generation == 'released_target':
+            store.release_host_run_lease(lease['lease_id'], executor_id=lease['executor_id'], reason='termination_unknown')
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False)
+    try:
+        with pytest.raises(RuntimeErrorBase, match='active_work_generation_changed'):
+            service.pause_worker(worker['worker_id'], run_id=run['run_id'])
+        assert store.get_run(run['run_id'])['state'] == 'queued'
+        assert not store.get_worker(worker['worker_id'])['compute_release_token']
+    finally:
+        service.shutdown();store.close()
+
+
+@pytest.mark.parametrize('proof', ['unknown', 'attempt_mismatch', 'worker_mismatch', 'newer_lease', 'resumed', 'other_active_generation', 'started_no_lease', 'reserved_unconfirmed'])
+def test_exact_stop_never_reuses_stale_or_unknown_host_pause_proof(tmp_path, proof):
+    store = Store(str(tmp_path / 'negative-pause-stop.sqlite3'))
+    project, worker, run = _active_worker_and_run(store, 'negative-pause-stop', execution_mode='host', run_state='running')
+    lease = store.get_active_host_run_lease_for_run(run['run_id'])
+    store.transition_run_if_state(run['run_id'], 'running', 'paused')
+    store.update_worker_state(worker['worker_id'], 'paused')
+    store.release_host_run_lease(lease['lease_id'], executor_id=lease['executor_id'], reason='pause_run_confirmed')
+    if proof == 'unknown':
+        with store._connect() as conn:
+            conn.execute("UPDATE host_run_leases SET release_reason='termination_unknown' WHERE lease_id=?", (lease['lease_id'],))
+    elif proof == 'attempt_mismatch':
+        with store._connect() as conn:
+            conn.execute("UPDATE host_run_leases SET attempt_id='' WHERE lease_id=?", (lease['lease_id'],))
+    elif proof == 'worker_mismatch':
+        sibling = store.create_worker(project['project_id'], worker['owner_id'], 'Sibling', 'worker', 'codex-cli', 'codex-cli', 'codex-cli', 'test', execution_mode='host')
+        with store._connect() as conn:
+            conn.execute('UPDATE host_run_leases SET worker_id=? WHERE lease_id=?', (sibling['worker_id'], lease['lease_id']))
+    elif proof == 'newer_lease':
+        with store._connect() as conn:
+            conn.execute("UPDATE host_run_leases SET lease_id='synthetic-newer-active-lease',acquired_at='2999-01-01T00:00:00+00:00',status='active',released_at=NULL,release_reason='' WHERE lease_id=?", (lease['lease_id'],))
+    elif proof == 'started_no_lease':
+        with store._connect() as conn:
+            conn.execute('DELETE FROM host_run_leases WHERE lease_id=?', (lease['lease_id'],))
+    elif proof == 'reserved_unconfirmed':
+        with store._connect() as conn:
+            conn.execute("UPDATE host_run_leases SET status='active',startup_state='reserved',released_at=NULL,release_reason='' WHERE lease_id=?", (lease['lease_id'],))
+            conn.execute('UPDATE runs SET started_at=NULL WHERE run_id=?', (run['run_id'],))
+    elif proof == 'resumed':
+        with store._connect() as conn:
+            conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run['run_id'],))
+        store.update_worker_state(worker['worker_id'], 'running')
+    elif proof == 'other_active_generation':
+        other = store.create_run(worker['worker_id'], project['project_id'], 'Other reserved generation')
+        store.acquire_host_run_lease(runtime_family='codex', lane='mission', tenant_id='local', owner_id=worker['owner_id'], worker_id=worker['worker_id'], run_id=other['run_id'], executor_id='other-executor', conversation_limit=2, mission_limit=64, account_mission_limit=64, tenant_mission_limit=64, lease_ttl_s=300)
+    interrupts = []
+    class UnknownIdentityRuntime(StubRuntime):
+        def interrupt_worker(self, worker, *, run_id=None):
+            interrupts.append(run_id)
+            raise RuntimeErrorBase('The exact host process identity is not confirmed')
+    service = WorkersProjectsService(store, UnknownIdentityRuntime(), reconcile_on_startup=False, start_background_consumers=False)
+    try:
+        outcome = service.stop_run(worker['worker_id'], run['run_id'])
+        assert outcome['confirmation_pending'] or not outcome['accepted']
+        assert store.get_run(run['run_id'])['state'] == ('running' if proof == 'resumed' else 'paused')
+        assert not store.get_worker(worker['worker_id'])['work_stop_settled_at']
+        if proof == 'newer_lease':
+            assert store.get_active_host_run_lease_for_run(run['run_id'])['lease_id'] == 'synthetic-newer-active-lease'
+        if proof == 'other_active_generation':
+            assert store.get_active_host_run_lease_for_run(other['run_id']) is not None
+            assert store.get_run(other['run_id'])['state'] == 'queued'
+        else:
+            assert interrupts == [run['run_id']]
+    finally:
+        service.shutdown();store.close()
 
 
 def test_unproven_worker_compute_keeps_paused_run_and_lease_fenced(tmp_path):
@@ -9341,3 +9801,116 @@ def test_explicit_invocation_grant_retry_keeps_default_needs_input_reopen(tmp_pa
     finally:
         service.shutdown()
         store.close()
+
+
+@pytest.mark.parametrize('kind', ['question', 'permission'])
+def test_legitimate_native_input_wait_preserves_liveness_and_max_duration(tmp_path, monkeypatch, kind):
+    store = Store(str(tmp_path / 'native-input-wait.sqlite3'))
+    _, worker, run = _active_worker_and_run(store, 'native-wait', execution_mode='host', run_state='running')
+    run_id, attempt_id = run['run_id'], run['active_attempt_id']
+    store.update_run(run_id, native_session_id='native-exact')
+    pending = {'kind': kind, 'runId': run_id, 'attemptId': attempt_id, 'sessionId': 'native-exact',
+               'requestId': 'request-exact', 'requestFingerprint': 'a' * 64,
+               'expiresAt': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}
+    runtime = StubRuntime()
+    runtime.pending_native_input = lambda current_worker, *, run_id: pending
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False, start_background_consumers=False)
+    releases = []
+    # Advance watchdog clocks without corrupting the immutable attempt timestamps.
+    due = datetime.now(timezone.utc) + timedelta(seconds=1801)
+    monkeypatch.setattr(service, '_now_datetime', lambda: due)
+    monkeypatch.setattr(service, '_run_age_seconds', lambda current_run: 1801)
+    monkeypatch.setattr(service, '_max_run_duration_s', lambda: 1800)
+    monkeypatch.setattr(service, '_release_needs_input_compute', lambda *args: releases.append('liveness'))
+    monkeypatch.setattr(service, '_release_worker_compute', lambda *args, **kwargs: releases.append('max'))
+    try:
+        assert service.process_provider_liveness_once() == []
+        assert service.reap_expired_runs_once() == []
+        assert releases == []
+        assert store.get_run(run_id)['state'] == 'running'
+        assert store.list_provider_liveness_events(run_id) == []
+        # A resolved/ACKed native request no longer holds either watchdog.
+        pending = None
+        transitioned = service.process_provider_liveness_once()
+        assert [item['run_id'] for item in transitioned] == [run_id]
+        assert releases == ['liveness']
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize('mismatch', ['runId', 'attemptId', 'sessionId', 'expiresAt', 'requestId', 'requestFingerprint', 'kind'])
+def test_invalid_or_expired_native_input_does_not_hide_stalled_provider(tmp_path, monkeypatch, mismatch):
+    store = Store(str(tmp_path / 'invalid-native-input-wait.sqlite3'))
+    _, worker, run = _active_worker_and_run(store, 'invalid-native-wait', execution_mode='host', run_state='running')
+    run_id, attempt_id = run['run_id'], run['active_attempt_id']
+    store.update_run(run_id, native_session_id='native-exact', liveness_started_at='2020-01-01T00:00:00+00:00')
+    pending = {'kind': 'question', 'runId': run_id, 'attemptId': attempt_id, 'sessionId': 'native-exact',
+               'requestId': 'request-exact', 'requestFingerprint': 'a' * 64,
+               'expiresAt': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}
+    pending[mismatch] = {'expiresAt': '2020-01-01T00:00:00+00:00', 'requestId': '',
+                         'requestFingerprint': 'not-a-fingerprint', 'kind': 'generic_attention'}.get(mismatch, 'foreign')
+    runtime = StubRuntime()
+    runtime.pending_native_input = lambda current_worker, *, run_id: pending
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False, start_background_consumers=False)
+    monkeypatch.setattr(service, '_release_needs_input_compute', lambda *args: None)
+    try:
+        assert [item['run_id'] for item in service.process_provider_liveness_once()] == [run_id]
+        assert store.get_run(run_id)['failure_class'] == 'provider_progress_stalled'
+    finally:
+        service.shutdown()
+
+
+def test_unavailable_native_input_authority_does_not_release_compute(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / 'unavailable-native-input-wait.sqlite3'))
+    _, _, run = _active_worker_and_run(store, 'unavailable-native-wait', execution_mode='host', run_state='running')
+    runtime = StubRuntime()
+    def unavailable(*args, **kwargs):
+        raise OSError('Native request state is unavailable')
+    runtime.pending_native_input = unavailable
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False, start_background_consumers=False)
+    releases = []
+    monkeypatch.setattr(service, '_now_datetime', lambda: datetime.now(timezone.utc) + timedelta(seconds=1801))
+    monkeypatch.setattr(service, '_run_age_seconds', lambda current_run: 1801)
+    monkeypatch.setattr(service, '_max_run_duration_s', lambda: 1800)
+    monkeypatch.setattr(service, '_release_needs_input_compute', lambda *args: releases.append('liveness'))
+    monkeypatch.setattr(service, '_release_worker_compute', lambda *args, **kwargs: releases.append('max'))
+    try:
+        with pytest.raises(OSError):
+            service.process_provider_liveness_once()
+        with pytest.raises(OSError):
+            service.reap_expired_runs_once()
+        assert releases == []
+        assert store.get_run(run['run_id'])['state'] == 'running'
+        assert store.list_provider_liveness_events(run['run_id']) == []
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize('limit,waiting_count', [(1, 1), (2, 3)])
+@pytest.mark.parametrize('blank_anchor', [False, True])
+def test_pending_native_inputs_do_not_starve_later_stalled_runs(tmp_path, limit, waiting_count, blank_anchor):
+    store = Store(str(tmp_path / 'native-wait-fairness.sqlite3'))
+    waiting = set()
+    all_runs = []
+    for index in range(waiting_count + limit + 1):
+        _, _, run = _active_worker_and_run(store, f'wait-fair-{index}', execution_mode='host', run_state='running')
+        all_runs.append(run)
+        if index < waiting_count:
+            waiting.add(run['run_id'])
+    if blank_anchor:
+        for run in all_runs:
+            store.update_run(run['run_id'], meaningful_progress_at='')
+        all_runs.sort(key=lambda run: run['run_id'])
+        waiting = {run['run_id'] for run in all_runs[:waiting_count]}
+    due = (datetime.now(timezone.utc) + timedelta(seconds=1801)).isoformat()
+    transitions = store.transition_stalled_provider_liveness_runs(
+        now=due, inactivity_seconds=900, limit=limit,
+        native_input_waiting=lambda run, worker: run['run_id'] in waiting)
+    assert [item['run_id'] for item in transitions] == [item['run_id'] for item in all_runs[waiting_count:waiting_count + limit]]
+    assert all(store.get_run(run_id)['state'] == 'running' for run_id in waiting)
+    assert store.get_run(all_runs[-1]['run_id'])['state'] == 'running'
+    # A later sweep reaches remaining due work in the same stable order.
+    transitions = store.transition_stalled_provider_liveness_runs(
+        now=due, inactivity_seconds=900, limit=limit,
+        native_input_waiting=lambda run, worker: run['run_id'] in waiting)
+    assert [item['run_id'] for item in transitions] == [all_runs[-1]['run_id']]

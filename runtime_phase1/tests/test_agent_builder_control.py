@@ -40,11 +40,14 @@ def test_native_generation_terminal_controls_match_existing_tool_parts(terminal)
         stream = 200 if boundary == 'generation' else 100
         chunk(raw[:-2], stream)
         if boundary == 'generation':
-            assert parts.prefix() is None
+            if terminal['type'] == 'tool_call' and terminal['voice'] == 'skip':
+                assert parts.prefix() is None
+            else:
+                assert parts.prefix()['delivery_disposition']['audio'] == terminal['voice']
         chunk(raw[-2:], stream)
         parts.update({'sessionUpdate': 'response_completed'})
         prefix = parts.prefix()
-        assert bool(prefix) is (terminal['voice'] == 'eligible')
+        assert bool(prefix) is (terminal['type'] == 'assistant_response' or terminal['voice'] == 'eligible')
         if prefix:
             assert prefix['text'] == terminal['content']
         outputs.append(json.loads(parts.finish()))
@@ -53,7 +56,7 @@ def test_native_generation_terminal_controls_match_existing_tool_parts(terminal)
             if terminal['type'] == 'tool_call':
                 assert json.loads(parts.finish()) == outputs[-1]
             else:
-                assert json.loads(parts.finish())['content'] == 'I will check.\n\nI will check.'
+                assert json.loads(parts.finish())['content'] == 'I will check.\n\n' + terminal['content'] + '\n\nI will check.'
     assert outputs == [{**terminal, 'content': 'I will check.\n\n' + terminal['content']}] * 2
 
 
@@ -71,11 +74,11 @@ def test_native_silent_predecessor_keeps_later_part_controls_without_erasing_pub
     put('Silent body.', 'skip', 100)
     put('Silent body.' if voice == 'skip' else 'Useful addition.', voice, 200)
     payload = json.loads(parts.finish())
-    assert payload['voice'] == voice
-    assert payload['content'] == ('Accepted narration.\n\n' if earlier_public else '') + (
+    assert payload['voice'] == 'skip'  # The preserved text-only predecessor stays text-only.
+    assert payload['content'] == ('Accepted narration.\n\n' if earlier_public else '') + 'Silent body.\n\n' + (
         'Silent body.' if voice == 'skip' else 'Useful addition.')
-    assert parts.parts == (['Accepted narration.'] if earlier_public else [])
-    assert bool(parts.prefix()) is (voice == 'eligible')
+    assert parts.parts == (['Accepted narration.'] if earlier_public else []) + ['Silent body.']
+    assert parts.prefix()['delivery_disposition']['audio'] == voice
 
 
 def test_graph_only_output_declines_optional_interject_without_changing_voice_or_freeform():
@@ -87,7 +90,7 @@ def test_graph_only_output_declines_optional_interject_without_changing_voice_or
     assert conversation_interjection_supported(conversation_output_schema(graph, None)) is False
 
 
-def test_native_generation_parts_deduplicate_only_complete_envelopes():
+def test_distinct_native_generations_preserve_model_authored_repetition_and_stream_prefix():
     parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
     def put(text, stream, complete=True):
         raw = json.dumps({'type': 'assistant_response', 'tool_name': None,
@@ -100,12 +103,14 @@ def test_native_generation_parts_deduplicate_only_complete_envelopes():
         return meta, raw
     put('First answer.', 100)
     meta, raw = put('First answer.', 200, False)
-    assert parts.prefix() is None
+    assert parts.prefix()['text'] == 'First answer.'
+    assert parts.prefix()['complete'] is False
     parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': raw[-2:]}}, meta)
-    assert parts.prefix()['duplicate'] is True
+    assert parts.prefix()['text'] == 'First answer.'
+    assert not parts.prefix().get('duplicate')
     parts.update({'sessionUpdate': 'response_completed'})
     put('Useful addition.', 300)
-    assert json.loads(parts.finish())['content'] == 'First answer.\n\nUseful addition.'
+    assert json.loads(parts.finish())['content'] == 'First answer.\n\nFirst answer.\n\nUseful addition.'
     assert parts.part_index == 3
 
 
@@ -171,8 +176,8 @@ def test_native_tools_retire_public_buffer_before_later_completed_generation(fir
     chunk('Same public text.', final_voice, 300)
     parts.update({'sessionUpdate': 'response_completed'})
     payload = json.loads(parts.finish())
-    earlier = (['Same public text.'] + (['Intervening narration.'] if buffered else [])) if first_voice == 'eligible' else []
-    assert payload == {'type': 'assistant_response', 'tool_name': None, 'voice': final_voice,
+    earlier = ['Same public text.'] + (['Intervening narration.'] if buffered else [])
+    assert payload == {'type': 'assistant_response', 'tool_name': None, 'voice': 'skip' if 'skip' in (first_voice, final_voice) else 'eligible',
                        'content': '\n\n'.join([*earlier, 'Same public text.'])}
 
 
@@ -647,7 +652,6 @@ def test_public_prefix_requires_controls_first_and_decodes_split_json_strings():
 
 
 @pytest.mark.parametrize("envelope", [
-    '{"content":"Private until controls", "type":"assistant_response", "tool_name":null, "voice":"eligible"}',
     '{"type":"assistant_response", "tool_name":null, "voice":"skip", "content":"Text only"}',
     '{"type":"tool_call", "tool_name":"lc_transfer_to_specialist", "voice":"eligible", "content":"Internal"}',
     '{"type":"assistant_response", "tool_name":null, "voice":"eligible", "extra":true, "content":"Unknown field"}',
@@ -738,3 +742,204 @@ def test_public_audio_schema_defers_to_surface_and_participant_role(with_graph):
         "voice": "skip", "content": "Requested silent text."}), graph,
         messaging_delivery_control(audio_eligible=True))
     assert result["delivery_disposition"]["audio"] == "skip"
+
+
+def test_intermediate_native_completion_retires_unstructured_tool_narration():
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    def chunk(text, stream):
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': text}},
+                     {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream})
+    chunk('I will inspect the folder.', 100)
+    parts.update({'sessionUpdate': 'response_completed'})
+    parts.update({'sessionUpdate': 'tool_call'})
+    chunk('I will perform the authorized action.', 200)
+    parts.update({'sessionUpdate': 'response_completed'})
+    assert parts.prefix() is None
+    parts.update({'sessionUpdate': 'tool_call'})
+    raw = json.dumps({'type': 'assistant_response', 'tool_name': None,
+                      'voice': 'eligible', 'content': 'The artifact is ready.'})
+    chunk(raw, 300)
+    parts.update({'sessionUpdate': 'response_completed'})
+    assert json.loads(parts.finish()) == json.loads(raw)
+    assert parts.parts == []
+
+
+@pytest.mark.parametrize('terminal', ['Unstructured terminal result.',
+    '{"type":"assistant_response","tool_name":null,"voice":"eligible","content":"Incomplete'])
+def test_deferred_native_completion_still_rejects_invalid_terminal_envelope(terminal):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    def chunk(text, stream):
+        parts.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': text}},
+                     {'promptId': 'prompt-exact', 'turnStartMs': 50, 'streamStartMs': stream})
+    chunk('Intermediate narration.', 100)
+    parts.update({'sessionUpdate': 'tool_call'})
+    parts.update({'sessionUpdate': 'response_completed'})
+    chunk(terminal, 200)
+    parts.update({'sessionUpdate': 'response_completed'})
+    with pytest.raises(ValueError):
+        parts.finish()
+
+
+@pytest.mark.parametrize("with_delivery", [True, False])
+def test_native_continuation_changes_guidance_without_changing_authority(with_delivery):
+    graph = graph_transfer_control(_payload().tools)
+    delivery = messaging_delivery_control(audio_eligible=True) if with_delivery else None
+    original = conversation_output_schema(graph, delivery)
+    continued = conversation_output_schema(graph, delivery, same_turn_continuation=True)
+    assert {k: v for k, v in original.items() if k != "description"} == {
+        k: v for k, v in continued.items() if k != "description"
+    }
+    assert "ends your work for this turn" not in continued["description"]
+    assert "continue this same turn" in continued["description"]
+    assert "full prior goal, context, tool results and work" in continued["description"]
+    assert "unless the user requests repetition or a full replacement" in continued["description"]
+    assert "not proof that text, preview or speech reached the user" in continued["description"]
+    assert "not a substitute for answering an unanswered user request" in continued["description"]
+    empty = {"type": "assistant_response", "content": "", "tool_name": None}
+    if with_delivery:
+        empty["voice"] = "skip"
+    decision = parse_conversation_output(json.dumps(empty), graph, delivery)
+    assert decision["content"] == ""
+    if with_delivery:
+        assert decision["delivery_disposition"]["valid"] is True
+        assert decision["delivery_disposition"]["audio"] == "skip"
+
+
+@pytest.mark.parametrize("terminal,prior,expected_voice", [
+    ({"type": "assistant_response", "tool_name": None, "voice": "skip", "content": ""},
+     ["Useful earlier answer."], "eligible"),
+    ({"type": "assistant_response", "tool_name": None, "voice": "skip", "content": ""},
+     [], "skip"),
+    ({"type": "assistant_response", "tool_name": None, "voice": "skip", "content": ""},
+     [""], "skip"),
+    ({"type": "assistant_response", "tool_name": None, "voice": "skip", "content": "Read this silently."},
+     ["Useful earlier answer."], "skip"),
+    ({"type": "tool_call", "tool_name": "lc_transfer_to_specialist", "voice": "skip", "content": ""},
+     ["Useful earlier answer."], "skip"),
+])
+def test_silent_continuation_preserves_eligible_parts_for_final_only_consumers(terminal, prior, expected_voice):
+    from workers_projects_runtime.agent_builder_control import ordered_conversation_output
+    graph = {"version": 1, "tools": [{"name": "lc_transfer_to_specialist", "description": "Consult."}]}
+    delivery = messaging_delivery_control(audio_eligible=True)
+    output = ordered_conversation_output(prior, json.dumps(terminal), graph, delivery)
+    actual = json.loads(output)
+    assert actual["voice"] == expected_voice
+    assert actual["type"] == terminal["type"] and actual["tool_name"] == terminal["tool_name"]
+    expected_content = "\n\n".join([*prior, terminal["content"]]) if prior else terminal["content"]
+    assert actual["content"] == expected_content
+
+
+@pytest.mark.parametrize("prior_voice,expected_content,expected_voice", [
+    ("eligible", "Useful earlier answer.\n\n", "eligible"),
+    ("skip", "Useful earlier answer.\n\n", "skip"),
+])
+def test_two_native_generations_preserve_public_answer_when_continuation_is_silent(prior_voice, expected_content, expected_voice):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    for text, voice, stream in [("Useful earlier answer.", prior_voice, 100), ("", "skip", 200)]:
+        payload = {"type": "assistant_response", "tool_name": None, "voice": voice, "content": text}
+        parts.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps(payload)}},
+                     {"promptId": "prompt-exact", "turnStartMs": 50, "streamStartMs": stream})
+        parts.update({"sessionUpdate": "response_completed"})
+    result = json.loads(parts.finish())
+    assert result["content"] == expected_content
+    assert result["voice"] == expected_voice
+    assert result["tool_name"] is None
+
+
+@pytest.mark.parametrize("first_voice,second_voice", [("skip", "eligible"), ("eligible", "skip")])
+def test_native_text_and_audio_ranges_preserve_mixed_intent_and_utf16(first_voice, second_voice):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    for text, voice, stream in [("Text \U0001f642", first_voice, 100), ("Spoken addition.", second_voice, 200)]:
+        raw = json.dumps({"type": "assistant_response", "tool_name": None, "voice": voice, "content": text})
+        parts.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": raw}},
+                     {"promptId": "prompt-exact", "turnStartMs": 50, "streamStartMs": stream})
+        parts.update({"sessionUpdate": "response_completed"})
+    final = json.loads(parts.finish())
+    assert final["content"] == "Text \U0001f642\n\nSpoken addition."
+    assert final["voice"] == "skip"  # A legacy one-flag consumer must not speak skipped text.
+    ranges = parts.delivery_disposition_ranges()
+    assert [(item["start"], item["end"], item["disposition"]["audio"]) for item in ranges] == [
+        (0, 7, first_voice), (7, 25, second_voice)
+    ]
+    assert all(item["disposition"] == {"version": 1, "audio": audio, "required": True,
+                "valid": True, "source": "model"} for item, audio in zip(ranges, [first_voice, second_voice]))
+    assert parts.prefix()["delivery_disposition"]["audio"] == second_voice
+
+
+@pytest.mark.parametrize("voice,include_skipped,visible", [
+    ("eligible", False, True), ("skip", False, False), ("skip", True, True),
+])
+def test_complete_content_first_envelope_releases_without_waiting_for_later_generation(voice, include_skipped, visible):
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    raw = json.dumps({"content": "Earlier useful answer \U0001f642.", "type": "assistant_response", "tool_name": None, "voice": voice})
+    delivery = messaging_delivery_control(audio_eligible=True)
+    assert all(public_conversation_prefix(raw[:end], None, delivery, include_skipped=include_skipped) is None
+               for end in range(len(raw)))
+    prefix = public_conversation_prefix(raw, None, delivery, include_skipped=include_skipped)
+    assert bool(prefix) is visible
+    if visible:
+        assert prefix["complete"] is True and prefix["text"] == "Earlier useful answer \U0001f642."
+        assert prefix["delivery_disposition"]["audio"] == voice
+
+
+@pytest.mark.parametrize("tail", [
+    ',"voice":"eligible","voice":"skip"}',
+    ',"voice":"invalid"}',
+    ',"voice":"eligible","extra":true}',
+    ',"voice":"eligible"',
+    ',"voice":"eligible"} trailing',
+])
+def test_complete_content_first_invalid_controls_cannot_release(tail):
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    raw = '{"content":"Must stay withheld","type":"assistant_response","tool_name":null' + tail
+    assert public_conversation_prefix(raw, None, messaging_delivery_control(audio_eligible=True), include_skipped=True) is None
+
+
+@pytest.mark.parametrize("later", ["Useful new fact.", "Earlier useful answer."])
+def test_content_first_native_generation_is_public_before_later_delta_or_repeat(later):
+    parts = NativeConversationParts(None, messaging_delivery_control(audio_eligible=True))
+    first = {"content": "Earlier useful answer.", "type": "assistant_response", "voice": "eligible", "tool_name": None}
+    parts.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps(first)}},
+                 {"promptId": "prompt-exact", "turnStartMs": 50, "streamStartMs": 100})
+    assert parts.prefix()["text"] == first["content"] and parts.prefix()["complete"] is True
+    parts.update({"sessionUpdate": "response_completed"})
+    assert parts.prefix()["text"] == first["content"]
+    second = {**first, "content": later}
+    parts.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps(second)}},
+                 {"promptId": "prompt-exact", "turnStartMs": 50, "streamStartMs": 200})
+    parts.update({"sessionUpdate": "response_completed"})
+    assert json.loads(parts.finish())["content"] == first["content"] + "\n\n" + later
+
+
+def test_content_first_skipped_graph_evidence_remains_private():
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    graph = {"version": 1, "tools": [{"name": "lc_transfer_to_specialist", "description": "Consult."}]}
+    raw = json.dumps({"content": "Receiving-agent evidence.", "voice": "skip", "type": "tool_call", "tool_name": "lc_transfer_to_specialist"})
+    assert public_conversation_prefix(raw, graph, messaging_delivery_control(audio_eligible=True), include_skipped=True) is None
+
+
+@pytest.mark.parametrize('graph_enabled', [False, True])
+def test_minimal_wire_keeps_declared_controls_and_strict_pair_validation(graph_enabled):
+    from jsonschema import Draft202012Validator
+    from workers_projects_runtime.agent_builder_control import (
+        minimal_conversation_output_schema, conversation_controls_from_schema,
+    )
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]} if graph_enabled else None
+    delivery = messaging_delivery_control(audio_eligible=True)
+    declared = conversation_output_schema(graph, delivery, same_turn_continuation=True)
+    before = json.dumps(declared, sort_keys=True)
+    wire = minimal_conversation_output_schema(declared)
+    Draft202012Validator.check_schema(wire)
+    assert conversation_controls_from_schema(wire) == conversation_controls_from_schema(declared)
+    assert json.dumps(declared, sort_keys=True) == before
+    assert 'description' not in wire and 'anyOf' not in wire and '$schema' not in wire
+    answer = {'type': 'assistant_response', 'tool_name': None, 'voice': 'skip', 'content': 'Verified answer.'}
+    assert Draft202012Validator(wire).is_valid(answer)
+    assert parse_conversation_output(json.dumps(answer), graph, delivery)['delivery_disposition']['valid'] is True
+    if graph_enabled:
+        malformed = {**answer, 'type': 'tool_call'}
+        assert Draft202012Validator(wire).is_valid(malformed)
+        with pytest.raises(ValueError):
+            parse_conversation_output(json.dumps(malformed), graph, delivery)
+    with pytest.raises(ValueError, match='messaging controls'):
+        minimal_conversation_output_schema(conversation_output_schema(graph, None) or {'type': 'object'})

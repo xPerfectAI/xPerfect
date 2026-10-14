@@ -220,7 +220,7 @@ def _local_checkout_librechat_uploads_root() -> Path | None:
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "LibreChat" / "uploads"
         if candidate.is_dir():
-            return candidate
+            return candidate.resolve()
     return None
 
 
@@ -237,18 +237,24 @@ def _append_path_list_value(raw: str, value: Path) -> str:
 
 
 def _repair_local_upload_roots(loaded: dict[str, str]) -> None:
-    fallback_root = _local_checkout_librechat_uploads_root()
-    if fallback_root is None:
-        return
-
     configured_root = os.environ.get("WPR_LIBRECHAT_UPLOADS_ROOT", "").strip()
     configured_path = Path(configured_root).expanduser() if configured_root else None
-    if configured_path is None or not configured_path.is_dir():
-        os.environ["WPR_LIBRECHAT_UPLOADS_ROOT"] = os.fspath(fallback_root)
-        loaded["WPR_LIBRECHAT_UPLOADS_ROOT"] = os.fspath(fallback_root)
+    selected_root = (
+        configured_path if configured_path is not None and configured_path.is_dir()
+        else _local_checkout_librechat_uploads_root()
+    )
+    if selected_root is None:
+        return
+    # Producers and bootstrap/native consumers must name the same physical root.
+    # A checkout upload alias is not an additional trusted source location.
+    selected_root = selected_root.resolve(strict=True)
+    canonical_root = os.fspath(selected_root)
+    if configured_root != canonical_root:
+        os.environ["WPR_LIBRECHAT_UPLOADS_ROOT"] = canonical_root
+        loaded["WPR_LIBRECHAT_UPLOADS_ROOT"] = canonical_root
 
     source_roots = os.environ.get("WPR_BOOTSTRAP_SOURCE_ROOTS", "").strip()
-    repaired_roots = _append_path_list_value(source_roots, fallback_root)
+    repaired_roots = _append_path_list_value(source_roots, selected_root)
     if repaired_roots != source_roots:
         os.environ["WPR_BOOTSTRAP_SOURCE_ROOTS"] = repaired_roots
         loaded["WPR_BOOTSTRAP_SOURCE_ROOTS"] = repaired_roots

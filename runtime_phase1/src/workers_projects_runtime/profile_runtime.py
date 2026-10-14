@@ -38,7 +38,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Callable
 
-from .agent_builder_control import conversation_output_schema
+from .agent_builder_control import conversation_output_schema, normalized_graph_transfer_control
 from .auth import multi_user_security_enabled, native_installed_owner_id, require_native_installed_owner
 from .bootstrap import (
     GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS,
@@ -9194,8 +9194,27 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
         instruction_path = self._run_root(str(worker["worker_id"]), run_id) / "instruction.stdin"
         try:
             instruction = instruction_path.read_text()
-            if not instruction or hashlib.sha256(instruction.encode("utf-8")).hexdigest() != instruction_sha256:
+            if not instruction:
                 return unavailable
+            if hashlib.sha256(instruction.encode("utf-8")).hexdigest() != instruction_sha256:
+                # Worker context wraps the admitted instruction before native dispatch.
+                # Validate only that existing publisher shape; retain the whole native input.
+                def unique_object(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("Duplicate contextual instruction field")
+                        result[key] = value
+                    return result
+                envelope = json.loads(instruction, object_pairs_hook=unique_object)
+                if (not isinstance(envelope, dict)
+                        or set(envelope) != {"instruction", "context", "context_manifest"}
+                        or not isinstance(envelope["instruction"], str)
+                        or not isinstance(envelope["context"], list)
+                        or not isinstance(envelope["context_manifest"], dict)
+                        or hashlib.sha256(envelope["instruction"].encode("utf-8")).hexdigest()
+                        != instruction_sha256):
+                    return unavailable
             fingerprint = (path.stat().st_size, path.stat().st_mtime_ns)
             # Select by native turn identity plus exact input bytes, never by timing,
             # prose/tool-name matching, or the newest turn in a reused session.
@@ -9225,7 +9244,10 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
                     content = payload.get("content")
                     if payload.get("type") == "message" and payload.get("role") == "user" and isinstance(content, list):
                         texts = [part.get("text") for part in content if isinstance(part, dict) and part.get("type") == "input_text"]
-                        if texts == [instruction]:
+                        matches = texts.count(instruction)
+                        if matches > 1 or (matches == 1 and current in matched):
+                            return unavailable
+                        if matches == 1:
                             matched.add(current)
                     if current in matched and payload.get("type") in {
                         "custom_tool_call", "custom_tool_call_output", "function_call", "function_call_output"
@@ -11267,8 +11289,9 @@ raise SystemExit(exit_code)
         scope: dict,
         run_id: str,
         output: str,
+        *, native_edits: tuple[tuple[str, str], ...] = (),
     ) -> list[tuple[Path, str, NativeFileSnapshot]]:
-        """Snapshot only files the model explicitly selected in Markdown output."""
+        """Snapshot selected links and verified current-run native edits only."""
         if (
             scope.get("file_output_transport") != "artifact_sha256"
             or scope.get("run_id") != run_id
@@ -11300,25 +11323,25 @@ raise SystemExit(exit_code)
             re.sub(r"(`+)(?!`)(.*?)\1(?!`)", "", line)
             for _offset, line in markdown_body_lines(output)
         )
-        for match in re.finditer(
-            r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)",
-            body,
-        ):
-            destination = match.group(2).strip()
-            if destination.startswith("<") and destination.endswith(">"):
-                destination = destination[1:-1]
-            destination = unquote(destination)
-            try:
-                parsed = urlsplit(destination)
-            except ValueError:
-                continue
-            if parsed.scheme == "file":
-                if parsed.netloc not in {"", "localhost"} or parsed.query or parsed.fragment:
-                    reject(Path(parsed.path), "source_root_unsupported")
+        destinations = [(match.group(2).strip(), None) for match in re.finditer(
+            r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", body)]
+        destinations.extend(native_edits)
+        for destination, expected_digest in destinations:
+            if expected_digest is None:
+                if destination.startswith("<") and destination.endswith(">"):
+                    destination = destination[1:-1]
+                destination = unquote(destination)
+                try:
+                    parsed = urlsplit(destination)
+                except ValueError:
                     continue
-                destination = parsed.path
-            elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
-                continue  # Public references and already-projected artifacts are not local selections.
+                if parsed.scheme == "file":
+                    if parsed.netloc not in {"", "localhost"} or parsed.query or parsed.fragment:
+                        reject(Path(parsed.path), "source_root_unsupported")
+                        continue
+                    destination = parsed.path
+                elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+                    continue  # Public references and already-projected artifacts are not local selections.
             candidate = Path(destination)
             source_kind, source_root = "workspace", workspace
             if candidate.is_absolute():
@@ -11333,7 +11356,7 @@ raise SystemExit(exit_code)
                         continue
             else:
                 relative = candidate
-            if not is_user_deliverable_relative_path(relative, explicit_selection=True):
+            if not is_user_deliverable_relative_path(relative, explicit_selection=expected_digest is None):
                 reject(candidate, "not_deliverable")
                 continue
             key = (source_kind, relative)
@@ -11347,6 +11370,9 @@ raise SystemExit(exit_code)
                 reject(candidate, "unreadable")
                 continue
             digest = data.sha256
+            if expected_digest is not None and digest != expected_digest:
+                reject(candidate, "unreadable")
+                continue
             mime_type = mimetypes.guess_type(relative.name)[0] or "application/octet-stream"
             records.append(
                 {
@@ -13960,7 +13986,7 @@ raise SystemExit(exit_code)
             materialized = str(parsed.get("developer_instructions") or "")
             placement = "codex_developer_instructions"
         elif self.runtime_name == "grok-build":
-            from .bootstrap import native_profile_tool_access_instructions
+            from .grok_runtime import grok_native_authority_instructions, _grok_minimal_wire_output_contract
             from .grok_projection import mcp_servers_for_bundle
 
             projected_bundle = bootstrap_bundle_for(worker)
@@ -13972,9 +13998,10 @@ raise SystemExit(exit_code)
                 )
             except ValueError as exc:
                 raise RuntimeErrorBase(str(exc)) from exc
-            expected = native_profile_tool_access_instructions(
-                str(worker.get("profile") or self.runtime_name), bundle, servers,
-            )
+            output_schema = self._conversation_output_schema(worker)
+            expected = grok_native_authority_instructions(worker, bundle, servers, output_schema)
+            if ("--output-schema-minimal-wire" in command) != _grok_minimal_wire_output_contract(worker, bundle, output_schema):
+                raise RuntimeErrorBase("Native Grok output contract transport differs from the admitted conversation")
             flag = "--system-prompt-file"
             try:
                 rules_path = Path(command[command.index(flag) + 1])
@@ -15314,6 +15341,103 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
             tuple[str, str], tuple[float, tuple[dict[str, object], dict[str, object]]]
         ] = {}
 
+    def _native_midstream_schema_supported(self) -> bool:
+        """Use the selected installed binary's schema, cached by executable identity."""
+        binary = shutil.which(self.binary) or self.binary
+        try:
+            identity = (str(Path(binary).resolve()), Path(binary).stat().st_mtime_ns)
+        except OSError:
+            return False
+        cached = self.__dict__.get("_native_midstream_schema_cache")
+        if cached and cached[0] == identity:
+            return cached[1]
+        supported = False
+        try:
+            version = subprocess.run([self.binary, "--version"], capture_output=True, text=True,
+                timeout=5, check=False)
+            if version.returncode != 0 or version.stdout.strip() != native_input.CODEX_EXEC_REVIEWED_VERSION:
+                self.__dict__["_native_midstream_schema_cache"] = (identity, False)
+                return False
+            with tempfile.TemporaryDirectory(prefix="xperfect-native-schema-") as directory:
+                result = subprocess.run([self.binary, "app-server", "generate-json-schema", "--experimental", "--out", directory],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+                if result.returncode == 0:
+                    root = Path(directory) / "v2"
+                    steer = json.loads((root / "TurnSteerParams.json").read_text())
+                    start = json.loads((root / "ThreadStartParams.json").read_text())
+                    resume = json.loads((root / "ThreadResumeParams.json").read_text())
+                    requests = json.loads((Path(directory) / "ServerRequest.json").read_text())
+                    methods = {entry["properties"]["method"]["enum"][0] for entry in requests.get("oneOf") or []}
+                    supported = (set(steer.get("required") or []) == {"threadId", "input", "expectedTurnId"}
+                        and methods == native_input.CODEX_EXEC_REQUEST_METHODS
+                        and all({"runtimeWorkspaceRoots", "model", "sandbox", "approvalPolicy"}
+                            <= set(schema.get("properties") or {}) for schema in (start, resume)))
+        except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired):
+            pass
+        self.__dict__["_native_midstream_schema_cache"] = (identity, supported)
+        return supported
+
+    def _prepare_native_midstream_command(self, worker, command, *, run_root):
+        launch = native_input.codex_app_launch(command)
+        if launch is None or not self._native_midstream_schema_supported():
+            return command
+        attempt = str(worker.get("_run_attempt_id") or "")
+        if not attempt:
+            return command
+        bundle = self._bootstrap_bundle_for_worker(worker)
+        graph = normalized_graph_transfer_control(bundle.get("agent_builder_control"))
+        expected_schema = conversation_output_schema(graph, bundle.get("messaging_delivery_control"))
+        # Bind this output capability to the actual translated native turn schema.
+        if graph and launch["turn"].get("outputSchema") == expected_schema:
+            launch["interject_graph_control"] = graph
+        context_path = run_root / "native-input-context.json"
+        native_input.publish(context_path, {"version": 1, "protocol": "codex-app-server",
+            "workerId": str(worker["worker_id"]), "runId": str(worker["_active_run_id"]),
+            "attemptId": attempt, "nativeSessionActive": False, "launch": launch})
+        relay_path = run_root / "native-input-relay.py"
+        _atomic_write_private_text(relay_path, Path(native_input.__file__).read_text())
+        from . import grok_control
+        _atomic_write_private_text(run_root / "grok_control.py", Path(grok_control.__file__).read_text())
+        return [sys.executable, str(relay_path), str(context_path), *launch["command"]]
+
+    def _native_midstream_context(self, worker, *, run_id, attempt_id):
+        active = self._read_active_session(str(worker["worker_id"])) or {}
+        if (active.get("run_id") != run_id or active.get("attempt_id") != attempt_id
+                or not self.host_process_identity(worker, run_id)):
+            return {}
+        try:
+            context = native_input.read_object(self._run_root(str(worker["worker_id"]), run_id) / "native-input-context.json")
+        except (OSError, ValueError, native_input.NativeInputError):
+            return {}
+        if (context.get("protocol") != "codex-app-server" or context.get("workerId") != worker["worker_id"]
+                or context.get("runId") != run_id or context.get("attemptId") != attempt_id
+                or context.get("nativeSessionActive") is not True
+                or not context.get("nativeSessionId") or not context.get("nativeTurnId")):
+            return {}
+        return context
+
+    def supports_native_control(self, worker, action, *, run_id="", attempt_id=""):
+        context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
+        return bool(context and (context.get("nativeControlCapabilities") or {}).get(action) is True)
+
+    def native_control_state(self, worker, *, run_id, attempt_id):
+        context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
+        if not context:
+            raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
+        return {"run_id": run_id, "attempt_id": attempt_id, "session_id": context["nativeSessionId"],
+            "interject_graph_control": context.get("nativeGraphControl"), "pending_requests": []}
+
+    def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
+        context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
+        if not context or (context.get("nativeControlCapabilities") or {}).get(action) is not True:
+            raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
+        from .grok_control import submit_control
+        body = {**(payload or {}), "run_id": run_id, "attempt_id": attempt_id,
+                "session_id": context["nativeSessionId"], "action": action}
+        identity = body.pop("message_id", None)
+        return submit_control(self._run_root(str(worker["worker_id"]), run_id) / "native-control", body,
+                              message_id=identity, **({"timeout": 0} if identity else {}))
+
     def _authority_units(self, worker: dict) -> dict[str, str]:
         bundle = self._bootstrap_bundle_for_worker(worker)
         return codex_authority.units(
@@ -15325,6 +15449,7 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
         self, worker: dict, command: list[str], *, run_root: Path,
         timeout_sec: float | None,
     ) -> list[str]:
+        command = self._prepare_native_midstream_command(worker, command, run_root=run_root)
         # A recovered attempt must not inherit an earlier preflight failure classification.
         (run_root / "native-authority-failure.json").unlink(missing_ok=True)
         session = (
@@ -15696,9 +15821,9 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
             workspace,
         )
         if is_resume:
-            command = [self.binary, "exec", "resume"]
+            command = [self.binary, "exec", "resume", "--json"]
             if conversation_mode:
-                command.extend(["--json", "--skip-git-repo-check"])
+                command.append("--skip-git-repo-check")
         else:
             command = [
                 self.binary,
@@ -15812,6 +15937,97 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
 
 class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
     worker_root_name = "host_claude_code_runtime"
+
+    def _native_context_hooks_supported(self):
+        from .claude_native_hooks import REVIEWED_VERSION
+        binary = shutil.which(self.binary) or self.binary
+        try:
+            identity = (str(Path(binary).resolve()), Path(binary).stat().st_mtime_ns)
+            cached = self.__dict__.get("_native_context_hooks_cache")
+            if cached and cached[0] == identity:
+                return cached[1]
+            version = subprocess.run([self.binary, "--version"], capture_output=True,
+                text=True, timeout=5, check=False)
+            supported = version.returncode == 0 and version.stdout.strip() == REVIEWED_VERSION
+            self.__dict__["_native_context_hooks_cache"] = (identity, supported)
+            return supported
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def _prepare_conversation_authority_command(self, worker, command, *, run_root, timeout_sec):
+        from . import claude_native_hooks, grok_control
+        attempt = str(worker.get("_run_attempt_id") or "")
+        bundle = self._bootstrap_bundle_for_worker(worker)
+        if (not attempt or _native_tools_disabled(bundle)
+                or str(bundle.get("access_mode") or "full").strip().lower() == "workspace"
+                or not self._native_context_hooks_supported()):
+            return command
+        settings = {}
+        command = list(command)
+        if "--settings" in command:
+            at = command.index("--settings") + 1
+            settings = json.loads(command[at])
+        else:
+            command.extend(["--settings", "{}"])
+            at = len(command) - 1
+        if settings.get("disableAllHooks") is True:
+            return command
+        hooks = settings.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            raise RuntimeErrorBase("Claude Code native hook settings are invalid")
+        context_path = run_root / "claude-hook-context.json"
+        root = run_root / "native-control"
+        root.mkdir(mode=0o700, exist_ok=True)
+        root.chmod(0o700)
+        native_input.publish(context_path, {"version": 1, "protocol": "claude-native-hooks",
+            "workerId": str(worker["worker_id"]), "runId": str(worker["_active_run_id"]),
+            "attemptId": attempt, "nativeSessionActive": False})
+        for module in (claude_native_hooks, native_input, grok_control):
+            _atomic_write_private_text(run_root / Path(module.__file__).name, Path(module.__file__).read_text())
+        hook_command = shlex.join([sys.executable, str(run_root / "claude_native_hooks.py"), str(context_path)])
+        for event in claude_native_hooks.EVENTS:
+            groups = hooks.setdefault(event, [])
+            if not isinstance(groups, list):
+                raise RuntimeErrorBase("Claude Code native hook settings are invalid")
+            groups.append({"hooks": [{"type": "command", "command": hook_command, "timeout": 5}]})
+        command[at] = json.dumps(settings, separators=(",", ":"))
+        return command
+
+    def _native_midstream_context(self, worker, *, run_id, attempt_id):
+        active = self._read_active_session(str(worker["worker_id"])) or {}
+        if (active.get("run_id") != run_id or active.get("attempt_id") != attempt_id
+                or not self.host_process_identity(worker, run_id)):
+            return {}
+        try:
+            context = native_input.read_object(self._run_root(str(worker["worker_id"]), run_id) / "claude-hook-context.json")
+        except (OSError, ValueError, native_input.NativeInputError):
+            return {}
+        if (context.get("protocol") != "claude-native-hooks" or context.get("workerId") != worker["worker_id"]
+                or context.get("runId") != run_id or context.get("attemptId") != attempt_id
+                or context.get("nativeSessionActive") is not True or not context.get("nativeSessionId")):
+            return {}
+        return context
+
+    def supports_native_control(self, worker, action, *, run_id="", attempt_id=""):
+        return bool(action == "interject" and self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id))
+
+    def native_control_state(self, worker, *, run_id, attempt_id):
+        context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
+        if not context:
+            raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
+        return {"run_id": run_id, "attempt_id": attempt_id,
+            "session_id": context["nativeSessionId"], "pending_requests": []}
+
+    def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
+        context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
+        if action != "interject" or not context:
+            raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
+        from .grok_control import submit_control
+        body = {**(payload or {}), "run_id": run_id, "attempt_id": attempt_id,
+            "session_id": context["nativeSessionId"], "action": action}
+        identity = body.pop("message_id", None)
+        return submit_control(self._run_root(str(worker["worker_id"]), run_id) / "native-control",
+            body, message_id=identity, timeout=0)
     binary_env_var = "WPR_CLAUDE_CODE_BIN"
 
     def _host_workspace_dir(self, worker: dict) -> Path:

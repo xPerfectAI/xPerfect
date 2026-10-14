@@ -507,6 +507,53 @@ def project_upload_files(
     return result
 
 
+def reproject_retained_upload_source(
+    entry: dict[str, Any], source: Path | str, *, tenant_id: str, owner_id: str,
+) -> dict[str, Any] | None:
+    """Reproject a signed old root alias to the same existing owner-upload bytes.
+
+    The bootstrap caller validates the original owner/tenant signature first.
+    Missing originals and symlinks below the upload root are not recovery
+    authority. Reuse the normal projector and its exact file identity.
+    """
+    file_id = _safe_virtual_ref(entry.get("file_id"))
+    root_value = os.environ.get("WPR_LIBRECHAT_UPLOADS_ROOT", "").strip()
+    if not file_id or not root_value:
+        return None
+    lexical = Path(os.path.abspath(os.fspath(Path(source).expanduser())))
+    try:
+        root = Path(root_value).expanduser().resolve(strict=True)
+        resolved = lexical.resolve(strict=True)
+        relative = resolved.relative_to(root)
+        if not resolved.is_file() or len(relative.parts) < 2:
+            return None
+        # Only the root alias may change. Retain the same relative owner/file
+        # address and reject any leaf or intermediate symlink within it.
+        alias_root = lexical.parents[len(relative.parts) - 1]
+        if (
+            lexical.relative_to(alias_root) != relative
+            or alias_root.resolve(strict=True) != root
+            or _path_has_symlink_component(lexical, alias_root)
+        ):
+            return None
+        projected = project_upload_files(
+            {"selected_uploads": [{**entry, "filepath": f"/uploads/{relative.as_posix()}"}]},
+            tenant_id=tenant_id, owner_id=owner_id,
+            storage_owner_id=relative.parts[0],
+        )
+        if len(projected) != 1 or not projected[0].get("source_path"):
+            return None
+        canonical = Path(projected[0]["source_path"])
+        if canonical.resolve(strict=True) != resolved:
+            return None
+        return {
+            **entry, "source_path": os.fspath(canonical),
+            BOOTSTRAP_SOURCE_TOKEN_KEY: projected[0].get(BOOTSTRAP_SOURCE_TOKEN_KEY, ""),
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def merge_projected_upload_files(existing: Any, projected: list[dict[str, Any]]) -> list[Any]:
     files = list(existing) if isinstance(existing, list) else []
     seen_identities: set[tuple[str, str]] = set()

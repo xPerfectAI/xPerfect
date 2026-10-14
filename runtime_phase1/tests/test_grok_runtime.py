@@ -7,6 +7,8 @@ import subprocess
 import sys
 
 import pytest
+from jsonschema import Draft202012Validator
+from workers_projects_runtime.agent_builder_control import conversation_output_schema, parse_conversation_output
 
 from workers_projects_runtime.grok_runtime import GrokBuildRuntime, HostGrokBuildRuntime
 from workers_projects_runtime.coordinator import CoordinatorScopeError
@@ -821,6 +823,7 @@ def test_runner_reports_why_a_native_request_ended_the_turn(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize('failure_class,message', [
+    ('native_input_unanswered', 'Grok ended before an owner response was recorded.'),
     ('native_input_expired', 'Grok stopped because its request for your response expired without an answer.'),
     ('native_input_declined', 'Grok stopped after you declined its request.'),
     ('native_input_cancelled', 'Grok stopped because you cancelled its request.'),
@@ -943,7 +946,8 @@ def test_native_grok_materializes_and_checks_the_declared_conversation_output_sc
         'run_mode': 'conversation', 'agent_builder_control': control})
     command = runtime._grok_command(record, info(tmp_path), host=True)
     path = Path(command[command.index('--output-schema-file') + 1])
-    assert json.loads(path.read_text()) == conversation_output_schema(control, None)
+    assert json.loads(path.read_text()) == runtime._conversation_output_schema(record)
+    assert "anyOf" not in conversation_output_schema(control, None)
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
     assert path.read_text() not in command
@@ -1257,3 +1261,247 @@ def test_registered_grok_conversation_receipt_rejects_any_composed_authority_tam
         runtime._native_provider_authority_receipt(
             record, command=command, run_id="run-composed-authority", model="grok-selected")
     assert record["bootstrap_bundle_json"] == encoded
+
+
+@pytest.mark.parametrize("runtime_class", [GrokBuildRuntime, HostGrokBuildRuntime])
+@pytest.mark.parametrize("with_delivery", [False, True])
+@pytest.mark.parametrize("kind,name,valid", [
+    ("assistant_response", None, True),
+    ("tool_call", "lc_transfer_to_specialist", True),
+    ("tool_call", None, False),
+    ("assistant_response", "lc_transfer_to_specialist", False),
+    ("tool_call", "lc_transfer_to_foreign", False),
+])
+def test_grok_schema_and_parser_agree_on_terminal_control_pairs(
+    tmp_path, runtime_class, with_delivery, kind, name, valid
+):
+    graph = {"version": 1, "tools": [{"name": "lc_transfer_to_specialist", "description": "Transfer."}]}
+    delivery = {"version": 1, "audio_eligible": True} if with_delivery else None
+    record = {**worker(tmp_path), "trusted_run_lane": "conversation", "bootstrap_bundle_json": json.dumps({
+        "run_mode": "conversation", "agent_builder_control": graph,
+        "messaging_delivery_control": delivery})}
+    common = conversation_output_schema(graph, delivery)
+    schema = runtime_class(str(tmp_path / "state"))._conversation_output_schema(record)
+    assert schema["properties"] == common["properties"]
+    assert "anyOf" not in common
+    Draft202012Validator.check_schema(schema)
+    result = {"type": kind, "tool_name": name, "content": "Actual result."}
+    if with_delivery:
+        result["voice"] = "eligible"
+    assert Draft202012Validator(schema).is_valid(result) is valid
+    if valid:
+        assert parse_conversation_output(json.dumps(result), graph, delivery)["type"] == kind
+    else:
+        with pytest.raises(ValueError):
+            parse_conversation_output(json.dumps(result), graph, delivery)
+
+
+
+
+@pytest.mark.parametrize('runtime_class', [GrokBuildRuntime, HostGrokBuildRuntime])
+@pytest.mark.parametrize('mode', ['enabled', 'restricted', 'unadmitted', 'mission', 'no_schema'])
+def test_grok_final_contract_transport_preserves_native_authority_boundaries(tmp_path, runtime_class, mode):
+    from types import SimpleNamespace
+    import hashlib
+    from workers_projects_runtime.agent_builder_control import conversation_output_contract_instructions, messaging_delivery_control
+    runtime = runtime_class(str(tmp_path / 'state'))
+    runtime.sandbox = SimpleNamespace(home_mount='/workspace/home', box=None, paths=lambda _: {'home_dir': tmp_path / 'native-home'})
+    capsule = '<viventium_feeling_state>Synthetic.</viventium_feeling_state>'
+    tail = 'Fact guard\n' + capsule
+    authority = 'Exact authority.\n\n' + tail
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    bundle = {'run_mode': 'mission' if mode == 'mission' else 'conversation',
+              'developer_instructions': authority, 'application_developer_instructions': authority,
+              'declared_developer_instruction_tail': tail,
+              'provider_capabilities': {'native_tools': mode != 'restricted'},
+              'agent_builder_control': graph if mode != 'no_schema' else None,
+              'messaging_delivery_control': messaging_delivery_control(audio_eligible=True) if mode != 'no_schema' else None,
+              'env': {'WPR_GROK_REASONING_EFFORT': 'high'}}
+    record = {**worker(tmp_path), 'trusted_run_lane': 'mission' if mode in ('unadmitted', 'mission') else 'conversation',
+              'bootstrap_bundle_json': json.dumps(bundle)}
+    for host in (True, False):
+        command = runtime._grok_command(record, info(tmp_path), host=host)
+        assert ('--output-schema-minimal-wire' in command) is (mode == 'enabled')
+        assert command[command.index('--model') + 1] == 'grok-selected'
+        assert command[command.index('--effort') + 1] == 'high'
+        path = runtime._home_dir(record['worker_id']) / '.xperfect-grok' / 'developer-instructions.txt'
+        actual = path.read_text()
+        schema = runtime._conversation_output_schema(record)
+        if mode == 'enabled':
+            assert actual == 'Exact authority.\n\n' + conversation_output_contract_instructions(schema) + '\n\n' + tail
+        else:
+            assert actual == authority
+        assert actual.endswith(tail) and actual.count(capsule) == 1
+        assert json.loads(record['bootstrap_bundle_json']) == bundle
+        if host and mode not in ('mission', 'unadmitted') and runtime_class is HostGrokBuildRuntime:
+            receipt = runtime._native_provider_authority_receipt(record, command=command,
+                run_id='synthetic-run', model='grok-selected')
+            assert receipt['authority_sha256'] == hashlib.sha256(actual.encode()).hexdigest()
+            changed = [arg for arg in command if arg != '--output-schema-minimal-wire'] if mode == 'enabled' else [*command, '--output-schema-minimal-wire']
+            with pytest.raises(RuntimeErrorBase, match='transport differs'):
+                runtime._native_provider_authority_receipt(record, command=changed,
+                    run_id='synthetic-run', model='grok-selected')
+
+
+def test_grok_semantic_contract_rejects_mismatched_tail_and_changed_registered_contract(tmp_path):
+    from workers_projects_runtime.agent_builder_control import messaging_delivery_control
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    bundle = {'run_mode': 'conversation', 'developer_instructions': 'Authority.\n\nActual tail.',
+              'declared_developer_instruction_tail': 'Declared tail.', 'agent_builder_control': graph,
+              'messaging_delivery_control': messaging_delivery_control(audio_eligible=True)}
+    record = {**worker(tmp_path), 'trusted_run_lane': 'conversation', 'bootstrap_bundle_json': json.dumps(bundle)}
+    with pytest.raises(RuntimeErrorBase, match='declared tail'):
+        runtime._grok_command(record, info(tmp_path), host=True)
+    bundle['declared_developer_instruction_tail'] = 'Actual tail.'
+    record['bootstrap_bundle_json'] = json.dumps(bundle)
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    path = Path(command[command.index('--system-prompt-file') + 1])
+    path.write_text(path.read_text().replace('Conversation final-result protocol', 'Changed protocol', 1))
+    with pytest.raises(RuntimeErrorBase, match='differs from the request-pinned'):
+        runtime._native_provider_authority_receipt(record, command=command,
+            run_id='synthetic-run', model='grok-selected')
+
+
+@pytest.mark.parametrize('owner_answer,provider_text', [
+    (False, 'User declined the question.'),
+    (False, 'A useful provider conclusion.'),
+    (True, 'The owner selected North.'),
+    ('turn_cancelled', 'A provider conclusion after owner Stop.'),
+    ('turn_cancelled_at_fence', 'A provider conclusion while owner Stop wins the fence.'),
+])
+def test_runner_provider_end_requires_resolved_native_question(tmp_path, monkeypatch, capfd, owner_answer, provider_text):
+    import io, threading, time
+    from workers_projects_runtime import grok_acp_runner as runner
+    from workers_projects_runtime.grok_control import submit_control
+    control = tmp_path / 'control'
+    binary = tmp_path / 'native-peer'
+    script = r"""
+import json,sys,time
+from pathlib import Path
+for line in sys.stdin:
+ r=json.loads(line);method=r.get('method')
+ if not method:continue
+ if method=='initialize':
+  result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'close':{}}},'authMethods':[{'id':'cached_token'}],'_meta':{'grokShell':True,'defaultAuthMethodId':'cached_token'}}
+ elif method=='authenticate':result={}
+ elif method=='session/new':result={'sessionId':'native-exact','models':{'currentModelId':'grok-selected'}}
+ elif method=='session/prompt':
+  print(json.dumps({'jsonrpc':'2.0','id':'question-a','method':'x.ai/ask_user_question','params':{'sessionId':'native-exact','toolCallId':'question-tool-a','questions':[{'question':'Which route?','options':[{'label':'North'}]}]}}),flush=True)
+  deadline=time.monotonic()+3
+  while not list(Path(CONTROL).glob('*.pending')):
+   assert time.monotonic()<deadline
+   time.sleep(.01)
+  if OWNER:
+   selected=json.loads(sys.stdin.readline())
+   assert selected['result']=={'outcome':'accepted','answers':{'Which route?':['North']}}
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-exact','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':TEXT}}}}),flush=True)
+  result={'stopReason':'end_turn'}
+ elif method=='session/close':result={}
+ else:raise AssertionError(method)
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+""".replace('CONTROL', repr(str(control))).replace('OWNER', repr(owner_answer is True)).replace('TEXT', repr(provider_text))
+    binary.write_text('#!' + sys.executable + '\n' + script); binary.chmod(0o700)
+    monkeypatch.setenv('GROK_HOME', str(tmp_path / 'home'))
+    monkeypatch.setattr(sys, 'stdin', io.StringIO('Synthetic task.'))
+    if owner_answer == 'turn_cancelled':
+        original_prompt = runner.GrokSession.prompt
+        def cancelled_prompt(session, *args, **kwargs):
+            output = original_prompt(session, *args, **kwargs)
+            session.cancel_requested = True
+            return output
+        monkeypatch.setattr(runner.GrokSession, 'prompt', cancelled_prompt)
+    if owner_answer == 'turn_cancelled_at_fence':
+        original_finish = runner.ControlMailbox.finish_unanswered_question
+        def stopped_at_fence(mailbox):
+            # Owner Stop acquires the real mailbox lock after prompt returns.
+            # Hold the native notification flag behind it to exercise both races.
+            mailbox.session.cancel = lambda: None
+            mailbox.cancel_turn()
+            return original_finish(mailbox)
+        monkeypatch.setattr(runner.ControlMailbox, 'finish_unanswered_question', stopped_at_fence)
+    def owner():
+        deadline = time.monotonic()+5
+        while time.monotonic()<deadline:
+            pending = list(control.glob('*.pending'))
+            if pending:
+                offered = json.loads(pending[0].read_text())
+                submit_control(control, {'run_id':'run-a','attempt_id':'attempt-a',
+                    'session_id':'native-exact','action':'permission','request_id':offered['request_id'],
+                    'response':{'outcome':'accepted','answers':{'Which route?':['North']}}})
+                return
+            time.sleep(.01)
+        raise AssertionError('Native question not offered')
+    thread = threading.Thread(target=owner) if owner_answer is True else None
+    if thread:thread.start()
+    returned = runner.main(['--binary',str(binary),'--model','grok-selected','--control-dir',str(control),
+                           '--run-id','run-a','--attempt-id','attempt-a'])
+    if thread:thread.join(5)
+    events = [json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith('{')]
+    if owner_answer is True:
+        assert returned == 0
+        assert [event['output'] for event in events if event['type']=='grok.result'] == [provider_text]
+        assert not any(event['type']=='grok.error' for event in events)
+    else:
+        assert returned == 2
+        assert not any(event['type']=='grok.result' for event in events)
+        failure = next(event for event in events if event['type']=='grok.error')
+        expected = 'native_turn_cancelled' if str(owner_answer).startswith('turn_cancelled') else 'native_input_unanswered'
+        assert failure['failure_class'] == expected
+        assert failure['message'] == ('Grok stopped because its turn was cancelled.' if str(owner_answer).startswith('turn_cancelled')
+                                      else 'Grok ended before an owner response was recorded.')
+
+
+@pytest.mark.parametrize("lane,tools,continuation", [
+    ("conversation", True, True),
+    ("conversation", False, False),
+    ("mission", True, False),
+    (None, True, False),
+])
+def test_native_continuation_contract_is_pinned_to_admitted_native_path(tmp_path, lane, tools, continuation):
+    from workers_projects_runtime.agent_builder_control import messaging_delivery_control
+    runtime = HostGrokBuildRuntime(str(tmp_path / "state"))
+    tail = "Exact declared tail."
+    bundle = {
+        "run_mode": "conversation", "developer_instructions": "Original authority.\n\n" + tail,
+        "declared_developer_instruction_tail": tail,
+        "provider_capabilities": {"native_tools": tools},
+        "messaging_delivery_control": messaging_delivery_control(audio_eligible=True),
+    }
+    record = {**worker(tmp_path), "trusted_run_lane": lane,
+              "bootstrap_bundle_json": json.dumps(bundle)}
+    schema = runtime._conversation_output_schema(record)
+    if lane != "conversation" and tools:
+        assert schema is None
+    else:
+        assert ("continue this same turn" in schema["description"]) is continuation
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    rendered = (runtime._home_dir(record["worker_id"]) / ".xperfect-grok/developer-instructions.txt").read_text()
+    assert ("continue this same turn" in rendered) is continuation
+    assert rendered.startswith("Original authority.") and rendered.endswith(tail)
+    assert ("--output-schema-minimal-wire" in command) is continuation
+    assert json.loads(record["bootstrap_bundle_json"]) == bundle
+
+
+
+def test_native_mcp_readiness_projection_reaches_existing_runner_args(tmp_path):
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    bundle = {'glasshive_capability_broker': {'name': 'authorized-broker',
+              'allowed_host_tools': ['active_work_action', 'active_work_list']},
+              'grok_mcp_servers': [{'name': 'authorized-broker', 'type': 'stdio', 'command': 'synthetic'},
+                                  {'name': 'optional-resource-only', 'type': 'stdio', 'command': 'synthetic'}]}
+    record = {**worker(tmp_path), 'bootstrap_bundle_json': json.dumps(bundle)}
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    required = [command[index + 1] for index, flag in enumerate(command) if flag == '--required-mcp-server']
+    assert required == ['authorized-broker']
+    assert 'optional-resource-only' not in required
+
+
+
+def test_malformed_required_broker_tool_keeps_existing_runtime_configuration_wrapper(tmp_path):
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    bundle = {'glasshive_capability_broker': {'name': {}, 'allowed_host_tools': ['active_work_action']},
+              'grok_mcp_servers': [{'name': 'authorized-broker', 'type': 'stdio', 'command': 'synthetic'}]}
+    record = {**worker(tmp_path), 'bootstrap_bundle_json': json.dumps(bundle)}
+    with pytest.raises(RuntimeErrorBase, match='Declared broker server identity is invalid'):
+        runtime._grok_command(record, info(tmp_path), host=True)

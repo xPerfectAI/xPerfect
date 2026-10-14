@@ -8,13 +8,14 @@ import sqlite3
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
 import workers_projects_runtime.service as service_module
 import workers_projects_runtime.bootstrap as bootstrap_module
 import workers_projects_runtime.mcp_server as mcp_server_module
+import workers_projects_runtime.grok_runtime as grok_runtime_module
 import workers_projects_runtime.store as store_module
 from workers_projects_runtime.openclaw_runtime import HostCapacityError, StubRuntime
 from workers_projects_runtime.native_team import NativeTeamProjection
@@ -1167,6 +1168,7 @@ def test_prompt_layer_inventory_is_derived_from_actual_registered_producers():
         "workers_projects_runtime.bootstrap.merge_glasshive_worker_instructions",
         "workers_projects_runtime.bootstrap.native_profile_tool_access_instructions",
         "workers_projects_runtime.coordinator.prompt_manifest",
+        "workers_projects_runtime.grok_runtime.grok_native_authority_instructions",
         "workers_projects_runtime.mcp_server.create_mcp_server",
         "workers_projects_runtime.mcp_server.glasshive_workers_server_instructions",
         "workers_projects_runtime.profile_runtime.HostNativeCliMixin._host_harness_prompt",
@@ -1191,8 +1193,12 @@ def test_prompt_layer_inventory_is_derived_from_actual_registered_producers():
 
 
 
+@pytest.mark.parametrize("producer", [
+    bootstrap_module.native_profile_tool_access_instructions,
+    grok_runtime_module.grok_native_authority_instructions,
+])
 def test_registered_native_profile_prompt_is_in_live_orchestration_capability(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, producer
 ):
     monkeypatch.setenv("VIVENTIUM_PARALLEL_WORK_EXECUTION_MODE", "host")
     monkeypatch.delenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", raising=False)
@@ -1203,7 +1209,6 @@ def test_registered_native_profile_prompt_is_in_live_orchestration_capability(
         "disk_usage",
         lambda _path: service_module.shutil._ntuple_diskusage(100, 50, 50),
     )
-    producer = bootstrap_module.native_profile_tool_access_instructions
     producer_ref = producer.__glasshive_worker_prompt_producer_ref__
     assert bootstrap_module.WORKER_PROMPT_LAYER_PRODUCER_BINDINGS[producer_ref] == (
         "developer_instructions",
@@ -1226,6 +1231,51 @@ def test_registered_native_profile_prompt_is_in_live_orchestration_capability(
     assert result["nativeParallelReason"] == ""
     assert trace["unknownLayerNames"] == []
     assert "developer_instructions" in trace["layerNames"]
+
+def test_native_host_readiness_skips_disabled_isolation_proofs_within_core_deadline(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VIVENTIUM_PARALLEL_WORK_EXECUTION_MODE", "host")
+    monkeypatch.delenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", raising=False)
+    monkeypatch.setenv("GLASSHIVE_HOST_WORKERS_ENABLED", "true")
+    monkeypatch.setenv("GLASSHIVE_PROVIDER_ALLOW_FULL_ACCESS", "true")
+    release = Event()
+    observed = []
+
+    class HistoricalProofRuntime(StubRuntime):
+        def host_active_process_status(self, worker):
+            observed.append("process")
+            release.wait(2)
+            return {"state": "absent"}
+
+        def isolated_parallel_readiness(self, *, cached_only=False):
+            observed.append("isolated_runtime")
+            return {"ready": True}
+
+    store = Store(str(tmp_path / "native-policy-only.sqlite3"))
+    monkeypatch.setattr(store, "active_host_mission_worker_ids", lambda: {"retained-active"})
+    monkeypatch.setattr(store, "conclusively_terminal_host_mission_history",
+                        lambda: observed.append("terminal_history") or set())
+    monkeypatch.setattr(store, "list_host_mission_workers",
+                        lambda: observed.append("worker_inventory") or [{"worker_id": "historical"}])
+    service = WorkersProjectsService(store, HistoricalProofRuntime(), reconcile_on_startup=False)
+    monkeypatch.setattr(service, "_storage_pressure_v1", lambda: {"healthy": True})
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(service.orchestration_capabilities)
+            try:
+                result = future.result(timeout=1.0)
+            finally:
+                release.set()
+        assert result["nativeParallelReady"] is True
+        assert result["hostMissionsActive"] == 1
+        assert result["isolatedParallelReady"] is False
+        assert result["isolatedParallelReason"] == "isolated_parallel_policy_disabled"
+        assert observed == []
+    finally:
+        release.set()
+        service.shutdown()
+
 
 def test_actual_prompt_output_carries_each_nested_producer_identity():
     emitted = bootstrap_module.glasshive_project_agents_md({})

@@ -197,3 +197,23 @@ def test_current_grok_models_keep_effort_metadata_during_recovery():
         assert model is GLASSHIVE_MODELS[f"grok-build:{native}"]
         assert model.recommended_effort == "high"
         assert {"low", "medium", "high", "xhigh"} <= set(model.effort_choices)
+
+
+@pytest.mark.parametrize('host_tools,servers', [
+    (['active_work_action', 'active_work_list'], []), ([], ['reviewed-server']), ([], []),
+])
+def test_readiness_uses_the_existing_signed_broker_connection(host_tools, servers):
+    from workers_projects_runtime.grok_projection import required_mcp_servers_for_bundle
+    bundle = {'glasshive_capability_broker': {'name': 'authorized-broker',
+        'allowed_host_tools': host_tools, 'allowed_servers': servers}}
+    projected = [{'name': 'authorized-broker'}, {'name': 'optional-resource-only'}]
+    assert required_mcp_servers_for_bundle(bundle, projected) == ['authorized-broker']
+    assert required_mcp_servers_for_bundle(bundle, [{'name': 'optional-resource-only'}]) == []
+    assert required_mcp_servers_for_bundle({}, projected) == []
+
+
+def test_readiness_rejects_malformed_declared_broker_server_identity():
+    from workers_projects_runtime.grok_projection import required_mcp_servers_for_bundle
+    with pytest.raises(ValueError, match='identity is invalid'):
+        required_mcp_servers_for_bundle({'glasshive_capability_broker': {
+            'name': {}}}, [{'name': 'authorized-broker'}])

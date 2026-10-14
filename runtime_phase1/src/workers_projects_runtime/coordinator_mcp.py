@@ -44,8 +44,8 @@ def native_coordinator_server(coordinator, peers, endpoint: str):
         return coordinator.snapshot(*identity(ctx))
 
     @server.tool(name="coordinator_result", description=descriptions["coordinator_result"])
-    def result(goal_id: str, ctx: Context, offset: int = 0, max_chars: int = 12000):
-        return coordinator.read_result(*identity(ctx), goal_id, offset, max_chars)
+    def result(goal_id: str, ctx: Context, offset: int = 0, max_chars: int = 12000, run_id: str = ""):
+        return coordinator.read_result(*identity(ctx), goal_id, offset, max_chars, run_id)
 
     @server.tool(name="coordinator_handle", description=descriptions["coordinator_handle"])
     def handle(goal_ids: list[str], ctx: Context):

@@ -274,10 +274,15 @@ def _assert_schema_compatible(
     for key in SCHEMA_CONSTRAINT_KEYS:
         if key in baseline:
             assert key in candidate, f"{path}: schema constraint {key!r} disappeared"
-            assert candidate[key] == baseline[key], (
-                f"{path}: schema constraint {key!r} changed from "
-                f"{baseline[key]!r} to {candidate[key]!r}"
-            )
+            if key == "enum" and direction == "request":
+                assert all(value in candidate[key] for value in baseline[key]), (
+                    f"{path}: legacy request enum values disappeared"
+                )
+            else:
+                assert candidate[key] == baseline[key], (
+                    f"{path}: schema constraint {key!r} changed from "
+                    f"{baseline[key]!r} to {candidate[key]!r}"
+                )
 
     for union_key in ("anyOf", "oneOf"):
         if union_key not in baseline:
@@ -606,7 +611,7 @@ def _candidate_callback_payload() -> tuple[dict[str, Any], WorkersProjectsServic
         "telegram_user_id": None,
         "telegram_message_id": None,
     }
-    service._callback_config_for = lambda _worker: callback_config
+    service._callback_config_for = lambda _worker, **_kwargs: callback_config
     service._signed_watch_url = (
         lambda _worker, _callbacks: "https://glasshive.example.invalid/r/ref-1"
     )
@@ -1122,9 +1127,8 @@ def test_callback_payload_and_signature_contract_are_additive():
     candidate, service, callback_config = _candidate_callback_payload()
 
     assert service_module.RUN_STATE_BY_EVENT == golden["event_run_states"]
-    assert service_module.ACTIONABLE_CALLBACK_LINK_EVENTS == set(
-        golden["actionable_link_events"]
-    )
+    # Wire fields remain additive; ordinary status no longer adds workspace links to prose.
+    assert service_module.NATIVE_INPUT_CALLBACK_LINK_EVENTS == {"run.needs_input"}
     _assert_payload_additive(golden["payload"], candidate, "callback")
     baseline_payload = golden["payload"]
     encoded = service._encode_callback_payload(baseline_payload)
@@ -1225,3 +1229,22 @@ def test_supported_high_effort_values_remain_projectable(profile, effort, env_ke
     bundle = _apply_effort_to_bundle({}, profile=profile, effort=effort)
 
     assert bundle["env"][env_key] == effort
+
+
+@pytest.mark.parametrize("direction,values,compatible", [
+    ("request", ["full", "workspace", "read_only"], True),
+    ("request", ["full"], False),
+    ("response", ["full", "workspace", "read_only"], False),
+    ("response", ["full"], False),
+])
+def test_request_enum_additions_preserve_old_inputs_and_response_enums_stay_strict(direction, values, compatible):
+    baseline = {"type": "string", "enum": ["full", "workspace"]}
+    candidate = {"type": "string", "enum": values}
+    def check():
+        _assert_schema_compatible(baseline, candidate, baseline_components={},
+            candidate_components={}, direction=direction, path="synthetic enum")
+    if compatible:
+        check()
+    else:
+        with pytest.raises(AssertionError):
+            check()

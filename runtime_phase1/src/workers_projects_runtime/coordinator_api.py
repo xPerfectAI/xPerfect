@@ -5,6 +5,8 @@ from collections.abc import Callable
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 
+from .openclaw_runtime import RuntimeErrorBase
+
 from .coordinator import (
     Control, CoordinatorConfig, CoordinatorConflict, CoordinatorScope,
     CoordinatorScopeError, Route,
@@ -51,6 +53,13 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             raise HTTPException(403, str(exc)) from exc
         except CoordinatorConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        except RuntimeErrorBase as exc:
+            if str(exc) != "active_work_generation_changed":
+                raise
+            raise HTTPException(409, {
+                "code": "active_work_generation_changed",
+                "message": "Current work changed. Check its status and try again.",
+            }) from exc
 
     @router.post("/conversations")
     def create(request: Request, payload: ConversationCreateInput | None = None):
@@ -196,8 +205,8 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
         return invoke(coordinator.accept_goals, *principal(request), conversation_id, payload.turn_id, payload.goals)
 
     @router.get("/conversations/{conversation_id}/goals/{goal_id}/result")
-    def result(conversation_id: str, goal_id: str, request: Request, offset: int = 0, max_chars: int = 12000):
-        return invoke(coordinator.read_result, *principal(request), conversation_id, goal_id, offset, max_chars)
+    def result(conversation_id: str, goal_id: str, request: Request, offset: int = 0, max_chars: int = 12000, run_id: str = ""):
+        return invoke(coordinator.read_result, *principal(request), conversation_id, goal_id, offset, max_chars, run_id)
 
     @router.post("/conversations/{conversation_id}/dispatch")
     def dispatch(conversation_id: str, payload: Dispatch, request: Request):

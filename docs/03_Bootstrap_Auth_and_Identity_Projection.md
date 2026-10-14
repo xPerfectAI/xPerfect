@@ -58,6 +58,18 @@ Current phase-1 fields supported by the runtime:
 - `callbacks`
 - `project_definition`
 
+For Prompt Workbench scheduled workers, the native server validates the callback task and run
+against the declared owner and deterministic scheduled conversation and parent IDs. The server
+retains the validated task ID in its typed `viventium_launch_authority`. The shared callback
+owner derives the user from the persisted worker and restores that same task/run context for
+queued, started, blocked, and terminal lifecycle events. Missing task or run identity closes new
+callback production. Ordinary conversation callbacks keep their existing context.
+
+The receiver still verifies the signed worker/run body and persisted scheduled scope. Stored
+outbox payloads remain immutable on reload; their existing endpoint and signing secret remain
+available to the finite retry and dead-letter owner. This projection does not rewrite callbacks
+accepted before the repair.
+
 Host-native workers also materialize visible prompt/context files in the host workspace:
 
 - `project-definition.md`
@@ -110,6 +122,13 @@ editing, analysis, conversion, or returned downloadable files. If the original b
 projected safely, xPerfect should emit a metadata/blocker manifest and report the blocker rather
 than silently converting the problem into a `.txt` task.
 
+The configured upload root and checkout fallback are resolved to their canonical physical root
+before projection. A retained owner/tenant-signed upload entry may reproject an obsolete root
+alias through the existing upload projector only when that alias still resolves to the exact
+same file and relative owner/file address under the current declared upload root. The original
+record, file ID, workspace order and bytes stay unchanged. New source grants normalize an omitted tenant to the same default `local` namespace used by worker storage. A retained v1 grant with an empty tenant can be verified only for that default namespace, with its exact nonempty owner, source path and dedicated source signing key. Nondefault tenants cannot use that compatibility form. No unsigned or ownerless compatibility grant is accepted. Missing files, invalid signatures,
+foreign roots and symlinks below the root remain failures; recovery does not add trusted roots.
+
 Enterprise LibreChat deployments that use the normal LibreChat upload/file-transfer flow should
 mount the same upload storage read-only into the xPerfect VM and point both
 `WPR_LIBRECHAT_UPLOADS_ROOT` and `WPR_BOOTSTRAP_SOURCE_ROOTS` at that mount. For Azure Container
@@ -143,6 +162,14 @@ publication. Failed creation removes only its staged bundle; a consumed bundle i
 Existing reservations use the current-state grant attachment gate, so an active provider invocation
 cannot have its authority replaced by a duplicate assignment. Assignment does not reopen a current
 `needs_input` run; explicit authorization retries retain their existing reopen policy.
+
+Parallel clean-room runs carry the required capability broker grant and optional native peer and
+context grants through the same exact-generation tmpfs files. The launcher uses the shared
+clean-room environment allowlist, rejects other keys and invalid token values before any Docker
+effect, and records every projected key for the existing exit/cancellation scrub. Trusted native
+binders still own each grant's worker/run identity, scope, expiration and revocation; transport
+does not mint authority or persist bearer values. A partial write or failed post-write attestation
+uses the same exact-generation cleanup; a replacement generation is never cleared.
 
 Restricted Codex setup renders its broker descriptor without a bearer. The existing launch policy
 check requires the current run's bearer and an exact match to the restricted configuration before
@@ -365,6 +392,16 @@ C. Keep the xPerfect runtime independently usable by any client that can supply 
 
 ## Grok private native state
 
+Current-session Grok completion metadata projects native token usage into the normal terminal
+result. Cached input counts once; output already includes reasoning. Tool loops use the latest
+model response's prompt occupancy, rather than adding repeated prompts or adding the aggregate
+turn again. A turn-only metric is usable only for one model call. Missing or malformed metrics,
+foreign sessions and notifications outside the current prompt do not create measured usage.
+The existing request/epoch calibration then owns conversation occupancy and context-budget
+projection. This is token observability and budget evidence, not proof that a semantic answer
+or owner-requested control succeeded.
+
+
 Optional Grok 4.7 Fast availability comes from the selected worker account's ACP session model
 options. A service-account catalog is discovery only and cannot choose a turn's effective model.
 If that account offers standard Grok 4.7 but not Fast, the existing ACP model control selects
@@ -402,6 +439,12 @@ support; the selected worker's tool authority still owns which servers may be pr
 Cursor compatibility MCP scanning is disabled. Project-local native Grok and `.mcp.json` discovery
 remains subject to Grok's native trust/configuration policy and must be included in tool-grant QA.
 No universal tool-isolation guarantee follows from these switches.
+Before an enabled turn starts, the adapter waits up to the existing 30-second ACP startup budget
+for the exact native session to advertise at least one command from the configured signed broker.
+The broker publishes its policy-filtered catalog in one tools-list result; legitimate tool omissions
+do not block connection readiness. Optional resource-only MCP servers introduce no barrier.
+Missing readiness ends with typed `native_mcp_unavailable`; it never becomes successful tool-less
+inference. No-required-MCP and restricted empty-inventory turns retain their existing contracts.
 
 Updater, product telemetry, trace upload and external OpenTelemetry switches are pinned off for the
 managed process; ambient OTEL exporters are stripped. These switches do not claim or change the
@@ -420,3 +463,13 @@ The standalone deployment credential name is `XAI_API_KEY`. Enterprise projectio
 `grok-build`; Codex and Claude do not receive it. Grok auth/config/credential files are excluded from
 clean-room imports and workspace duplication. Run-scoped broker grants retain their existing
 scope and expiration when transported through native ACP.
+
+
+Native Grok MCP lifecycle receipts retain only current-session protocol event identity, configured
+required-server name, typed connection status and counts. They omit endpoint, authorization,
+reason prose and tool arguments. These events diagnose the native connection boundary. Once the exact native session reports MCP
+initialization complete, a single cached native registry inspection can supply required-server tool
+proof when the cosmetic command catalogue has not refreshed. It must show a resolved session and
+each exact configured required server enabled and ready with enabled named tools. Missing, foreign,
+disabled and empty results fail closed. Both evidence paths share the existing 30-second startup
+deadline; no inference or capability call runs before that proof.

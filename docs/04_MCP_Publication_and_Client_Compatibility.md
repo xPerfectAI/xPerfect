@@ -51,6 +51,25 @@ Do not regenerate the golden from the candidate under test. A future baseline up
 explicit release decision and reviewed semantic diff; use a new versioned fixture. Synthetic values
 only are permitted in this contract.
 
+Callback delivery adds the optional signed `callback_created_at` field from the immutable native
+outbox record's `created_at`. It keeps that exact creation clock across retries while `callback_ts`
+refreshes for each send and retains the existing freshness and signing contract. Receivers use the
+creation clock for event order, not transport arrival. A legacy record without a creation clock
+omits the field; the publisher does not synthesize it or copy one from the stored payload.
+
+Current nonterminal attention callbacks carry the same optional `run_input` accepted goal and
+continuation context as terminal callbacks. This applies to a current `needs_input` run and to a
+current running run with an exact pending native permission or question binding. The outbox
+transaction checks the accepted run input, current run and native attempt identity. Existing
+outbox payloads keep their original bytes on retry; an upgrade does not retrofit old callbacks.
+
+The authenticated `POST /v1/work/{work_ref}/actions/receipt` reads a previously finished action
+receipt. It accepts the original action request and requires the exact owner, tenant, work,
+idempotency key, action and canonical request digest. A completed receipt returns its saved body;
+a failed receipt returns its saved status and detail. Missing, mismatched or unfinished receipts
+return `active_work_idempotency_conflict`. This read never reserves, resumes, recovers or executes
+work. Clients use it only to recover an exact completed operation after a normal action conflict.
+
 ## Client Strategy
 
 ### LibreChat / Viventium / Standalone-Compatible Clients
@@ -82,6 +101,13 @@ chat model cannot see an uploaded file body, it should still launch the worker w
 reference and requested outcome so xPerfect can use the trusted upload metadata supplied by the
 host.
 
+A trusted selected-file packet may name earlier conversation attachments. The MCP adapter
+projects its explicit upload records under the authenticated transport owner before checking the
+complete selected set after joining current headers. Either carrier may hold only part
+of that set; completeness is checked once on their validated, owner-scoped union. A repeated stable file ID uses the existing file
+merge owner; unknown IDs and ambiguous records stay rejected, and cross-owner paths cannot
+supply original bytes. Current request metadata never replaces an authorized historical selection.
+
 Callbacks are optional. Viventium can use signed callbacks for durable completion delivery, but
 standalone/plain LibreChat deployments must still work without them by using:
 
@@ -110,6 +136,15 @@ A successful nonterminal `workspace_launch`, `worker_delegate_once`, or continua
 that mission-control link `View / Steer <task>`, with `<task>` derived from the typed launch title or
 description. Its structured kind is `mission_control` and its state is `nonterminal`; the link proves
 that the workspace exists, not that a requested deliverable or artifact is complete.
+Ordinary mission-control links remain available in the receipt, with `include_in_response: false`
+by default. The model may show one when useful or requested; tool descriptions follow that mark
+instead of requiring topology narration in every acknowledgement. Required native input and
+approval form links retain their separate user-action contract. Callback producers keep ordinary
+workspace links in typed `operator_url`/`watch_url` metadata, outside `message` and `full_message`.
+Only native input events may add the required workspace input route to prose; delivered file
+Download/Preview links remain usable. Failure guidance asks the agent to inspect existing native
+workspace/evidence rather than requiring an end-user operator page.
+
 
 Workspace-native tool and account setup stays inside the selected persistent workstation. The
 Workspaces `Set up tools` action opens that profile's installed AI harness through the generic desktop
@@ -244,7 +279,8 @@ deployment contract, not a LibreChat behavior.
 
 The MCP descriptions must make this non-callback path obvious to connected LLMs. A model should
 launch work with `workspace_launch`, include `uploaded_files` when the user attached files, return
-the View / Steer URL promptly, and use status/wait/artifact tools for follow-up and delivery. It
+an ordinary mission-control link only when useful or requested, and use status/wait/artifact tools
+for follow-up and delivery. It
 must not fall back to pasting whole generated files into chat or writing its own inferior local
 code path when xPerfect has already produced a signed artifact link.
 
@@ -513,6 +549,24 @@ Authenticated owner routes live under `/v1/coordinator/conversations`: create, r
 accept typed goals, dispatch and exact goal controls. Owner identity comes from existing request
 authentication. Public submissions cannot supply arbitrary bootstrap authority. The ordinary
 frontend `/v1` proxy retains its existing login and CSRF checks.
+
+A goal's `run_id` preserves its latest result binding. When queued follow-ups coexist with active
+or paused work, `control_run_id` and `control_state` identify the authoritative native control
+target. Clients pass that exact control ID; the existing action receipt pins it across retries.
+Queued result IDs cannot silently control a different active generation. Successful native
+Queue/Message receipts retain each source and effect in goal history, including earlier queued
+effects. Attachment rechecks the current native same-goal action receipt, including pending
+receipts, so a stale snapshot cannot discard newer guidance. Recovery keeps newer native result
+bindings; equal reservation times preserve the already bound result. The exact effect receipt is durable before native admission wakes. Stop intent fences new admission; visible state follows the actual run until native termination
+proof. Cancelled intent limits the native action mask to available Stop recovery or Dismiss.
+Stop confirms the exact controlled run and cancels only that goal's owned pending effects.
+A confirmed host-pause generation already has durable termination proof; native Stop reuses it
+after restart. A host run paused before it ever starts needs no termination signal when it has
+no lease history or active worker lease. Historical compute release on a reused worker does
+not reject exact Pause of a never-started queued run with no lease history or active worker lease;
+existing scope and generation fences still apply. Unknown proof or any newer active generation cannot
+use either shortcut. An unknown
+Stop can finish against the same owned control target; cancelled intent cannot revive other work.
 
 `/v1/native/coordinator/` is a narrow native MCP endpoint using the existing peer run/attempt binder.
 It exposes `coordinator_accept_goals`, `coordinator_dispatch`, `coordinator_handle`,

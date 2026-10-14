@@ -12,9 +12,10 @@ import re
 import sqlite3
 import stat
 import time
+from threading import get_ident
 from hashlib import sha256
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -108,7 +109,7 @@ from .models import (
     UserPreferencesResponse,
     WorkerResponse,
 )
-from .native_model_selection import ModelConfigurationRequired, native_grok_models, selected_grok_model, valid_model_id
+from .native_model_selection import ModelConfigurationRequired, native_grok_models, selected_grok_model, valid_model_id, native_timing_event
 from .openclaw_runtime import RuntimeConfigurationError, RuntimeDependencyMissingError, RuntimeErrorBase, StubRuntime, WorkerRuntime
 from .profile_runtime import ProfiledWorkerRuntime, _redact_text
 from .peer_api import install_peer_routes
@@ -264,6 +265,25 @@ install_sensitive_url_log_filter()
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "runtime_phase1.db"
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _account_read_stage(stage: str):
+    """Use existing opt-in native telemetry; no owner data or control effects."""
+    started = time.monotonic()
+    native_timing_event("account_read_enter", phase=stage, threadId=get_ident())
+    error_class = ""
+    try:
+        yield
+    except BaseException as exc:
+        error_class = type(exc).__name__
+        raise
+    finally:
+        native_timing_event("account_read_exit", phase=stage, threadId=get_ident(),
+                           durationMs=(time.monotonic() - started) * 1000,
+                           errorClass=error_class)
+
+
 TEXT_ARTIFACT_PREVIEW_EXTENSIONS = {
     ".css",
     ".csv",
@@ -3298,6 +3318,7 @@ def create_app(
         *,
         detail: bool = False,
         actions_only: bool = False,
+        include_artifacts: bool = True,
         history_cursor: str | None = None,
         history_limit: int = 16,
     ) -> dict[str, object]:
@@ -3351,7 +3372,8 @@ def create_app(
             ),
             "actions": _active_work_actions(record, state),
         }
-        pending_native_input = service.active_work_pending_native_input(record)
+        with _account_read_stage("pending_native_input"):
+            pending_native_input = service.active_work_pending_native_input(record)
         if pending_native_input is not None:
             payload["pendingNativeInput"] = pending_native_input
             payload["state"] = "needs_input"
@@ -3502,11 +3524,13 @@ def create_app(
                 )
                 or None,
             }
-        view_ref = _active_work_view_ref(record, request)
+        with _account_read_stage("view_ref"):
+            view_ref = _active_work_view_ref(record, request)
         if view_ref:
             payload["viewRef"] = view_ref
-            if state in {"completed", "failed", "cancelled"}:
-                payload["artifactLinks"] = _active_work_artifact_links(record, view_ref)
+            if include_artifacts and state in {"completed", "failed", "cancelled"}:
+                with _account_read_stage("artifact_links"):
+                    payload["artifactLinks"] = _active_work_artifact_links(record, view_ref)
         if state == "failed" and not bool(record.get("run_failure_retryable")):
             payload["attention"] = {
                 "kind": "input",
@@ -3703,24 +3727,29 @@ def create_app(
         cursor: str | None = None,
     ) -> dict[str, object]:
         tenant_id, owner_id = _account_scope(request)
-        store.reconcile_invalid_running_runs()
+        with _account_read_stage("reconcile_running"):
+            store.reconcile_invalid_running_runs()
         bounded_limit = max(1, min(int(limit), 100))
         before = _decode_active_work_cursor(cursor) if cursor else None
-        items = store.list_active_delegations(
-            tenant_id=tenant_id,
-            owner_id=owner_id,
-            limit=bounded_limit,
-            before=before,
-        )
-        total = store.count_active_delegations(
-            tenant_id=tenant_id,
-            owner_id=owner_id,
-            before=before,
-        )
+        with _account_read_stage("list_delegations"):
+            items = store.list_active_delegations(
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                limit=bounded_limit,
+                before=before,
+            )
+        with _account_read_stage("count_delegations"):
+            total = store.count_active_delegations(
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                before=before,
+            )
         overflow_count = max(0, total - len(items))
+        with _account_read_stage("payloads"):
+            work = [_active_work_payload(item, request) for item in items]
         response: dict[str, object] = {
             "snapshot": "fresh",
-            "work": [_active_work_payload(item, request) for item in items],
+            "work": work,
             "overflowCount": overflow_count,
         }
         if items and overflow_count:
@@ -3750,8 +3779,7 @@ def create_app(
         overflow_count = max(0, total - len(items))
         history_work: list[dict[str, object]] = []
         for item in items:
-            projected = _active_work_payload(item, request)
-            projected["actions"] = []
+            projected = _active_work_payload(item, request, include_artifacts=False)
             history_work.append(projected)
         response: dict[str, object] = {
             "snapshot": "fresh",
@@ -3800,6 +3828,8 @@ def create_app(
             "workRef": str(association.get("work_ref") or ""),
             "runId": str(association.get("run_id") or ""),
             "attemptId": str(association.get("active_attempt_id") or ""),
+            "currentRunId": str(association.get("current_run_id") or ""),
+            "currentRunState": str(association.get("current_run_state") or ""),
         }
 
     @app.post("/v1/callback-associations/recover")
@@ -3873,6 +3903,58 @@ def create_app(
             history_limit=historyLimit,
         )
 
+    def _active_work_action_request(payload: ActiveWorkActionRequest) -> dict[str, object]:
+        value = {
+            "action": payload.action,
+            "instruction": str(payload.instruction or "").strip(),
+            "capabilityReauthorization": (
+                payload.capability_reauthorization.model_dump()
+                if payload.capability_reauthorization is not None else None
+            ),
+        }
+        if payload.file_inputs:
+            value["fileInputs"] = [item.model_dump() for item in payload.file_inputs]
+        if payload.native_input is not None:
+            value["nativeInput"] = payload.native_input.model_dump()
+        if payload.native_human_input is not None:
+            value["nativeHumanInput"] = payload.native_human_input.model_dump(by_alias=True)
+        if payload.source_context is not None:
+            value["sourceContext"] = payload.source_context.model_dump()
+        return value
+
+    @app.post("/v1/work/{work_ref}/actions/receipt", status_code=202)
+    def completed_active_work_action_receipt(
+        work_ref: str, payload: ActiveWorkActionRequest, request: Request,
+    ) -> dict[str, object]:
+        tenant_id, owner_id = _account_scope(request)
+        if not store.get_delegation(work_ref, tenant_id=tenant_id, owner_id=owner_id):
+            raise HTTPException(status_code=404, detail="Active work not found")
+        receipt = store.get_completed_active_work_action_receipt(
+            tenant_id=tenant_id, owner_id=owner_id, work_ref=work_ref,
+            idempotency_key=payload.idempotency_key, action=payload.action,
+            payload_digest=_canonical_digest(_active_work_action_request(payload)),
+        )
+        unavailable = {
+            "code": "active_work_idempotency_conflict",
+            "message": "The exact completed active-work receipt is unavailable.",
+        }
+        if receipt is None:
+            raise HTTPException(status_code=409, detail=unavailable)
+        try:
+            saved = json.loads(str(receipt["response_json"]))
+            if not isinstance(saved, dict):
+                raise ValueError("Invalid saved receipt")
+            if receipt["status"] == "failed":
+                status = int(saved["statusCode"])
+                if not 400 <= status <= 599:
+                    raise ValueError("Invalid saved failure status")
+                detail = saved["detail"]
+            else:
+                return saved
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=409, detail=unavailable) from exc
+        raise HTTPException(status_code=status, detail=detail, headers=saved.get("headers"))
+
     @app.post("/v1/active-work/{work_ref}/actions", status_code=202, include_in_schema=False)
     @app.post("/v1/work/{work_ref}/actions", status_code=202)
     def active_work_action(
@@ -3885,6 +3967,7 @@ def create_app(
         if not record:
             raise HTTPException(status_code=404, detail="Active work not found")
         native_input = payload.native_input.model_dump() if payload.native_input is not None else None
+        native_human_input = payload.native_human_input.model_dump(by_alias=True) if payload.native_human_input is not None else None
         if native_input is not None:
             claims = getattr(request.state, "service_assertion_claims", {})
             if not claims.get("native_input_digest") or claims["native_input_digest"] != getattr(request.state, "native_input_body_digest", None):
@@ -3926,17 +4009,7 @@ def create_app(
                     "message": "Capability reauthorization is valid only for an authorization-attention resume.",
                 },
             )
-        action_request = {
-            "action": payload.action,
-            "instruction": instruction,
-            "capabilityReauthorization": capability_reauthorization,
-        }
-        if payload.file_inputs:
-            action_request["fileInputs"] = [item.model_dump() for item in payload.file_inputs]
-        if native_input is not None:
-            action_request["nativeInput"] = native_input
-        if source_context is not None:
-            action_request["sourceContext"] = source_context
+        action_request = _active_work_action_request(payload)
         try:
             reservation = store.reserve_active_work_action(
                 tenant_id=tenant_id,
@@ -4150,6 +4223,7 @@ def create_app(
                 capability_reauthorization=capability_reauthorization,
                 action_use_id=action_use_id,
                 native_input=native_input,
+                native_human_input=native_human_input,
             )
             new_run_id = str(result.get("run_id") or "")
             response: dict[str, object] = {

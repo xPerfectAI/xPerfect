@@ -166,6 +166,21 @@ work, send another request, target a correction or Stop, restart at the relevant
 visible results and retained files. Record the actual configured route and remaining gaps privately;
 publish only sanitized evidence. Reuse valid unchanged evidence and run only the affected checks.
 
+### Delivery lessons
+
+- Keep one native Queen/worker management owner. Hosts carry context, controls and results; they
+  must not create another planner, goal ledger or scheduler for the same work.
+- A queued input receipt proves admission, not model consumption. Prove the exact work, attempt,
+  native generation and public result before claiming that a correction was used.
+- Resume, Retry and Message must retain the accepted goal and retire only a proved ended
+  generation. A busy lifecycle lock keeps accepted queued work for the existing next wake.
+- Use the initialized native MCP registry to prove required tools are ready. A delayed cosmetic
+  command list must not add a separate startup wait. Keep session and tool identity checks.
+- Preserve typed native failures through the provider protocol so existing clients can recover.
+  Do not replace actionable errors with a generic status or speak internal maintenance notices.
+- Separate implementation, deterministic proof and channel acceptance. Short local examples do
+  not prove always-on endurance, natural audio quality, every provider path or latency targets.
+
 ## 8. Connected-Account Broker Readiness
 
 1. Confirm xPerfect does not require direct coupling to LibreChat internals.

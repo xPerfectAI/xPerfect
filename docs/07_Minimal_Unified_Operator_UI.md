@@ -122,6 +122,11 @@ A selected Docker account starts in a private execution-workspace member. Its pr
    - stop the exact live run session and its process tree
    - queue the replacement steer run automatically
    - keep the replacement steer run in execution mode until the requested action is actually performed or a blocker is raised
+   - if the exact source finishes or fails after the correction was durably accepted, keep its
+     terminal result and execute that same reserved correction after release proof; never treat
+     ordinary completion as cancellation of the new instruction
+   - preserve exact operation/run/mission ownership, Stop and closure fences during recovery
+     and receipt replay; an unapplied control must be shown truthfully and keep the draft
 22. The watch footer must expose a safe secondary queue gesture without diluting the default steer meaning:
    - normal `Send` or plain Enter redirects now
    - long-pressing `Send` queues a follow-up without interrupting current work
@@ -404,6 +409,12 @@ If shared workspace capacity, its resource probe, host capacity, or the selected
 unavailable before any provider request, the saved turn waits for bounded automatic retry and says
 it will start automatically.
 After that bound, or for missing configuration, the owner can use Retry.
+Docker admission uses the actual host and sandbox resource probes. The configured worker image
+must be prepared through the existing image-preparation owner before worker traffic; an unavailable
+probe remains unavailable rather than assumed capacity. Docker Desktop's disk-budget fallback
+reads the current settings store before the legacy settings file. Both `DiskSizeMiB` and
+`diskSizeMiB`, including wrapped positive integer values, are supported. Invalid or conflicting
+values fail closed, and an existing current store cannot be replaced by stale legacy settings.
 If a native request expires, the saved conversation says so and offers Send again.
 For a failed helper whose native response request expired, was declined, or was cancelled,
 the owner may explicitly Retry that exact child. Its replacement stays bound to the same goal;
@@ -440,6 +451,8 @@ Watch ZIP downloads submit selected file IDs in a native POST form, so selection
 The old operator `/api/launch` inline-base64 `files` transport is retired. Non-empty legacy payloads receive 422 with `legacy_upload_transport` before any workspace change. Clients must create streamed draft receipts and send `file_upload_ids`; the browser already uses this contract. Runtime bootstrap compatibility is separate and remains subject to the native storage policy.
 
 Files downloads bind the selected revision and abort if the open file changes during transfer. Same-name uploads retain both versions, including names at the filesystem UTF-8 byte limit. Native quota or disk-full errors leave a visible retry state, release the failed transfer reservation after cleanup, and preserve the same upload ID for retry.
+
+Unlimited logical-storage admission does not scan retained work for an unused total. Upload reservation, transfer checks, and accepted-input copy reservation still validate the storage adapter and owner policy. Finite logical limits and native hard quotas retain their existing accounting and guards. The storage display always computes actual usage; canonical root ancestry prevents double counting without comparing every prior workspace.
 
 
 ## Run and Watch status readback

@@ -239,3 +239,58 @@ console.log(JSON.stringify({
     assert shown["unconfigured"]["run"] is False and shown["unconfigured"]["connect"] is True
     assert shown["unconfigured"]["status"] == ("Conversations with a connected account need this deployment's shared workspace, "
                                            "which is not available. Use Run project for now.")
+
+
+def test_native_work_guidance_uses_declared_actions_and_dismiss_keeps_history():
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index("const blockerMessages")
+    body = source[start:source.index("async function refresh()", start)]
+    node = shutil.which("node")
+    assert node, "Node is required for the native work control proof"
+    code = r'''
+class El {
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
+  addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){} setAttribute(){}
+}
+const elements={}; const $=(id)=>(elements[id] ||= new El('div'));
+globalThis.document={createElement:(tag)=>new El(tag),cookie:'',activeElement:null};
+const base='/v1/coordinator/conversations'; const conversationId='c1'; let latest=null;
+const states={completed:'Completed',running:'Running'};
+const posts=[]; let fail=true;
+async function refresh(){}
+globalThis.fetch=async(path,init)=>{posts.push([path,JSON.parse(init.body||'{}')]);if(fail)throw new Error('Synthetic lost response');return {ok:true,status:200,json:async()=>({})};};
+''' + body + r'''
+const goal={goal_id:'child',worker_id:'worker',run_id:'run',text:'Complete the work',state:'completed',has_result:true,actions:['queue','message','dismiss']};
+render({turns:[],goals:[goal]});
+const card=$('goals').children[0];
+const guide=card.children.find((el)=>el.tag==='details' && el.children[0].textContent==='Give guidance');
+if(!guide)throw new Error('missing native guidance');
+const form=guide.children[1]; const [mode,input,send]=form.children;
+if(mode.children.map((el)=>el.value).join(',')!=='message,queue')throw new Error('offered unsupported Steer');
+mode.value='message';input.value='Preserve the original goal';
+await form.listeners.submit({preventDefault(){}});
+const first=posts.at(-1)[1];
+fail=false;await form.listeners.submit({preventDefault(){}});
+if(posts.at(-1)[1].idempotency_key!==first.idempotency_key)throw new Error('retry duplicated the guidance effect');
+if(first.action!=='message'||first.run_id!=='run'||first.message!==input.value)throw new Error('guidance target changed');
+const controls=card.children.find((el)=>el.className==='goal-actions');
+const dismiss=controls.children.find((el)=>el.textContent==='Dismiss');
+if(!dismiss)throw new Error('terminal card cannot be dismissed');
+await dismiss.listeners.click();
+if(posts.at(-1)[1].action!=='dismiss')throw new Error('dismiss used a lifecycle action');
+render({turns:[],goals:[{...goal,dismissed:true}]});
+if($('goals').children.length||!$('work').hidden)throw new Error('dismissed card still shown');
+render({turns:[],goals:[{...goal,actions:[]}]});
+if($('goals').children[0].children.some((el)=>el.tag==='details'&&el.children[0].textContent==='Give guidance'))throw new Error('empty action mask offers guidance');
+render({turns:[],goals:[{...goal,actions:undefined}]});
+if($('goals').children[0].children.some((el)=>el.tag==='details'&&el.children[0].textContent==='Give guidance'))throw new Error('terminal foreground handle offers child controls');
+render({turns:[],goals:[{...goal,run_id:'queued-result',state:'queued',control_run_id:'paused-source',control_state:'paused',actions:['resume','message','queue','stop']}]});
+const pausedControls=$('goals').children[0].children.find((el)=>el.className==='goal-actions');
+const resume=pausedControls.children.find((el)=>el.textContent==='Resume');
+if(!resume)throw new Error('queued result hid native paused Resume');
+await resume.listeners.click();
+if(posts.at(-1)[1].action!=='resume'||posts.at(-1)[1].run_id!=='paused-source')throw new Error('Resume targeted the queued result instead of exact paused source');
+'''
+    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr

@@ -65,8 +65,11 @@ def test_live_mission_projects_and_answers_all_native_choices(permission, choice
     runtime, worker, _, root, _, result, _ = permission
     pending = runtime.pending_native_input(worker, run_id='run-a')
     assert pending['kind'] == 'permission'
+    assert pending['requestedSchema']['properties']['optionId']['description'] == 'Run the requested operation'
     assert pending['requestedSchema']['properties']['optionId']['enum'] == [
         'allow-once', 'allow-always', 'reject-once', 'reject-always']
+    assert pending['requestedSchema']['properties']['optionId']['enumKinds'] == [
+        'allow_once', 'allow_always', 'reject_once', 'reject_always']
     assert 'not public' not in json.dumps(pending)
     accepted = runtime.respond_native_input(worker, run_id='run-a', request_id=pending['requestId'],
         request_fingerprint=pending['requestFingerprint'], action='accept',
@@ -312,7 +315,8 @@ def test_actual_mailbox_ack_commits_signed_work_action_once(account_client, monk
 
 
 @pytest.mark.parametrize('mismatch', [None, 'attempt_id', 'sessionId', 'requestId', 'replaced_question'])
-def test_live_permission_event_publishes_one_attention_callback(account_client, monkeypatch, mismatch):
+@pytest.mark.parametrize('kind', ['permission', 'question'])
+def test_live_permission_event_publishes_one_attention_callback(account_client, monkeypatch, mismatch, kind):
     response = account_client.post('/v1/delegations', headers=account_headers(idempotency_key='attention-input'),
         json=delegation_payload_with_origin())
     assert response.status_code == 202, response.text
@@ -324,6 +328,13 @@ def test_live_permission_event_publishes_one_attention_callback(account_client, 
         'requestFingerprint': 'a' * 64, 'runId': run['run_id'], 'attemptId': run['active_attempt_id'],
         'sessionId': 'session-a', 'expiresAt': '2099-01-01T00:00:00+00:00',
         'mode': 'form', 'message': 'Approve this operation?', 'state': 'pending'}
+    if kind == 'question':
+        from workers_projects_runtime.provider_native_input import project_native_request
+        projected = project_native_request({'request_id': 'question-a', 'expires_at': time.time() + 60,
+            'method': 'x.ai/ask_user_question', 'request': {'sessionId': 'session-a',
+                'questions': [{'question': 'Which synthetic entrance?', 'options': [{'label': 'North'}]}]}},
+            run_id=run['run_id'], attempt_id=run['active_attempt_id'], session_id='session-a')
+        pending.update(kind=kind, message=projected['prompt'], requestedSchema=projected['requestedSchema'])
     calls = []
     def current_pending(*_args, **_kw):
         calls.append(True)
@@ -335,7 +346,8 @@ def test_live_permission_event_publishes_one_attention_callback(account_client, 
     observation = {'worker_id': worker['worker_id'], 'run_id': run['run_id'],
         'attempt_id': run['active_attempt_id'], 'provider': 'grok',
         'event': {'event_type': 'provider.native.input.requested', 'payload': {
-            'requestId': 'question-a', 'sessionId': 'session-a', 'method': 'session/request_permission'}}}
+            'requestId': 'question-a', 'sessionId': 'session-a',
+            'method': 'session/request_permission' if kind == 'permission' else 'x.ai/ask_user_question'}}}
     if mismatch == 'attempt_id':
         observation['attempt_id'] = 'other-attempt'
     elif mismatch in {'sessionId', 'requestId'}:
@@ -348,8 +360,9 @@ def test_live_permission_event_publishes_one_attention_callback(account_client, 
     assert len(callbacks) == (0 if mismatch else 1)
     if not mismatch:
         payload = json.loads(callbacks[0]['payload_json'])
+        assert payload['message'] == pending['message']
         assert payload['pending_native_input']['requestFingerprint'] == 'a' * 64
-        assert payload['pending_native_input']['kind'] == 'permission'
+        assert payload['pending_native_input']['kind'] == kind
         assert payload['pending_native_input']['state'] == 'pending'
         assert payload['pending_native_input']['mode'] == 'form'
         assert payload['run_state'] == 'running'
@@ -358,7 +371,8 @@ def test_live_permission_event_publishes_one_attention_callback(account_client, 
 
 
 @pytest.mark.parametrize('mismatch', [None, 'attempt', 'session', 'expired_next'])
-def test_resolved_permission_publishes_next_overlapping_question(account_client, monkeypatch, tmp_path, mismatch):
+@pytest.mark.parametrize('next_kind', ['permission', 'question'])
+def test_resolved_permission_publishes_next_overlapping_question(account_client, monkeypatch, tmp_path, mismatch, next_kind):
     from workers_projects_runtime.grok_projection import native_events
     accepted = account_client.post('/v1/delegations',
         headers=account_headers(idempotency_key='overlapping-permission'),
@@ -403,16 +417,21 @@ def test_resolved_permission_publishes_next_overlapping_question(account_client,
     threads = []
     try:
         for title in ['First operation', 'Second operation']:
-            thread = Thread(target=lambda title=title: results.append(mailbox.permission({
-                'sessionId': 'native-mission', 'toolCall': {'title': title},
-                'options': [{'optionId': 'allow-once', 'kind': 'allow_once'}]})))
+            def request_input(title=title):
+                if title == 'Second operation' and next_kind == 'question':
+                    return mailbox.interaction('x.ai/ask_user_question', {
+                        'sessionId': 'native-mission', 'toolCallId': 'question-tool-a',
+                        'questions': [{'question': title, 'options': [{'label': 'North'}]}]})
+                return mailbox.permission({'sessionId': 'native-mission', 'toolCall': {'title': title},
+                    'options': [{'optionId': 'allow-once', 'kind': 'allow_once'}]})
+            thread = Thread(target=lambda request_input=request_input: results.append(request_input()))
             thread.start(); threads.append(thread)
             deadline = time.monotonic() + 1
             while len([event for event in events if event['type'] == 'grok.permission.requested']) < len(threads):
                 assert time.monotonic() < deadline
                 time.sleep(.01)
         first = runtime.pending_native_input(worker, run_id=run['run_id'])
-        assert first['message'] == 'First operation'
+        assert first['message'] == 'First operation\nallow_once.'
         assert runtime.respond_native_input(worker, run_id=run['run_id'], request_id=first['requestId'],
             request_fingerprint=first['requestFingerprint'], action='accept',
             content={'optionId': 'allow-once'})['status'] == 'accepted'
@@ -424,15 +443,19 @@ def test_resolved_permission_publishes_next_overlapping_question(account_client,
         assert len(callbacks) == (1 if mismatch else 2)
         if mismatch is None:
             second = runtime.pending_native_input(worker, run_id=run['run_id'])
-            assert second['message'] == 'Second operation'
+            assert second['message'] == ('Second operation\nallow_once.' if next_kind == 'permission'
+                else 'Second operation\nNorth; Other.')
+            assert second['kind'] == next_kind
             assert {item['pending_native_input']['requestId'] for item in callbacks} == {
                 first['requestId'], second['requestId']}
             assert runtime.respond_native_input(worker, run_id=run['run_id'], request_id=second['requestId'],
                 request_fingerprint=second['requestFingerprint'], action='accept',
-                content={'optionId': 'allow-once'})['status'] == 'accepted'
+                content={'optionId': 'allow-once'} if next_kind == 'permission'
+                    else {'answers': {'Second operation': ['North']}})['status'] == 'accepted'
             threads[1].join(1)
             assert not threads[1].is_alive()
-            assert results == ['allow-once', 'allow-once']
+            assert results == ['allow-once', 'allow-once' if next_kind == 'permission'
+                else {'outcome': 'accepted', 'answers': {'Second operation': ['North']}}]
             assert len([row for row in store.list_callback_outbox_for_run(run['run_id'],
                 tenant_id='tenant-a', owner_id='owner-a')
                 if json.loads(row['payload_json'])['event'] == 'run.needs_input']) == 2

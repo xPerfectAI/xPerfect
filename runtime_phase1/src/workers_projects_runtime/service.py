@@ -210,12 +210,7 @@ logger = logging.getLogger(__name__)
 TERMINAL_CALLBACK_MESSAGE_LIMIT = 4000
 VIVENTIUM_CALLBACK_PATH = "/api/viventium/glasshive/callback"
 SCHEDULING_CORTEX_CALLBACK_PATH = "/internal/scheduled-prompts/glasshive-callback"
-ACTIONABLE_CALLBACK_LINK_EVENTS = {
-    "run.failed",
-    "run.paused",
-    "run.interrupted",
-    "run.cancelled",
-}
+NATIVE_INPUT_CALLBACK_LINK_EVENTS = {"run.needs_input"}
 PARENT_VISIBLE_CALLBACK_FIELDS = ("user_id", "conversation_id", "parent_message_id", "message_id")
 CALLBACK_DEAD_LETTER_IMMEDIATE_STATUS_CODES = {400, 401, 403, 404, 409, 410, 422, 501}
 CALLBACK_RETRYABLE_STATUS_CODES = {408, 425, 429}
@@ -337,6 +332,7 @@ def worker_prompt_layer_actual_producers() -> tuple[object, ...]:
     )
     from .mcp_server import create_mcp_server, glasshive_workers_server_instructions
     from .coordinator import prompt_manifest
+    from .grok_runtime import grok_native_authority_instructions
     from .profile_runtime import (
         HostNativeCliMixin,
         _apply_codex_developer_instructions,
@@ -345,6 +341,7 @@ def worker_prompt_layer_actual_producers() -> tuple[object, ...]:
 
     return (
         prompt_manifest,
+        grok_native_authority_instructions,
         canonicalize_viventium_feeling_projection,
         glasshive_project_agents_md,
         glasshive_project_claude_md,
@@ -2336,7 +2333,9 @@ class WorkersProjectsService:
             raise TypeError("Provider run start fence must be callable")
         self._provider_run_start_fence = fence
 
-    def _callback_config_for(self, worker: dict) -> dict:
+    def _callback_config_for(
+        self, worker: dict, *, require_scheduled_scope: bool = False
+    ) -> dict:
         bundle = self._bootstrap_bundle_for(worker) or {}
         callbacks = bundle.get("callbacks")
         if not isinstance(callbacks, dict) or not callbacks:
@@ -2351,6 +2350,11 @@ class WorkersProjectsService:
             and authority.get("execution_mode") == "docker"
         ):
             origin_ref = str(resolved.get("origin_ref") or "").strip()
+            task_ref = authority.get("scheduled_prompt_task_id")
+            task_ref = task_ref.strip() if isinstance(task_ref, str) else ""
+            if require_scheduled_scope and (not origin_ref or not task_ref):
+                # An incomplete scheduled scope cannot produce a parent callback.
+                return {}
             if origin_ref:
                 resolved.update(
                     {
@@ -2360,6 +2364,14 @@ class WorkersProjectsService:
                         "surface": "workbench",
                     }
                 )
+                if task_ref:
+                    resolved.update(
+                        {
+                            "scheduled_prompt_task_id": task_ref,
+                            "conversation_id": f"workbench-scheduled-prompt:{task_ref}",
+                            "parent_message_id": f"scheduled-prompt:{task_ref}",
+                        }
+                    )
         load_viventium_runtime_env()
         callback_url = (
             os.environ.get("GLASSHIVE_EVENTS_WEBHOOK_URL", "").strip()
@@ -2413,11 +2425,15 @@ class WorkersProjectsService:
             self.store.scheduling_cortex_occurrence_for_run(run_id)
         )
 
-    def _callback_config_for_event(self, worker: dict, run: dict | None) -> dict:
+    def _callback_config_for_event(
+        self, worker: dict, run: dict | None, *, require_scheduled_scope: bool = False
+    ) -> dict:
         run_id = str((run or {}).get("run_id") or "").strip()
         if run_id and self.store.scheduling_cortex_occurrence_for_run(run_id):
             return self._scheduling_cortex_callback_config_for_run(run)
-        return self._callback_config_for(worker)
+        return self._callback_config_for(
+            worker, require_scheduled_scope=require_scheduled_scope
+        )
 
     def _derive_callback_secret(self, secret: str, worker_id: str, run_id: str | None) -> bytes:
         binding = f"{worker_id}:{run_id or ''}".encode("utf-8")
@@ -2733,6 +2749,11 @@ class WorkersProjectsService:
                 return
             attempts += 1
             delivery_payload = {**payload, "callback_ts": int(time.time())}
+            callback_created_at = record.get("created_at")
+            if isinstance(callback_created_at, str) and callback_created_at:
+                delivery_payload["callback_created_at"] = callback_created_at
+            else:
+                delivery_payload.pop("callback_created_at", None)
             encoded = self._encode_callback_payload(delivery_payload)
             headers = self._callback_headers(callbacks, delivery_payload, encoded)
             qa_transport = self._consume_local_qa(
@@ -3320,7 +3341,7 @@ class WorkersProjectsService:
             return self._runtime_start_locks.setdefault(worker_id, Lock())
 
     def _coordinator_retry_dispatch_ready(self, worker: dict, run: dict) -> bool:
-        """Keep a reserved child Retry queued until its exact goal owns the run."""
+        """Keep a reserved child follow-up queued until its exact goal owns the run."""
 
         worker_id = str(worker.get("worker_id") or "")
         run_id = str(run.get("run_id") or "")
@@ -3334,17 +3355,19 @@ class WorkersProjectsService:
             actions = conn.execute(
                 "SELECT a.conversation_id,a.goal_id,a.idempotency_key,g.work_ref,"
                 "g.run_id,g.intent_state,g.restore_hold,c.restore_hold AS conversation_hold,"
-                "c.tenant_id,c.owner_id FROM coordinator_actions a "
+                "c.tenant_id,c.owner_id,json_extract(a.payload_json,'$.action') AS action,"
+                "CASE WHEN json_valid(a.response_json) THEN json_extract(a.response_json,'$.run_id') END AS effect_run_id "
+                "FROM coordinator_actions a "
                 "JOIN coordinator_goals g ON g.conversation_id=a.conversation_id "
                 "AND g.goal_id=a.goal_id "
                 "JOIN coordinator_conversations c ON c.conversation_id=a.conversation_id "
                 "WHERE g.worker_id=? AND json_valid(a.payload_json) "
-                "AND json_extract(a.payload_json,'$.action')='retry'",
+                "AND json_extract(a.payload_json,'$.action') IN ('retry','queue','message')",
                 (worker_id,),
             ).fetchall()
         for action in actions:
             effect_key = (
-                f"coordinator-retry:{action['conversation_id']}:"
+                f"coordinator-{action['action']}:{action['conversation_id']}:"
                 f"{action['goal_id']}:{action['idempotency_key']}"
             )
             expected_id = self._idempotent_run_id(
@@ -3356,7 +3379,7 @@ class WorkersProjectsService:
             if expected_id != run_id:
                 continue
             return bool(
-                action["run_id"] == run_id
+                (action["run_id"] == run_id or action["effect_run_id"] == run_id)
                 and action["intent_state"] == "accepted"
                 and not action["restore_hold"]
                 and not action["conversation_hold"]
@@ -3553,49 +3576,50 @@ class WorkersProjectsService:
         storage_pressure = self._storage_pressure_v1()
         policy_enabled = isolated_parallel_policy_enabled()
         active_worker_ids = self.store.active_host_mission_worker_ids()
-        terminal_history = self.store.conclusively_terminal_host_mission_history()
-        process_status_reader = getattr(
-            self.runtime, "host_active_process_status", None
-        )
         process_state_uncertain = False
-        for worker in self.store.list_host_mission_workers():
-            worker_id = str(worker.get("worker_id") or "")
-            if not callable(process_status_reader):
-                process_state_uncertain = True
-                continue
-            try:
-                status = process_status_reader(worker)
-            except Exception:
-                logger.exception(
-                    "Failed to prove host mission process absence for worker %s",
-                    worker_id,
-                )
-                process_state_uncertain = True
-                continue
-            if not isinstance(status, dict):
-                process_state_uncertain = True
-                continue
-            state = str(status.get("state") or "uncertain")
-            if state == "active":
-                active_worker_ids.add(worker_id)
-            elif state == "uncertain":
-                observed_run_id = str(status.get("run_id") or "").strip()
-                historical_record_only = (
-                    status.get("historical_record_only") is True
-                )
-                if (
-                    not historical_record_only
-                    or (worker_id, observed_run_id) not in terminal_history
-                ):
+        if policy_enabled:
+            terminal_history = self.store.conclusively_terminal_host_mission_history()
+            process_status_reader = getattr(
+                self.runtime, "host_active_process_status", None
+            )
+            for worker in self.store.list_host_mission_workers():
+                worker_id = str(worker.get("worker_id") or "")
+                if not callable(process_status_reader):
                     process_state_uncertain = True
-            elif state != "absent":
-                process_state_uncertain = True
+                    continue
+                try:
+                    status = process_status_reader(worker)
+                except Exception:
+                    logger.exception(
+                        "Failed to prove host mission process absence for worker %s",
+                        worker_id,
+                    )
+                    process_state_uncertain = True
+                    continue
+                if not isinstance(status, dict):
+                    process_state_uncertain = True
+                    continue
+                state = str(status.get("state") or "uncertain")
+                if state == "active":
+                    active_worker_ids.add(worker_id)
+                elif state == "uncertain":
+                    observed_run_id = str(status.get("run_id") or "").strip()
+                    historical_record_only = (
+                        status.get("historical_record_only") is True
+                    )
+                    if (
+                        not historical_record_only
+                        or (worker_id, observed_run_id) not in terminal_history
+                    ):
+                        process_state_uncertain = True
+                elif state != "absent":
+                    process_state_uncertain = True
         isolated_runtime_ready = False
         isolated_runtime_reason = "isolated_runtime_readiness_unavailable"
         isolated_readiness_probe = getattr(
             self.runtime, "isolated_parallel_readiness", None
         )
-        if callable(isolated_readiness_probe):
+        if policy_enabled and callable(isolated_readiness_probe):
             try:
                 try:
                     readiness = isolated_readiness_probe(cached_only=True)
@@ -4236,6 +4260,7 @@ class WorkersProjectsService:
             "version": 1,
             "kind": PROMPT_WORKBENCH_SCHEDULED_AUTHORITY_KIND,
             "execution_mode": "docker",
+            "scheduled_prompt_task_id": task_id,
             **(
                 {"fallback_worker_profile": fallback["worker_profile"]}
                 if fallback
@@ -4516,7 +4541,7 @@ class WorkersProjectsService:
             open_url = self._signed_artifact_open_url(worker, workspace_path)
             if open_url:
                 links.append(f"Preview: [Open GlassHive file]({open_url})")
-        watch_url = self._signed_watch_url(worker, callbacks)
+        watch_url = self._signed_watch_url(worker, callbacks) if include_watch_link else ""
         if watch_url:
             links.append(f"View / Steer: [Open GlassHive workspace]({watch_url})")
         if not links:
@@ -4540,7 +4565,9 @@ class WorkersProjectsService:
         pending_native_input: dict | None = None,
     ) -> dict | None:
         requested_callback_id = str(callback_id or "").strip()
-        callbacks = self._callback_config_for_event(worker, run)
+        callbacks = self._callback_config_for_event(
+            worker, run, require_scheduled_scope=True
+        )
         url = str(callbacks.get("events_webhook_url") or callbacks.get("url") or "").strip()
         if not url:
             return None
@@ -4797,10 +4824,7 @@ class WorkersProjectsService:
             if full_message:
                 full_message = self.render_provider_native_images(request, run, full_message)
         operator_url = self._signed_watch_url(worker, callbacks) if link_safe else ""
-        include_watch_link = link_safe and (
-            event_type in ACTIONABLE_CALLBACK_LINK_EVENTS
-            or event_type == "run.needs_input"
-        )
+        include_watch_link = link_safe and event_type in NATIVE_INPUT_CALLBACK_LINK_EVENTS
         payload = {
             "callback_id": resolved_callback_id,
             "callback_ts": callback_timestamp,
@@ -4952,14 +4976,20 @@ class WorkersProjectsService:
                 )
             ):
                 return None
-            if isinstance(current_input, dict) and current_input.get("kind") == "permission":
+            if isinstance(current_input, dict) and current_input.get("kind") in {"permission", "question"}:
                 payload["pending_native_input"] = {
                     key: current_input[key] for key in (
                         "version", "requestId", "requestFingerprint", "runId",
                         "attemptId", "sessionId", "expiresAt", "kind", "state", "mode",
                     )
                 }
-        if terminal_result_state and durable_ended_at:
+        current_needs_input = (
+            event_type == "run.needs_input"
+            and (durable_state == "needs_input"
+                 or (durable_state == "running" and "pending_native_input" in payload))
+            and (not delegation or str(delegation.get("current_run_id") or "") == run_id)
+        )
+        if terminal_event or current_needs_input:
             retained_callback = self.store.get_callback_outbox(resolved_callback_id)
             if retained_callback is None:
                 payload["run_input"] = accepted_run_input(durable_run or {})
@@ -4969,6 +4999,7 @@ class WorkersProjectsService:
                 retained_payload = json.loads(retained_callback["payload_json"])
                 if "run_input" in retained_payload:
                     payload["run_input"] = retained_payload["run_input"]
+        if terminal_event:
             media = self._native_media_callback_observations(worker, durable_run or run or {})
             if media["observations"] or media["omitted_count"]:
                 payload["native_media"] = media
@@ -5398,7 +5429,12 @@ class WorkersProjectsService:
 
     def reap_needs_input_workers_once(self) -> list[dict[str, object]]:
         reaped: list[dict[str, object]] = []
-        for worker in self.store.list_all_workers():
+        for candidate_id in self.store.list_worker_ids(
+            states={"needs_input"}, compute_released=False
+        ):
+            worker = self.store.get_worker(candidate_id)
+            if worker is None:
+                continue
             worker_id = str(worker.get("worker_id") or "")
             if (
                 not worker_id
@@ -5470,7 +5506,12 @@ class WorkersProjectsService:
 
     def _release_idle_workers(self, threshold: float) -> list[dict[str, object]]:
         released: list[dict[str, object]] = []
-        for worker in self.store.list_all_workers():
+        for candidate_id in self.store.list_worker_ids(
+            exclude_states={"terminating", "termination_failed", "terminated", "paused", "running", "starting"}
+        ):
+            worker = self.store.get_worker(candidate_id)
+            if worker is None:
+                continue
             worker_id = str(worker.get("worker_id") or "")
             if not worker_id or worker.get("state") in {"terminating", "termination_failed", "terminated", "paused", "running", "starting"}:
                 continue
@@ -5551,7 +5592,10 @@ class WorkersProjectsService:
 
     def reap_terminated_workers_once(self) -> list[dict[str, object]]:
         reaped: list[dict[str, object]] = []
-        for worker in self.store.list_all_workers():
+        for candidate_id in self.store.list_worker_ids(states={"terminated", "failed"}):
+            worker = self.store.get_worker(candidate_id)
+            if worker is None:
+                continue
             try:
                 reconciled = self._reconcile_terminated_worker_compute(worker)
                 if reconciled:
@@ -5569,7 +5613,12 @@ class WorkersProjectsService:
         if threshold <= 0:
             return []
         reaped: list[dict[str, object]] = []
-        for worker in self.store.list_all_workers():
+        for candidate_id in self.store.list_worker_ids(
+            states={"paused"}, compute_released=False
+        ):
+            worker = self.store.get_worker(candidate_id)
+            if worker is None:
+                continue
             worker_id = str(worker.get("worker_id") or "")
             if not worker_id or worker.get("state") != "paused":
                 continue
@@ -5638,6 +5687,9 @@ class WorkersProjectsService:
                 continue
             age_seconds = self._run_age_seconds(run)
             if age_seconds < threshold:
+                continue
+            worker = self.store.get_worker(worker_id)
+            if worker and self._run_waits_for_native_input(run, worker):
                 continue
             if str(run.get("liveness_mode") or "standard") == "declared_long":
                 if int(run.get("meaningful_progress_sequence") or 0) <= 0:
@@ -7834,6 +7886,7 @@ class WorkersProjectsService:
         capability_reauthorization: dict[str, object] | None = None,
         action_use_id: str = "",
         native_input: dict[str, object] | None = None,
+        native_human_input: dict[str, object] | None = None,
     ) -> dict[str, object]:
         worker_id = str(delegation.get("worker_id") or "")
         project_id = str(delegation.get("project_id") or "")
@@ -7884,6 +7937,7 @@ class WorkersProjectsService:
             prior_pending = (prior_response.get("status") == "pending"
                              and prior_response.get("confirmationPending") is True)
             try:
+                human_args = {"native_human_input": native_human_input} if native_human_input is not None else {}
                 result = method(
                     {**self._runtime_worker_for_run(worker, run),
                      "_run_attempt_id": str(run.get("active_attempt_id") or "")},
@@ -7895,6 +7949,7 @@ class WorkersProjectsService:
                     action=str(native_input.get("action") or ""),
                     content=native_input.get("content"),
                     allow_new=not prior_pending and run_state in {"running", "paused"},
+                    **human_args,
                 )
             except RuntimeErrorBase as exc:
                 if str(exc) == "native_input_invalid":
@@ -7973,6 +8028,7 @@ class WorkersProjectsService:
                     event_type="run.followup_queued",
                     idempotency_key=effect_idempotency_key,
                     resume_paused_worker=False,
+                    start_processor=start_processor,
                     origin_trace=origin_trace,
                     continuation_contract=continuation_contract,
                     continuation_context=queue_context,
@@ -8051,7 +8107,8 @@ class WorkersProjectsService:
                                 run=created,
                                 message=message_instruction,
                             )
-                        self._ensure_worker_processor(worker_id)
+                        if start_processor:
+                            self._ensure_worker_processor(worker_id)
                 if created is None:
                     created = self.assign_run(
                         worker_id,
@@ -8059,6 +8116,7 @@ class WorkersProjectsService:
                         event_type="worker.message_queued",
                         idempotency_key=effect_idempotency_key,
                         resume_paused_worker=False,
+                        start_processor=start_processor,
                         origin_trace=origin_trace,
                         continuation_contract=continuation_contract,
                         continuation_context=message_context,
@@ -8694,8 +8752,10 @@ class WorkersProjectsService:
                     "advance_current_run": False,
                 }
             if action == "steer" and not (
-                source_state in {"interrupted", "cancelled"}
-                and action_proves("steer_run", f"run.{source_state}")
+                (source_state in {"interrupted", "cancelled"}
+                 and action_proves("steer_run", f"run.{source_state}"))
+                or (source_state in {"completed", "failed"}
+                    and action_proves("steer_run", "control.source_settled"))
             ):
                 return None
             return {
@@ -13509,9 +13569,12 @@ class WorkersProjectsService:
     def reconcile_all_workers(self) -> None:
         self.store.reconcile_invalid_running_runs()
         self.reconcile_terminal_artifact_observations()
-        for worker in self.store.list_all_workers():
+        for worker_id in self.store.list_worker_ids():
             if self._shutdown_event.is_set():
                 return
+            worker = self.store.get_worker(worker_id)
+            if worker is None:
+                continue
             try:
                 self._reconcile_worker_row(worker)
             except Exception as exc:
@@ -14372,6 +14435,37 @@ class WorkersProjectsService:
             "terminated",
         } or self.store.has_active_operator_pause(worker_id):
             return
+        if (worker.get("compute_release_kind") == "needs_input"
+                and worker.get("compute_release_scope") == "compute_only"
+                and worker.get("compute_release_token")):
+            try:
+                guard = self._acquire_worker_lifecycle_guard(worker_id, timeout_s=0.0)
+            except RuntimeErrorBase:
+                return
+            try:
+                current = self.store.get_worker(worker_id) or {}
+                target = self.store.get_run(str(current.get("compute_release_target_run_id") or "")) or {}
+                queued = (
+                    target if target.get("state") == "queued"
+                    else self.store.peek_next_queued_run(worker_id) or {}
+                    if target.get("state") in TERMINAL_RUN_STATES else {}
+                )
+                if (current.get("compute_release_kind") == "needs_input"
+                        and current.get("compute_release_scope") == "compute_only"
+                        and current.get("compute_release_token")
+                        and current.get("state") in {"ready", "starting"}
+                        and not self.store.has_active_operator_pause(worker_id)
+                        and target.get("worker_id") == worker_id
+                        and queued.get("worker_id") == worker_id and queued.get("state") == "queued"
+                        and not queued.get("started_at") and not queued.get("runtime_invoked_at")
+                        and not self.store.get_active_run(worker_id)
+                        and not self.store.has_unconfirmed_host_run_start(worker_id)):
+                    worker = self.store.abandon_stale_worker_compute_release_claim(
+                        worker_id, str(current["compute_release_token"]),
+                        int(current.get("compute_release_epoch") or 0), kind="needs_input",
+                    ) or current
+            finally:
+                guard.release()
         if (
             str(worker.get("compute_release_token") or "").strip()
             or self.store.has_unconfirmed_host_run_start(worker_id)
@@ -17693,14 +17787,16 @@ class WorkersProjectsService:
         )
 
     def _acquire_worker_lifecycle_guard(
-        self, worker_id: str
+        self, worker_id: str, *, timeout_s: float | None = None
     ) -> _WorkerLifecycleGuard:
         digest = hashlib.sha256(worker_id.encode("utf-8")).hexdigest()[:24]
         canonical_db_path = Path(self.store.db_path).resolve(strict=False)
         lock_path = Path(f"{canonical_db_path}.compute-release-{digest}.lock")
         handle = lock_path.open("a+")
         lock_path.chmod(0o600)
-        deadline = time.monotonic() + self._worker_lifecycle_lock_timeout_s()
+        deadline = time.monotonic() + (
+            self._worker_lifecycle_lock_timeout_s() if timeout_s is None else max(0.0, timeout_s)
+        )
         while True:
             try:
                 fcntl.flock(
@@ -18004,7 +18100,28 @@ class WorkersProjectsService:
                 if existing_token
                 else self._runtime_compute_container_id(current)
             )
-            claim = self.store.try_claim_worker_compute_release(
+            attention_target = self.store.get_run(requested_target) if requested_target else None
+            pending_attention = bool(
+                existing_token and requested_kind == "needs_input"
+                and current.get("compute_release_scope") == "compute_only"
+                and attention_target and attention_target.get("worker_id") == worker_id
+                and (
+                    current.get("state") == "needs_input"
+                    and attention_target.get("state") == "needs_input"
+                    or current.get("state") in {"ready", "starting"}
+                    and attention_target.get("state") in TERMINAL_RUN_STATES
+                    and not self.store.has_active_operator_pause(worker_id)
+                )
+                and not self.store.get_active_run(worker_id)
+                and not self.store.has_unconfirmed_host_run_start(worker_id)
+                and self.store.worker_compute_release_claim_matches(
+                    worker_id, existing_token, int(current.get("compute_release_epoch") or 0),
+                )
+            )
+            claim = {
+                "worker": current, "token": existing_token,
+                "epoch": int(current.get("compute_release_epoch") or 0),
+            } if pending_attention else self.store.try_claim_worker_compute_release(
                 worker_id,
                 expected_updated_at=str(current.get("updated_at") or ""),
                 expected_last_run_id=last_run_id,
@@ -18090,7 +18207,18 @@ class WorkersProjectsService:
             terminal_run = (
                 self.store.get_run(terminal_run_id) if terminal_run_id else None
             )
-            if terminal_run and str(terminal_run.get("state") or "") in TERMINAL_RUN_STATES:
+            if (str(claimed_worker.get("execution_mode") or "docker") == "host"
+                    and not runtime_worker.get("_active_run_id")):
+                observe = getattr(self.runtime, "host_active_process_status", None)
+                observation = observe(claimed_worker) if callable(observe) else {}
+                status = observation if isinstance(observation, dict) else {}
+                observed_run_id = str((status or {}).get("run_id") or "")
+                observed_run = self.store.get_run(observed_run_id) if observed_run_id else None
+                if (status.get("state") == "absent" and observed_run
+                        and observed_run.get("worker_id") == worker_id
+                        and observed_run.get("state") in TERMINAL_RUN_STATES):
+                    runtime_worker["_terminal_run_id"] = observed_run_id
+            elif terminal_run and str(terminal_run.get("state") or "") in TERMINAL_RUN_STATES:
                 runtime_worker["_terminal_run_id"] = terminal_run_id
             info = self.runtime.terminate_worker(runtime_worker)
             if not self._runtime_control_info_is_confirmed(info):
@@ -18343,6 +18471,10 @@ class WorkersProjectsService:
                                 operation.get("replacement_run") or replacement or {}
                             ),
                         )
+                    if (kind == "steer_run"
+                            and not operation.get("terminal_won")
+                            and str((operation.get("replacement_run") or {}).get("state") or "") == "queued"):
+                        self._ensure_worker_processor(worker_id)
                     recovered.append(
                         {
                             "worker_id": worker_id,
@@ -20006,7 +20138,7 @@ class WorkersProjectsService:
             pending = self.active_work_pending_native_input({
                 "run_id": run_id, "worker_id": worker_id,
             })
-            if (not isinstance(pending, dict) or pending.get("kind") != "permission"
+            if (not isinstance(pending, dict) or pending.get("kind") not in {"permission", "question"}
                     or pending.get("runId") != run_id or pending.get("attemptId") != attempt_id
                     or (event_type == "provider.native.input.requested"
                         and pending.get("requestId") != payload.get("requestId"))
@@ -20018,7 +20150,7 @@ class WorkersProjectsService:
             ).encode()).hexdigest()
             self._emit_callback_parallel(
                 worker, "run.needs_input", run=run,
-                message="The native harness is waiting for your response.",
+                message=str(pending.get("message") or "").strip(),
                 callback_id=callback_id, insert_once=True,
                 pending_native_input=pending,
             )
@@ -20091,10 +20223,37 @@ class WorkersProjectsService:
             self._settle_provider_liveness_attention(updated)
         return updated
 
+    def _run_waits_for_native_input(self, run: dict, worker: dict) -> bool:
+        """Reuse native request authority; generic attention never suspends liveness."""
+        method = getattr(self.runtime, "pending_native_input", None)
+        if not callable(method):
+            return False
+        pending = method({**self._runtime_worker_for_run(worker, run),
+                          "_run_attempt_id": str(run.get("active_attempt_id") or "")},
+                         run_id=str(run.get("run_id") or ""))
+        if (not isinstance(pending, dict)
+                or pending.get("kind") not in {"permission", "question"}
+                or pending.get("runId") != run.get("run_id")
+                or not run.get("active_attempt_id")
+                or pending.get("attemptId") != run.get("active_attempt_id")
+                or not run.get("native_session_id")
+                or pending.get("sessionId") != run.get("native_session_id")
+                or not isinstance(pending.get("requestId"), str)
+                or not pending["requestId"]
+                or not isinstance(pending.get("requestFingerprint"), str)
+                or len(pending["requestFingerprint"]) != 64
+                or any(char not in "0123456789abcdef" for char in pending["requestFingerprint"])):
+            return False
+        try:
+            return self._normalized_datetime(str(pending.get("expiresAt") or "")) > self._now_datetime()
+        except ValueError:
+            return False
+
     def process_provider_liveness_once(self) -> list[dict[str, object]]:
         transitioned = self.store.transition_stalled_provider_liveness_runs(
             now=self._now_datetime().isoformat(),
             inactivity_seconds=self._provider_no_progress_timeout_s(),
+            native_input_waiting=self._run_waits_for_native_input,
         )
         for run in transitioned:
             self._settle_provider_liveness_attention(run)
@@ -21061,10 +21220,11 @@ class WorkersProjectsService:
             if selected is None or effort not in selected.effort_choices:
                 raise BackgroundWorkerConfigurationError("Configured background reasoning effort is unsupported by its exact model.")
             effort_env = {"codex-cli": "WPR_CODEX_CLI_REASONING_EFFORT",
-                          "claude-code": "WPR_CLAUDE_CODE_EFFORT"}.get(profile)
-            if effort_env is None and not (profile == "grok-build" and effort == "default"):
+                          "claude-code": "WPR_CLAUDE_CODE_EFFORT",
+                          "grok-build": "WPR_GROK_REASONING_EFFORT"}.get(profile)
+            if effort_env is None:
                 raise BackgroundWorkerConfigurationError("Configured background worker does not support reasoning effort.")
-            if effort_env is not None:
+            if effort_env is not None and not (profile == "grok-build" and effort == "default"):
                 result["env"] = {**dict(result.get("env") or {}), effort_env: effort}
         result["provider_model"] = model
         return model, result
@@ -21934,10 +22094,30 @@ class WorkersProjectsService:
                 str(target.get("state") or "") in {"queued", "needs_input"}
                 and not active_lease
             )
-            if prelaunch_reservation or no_started_compute:
-                # The work-stop tombstone won before any external identity was
-                # accepted. The waiting processor will fail its reservation
-                # re-read under the same flock, so there is nothing to signal.
+            paused_host_without_compute = False
+            if (str(claimed_worker.get("execution_mode") or "") == "host"
+                    and durable_target.get("state") == "paused" and not active_lease):
+                latest = self.store.latest_host_run_lease_for_run(run_id)
+                worker_has_active_lease = any(
+                    lease["worker_id"] == worker_id
+                    for lease in self.store.list_active_host_run_leases()
+                )
+                if not worker_has_active_lease:
+                    if not durable_target.get("started_at") and not latest:
+                        # Queued Pause accepted no process generation at all.
+                        paused_host_without_compute = True
+                    elif latest:
+                        marker = self.store.get_confirmed_host_pause_marker_for_run(
+                            run_id, worker_id=worker_id,
+                            expected_started_at=str(durable_target.get("started_at") or ""),
+                        )
+                        paused_host_without_compute = bool(
+                            marker and marker["lease_id"] == latest["lease_id"]
+                        )
+            if prelaunch_reservation or no_started_compute or paused_host_without_compute:
+                # The native tombstone fences new starts. Prelaunch has no
+                # accepted identity; paused host work either never started or its
+                # exact confirmed marker proves it stopped. Nothing remains to signal.
                 info = RuntimeInfo(
                     runtime=str(claimed_worker.get("runtime") or ""),
                     model=str(claimed_worker.get("model") or ""),

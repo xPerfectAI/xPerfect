@@ -44,7 +44,8 @@ function blockerMessage(code) {
 }
 // A goal the runtime refused to start says so, and why, instead of seeming to wait.
 function goalStateLabel(goal) {
-  return goal.state === 'blocked' && goal.blocker ? `Blocked: ${blockerMessage(goal.blocker)}` : states[goal.state] || goal.state;
+  const state=goal.control_state || goal.state;
+  return goal.state === 'blocked' && goal.blocker ? `Blocked: ${blockerMessage(goal.blocker)}` : states[state] || state;
 }
 // Why a connected account's conversation cannot start here, before anything is typed.
 function connectedUnavailableMessage(code) {
@@ -155,30 +156,40 @@ function render(snapshot) {
     $('messages').dataset.version=digest;
     if (messages.length && nearLatest && typeof window!=='undefined') window.requestAnimationFrame?.(() => window.scrollTo(0,document.documentElement.scrollHeight));
   }
-  $('work').hidden=snapshot.goals.length===0 && !(snapshot.foreground_native_runs || []).length;
+  $('work').hidden=!snapshot.goals.some((goal)=>!goal.dismissed) && !(snapshot.foreground_native_runs || []).length;
   const goalDigest=JSON.stringify(snapshot.goals);
   if ($('goals').dataset.version !== goalDigest && !$('goals').contains(document.activeElement)) {
-    const cards=snapshot.goals.map((goal) => {
+    const cards=snapshot.goals.filter((goal)=>!goal.dismissed).map((goal) => {
       const card=node('section',undefined,'goal'); card.append(node('p',goal.text),node('span',goalStateLabel(goal),'goal-state'));
       if (!goal.run_id && ['accepted','blocked'].includes(goal.state)) card.append(action('Stop',() => api(`${base}/${encodeURIComponent(conversationId)}/goals/${encodeURIComponent(goal.goal_id)}/control`,'POST',{action:'stop',run_id:'',idempotency_key:crypto.randomUUID()})));
       if (goal.run_id) {
         const controls=node('div',undefined,'goal-actions');
-        const control=(name,message='',key=crypto.randomUUID()) => api(`${base}/${encodeURIComponent(conversationId)}/goals/${encodeURIComponent(goal.goal_id)}/control`,'POST',{action:name,run_id:goal.run_id,idempotency_key:key,message});
+        const controlState=goal.control_state || goal.state;
+        const control=(name,message='',key=crypto.randomUUID()) => api(`${base}/${encodeURIComponent(conversationId)}/goals/${encodeURIComponent(goal.goal_id)}/control`,'POST',{action:name,run_id:goal.control_run_id || goal.run_id,idempotency_key:key,message});
         const sharedReply=snapshot.goals.filter((item)=>item.run_id===goal.run_id).length>1;
-        if (!sharedReply && goal.state==='failed' && goal.retryable) {
+        const can=(name)=>!Array.isArray(goal.actions)||goal.actions.includes(name);
+        if (!sharedReply && can('retry') && goal.state==='failed' && goal.retryable) {
           const retryKey=crypto.randomUUID();
           controls.append(action('Retry',() => control('retry','',retryKey)));
         }
-        if (!sharedReply && ['running','queued','needs_input'].includes(goal.state)) controls.append(action('Pause',() => control('pause')));
-        if (!sharedReply && goal.state==='paused') controls.append(action('Resume',() => control('resume')));
-        if (!sharedReply && ['running','queued','needs_input','paused'].includes(goal.state)) {
-          controls.append(action('Stop',() => control('stop')));
+        if (!sharedReply && can('pause') && ['running','queued','needs_input'].includes(controlState)) controls.append(action('Pause',() => control('pause')));
+        if (!sharedReply && can('resume') && controlState==='paused') controls.append(action('Resume',() => control('resume')));
+        if (!sharedReply && ['running','queued','needs_input','paused'].includes(controlState) && can('stop')) controls.append(action('Stop',() => control('stop')));
+        const guidanceActions=Array.isArray(goal.actions) ? ['message','queue','steer'].filter((name)=>can(name)) : (['running','queued','needs_input','paused'].includes(goal.state) ? ['steer'] : []);
+        if (!sharedReply && guidanceActions.length) {
           const guide=node('details'); guide.append(node('summary','Give guidance'));
           const form=node('form',undefined,'steer-form'); const input=node('textarea'); input.setAttribute('aria-label','Guidance for this work'); input.required=true;
-          const send=node('button','Send guidance'); send.type='submit'; form.append(input,send);
-          form.addEventListener('submit',async(event)=>{event.preventDefault();send.disabled=true;try{await control('steer',input.value);guide.open=false;await refresh();clearError();}catch(error){showError(error);}finally{send.disabled=false;}});
+          const mode=node('select'); mode.setAttribute('aria-label','Guidance action');
+          for(const name of guidanceActions){const option=node('option',name[0].toUpperCase()+name.slice(1));option.value=name;mode.append(option);}
+          const send=node('button','Send guidance'); send.type='submit'; form.append(mode,input,send);
+          let pendingGuidance=null;
+          form.addEventListener('submit',async(event)=>{event.preventDefault();send.disabled=true;try{
+            if(!pendingGuidance || pendingGuidance.action!==mode.value || pendingGuidance.message!==input.value) pendingGuidance={action:mode.value,message:input.value,key:crypto.randomUUID()};
+            await control(pendingGuidance.action,pendingGuidance.message,pendingGuidance.key);pendingGuidance=null;guide.open=false;await refresh();clearError();
+          }catch(error){showError(error);}finally{send.disabled=false;}});
           guide.append(form); card.append(guide);
         }
+        if(!sharedReply && Array.isArray(goal.actions) && can('dismiss')) controls.append(action('Dismiss',async()=>{await control('dismiss');await refresh();}));
         const link=node('a','Open work'); link.href=`/watch/${encodeURIComponent(goal.worker_id)}`; controls.append(link); card.append(controls);
       }
       if (goal.has_result) {
@@ -207,8 +218,8 @@ async function refresh() {
 async function refreshNativeControls(snapshot) {
   const active=new Map();
   for (const goal of snapshot.goals || []) {
-    if (goal.worker_id && goal.run_id && ['running','needs_input'].includes(goal.state)) {
-      active.set(goal.worker_id,goal.run_id);
+    if (goal.worker_id && goal.run_id && ['running','needs_input'].includes(goal.control_state || goal.state)) {
+      active.set(goal.worker_id,goal.control_run_id || goal.run_id);
     }
   }
   for (const run of snapshot.foreground_native_runs || []) {

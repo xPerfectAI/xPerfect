@@ -39,7 +39,9 @@ from .agent_builder_control import (
     graph_transfer_control,
     messaging_delivery_control,
     normalized_messaging_delivery_control,
+    normalized_graph_transfer_control,
     parse_conversation_output,
+    ordered_conversation_output,
     public_conversation_prefix,
     _unique_json_object,
     NativeConversationParts,
@@ -159,6 +161,18 @@ CONVERSATION_MAX_CHARS_PER_TOKEN = 8.0
 
 _GRAPH_CONTROL_UNSET = object()
 
+# This typed capability is admitted only from the signed trusted-host bootstrap.
+_PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT = {
+    "version": 1, "visibility": "private_machine_state", "format": "json_object",
+}
+
+def _private_machine_state_response_contract(metadata: CompletionMetadata | None) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    capabilities = metadata.bootstrap_bundle.get("provider_capabilities")
+    contract = capabilities.get("response_contract") if isinstance(capabilities, dict) else None
+    return dict(contract) if isinstance(contract, dict) else None
+
 CONVERSATION_BOOTSTRAP_MAX_RATIO = 0.50
 
 CONVERSATION_COMPACTION_TRIGGER_RATIO = 0.70
@@ -244,12 +258,15 @@ def _provider_failure_http_status(run: dict[str, Any]) -> int:
     failure_class = str(run.get("failure_class") or "").strip()
     if failure_class == "provider_rate_limited":
         return 429
+    if failure_class == "native_output_files_identity_unavailable":
+        return 409
     return 502
 
 
 # Typed failure classes that provider clients already recognize. They travel as the error code
 # instead of being flattened into server_error, so a client never has to read failure prose.
 _PUBLIC_FAILURE_CODES = frozenset({
+    "native_mcp_unavailable",
     "native_input_declined",
     "native_input_expired",
     "native_input_cancelled",
@@ -260,6 +277,7 @@ _PUBLIC_FAILURE_CODES = frozenset({
     "provider_quota_exhausted",
     "provider_temporarily_unavailable",
     "provider_response_failed",
+    "native_output_files_identity_unavailable",
     "provider_progress_stalled",
     "host_capacity",
     "source_context_unavailable",
@@ -2145,6 +2163,21 @@ def _hydrate_metadata(
     options["access"] = requested_access
     metadata["glasshive_options"] = options
 
+    capabilities = metadata["bootstrap_bundle"].get("provider_capabilities")
+    private_contract = capabilities.get("response_contract") if isinstance(capabilities, dict) else None
+    if private_contract is not None:
+        if (not auth.trust_identity_headers
+                or private_contract != _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT
+                or not isinstance(private_contract, dict)
+                or type(private_contract.get("version")) is not int
+                or capabilities.get("native_tools") is not False
+                or metadata["provider_session_mode"] != "stateless"
+                or requested_access != "read_only"
+                or authoring_scope != {"actor_kind": "system", "origin": "system"}
+                or metadata["audio_eligible"] is not False
+                or payload.tools):
+            raise HTTPException(status_code=403, detail="Private machine state requires an internal zero-tool host actor")
+
     try:
         hydrated = CompletionMetadata.model_validate(metadata)
     except ValueError as exc:
@@ -2499,6 +2532,8 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
     parts = NativeConversationParts(graph_control, delivery_control)
     candidate = None
     completed_parts: dict[int, int] = {}
+    completed_dispositions: dict[int, dict[str, Any]] = {}
+    presentation_parts: dict[int, dict[str, Any]] = {}
     for sequence, line in enumerate(str(stdout or "").splitlines(), 1):
         try:
             event = json.loads(line)
@@ -2555,24 +2590,33 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
                     envelope = json.loads("".join(parts.current))
                 except (TypeError, ValueError):
                     envelope = None
-                if (isinstance(envelope, dict) and envelope.get("type") in {"assistant_response", "tool_call"}
+                if (prefix["delivery_disposition"]["audio"] == "eligible"
+                        and isinstance(envelope, dict) and envelope.get("type") in {"assistant_response", "tool_call"}
                         and not prefix.get("duplicate")):
                     completed_parts[parts.part_index] = len(text)
+                    completed_dispositions[parts.part_index] = prefix["delivery_disposition"]
+                if isinstance(envelope, dict) and envelope.get("type") in {"assistant_response", "tool_call"}:
+                    presentation_parts[parts.part_index] = {"part_index": parts.part_index,
+                        "text_end": len(text), "delivery_disposition": prefix["delivery_disposition"]}
             candidate = {"sequence": sequence, "text": text, "part_complete": prefix["complete"],
                          "word_boundary": word_boundary,
                          "completed_parts": [{"part_index": index, "text_end": end}
                              for index, end in completed_parts.items() if end <= len(text)],
+                         "completed_part_dispositions": completed_dispositions,
+                         "presentation_parts": list(presentation_parts.values()),
                          "delivery_disposition": prefix["delivery_disposition"]}
     return candidate
 
 
-def _native_terminal_text(profile: str, stdout: str) -> str | None:
+def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
+                          delivery_control: Any = None) -> str | None:
     """Keep a completed empty authored terminal distinct from an absent terminal."""
 
     assistant_parts: list[str] = []
     result_parts: list[str] = []
     codex_last_item_text: str | None = None
     codex_terminal_text: str | None = None
+    codex_authored_parts: list[str] = []
     grok_session_id = ""
     grok_results: list[str] = []
     for raw_line in str(stdout or "").splitlines():
@@ -2600,6 +2644,8 @@ def _native_terminal_text(profile: str, stdout: str) -> str | None:
             event_type = event.get("type")
             if event_type == "turn.failed":
                 return None
+            if event_type == "turn.started":
+                codex_authored_parts = []
             if (event_type in {"turn.started", "item.started"}
                     or (event_type == "item.updated" and item.get("type") != "agent_message")):
                 codex_last_item_text = None
@@ -2611,6 +2657,8 @@ def _native_terminal_text(profile: str, stdout: str) -> str | None:
                     else None
                 )
                 codex_terminal_text = None
+                if codex_last_item_text is not None:
+                    codex_authored_parts.append(codex_last_item_text)
             elif event_type == "turn.completed":
                 codex_terminal_text = codex_last_item_text
             continue
@@ -2641,6 +2689,25 @@ def _native_terminal_text(profile: str, stdout: str) -> str | None:
         # task starts, for example) may refer to an earlier one, so the reply carries every turn.
         return "\n\n".join(_select_user_facing_agent_output([part]) for part in result_parts) or None
     if profile == "codex-cli" and codex_terminal_text is not None:
+        if normalized_messaging_delivery_control(delivery_control):
+            terminal = parse_conversation_output(codex_terminal_text, graph_control, delivery_control)
+            choice = terminal.get("delivery_disposition") or {}
+            if (terminal.get("type") == "assistant_response" and not terminal.get("content", "").strip()
+                    and choice.get("valid") is True and choice.get("audio") == "skip"):
+                public_parts = []
+                dispositions = []
+                for raw in codex_authored_parts[:-1]:
+                    try:
+                        authored = parse_conversation_output(raw, graph_control, delivery_control)
+                    except ValueError:
+                        continue
+                    disposition = authored.get("delivery_disposition") or {}
+                    if (authored.get("type") == "assistant_response" and authored.get("content", "").strip()
+                            and disposition.get("valid") is True):
+                        public_parts.append(authored["content"])
+                        dispositions.append(disposition)
+                return ordered_conversation_output(public_parts, codex_terminal_text,
+                    graph_control, delivery_control, part_dispositions=dispositions)
         return _select_user_facing_agent_output([codex_terminal_text])
     if profile == "grok-build" and len(grok_results) == 1:
         return _select_user_facing_agent_output(grok_results) or None
@@ -3019,6 +3086,79 @@ def _normalized_harness_activity(profile: str, stdout: str) -> list[dict[str, An
                 }
             )
     return normalized
+
+
+def _codex_async_question_content(stdout: str, content: str) -> str:
+    """Carry accepted native conversational questions, not permission or worker ACKs."""
+    calls: dict[str, dict[str, Any]] = {}
+    outputs: dict[str, Any] = {}
+    invalid: set[str] = set()
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line, object_pairs_hook=_unique_json_object)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "glasshive.tool_evidence_unavailable":
+            return content
+        payload = event.get("payload")
+        if event.get("type") != "response_item" or not isinstance(payload, dict):
+            continue
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str) or not call_id or len(call_id) > 256:
+            continue
+        if payload.get("type") == "function_call":
+            if call_id in calls:
+                invalid.add(call_id)
+            calls[call_id] = payload
+        elif payload.get("type") == "function_call_output":
+            if call_id in outputs or call_id not in calls:
+                invalid.add(call_id)
+            outputs[call_id] = payload.get("output")
+    blocks: list[str] = []
+    count = 0
+    for call_id, call in calls.items():
+        if call_id in invalid or call.get("name") != "request_user_input_async":
+            continue
+        try:
+            accepted = json.loads(outputs.get(call_id), object_pairs_hook=_unique_json_object)
+            arguments = json.loads(call.get("arguments"), object_pairs_hook=_unique_json_object)
+        except (ValueError, TypeError):
+            continue
+        if accepted != {"accepted": True} or accepted.get("accepted") is not True:
+            continue
+        if not isinstance(arguments, dict) or set(arguments) != {"questions"}:
+            continue
+        questions = arguments["questions"]
+        if not isinstance(questions, list) or not 1 <= len(questions) <= 16:
+            continue
+        selected: list[str] = []
+        for question in questions:
+            if (not isinstance(question, dict) or set(question) - {"title", "options"}
+                    or not isinstance(question.get("title"), str)
+                    or not question["title"].strip() or len(question["title"]) > 8000):
+                break
+            options = question.get("options")
+            if options is not None and (not isinstance(options, list) or not 1 <= len(options) <= 16
+                    or any(not isinstance(option, str) or not option.strip() or len(option) > 160
+                           for option in options) or len(set(options)) != len(options)):
+                break
+            text = _sanitize_user_visible_text(_redact_text(question["title"])).strip()
+            labels = [_sanitize_user_visible_text(_redact_text(option)).strip() for option in options or []]
+            if not text or any(not label for label in labels):
+                break
+            selected.append("\n".join([text, *(f"- {label}" for label in labels)]))
+        else:
+            count += len(selected)
+            if count > 16:
+                return content
+            blocks.extend(block for block in selected if block not in blocks)
+    presentation = "\n\n".join(blocks)
+    if len(presentation.encode("utf-8")) > 8000:
+        return content
+    suffix = [block for block in blocks if block not in content]
+    return "\n\n".join([content, *suffix]) if content else "\n\n".join(suffix)
 
 
 def _native_tool_evidence(profile: str, stdout: str) -> dict[str, Any]:
@@ -5278,6 +5418,13 @@ class ConversationProvider:
                         failure_retryable=1, failure_structured=1,
                     )
                     run = self.store.get_run(run_id) or run
+                elif isinstance(exc.detail, dict) and exc.detail.get("code") == "native_output_files_identity_unavailable":
+                    self.store.update_run(
+                        run_id, failure_class=exc.detail["code"],
+                        failure_user_message=str(exc.detail["message"]),
+                        failure_retryable=0, failure_structured=1,
+                    )
+                    run = self.store.get_run(run_id) or run
                 else:
                     self.store.update_run(run_id, failure_class="invalid_agent_builder_control_output",
                         failure_user_message="GlassHive harness returned invalid Agent Builder graph control output")
@@ -5577,6 +5724,57 @@ class ConversationProvider:
     ) -> str:
         return self._native_terminal_output_snapshot(request_record, run) or ""
 
+    def _native_delivery_ranges(self, request_record, run, visible_output):
+        """Carry exact native part choices through the existing public-output projection."""
+        collector = getattr(self.service.runtime, "provider_activity_log", None)
+        worker = self.store.get_worker(str(run.get("worker_id") or ""))
+        if not callable(collector) or not worker:
+            return None
+        try:
+            profile, stdout = collector(_provider_log_worker(worker, run), str(run.get("run_id") or ""))
+            raw = _native_terminal_text(profile, stdout) if profile == "grok-build" else None
+            if raw is None:
+                return None
+            event = next((json.loads(line) for line in reversed(stdout.splitlines())
+                if line.startswith('{') and json.loads(line).get("type") == "grok.result"), None)
+            if not event or "deliveryDispositionRanges" not in event:
+                return None
+            ranges = event["deliveryDispositionRanges"]
+            source = json.loads(raw, object_pairs_hook=_unique_json_object)
+            text = source["content"]
+            encoded = text.encode("utf-16-le")
+            if not isinstance(ranges, list):
+                return []
+            projected = []
+            cursor = public_cursor = 0
+            for item in ranges:
+                choice = item.get("disposition") if isinstance(item, dict) else None
+                end = item.get("end") if isinstance(item, dict) else None
+                if (not isinstance(item, dict) or set(item) != {"start", "end", "disposition"}
+                        or type(item.get("start")) is not int or item["start"] != cursor
+                        or type(end) is not int or end <= cursor or end * 2 > len(encoded)
+                        or not isinstance(choice, dict)
+                        or set(choice) != {"version", "audio", "required", "valid", "source"}
+                        or type(choice.get("version")) is not int or choice["version"] != 1
+                        or choice.get("audio") not in {"eligible", "skip"}
+                        or choice.get("required") is not True or choice.get("valid") is not True
+                        or choice.get("source") != "model"):
+                    return []
+                prefix = encoded[:end * 2].decode("utf-16-le")
+                envelope = json.dumps({**source, "content": prefix}, ensure_ascii=False)
+                rendered = _redact_provider_output(self.service.render_provider_native_images(
+                    request_record, run, envelope, include_captured_files=False))
+                public_prefix = json.loads(rendered)["content"]
+                public_end = len(public_prefix.encode("utf-16-le")) // 2
+                if not visible_output.startswith(public_prefix) or public_end < public_cursor:
+                    return []
+                if public_end > public_cursor:
+                    projected.append({"start": public_cursor, "end": public_end, "disposition": choice})
+                cursor, public_cursor = end, public_end
+            return projected if cursor * 2 == len(encoded) and public_cursor * 2 == len(visible_output.encode("utf-16-le")) else []
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
+            return []
+
     def _native_terminal_output_snapshot(
         self,
         request_record: dict[str, Any],
@@ -5595,7 +5793,9 @@ class ConversationProvider:
             profile, stdout = collector(_provider_log_worker(worker, run), str(run.get("run_id") or ""))
         except (OSError, RuntimeError, ValueError):
             return None
-        return _native_terminal_text(str(profile or ""), str(stdout or ""))
+        contract = self._saved_completion_contract(request_record) or {}
+        return _native_terminal_text(str(profile or ""), str(stdout or ""),
+            contract.get("graph_control"), contract.get("delivery_control"))
 
     def _native_effective_model(
         self, record: dict[str, Any], run: dict[str, Any], contract: dict[str, Any],
@@ -5815,7 +6015,8 @@ class ConversationProvider:
         native = self._native_output_snapshot(request_record, run)
         output = native if callable(getattr(self.service.runtime, "provider_activity_log", None)) else str(run.get("output_text") or "")
         return _redact_provider_output(self.service.render_provider_native_images(
-            request_record, run, output, output_files=output_files, output_rejections=output_rejections))
+            request_record, run, output, output_files=output_files, output_rejections=output_rejections,
+            include_captured_files=output_files is not None))
 
     def _completion_usage(
         self,
@@ -5915,8 +6116,10 @@ class ConversationProvider:
         return json.loads(winner["response_json"])
 
     def _completion_contract(self, payload: ChatCompletionRequest) -> dict[str, Any]:
+        private_contract = _private_machine_state_response_contract(payload.metadata)
         return {
             "version": 1, "model": payload.model,
+            **({"response_contract": private_contract} if private_contract else {}),
             "reasoning_effort": payload.reasoning_effort,
             "graph_control": self._graph_transfer_control(payload),
             "delivery_control": messaging_delivery_control(
@@ -5956,8 +6159,38 @@ class ConversationProvider:
     ) -> dict[str, Any]:
         output_files: list[dict] = []
         output_rejections: list[dict] = []
-        output = self._conversation_output(request_record, run, output_files=output_files,
-                                           output_rejections=output_rejections)
+        if contract.get("response_contract") == _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT:
+            session = self.store.get_provider_session_by_id(str(request_record["session_id"])) or {}
+            worker = self.store.get_worker(str(run.get("worker_id") or "")) or {}
+            if (not request_record.get("owner_id") or not request_record.get("tenant_id")
+                    or not request_record.get("run_id")
+                    or request_record.get("state") in {"cancelled", "failed"}
+                    or session.get("owner_id") != request_record.get("owner_id")
+                    or worker.get("owner_id") != request_record.get("owner_id")
+                    or worker.get("tenant_id") != request_record.get("tenant_id")
+                    or session.get("tenant_id") != request_record.get("tenant_id")
+                    or session.get("actor_kind") != "system" or session.get("origin") != "system"
+                    or str(run.get("run_id") or "") != str(request_record.get("run_id") or "")
+                    or run.get("state") != "completed"):
+                raise HTTPException(status_code=403, detail="Private machine state ownership is unavailable")
+            output = self._native_terminal_output_snapshot(request_record, run)
+            try:
+                # Match the continuity consumer's one complete optional JSON fence.
+                # Validate its object body while preserving the original terminal bytes.
+                raw_state = output.strip() if isinstance(output, str) else output
+                fenced_state = (
+                    re.fullmatch(r"```(?:json)?\s*\n([\s\S]*?)\n```", raw_state, re.IGNORECASE)
+                    if isinstance(raw_state, str) else None
+                )
+                state_body = fenced_state.group(1).strip() if fenced_state else raw_state
+                state = json.loads(state_body, object_pairs_hook=_unique_json_object)
+                if not isinstance(state, dict):
+                    raise ValueError("Machine state must be an object")
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=502, detail="Native private machine state is not a complete JSON object") from exc
+        else:
+            output = self._conversation_output(request_record, run, output_files=output_files,
+                                               output_rejections=output_rejections)
         try:
             decision = parse_conversation_output(
                 output,
@@ -6016,6 +6249,9 @@ class ConversationProvider:
             message["provider_specific_fields"] = {
                 "viventium": {"delivery_disposition": delivery_disposition}
             }
+            ranges = self._native_delivery_ranges(request_record, run, visible_output)
+            if ranges is not None:
+                message["provider_specific_fields"]["viventium"]["deliveryDispositionRanges"] = ranges
         effective_model = self._native_effective_model(request_record, run, contract)
         if effective_model is None:
             raise HTTPException(status_code=502, detail="Native model selection is not yet available")
@@ -6051,7 +6287,7 @@ class ConversationProvider:
         if (output_files or output_rejections) and (
                 decision["type"] == "assistant_response" or output_identity_available):
             if not output_identity_available:
-                raise HTTPException(status_code=502, detail={"code": "native_output_files_identity_unavailable",
+                raise HTTPException(status_code=409, detail={"code": "native_output_files_identity_unavailable",
                     "message": "The selected files could not be bound to this response."})
             identity = contract.get("output_file_identity") or {}
             envelope = {
@@ -6095,6 +6331,21 @@ class ConversationProvider:
                     "request_id": str(request_record["request_id"]), "run_id": str(run["run_id"]),
                     **evidence,
                 }
+                if (profile == "codex-cli" and callable(getattr(
+                        self.service.runtime, "provider_tool_evidence_log", None))
+                        and decision["type"] == "assistant_response"
+                        and not (isinstance(disposition, dict) and disposition.get("valid") is False)
+                        and contract.get("response_contract") != _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT
+                        and session.get("actor_kind") == "external_user"
+                        and session.get("origin") == "interactive"
+                        and session.get("owner_id") == request_record.get("owner_id")
+                        and session.get("tenant_id") == request_record.get("tenant_id")
+                        and worker.get("tenant_id") == request_record.get("tenant_id")
+                        and run.get("state") == "completed"
+                        and request_record.get("state") not in {"failed", "cancelled"}):
+                    message["content"] = _codex_async_question_content(
+                        str(stdout), str(message.get("content") or ""),
+                    )
             except (OSError, RuntimeError, ValueError):
                 # A missing native log cannot become invented tool success.
                 pass
@@ -6265,19 +6516,20 @@ class ConversationProvider:
                 else model_contract["model"])
             model_metadata = ({"glasshive": {"requested_model": model_contract["model"]}}
                               if effective_model != model_contract["model"] else {})
+            private_machine_state = model_contract.get("response_contract") == _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT
             # Keep pre-open lifecycle/heartbeat visibility. Public bytes require the
             # native requested/effective selection from this exact invocation.
             spoken = (await asyncio.to_thread(self._native_spoken_snapshot, record, run, payload,
                                               agent_builder_control, delivery_control)
-                      if selected_model is not None else None)
+                      if selected_model is not None and not private_machine_state else None)
             if spoken and spoken["text"].startswith(native_snapshot):
                 # Preserve word streaming, then seal each complete public part in
                 # order, including a completion-only observation on the next poll.
                 cursor = len(native_snapshot)
                 pending_redactor = copy.copy(redactor)
                 pending_public_parts: set[tuple[str, int]] = set()
-                pieces: list[tuple[str, dict[str, Any] | None]] = []
-                for part in (spoken.get("completed_parts", [])
+                pieces: list[tuple[str, dict[str, Any] | None, dict[str, Any]]] = []
+                for part in (spoken.get("presentation_parts", spoken.get("completed_parts", []))
                              if record.get("message_id") and record.get("stream_id") else []):
                     end = part["text_end"]
                     key = (str(run["run_id"]), part["part_index"])
@@ -6287,17 +6539,18 @@ class ConversationProvider:
                     visible += pending_redactor.flush()
                     cursor = end
                     pending_public_parts.add(key)
+                    disposition = part.get("delivery_disposition") or spoken.get("completed_part_dispositions", {}).get(part["part_index"], spoken["delivery_disposition"])
                     completion = {"version": 1, "complete": True,
                         "request_id": request_id, "run_id": str(run["run_id"]),
                         "part_id": f"{run['run_id']}:{part['part_index']}",
-                        "message_id": str(record["message_id"]), "stream_id": str(record["stream_id"])}
-                    pieces.append((visible, completion))
+                        "message_id": str(record["message_id"]), "stream_id": str(record["stream_id"])} if disposition["audio"] == "eligible" else None
+                    pieces.append((visible, completion, disposition))
                 visible = pending_redactor.feed(spoken["text"][cursor:], word_boundary=spoken["word_boundary"])
                 if spoken["part_complete"]:
                     visible += pending_redactor.flush()
                 if visible:
-                    pieces.append((visible, None))
-                if not emitted_content and any(visible_delta for visible_delta, _ in pieces):
+                    pieces.append((visible, None, spoken["delivery_disposition"]))
+                if not emitted_content and any(visible_delta for visible_delta, _, _ in pieces):
                     try:
                         await asyncio.to_thread(self.store.add_provider_activity_once, request_id,
                             "authored-response", "The model authored public response text.",
@@ -6316,21 +6569,21 @@ class ConversationProvider:
                 redactor = pending_redactor
                 emitted_public_parts.update(pending_public_parts)
                 native_snapshot = spoken["text"]
-                for visible_delta, completion in pieces:
+                for visible_delta, completion, part_disposition in pieces:
                     emitted_content += visible_delta
                     yield "data: " + json.dumps({
                         "id": request_id, "object": "chat.completion.chunk", "created": created,
                         **model_metadata,
                         "model": effective_model, "choices": [{"index": 0,
                             "delta": {"content": visible_delta, "provider_specific_fields": {"viventium": {
-                                "delivery_disposition": spoken["delivery_disposition"],
+                                "delivery_disposition": part_disposition,
                                 **({"public_part_complete": completion} if completion else {})}}},
                             "finish_reason": None}],
                     }, separators=(",", ":")) + "\n\n"
                     last_heartbeat = time.monotonic()
             preview = (await asyncio.to_thread(self._native_preview_snapshot, record, run, payload,
                                                agent_builder_control, delivery_control)
-                       if selected_model is not None else None)
+                       if selected_model is not None and not private_machine_state else None)
             if preview and preview["sequence"] > emitted_preview_sequence:
                 emitted_preview_sequence = preview["sequence"]
                 yield "data: " + json.dumps({
@@ -6345,11 +6598,12 @@ class ConversationProvider:
                 self._native_output_snapshot,
                 record,
                 run,
-            ) if selected_model is not None and not agent_builder_control and not delivery_control else "")
-            if record["state"] == "completed" and record.get("response_json"):
+            ) if selected_model is not None and not agent_builder_control and not delivery_control and not private_machine_state else "")
+            if record["state"] == "completed" and record.get("response_json") and not private_machine_state:
                 latest_native = str(json.loads(record["response_json"])["choices"][0]["message"].get("content") or "")
             if (
-                not agent_builder_control
+                not private_machine_state
+                and not agent_builder_control
                 and not delivery_control
                 and latest_native.startswith(native_snapshot)
             ):
@@ -6418,7 +6672,7 @@ class ConversationProvider:
                     delivery_disposition = (
                         message.get("provider_specific_fields", {}).get("viventium", {}).get("delivery_disposition")
                     )
-                    if (agent_builder_control or delivery_control) and not emitted_content:
+                    if (private_machine_state or agent_builder_control or delivery_control) and not emitted_content:
                         terminal_delta = output
                     else:
                         flushed = redactor.flush()
@@ -6490,6 +6744,11 @@ class ConversationProvider:
                 terminal_fields = {}
                 if delivery_disposition is not None:
                     terminal_fields["delivery_disposition"] = delivery_disposition
+                if record["state"] == "completed":
+                    ranges = message.get("provider_specific_fields", {}).get("viventium", {}).get("deliveryDispositionRanges")
+                    if ranges is not None:
+                        terminal_fields["deliveryDispositionRanges"] = ranges
+                        terminal_fields["delivery_range_text"] = str(message.get("content") or "")
                 if record["state"] == "completed" and canonical["glasshive"].get("output_files"):
                     terminal_fields["output_files"] = canonical["glasshive"]["output_files"]
                 final_chunk = {
@@ -8610,15 +8869,28 @@ def install_conversation_provider_routes(
                         idempotency_keys=(str(current.get("base_idempotency_key") or ""),
                                           str(current.get("idempotency_key") or "")))):
                 return {**envelope, "status": "not_running"}
-            # This endpoint is the automatic Core cohort courier. Its exact
-            # admitted contract must support framed generations; ordinary
-            # operator/worker native controls retain their existing behaviour.
+            # Automatic input needs the admitted output's real framing owner.
+            # Audio generations and native terminal graph items have distinct
+            # contracts; speech permission is not a native input capability.
             contract = provider._saved_completion_contract(current) or {}
-            if not normalized_messaging_delivery_control(contract.get("delivery_control")):
-                return {**envelope, "status": "unsupported"}
             runtime_worker = service._runtime_worker_for_run(worker, run)
             run_id, attempt_id = str(active["run_id"]), str(active["active_attempt_id"])
             probe = getattr(service.runtime, "supports_native_control", None)
+            framed = bool(normalized_messaging_delivery_control(contract.get("delivery_control")))
+            graph = normalized_graph_transfer_control(contract.get("graph_control"))
+            state_reader = getattr(service.runtime, "native_control_state", None)
+            if (not framed and contract.get("delivery_control") is None and graph
+                    and callable(probe) and callable(state_reader)
+                    and probe(runtime_worker, "interject_graph_output", run_id=run_id, attempt_id=attempt_id)):
+                try:
+                    native_state = state_reader(runtime_worker, run_id=run_id, attempt_id=attempt_id)
+                except (RuntimeError, ValueError, OSError):
+                    native_state = {}
+                framed = bool(isinstance(native_state, dict)
+                    and native_state.get("run_id") == run_id and native_state.get("attempt_id") == attempt_id
+                    and normalized_graph_transfer_control(native_state.get("interject_graph_control")) == graph)
+            if not framed:
+                return {**envelope, "status": "unsupported"}
             if (not callable(getattr(service.runtime, "native_control", None))
                     or (callable(probe) and not probe(runtime_worker, "interject", run_id=run_id, attempt_id=attempt_id))):
                 return {**envelope, "status": "unsupported"}

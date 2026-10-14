@@ -328,7 +328,8 @@ def test_registered_permission_cannot_allow_while_cancel_notification_is_in_flig
         assert resume_cancel.wait(3)
 
     transport.notify = notify
-    session = SimpleNamespace(session_id='native-exact', cancel_requested=False, client=transport)
+    session = SimpleNamespace(session_id='native-exact', cancel_requested=False, client=transport,
+                              _native_tools_manifest=Event())
     session.cancel = lambda: GrokSession.cancel(session)
     mailbox = ControlMailbox(tmp_path, run_id='run-1', attempt_id='attempt-1',
                              session=session, event=emit, permission_timeout=30)

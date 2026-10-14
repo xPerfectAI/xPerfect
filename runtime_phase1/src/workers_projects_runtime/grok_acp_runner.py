@@ -23,11 +23,11 @@ from threading import Lock
 try:
     from .grok_acp import AcpClient, AcpError, GrokSession
     from .grok_control import ControlMailbox
-    from .agent_builder_control import conversation_interjection_supported
+    from .agent_builder_control import conversation_interjection_supported, conversation_controls_from_schema, conversation_output_contract_instructions, minimal_conversation_output_schema
 except ImportError:  # Private, materialized standalone runtime copy.
     from grok_acp import AcpClient, AcpError, GrokSession
     from grok_control import ControlMailbox
-    from agent_builder_control import conversation_interjection_supported
+    from agent_builder_control import conversation_interjection_supported, conversation_controls_from_schema, conversation_output_contract_instructions, minimal_conversation_output_schema
 
 
 def main(argv=None):
@@ -40,10 +40,12 @@ def main(argv=None):
     parser.add_argument('--native-tools-disabled', action='store_true')
     parser.add_argument('--restricted-workspace')
     parser.add_argument('--mcp-file')
+    parser.add_argument('--required-mcp-server', action='append', default=[])
     authority = parser.add_mutually_exclusive_group()
     authority.add_argument('--rules-file')
     authority.add_argument('--system-prompt-file')
     parser.add_argument('--output-schema-file')
+    parser.add_argument('--output-schema-minimal-wire', action='store_true')
     parser.add_argument('--allow-mcp-tool', action='append', default=[])
     parser.add_argument('--control-dir')
     parser.add_argument('--run-id', default='')
@@ -73,9 +75,11 @@ def main(argv=None):
 
 def _stopped_turn(exc, session, mailbox):
     # A cancelled turn is explained from typed state, never from Grok's text.
+    if exc.stop_reason == 'mcp_unavailable':
+        return 'native_mcp_unavailable', 'Configured Grok MCP tools did not become ready before prompting.'
     if exc.stop_reason != 'cancelled':
         return None, str(exc)
-    if session.cancel_requested:
+    if session.cancel_requested or (mailbox and mailbox.turn_cancelled()):
         return 'native_turn_cancelled', 'Grok stopped because its turn was cancelled.'
     outcome = mailbox.terminal_cause() if mailbox else None
     if outcome == 'expired':
@@ -118,6 +122,21 @@ def run(args):
     output_schema = json.loads(Path(schema_file).read_text()) if schema_file else None
     if output_schema is not None and not isinstance(output_schema, dict):
         raise ValueError('Grok output schema must be an object')
+    minimal_wire = getattr(args, 'output_schema_minimal_wire', False)
+    if minimal_wire and (restricted or output_schema is None or not system_prompt):
+        raise ValueError('Grok minimal-wire output contract requires native tools and composed conversation authority')
+    if minimal_wire:
+        if not any(conversation_controls_from_schema(output_schema)):
+            raise ValueError('Grok minimal-wire output contract requires declared conversation controls')
+        if conversation_output_contract_instructions(output_schema) not in system_prompt:
+            raise ValueError('Grok minimal-wire output contract is missing from composed conversation authority')
+    emit({'type': 'grok.output_contract', 'mode': 'minimal_wire_constraint' if minimal_wire else 'native_constraint' if output_schema is not None else 'none',
+          **({'declared_schema_sha256': hashlib.sha256(json.dumps(output_schema, sort_keys=True,
+              separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(),
+              'wire_schema_sha256': hashlib.sha256(json.dumps(
+                  minimal_conversation_output_schema(output_schema) if minimal_wire else output_schema,
+                  sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()}
+              if output_schema is not None else {})})
     reviewed_interject = False
     interject_reason = 'artifact_unreviewed'
     if args.reviewed_binary_sha256:
@@ -157,7 +176,7 @@ def run(args):
         try:
             emit({'type':'grok.runtime.phase','phase':'session_open_started'})
             session.open(cwd=child_cwd, model=args.model, session_id=args.session_id,
-                         effort=args.effort, mcp_servers=mcp_servers, rules=rules,
+                         effort=args.effort, mcp_servers=mcp_servers, required_mcp_servers=args.required_mcp_server, rules=rules,
                          system_prompt_override=system_prompt,
                          yolo_mode=({'true': True, 'false': False}.get(getattr(args, 'yolo_mode', None))),
                          auth_method='xai.api_key' if os.environ.get('XAI_API_KEY') else None,
@@ -183,9 +202,22 @@ def run(args):
             if session.cancel_requested:
                 raise AcpError('Grok turn was cancelled before prompting', stop_reason='cancelled')
             emit({'type':'grok.runtime.phase','phase':'prompt_started'})
-            output = session.prompt(instruction, output_schema=output_schema)
+            output = session.prompt(instruction, output_schema=output_schema, minimal_wire_output=minimal_wire)
+            unanswered_question = mailbox and mailbox.finish_unanswered_question()
+            if session.cancel_requested or (mailbox and mailbox.turn_cancelled()):
+                raise AcpError('Grok turn was cancelled while prompting', stop_reason='cancelled')
+            if unanswered_question:
+                message = 'Grok ended before an owner response was recorded.'
+                emit({'type':'grok.error','session_id':session.session_id,'code':None,
+                      'failure_class':'native_input_unanswered','message':message})
+                print(message, file=sys.stderr)
+                session.close()
+                return 2
+            ranges = session.delivery_disposition_ranges()
             emit({'type':'grok.result','session_id':session.session_id,
-                  'stop_reason':'end_turn','output':output})
+                  'stop_reason':'end_turn','output':output,
+                  **({'usage': session.native_usage} if session.native_usage is not None else {}),
+                  **({'deliveryDispositionRanges': ranges} if ranges else {})})
             session.close()
             return 0
         except AcpError as exc:

@@ -483,11 +483,16 @@ class WorkspaceFiles:
                         reserved += item["size_bytes"]
         return used, int(reserved)
 
-    def _capacity(self, conn, tenant_id: str, owner_id: str):
+    def _capacity(self, conn, tenant_id: str, owner_id: str, *, enforcement_only: bool = False):
         snapshot = self.storage_adapter.snapshot(conn, tenant_id, owner_id)
         if snapshot is None:
+            limit = self._policy(conn, tenant_id, owner_id)["storage_limit_bytes"]
+            # Admission needs no retained-work scan when there is no logical limit.
+            # The default path still accounts for every byte in the public meter.
+            if enforcement_only and limit is None:
+                return 0, 0, None, 1, None
             used, reserved = self._logical_usage(conn, tenant_id, owner_id)
-            return used, reserved, self._policy(conn, tenant_id, owner_id)["storage_limit_bytes"], 1, None
+            return used, reserved, limit, 1, None
         reserved = self.storage_adapter.reservation(conn, tenant_id, owner_id, snapshot)
         return snapshot.used_allocated_bytes, reserved, snapshot.kernel_hard_limit_bytes, snapshot.filesystem_block_bytes, snapshot
 
@@ -500,7 +505,7 @@ class WorkspaceFiles:
     ) -> None:
         """Caller must persist the manifest in this same IMMEDIATE transaction."""
         from .workspace_file_storage import round_allocation
-        used, reserved, limit, block, _ = self._capacity(conn, tenant_id, owner_id)
+        used, reserved, limit, block, _ = self._capacity(conn, tenant_id, owner_id, enforcement_only=True)
         if (
             limit is not None
             and used + reserved + sum(round_allocation(item["size_bytes"], block) for item in manifest) > limit
@@ -676,7 +681,7 @@ class WorkspaceFiles:
                     "Selection exceeds the configured byte limit", 413
                 )
             from .workspace_file_storage import round_allocation
-            used, reserved, limit, block, _ = self._capacity(conn, tenant_id, owner_id)
+            used, reserved, limit, block, _ = self._capacity(conn, tenant_id, owner_id, enforcement_only=True)
             if (
                 limit is not None
                 and used + reserved + round_allocation(size_bytes, block) > limit
@@ -821,7 +826,7 @@ class WorkspaceFiles:
                 "UPDATE workspace_file_uploads SET state='receiving',received_bytes=0,error='',lease_id=?,lease_until=?,updated_at=? WHERE upload_id=?",
                 (lease, time.time() + 120, time.time(), upload_id),
             )
-            used, reserved, limit, _, _ = self._capacity(conn, tenant_id, owner_id)
+            used, reserved, limit, _, _ = self._capacity(conn, tenant_id, owner_id, enforcement_only=True)
             if limit is not None and used + reserved > limit:
                 raise FileAdmissionError("Not enough storage to retry this file", 413)
         received, digest = 0, hashlib.sha256()
@@ -872,7 +877,7 @@ class WorkspaceFiles:
                 current = self._upload(conn, tenant_id, owner_id, upload_id)
                 if current["state"] != "receiving" or current["lease_id"] != lease:
                     raise FileAdmissionError("Upload was cancelled or replaced", 409)
-                used, reserved, limit, _, _ = self._capacity(conn, tenant_id, owner_id)
+                used, reserved, limit, _, _ = self._capacity(conn, tenant_id, owner_id, enforcement_only=True)
                 if limit is not None and used + reserved > limit:
                     raise FileAdmissionError(
                         "Storage filled during upload; retry after freeing space", 413
@@ -1807,17 +1812,15 @@ def logical_bytes(roots: list[Path]) -> int:
     unique_roots = sorted(
         {root.resolve(strict=False) for root in roots}, key=lambda root: len(root.parts)
     )
-    visited_roots: list[Path] = []
+    visited_roots: set[Path] = set()
     for root in unique_roots:
         if (
-            any(
-                root == parent or root.is_relative_to(parent)
-                for parent in visited_roots
-            )
+            root in visited_roots
+            or any(parent in visited_roots for parent in root.parents)
             or not root.is_dir()
         ):
             continue
-        visited_roots.append(root)
+        visited_roots.add(root)
         for current, directories, files in os.walk(root, followlinks=False):
             directories[:] = [
                 name for name in directories if not (Path(current) / name).is_symlink()

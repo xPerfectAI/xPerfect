@@ -16,9 +16,9 @@ from typing import Callable
 
 
 try:
-    from .agent_builder_control import conversation_controls_from_schema, conversation_interjection_supported, NativeConversationParts
+    from .agent_builder_control import conversation_controls_from_schema, conversation_interjection_supported, NativeConversationParts, minimal_conversation_output_schema
 except ImportError:
-    from agent_builder_control import conversation_controls_from_schema, conversation_interjection_supported, NativeConversationParts
+    from agent_builder_control import conversation_controls_from_schema, conversation_interjection_supported, NativeConversationParts, minimal_conversation_output_schema
 
 
 class AcpError(RuntimeError):
@@ -253,6 +253,36 @@ class AcpClient:
         self.close()
 
 
+def _native_response_usage(usage):
+    """Project the latest model prompt, including cached input exactly once."""
+    if not isinstance(usage, dict):
+        return None
+    counts = [usage.get('input_tokens'), usage.get('output_tokens'),
+              usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0)]
+    if any(type(value) is not int or value < 0 for value in counts):
+        return None
+    input_tokens, output_tokens, cache_read, cache_create = counts
+    return {'prompt_tokens': input_tokens + cache_read + cache_create,
+            'completion_tokens': output_tokens,
+            'total_tokens': input_tokens + cache_read + cache_create + output_tokens}
+
+
+def _native_single_call_turn_usage(usage):
+    """A multi-call turn total cannot identify the latest prompt occupancy."""
+    if not isinstance(usage, dict) or type(usage.get('modelCalls')) is not int or usage['modelCalls'] != 1:
+        return None
+    counts = [usage.get('inputTokens'), usage.get('outputTokens'),
+              usage.get('cachedReadTokens', 0), usage.get('cacheCreationTokens', 0)]
+    if any(type(value) is not int or value < 0 for value in counts):
+        return None
+    input_tokens, output_tokens, cache_read, cache_create = counts
+    if cache_read + cache_create > input_tokens:
+        return None
+    # Native turn inputTokens already includes its cache counts; output includes reasoning.
+    return {'prompt_tokens': input_tokens, 'completion_tokens': output_tokens,
+            'total_tokens': input_tokens + output_tokens}
+
+
 class GrokSession:
     def __init__(self, client, *, event=None, reviewed_interject=False, max_output_chars=8_000_000):
         self.client = client
@@ -267,15 +297,21 @@ class GrokSession:
         self._model_changed = False
         self._prompt_lock = Lock()
         self._collecting = False
+        self.native_usage = None
+        self._native_response_usage_seen = False
         self._chars = 0
         self._output_error = None
         self._conversation_parts = NativeConversationParts(None, None)
         self._interject_schema_supported = True
         self.cancel_requested = False
         self._native_tools_disabled = False
+        self._required_mcp_servers = ()
         self._native_tools_verified = False
         self._native_tools_invalid = False
         self._native_tools_manifest = Event()
+        self._native_mcp_observation = Event()
+        self._native_mcp_initialized = False
+        self._preopen_mcp_initialized = set()
         self._native_tools_lock = Lock()
         self._preopen_tools_manifests = {}
         self._preopen_tools_manifest_count = 0
@@ -283,7 +319,9 @@ class GrokSession:
 
     def _record_native_tools_manifest(self, params, update):
         kind = update.get('sessionUpdate')
-        if not self._native_tools_disabled or kind not in ('available_commands_update', 'tool_call', 'tool_call_update'):
+        if kind not in ('available_commands_update', 'tool_call', 'tool_call_update'):
+            return
+        if not self._native_tools_disabled and (not self._required_mcp_servers or kind != 'available_commands_update'):
             return
         identity = params.get('sessionId')
         if not isinstance(identity, str) or not identity:
@@ -291,6 +329,24 @@ class GrokSession:
         meta = update.get('_meta')
         tools = meta.get('tools') if isinstance(meta, dict) else None
         empty = kind == 'available_commands_update' and isinstance(tools, list) and tools == []
+        if not self._native_tools_disabled:
+            ready = isinstance(tools, list) and all(isinstance(tool, str) for tool in tools) and all(
+                any(tool.startswith(name + '__') and len(tool) > len(name) + 2 for tool in tools)
+                for name in self._required_mcp_servers)
+            with self._native_tools_lock:
+                if self.session_id is None:
+                    self._preopen_tools_manifest_count += 1
+                    if self._preopen_tools_manifest_count <= 32:
+                        self._preopen_tools_manifests[identity] = ready
+                    return
+                if identity != self.session_id:
+                    return
+                if ready:
+                    self._native_tools_manifest.set()
+                    self._native_mcp_observation.set()
+                else:
+                    self._native_tools_manifest.clear()
+            return
         with self._native_tools_lock:
             if self.session_id is None:
                 self._preopen_tools_manifest_count += 1
@@ -310,6 +366,16 @@ class GrokSession:
 
     def _bind_native_tools_manifest(self):
         with self._native_tools_lock:
+            if not self._native_tools_disabled:
+                if self._preopen_tools_manifests.get(self.session_id) is True:
+                    self._native_tools_manifest.set()
+                    self._native_mcp_observation.set()
+                if self.session_id in self._preopen_mcp_initialized:
+                    self._native_mcp_initialized = True
+                    self._native_mcp_observation.set()
+                self._preopen_mcp_initialized.clear()
+                self._preopen_tools_manifests.clear()
+                return
             if self.session_id in self._preopen_tools_manifests:
                 self._native_tools_invalid = (
                     self._native_tools_invalid or not self._preopen_tools_manifests[self.session_id])
@@ -323,8 +389,98 @@ class GrokSession:
             if self._native_tools_invalid:
                 raise AcpError('Restricted Grok exposed an invalid or nonempty native tool inventory')
 
+    def _require_mcp_tools(self):
+        if not self._required_mcp_servers:
+            return
+        deadline = time.monotonic() + 30
+        self._native_mcp_observation.wait(timeout=30)
+        if self.cancel_requested:
+            raise AcpError('Grok turn was cancelled before prompting', stop_reason='cancelled')
+        ready = self._native_tools_manifest.is_set()
+        if not ready and self._native_mcp_initialized:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    envelope = self.client.request('_x.ai/mcp/list',
+                        {'sessionId': self.session_id, 'cache': True}, timeout=remaining)
+                    ready = self._native_registry_has_required_tools(envelope)
+                except AcpError:
+                    ready = False
+                if not ready and not self.cancel_requested:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        ready = self._native_tools_manifest.wait(timeout=remaining)
+        if self.cancel_requested:
+            raise AcpError('Grok turn was cancelled before prompting', stop_reason='cancelled')
+        if not ready:
+            raise AcpError('Configured Grok MCP tools did not become ready before prompting',
+                           code=-32000, stop_reason='mcp_unavailable')
+
+    def _native_registry_has_required_tools(self, envelope):
+        if not isinstance(envelope, dict) or envelope.get('error') is not None:
+            return False
+        result = envelope.get('result')
+        if not isinstance(result, dict) or result.get('sessionMcpResolved') is not True:
+            return False
+        servers = result.get('servers')
+        if not isinstance(servers, list):
+            return False
+        for name in self._required_mcp_servers:
+            matching = [server for server in servers if isinstance(server, dict) and server.get('name') == name]
+            if len(matching) != 1:
+                return False
+            state = matching[0].get('session')
+            if (not isinstance(state, dict) or state.get('enabled') is not True
+                    or state.get('status') != 'ready' or state.get('authRequired') is True
+                    or state.get('setupRequired') is True):
+                return False
+            tools = state.get('tools')
+            if (not isinstance(tools, list) or not tools or
+                    any(not isinstance(tool, dict) or not isinstance(tool.get('name'), str)
+                        or not tool['name'].strip() or type(tool.get('enabled')) is not bool for tool in tools)
+                    or not any(tool['enabled'] for tool in tools)):
+                return False
+        if self.event:
+            self.event({'type': 'grok.mcp.registry_ready', 'session_id': self.session_id,
+                        'required_server_count': len(self._required_mcp_servers)})
+        return True
+
     def _update(self, method, params):
         if not isinstance(params, dict):
+            return
+        if method in ('_x.ai/mcp/server_status', '_x.ai/mcp/init_progress',
+                      '_x.ai/mcp_initialized', '_x.ai/mcp/tools_changed'):
+            identity = params.get('sessionId')
+            count = params.get('mcpToolCount')
+            if (method == '_x.ai/mcp_initialized' and self._required_mcp_servers
+                    and isinstance(identity, str) and identity
+                    and type(count) is int and 0 <= count <= 2**53 - 1):
+                if self.session_id is None:
+                    if len(self._preopen_mcp_initialized) < 32:
+                        self._preopen_mcp_initialized.add(identity)
+                elif identity == self.session_id:
+                    self._native_mcp_initialized = True
+                    self._native_mcp_observation.set()
+            if not self.session_id or identity != self.session_id or not self.event:
+                return
+            observation = {'type': 'grok.mcp.lifecycle', 'session_id': self.session_id, 'method': method}
+            server = params.get('name') if method == '_x.ai/mcp/server_status' else params.get('serverName')
+            if server is not None:
+                if server not in self._required_mcp_servers:
+                    return
+                observation['server'] = server
+            if method == '_x.ai/mcp/server_status':
+                status = params.get('status')
+                if status not in ('ready', 'initializing', 'unavailable', 'needsAuth', 'needsauth'):
+                    return
+                observation['status'] = status
+            for key in ('total', 'connected', 'mcpToolCount', 'elapsedMs'):
+                value = params.get(key)
+                if type(value) is int and 0 <= value <= 2**53 - 1:
+                    observation[key] = value
+            if isinstance(params.get('tools'), list):
+                observation['tool_count'] = len(params['tools'])
+            self.event(observation)
             return
         if method not in ('session/update', '_x.ai/session/update', '_x.ai/session_notification'):
             return
@@ -346,6 +502,12 @@ class GrokSession:
         if self._collecting and not self._output_error:
             try:
                 self._conversation_parts.update(update, params.get('_meta'))
+                kind = update.get('sessionUpdate')
+                if kind == 'response_completed':
+                    self.native_usage = _native_response_usage(update.get('usage'))
+                    self._native_response_usage_seen = isinstance(update.get('usage'), dict)
+                elif kind == 'turn_completed' and not self._native_response_usage_seen:
+                    self.native_usage = _native_single_call_turn_usage(update.get('usage'))
             except ValueError as exc:
                 self._output_error = AcpError(str(exc))
         content = update.get('content')
@@ -363,11 +525,26 @@ class GrokSession:
         return next((option for option in state.get('configOptions', [])
                      if isinstance(option, dict) and option.get('id') == config_id), None)
 
-    def open(self, *, cwd, model, session_id=None, effort=None, mcp_servers=None, auth_method=None, rules=None, system_prompt_override=None, yolo_mode=None, native_tools_disabled=False):
+    def open(self, *, cwd, model, session_id=None, effort=None, mcp_servers=None, required_mcp_servers=None, auth_method=None, rules=None, system_prompt_override=None, yolo_mode=None, native_tools_disabled=False):
         self.requested_model = model
         if not isinstance(native_tools_disabled, bool):
             raise AcpError('Grok native tool restriction must be a boolean')
         self._native_tools_disabled = native_tools_disabled
+        self._required_mcp_servers = ()
+        if required_mcp_servers:
+            names = [server.get('name') for server in mcp_servers or [] if isinstance(server, dict)]
+            if (native_tools_disabled or not isinstance(required_mcp_servers, list)
+                    or any(not isinstance(name, str) or not name or name != name.strip()
+                           or name not in names for name in required_mcp_servers)):
+                raise AcpError('Required Grok MCP server identity is not configured')
+            self._required_mcp_servers = tuple(dict.fromkeys(required_mcp_servers))
+            with self._native_tools_lock:
+                self._native_tools_manifest.clear()
+                self._native_mcp_observation.clear()
+                self._native_mcp_initialized = False
+                self._preopen_mcp_initialized.clear()
+                self._preopen_tools_manifests.clear()
+                self._preopen_tools_manifest_count = 0
         if native_tools_disabled:
             if session_id or mcp_servers:
                 raise AcpError('Restricted Grok requires a fresh session without MCP servers')
@@ -431,8 +608,8 @@ class GrokSession:
         if not isinstance(actual_id, str) or not actual_id or (session_id and actual_id != session_id):
             raise AcpError('Grok native session identity mismatch')
         self.session_id = actual_id
+        self._bind_native_tools_manifest()
         if native_tools_disabled:
-            self._bind_native_tools_manifest()
             self._require_empty_native_tools()
         model_option = self._options(state, 'model') or {}
         actual_model = state.get('models', {}).get('currentModelId') or model_option.get('currentValue')
@@ -459,6 +636,10 @@ class GrokSession:
                 # the pinned authority before any user turn. Restricted setup
                 # already does that in its final inventory reload; retain this
                 # reload when the selection response omits effort options.
+                if self._required_mcp_servers:
+                    self._native_tools_manifest.clear()
+                    self._native_mcp_observation.clear()
+                    self._native_mcp_initialized = False
                 reloaded = self.client.request('session/load', {
                     **params, 'sessionId': self.session_id,
                     '_meta': {**params.get('_meta', {}), 'noReplay': True}})
@@ -507,11 +688,21 @@ class GrokSession:
             if self.event:
                 self.event({'type': 'grok.native_tools.verified', 'session_id': self.session_id,
                             'native_tools': False, 'function_tool_count': 0})
+        self._require_mcp_tools()
         self.session_state = state
         self.configured_model = model
         return self.session_id
 
-    def prompt(self, instruction, *, timeout=None, output_schema=None):
+    def delivery_disposition_ranges(self):
+        """Return native-derived delivery choices for the completed authored result."""
+        return self._conversation_parts.delivery_disposition_ranges()
+
+    def prompt(self, instruction, *, timeout=None, output_schema=None, minimal_wire_output=False):
+        if type(minimal_wire_output) is not bool:
+            raise AcpError('Grok output constraint mode must be a boolean')
+        if minimal_wire_output and (self._native_tools_disabled or not isinstance(output_schema, dict)
+                                     or not any(conversation_controls_from_schema(output_schema))):
+            raise AcpError('Grok minimal-wire output contract requires native tools and declared controls')
         if not self.session_id:
             raise AcpError('Grok session is not initialized')
         if self._native_tools_disabled and (not self._native_tools_verified or self._native_tools_invalid):
@@ -520,6 +711,7 @@ class GrokSession:
             raise AcpError('Grok session changed the exact configured model')
         if self.cancel_requested:
             raise AcpError('Grok turn was cancelled before prompting', stop_reason='cancelled')
+        self._require_mcp_tools()
         if not self._prompt_lock.acquire(blocking=False):
             raise AcpError('Grok session already has an active prompt')
         try:
@@ -528,12 +720,15 @@ class GrokSession:
             self._chars, self._output_error = 0, None
             self._conversation_parts = NativeConversationParts(*conversation_controls_from_schema(output_schema))
             self._interject_schema_supported = conversation_interjection_supported(output_schema)
+            self.native_usage = None
+            self._native_response_usage_seen = False
             self._collecting = True
             params = {'sessionId':self.session_id, 'prompt':[{'type':'text','text':instruction}]}
             if output_schema is not None:
                 if not isinstance(output_schema, dict):
                     raise AcpError('Grok output schema must be an object')
-                params['_meta'] = {'outputSchema': output_schema}
+                params['_meta'] = {'outputSchema': (minimal_conversation_output_schema(output_schema)
+                    if minimal_wire_output else output_schema)}
             result = self.client.request('session/prompt', params, timeout=timeout)
             if self._model_changed:
                 raise AcpError('Grok session changed the exact configured model')
@@ -554,6 +749,8 @@ class GrokSession:
 
     def cancel(self):
         self.cancel_requested = True
+        self._native_tools_manifest.set()
+        self._native_mcp_observation.set()
         if self.session_id:
             self.client.notify('session/cancel', {'sessionId':self.session_id})
 

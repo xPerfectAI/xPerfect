@@ -1106,8 +1106,13 @@ def test_paused_child_stop_uses_exact_work_stop_and_survives_reload(coordinator)
     control = Control(action='stop', run_id=run['run_id'], idempotency_key='stop-paused')
     with pytest.raises(CoordinatorConflict, match='not accepted'):
         coordinator.control('local', 'owner', cid, 'a', control)
+    assert coordinator._goal(cid, 'a')['intent_state'] == 'cancelled'
+    assert coordinator.goal_snapshot('local', 'owner', cid, 'a')['state'] == 'paused'
+    reopened = CoordinatorService(coordinator.store, coordinator.service, Provider())
+    assert reopened.snapshot('local', 'owner', cid)['goals'][0]['state'] == 'paused'
     pending = coordinator.control('local', 'owner', cid, 'a', control)
     assert pending['confirmation_pending'] is True
+    assert pending['state'] == 'paused'
     assert (coordinator.store.get_run(run['run_id']) or {})['state'] == 'paused'
     result = coordinator.control('local', 'owner', cid, 'a', control)
     assert result['state'] == 'cancelled'
@@ -1386,7 +1391,7 @@ def test_result_wake_carries_exact_small_output_and_marks_large_remainder(coordi
     assert result['sha256'] == hashlib.sha256(output.encode()).hexdigest()
 
 
-def test_result_wake_waits_for_dispatched_sibling_to_release_account(coordinator):
+def test_result_wake_does_not_wait_for_unrelated_dispatched_sibling(coordinator):
     from workers_projects_runtime.coordinator import canonical, now
 
     cid = create(coordinator)
@@ -1406,11 +1411,12 @@ def test_result_wake_waits_for_dispatched_sibling_to_release_account(coordinator
                      (worker['worker_id'], run['run_id'], cid))
         conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
                      (cid, 'result_available', 'run-a', canonical({'goal_id':'a','run_id':'run-a','state':'completed'}), now()))
-    assert coordinator.queue_result_turn('local', 'owner', cid) is None
+    turn_id = coordinator.queue_result_turn('local', 'owner', cid)
+    assert turn_id.startswith('results-')
     with coordinator.store._connect() as conn:
-        assert conn.execute("SELECT delivered_turn_id FROM coordinator_events WHERE conversation_id=?", (cid,)).fetchone()[0] == ''
-        conn.execute("UPDATE runs SET state='completed',ended_at=? WHERE run_id=?", (now(), run['run_id']))
-    assert coordinator.queue_result_turn('local', 'owner', cid).startswith('results-')
+        assert conn.execute("SELECT delivered_turn_id FROM coordinator_events WHERE conversation_id=?", (cid,)).fetchone()[0] == turn_id
+    assert coordinator.store.get_run(run['run_id'])['state'] == 'queued'
+    assert coordinator.queue_result_turn('local', 'owner', cid) is None
 
 
 def test_foreground_run_result_does_not_wake_a_duplicate_reply(coordinator):
@@ -1621,6 +1627,9 @@ def test_native_tools_all_have_canonical_descriptions(coordinator):
     expected = coordinator_tool_manifest()['tools']
     assert {tool.name:tool.description for tool in tools} == expected
     assert 'goal_ids' in next(t for t in tools if t.name=='coordinator_handle').inputSchema['properties']
+    assert 'run_id' in next(t for t in tools if t.name=='coordinator_result').inputSchema['properties']
+    control = next(t for t in tools if t.name=='coordinator_control').inputSchema
+    assert set(control['$defs']['Control']['properties']['action']['enum']) == {'queue','message','steer','pause','resume','stop','retry','dismiss'}
 
 
 def test_future_coordinator_schema_is_rejected_without_downgrade(coordinator):
@@ -1913,3 +1922,568 @@ def test_readiness_reports_what_a_new_conversation_would_meet_and_creates_nothin
     assert client.get('/v1/coordinator/readiness').json()['default'] == {'available': True, 'code': 'ready'}
     with coordinator.store._connect() as conn:
         assert conn.execute('SELECT COUNT(*) FROM coordinator_conversations').fetchone()[0] == 0
+
+
+@pytest.fixture
+def delegated_coordinator(tmp_path, request):
+    store = Store(tmp_path / 'native-actions.sqlite3')
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    service.start_assigned_run = lambda worker_id: None
+    service._ensure_worker_processor = lambda worker_id: None
+    core = CoordinatorService(store, service, Provider())
+    cid = create(core)
+    core.accept_turn('local', 'owner', cid, 'turn', 'Independent goals',
+                     [Goal(id='child', text='Continue this exact work'),
+                      Goal(id='sibling', text='Keep this separate')])
+    work = store.reserve_delegation(
+        tenant_id='local', owner_id='owner', idempotency_key='native-action-source',
+        request_digest='native-action-source-digest', origin_ref='native-action-origin',
+        title='Exact child', goal='Continue this exact work', instruction='Original exact task',
+        origin_surface='coordinator', worker_name='Child', worker_role='research',
+        profile='openclaw-general', backend='openclaw', runtime='openclaw-stub',
+        model='stub-model', execution_mode='docker',
+    )
+    initial_state = getattr(getattr(request.node, 'callspec', None), 'params', {}).get('source_state', 'completed')
+    store.update_run(work['run_id'], state='queued' if initial_state == 'running' else initial_state,
+                     output_text='Original evidence',
+                     started_at='2026-09-23T00:00:00+00:00' if initial_state == 'completed' else None)
+    with store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET work_ref=?,worker_id=?,run_id=? "
+                     "WHERE conversation_id=? AND goal_id='child'",
+                     (work['work_ref'], work['worker_id'], work['run_id'], cid))
+    yield core, cid, work
+    service.shutdown()
+    store.close()
+
+
+@pytest.mark.parametrize('action', ['queue', 'message'])
+def test_native_queen_follow_up_binds_before_start_and_replays_exact_receipt(delegated_coordinator, action):
+    core, cid, work = delegated_coordinator
+    sibling = core.goal_snapshot('local', 'owner', cid, 'sibling')
+    starts = []
+    def start(worker_id):
+        goal = core.goal_snapshot('local', 'owner', cid, 'child')
+        current = core.store.get_delegation(work['work_ref'], tenant_id='local', owner_id='owner')
+        assert goal['run_id'] == current['current_run_id']
+        assert goal['run_id'] != work['run_id']
+        assert core.service._coordinator_retry_dispatch_ready(core.store.get_worker(worker_id), core.store.get_run(goal['run_id']))
+        starts.append(goal['run_id'])
+    core.service.start_assigned_run = start
+    control = Control(action=action, run_id=work['run_id'], idempotency_key='one-follow-up',
+                      message='Inspect the saved evidence and finish the original goal')
+    first = core.control('local', 'owner', cid, 'child', control)
+    assert first['action'] == action
+    assert first['status'] == 'queued'
+    assert first['delivery_mode'] == ('queued_next_boundary' if action == 'message' else 'queued')
+    assert core.control('local', 'owner', cid, 'child', control) == first
+    assert starts == [first['run_id']]
+    assert core.goal_snapshot('local', 'owner', cid, 'sibling') == sibling
+    assert core.store.get_run(work['run_id'])['output_text'] == 'Original evidence'
+    with pytest.raises(CoordinatorConflict, match='stale or unrelated'):
+        core.control('local', 'owner', cid, 'child', Control(
+            action=action, run_id=work['run_id'], idempotency_key='stale-follow-up', message='More'))
+
+
+@pytest.mark.parametrize('action', ['queue', 'message'])
+def test_native_queen_follow_up_recovers_reserved_effect_without_second_run(delegated_coordinator, monkeypatch, action):
+    core, cid, work = delegated_coordinator
+    original = core._bind_goal_replacement
+    def interrupted(*args, **kwargs):
+        raise RuntimeError('synthetic crash before attachment')
+    monkeypatch.setattr(core, '_bind_goal_replacement', interrupted)
+    control = Control(action=action, run_id=work['run_id'], idempotency_key='recover-effect', message='Continue')
+    with pytest.raises(RuntimeError, match='synthetic crash'):
+        core.control('local', 'owner', cid, 'child', control)
+    effect_key = f'coordinator-{action}:{cid}:child:recover-effect'
+    effect_id = core.service.active_work_effect_run_id(work, idempotency_key=effect_key)
+    replacement = core.store.get_run(effect_id)
+    assert replacement['state'] == 'queued'
+    worker = core.store.get_worker(work['worker_id'])
+    assert not core.service._coordinator_retry_dispatch_ready(worker, replacement)
+    monkeypatch.setattr(core, '_bind_goal_replacement', original)
+    core.recover_retry_actions('local', 'owner', cid)
+    response = core.control('local', 'owner', cid, 'child', control)
+    assert response['run_id'] == effect_id
+    assert core.service._coordinator_retry_dispatch_ready(worker, replacement)
+    with core.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM runs WHERE worker_id=?', (work['worker_id'],)).fetchone()[0] == 2
+
+
+def test_native_queen_dismiss_preserves_result_history_and_owner_scope(delegated_coordinator):
+    core, cid, work = delegated_coordinator
+    control = Control(action='dismiss', run_id=work['run_id'], idempotency_key='dismiss-once')
+    result = core.control('local', 'owner', cid, 'child', control)
+    assert result['dismissed'] is True
+    assert core.control('local', 'owner', cid, 'child', control) == result
+    assert core.read_result('local', 'owner', cid, 'child')['output_text'] == 'Original evidence'
+    with pytest.raises(CoordinatorScopeError):
+        core.control('local', 'other-owner', cid, 'child', control)
+
+
+@pytest.mark.parametrize('action', ['queue', 'message'])
+def test_native_queen_empty_guidance_has_no_durable_action(delegated_coordinator, action):
+    core, cid, work = delegated_coordinator
+    with pytest.raises(CoordinatorConflict, match='Guidance is required'):
+        core.control('local', 'owner', cid, 'child', Control(
+            action=action, run_id=work['run_id'], idempotency_key='empty', message='  '))
+    with core.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM coordinator_actions WHERE conversation_id=?', (cid,)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('action', ['queue', 'message'])
+@pytest.mark.parametrize('source_state', ['queued', 'running', 'paused'])
+def test_native_queen_follow_up_preserves_existing_action_lifecycle(delegated_coordinator, action, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_run(work['run_id'], state='queued' if source_state == 'running' else source_state,
+                          output_text='Existing progress')
+    if source_state == 'running':
+        _admit_native_control_source(core, work)
+    assert core.store.get_run(work['run_id'])['state'] == source_state
+    if source_state == 'paused':
+        core.store.update_worker_state(work['worker_id'], 'paused')
+    response = core.control('local', 'owner', cid, 'child', Control(
+        action=action, run_id=work['run_id'], idempotency_key='lifecycle', message='Additional guidance'))
+    assert response['run_id'] != work['run_id']
+    assert response['state'] == 'queued'
+    previous = core.store.get_run(work['run_id'])
+    # Message coalesces a not-yet-started run; Queue and already active work stay intact.
+    assert previous['state'] == ('cancelled' if action == 'message' and source_state == 'queued' else source_state)
+    if source_state == 'paused':
+        assert core.store.get_worker(work['worker_id'])['state'] == 'paused'
+
+
+def test_native_queen_dismiss_rejects_active_work(delegated_coordinator):
+    core, cid, work = delegated_coordinator
+    core.store.update_run(work['run_id'], state='queued')
+    with pytest.raises(CoordinatorConflict, match='unavailable'):
+        core.control('local', 'owner', cid, 'child', Control(
+            action='dismiss', run_id=work['run_id'], idempotency_key='active-dismiss'))
+    assert not core.goal_snapshot('local', 'owner', cid, 'child')['dismissed']
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_paused_control_targets_source_and_preserves_queued_followups(delegated_coordinator, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    first = core.control('local', 'owner', cid, 'child', Control(
+        action='message', run_id=work['run_id'], idempotency_key='paused-message', message='Guidance'))
+    assert first['control_run_id'] == work['run_id']
+    assert first['control_state'] == 'paused' and first['run_id'] != work['run_id']
+    second = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=first['control_run_id'], idempotency_key='paused-queue', message='Later work'))
+    assert second['run_id'] not in {work['run_id'], first['run_id']}
+    worker = core.store.get_worker(work['worker_id'])
+    for followup in (first, second):
+        run = core.store.get_run(followup['run_id'])
+        assert run['state'] == 'queued'
+        assert core.service._coordinator_retry_dispatch_ready(worker, run)
+    with pytest.raises(CoordinatorConflict, match='stale or unrelated'):
+        core.control('local', 'owner', cid, 'child', Control(
+            action='resume', run_id=second['run_id'], idempotency_key='wrong-queued-target'))
+    resumes = []
+    original_resume = core.service.resume_worker
+    def resume(worker_id, **kwargs):
+        resumes.append(kwargs['run_id'])
+        return original_resume(worker_id, **kwargs)
+    core.service.resume_worker = resume
+    request = Control(action='resume', run_id=second['control_run_id'], idempotency_key='resume-exact-source')
+    response = core.control('local', 'owner', cid, 'child', request)
+    assert resumes == [work['run_id']]
+    assert core.store.get_worker(work['worker_id'])['state'] != 'paused'
+    assert core.store.get_run(work['run_id'])['state'] == 'queued'
+    assert core.goal_snapshot('local', 'owner', cid, 'child')['run_id'] == second['run_id']
+    assert core.control('local', 'owner', cid, 'child', request) == response
+    assert resumes == [work['run_id']]
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_interleaved_followups_save_their_own_effect_receipts(delegated_coordinator, monkeypatch, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    snapshot = core.goal_snapshot
+    later = []
+    def interleaved(*args):
+        current = core._goal(cid, 'child')
+        if not later and current['run_id'] != work['run_id']:
+            later.append(None)
+            later[0] = core.control('local', 'owner', cid, 'child', Control(
+                action='queue', run_id=work['run_id'], idempotency_key='interleaved-second', message='Second'))
+        return snapshot(*args)
+    monkeypatch.setattr(core, 'goal_snapshot', interleaved)
+    first = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=work['run_id'], idempotency_key='interleaved-first', message='First'))
+    assert first['run_id'] != later[0]['run_id']
+    assert snapshot('local', 'owner', cid, 'child')['run_id'] == later[0]['run_id']
+    for receipt in (first, later[0]):
+        assert core.service._coordinator_retry_dispatch_ready(
+            core.store.get_worker(work['worker_id']), core.store.get_run(receipt['run_id']))
+        assert core.read_result('local', 'owner', cid, 'child', run_id=receipt['run_id'])['run_id'] == receipt['run_id']
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+@pytest.mark.parametrize('crash_after_attachment', [False, True])
+@pytest.mark.parametrize('same_reservation_time', [False, True])
+def test_native_queen_pending_older_receipt_never_rewinds_later_success(
+        delegated_coordinator, monkeypatch, source_state, crash_after_attachment, same_reservation_time):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    bind = core._bind_goal_replacement
+    def crash(*args, **kwargs):
+        if crash_after_attachment:
+            bind(*args, **kwargs)
+        raise RuntimeError('Synthetic receipt crash')
+    later_key = f'coordinator-queue:{cid}:child:later-success'
+    later_id = core.service.active_work_effect_run_id(work, idempotency_key=later_key)
+    for ordinal in range(100):
+        key = f'pending-older-{ordinal}'
+        effect_id = core.service.active_work_effect_run_id(work, idempotency_key=f'coordinator-queue:{cid}:child:{key}')
+        if effect_id > later_id:
+            break
+    assert effect_id > later_id  # Hash lexical order must never become action order.
+    request = Control(action='queue', run_id=work['run_id'], idempotency_key=key, message='First')
+    monkeypatch.setattr(core, '_bind_goal_replacement', crash)
+    with pytest.raises(RuntimeError, match='Synthetic receipt'):
+        core.control('local', 'owner', cid, 'child', request)
+    monkeypatch.setattr(core, '_bind_goal_replacement', bind)
+    later = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=work['run_id'], idempotency_key='later-success', message='Second'))
+    if same_reservation_time:
+        with core.store._connect() as conn:
+            conn.execute('UPDATE runs SET first_queued_at=? WHERE run_id=?',
+                         (core.store.get_run(later['run_id'])['first_queued_at'], effect_id))
+    wake_admission = []
+    start = core.service.start_assigned_run
+    def wake(worker_id):
+        wake_admission.append(core.service._coordinator_retry_dispatch_ready(
+            core.store.get_worker(worker_id), core.store.get_run(effect_id)))
+        return start(worker_id)
+    monkeypatch.setattr(core.service, 'start_assigned_run', wake)
+    recovered = core.control('local', 'owner', cid, 'child', request)
+    assert wake_admission == [True]
+    assert recovered['run_id'] != later['run_id']
+    assert core.goal_snapshot('local', 'owner', cid, 'child')['run_id'] == later['run_id']
+    assert core.control('local', 'owner', cid, 'child', request) == recovered
+    for receipt in (recovered, later):
+        assert core.read_result('local', 'owner', cid, 'child', run_id=receipt['run_id'])['run_id'] == receipt['run_id']
+        assert core.service._coordinator_retry_dispatch_ready(
+            core.store.get_worker(work['worker_id']), core.store.get_run(receipt['run_id']))
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_started_predecessor_pending_receipt_keeps_completed_evidence(delegated_coordinator, monkeypatch, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    bind = core._bind_goal_replacement
+    def crash(*args, **kwargs):
+        bind(*args, **kwargs)
+        raise RuntimeError('Synthetic receipt crash')
+    request = Control(action='queue', run_id=work['run_id'], idempotency_key='completed-before-save', message='First')
+    monkeypatch.setattr(core, '_bind_goal_replacement', crash)
+    with pytest.raises(RuntimeError):
+        core.control('local', 'owner', cid, 'child', request)
+    first_id = core._goal(cid, 'child')['run_id']
+    with core.store._connect() as conn:
+        conn.execute("UPDATE runs SET state='completed',started_at=first_queued_at,output_text='Completed earlier evidence' WHERE run_id=?", (first_id,))
+    monkeypatch.setattr(core, '_bind_goal_replacement', bind)
+    later = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=work['run_id'], idempotency_key='after-completed-before-save', message='Second'))
+    recovered = core.control('local', 'owner', cid, 'child', request)
+    assert recovered['run_id'] == first_id and recovered['state'] == recovered['status'] == 'completed'
+    assert core._goal(cid, 'child')['run_id'] == later['run_id']
+    assert core.read_result('local', 'owner', cid, 'child', run_id=first_id)['output_text'] == 'Completed earlier evidence'
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_pending_newer_receipt_can_bind_after_earlier_success(delegated_coordinator, monkeypatch, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    earlier = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=work['run_id'], idempotency_key='earlier-success', message='First'))
+    bind = core._bind_goal_replacement
+    def crash(*args, **kwargs):
+        raise RuntimeError('Synthetic attachment crash')
+    request = Control(action='queue', run_id=work['run_id'], idempotency_key='pending-newer', message='Second')
+    monkeypatch.setattr(core, '_bind_goal_replacement', crash)
+    with pytest.raises(RuntimeError, match='Synthetic attachment'):
+        core.control('local', 'owner', cid, 'child', request)
+    monkeypatch.setattr(core, '_bind_goal_replacement', bind)
+    recovered = core.control('local', 'owner', cid, 'child', request)
+    assert recovered['run_id'] != earlier['run_id']
+    assert core.goal_snapshot('local', 'owner', cid, 'child')['run_id'] == recovered['run_id']
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+@pytest.mark.parametrize('phase', ['before_reservation', 'before_binding', 'bind_before_receipt'])
+def test_native_queen_concurrent_followups_keep_valid_guidance_and_latest_order(delegated_coordinator, monkeypatch, source_state, phase):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    bind = core._bind_goal_replacement
+    execute = core.service.execute_active_work_action
+    later = []
+    second_request = Control(action='queue', run_id=work['run_id'], idempotency_key='concurrent-second', message='Second')
+    if phase == 'before_reservation':
+        def execute_first(*args, **kwargs):
+            monkeypatch.setattr(core.service, 'execute_active_work_action', execute)
+            later.append(core.control('local', 'owner', cid, 'child', second_request))
+            return execute(*args, **kwargs)
+        monkeypatch.setattr(core.service, 'execute_active_work_action', execute_first)
+    else:
+        def bind_first(*args, **kwargs):
+            monkeypatch.setattr(core, '_bind_goal_replacement', bind)
+            if phase == 'bind_before_receipt':
+                def execute_second(*second_args, **second_kwargs):
+                    bind(*args, **kwargs)  # A is attached, but its receipt is still pending.
+                    monkeypatch.setattr(core.service, 'execute_active_work_action', execute)
+                    return execute(*second_args, **second_kwargs)
+                monkeypatch.setattr(core.service, 'execute_active_work_action', execute_second)
+            later.append(core.control('local', 'owner', cid, 'child', second_request))
+            if phase != 'bind_before_receipt':
+                bind(*args, **kwargs)
+        monkeypatch.setattr(core, '_bind_goal_replacement', bind_first)
+    first_request = Control(action='queue', run_id=work['run_id'], idempotency_key='concurrent-first', message='First')
+    first = core.control('local', 'owner', cid, 'child', first_request)
+    newest = first if phase == 'before_reservation' else later[0]
+    assert core._goal(cid, 'child')['run_id'] == newest['run_id']
+    assert core.store.get_delegation(work['work_ref'], tenant_id='local', owner_id='owner')['current_run_id'] == newest['run_id']
+    for request, receipt in ((first_request, first), (second_request, later[0])):
+        assert core.store.get_run(receipt['run_id'])['state'] == 'queued'
+        assert core.control('local', 'owner', cid, 'child', request) == receipt
+        assert core.read_result('local', 'owner', cid, 'child', run_id=receipt['run_id'])['run_id'] == receipt['run_id']
+        assert core.service._coordinator_retry_dispatch_ready(
+            core.store.get_worker(work['worker_id']), core.store.get_run(receipt['run_id']))
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_concurrent_same_worker_unrelated_current_cannot_authorize_attachment(delegated_coordinator, monkeypatch, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    unrelated = core.store.create_run(work['worker_id'], work['project_id'], 'Unrelated work')
+    bind = core._bind_goal_replacement
+    def move_unrelated(*args, **kwargs):
+        with core.store._connect() as conn:
+            conn.execute("UPDATE coordinator_goals SET run_id=? WHERE conversation_id=? AND goal_id='child'", (unrelated['run_id'], cid))
+            conn.execute('UPDATE delegations SET current_run_id=? WHERE work_ref=?', (unrelated['run_id'], work['work_ref']))
+        return bind(*args, **kwargs)
+    monkeypatch.setattr(core, '_bind_goal_replacement', move_unrelated)
+    with pytest.raises(CoordinatorConflict, match='Goal changed before'):
+        core.control('local', 'owner', cid, 'child', Control(
+            action='queue', run_id=work['run_id'], idempotency_key='unrelated-current', message='Valid guidance'))
+    assert core._goal(cid, 'child')['run_id'] == unrelated['run_id']
+    assert core.store.get_run(unrelated['run_id'])['state'] == 'queued'
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_stop_controls_paused_source_and_cancels_only_its_pending_followups(delegated_coordinator, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    message = core.control('local', 'owner', cid, 'child', Control(
+        action='message', run_id=work['run_id'], idempotency_key='message-before-stop', message='Guidance'))
+    followup = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=message['control_run_id'], idempotency_key='before-stop', message='Later'))
+    sibling = core.goal_snapshot('local', 'owner', cid, 'sibling')
+    request = Control(action='stop', run_id=followup['control_run_id'], idempotency_key='stop-exact-source')
+    stopped = core.control('local', 'owner', cid, 'child', request)
+    assert stopped['state'] == 'cancelled'
+    assert not stopped.get('confirmation_pending')
+    assert core.store.get_run(work['run_id'])['state'] in {'cancelled', 'interrupted'}
+    assert core._goal(cid, 'child')['intent_state'] == 'cancelled'
+    for effect in (message, followup):
+        assert core.store.get_run(effect['run_id'])['state'] == 'cancelled'
+        assert not core.service._coordinator_retry_dispatch_ready(
+            core.store.get_worker(work['worker_id']), core.store.get_run(effect['run_id']))
+    assert core.goal_snapshot('local', 'owner', cid, 'sibling') == sibling
+    assert core.control('local', 'owner', cid, 'child', request) == stopped
+    assert core.read_result('local', 'owner', cid, 'child', run_id=work['run_id'])['output_text'] == 'Original evidence'
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+@pytest.mark.parametrize('stop_pending', [False, True])
+def test_native_queen_unknown_stop_can_finish_with_fresh_exact_control(delegated_coordinator, monkeypatch, source_state, stop_pending):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    queued = core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=work['run_id'], idempotency_key='before-unknown-stop', message='Later'))
+    stop = core.service.stop_run
+    monkeypatch.setattr(core.service, 'stop_run', lambda *args, **kwargs: {
+        'accepted': stop_pending, 'confirmation_pending': stop_pending})
+    first_stop = Control(action='stop', run_id=work['run_id'], idempotency_key='unknown-stop')
+    if stop_pending:
+        pending = core.control('local', 'owner', cid, 'child', first_stop)
+        assert pending['confirmation_pending'] and pending['state'] == 'queued'
+        assert pending['control_state'] == 'paused' and pending['actions'] == ['stop']
+    else:
+        with pytest.raises(CoordinatorConflict, match='Exact Stop was not accepted'):
+            core.control('local', 'owner', cid, 'child', first_stop)
+    assert core._goal(cid, 'child')['intent_state'] == 'cancelled'
+    assert core.store.get_run(work['run_id'])['state'] == 'paused'
+    truthful = core.goal_snapshot('local', 'owner', cid, 'child')
+    assert truthful['state'] == 'queued' and truthful['control_state'] == 'paused'
+    assert truthful['actions'] == ['stop']
+    assert not core.service._coordinator_retry_dispatch_ready(
+        core.store.get_worker(work['worker_id']), core.store.get_run(queued['run_id']))
+    monkeypatch.setattr(core.service, 'stop_run', stop)
+    with pytest.raises(CoordinatorConflict, match='already stopped'):
+        core.control('local', 'owner', cid, 'child', Control(
+            action='resume', run_id=work['run_id'], idempotency_key='cannot-revive'))
+    request = Control(action='stop', run_id=work['run_id'], idempotency_key='finish-unknown-stop')
+    response = core.control('local', 'owner', cid, 'child', request)
+    assert response['state'] == 'cancelled' and not response.get('confirmation_pending')
+    assert core.store.get_run(work['run_id'])['state'] in {'cancelled', 'interrupted'}
+    assert core.store.get_run(queued['run_id'])['state'] == 'cancelled'
+    assert core.control('local', 'owner', cid, 'child', request) == response
+
+
+@pytest.mark.parametrize('source_state', ['paused'])
+def test_native_queen_unbound_cancelled_followup_cannot_be_recovered_as_queued(delegated_coordinator, monkeypatch, source_state):
+    core, cid, work = delegated_coordinator
+    core.store.update_worker_state(work['worker_id'], 'paused')
+    original = core._bind_goal_replacement
+    def lost_binding(*args, **kwargs):
+        core.store.update_run(args[-1], state='cancelled')
+        raise CoordinatorConflict('Synthetic lost binding')
+    monkeypatch.setattr(core, '_bind_goal_replacement', lost_binding)
+    control = Control(action='queue', run_id=work['run_id'], idempotency_key='lost-binding', message='Later')
+    with pytest.raises(CoordinatorConflict, match='Synthetic lost'):
+        core.control('local', 'owner', cid, 'child', control)
+    monkeypatch.setattr(core, '_bind_goal_replacement', original)
+    with pytest.raises(CoordinatorConflict, match='Reserved follow-up is terminal'):
+        core.control('local', 'owner', cid, 'child', control)
+    assert core.goal_snapshot('local', 'owner', cid, 'child')['run_id'] == work['run_id']
+
+
+@pytest.mark.parametrize('source_state', ['queued'])
+def test_native_queen_message_coalesced_reservation_has_no_result_wake(delegated_coordinator, source_state):
+    core, cid, work = delegated_coordinator
+    response = core.control('local', 'owner', cid, 'child', Control(
+        action='message', run_id=work['run_id'], idempotency_key='coalesce-pending',
+        message='Additional guidance'))
+    source = core.store.get_run(work['run_id'])
+    assert source['state'] == 'cancelled' and not source['started_at']
+    assert core.store.get_run(response['run_id'])['state'] == 'queued'
+    core.refresh('local', 'owner', cid)
+    with core.store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM coordinator_events WHERE conversation_id=? "
+                            "AND kind='result_available' AND identity=?",
+                            (cid, work['run_id'])).fetchone()[0] == 0
+    # Current terminal admission failures must still surface; this is not a general failure filter.
+    core.store.update_run(response['run_id'], state='failed', output_text='Admission unavailable')
+    core.refresh('local', 'owner', cid)
+    with core.store._connect() as conn:
+        event = conn.execute("SELECT payload_json FROM coordinator_events WHERE conversation_id=? "
+                             "AND kind='result_available' AND identity=?",
+                             (cid, response['run_id'])).fetchone()
+        assert event is not None
+
+
+@pytest.mark.parametrize('source_state', ['completed', 'failed'])
+@pytest.mark.parametrize('action', ['queue', 'message'])
+def test_native_queen_follow_up_keeps_source_result_and_exact_pagination(delegated_coordinator, action, source_state):
+    import json
+    core, cid, work = delegated_coordinator
+    output = 'Exact preserved evidence. ' * 1000
+    core.store.update_run(work['run_id'], output_text=output)
+    if source_state == 'failed':
+        assert not core.store.get_run(work['run_id'])['started_at']
+    response = core.control('local', 'owner', cid, 'child', Control(
+        action=action, run_id=work['run_id'], idempotency_key='preserve-source', message='Continue'))
+    assert core.goal_snapshot('local', 'owner', cid, 'child')['run_id'] == response['run_id']
+    # A pending original Queen turn still has priority. Complete its saved state without a provider run.
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=?", (cid,))
+    core.refresh('local', 'owner', cid)
+    turn = core.queue_result_turn('local', 'owner', cid)
+    assert turn.startswith('results-')
+    with core.store._connect() as conn:
+        evidence = json.loads(conn.execute('SELECT message FROM coordinator_turns WHERE conversation_id=? AND turn_id=?', (cid, turn)).fetchone()[0])
+    source = next(item for item in evidence['items'] if item['run_id'] == work['run_id'])
+    assert source['state'] == source_state
+    assert source['result']['output_text'] == output[:12000]
+    page = core.read_result('local', 'owner', cid, 'child', source['result']['next_offset'], 64000, work['run_id'])
+    assert page['output_text'] == output[12000:]
+    assert page['run_id'] == work['run_id']
+    assert core.store.get_run(response['run_id'])['state'] == 'queued'
+    assert core.queue_result_turn('local', 'owner', cid) is None
+    with pytest.raises(CoordinatorScopeError, match='Bound result unavailable'):
+        core.read_result('local', 'owner', cid, 'sibling', run_id=work['run_id'])
+    with pytest.raises(CoordinatorScopeError):
+        core.read_result('local', 'other-owner', cid, 'child', run_id=work['run_id'])
+
+
+def _admit_native_control_source(core, work):
+    # Use native claim/admit/invoke/start proof. update_run intentionally cannot invent running state.
+    worker_id = work['worker_id']
+    claimed = core.store.claim_next_queued_run(worker_id, executor_id='native-controls')
+    assert claimed is not None
+    lease = core.store.acquire_host_run_lease(runtime_family='openclaw', lane='mission', tenant_id='local',
+        owner_id='owner', worker_id=worker_id, run_id=work['run_id'], executor_id='native-controls',
+        conversation_limit=2, mission_limit=64, account_mission_limit=64, tenant_mission_limit=64, lease_ttl_s=300)
+    assert core.store.admit_claimed_run(work['run_id'], lease_id=lease['lease_id'], executor_id='native-controls')
+    invoked = core.store.mark_run_runtime_invoked(work['run_id'], lease_id=lease['lease_id'], executor_id='native-controls')
+    assert invoked is not None
+    assert core.store.confirm_host_run_start(worker_id=worker_id, run_id=work['run_id'],
+        run_started_at=invoked['runtime_invoked_at'], lease_id=lease['lease_id'],
+        startup_token=lease['startup_token'], executor_id='native-controls', identity_kind='in_process',
+        pid=None, process_group=None, process_start_identity='', container_id='', session_id='in-process')
+
+
+@pytest.mark.parametrize('source_state', ['running'])
+@pytest.mark.parametrize('action', ['queue', 'message'])
+def test_native_queen_consumes_original_completion_after_follow_up_is_current(delegated_coordinator, source_state, action):
+    import json
+    core, cid, work = delegated_coordinator
+    _admit_native_control_source(core, work)
+    response = core.control('local', 'owner', cid, 'child', Control(
+        action=action, run_id=work['run_id'], idempotency_key='active-source', message='Continue later'))
+    assert core.store.get_run(work['run_id'])['state'] == 'running'
+    core.store.update_run(work['run_id'], state='completed', output_text='Original useful result')
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=?", (cid,))
+    core.refresh('local', 'owner', cid)
+    turn = core.queue_result_turn('local', 'owner', cid)
+    with core.store._connect() as conn:
+        evidence = json.loads(conn.execute('SELECT message FROM coordinator_turns WHERE conversation_id=? AND turn_id=?', (cid, turn)).fetchone()[0])
+    source = next(item for item in evidence['items'] if item['run_id'] == work['run_id'])
+    assert source['result']['output_text'] == 'Original useful result'
+    assert core.store.get_run(response['run_id'])['state'] == 'queued'
+
+
+def test_native_owner_result_route_preserves_exact_source_and_scope(delegated_coordinator):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.coordinator_api import install_coordinator_routes
+    core, cid, work = delegated_coordinator
+    core.control('local', 'owner', cid, 'child', Control(
+        action='queue', run_id=work['run_id'], idempotency_key='api-source', message='Continue'))
+    app = FastAPI()
+    install_coordinator_routes(app, core, lambda request: ('local', request.headers.get('x-test-owner', 'owner')),
+                               lambda *args: None)
+    with TestClient(app) as client:
+        url = f'/v1/coordinator/conversations/{cid}/goals/child/result'
+        page = client.get(url, params={'run_id': work['run_id']})
+        assert page.status_code == 200
+        assert page.json()['run_id'] == work['run_id']
+        assert page.json()['output_text'] == 'Original evidence'
+        assert client.get(url, params={'run_id': 'foreign-run'}).status_code == 403
+        assert client.get(url, params={'run_id': work['run_id']}, headers={'x-test-owner': 'other-owner'}).status_code == 403
+
+
+@pytest.mark.parametrize("code,expected_status", [("active_work_generation_changed", 409), ("private-internal-runtime-detail", 500)])
+def test_coordinator_api_maps_only_exact_native_generation_conflict(coordinator, code, expected_status):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.coordinator_api import install_coordinator_routes
+    from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
+    def refuse(*args):
+        raise RuntimeErrorBase(code)
+    coordinator.control = refuse
+    app = FastAPI()
+    install_coordinator_routes(app, coordinator, lambda request: ('local', 'owner'), lambda *args: None)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post('/v1/coordinator/conversations/synthetic/goals/goal/control', json={
+            'action': 'pause', 'run_id': 'synthetic-run', 'idempotency_key': 'synthetic-pause'})
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert response.json()['detail']['code'] == 'active_work_generation_changed'
+    else:
+        assert code not in response.text

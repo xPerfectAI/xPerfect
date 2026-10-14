@@ -160,17 +160,18 @@ class ControlMailbox:
         if params.get('sessionId') != self.session.session_id:
             return None
         request_id = uuid.uuid4().hex
-        result = {'resolved':Event(), 'option':None, 'reason':None}
+        result = {'resolved':Event(), 'option':None, 'reason':None, 'method':method}
         with self._lock:
             fenced = self._turn_cancelled
+            stopped = self.stopped.is_set()
             expired = self._permission_deadline is not None and time.monotonic() >= self._permission_deadline
-            if not fenced and not expired:
+            if not fenced and not stopped and not expired:
                 self._permissions[request_id] = result
-        if fenced or expired:
+        if fenced or stopped or expired:
             # A callback received before Stop but scheduled after it gets the
             # typed cancelled answer and never publishes a pending request.
-            reason = 'turn_cancelled' if fenced else 'expired'
-            if expired and not fenced:
+            reason = 'turn_cancelled' if fenced else 'stopped' if stopped else 'expired'
+            if expired and not fenced and not stopped:
                 self.unanswered.append(reason)
             self._record(reason)
             self.event({'type':'grok.permission.response_submitted', 'session_id':self.session.session_id,
@@ -219,6 +220,27 @@ class ControlMailbox:
         with self._lock:
             return self.negative_outcomes[-1] if self.negative_outcomes else None
 
+    def turn_cancelled(self):
+        with self._lock:
+            return self._turn_cancelled
+
+    def finish_unanswered_question(self):
+        """Fence a provider-ended question only if no owner answer won the lock."""
+        with self._lock:
+            if self._turn_cancelled:
+                return False
+            pending = [result for result in self._permissions.values()
+                       if result['method'] == 'x.ai/ask_user_question'
+                       and result['reason'] is None
+                       and not result['resolved'].is_set()]
+            if not pending:
+                return False
+            self.stopped.set()
+            for result in pending:
+                result['reason'] = 'provider_ended_without_owner_response'
+                result['resolved'].set()
+            return True
+
     def _resolve_unanswered(self, pending, reason):
         with self._lock:
             for result in pending:
@@ -261,7 +283,7 @@ class ControlMailbox:
         if action == 'permission':
             with self._lock:
                 pending = self._permissions.get(request.get('request_id'))
-                if (self._turn_cancelled or not pending or pending['resolved'].is_set()
+                if (self._turn_cancelled or self.stopped.is_set() or not pending or pending['resolved'].is_set()
                         or (self._permission_deadline is not None and time.monotonic() >= self._permission_deadline)):
                     raise ValueError('Grok permission is absent, expired or already resolved')
                 if request.get('request_fingerprint'):

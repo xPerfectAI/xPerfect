@@ -10,14 +10,61 @@ import shutil
 import stat
 import sys
 import tempfile
+from datetime import datetime
 
-from .bootstrap import bootstrap_env_for, bootstrap_bundle_for, native_profile_tool_access_instructions
-from .agent_builder_control import conversation_output_schema
+from .bootstrap import bootstrap_env_for, bootstrap_bundle_for, native_profile_tool_access_instructions, native_instruction_before_tail, worker_prompt_layer_producer
+from .agent_builder_control import conversation_output_schema, conversation_output_contract_instructions, conversation_controls_from_schema
 from .mission_provider_accounts import apply_bound_provider_account_environment, native_current_account_allowed
 from .auth import _env_bool, multi_user_security_enabled, native_installed_owner_id
 from .grok_acp import validated_session_model
 from .openclaw_runtime import ProviderAuthenticationMissingError, RuntimeConfigurationError, RuntimeDependencyMissingError, RuntimeErrorBase
 from .profile_runtime import BaseCliWorkerRuntime, HostNativeCliMixin, _atomic_write_private_text, _native_tools_disabled
+
+
+def _grok_conversation_output_schema(schema):
+    """Couple terminal controls using Grok's supported JSON Schema union."""
+    if not schema or 'tool_call' not in schema['properties']['type']['enum']:
+        return schema
+    branches = []
+    for result_type, names in (
+        ('assistant_response', [None]),
+        ('tool_call', [name for name in schema['properties']['tool_name']['enum'] if name is not None]),
+    ):
+        branches.append({
+            'type': 'object',
+            'additionalProperties': False,
+            'properties': {
+                **schema['properties'],
+                'type': {'type': 'string', 'enum': [result_type]},
+                'tool_name': {'type': 'null' if result_type == 'assistant_response' else 'string', 'enum': names},
+            },
+            'required': list(schema['required']),
+        })
+    return {**schema, 'anyOf': branches}
+
+
+def _grok_minimal_wire_output_contract(worker, bundle, output_schema):
+    return bool(output_schema and any(conversation_controls_from_schema(output_schema))
+                and bundle.get('run_mode') == 'conversation'
+                and worker.get('trusted_run_lane') == 'conversation'
+                and not _native_tools_disabled(bundle))
+
+
+@worker_prompt_layer_producer("developer_instructions")
+def grok_native_authority_instructions(worker, bundle, servers, output_schema):
+    """Compose the registered native facts and declared protocol before the pinned tail."""
+    instructions = native_profile_tool_access_instructions(
+        str(worker.get('profile') or 'grok-build'), bundle, servers,
+    )
+    if _grok_minimal_wire_output_contract(worker, bundle, output_schema):
+        try:
+            return native_instruction_before_tail(
+                bundle, instructions, conversation_output_contract_instructions(output_schema),
+                require_exact_tail=True,
+            )
+        except ValueError as exc:
+            raise RuntimeErrorBase(str(exc)) from exc
+    return instructions
 
 
 class GrokBuildRuntime(BaseCliWorkerRuntime):
@@ -49,8 +96,10 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         bundle = bootstrap_bundle_for(worker)
         if bundle.get('run_mode') != 'conversation':
             return None
-        return conversation_output_schema(bundle.get('agent_builder_control'),
-                                          bundle.get('messaging_delivery_control'))
+        return _grok_conversation_output_schema(conversation_output_schema(
+            bundle.get('agent_builder_control'), bundle.get('messaging_delivery_control'),
+            same_turn_continuation=(worker.get('trusted_run_lane') == 'conversation'
+                                    and not _native_tools_disabled(bundle))))
 
     def _runner_files(self, worker):
         target = self._home_dir(worker['worker_id']) / '.xperfect-grok'
@@ -214,29 +263,34 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
                 and str(worker.get('trusted_run_lane') or '').strip().lower() == 'conversation'
                 and bundle.get('run_mode') == 'conversation'):
             command += ['--yolo-mode', 'true' if bundle.get('access_mode') == 'full' else 'false']
-        from .grok_projection import mcp_servers_for_bundle
+        from .grok_projection import mcp_servers_for_bundle, required_mcp_servers_for_bundle
         try:
             servers = [] if restricted else mcp_servers_for_bundle(bundle, self._native_environment(worker, host=host) if bundle.get('claude_project_mcp') else {})
+            required_servers = required_mcp_servers_for_bundle(bundle, servers)
         except ValueError as exc:
             raise RuntimeErrorBase(str(exc)) from exc
         if servers is not None and (not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers)):
             raise RuntimeErrorBase('grok_mcp_servers must contain native ACP MCP server objects')
-        rules = native_profile_tool_access_instructions(str(worker.get('profile') or self.runtime_name), bundle, servers)
+        output_schema = self._conversation_output_schema(worker)
+        rules = grok_native_authority_instructions(worker, bundle, servers, output_schema)
         if rules:
             path = target / 'developer-instructions.txt'
             _atomic_write_private_text(path, rules)
             # ACP rules are creation-only. Replace pinned conversation authority on resume.
             flag = '--system-prompt-file' if bundle.get('run_mode') == 'conversation' else '--rules-file'
             command += [flag, str(path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/developer-instructions.txt']
-        output_schema = self._conversation_output_schema(worker)
         if output_schema:
             schema_path = target / 'conversation-output-schema.json'
             _atomic_write_private_text(schema_path, json.dumps(output_schema, separators=(',', ':')))
             command += ['--output-schema-file', str(schema_path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/conversation-output-schema.json']
+            if _grok_minimal_wire_output_contract(worker, bundle, output_schema):
+                command += ['--output-schema-minimal-wire']
         if servers is not None:
             path = target / 'mcp-servers.json'
             _atomic_write_private_text(path, json.dumps(servers))
             command += ['--mcp-file', str(path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/mcp-servers.json']
+            for name in required_servers:
+                command += ['--required-mcp-server', name]
             projection = worker.get('_coordinator_native_projection')
             from .native_transport import is_projected_stdio
             token = str(projection.get('token') or '') if isinstance(projection, dict) else ''
@@ -287,7 +341,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             'pending_requests':pending,'receipts':receipts}
 
     def pending_native_input(self, worker, *, run_id):
-        from .provider_native_input import project_permission_request
+        from .provider_native_input import project_native_request
         active = self._read_active_session(worker['worker_id']) or {}
         attempt_id = str(active.get('attempt_id') or '')
         if (active.get('run_id') != run_id or not attempt_id
@@ -298,28 +352,91 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         if not session_id or active.get('native_session_id') != session_id:
             return None
         for item in native['pending_requests']:
-            projected = project_permission_request(item, run_id=run_id,
+            projected = project_native_request(item, run_id=run_id,
                 attempt_id=attempt_id, session_id=session_id)
             if projected is None:
                 continue
+            if projected['kind'] == 'question':
+                return {**{key: value for key, value in projected.items() if key != 'prompt'},
+                    'version': 1, 'runtimeName': 'Grok', 'sessionId': session_id,
+                    'state': 'pending', 'mode': 'form', 'message': projected['prompt']}
             choices = projected['choices']
-            return {**{key: value for key, value in projected.items() if key not in {'prompt', 'choices'}},
+            return {**{key: value for key, value in projected.items() if key not in {'prompt', 'choices', 'operationTitle'}},
                 'version': 1, 'kind': 'permission', 'runtimeName': 'Grok',
                 'sessionId': session_id, 'state': 'pending', 'mode': 'form',
                 'message': projected['prompt'],
                 'requestedSchema': {'type': 'object', 'properties': {
                     'optionId': {'type': 'string', 'title': 'Response',
+                        'description': projected['operationTitle'],
                         'enum': [choice['value'] for choice in choices],
+                        'enumKinds': [choice.get('kind') for choice in choices],
                         'enumNames': [choice['label'] for choice in choices]}},
                     'required': ['optionId']}}
         return None
 
+    def _validate_native_human_permission(self, worker, run_id, attempt_id, pending, option_id, human):
+        """Bind the signed original human receipt to the exact native offer."""
+        from .grok_control import control_digest
+        native = self.native_control_state(worker, run_id=run_id, attempt_id=attempt_id)
+        current = [item for item in native.get('pending_requests', [])
+                   if item.get('request_id') == pending['requestId']]
+        if (len(current) != 1 or pending.get('kind') != 'permission'
+                or native.get('session_id') != pending.get('sessionId')
+                or control_digest(current[0]) != pending['requestFingerprint']):
+            raise RuntimeErrorBase('native_input_stale')
+        item = current[0]
+        params = item.get('request')
+        if not isinstance(params, dict) or params.get('sessionId') != pending['sessionId']:
+            raise RuntimeErrorBase('native_input_stale')
+        offered = [option for option in params.get('options', [])
+                   if isinstance(option, dict) and option.get('optionId') == option_id]
+        if (len(offered) != 1 or offered[0].get('kind') not in ('allow_once', 'reject_once')):
+            raise RuntimeErrorBase('native_input_invalid')
+        transcript = self._attempt_transcript(worker['worker_id'], run_id, attempt_id)
+        if transcript is None:
+            raise RuntimeErrorBase('native_input_stale')
+        matches = []
+        try:
+            with transcript[0].open() as lines:
+                for line in lines:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(event, dict) and event.get('type') == 'grok.permission.requested'
+                            and event.get('request_id') == pending['requestId']):
+                        matches.append(event)
+        except OSError as exc:
+            raise RuntimeErrorBase('native_input_stale') from exc
+        if (self._attempt_transcript(worker['worker_id'], run_id, attempt_id) != transcript
+                or len(matches) != 1 or matches[0].get('session_id') != pending['sessionId']
+                or matches[0].get('method') != 'session/request_permission'
+                or matches[0].get('request') != params):
+            raise RuntimeErrorBase('native_input_stale')
+        try:
+            observed = datetime.fromisoformat(matches[0]['observed_at'].replace('Z', '+00:00'))
+            if observed.tzinfo is None or observed.timestamp() * 1000 >= human['receivedAt']:
+                raise ValueError('Human receipt must follow the exact native offer')
+        except (KeyError, AttributeError, TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeErrorBase('native_input_stale') from exc
+
     def respond_native_input(self, worker, *, run_id, request_id, request_fingerprint,
-                             action, content=None, allow_new=True):
+                             action, content=None, allow_new=True, native_human_input=None):
         from .grok_control import control_receipt, permission_message_id, read_message, submit_control
+        from .provider_native_input import native_question_response
+        if native_human_input is not None:
+            from .models import NativeHumanInputRequest
+            try:
+                human = NativeHumanInputRequest.model_validate(native_human_input).model_dump(by_alias=True)
+            except ValueError as exc:
+                raise RuntimeErrorBase('native_input_invalid') from exc
+            if (type(human['version']) is not int or action != 'accept'
+                    or not isinstance(content, dict) or set(content) != {'optionId'}):
+                raise RuntimeErrorBase('native_input_invalid')
         if (action not in {'accept', 'decline', 'cancel'}
                 or (action == 'accept' and (not isinstance(content, dict)
-                    or set(content) != {'optionId'} or not isinstance(content['optionId'], str)))
+                    or not (set(content) == {'optionId'} and isinstance(content['optionId'], str)
+                            or 'answers' in content)))
                 or (action != 'accept' and content not in (None, {}))):
             raise RuntimeErrorBase('native_input_invalid')
         attempt_id = str(worker.get('_run_attempt_id') or '')
@@ -330,16 +447,36 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             raise RuntimeErrorBase('native_input_stale')
         root = self._control_dir(worker, run_id, attempt_id)
         message_id = permission_message_id(run_id, attempt_id, request_id, request_fingerprint)
-        expected = {'run_id': run_id, 'attempt_id': attempt_id, 'action': 'permission',
-            'request_id': request_id, 'request_fingerprint': request_fingerprint,
-            'option_id': content['optionId'] if action == 'accept' else None}
         try:
+            retained = None
+            response_path = root / (message_id + '.response')
+            queued = root / (message_id + '.request')
+            if response_path.is_file():
+                retained = read_message(response_path).get('_request')
+            elif queued.is_file():
+                retained = read_message(queued)
+            pending = None
+            question = action == 'accept' and 'answers' in content
+            if action != 'accept':
+                if isinstance(retained, dict):
+                    question = 'response' in retained
+                elif allow_new:
+                    pending = self.pending_native_input(worker, run_id=run_id)
+                    question = bool(pending and pending.get('kind') == 'question')
+            expected = {'run_id': run_id, 'attempt_id': attempt_id, 'action': 'permission',
+                'request_id': request_id, 'request_fingerprint': request_fingerprint}
+            if native_human_input is not None:
+                expected['native_human_input'] = human
+            if question:
+                expected['response'] = (native_question_response(content) if action == 'accept'
+                                        else {'outcome': 'cancelled'})
+            else:
+                expected['option_id'] = content['optionId'] if action == 'accept' else None
             receipt = control_receipt(root, message_id, expected)
             if receipt is not None:
                 if receipt.get('status') != 'permission_submitted':
                     raise RuntimeErrorBase('native_input_stale')
                 return {'status': 'already_accepted'}
-            queued = root / (message_id + '.request')
             if queued.is_file():
                 body = read_message(queued)
                 if any(body.get(key) != value for key, value in expected.items()):
@@ -351,12 +488,18 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             else:
                 if not allow_new:
                     raise RuntimeErrorBase('native_input_confirmation_unavailable')
-                pending = self.pending_native_input(worker, run_id=run_id)
+                pending = pending or self.pending_native_input(worker, run_id=run_id)
                 if (not pending or pending['requestId'] != request_id
-                        or pending['requestFingerprint'] != request_fingerprint):
+                        or pending['requestFingerprint'] != request_fingerprint
+                        or question != (pending.get('kind') == 'question')):
                     raise RuntimeErrorBase('native_input_stale')
-                if action == 'accept' and content['optionId'] not in pending['requestedSchema']['properties']['optionId']['enum']:
-                    raise RuntimeErrorBase('native_input_invalid')
+                if action == 'accept':
+                    if question:
+                        native_question_response(content, pending['requestedSchema'])
+                    elif content['optionId'] not in pending['requestedSchema']['properties']['optionId']['enum']:
+                        raise RuntimeErrorBase('native_input_invalid')
+                if native_human_input is not None:
+                    self._validate_native_human_permission(worker, run_id, attempt_id, pending, content['optionId'], human)
                 body = {**expected, 'session_id': pending['sessionId']}
                 result = submit_control(root, body, message_id=message_id,
                     managed_acl=getattr(self.sandbox, 'box', None) is not None)
@@ -433,7 +576,11 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         if (not _native_tools_disabled(bootstrap_bundle_for(worker))
                 and info.session_key and session['session_id'] != info.session_key):
             raise RuntimeErrorBase('Grok resumed a different native session')
-        return session['session_id'], self._select_native_agent_output(worker, info, [result['output']])
+        output = self._select_native_agent_output(worker, info, [result['output']])
+        capture = getattr(self, '_capture_completed_native_edits', None)
+        if callable(capture):
+            capture(worker, info, stdout, session['session_id'], result['output'])
+        return session['session_id'], output
 
     def _stdout_has_complete_response(self, stdout_path):
         try:
@@ -454,6 +601,75 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
 
 class HostGrokBuildRuntime(HostNativeCliMixin, GrokBuildRuntime):
     worker_root_name = 'host_grok_build_runtime'
+
+    def _conversation_output_schema(self, worker):
+        schema = super()._conversation_output_schema(worker)
+        if not schema:
+            return None
+        bundle = self._bootstrap_bundle_for_worker(worker)
+        return _grok_conversation_output_schema(conversation_output_schema(
+            bundle.get('agent_builder_control'), bundle.get('messaging_delivery_control'),
+            same_turn_continuation=(worker.get('trusted_run_lane') == 'conversation'
+                                    and not _native_tools_disabled(bundle))))
+
+    def _capture_completed_native_edits(self, worker, info, stdout, session_id, output):
+        run_id, attempt_id = worker.get('_active_run_id'), worker.get('_run_attempt_id')
+        if not run_id or not attempt_id:
+            return
+        transcript = self._attempt_transcript(worker['worker_id'], run_id, attempt_id)
+        if transcript is None:
+            return
+        try:
+            if transcript[0].read_text() != stdout:
+                return
+        except OSError:
+            return
+        calls, completed = {}, {}
+        for event in self._events(stdout):
+            if event.get('type') != 'grok.session.update' or event.get('session_id') != session_id:
+                continue
+            update = event.get('update')
+            if (not isinstance(update, dict) or update.get('sessionUpdate')
+                    not in ('tool_call', 'tool_call_update')):
+                continue
+            call_id = update.get('toolCallId')
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            metadata = update.get('_meta')
+            tool = metadata.get('x.ai/tool') if isinstance(metadata, dict) else None
+            if isinstance(tool, dict) and tool.get('version') == 1:
+                if tool.get('kind') in ('write', 'edit') and tool.get('read_only') is False:
+                    calls[call_id] = tool
+                else:
+                    calls.pop(call_id, None)
+            if update.get('status') != 'completed' or call_id not in calls:
+                if update.get('status') in ('failed', 'cancelled'):
+                    completed.pop(call_id, None)
+                continue
+            diffs = update.get('content')
+            if not isinstance(diffs, list):
+                continue
+            edits = []
+            for diff in diffs:
+                if not isinstance(diff, dict) or diff.get('type') != 'diff':
+                    continue
+                path, old, new = diff.get('path'), diff.get('oldText'), diff.get('newText')
+                if (not isinstance(path, str) or not path or (old is not None and not isinstance(old, str))
+                        or not isinstance(new, str)):
+                    continue
+                declared = calls[call_id].get('input')
+                if isinstance(declared, dict) and declared.get('path') not in (None, path):
+                    continue
+                edits.append((path, hashlib.sha256(new.encode('utf-8')).hexdigest()))
+            completed[call_id] = edits
+        if self._attempt_transcript(worker['worker_id'], run_id, attempt_id) != transcript:
+            return
+        latest_edits = {path: digest for values in completed.values() for path, digest in values}
+        edits = tuple(latest_edits.items())
+        if edits:
+            scope = self._read_native_image_scope(worker['worker_id'], run_id)
+            self._capture_native_output_files(worker, str(info.workspace_dir or ''), scope,
+                                              run_id, output, native_edits=edits)
 
     def pending_native_input(self, worker, *, run_id):
         return GrokBuildRuntime.pending_native_input(self, worker, run_id=run_id)

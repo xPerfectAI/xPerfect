@@ -9,6 +9,7 @@ import os
 import sqlite3
 import time
 from urllib.parse import urlsplit
+from pathlib import Path
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 import httpx
@@ -2075,7 +2076,7 @@ def test_workspace_status_returns_view_steer_link_for_web_mcp_surfaces(monkeypat
             )
             assert "watch/wrk_poll" in record["target_url"]
             assert "gh_token=" in record["target_url"]
-            assert payload["view_steer"]["include_in_response"] is True
+            assert payload["view_steer"]["include_in_response"] is False
 
     asyncio.run(scenario())
 
@@ -2574,7 +2575,7 @@ def test_worker_delegate_once_creates_resumes_and_runs_without_listing(monkeypat
             )
             assert "watch/wrk_resumed" in record["target_url"]
             assert "gh_token=" in record["target_url"]
-            assert payload["view_steer"]["include_in_response"] is True
+            assert payload["view_steer"]["include_in_response"] is False
             assert payload["view_steer"]["url"] == payload["view_steer_url"]
             assert payload["view_steer"]["label"] == "View / Steer Host Page Title QA"
             assert payload["view_steer"]["link_kind"] == "mission_control"
@@ -4161,6 +4162,136 @@ def test_worker_delegate_once_materializes_explicit_uploaded_files(monkeypatch):
     assert "`uploads/client_upload.txt`" in bundle["project_definition"]
     assert "Do not ask the user to re-attach" in bundle["project_definition"]
 
+
+
+@pytest.mark.parametrize("header_selection", ["none", "partial", "all", "mixed"])
+@pytest.mark.parametrize("tool_name", ["worker_delegate_once", "workspace_launch", "workspace_schedule"])
+def test_selected_history_uploads_join_current_carrier_before_complete_validation(
+    monkeypatch, tmp_path, header_selection, tool_name
+):
+    owner = "synthetic-owner"
+    uploads_root = tmp_path / "uploads"
+    root = uploads_root / owner
+    root.mkdir(parents=True)
+    records = []
+    bodies = [b"%PDF-1.7\nfirst synthetic plan\n", b"%PDF-1.7\nsecond synthetic plan\n", b"route,minutes\ngarden,20\n"]
+    names = ["first-plan.pdf", "second-plan.pdf", "options.csv"]
+    for index, (name, body) in enumerate(zip(names, bodies)):
+        file_id = f"synthetic-file-{index}"
+        (root / f"{file_id}__{name}").write_bytes(body)
+        records.append({"file_id": file_id, "filename": name, "source": "local", "bytes": len(body), "media_group_index": index})
+    explicit_records = records[:-1] if header_selection == "mixed" else records
+    header_records = [] if header_selection == "none" else records[-1:] if header_selection in {"partial", "mixed"} else records
+    header_records = [{**r, "filepath": f"/uploads/{owner}/{r['file_id']}__{r['filename']}"} for r in header_records]
+    headers = {
+        "X-Viventium-Tenant-Id": "local", "X-Viventium-User-Id": owner,
+        "X-Viventium-Storage-User-Id": owner,
+        "X-Viventium-Message-Id": "synthetic-current-text-message",
+    }
+    if header_records:
+        headers["X-Viventium-Request-Files"] = "b64:" + base64.b64encode(json.dumps(header_records).encode()).decode()
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(uploads_root))
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: headers)
+    monkeypatch.setattr(mcp_server, "_owner_recent_upload_entries", lambda **_: [])
+    source_text = "Read the original selected CSV; keep both plans unchanged."
+    bundle = {
+        "viventium_delegation_identity": {"source_event_id": "synthetic-current-source"},
+        "viventium_delegation_context": {"version": 1, "source_event_id": "synthetic-current-source",
+            "triggering_source_segments": [{"ordinal": 0, "source_event_id": "synthetic-current-source", "source_index": 0, "text": source_text}]},
+        "viventium_delegation_packet": {"version": 1, "task": {"instruction": source_text,
+            "source_segments": [{"ordinal": 0, "text": source_text}]},
+            "explicit_constraints": [], "selected_files": [{"ordinal": i, "ref": r["file_id"]} for i,r in enumerate(records)]},
+        "viventium_feelings_projection": {"version": 1, "enabled": False, "scope": "unknown", "expected_capsule_count": 0,
+            "canonical_instruction_field": "agents_md", "snapshot_sha256": ""},
+    }
+    class AtomicApi(TrackingApiClient):
+        def __init__(self):
+            super().__init__()
+            self.delegations = []
+        def create_delegation(self, **kwargs):
+            self.delegations.append(kwargs)
+            return {"workRef": "synthetic-work-ref", "state": "queued", "viewRef": "/r/synthetic-view", "resourceClass": "standard", "idempotentReplay": False}
+    api = AtomicApi() if tool_name == "worker_delegate_once" else TrackingApiClient()
+    server = create_mcp_server(api_client=api)
+    args = {"profile": "codex-cli", "execution_mode": "docker", "uploaded_files": explicit_records, "bootstrap_bundle_json": bundle}
+    if tool_name == "worker_delegate_once":
+        args.update(title="Historical file mission", instruction=source_text)
+        secret = "synthetic-service-assertion-key"
+        monkeypatch.setenv("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET", secret)
+        goal_digest = hashlib.sha256(source_text.encode()).hexdigest()
+        call_digest = hashlib.sha256(b"synthetic-native-tool-call").hexdigest()
+        identity = {"version": 2, "source_event_id": "synthetic-current-source", "objective_ordinal": 0,
+            "goal_digest": goal_digest, "call_identity_digest": call_digest, "launch_payload_digest": _launch_payload_digest(args),
+            "idempotency_key": hashlib.sha256(f"local\0{owner}\0synthetic-current-source\0call:{call_digest}\0{goal_digest}".encode()).hexdigest()}
+        bundle["viventium_delegation_identity"] = identity
+        bundle["viventium_delegation_assertion"] = _scoped_delegation_identity_assertion(identity, secret, tenant_id="local", owner_id=owner)
+    else:
+        args.update(description=source_text)
+        if tool_name == "workspace_schedule":
+            args["run_at"] = "2030-01-01T00:00:00Z"
+    async def scenario():
+        async with Client(server) as client:
+            result = _tool_json(await client.call_tool(tool_name, args))
+            assert result["status"] in {"dispatched", "scheduled"}
+    asyncio.run(scenario())
+    if tool_name == "worker_delegate_once":
+        assert len(api.delegations) == 1
+        assert api.find_or_resume_payloads == []
+        actual = api.delegations[0]["payload"]["bootstrapBundle"]
+        assert api.delegations[0]["owner_id"] == owner
+    else:
+        assert len(api.find_or_resume_payloads) == 1
+        actual = api.find_or_resume_payloads[0]["bootstrap_bundle"]
+    assert [r["file_id"] for r in actual["files"]] == [r["file_id"] for r in records]
+    assert [Path(r["source_path"]).read_bytes() for r in actual["files"]] == bodies
+    assert actual["viventium_upload_context"]["tool_uploaded_files"] == explicit_records
+    assert len(actual["files"]) == 3
+
+
+@pytest.mark.parametrize("invalid_kind", ["unknown", "ambiguous", "mixed_unknown", "header_ambiguous"])
+def test_selected_history_upload_validation_stays_closed_before_api(monkeypatch, invalid_kind):
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    headers = {"X-Viventium-User-Id": "synthetic-owner"}
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: headers)
+    records = [{"file_id": "synthetic-owned", "filename": "safe.csv", "text": "route,minutes\ngarden,20\n"}]
+    selected = "synthetic-unknown" if invalid_kind in {"unknown", "mixed_unknown"} else "synthetic-owned"
+    if invalid_kind in {"mixed_unknown", "header_ambiguous"}:
+        current = [{"file_id": "synthetic-current", "filename": "current.csv", "text": "route,minutes\ncurrent,10\n"}]
+        if invalid_kind == "header_ambiguous":
+            current = [{**records[0], "filepath": "/uploads/synthetic-owner/first.csv"},
+                       {**records[0], "filepath": "/uploads/synthetic-owner/second.csv"}]
+        headers["X-Viventium-Request-Files"] = "b64:" + base64.b64encode(json.dumps(current).encode()).decode()
+    if invalid_kind == "ambiguous":
+        records = [{**records[0], "filepath": "/uploads/synthetic-owner/first.csv"},
+                   {**records[0], "filepath": "/uploads/synthetic-owner/second.csv"}]
+    api = TrackingApiClient()
+    server = create_mcp_server(api_client=api)
+    async def scenario():
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match="Selected file identity"):
+                await client.call_tool("worker_delegate_once", {"title": "Closed selected scope", "instruction": "Use exact selected file.", "profile": "codex-cli", "execution_mode": "docker", "uploaded_files": records,
+                    "bootstrap_bundle_json": {"viventium_delegation_packet": {"selected_files": [{"ordinal": 0, "ref": selected}]}}})
+    asyncio.run(scenario())
+    assert api.find_or_resume_payloads == []
+    assert api.assign_run_payloads == []
+
+
+def test_selected_history_upload_scope_never_reads_foreign_owner_bytes(monkeypatch, tmp_path):
+    root = tmp_path / "uploads"
+    foreign = root / "other-owner" / "synthetic-foreign__private.pdf"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"foreign owner secret bytes")
+    monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(root))
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {"X-Viventium-Tenant-Id": "local", "X-Viventium-User-Id": "synthetic-owner"})
+    bundle = mcp_server._merge_request_context(
+        {"viventium_delegation_packet": {"selected_files": [{"ordinal": 0, "ref": "synthetic-foreign"}]}},
+        uploaded_files=[{"file_id": "synthetic-foreign", "filename": "private.pdf", "filepath": "/uploads/other-owner/synthetic-foreign__private.pdf"}],
+    )
+    assert bundle["files"][0]["upload_blocker"]
+    assert "source_path" not in bundle["files"][0]
+    assert "foreign owner secret bytes" not in json.dumps(bundle)
+    assert str(foreign) not in json.dumps(bundle)
 
 def test_uploaded_file_text_prefers_owner_scoped_binary_when_available(monkeypatch, tmp_path):
     uploads_root = tmp_path / "uploads"
@@ -7464,3 +7595,17 @@ def test_scheduling_a_saved_expert_by_name_never_creates_another_workspace(monke
         scheduled_workers = conn.execute("SELECT worker_id FROM scheduled_runs").fetchall()
     assert [name for _worker_id, name in workers] == ["Supplies Expert"]
     assert scheduled_workers == [(workers[0][0],)]
+
+
+def test_selected_history_partial_no_context_stays_closed(monkeypatch):
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
+    for key in ("GLASSHIVE_EVENTS_WEBHOOK_URL", "VIVENTIUM_GLASSHIVE_CALLBACK_URL",
+                "GLASSHIVE_EVENTS_HMAC_SECRET", "VIVENTIUM_GLASSHIVE_CALLBACK_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(ValueError, match="Selected file identity does not match"):
+        mcp_server._merge_request_context(
+            {"viventium_delegation_packet": {"selected_files": [
+                {"ordinal": 0, "ref": "synthetic-history"},
+                {"ordinal": 1, "ref": "synthetic-current"}]}},
+            uploaded_files=[{"file_id": "synthetic-history", "filename": "safe.csv", "text": "synthetic"}],
+        )

@@ -11,6 +11,72 @@ from workers_projects_runtime.service import WorkersProjectsService
 import workers_projects_runtime.native_model_selection as timing
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_opt_in_timing_reaches_existing_runtime_handler(enabled):
+    import os
+    import subprocess
+    import sys
+
+    child = subprocess.run(
+        [sys.executable, "-c", "import logging.config; "
+         "from uvicorn.config import LOGGING_CONFIG; "
+         "logging.config.dictConfig(LOGGING_CONFIG); "
+         "from workers_projects_runtime.native_model_selection import native_timing_event; "
+         "native_timing_event('synthetic_account_read', phase='payloads', durationMs=1)"],
+        env={**os.environ, "VIVENTIUM_VOICE_LOG_LATENCY": "1" if enabled else "0"},
+        capture_output=True, text=True, check=True,
+    )
+    assert ("[NativeP0]" in child.stderr) == enabled
+    if enabled:
+        payload = json.loads(child.stderr.split("[NativeP0] ", 1)[1])
+        assert payload["stage"] == "synthetic_account_read"
+        assert payload["phase"] == "payloads"
+        assert payload["durationMs"] == 1
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("logger_failure", [False, True])
+def test_account_read_timing_preserves_private_failure_and_opt_in(
+    monkeypatch, enabled, logger_failure
+):
+    from workers_projects_runtime.api import _account_read_stage
+
+    monkeypatch.setenv("VIVENTIUM_VOICE_LOG_LATENCY", "1" if enabled else "0")
+    log = Mock()
+    if logger_failure:
+        log.info.side_effect = OSError("synthetic-log-failure")
+    monkeypatch.setattr(timing, "_logger", log)
+    failure = ValueError("synthetic-private-account-value")
+    with pytest.raises(ValueError) as caught:
+        with _account_read_stage("list_delegations"):
+            raise failure
+    assert caught.value is failure
+    assert bool(log.info.call_args_list) == enabled
+    if enabled:
+        rows = [json.loads(call.args[1]) for call in log.info.call_args_list]
+        assert [row["stage"] for row in rows] == ["account_read_enter", "account_read_exit"]
+        assert {row["phase"] for row in rows} == {"list_delegations"}
+        assert rows[0]["threadId"] == rows[1]["threadId"]
+        assert rows[1]["durationMs"] >= 0
+        assert rows[1]["errorClass"] == "ValueError"
+        assert "synthetic-private-account-value" not in json.dumps(rows)
+
+
+def test_account_read_timing_preserves_success(monkeypatch):
+    from workers_projects_runtime.api import _account_read_stage
+
+    monkeypatch.setenv("VIVENTIUM_VOICE_LOG_LATENCY", "1")
+    log = Mock()
+    monkeypatch.setattr(timing, "_logger", log)
+    result = {"snapshot": "fresh", "work": []}
+    with _account_read_stage("payloads"):
+        observed = result
+    assert observed is result
+    rows = [json.loads(call.args[1]) for call in log.info.call_args_list]
+    assert rows[-1]["errorClass"] == ""
+    assert rows[-1]["durationMs"] >= 0
+
+
 @pytest.mark.parametrize('state,missing', [('queued',False), ('cancelled',False), ('queued',True)])
 def test_start_lock_timings_preserve_exact_start_fence_and_release(state, missing, monkeypatch):
     monkeypatch.setenv('VIVENTIUM_VOICE_LOG_LATENCY','1')

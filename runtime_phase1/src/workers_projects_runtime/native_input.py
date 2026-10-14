@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
+import threading
+import tomllib
 import os
 from pathlib import Path
 import selectors
@@ -165,6 +168,8 @@ def respond(root: Path, *, worker_id: str, run_id: str, request_id: str,
 
 def relay(context_path: Path, command: list[str]) -> int:
     context = read_object(context_path)
+    if context.get("protocol") == "codex-app-server":
+        return codex_relay(context_path, command)
     root = context_path.parent
     instruction = sys.stdin.buffer.read().decode()
     context = {**context, "nativeTurnId": str(uuid.uuid4()), "nativeSessionActive": False}
@@ -268,6 +273,403 @@ def relay(context_path: Path, command: list[str]) -> int:
                 child.kill()
                 child.wait()
         publish(context_path, {**context, "nativeSessionActive": False})
+
+
+def codex_app_launch(command: list[str]) -> dict | None:
+    """Translate only understood exec flags; unknown policy keeps the exec path."""
+    if len(command) < 3 or command[1] != "exec" or command[-1] != "-":
+        return None
+    argv = [command[0], "app-server", "--stdio"]
+    thread, turn, images = {}, {}, []
+    overrides = {}
+    resumed = command[2] == "resume"
+    tokens = command[3:-1] if resumed else command[2:-1]
+    positionals = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--json", "--skip-git-repo-check"}:
+            index += 1
+            continue
+        if token == "--ephemeral":
+            thread["ephemeral"] = True
+            index += 1
+            continue
+        if token == "--dangerously-bypass-approvals-and-sandbox":
+            overrides.update(sandbox_mode="danger-full-access", approval_policy="never")
+            argv.extend(["-c", 'sandbox_mode="danger-full-access"', "-c", 'approval_policy="never"'])
+            index += 1
+            continue
+        if token == "--strict-config":
+            argv.append(token)
+            index += 1
+            continue
+        if token in {"-c", "--config", "--enable", "--disable", "-m", "--model", "-C", "--cd", "-s", "--sandbox", "--add-dir", "--image", "--output-schema"}:
+            if index + 1 >= len(tokens):
+                return None
+            value = tokens[index + 1]
+            if token in {"-c", "--config"}:
+                argv.extend([token, value])
+                try:
+                    overrides.update(tomllib.loads(value))
+                except tomllib.TOMLDecodeError:
+                    return None
+            elif token in {"--enable", "--disable"}:
+                argv.extend([token, value])
+            elif token in {"-m", "--model"}:
+                thread["model"] = value
+            elif token in {"-C", "--cd"}:
+                thread["cwd"] = value
+            elif token in {"-s", "--sandbox"}:
+                overrides["sandbox_mode"] = value
+                argv.extend(["-c", "sandbox_mode=" + json.dumps(value)])
+            elif token == "--add-dir":
+                thread.setdefault("runtimeWorkspaceRoots", []).append(value)
+            elif token == "--image":
+                images.append({"type": "localImage", "path": value})
+            else:
+                turn["outputSchema"] = json.loads(Path(value).read_text())
+            index += 2
+            continue
+        if token.startswith("-"):
+            return None
+        positionals.append(token)
+        index += 1
+    if (resumed and len(positionals) != 1) or (not resumed and positionals):
+        return None
+    if resumed:
+        thread["threadId"] = positionals[0]
+        thread["excludeTurns"] = True
+    if "model" in overrides:
+        thread["model"] = overrides["model"]
+    if "model_provider" in overrides:
+        thread["modelProvider"] = overrides["model_provider"]
+    if "sandbox_mode" in overrides:
+        thread["sandbox"] = overrides["sandbox_mode"]
+    if "approval_policy" in overrides:
+        thread["approvalPolicy"] = overrides["approval_policy"]
+    if "model_reasoning_effort" in overrides:
+        turn["effort"] = overrides["model_reasoning_effort"]
+    additional_roots = list(thread.get("runtimeWorkspaceRoots") or [])
+    if additional_roots:
+        workspace_policy = overrides.setdefault("sandbox_workspace_write", {})
+        if not isinstance(workspace_policy, dict):
+            return None
+        configured_roots = workspace_policy.get("writable_roots") or []
+        if not isinstance(configured_roots, list):
+            return None
+        writable_roots = list(dict.fromkeys([*configured_roots, *additional_roots]))
+        workspace_policy["writable_roots"] = writable_roots
+        argv.extend(["-c", "sandbox_workspace_write.writable_roots=" + json.dumps(writable_roots)])
+        if thread.get("cwd"):
+            thread["runtimeWorkspaceRoots"].insert(0, thread["cwd"])
+    if thread.get("approvalPolicy") != "never":
+        return None
+    if not resumed:
+        thread["experimentalRawEvents"] = True
+    return {"command": argv, "thread": thread, "turn": turn, "images": images,
+            "resumed": resumed, "workspace_policy": overrides.get("sandbox_workspace_write") or {}}
+
+
+class CodexRpc:
+    """One native stdio connection; control responses never block event reading."""
+    def __init__(self, command: list[str]):
+        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        text=True, bufsize=1)
+        self.events = queue.Queue()
+        self.lock = threading.Lock()
+        self.waiters = {}
+        self.closed = False
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                if len(line.encode()) > 8 * 1024 * 1024:
+                    raise NativeInputError("native_event_oversized")
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise NativeInputError("native_event_invalid")
+                if "id" in value and "method" not in value:
+                    with self.lock:
+                        waiter = self.waiters.get(value["id"])
+                    if waiter is not None:
+                        waiter.put(value)
+                else:
+                    self.events.put(value)
+        except (OSError, ValueError, NativeInputError):
+            pass
+        finally:
+            with self.lock:
+                self.closed = True
+                for waiter in self.waiters.values():
+                    waiter.put(None)
+            self.events.put(None)
+
+    def send(self, payload):
+        with self.lock:
+            if self.closed or self.process.stdin.closed:
+                raise NativeInputError("native_control_closed")
+            self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            self.process.stdin.flush()
+
+    def call(self, method, params, timeout=10):
+        identity = "xperfect-" + uuid.uuid4().hex
+        waiter = queue.Queue()
+        with self.lock:
+            if self.closed:
+                raise NativeInputError("native_control_closed")
+            self.waiters[identity] = waiter
+        try:
+            self.send({"id": identity, "method": method, "params": params})
+            try:
+                value = waiter.get(timeout=timeout)
+            except queue.Empty as exc:
+                raise NativeInputError("native_control_unconfirmed") from exc
+            if value is None:
+                raise NativeInputError("native_control_closed")
+            if "error" in value:
+                raise NativeInputError("native_control_rejected")
+            result = value.get("result")
+            if not isinstance(result, dict):
+                raise NativeInputError("native_control_invalid_ack")
+            return result
+        finally:
+            with self.lock:
+                self.waiters.pop(identity, None)
+
+    def close(self):
+        if self.process.stdin is not None and not self.process.stdin.closed:
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
+        self.reader.join(timeout=1)
+
+
+class CodexTurn:
+    def __init__(self, rpc, session_id, turn_id):
+        self.rpc, self.session_id, self.turn_id = rpc, session_id, turn_id
+        self.active = True
+        self.lock = threading.Lock()
+
+    def interject(self, text, message_id):
+        with self.lock:
+            if not self.active:
+                raise NativeInputError("native_turn_ended")
+            params = {"threadId": self.session_id, "expectedTurnId": self.turn_id,
+                      "input": [{"type": "text", "text": text}]}
+        result = self.rpc.call("turn/steer", params)
+        if result.get("turnId") != self.turn_id:
+            raise NativeInputError("native_turn_ack_mismatch")
+        return {"status": "queued", "message_id": message_id}
+
+    def cancel(self):
+        self.end()
+        self.rpc.call("turn/interrupt", {"threadId": self.session_id, "turnId": self.turn_id})
+
+    def end(self):
+        with self.lock:
+            self.active = False
+
+
+_CODEX_ITEM_TYPES = {
+    "agentMessage": "agent_message", "commandExecution": "command_execution",
+    "fileChange": "file_change", "mcpToolCall": "mcp_tool_call", "dynamicToolCall": "dynamic_tool_call",
+    "collabAgentToolCall": "collab_agent_tool_call", "subAgentActivity": "sub_agent_activity",
+    "webSearch": "web_search", "imageView": "image_view", "imageGeneration": "image_generation",
+    "contextCompaction": "context_compaction", "functionCallOutput": "function_call_output",
+}
+_CODEX_ITEM_FIELDS = {"aggregatedOutput": "aggregated_output", "exitCode": "exit_code",
+    "receiverThreadIds": "receiver_thread_ids", "senderThreadId": "sender_thread_id",
+    "agentsStates": "agents_states", "agentThreadId": "agent_thread_id", "agentPath": "agent_path",
+    "reasoningEffort": "reasoning_effort", "savedPath": "saved_path", "contentItems": "content_items"}
+
+
+def codex_event(value, session_id, turn_id):
+    """Keep the existing exec reader's typed items, native calls and team evidence."""
+    params = value.get("params") or {}
+    if params.get("threadId") != session_id or params.get("turnId", turn_id) != turn_id:
+        return None
+    method = value.get("method")
+    if method in {"item/started", "item/completed"}:
+        item = params.get("item")
+        if not isinstance(item, dict):
+            return None
+        if item.get("type") in {"userMessage", "hookPrompt"}:
+            return None
+        mapped = {_CODEX_ITEM_FIELDS.get(key, key): data for key, data in item.items()}
+        mapped["type"] = _CODEX_ITEM_TYPES.get(item.get("type"), item.get("type"))
+        if mapped["type"] == "reasoning":
+            mapped["text"] = "\n".join(item.get("summary") or item.get("content") or [])
+        if mapped["type"] == "sub_agent_activity":
+            return {"type": "sub_agent_activity", **{key: data for key, data in mapped.items() if key != "type"}}
+        if mapped["type"] == "web_search" and "results" in mapped:
+            mapped["result"] = mapped["results"]
+        return {"type": "item.started" if method == "item/started" else "item.completed", "item": mapped}
+    if method == "item/rawResponseItem/completed" and isinstance(params.get("item"), dict):
+        return {"type": "response_item", "payload": params["item"]}
+    # Raw native events preserve async call/acceptance evidence not present in an item summary.
+    if str(method).startswith("codex/event/") and isinstance(params.get("msg"), dict):
+        msg = params["msg"]
+        if msg.get("type") == "raw_response_item" and isinstance(msg.get("item"), dict):
+            return {"type": "response_item", "payload": msg["item"]}
+    return None
+
+
+CODEX_EXEC_REVIEWED_VERSION = "codex-cli 0.162.0-alpha.17.2"
+CODEX_EXEC_REQUEST_REJECTIONS = {
+    "item/commandExecution/requestApproval": ("command execution approval", "threadId"),
+    "item/fileChange/requestApproval": ("file change approval", "threadId"),
+    "item/tool/requestUserInput": ("request_user_input", "threadId"),
+    "item/tool/call": ("dynamic tool calls", "threadId"),
+    "item/permissions/requestApproval": ("permissions approval", "threadId"),
+    "applyPatchApproval": ("apply_patch approval", "conversationId"),
+    "execCommandApproval": ("exec command approval", "conversationId"),
+    "account/chatgptAuthTokens/refresh": ("chatgpt auth token refresh", None),
+    "attestation/generate": ("attestation generation", None),
+    "currentTime/read": ("external current time", None),
+}
+CODEX_EXEC_REQUEST_METHODS = {*CODEX_EXEC_REQUEST_REJECTIONS, "mcpServer/elicitation/request"}
+
+
+def codex_exec_response(event: dict) -> dict:
+    """Keep the reviewed native exec's typed server-request behavior, including bees.
+
+    Source: openai/codex rust-v0.162.0-alpha.17.2, exec/src/lib.rs,
+    canceled_mcp_server_elicitation_response and handle_server_request.
+    This does not advertise interactive request_user_input support.
+    """
+    method = event["method"]
+    if method == "mcpServer/elicitation/request":
+        return {"id": event["id"], "result": {"action": "cancel", "content": None, "_meta": None}}
+    route = CODEX_EXEC_REQUEST_REJECTIONS.get(method)
+    if route is None:
+        # Preflight excludes unreviewed server-request schemas before inference.
+        raise NativeInputError("native_server_request_unreviewed")
+    name, thread_key = route
+    message = f"{name} {'are' if name == 'dynamic tool calls' else 'is'} not supported in exec mode"
+    if thread_key:
+        message += f" for thread `{(event.get('params') or {}).get(thread_key, '')}`"
+    return {"id": event["id"], "error": {"code": -32000, "message": message, "data": None}}
+
+
+def codex_relay(context_path: Path, command: list[str]) -> int:
+    try:
+        from .grok_control import ControlMailbox
+    except ImportError:
+        from grok_control import ControlMailbox
+    context = read_object(context_path)
+    instruction = sys.stdin.buffer.read().decode()
+    launch = context["launch"]
+    rpc = CodexRpc(command)
+    turn = mailbox = None
+    usage = None
+
+    def emit(value):
+        sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+
+    def stopped(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, stopped)
+    try:
+        rpc.call("initialize", {"clientInfo": {"name": "xperfect-native", "version": "1"},
+                                "capabilities": {"experimentalApi": True}})
+        rpc.send({"method": "initialized", "params": {}})
+        options = launch["thread"]
+        result = rpc.call("thread/resume" if launch["resumed"] else "thread/start", options)
+        session_id = (result.get("thread") or {}).get("id")
+        if not isinstance(session_id, str) or not session_id or (launch["resumed"] and session_id != options["threadId"]):
+            raise NativeInputError("native_session_mismatch")
+        # A native server may report a substituted model or policy. Do not author on it.
+        for wanted, actual in [("model", "model"), ("modelProvider", "modelProvider"), ("approvalPolicy", "approvalPolicy")]:
+            if wanted in options and result.get(actual) != options[wanted]:
+                raise NativeInputError("native_binding_mismatch")
+        expected_sandbox = {"danger-full-access": "dangerFullAccess", "read-only": "readOnly", "workspace-write": "workspaceWrite"}.get(options.get("sandbox"))
+        if expected_sandbox and (result.get("sandbox") or {}).get("type") != expected_sandbox:
+            raise NativeInputError("native_sandbox_mismatch")
+        if options.get("cwd") and Path(result.get("cwd") or "").resolve() != Path(options["cwd"]).resolve():
+            raise NativeInputError("native_workspace_mismatch")
+        workspace_policy = launch.get("workspace_policy") or {}
+        if (expected_sandbox == "workspaceWrite" and "network_access" in workspace_policy
+                and (result.get("sandbox") or {}).get("networkAccess") is not workspace_policy["network_access"]):
+            raise NativeInputError("native_network_policy_mismatch")
+        expected_roots = {str(Path(path).resolve()) for path in workspace_policy.get("writable_roots") or []}
+        actual_roots = {str(Path(path).resolve()) for path in (result.get("sandbox") or {}).get("writableRoots") or []}
+        if expected_sandbox == "workspaceWrite" and not expected_roots <= actual_roots:
+            raise NativeInputError("native_writable_roots_mismatch")
+        if "runtimeWorkspaceRoots" in options and result.get("runtimeWorkspaceRoots") != options["runtimeWorkspaceRoots"]:
+            raise NativeInputError("native_workspace_roots_mismatch")
+        expected_effort = launch["turn"].get("effort")
+        if expected_effort and result.get("reasoningEffort") != expected_effort:
+            raise NativeInputError("native_effort_mismatch")
+        emit({"type": "thread.started", "thread_id": session_id})
+        started = rpc.call("turn/start", {**launch["turn"], "threadId": session_id,
+            "input": [{"type": "text", "text": instruction}, *launch["images"]]})
+        turn_id = (started.get("turn") or {}).get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            raise NativeInputError("native_turn_missing")
+        turn = CodexTurn(rpc, session_id, turn_id)
+        context = {**context, "nativeSessionId": session_id, "nativeTurnId": turn_id,
+                   "nativeSessionActive": True, "nativeGraphControl": launch.get("interject_graph_control"),
+                   "nativeControlCapabilities": {"interject": True, "cancel": True,
+                       "interject_graph_output": bool(launch.get("interject_graph_control"))}}
+        publish(context_path, context)
+        mailbox = ControlMailbox(context_path.parent / "native-control", run_id=context["runId"],
+            attempt_id=context["attemptId"], session=turn, event=lambda _event: None)
+        mailbox.start()
+        emit({"type": "turn.started"})
+        while True:
+            event = rpc.events.get()
+            if event is None:
+                raise NativeInputError("native_control_closed")
+            params = event.get("params") or {}
+            if "id" in event and "method" in event:
+                rpc.send(codex_exec_response(event))
+                continue
+            if params.get("threadId") != session_id:
+                continue
+            if event.get("method") == "thread/tokenUsage/updated" and params.get("turnId") == turn_id:
+                usage = (params.get("tokenUsage") or {}).get("last")
+                continue
+            if event.get("method") == "turn/completed" and (params.get("turn") or {}).get("id") == turn_id:
+                turn.end()
+                publish(context_path, {**context, "nativeSessionActive": False})
+                status = params["turn"].get("status")
+                if status == "completed":
+                    counts = {"input_tokens": usage.get("inputTokens"), "cached_input_tokens": usage.get("cachedInputTokens", 0),
+                              "output_tokens": usage.get("outputTokens")} if isinstance(usage, dict) else None
+                    emit({"type": "turn.completed", **({"usage": counts} if counts else {})})
+                    return 0
+                error = params["turn"].get("error") or {}
+                emit({"type": "turn.failed", "error": error, "native_status": status})
+                return 1
+            projected = codex_event(event, session_id, turn_id)
+            if projected:
+                emit(projected)
+    except (NativeInputError, OSError, ValueError, KeyError) as exc:
+        emit({"type": "turn.failed", "error": {"message": str(exc)}})
+        return 1
+    finally:
+        if turn is not None:
+            turn.end()
+        publish(context_path, {**context, "nativeSessionActive": False})
+        if mailbox is not None:
+            mailbox.close()
+        rpc.close()
 
 
 if __name__ == "__main__":

@@ -448,7 +448,6 @@ def create_signed_link_ref(*, token: str, target_url: str = "") -> str:
     payload_json = _payload_json(payload)
     scope_key = _scope_key(payload, target_url)
     with _link_ref_conn() as conn:
-        conn.execute("DELETE FROM signed_link_refs WHERE expires_at > 0 AND expires_at < ?", (now,))
         existing = conn.execute(
             """
             SELECT ref_id, token FROM signed_link_refs
@@ -469,6 +468,7 @@ def create_signed_link_ref(*, token: str, target_url: str = "") -> str:
                 existing_exp = 0
             if existing_exp >= now:
                 return str(existing["ref_id"] or "")
+        conn.execute("DELETE FROM signed_link_refs WHERE expires_at > 0 AND expires_at < ?", (now,))
         ref_id = f"ghr_{uuid.uuid4().hex[:24]}"
         conn.execute(
             """
