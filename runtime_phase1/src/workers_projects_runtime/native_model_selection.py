@@ -53,7 +53,7 @@ class _NativeCatalogUnavailable(Exception):
 _catalog_lock = RLock()
 _catalog_inflight: dict[tuple, Future] = {}
 _catalog_observation: ContextVar[dict | None] = ContextVar("native_catalog_observation", default=None)
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("uvicorn.error")
 
 
 def native_timing_enabled() -> bool:

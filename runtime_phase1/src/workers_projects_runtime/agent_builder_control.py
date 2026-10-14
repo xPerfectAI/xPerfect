@@ -170,6 +170,8 @@ def _fail_closed_delivery_result(content: str, source: str) -> dict[str, Any]:
 def conversation_output_schema(
     graph_control: Any,
     delivery_control: Any,
+    *,
+    same_turn_continuation: bool = False,
 ) -> dict[str, Any] | None:
     normalized_graph = normalized_graph_transfer_control(graph_control)
     normalized_delivery = normalized_messaging_delivery_control(delivery_control)
@@ -187,9 +189,22 @@ def conversation_output_schema(
     )
     description_parts = [
         "Return one structured result for the current conversation turn.",
-        "For type=assistant_response, put the complete user-facing answer in content.",
-        "Returning type=assistant_response ends your work for this turn. First complete authorized work you can do now, or report its actual blocker; a promise is not a result. A real accepted asynchronous work receipt may be acknowledged without waiting for completion.",
+        "This schema describes the final host-graph result, not native function or MCP calls. Execute authorized native functions and MCP tools through their normal protocol before returning this result.",
     ]
+    if same_turn_continuation:
+        description_parts.extend([
+            "For type=assistant_response, put the useful user-facing answer in content. The native harness may admit more input at a safe boundary and continue this same turn after that response.",
+            "Every response, including every later continuation, must be a complete structured envelope matching this schema; never return bare text or empty transport output.",
+            "On continuation, use the new input together with the full prior goal, context, tool results and work. Earlier authored content remains part of this conversation. Continue from it: provide only the new details or correction needed, not a replacement full answer or a recap. Do not reapply the original answer length or format to a rewritten answer. Preserve earlier authored answers in history without replaying them unless the user requests repetition or a full replacement. Complete remaining authorized work and report actual results or blockers.",
+            "An earlier native response, input queue acknowledgement or response_completed event is not proof that text, preview or speech reached the user. Use supplied public-delivery evidence when available; do not claim to retract content already displayed or heard. A completed native turn receives later user input as the ordinary next turn.",
+            "When no additional public content is useful, return assistant_response with empty content and, when the voice field is present, voice=skip. This is silent continuation, not a substitute for answering an unanswered user request. Do not narrate internal status or silence markers.",
+            "First complete authorized work you can do now, or report its actual blocker; a promise is not a result. A real accepted asynchronous work receipt may be acknowledged without waiting for completion.",
+        ])
+    else:
+        description_parts.extend([
+            "For type=assistant_response, put the complete user-facing answer in content.",
+            "Returning type=assistant_response ends your work for this turn. First complete authorized work you can do now, or report its actual blocker; a promise is not a result. A real accepted asynchronous work receipt may be acknowledged without waiting for completion.",
+        ])
     if normalized_graph:
         description_parts.extend(
             [
@@ -235,6 +250,7 @@ def conversation_output_schema(
         "tool_name": {
             "type": ["string", "null"],
             "enum": [None, *names],
+            "description": "Must be null for assistant_response; for tool_call, must name one listed host-graph transfer. Native function and MCP calls use their own protocol, not this field.",
         },
     }
     required = ["type", "content", "tool_name"]
@@ -256,6 +272,31 @@ def conversation_output_schema(
         "required": required,
     }
 
+
+
+def conversation_output_contract_instructions(schema: dict[str, Any]) -> str:
+    """Render the declared final contract without constraining native tool calls."""
+    if not isinstance(schema, dict):
+        raise ValueError("Conversation output contract must be an object")
+    return "Conversation final-result protocol (native tools retain their own protocol):\n" + json.dumps(
+        schema, ensure_ascii=False, separators=(",", ":"),
+    )
+
+
+
+def minimal_conversation_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Project sampler constraints while the declared contract owns final validation."""
+    if not any(conversation_controls_from_schema(schema)):
+        raise ValueError("Minimal conversation output requires declared messaging controls")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            name: {key: value for key, value in spec.items() if key in {"type", "enum"}}
+            for name, spec in schema["properties"].items()
+        },
+        "required": list(schema["required"]),
+    }
 
 
 def conversation_controls_from_schema(schema: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -302,10 +343,11 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def public_conversation_prefix(output: str, graph_control: Any, delivery_control: Any) -> dict[str, Any] | None:
+def public_conversation_prefix(output: str, graph_control: Any, delivery_control: Any,
+                               *, include_skipped: bool = False) -> dict[str, Any] | None:
     """Decode only a public string after every required audio/graph control.
 
-    Content-first envelopes remain valid terminal results, but cannot stream early.
+    Content-first envelopes wait for complete strict validation, then release immediately.
     JSON escapes and surrogate pairs stay buffered until structurally complete.
     """
     if not normalized_messaging_delivery_control(delivery_control):
@@ -315,6 +357,20 @@ def public_conversation_prefix(output: str, graph_control: Any, delivery_control
     source = str(output or "").lstrip()
     if not source.startswith("{"):
         return None
+    if source.rstrip().endswith("}"):
+        try:
+            decision = parse_conversation_output(source, graph_control, delivery_control)
+        except (ValueError, TypeError):
+            decision = None
+        disposition = decision.get("delivery_disposition") if decision else None
+        if isinstance(disposition, dict) and disposition.get("valid") is True:
+            audio = disposition["audio"]
+            if (audio == "skip" and (not include_skipped or decision["type"] != "assistant_response")):
+                return None
+            text = decision["content"]
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in text):
+                return None
+            return {"text": text, "complete": True, "delivery_disposition": disposition}
     decoder = json.JSONDecoder(object_pairs_hook=_unique_json_object)
     offset = 1
     controls: dict[str, Any] = {}
@@ -336,7 +392,8 @@ def public_conversation_prefix(output: str, graph_control: Any, delivery_control
             offset += 1
         if key == "content":
             if (set(controls) != {"type", "tool_name", "voice"}
-                    or controls.get("voice") != "eligible"
+                    or controls.get("voice") not in ({"eligible", "skip"} if include_skipped else {"eligible"})
+                    or (controls.get("voice") == "skip" and controls.get("type") != "assistant_response")
                     or not (
                         (controls.get("type") == "assistant_response" and controls.get("tool_name") is None)
                         or (controls.get("type") == "tool_call"
@@ -395,7 +452,7 @@ def public_conversation_prefix(output: str, graph_control: Any, delivery_control
             except ValueError:
                 return None
             return {"text": content, "complete": closed, "delivery_disposition": {
-                "version": MESSAGING_DELIVERY_CONTROL_VERSION, "audio": "eligible",
+                "version": MESSAGING_DELIVERY_CONTROL_VERSION, "audio": controls["voice"],
                 "required": True, "valid": True, "source": "model",
             }}
         try:
@@ -411,7 +468,8 @@ def public_conversation_prefix(output: str, graph_control: Any, delivery_control
     return None
 
 
-def ordered_conversation_output(parts: list[str], output: str, graph_control: Any, delivery_control: Any) -> str:
+def ordered_conversation_output(parts: list[str], output: str, graph_control: Any, delivery_control: Any,
+                                *, part_dispositions: list[dict[str, Any]] | None = None) -> str:
     """Keep accepted model-authored narration in the same native terminal answer."""
     if not parts:
         return output
@@ -420,6 +478,21 @@ def ordered_conversation_output(parts: list[str], output: str, graph_control: An
     disposition = decision.get("delivery_disposition")
     if isinstance(disposition, dict) and disposition.get("valid") is not True:
         raise ValueError("Invalid terminal conversation delivery control")
+    if decision["type"] == "assistant_response" and part_dispositions is not None:
+        choices = [item["audio"] for text, item in zip(parts, part_dispositions) if text.strip()]
+        if str(payload["content"]).strip() and isinstance(disposition, dict):
+            choices.append(disposition["audio"])
+        # The canonical envelope has one audio flag. Mixed public text retains
+        # conservative silence there; the existing per-part ranges own delivery.
+        if choices:
+            payload["voice"] = "eligible" if all(choice == "eligible" for choice in choices) else "skip"
+    elif (decision["type"] == "assistant_response" and not str(payload["content"]).strip()
+            and isinstance(disposition, dict) and disposition.get("audio") == "skip"
+            and any(part.strip() for part in parts)):
+        # Parts are earlier validated, audio-eligible authored narration. A silent
+        # continuation cannot withdraw its delivery from final-only channels.
+        # Intentional text-only additions and terminal transfers retain their controls.
+        payload["voice"] = "eligible"
     payload["content"] = "\n\n".join([*parts, str(payload["content"])])
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -428,8 +501,8 @@ class NativeConversationParts:
     """The existing ordered public parts, framed by exact native generation metadata.
 
     Callers must first bind notifications to their exact active native session.
-    A later generation is buffered to distinguish complete envelope duplicates;
-    Silent assistant predecessors add no public narration. A declared terminal
+    Distinct native generations preserve their authored content, even when equal;
+    Text-only predecessors retain their text and declared audio intent. A declared terminal
     graph transfer remains terminal; optional context cannot replace its controls.
     """
 
@@ -437,12 +510,10 @@ class NativeConversationParts:
         self.controls = (graph_control, delivery_control)
         self.current: list[str] = []
         self.parts: list[str] = []
+        self.part_dispositions: list[dict[str, Any]] = []
         self.part_index = 1
         self.generation: tuple[str, int, int] | None = None
         self.completed = False
-        self.buffered_generation = False
-        self.previous_envelope: dict[str, Any] | None = None
-        self.generation_base_parts = 0
         self.prefix_seen = False
         self.terminal_graph = False
 
@@ -472,8 +543,9 @@ class NativeConversationParts:
                     key in metadata and metadata[key] != expected
                     for key, expected in zip(("promptId", "turnStartMs", "streamStartMs"), self.generation)):
                 raise ValueError("Native completion changed its active generation identity")
-            if self.buffered_generation:
-                self._envelope()
+            # Native completion also ends intermediate tool narration. The exact
+            # terminal envelope is validated by finish(), after native tools retire
+            # their buffer; a generation notification is not a terminal result.
             self.completed = self.generation is not None
             return
         if kind == "tool_call":
@@ -486,13 +558,12 @@ class NativeConversationParts:
             if prefix and prefix["text"]:
                 if not prefix["complete"]:
                     raise ValueError("Native tool interrupted an incomplete public response envelope")
-                if not prefix.get("duplicate"):
-                    self.parts.append(prefix["text"])
+                self.parts.append(prefix["text"])
+                self.part_dispositions.append(prefix["delivery_disposition"])
             elif self.prefix_seen:
                 raise ValueError("Native tool changed an accepted public response envelope")
             self.current = []
             self.prefix_seen = False
-            self.buffered_generation = False
             self.part_index += 1
             return
         content = update.get("content")
@@ -527,14 +598,13 @@ class NativeConversationParts:
                         self.generation = generation
                         self.completed = False
                         return
-                    if envelope and envelope["voice"] == "eligible" and envelope != self.previous_envelope:
+                    if envelope:
                         self.parts.append(envelope["content"])
-                    self.previous_envelope = envelope
-                    self.generation_base_parts = len(self.parts)
+                        self.part_dispositions.append(parse_conversation_output(
+                            json.dumps(envelope), *self.controls)["delivery_disposition"])
                     self.current = []
                     self.prefix_seen = False
                     self.part_index += 1
-                    self.buffered_generation = True
                     self.completed = False
                 self.generation = generation
             elif self.generation is not None:
@@ -547,30 +617,39 @@ class NativeConversationParts:
             self.prefix_seen = True
 
     def prefix(self) -> dict[str, Any] | None:
-        prefix = public_conversation_prefix("".join(self.current), *self.controls)
-        if self.buffered_generation:
-            if not prefix or not prefix["complete"]:
-                return None
-            payload = self._envelope()
-            prefix = {**prefix, "duplicate": self._is_duplicate(payload)}
-        return prefix
+        return public_conversation_prefix("".join(self.current), *self.controls, include_skipped=True)
 
-    def _is_duplicate(self, payload: dict[str, Any]) -> bool:
-        return (payload == self.previous_envelope and payload["type"] == "assistant_response"
-                and payload["voice"] == "eligible" and len(self.parts) == self.generation_base_parts)
+    def delivery_disposition_ranges(self) -> list[dict[str, Any]]:
+        """Project validated native choices using the host's existing UTF-16 ranges."""
+        if not normalized_messaging_delivery_control(self.controls[1]):
+            return []
+        raw = "".join(self.current)
+        decision = parse_conversation_output(raw, *self.controls)
+        disposition = decision.get("delivery_disposition")
+        if not isinstance(disposition, dict) or disposition.get("valid") is not True:
+            raise ValueError("Invalid terminal conversation delivery control")
+        segments = [*zip(self.parts, self.part_dispositions), (decision["content"], disposition)]
+        ranges: list[dict[str, Any]] = []
+        offset = 0
+        for index, (text, choice) in enumerate(segments):
+            segment = ("\n\n" if index else "") + text
+            end = offset + len(segment.encode("utf-16-le")) // 2
+            if end > offset:
+                if ranges and ranges[-1]["disposition"] == choice:
+                    ranges[-1]["end"] = end
+                else:
+                    ranges.append({"start": offset, "end": end, "disposition": dict(choice)})
+            offset = end
+        return ranges
 
     def finish(self) -> str:
         raw = "".join(self.current)
-        parts = self.parts
-        if self.buffered_generation:
-            payload = self._envelope()
-            if self._is_duplicate(payload):
-                parts = parts[:-1]
-        if self.prefix_seen:
+        if self.prefix_seen or (self.part_index > 1 and self.generation is not None):
             decision = parse_conversation_output(raw, *self.controls)
             if decision.get("delivery_disposition", {}).get("valid") is not True:
                 raise ValueError("Invalid public response envelope")
-        return ordered_conversation_output(parts, raw, *self.controls)
+        return ordered_conversation_output(self.parts, raw, *self.controls,
+                                          part_dispositions=self.part_dispositions)
 
 
 def graph_transfer_output_schema(control: Any) -> dict[str, Any] | None:

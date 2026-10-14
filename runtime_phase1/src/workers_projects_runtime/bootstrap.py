@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from .auth import multi_user_security_enabled
+from .auth import DEFAULT_TENANT_ID, multi_user_security_enabled
 from .codex_plugins import provision_codex_official_marketplace
 
 import errno
@@ -284,9 +284,18 @@ def native_profile_tool_access_instructions(
     fact = _worker_prompt(prompt_id, "").strip()
     if fact in instructions:
         return instructions
+    return native_instruction_before_tail(bundle, instructions, fact)
+
+
+def native_instruction_before_tail(
+    bundle: JsonDict, instructions: str, fact: str, *, require_exact_tail: bool = False,
+) -> str:
+    """Reuse native instruction placement while keeping the declared final tail last."""
     tail = _instruction_text(bundle.get("declared_developer_instruction_tail"))
     if tail:
         if not instructions.rstrip().endswith(tail):
+            if require_exact_tail:
+                raise ValueError("Native instruction authority does not end with its declared tail")
             logging.getLogger(__name__).warning("native_profile_tool_access_skipped=true")
             return instructions
         return "\n\n".join(_unique_instruction_parts(
@@ -751,30 +760,37 @@ def _canonical_source_for_token(source: Path | str) -> str:
     return os.fspath(Path(os.path.abspath(os.fspath(Path(source).expanduser()))))
 
 
-def sign_bootstrap_source_path(source: Path | str, *, tenant_id: str | None = None, owner_id: str | None = None) -> str:
+def _bootstrap_source_token(source: Path | str, *, tenant_id: str, owner_id: str) -> str:
     secret = _bootstrap_source_secret()
     if not secret:
         return ""
-    message = "\0".join(
-        (
-            "v1",
-            _canonical_source_for_token(source),
-            str(tenant_id or ""),
-            str(owner_id or ""),
-        )
-    )
+    message = "\0".join(("v1", _canonical_source_for_token(source), tenant_id, owner_id))
     digest = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"v1:{digest}"
 
 
-def _source_token_is_valid(entry: dict[str, Any], source: Path | str, worker: dict[str, Any]) -> bool:
-    expected = sign_bootstrap_source_path(
-        source,
-        tenant_id=str(worker.get("tenant_id") or ""),
-        owner_id=str(worker.get("owner_id") or ""),
+def sign_bootstrap_source_path(source: Path | str, *, tenant_id: str | None = None, owner_id: str | None = None) -> str:
+    # File grants and worker storage share the same omitted-tenant namespace.
+    return _bootstrap_source_token(
+        source, tenant_id=str(tenant_id or DEFAULT_TENANT_ID), owner_id=str(owner_id or ""),
     )
+
+
+def _source_token_is_valid(entry: dict[str, Any], source: Path | str, worker: dict[str, Any]) -> bool:
+    tenant_id = str(worker.get("tenant_id") or DEFAULT_TENANT_ID)
+    owner_id = str(worker.get("owner_id") or "")
+    expected = sign_bootstrap_source_path(source, tenant_id=tenant_id, owner_id=owner_id)
     token = str(entry.get(BOOTSTRAP_SOURCE_TOKEN_KEY) or "").strip()
-    return bool(expected and token and hmac.compare_digest(token, expected))
+    if not expected or not token:
+        return False
+    if hmac.compare_digest(token, expected):
+        return True
+    # Prior omitted-tenant grants are valid only in the existing default namespace.
+    # Their exact nonempty owner/path and the dedicated signing key remain required.
+    if tenant_id != DEFAULT_TENANT_ID or not owner_id.strip():
+        return False
+    legacy = _bootstrap_source_token(source, tenant_id="", owner_id=owner_id)
+    return bool(legacy and hmac.compare_digest(token, legacy))
 
 
 def resolve_authorized_bootstrap_source_path(
@@ -782,9 +798,29 @@ def resolve_authorized_bootstrap_source_path(
 ) -> Path:
     """Apply one source-path trust contract for Docker and host-native workers."""
 
-    if _enterprise_mode_enabled() and not _source_token_is_valid(entry, source, worker):
+    signed = _source_token_is_valid(entry, source, worker)
+    if _enterprise_mode_enabled() and not signed:
         raise PermissionError("Bootstrap source_path is not authorized for this enterprise user")
-    return resolve_bootstrap_source_path(source)
+    try:
+        return resolve_bootstrap_source_path(source)
+    except PermissionError:
+        # A retained signed entry may name the previous checkout root alias.
+        # Its existing file projector can repair only that address, not trust,
+        # ownership, missing bytes or arbitrary changed file content.
+        if not signed:
+            raise
+        from .upload_projection import reproject_retained_upload_source
+        projected = reproject_retained_upload_source(
+            entry, source,
+            tenant_id=str(worker.get("tenant_id") or ""),
+            owner_id=str(worker.get("owner_id") or ""),
+        )
+        if projected is None:
+            raise
+        canonical = projected["source_path"]
+        if not _source_token_is_valid(projected, canonical, worker):
+            raise PermissionError("Reprojected bootstrap source is not authorized for this user")
+        return resolve_bootstrap_source_path(canonical)
 
 def _worker_env_allowlist() -> set[str]:
     raw = os.environ.get("GLASSHIVE_WORKER_ENV_ALLOWLIST", "").strip()

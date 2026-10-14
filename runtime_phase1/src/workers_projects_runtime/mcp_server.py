@@ -1637,7 +1637,7 @@ def _view_steer_link(
     return {
         "label": f"View / Steer {task_label}",
         "url": url,
-        "include_in_response": bool(url),
+        "include_in_response": False,
         "link_kind": "mission_control",
         "state": "terminal" if terminal else "nonterminal",
     }
@@ -3195,9 +3195,21 @@ def _apply_connected_account_intent_guard(
     return guarded_bundle, guarded_instruction
 
 
-def _merge_request_context(bundle: dict[str, Any] | None) -> dict[str, Any] | None:
+def _merge_request_context(
+    bundle: dict[str, Any] | None, *, uploaded_files: Any = None
+) -> dict[str, Any] | None:
     load_viventium_runtime_env()
     headers = _request_headers()
+    # The trusted selected ledger may include historical files absent from this
+    # turn's compact headers. Project explicit records under transport owner scope
+    # before validating the complete selected-file set across both carriers.
+    bundle = _merge_explicit_uploaded_files(
+        bundle, uploaded_files,
+        tenant_id=_header_value(headers, HEADER_TENANT_ID) or None,
+        owner_id=_header_value(headers, HEADER_USER_ID) or None,
+        storage_owner_id=_header_value(headers, HEADER_STORAGE_USER_ID) or None,
+        require_all_selected=False,
+    )
     callback_url = (
         os.environ.get("GLASSHIVE_EVENTS_WEBHOOK_URL", "").strip()
         or os.environ.get("VIVENTIUM_GLASSHIVE_CALLBACK_URL", "").strip()
@@ -3240,6 +3252,8 @@ def _merge_request_context(bundle: dict[str, Any] | None) -> dict[str, Any] | No
         dict(bundle or {})
     )
     if not context and not callback_url and not upload_context:
+        if selected_files is not None:
+            intersect_upload_records(merged.get("files"), selected_files, require_all=True)
         if selected_files is not None and merged.get("files"):
             _append_materialized_uploads_instruction(merged, merged["files"])
         return _without_internal_storage_authority(merged)
@@ -3277,12 +3291,6 @@ def _merge_request_context(bundle: dict[str, Any] | None) -> dict[str, Any] | No
 
     projected: list[dict[str, Any]] = []
     if upload_context:
-        if selected_files is not None:
-            intersect_upload_records(
-                [merged.get("files"), upload_context],
-                selected_files,
-                require_all=True,
-            )
         selected_records, upload_context = _selected_upload_context(
             upload_context, selected_files
         )
@@ -3300,12 +3308,6 @@ def _merge_request_context(bundle: dict[str, Any] | None) -> dict[str, Any] | No
             conversation_id=context.get("conversation_id"),
             message_id=context.get("message_id"),
         )
-        if selected_files is not None:
-            intersect_upload_records(
-                [merged.get("files"), recent],
-                selected_files,
-                require_all=True,
-            )
         projected = intersect_upload_records(recent, selected_files)
         if projected:
             LOGGER.info(
@@ -3328,11 +3330,20 @@ def _merge_request_context(bundle: dict[str, Any] | None) -> dict[str, Any] | No
                 }
                 for entry in projected
             ]
+    explicit_ledger = public_upload_ledger(
+        intersect_upload_records(uploaded_files, selected_files)
+    )
+    if explicit_ledger:
+        upload_context = {**upload_context, "tool_uploaded_files": explicit_ledger}
     if upload_context:
         merged["glasshive_upload_context"] = upload_context
         merged["viventium_upload_context"] = upload_context
     if projected:
         merged["files"] = _merge_bundle_files(merged.get("files"), projected)
+    if selected_files is not None:
+        # Both carriers have passed their existing ambiguity and owner checks.
+        # Only their complete projected union can satisfy packet authority.
+        intersect_upload_records(merged.get("files"), selected_files, require_all=True)
     if selected_files is not None and merged.get("files"):
         _append_materialized_uploads_instruction(merged, merged["files"])
     elif projected:
@@ -3347,12 +3358,13 @@ def _merge_explicit_uploaded_files(
     tenant_id: str | None = None,
     owner_id: str | None = None,
     storage_owner_id: str | None = None,
+    require_all_selected: bool = True,
 ) -> dict[str, Any]:
     if uploaded_files in (None, "", [], {}):
         merged, _selected = _apply_trusted_selected_file_scope(dict(bundle or {}))
         return _without_internal_storage_authority(merged)
     merged, selected_files = _apply_trusted_selected_file_scope(dict(bundle or {}))
-    if selected_files is not None:
+    if selected_files is not None and require_all_selected:
         intersect_upload_records(
             [merged.get("files"), uploaded_files],
             selected_files,
@@ -5107,7 +5119,7 @@ def create_mcp_server(
             "Callbacks are optional; plain LibreChat or standalone deployments can use workspace_status for non-blocking checks and workspace_wait when the user explicitly wants to wait. "
             "For attached/uploaded-file tasks, use uploaded_files when the file content is visible in the current model context, for example [{'filename':'brief.txt','text':'...'}]. "
             "If the chat model cannot read the file body, still call this with file names/references and requested transformation so GlassHive can use request upload metadata supplied by the host or return an honest blocker. "
-            "Write your own short acknowledgement and include the View / Steer link when view_steer_url is present. Use result_tools for later user status/result questions; request diagnostics only when raw ids are needed. "
+            "Write your own short acknowledgement; include a View / Steer link only when view_steer.include_in_response is true, or when useful or requested. Use result_tools for later user status/result questions; request diagnostics only when raw ids are needed. "
             "Do not shorten, summarize, paraphrase, or water down the user's request: pass the full available brief, background, constraints, examples, links, file references, exclusions, and success criteria through instruction/goal/bootstrap context so the worker receives the full picture. "
             "For connected-account facts or actions, prefer MCP/tools over browser or computer UI when available. Connected-account read authorization comes from the host-signed broker grant; connected_account_content_intent is only a compatibility hint for missing-broker warnings, not a required authorization switch. "
             "Pass MCP/tool availability as context, not as a made-up project goal or success criterion, unless the user explicitly asked to prove tool usage. "
@@ -5291,7 +5303,7 @@ def create_mcp_server(
             bundle["project_definition"] = default_project_definition
         else:
             bundle.setdefault("project_definition", default_project_definition)
-        bundle = _merge_request_context(bundle)
+        bundle = _merge_request_context(bundle, uploaded_files=uploaded_files)
         bundle, worker_instruction = _project_trusted_triggering_source_segments(
             bundle,
             worker_instruction,
@@ -5300,16 +5312,6 @@ def create_mcp_server(
         _validate_viventium_feelings_projection(
             bundle,
             required=isinstance(bundle.get("viventium_delegation_packet"), dict),
-        )
-        trusted_tenant_id, trusted_owner_id, trusted_storage_owner_id = (
-            _trusted_request_upload_scope()
-        )
-        bundle = _merge_explicit_uploaded_files(
-            bundle,
-            uploaded_files,
-            tenant_id=trusted_tenant_id,
-            owner_id=trusted_owner_id,
-            storage_owner_id=trusted_storage_owner_id,
         )
         validate_file_transport(file_upload_ids, uploaded_files, bundle)
         bundle = _apply_effort_to_bundle(bundle, profile=resolved_profile, effort=resolved_effort)
@@ -6010,17 +6012,7 @@ def create_mcp_server(
             "project_definition",
             _default_project_definition(title=title, goal=clean_success_criteria, instruction=scheduled_instruction),
         )
-        bundle = _merge_request_context(bundle)
-        trusted_tenant_id, trusted_owner_id, trusted_storage_owner_id = (
-            _trusted_request_upload_scope()
-        )
-        bundle = _merge_explicit_uploaded_files(
-            bundle,
-            uploaded_files,
-            tenant_id=trusted_tenant_id,
-            owner_id=trusted_owner_id,
-            storage_owner_id=trusted_storage_owner_id,
-        )
+        bundle = _merge_request_context(bundle, uploaded_files=uploaded_files)
         validate_file_transport(file_upload_ids, uploaded_files, bundle)
         bundle = _apply_effort_to_bundle(bundle, profile=resolved_profile, effort=resolved_effort)
         provider_selection = _provider_account_selection(
@@ -7031,7 +7023,7 @@ def create_mcp_server(
             "view_steer": {
                 "label": "View / Steer GlassHive workspace",
                 "url": view_steer_url,
-                "include_in_response": bool(view_steer_url),
+                "include_in_response": False,
             },
             "artifact_links": artifact_links,
         }
@@ -7624,8 +7616,9 @@ def create_mcp_server(
             "previous_failure_class": str(previous_run.get("failure_class") or "") or None,
             "effort": resolved_effort,
             "acknowledgement_guidance": (
-                "Tell the user GlassHive is continuing in the same workspace, include the View / Steer "
-                "link when present, and use the returned result_tools for later status or wait."
+                "Tell the user GlassHive is continuing in the same workspace. Include the View / Steer "
+                "link only when view_steer.include_in_response is true, or when useful or requested, "
+                "and use the returned result_tools for later status or wait."
             ),
             **dispatch_context,
         }

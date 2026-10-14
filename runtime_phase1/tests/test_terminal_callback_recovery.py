@@ -145,6 +145,89 @@ def test_recovered_result_acceptance_is_exact_and_does_not_send_twice(account_cl
     assert not tasks
 
 
+def test_publisher_retry_signs_immutable_creation_clock_and_refreshes_send_clock(
+    account_client, monkeypatch
+):
+    store, service, body, original = retained_result(account_client)
+    tasks, received = [], []
+    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    assert account_client.post("/v1/callback-associations/recover",
+        headers=account_headers(), json=body).status_code == 202
+    args, kwargs = tasks.pop()
+    clock = [1_900_000_001]
+    monkeypatch.setattr("workers_projects_runtime.service.time.time", lambda: clock[0])
+    monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S", "0")
+
+    def post(url, *, content, headers, timeout):
+        payload = json.loads(content)
+        received.append((payload, content, headers))
+        if len(received) == 1:
+            clock[0] += 7
+            return httpx.Response(500, request=httpx.Request("POST", url))
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "callback_status": "accepted", "callback_id": payload["callback_id"],
+            "run_id": payload["run_id"], "result_revision": payload["result_revision"],
+            "result_digest": payload["result_digest"],
+            "current_result_revision": payload["result_revision"],
+            "current_callback_id": payload["callback_id"],
+            "current_result_digest": payload["result_digest"],
+        })
+
+    monkeypatch.setattr("workers_projects_runtime.service.httpx.post", post)
+    args[0](*args[1:], **{**kwargs, "delivery_attempts": 2})
+    assert len(received) == 2
+    assert [item[0]["callback_ts"] for item in received] == [1_900_000_001, 1_900_000_008]
+    assert {item[0]["callback_created_at"] for item in received} == {original["created_at"]}
+    worker = store.get_worker(body["workerId"])
+    callbacks = service._callback_config_for(worker)
+    for payload, encoded, headers in received:
+        assert headers == service._callback_headers(callbacks, payload, encoded)
+        changed = {**payload, "callback_created_at": "2000-01-01T00:00:00+00:00"}
+        changed_signature = service._callback_headers(
+            callbacks, changed, service._encode_callback_payload(changed)
+        )["X-GlassHive-Signature"]
+        assert headers["X-GlassHive-Signature"] != changed_signature
+    assert row(store, body)["status"] == "http_accepted"
+    assert row(store, body)["created_at"] == original["created_at"]
+    assert row(store, body)["payload_json"] == original["payload_json"]
+
+
+@pytest.mark.parametrize("legacy_clock", [None, ""])
+def test_publisher_legacy_record_does_not_invent_creation_clock(
+    account_client, monkeypatch, legacy_clock
+):
+    store, service, body, original = retained_result(account_client)
+    tasks, received = [], []
+    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    assert account_client.post("/v1/callback-associations/recover",
+        headers=account_headers(), json=body).status_code == 202
+    args, kwargs = tasks.pop()
+    claimed = {**args[2], "created_at": legacy_clock}
+    payload = json.loads(claimed["payload_json"])
+    payload["callback_created_at"] = "2000-01-01T00:00:00+00:00"
+    claimed["payload_json"] = json.dumps(payload)
+
+    def post(url, *, content, headers, timeout):
+        delivered = json.loads(content)
+        received.append(delivered)
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "callback_status": "accepted", "callback_id": delivered["callback_id"],
+            "run_id": delivered["run_id"], "result_revision": delivered["result_revision"],
+            "result_digest": delivered["result_digest"],
+            "current_result_revision": delivered["result_revision"],
+            "current_callback_id": delivered["callback_id"],
+            "current_result_digest": delivered["result_digest"],
+        })
+
+    monkeypatch.setattr("workers_projects_runtime.service.httpx.post", post)
+    args[0](args[1], claimed, args[3], **kwargs)
+    assert len(received) == 1
+    assert "callback_created_at" not in received[0]
+    assert received[0]["callback_ts"] > 0
+    assert row(store, body)["status"] == "http_accepted"
+    assert row(store, body)["created_at"] == original["created_at"]
+
+
 def test_recovery_failure_cannot_overwrite_a_new_delivery_lease(account_client, monkeypatch):
     store, service, body, _ = retained_result(account_client)
     tasks = []

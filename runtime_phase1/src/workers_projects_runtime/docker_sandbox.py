@@ -23,7 +23,11 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .auth import multi_user_security_enabled
-from .bootstrap import apply_bootstrap
+from .bootstrap import (
+    CLEAN_ROOM_RUNTIME_ENV_KEYS,
+    GLASSHIVE_CAPABILITY_BROKER_TOKEN_ENV,
+    apply_bootstrap,
+)
 from .codex_plugins import (
     OPENAI_PLUGIN_MARKETPLACE_COMMIT,
     OPENAI_PLUGIN_MARKETPLACE_IMAGE_PATH,
@@ -1931,11 +1935,21 @@ class DockerSandboxManager:
             )
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", clean_run_id):
             raise RuntimeError("Parallel clean-room run identity is invalid")
-        if set(env) != {"GLASSHIVE_CAPABILITY_BROKER_TOKEN"}:
+        if (
+            not isinstance(env, dict)
+            or GLASSHIVE_CAPABILITY_BROKER_TOKEN_ENV not in env
+            or not set(env).issubset(CLEAN_ROOM_RUNTIME_ENV_KEYS)
+        ):
             raise RuntimeError("Parallel clean-room run authority scope is invalid")
-        grant = str(env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_-]{16,16384}", grant):
-            raise RuntimeError("Parallel clean-room run authority is invalid")
+        # The trusted run binder owns these grants. Preserve its optional peer/context
+        # authority in the same exact-generation tmpfs, without admitting other env keys.
+        grants: dict[str, str] = {}
+        for key, value in env.items():
+            if not isinstance(value, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{16,16384}", value
+            ):
+                raise RuntimeError("Parallel clean-room run authority is invalid")
+            grants[key] = value
 
         container_name = self._container_name(worker_id)
         boundary = self.parallel_clean_room_readiness()
@@ -1960,62 +1974,74 @@ class DockerSandboxManager:
             )
 
         secret_root = f"/run/glasshive/{clean_run_id}"
-        prepared = self._docker_exec(
-            container_id,
-            [
-                "bash",
-                "-c",
-                (
-                    "set -e; umask 077; "
-                    f"mkdir -p {shlex.quote(secret_root)}; "
-                    f"chmod 700 {shlex.quote(secret_root)}"
-                ),
-            ],
-            user=self.user,
-        )
-        if prepared.returncode != 0:
-            raise RuntimeError(
-                "Parallel clean-room tmpfs authority directory could not be prepared"
-            )
-
-        env_file = f"{secret_root}/secret-runtime.env"
-        keys_file = f"{secret_root}/secret-runtime.keys"
-        for destination, content in (
-            (
-                env_file,
-                "export GLASSHIVE_CAPABILITY_BROKER_TOKEN="
-                f"{shlex.quote(grant)}\n",
-            ),
-            (keys_file, "GLASSHIVE_CAPABILITY_BROKER_TOKEN\n"),
-        ):
-            written = self._docker_exec(
+        # Projection can fail after a grant write. The owning cleanup re-attests
+        # the exact generation and never clears a replacement container.
+        try:
+            prepared = self._docker_exec(
                 container_id,
                 [
                     "bash",
                     "-c",
                     (
                         "set -e; umask 077; "
-                        f"cat > {shlex.quote(destination)}; "
-                        f"chmod 600 {shlex.quote(destination)}"
+                        f"mkdir -p {shlex.quote(secret_root)}; "
+                        f"chmod 700 {shlex.quote(secret_root)}"
                     ),
                 ],
                 user=self.user,
-                input_text=content,
             )
-            if written.returncode != 0:
+            if prepared.returncode != 0:
                 raise RuntimeError(
-                    "Parallel clean-room run authority could not be projected"
+                    "Parallel clean-room tmpfs authority directory could not be prepared"
                 )
-        after = self.inspect_fresh(worker_id)
-        if (
-            after.status != "present"
-            or after.sandbox is None
-            or str(after.sandbox.container_id or "").strip() != container_id
-            or not self._sandbox_matches_parallel_clean_room_policy(after.sandbox)
-        ):
-            raise RuntimeError(
-                "Parallel clean-room sandbox generation changed during run authority projection"
+
+            env_file = f"{secret_root}/secret-runtime.env"
+            keys_file = f"{secret_root}/secret-runtime.keys"
+            for destination, content in (
+                (
+                    env_file,
+                    "".join(
+                        f"export {key}={shlex.quote(grants[key])}\n"
+                        for key in sorted(grants)
+                    ),
+                ),
+                (keys_file, "".join(f"{key}\n" for key in sorted(grants))),
+            ):
+                written = self._docker_exec(
+                    container_id,
+                    [
+                        "bash",
+                        "-c",
+                        (
+                            "set -e; umask 077; "
+                            f"cat > {shlex.quote(destination)}; "
+                            f"chmod 600 {shlex.quote(destination)}"
+                        ),
+                    ],
+                    user=self.user,
+                    input_text=content,
+                )
+                if written.returncode != 0:
+                    raise RuntimeError(
+                        "Parallel clean-room run authority could not be projected"
+                    )
+            after = self.inspect_fresh(worker_id)
+            if (
+                after.status != "present"
+                or after.sandbox is None
+                or str(after.sandbox.container_id or "").strip() != container_id
+                or not self._sandbox_matches_parallel_clean_room_policy(after.sandbox)
+            ):
+                raise RuntimeError(
+                    "Parallel clean-room sandbox generation changed during run authority projection"
+                )
+        except Exception:
+            self.clear_parallel_clean_room_run_secrets(
+                worker_id,
+                expected_container_id=container_id,
+                run_id=clean_run_id,
             )
+            raise
         return {"env_file": env_file, "keys_file": keys_file}
 
     def clear_parallel_clean_room_run_secrets(
@@ -5960,17 +5986,33 @@ screen -ls | awk -v target="$target" '
         for settings_path in settings_candidates:
             try:
                 settings = json.loads(settings_path.read_text())
+            except FileNotFoundError:
+                continue
             except (OSError, json.JSONDecodeError):
-                continue
-            raw_size = settings.get("diskSizeMiB") if isinstance(settings, dict) else None
-            if isinstance(raw_size, dict):
-                raw_size = raw_size.get("value")
-            try:
-                size_mib = int(raw_size or 0)
-            except (TypeError, ValueError):
-                continue
-            if size_mib > 0:
-                return size_mib * 1024**2
+                return None
+            # The first existing vendor file owns current state. Never resurrect
+            # a stale legacy budget when its current value is invalid or absent.
+            if not isinstance(settings, dict):
+                return None
+            sizes = []
+            for key in ("DiskSizeMiB", "diskSizeMiB"):
+                if key not in settings:
+                    continue
+                raw_size = settings[key]
+                if isinstance(raw_size, dict):
+                    raw_size = raw_size.get("value")
+                if type(raw_size) is int:
+                    size_mib = raw_size
+                elif isinstance(raw_size, str) and raw_size.strip().isascii() and raw_size.strip().isdigit():
+                    size_mib = int(raw_size.strip())
+                else:
+                    return None
+                if size_mib <= 0:
+                    return None
+                sizes.append(size_mib)
+            if not sizes or len(set(sizes)) != 1:
+                return None
+            return sizes[0] * 1024**2
         return None
 
 

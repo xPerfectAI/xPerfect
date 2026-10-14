@@ -65,6 +65,17 @@ def mcp_servers_for_bundle(bundle, environment):
     return result
 
 
+def required_mcp_servers_for_bundle(bundle, servers):
+    """Await the configured signed broker connection, not its policy-filtered tool allowlist."""
+    broker = bundle.get('glasshive_capability_broker')
+    if not isinstance(broker, dict):
+        return []
+    name = broker.get('name')
+    if not isinstance(name, str) or not name or name != name.strip():
+        raise ValueError('Declared broker server identity is invalid')
+    return [name] if any(server.get('name') == name for server in servers) else []
+
+
 def native_events(value, *, observed_at=None):
     from .native_team import _session_event, _clean_ref, _clean_role, _observed_at, _event
     event_type = value.get('type')

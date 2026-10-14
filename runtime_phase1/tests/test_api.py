@@ -1351,7 +1351,7 @@ def test_completed_callback_uses_final_report_message(tmp_path, monkeypatch):
         service.shutdown()
 
 
-def test_completed_file_callback_adds_signed_open_download_and_watch_links(tmp_path, monkeypatch):
+def test_completed_file_callback_keeps_artifact_links_and_typed_workspace_link(tmp_path, monkeypatch):
     class FileRuntime(StubRuntime):
         def run_task(
             self,
@@ -1425,9 +1425,9 @@ def test_completed_file_callback_adds_signed_open_download_and_watch_links(tmp_p
         assert "gh_token=" not in completed["message"]
         assert "File: [Download file](https://glasshive-api.example.test/v1/link-refs/" in completed["message"]
         assert "Preview: [Open GlassHive file](https://glasshive-api.example.test/v1/link-refs/" in completed["message"]
-        assert "View / Steer: [Open GlassHive workspace](https://glasshive-ui.example.test/r/" in completed["message"]
+        assert "View / Steer:" not in completed["message"]
+        assert "View / Steer:" not in completed["full_message"]
         assert completed["message"].index("File: [Download file]") < completed["message"].index("Preview:")
-        assert completed["message"].index("Preview:") < completed["message"].index("View / Steer:")
         artifact_matches = re.findall(
             r"https://glasshive-api\.example\.test/v1/link-refs/([A-Za-z0-9_-]+)",
             completed["message"],
@@ -1439,7 +1439,7 @@ def test_completed_file_callback_adds_signed_open_download_and_watch_links(tmp_p
         preview_record = resolve_signed_link_ref(artifact_matches[1])
         assert preview_record is not None
         assert preview_record["kind"] == "artifact_open"
-        watch_match = re.search(r"https://glasshive-ui\.example\.test/r/([A-Za-z0-9_-]+)", completed["message"])
+        watch_match = re.search(r"https://glasshive-ui\.example\.test/r/([A-Za-z0-9_-]+)", completed["operator_url"])
         assert watch_match
         watch_record = resolve_signed_link_ref(watch_match.group(1))
         assert watch_record is not None
@@ -1451,7 +1451,7 @@ def test_completed_file_callback_adds_signed_open_download_and_watch_links(tmp_p
         service.shutdown()
 
 
-def test_failed_callback_reports_terminal_state_and_view_steer_link_without_local_path(tmp_path, monkeypatch):
+def test_failed_callback_keeps_typed_operator_link_out_of_prose_and_redacts_local_path(tmp_path, monkeypatch):
     synthetic_home_path = "/" + "/".join(("Users", "example", "private-upload.pdf"))
     synthetic_home_prefix = "/".join(("Users", "example"))
 
@@ -1522,7 +1522,8 @@ def test_failed_callback_reports_terminal_state_and_view_steer_link_without_loca
         assert failed["run_state"] == "failed"
         assert "Bootstrap source file not found: [local path]" in failed["message"]
         assert synthetic_home_prefix not in failed["message"]
-        assert "View / Steer: [Open GlassHive workspace](https://glasshive-ui.example.test/r/" in failed["message"]
+        assert "View / Steer:" not in failed["message"]
+        assert "View / Steer:" not in failed["full_message"]
         assert "gh_token=" not in failed["message"]
         watch_record = assert_link_ref_url(failed["watch_url"], prefix="https://glasshive-ui.example.test/r/", kind="worker_view")
         assert f"/watch/{worker['worker_id']}" in watch_record["target_url"]
@@ -7689,6 +7690,9 @@ def test_scheduled_workbench_persists_default_claude_effort_and_derives_callback
         "user_id": "synthetic-owner",
         "message_id": run_id,
         "scheduled_prompt_run_id": run_id,
+        "scheduled_prompt_task_id": "synthetic-task",
+        "conversation_id": "workbench-scheduled-prompt:synthetic-task",
+        "parent_message_id": "scheduled-prompt:synthetic-task",
         "surface": "workbench",
     }
 
@@ -7788,6 +7792,7 @@ def test_scheduled_workbench_callback_config_derives_owner_from_persisted_worker
                     "version": 1,
                     "kind": "prompt_workbench_scheduled",
                     "execution_mode": "docker",
+                    "scheduled_prompt_task_id": "synthetic-task",
                 },
                 "callbacks": {
                     "events_webhook_url": (
@@ -7812,6 +7817,9 @@ def test_scheduled_workbench_callback_config_derives_owner_from_persisted_worker
             "user_id": "synthetic-owner",
             "message_id": run_id,
             "scheduled_prompt_run_id": run_id,
+            "scheduled_prompt_task_id": "synthetic-task",
+            "conversation_id": "workbench-scheduled-prompt:synthetic-task",
+            "parent_message_id": "scheduled-prompt:synthetic-task",
             "surface": "workbench",
         }
     finally:
@@ -7895,6 +7903,7 @@ def test_scheduled_workbench_fallback_authority_is_server_constructed_and_replac
         "version": 1,
         "kind": "prompt_workbench_scheduled",
         "execution_mode": "docker",
+        "scheduled_prompt_task_id": "synthetic-task",
         "fallback_worker_profile": "claude-code",
     }
     assert first_bundle["callbacks"] == {
@@ -7914,6 +7923,8 @@ def test_scheduled_workbench_fallback_authority_is_server_constructed_and_replac
     assert resolved_callbacks["message_id"] == "scheduled-run-1"
     assert resolved_callbacks["scheduled_prompt_run_id"] == "scheduled-run-1"
     assert resolved_callbacks["surface"] == "workbench"
+    assert resolved_callbacks["conversation_id"] == "workbench-scheduled-prompt:synthetic-task"
+    assert resolved_callbacks["parent_message_id"] == "scheduled-prompt:synthetic-task"
 
     same = client.post(
         endpoint,
@@ -7977,6 +7988,7 @@ def test_scheduled_workbench_fallback_authority_is_server_constructed_and_replac
         "version": 1,
         "kind": "prompt_workbench_scheduled",
         "execution_mode": "docker",
+        "scheduled_prompt_task_id": "synthetic-task",
     }
     store.update_worker(
         worker_id,
@@ -13922,9 +13934,9 @@ def test_completed_web_callback_includes_operator_url_and_deliverable(tmp_path, 
         assert "gh_token=" not in payload["message"]
         assert "File: [Download file](http://127.0.0.1:8780/v1/link-refs/" in payload["message"]
         assert "Preview: [Open GlassHive file](http://127.0.0.1:8780/v1/link-refs/" in payload["message"]
-        assert "View / Steer: [Open GlassHive workspace]" in payload["message"]
+        assert "View / Steer:" not in payload["message"]
+        assert "View / Steer:" not in payload["full_message"]
         assert payload["message"].index("File: [Download file]") < payload["message"].index("Preview:")
-        assert payload["message"].index("Preview:") < payload["message"].index("View / Steer:")
 
 
 def test_artifact_open_page_previews_text_without_forcing_download(tmp_path, monkeypatch):
@@ -14716,3 +14728,140 @@ def test_profile_inventory_does_not_claim_stub_native_support(tmp_path, monkeypa
         assert all(item['execution_modes'] == [] for item in items)
         assert all(item['shared_workspace'] is False for item in items)
         assert client.get('/v1/provider-readiness/unknown').status_code == 404
+
+
+@pytest.mark.parametrize("task_ref", [None, "", "  ", 17, True])
+def test_scheduled_workbench_callback_scope_missing_task_is_closed(monkeypatch, task_ref):
+    service = object.__new__(WorkersProjectsService)
+    bundle = {
+        "callbacks": {"events_webhook_url": "http://127.0.0.1:7010/internal/scheduled-prompts/glasshive-callback", "origin_ref": "scheduled-run-scope"},
+        "viventium_launch_authority": {"version": 1, "kind": "prompt_workbench_scheduled", "execution_mode": "docker", "scheduled_prompt_task_id": task_ref},
+    }
+    monkeypatch.setattr(service, "_bootstrap_bundle_for", lambda worker: bundle)
+    assert service._callback_config_for({"owner_id": "owner-1"}, require_scheduled_scope=True) == {}
+    # Previously accepted outboxes retain their transport; no stored payload is rewritten.
+    monkeypatch.setattr(service_module, "load_viventium_runtime_env", lambda: None)
+    transport = service._callback_config_for({"owner_id": "owner-1"})
+    assert transport["events_webhook_url"] == bundle["callbacks"]["events_webhook_url"]
+
+
+@pytest.mark.parametrize("origin_ref", [None, "", "  "])
+def test_scheduled_workbench_callback_scope_missing_run_is_closed(monkeypatch, origin_ref):
+    service = object.__new__(WorkersProjectsService)
+    bundle = {
+        "callbacks": {"events_webhook_url": "http://127.0.0.1:7010/internal/scheduled-prompts/glasshive-callback", "origin_ref": origin_ref},
+        "viventium_launch_authority": {"version": 1, "kind": "prompt_workbench_scheduled", "execution_mode": "docker", "scheduled_prompt_task_id": "synthetic-task"},
+    }
+    monkeypatch.setattr(service, "_bootstrap_bundle_for", lambda worker: bundle)
+    assert service._callback_config_for({"owner_id": "owner-1"}, require_scheduled_scope=True) == {}
+
+
+def test_scheduled_workbench_callback_scope_does_not_change_ordinary_parent(monkeypatch):
+    service = object.__new__(WorkersProjectsService)
+    callbacks = {"events_webhook_url": "https://callback.example.invalid/events", "hmac_secret": "synthetic-secret", "user_id": "owner-1", "conversation_id": "ordinary-conversation", "parent_message_id": "ordinary-parent", "message_id": "ordinary-message", "surface": "telegram"}
+    monkeypatch.setattr(service, "_bootstrap_bundle_for", lambda worker: {"callbacks": callbacks})
+    monkeypatch.setattr(service_module, "load_viventium_runtime_env", lambda *args, **kwargs: None)
+    assert service._callback_config_for({"owner_id": "owner-1"}) == callbacks
+
+
+@pytest.mark.parametrize("event_type", ["run.queued", "run.started", "run.waiting_on_capacity", "run.needs_input"])
+def test_scheduled_workbench_callback_scope_covers_native_lifecycle_intents(tmp_path, event_type):
+    store = Store(str(tmp_path / "runtime.db"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    project = service.create_project("synthetic-owner", "Scheduled callback scope", "Retain one declared scheduled origin.", "codex-cli")
+    try:
+        worker = service.create_worker(
+            project_id=project["project_id"], owner_id="synthetic-owner", name="Synthetic scheduled worker", role="worker", profile="codex-cli", backend="codex-cli", execution_mode="docker", bootstrap_profile="clean-room",
+            bootstrap_bundle={"execution_policy": "parallel-clean-room-v1", "viventium_launch_authority": {"version": 1, "kind": "prompt_workbench_scheduled", "execution_mode": "docker", "scheduled_prompt_task_id": "synthetic-task"}, "callbacks": {"events_webhook_url": "http://127.0.0.1:7010/internal/scheduled-prompts/glasshive-callback", "hmac_secret": "synthetic-secret", "origin_ref": "scheduled-run-scope"}},
+            start_synchronously=False,
+        )
+        run = store.create_run(worker["worker_id"], project["project_id"], "One synthetic run.")
+        intent = service._emit_callback(worker, event_type, run=run, persist_callback=True, submit_delivery=False)
+        assert intent is not None
+        payload = json.loads(intent["payload_json"])
+        assert payload["user_id"] == "synthetic-owner"
+        assert payload["message_id"] == "scheduled-run-scope"
+        assert payload["surface"] == "workbench"
+        assert payload["conversation_id"] == "workbench-scheduled-prompt:synthetic-task"
+        assert payload["parent_message_id"] == "scheduled-prompt:synthetic-task"
+        assert payload["worker_id"] == worker["worker_id"]
+        assert payload["run_id"] == run["run_id"]
+        reopened = Store(str(tmp_path / "runtime.db"))
+        persisted = reopened.list_pending_callbacks()
+        assert len(persisted) == 1
+        assert persisted[0]["payload_json"] == intent["payload_json"]
+        assert service._callback_config_for(reopened.get_worker(worker["worker_id"])) == service._callback_config_for(worker)
+        incomplete_bundle = json.loads(worker["bootstrap_bundle_json"])
+        incomplete_bundle["viventium_launch_authority"].pop("scheduled_prompt_task_id")
+        incomplete_worker = {**worker, "bootstrap_bundle_json": json.dumps(incomplete_bundle)}
+        assert service._emit_callback(incomplete_worker, event_type, run=run, persist_callback=False, submit_delivery=False) is None
+        # The durable run belongs to this worker/project; another scope cannot emit it.
+        assert service._emit_callback({**worker, "project_id": "foreign-project"}, event_type, run=run, persist_callback=False, submit_delivery=False) is None
+    finally:
+        service.shutdown()
+
+
+def test_scheduled_workbench_callback_scope_preserves_legacy_outbox_transport(tmp_path, monkeypatch):
+    monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_ATTEMPTS", "1")
+    monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S", "0")
+    store = Store(str(tmp_path / "runtime.db"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    try:
+        project = store.create_project("synthetic-owner", "Legacy callback", "Preserve accepted callback bytes.", "codex-cli")
+        worker = store.create_worker(
+            project_id=project["project_id"], owner_id="synthetic-owner", name="Synthetic worker", role="worker", profile="codex-cli", backend="openclaw", runtime="codex-cli", model="synthetic-model",
+            bootstrap_bundle={"viventium_launch_authority": {"version": 1, "kind": "prompt_workbench_scheduled", "execution_mode": "docker"}, "callbacks": {"events_webhook_url": "http://127.0.0.1:7010/internal/scheduled-prompts/glasshive-callback", "hmac_secret": "synthetic-secret", "origin_ref": "scheduled-run-scope"}},
+        )
+        run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic legacy intent.")
+        payload = {"callback_id": "cb_synthetic_legacy", "callback_ts": 1700000000, "event": "run.queued", "worker_id": worker["worker_id"], "run_id": run["run_id"], "attempt_number": None, "conversation_id": None, "parent_message_id": None}
+        raw = json.dumps(payload)
+        record = store.upsert_callback_outbox(callback_id=payload["callback_id"], project_id=project["project_id"], worker_id=worker["worker_id"], run_id=run["run_id"], event_type="run.queued", url="http://127.0.0.1:7010/internal/scheduled-prompts/glasshive-callback", payload_json=raw)
+        attempts = []
+        def reject_signed_old_payload(url, *, content, headers, timeout):
+            attempts.append(json.loads(content))
+            assert headers.get("X-GlassHive-Signature") or headers.get("x-glasshive-signature")
+            return httpx.Response(409, request=httpx.Request("POST", url))
+        monkeypatch.setattr(service_module.httpx, "post", reject_signed_old_payload)
+        reopened = Store(str(tmp_path / "runtime.db"))
+        persisted_worker = reopened.get_worker(worker["worker_id"])
+        service._deliver_callback_record(persisted_worker, reopened.get_callback_outbox(record["callback_id"]), service._callback_config_for(persisted_worker))
+        current = reopened.get_callback_outbox(record["callback_id"])
+        assert len(attempts) == 1
+        assert current["status"] == "pending"
+        assert current["attempts"] == 1
+        assert current["payload_json"] == raw
+        assert service._callback_max_total_attempts() == 25
+        assert service._emit_callback(persisted_worker, "run.queued", run=run, submit_delivery=False) is None
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize('event', ['run.completed', 'run.failed', 'run.paused', 'run.interrupted', 'run.cancelled', 'run.needs_input'])
+def test_callback_workspace_url_is_typed_and_only_native_input_adds_prose_link(tmp_path, monkeypatch, event):
+    store = Store(tmp_path / 'callback-prose.sqlite3')
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = store.create_project('owner', 'Callback delivery', 'Keep operator metadata separate', 'openclaw-general')
+    worker = store.create_worker(project['project_id'], 'owner', 'Callback worker', 'research',
+                                 'openclaw-general', 'openclaw', 'openclaw-stub', 'stub-model')
+    run = store.create_run(worker['worker_id'], project['project_id'], 'Original task')
+    monkeypatch.setattr(service, '_callback_config_for_event', lambda *args, **kwargs: {
+        'events_webhook_url': 'https://callback.example.invalid/events', 'surface': 'web'})
+    monkeypatch.setattr(service, '_signed_watch_url', lambda *args: 'https://workspace.example.invalid/r/operator')
+    try:
+        intent = service._emit_callback(worker, event, run=run, message='Exact result',
+                                        full_message='Exact full evidence', submit_delivery=False,
+                                        persist_callback=False)
+        payload = json.loads(intent['payload_json'])
+        assert payload['operator_url'] == 'https://workspace.example.invalid/r/operator'
+        assert payload['watch_url'] == payload['operator_url']
+        for field, original in [('message', 'Exact result'), ('full_message', 'Exact full evidence')]:
+            if event == 'run.needs_input':
+                assert payload[field].startswith(original)
+                assert 'View / Steer:' in payload[field]
+            else:
+                assert payload[field] == original
+                assert payload['operator_url'] not in payload[field]
+    finally:
+        service.shutdown()
+        store.close()

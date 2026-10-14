@@ -4428,8 +4428,12 @@ def test_remove_parallel_clean_room_mission_network_disconnects_only_attested_pr
         ["network", "rm", mission_network],
     ] == [call for call in calls if call[0:2] != ["network", "inspect"] and call[0] != "inspect"]
 
+@pytest.mark.parametrize("optional_keys", [
+    (), ("GLASSHIVE_PEER_TOKEN",), ("GLASSHIVE_CONTEXT_TOKEN",),
+    ("GLASSHIVE_PEER_TOKEN", "GLASSHIVE_CONTEXT_TOKEN"),
+])
 def test_parallel_clean_room_run_grant_is_projected_only_to_exact_generation_tmpfs(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, optional_keys
 ):
     monkeypatch.setenv(
         "WPR_PARALLEL_CLEAN_ROOM_NETWORK", "glasshive-parallel-clean-room"
@@ -4469,11 +4473,35 @@ def test_parallel_clean_room_run_grant_is_projected_only_to_exact_generation_tmp
 
     manager._docker = fake_docker  # type: ignore[method-assign]
 
+    from workers_projects_runtime.bootstrap import bootstrap_env_for
+
+    worker = {
+        "worker_id": worker_id,
+        "_active_run_id": run_id,
+        "bootstrap_bundle_json": json.dumps({
+            "execution_policy": PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
+            "env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": grant,
+                    **{key: "synthetic-context-grant-generation-bound"
+                       for key in optional_keys if key == "GLASSHIVE_CONTEXT_TOKEN"}},
+        }),
+    }
+    if "GLASSHIVE_PEER_TOKEN" in optional_keys:
+        worker["_peer_native_projection"] = {
+            "worker_id": worker_id, "run_id": run_id,
+            "url": "http://native-runtime:8766/v1/native/peers/",
+            "token": "synthetic-peer-grant-generation-bound",
+        }
+        worker["_coordinator_native_projection"] = {
+            **worker["_peer_native_projection"],
+            "url": "http://native-runtime:8766/v1/native/coordinator/",
+        }
+    env = bootstrap_env_for(worker)
+    assert set(env) == {"GLASSHIVE_CAPABILITY_BROKER_TOKEN", *optional_keys}
     projected = manager.project_parallel_clean_room_run_secrets(
         worker_id,
         expected_container_id=container_id,
         run_id=run_id,
-        env={"GLASSHIVE_CAPABILITY_BROKER_TOKEN": grant},
+        env=env,
     )
 
     secret_root = f"/run/glasshive/{run_id}"
@@ -4482,10 +4510,12 @@ def test_parallel_clean_room_run_grant_is_projected_only_to_exact_generation_tmp
         "keys_file": f"{secret_root}/secret-runtime.keys",
     }
     assert stdin_payloads == [
-        "export GLASSHIVE_CAPABILITY_BROKER_TOKEN="
-        "synthetic-run-grant-generation-bound\n",
-        "GLASSHIVE_CAPABILITY_BROKER_TOKEN\n",
+        "".join(f"export {key}={shlex.quote(env[key])}\n" for key in sorted(env)),
+        "".join(f"{key}\n" for key in sorted(env)),
     ]
+    for key in optional_keys:
+        assert env[key] not in json.dumps(calls)
+        assert key in stdin_payloads[1]
     assert grant not in json.dumps(calls)
     assert all(any(container_id in part for part in call) for call in calls)
     assert any(
@@ -4512,6 +4542,113 @@ def test_parallel_clean_room_run_grant_is_projected_only_to_exact_generation_tmp
         and f"/run/glasshive/{run_id}" in " ".join(call)
         for call in calls
     )
+
+
+@pytest.mark.parametrize("env", [
+    {}, {"GLASSHIVE_PEER_TOKEN": "synthetic-peer-grant"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant", "OPENAI_API_KEY": "synthetic-provider-key"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant", "UNKNOWN_TOKEN": "synthetic-extra-grant"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": ""},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "short"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant\n"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant", "GLASSHIVE_PEER_TOKEN": "bad;echo forged"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant", "GLASSHIVE_CONTEXT_TOKEN": "synthetic-context-grant\n"},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant", "GLASSHIVE_CONTEXT_TOKEN": 123},
+    {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant", "GLASSHIVE_PEER_TOKEN": "x" * 16385},
+])
+def test_parallel_clean_room_run_grants_reject_invalid_scope_before_effect(tmp_path, env):
+    manager = DockerSandboxManager(base_dir=str(tmp_path))
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("invalid authority reached a Docker effect")
+    manager._docker = unexpected
+    manager.inspect_fresh = unexpected
+    with pytest.raises(RuntimeError, match="run authority"):
+        manager.project_parallel_clean_room_run_secrets(
+            "wrk_invalid_scope", expected_container_id="c" * 64,
+            run_id="run_invalid_scope", env=env,
+        )
+
+
+@pytest.mark.parametrize("projection_key", ["_peer_native_projection", "_coordinator_native_projection"])
+def test_parallel_clean_room_bootstrap_rejects_forged_projection_identity(projection_key):
+    from workers_projects_runtime.bootstrap import bootstrap_env_for
+    worker = {
+        "worker_id": "wrk_allowed", "_active_run_id": "run_allowed",
+        "bootstrap_bundle_json": json.dumps({
+            "execution_policy": PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
+            "env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant"},
+        }),
+        projection_key: {
+            "worker_id": "wrk_forged", "run_id": "run_forged",
+            "url": "http://native-runtime:8766/v1/native/peers/",
+            "token": "synthetic-forged-grant",
+        },
+    }
+    from workers_projects_runtime.coordinator import CoordinatorScopeError
+    from workers_projects_runtime.peer_collaboration import PeerError
+    with pytest.raises((PeerError, CoordinatorScopeError), match="mismatch"):
+        bootstrap_env_for(worker)
+
+
+@pytest.mark.parametrize("failure_at", ["keys", "reattest"])
+@pytest.mark.parametrize("replacement_generation", [False, True])
+def test_parallel_clean_room_run_grant_partial_projection_cleanup_is_generation_bound(
+    tmp_path, monkeypatch, failure_at, replacement_generation
+):
+    monkeypatch.setenv("WPR_PARALLEL_CLEAN_ROOM_NETWORK", "glasshive-parallel-clean-room")
+    monkeypatch.setenv("WPR_PARALLEL_CLEAN_ROOM_PROVIDER_PROXY_URL", "http://provider-egress:8080")
+    manager = DockerSandboxManager(base_dir=str(tmp_path))
+    worker_id = "wrk_partial_grant"
+    container_id = "c" * 64
+    replacement_id = "d" * 64
+    run_id = "run_partial_grant"
+    sandbox = _attested_clean_room_sandbox(manager, worker_id, container_id=container_id)
+    replacement = _attested_clean_room_sandbox(
+        manager, worker_id, container_id=replacement_id
+    )
+    manager.parallel_clean_room_readiness = lambda: {"ready": True, "reason": ""}
+    manager._ensure_parallel_clean_room_mission_network = lambda _name: sandbox.network_mode
+    inspections = 0
+    def inspect(_worker):
+        nonlocal inspections
+        inspections += 1
+        if inspections == 1:
+            return FreshSandboxInspection(status="present", sandbox=sandbox)
+        if failure_at == "reattest" and inspections == 2:
+            return FreshSandboxInspection(status="unavailable", sandbox=None)
+        return FreshSandboxInspection(
+            status="present", sandbox=replacement if replacement_generation else sandbox
+        )
+    manager.inspect_fresh = inspect
+    calls = []
+    authority_present = False
+    def docker(args, **kwargs):
+        nonlocal authority_present
+        calls.append(args)
+        content = kwargs.get("input_text")
+        if content and content.startswith("export "):
+            authority_present = True
+        if content and "secret-runtime.keys" in " ".join(args) and failure_at == "keys":
+            return subprocess.CompletedProcess(args, 1, "", "synthetic write failure")
+        if "rm" in args:
+            assert container_id in args
+            authority_present = False
+        return subprocess.CompletedProcess(args, 0, "", "")
+    manager._docker = docker
+    with pytest.raises(RuntimeError, match="could not be projected|changed during"):
+        manager.project_parallel_clean_room_run_secrets(
+            worker_id, expected_container_id=container_id, run_id=run_id,
+            env={"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant-generation-bound"},
+        )
+    assert any("secret-runtime.env" in " ".join(call) for call in calls)
+    assert not any(replacement_id in call for call in calls)
+    removals = [call for call in calls if "rm" in call]
+    if replacement_generation:
+        assert removals == []  # The old generation's tmpfs has disappeared.
+    else:
+        assert len(removals) == 1
+        assert not authority_present
+        assert f"/run/glasshive/{run_id}" in removals[0]
 
 def test_docker_exec_timeout_returns_failed_result(tmp_path, monkeypatch):
     manager = DockerSandboxManager(base_dir=str(tmp_path))
@@ -6508,3 +6645,41 @@ def test_ensure_ready_records_idle_desktop_prime_nonzero_return_as_failure(tmp_p
     assert calls == ["create", "writable", "provider_tmp", "harden", "background", "prime"]
     assert marker["status"] == "failed"
     assert "wmctrl failed" in marker["detail"]
+
+
+@pytest.mark.parametrize('settings', [
+    {'DiskSizeMiB':98304}, {'diskSizeMiB':98304},
+    {'DiskSizeMiB':{'value':'98304'}},
+    {'DiskSizeMiB':98304,'diskSizeMiB':98304},
+])
+def test_docker_current_and_legacy_proven_disk_budget(tmp_path,monkeypatch,settings):
+    monkeypatch.delenv('WPR_DOCKER_DISK_BUDGET_MB',raising=False)
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    path=tmp_path/'Library/Group Containers/group.com.docker/settings-store.json'
+    path.parent.mkdir(parents=True);path.write_text(json.dumps(settings))
+    manager=DockerSandboxManager(base_dir=str(tmp_path/'runtime'),create_directories=False)
+    assert manager._docker_disk_budget_bytes({'DockerRootDir':'/nonexistent/docker-root'})==98304*1024**2
+
+@pytest.mark.parametrize('current', [
+    {}, {'DiskSizeMiB':0}, {'DiskSizeMiB':-1}, {'DiskSizeMiB':True},
+    {'DiskSizeMiB':1.5}, {'DiskSizeMiB':{'value':'not-a-budget'}},
+    {'DiskSizeMiB':98304,'diskSizeMiB':65536}, {'DiskSizeMiB':'NaN'},
+])
+def test_current_disk_budget_invalid_or_conflicting_does_not_use_stale_legacy(tmp_path,monkeypatch,current):
+    monkeypatch.delenv('WPR_DOCKER_DISK_BUDGET_MB',raising=False)
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    path=tmp_path/'Library/Group Containers/group.com.docker/settings-store.json'
+    path.parent.mkdir(parents=True);path.write_text(json.dumps(current))
+    (path.parent/'settings.json').write_text(json.dumps({'diskSizeMiB':65536}))
+    manager=DockerSandboxManager(base_dir=str(tmp_path/'runtime'),create_directories=False)
+    assert manager._docker_disk_budget_bytes({'DockerRootDir':'/nonexistent/docker-root'}) is None
+
+def test_legacy_disk_file_only_when_current_absent(tmp_path,monkeypatch):
+    monkeypatch.delenv('WPR_DOCKER_DISK_BUDGET_MB',raising=False)
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    path=tmp_path/'Library/Group Containers/group.com.docker/settings.json'
+    path.parent.mkdir(parents=True);path.write_text(json.dumps({'diskSizeMiB':1024}))
+    manager=DockerSandboxManager(base_dir=str(tmp_path/'runtime'),create_directories=False)
+    assert manager._docker_disk_budget_bytes({'DockerRootDir':'/nonexistent/docker-root'})==1024**3
+    (path.parent/'settings-store.json').write_text('{bad-json')
+    assert manager._docker_disk_budget_bytes({'DockerRootDir':'/nonexistent/docker-root'}) is None

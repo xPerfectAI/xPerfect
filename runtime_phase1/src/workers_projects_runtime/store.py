@@ -7,7 +7,7 @@ import sqlite3
 import time
 import uuid
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -2959,6 +2959,11 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_provider_stop_tombstones_expiry ON provider_stop_tombstones(expires_at);
                 """
             )
+            self._reconcile_provider_session_scope_indexes(conn)
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(name, completed_at) VALUES (?, ?)",
+                ("provider_session_scope_identity_v1", utc_now()),
+            )
             workspace_columns = {row["name"] for row in conn.execute("PRAGMA table_info(execution_workspaces)")}
             if "file_placement" not in workspace_columns:
                 conn.execute("ALTER TABLE execution_workspaces ADD COLUMN file_placement TEXT NOT NULL DEFAULT 'member_private' CHECK(file_placement IN ('common', 'member_private'))")
@@ -4520,126 +4525,38 @@ class Store:
             )
 
     @staticmethod
-    def _migrate_provider_session_identity(conn: sqlite3.Connection) -> None:
-        """Collapse legacy actor/origin splits onto the four-column identity."""
-
-        duplicate_groups = conn.execute(
-            """
-            SELECT tenant_id, owner_id, conversation_id, agent_id
-            FROM provider_sessions
-            GROUP BY tenant_id, owner_id, conversation_id, agent_id
-            HAVING COUNT(*) > 1
-            ORDER BY tenant_id, owner_id, conversation_id, agent_id
-            """
-        ).fetchall()
-        if duplicate_groups:
-            conn.execute("SAVEPOINT provider_session_identity_v1")
-            try:
-                for group in duplicate_groups:
-                    sessions = conn.execute(
-                        """
-                        SELECT session_id, updated_at, created_at
-                        FROM provider_sessions
-                        WHERE tenant_id = ? AND owner_id = ?
-                          AND conversation_id = ? AND agent_id = ?
-                        ORDER BY updated_at DESC, created_at DESC, session_id DESC
-                        """,
-                        (
-                            group["tenant_id"],
-                            group["owner_id"],
-                            group["conversation_id"],
-                            group["agent_id"],
-                        ),
-                    ).fetchall()
-                    survivor_id = str(sessions[0]["session_id"])
-                    for loser in sessions[1:]:
-                        loser_id = str(loser["session_id"])
-                        conn.execute(
-                            "UPDATE provider_requests SET session_id = ? WHERE session_id = ?",
-                            (survivor_id, loser_id),
-                        )
-                        admissions = conn.execute(
-                            """
-                            SELECT rowid, message_key, advancement_key, accepted_at
-                            FROM provider_session_visible_admissions
-                            WHERE session_id = ?
-                            ORDER BY accepted_at DESC, rowid DESC
-                            """,
-                            (loser_id,),
-                        ).fetchall()
-                        for admission in admissions:
-                            existing = conn.execute(
-                                """
-                                SELECT accepted_at
-                                FROM provider_session_visible_admissions
-                                WHERE session_id = ? AND message_key = ?
-                                """,
-                                (survivor_id, admission["message_key"]),
-                            ).fetchone()
-                            if existing is None:
-                                conn.execute(
-                                    """
-                                    INSERT INTO provider_session_visible_admissions (
-                                        session_id, message_key, advancement_key, accepted_at
-                                    ) VALUES (?, ?, ?, ?)
-                                    """,
-                                    (
-                                        survivor_id,
-                                        admission["message_key"],
-                                        admission["advancement_key"],
-                                        admission["accepted_at"],
-                                    ),
-                                )
-                            elif str(admission["accepted_at"] or "") > str(
-                                existing["accepted_at"] or ""
-                            ):
-                                conn.execute(
-                                    """
-                                    UPDATE provider_session_visible_admissions
-                                    SET advancement_key = ?, accepted_at = ?
-                                    WHERE session_id = ? AND message_key = ?
-                                    """,
-                                    (
-                                        admission["advancement_key"],
-                                        admission["accepted_at"],
-                                        survivor_id,
-                                        admission["message_key"],
-                                    ),
-                                )
-                        conn.execute(
-                            "DELETE FROM provider_session_visible_admissions WHERE session_id = ?",
-                            (loser_id,),
-                        )
-                        conn.execute(
-                            "DELETE FROM provider_sessions WHERE session_id = ?",
-                            (loser_id,),
-                        )
-                conn.execute("RELEASE provider_session_identity_v1")
-            except Exception:
-                conn.execute("ROLLBACK TO provider_session_identity_v1")
-                conn.execute("RELEASE provider_session_identity_v1")
-                raise
-
-        unique_index = None
+    def _provider_session_unique_indexes(
+        conn: sqlite3.Connection,
+        columns: tuple[str, ...],
+        *,
+        explicit_only: bool = False,
+    ) -> list[str]:
+        """Find complete unique identities by SQLite metadata, independent of index name."""
+        matches = []
         for index in conn.execute("PRAGMA index_list(provider_sessions)").fetchall():
-            if not int(index["unique"]):
+            if not int(index["unique"]) or int(index["partial"]):
+                continue
+            if explicit_only and index["origin"] != "c":
                 continue
             index_name = str(index["name"])
             escaped_name = index_name.replace('"', '""')
-            columns = [
-                str(row["name"])
+            actual_columns = [
+                row["name"]
                 for row in conn.execute(f'PRAGMA index_info("{escaped_name}")').fetchall()
             ]
-            if columns == ["tenant_id", "owner_id", "conversation_id", "agent_id"]:
-                unique_index = index_name
-                break
-        if unique_index is None:
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_sessions_identity
-                ON provider_sessions(tenant_id, owner_id, conversation_id, agent_id)
-                """
-            )
+            if len(actual_columns) == len(columns) and set(actual_columns) == set(columns):
+                matches.append(index_name)
+        return matches
+
+    @staticmethod
+    def _reconcile_provider_session_scope_indexes(conn: sqlite3.Connection) -> None:
+        """Retain full authoring-scope uniqueness before removing obsolete identities."""
+        identity = ("tenant_id", "owner_id", "conversation_id", "agent_id")
+        if not Store._provider_session_unique_indexes(conn, (*identity, "actor_kind", "origin")):
+            raise RuntimeError("Provider session authoring-scope uniqueness is unavailable")
+        for index_name in Store._provider_session_unique_indexes(conn, identity, explicit_only=True):
+            escaped_name = index_name.replace('"', '""')
+            conn.execute(f'DROP INDEX "{escaped_name}"')
 
     def add_provider_activity_once(
         self,
@@ -4841,8 +4758,11 @@ class Store:
     @staticmethod
     def _migrate_provider_session_scopes(conn: sqlite3.Connection) -> None:
         """Preserve legacy session IDs and every dependent row while extending the unique key."""
+        obsolete_indexes = set(Store._provider_session_unique_indexes(
+            conn, ("tenant_id", "owner_id", "conversation_id", "agent_id"), explicit_only=True,
+        ))
         schema_objects = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE tbl_name = 'provider_sessions' "
+            "SELECT name, sql FROM sqlite_master WHERE tbl_name = 'provider_sessions' "
             "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
         ).fetchall()
         conn.execute("""
@@ -4880,7 +4800,8 @@ class Store:
         conn.execute("DROP TABLE provider_sessions")
         conn.execute("ALTER TABLE provider_sessions_scoped RENAME TO provider_sessions")
         for schema_object in schema_objects:
-            conn.execute(schema_object["sql"])
+            if schema_object["name"] not in obsolete_indexes:
+                conn.execute(schema_object["sql"])
 
     def consume_internal_assertion_jti(
         self,
@@ -7728,6 +7649,40 @@ class Store:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM workers ORDER BY created_at DESC").fetchall()
         return self._rows(rows)
+
+    def list_worker_ids(
+        self,
+        *,
+        states: set[str] | None = None,
+        exclude_states: set[str] | None = None,
+        compute_released: bool | None = None,
+    ) -> list[str]:
+        """Select recovery candidates without loading their retained instructions.
+
+        This inventory is not lifecycle or authorization proof. Callers must read
+        each current worker and retain their existing eligibility and action fences.
+        """
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        for values, operator in ((states, "IN"), (exclude_states, "NOT IN")):
+            if values:
+                placeholders = ", ".join("?" for _ in values)
+                clauses.append(f"state {operator} ({placeholders})")
+                params.extend(sorted(values))
+        if compute_released is not None:
+            clauses.append(
+                "(compute_released_at IS NOT NULL AND compute_released_at != '')"
+                if compute_released
+                else "(compute_released_at IS NULL OR compute_released_at = '')"
+            )
+        query = "SELECT worker_id FROM workers"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [str(row["worker_id"]) for row in rows]
 
     def count_active_host_missions(self) -> int:
         """Count durable host mission roots that could conflict with Parallel Main.
@@ -15642,6 +15597,51 @@ class Store:
             return None
         return dict(row)
 
+    @staticmethod
+    def _retire_ended_run_attempt_conn(
+        conn: sqlite3.Connection, run: sqlite3.Row, *, worker_id: str
+    ) -> bool:
+        """Retire only an exact ended generation, retaining its immutable history."""
+        attempt_id = str(run["active_attempt_id"] or "").strip()
+        if not attempt_id:
+            return True
+        attempt = conn.execute(
+            "SELECT * FROM run_attempts WHERE attempt_id = ? AND run_id = ?",
+            (attempt_id, run["run_id"]),
+        ).fetchone()
+        if (
+            attempt is None
+            or not str(attempt["ended_at"] or "").strip()
+            or conn.execute(
+                "SELECT 1 FROM run_attempts WHERE run_id = ? AND attempt_number > ? LIMIT 1",
+                (run["run_id"], attempt["attempt_number"]),
+            ).fetchone() is not None
+            or conn.execute(
+                "SELECT 1 FROM host_run_leases WHERE worker_id = ? AND status = 'active' LIMIT 1",
+                (worker_id,),
+            ).fetchone() is not None
+        ):
+            return False
+        lease_id = str(attempt["lease_id"] or "").strip()
+        if lease_id:
+            lease = conn.execute(
+                "SELECT * FROM host_run_leases WHERE lease_id = ? AND run_id = ? AND worker_id = ?",
+                (lease_id, run["run_id"], worker_id),
+            ).fetchone()
+            if (
+                lease is None
+                or str(lease["status"] or "") != "released"
+                or not str(lease["released_at"] or "").strip()
+                or str(lease["attempt_id"] or "") != attempt_id
+            ):
+                return False
+        return conn.execute(
+            "UPDATE runs SET active_attempt_id = '', claimed_at = NULL, admitted_at = NULL, "
+            "runtime_invoked_at = NULL WHERE run_id = ? AND worker_id = ? "
+            "AND state = ? AND active_attempt_id = ?",
+            (run["run_id"], worker_id, run["state"], attempt_id),
+        ).rowcount == 1
+
     def acquire_host_run_lease(
         self,
         *,
@@ -15689,6 +15689,25 @@ class Store:
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT run_id, state, active_attempt_id FROM runs WHERE run_id = ? AND worker_id = ?",
+                (run_id, worker_id),
+            ).fetchone()
+            if run is None:
+                conn.execute("ROLLBACK")
+                raise ValueError("Host admission requires an existing run")
+            if (
+                str(run["state"] or "") == "queued"
+                and str(run["active_attempt_id"] or "").strip()
+            ):
+                if not self._retire_ended_run_attempt_conn(conn, run, worker_id=worker_id):
+                    conn.execute("ROLLBACK")
+                    raise WorkAdmissionError(
+                        "run_not_claimed",
+                        "Host admission requires a currently claimed run attempt",
+                    )
+                run = dict(run)
+                run["active_attempt_id"] = ""
             existing = conn.execute(
                 "SELECT * FROM host_run_leases WHERE run_id = ?",
                 (run_id,),
@@ -15780,13 +15799,6 @@ class Store:
                 conn.execute("COMMIT")
                 return {**dict(existing), "idempotent_replay": True}
 
-            run = conn.execute(
-                "SELECT state, active_attempt_id FROM runs WHERE run_id = ? AND worker_id = ?",
-                (run_id, worker_id),
-            ).fetchone()
-            if run is None:
-                conn.execute("ROLLBACK")
-                raise ValueError("Host admission requires an existing run")
             active_attempt_id = str(run["active_attempt_id"] or "").strip()
             if active_attempt_id and str(run["state"] or "") != "claimed":
                 conn.execute("ROLLBACK")
@@ -16302,6 +16314,22 @@ class Store:
 
         observed_at = str(now or utc_now())
         with self._connect() as conn:
+            # Healthy snapshots need no writer reservation. Keep one consistent
+            # read snapshot, then recheck under the existing write fence if any
+            # running generation needs correction.
+            conn.execute("BEGIN")
+            running_ids = conn.execute(
+                "SELECT run_id FROM runs WHERE state = 'running' ORDER BY queued_at, run_id"
+            ).fetchall()
+            all_exact = all(
+                self._running_generation_is_exact_conn(
+                    conn, str(row["run_id"]), now=observed_at
+                )
+                for row in running_ids
+            )
+            conn.execute("ROLLBACK")
+            if all_exact:
+                return 0
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT * FROM runs WHERE state = 'running' ORDER BY queued_at, run_id"
@@ -19339,27 +19367,29 @@ class Store:
         worker_id: str,
         run_id: str,
     ) -> dict[str, Any] | None:
-        """Resolve an exact mission/run binding without exposing partial matches."""
+        """Resolve historical binding and the existing current-work selection in one snapshot."""
 
+        current_work = self._delegation_select() + """
+            WHERE delegations.tenant_id = ? AND delegations.owner_id = ?
+              AND delegations.origin_ref = ? AND delegations.work_ref = ?
+              AND delegations.worker_id = ?
+        """
         with self._connect() as conn:
             row = conn.execute(
-                """
-                SELECT delegations.origin_ref, delegations.work_ref,
-                       runs.run_id, runs.active_attempt_id
-                FROM delegations
-                JOIN runs
-                  ON runs.run_id = ?
-                 AND runs.worker_id = delegations.worker_id
-                 AND runs.project_id = delegations.project_id
-                 AND runs.tenant_id = delegations.tenant_id
-                WHERE delegations.tenant_id = ?
-                  AND delegations.owner_id = ?
-                  AND delegations.origin_ref = ?
-                  AND delegations.work_ref = ?
-                  AND delegations.worker_id = ?
+                "WITH current_work AS (" + current_work + ")" + """
+                SELECT current_work.origin_ref, current_work.work_ref,
+                       current_work.run_id AS current_run_id,
+                       current_work.run_state AS current_run_state,
+                       callback_run.run_id, callback_run.active_attempt_id
+                FROM current_work
+                JOIN runs AS callback_run
+                  ON callback_run.run_id = ?
+                 AND callback_run.worker_id = current_work.worker_id
+                 AND callback_run.project_id = current_work.project_id
+                 AND callback_run.tenant_id = current_work.tenant_id
                 LIMIT 1
                 """,
-                (run_id, tenant_id, owner_id, origin_ref, work_ref, worker_id),
+                (tenant_id, owner_id, origin_ref, work_ref, worker_id, run_id),
             ).fetchone()
         return self._row(row)
 
@@ -19904,6 +19934,9 @@ class Store:
                 conn.execute("ROLLBACK")
                 return None
             if str(run["state"] or "") == "needs_input":
+                if not self._retire_ended_run_attempt_conn(conn, run, worker_id=worker_id):
+                    conn.execute("ROLLBACK")
+                    return None
                 resume_fields: dict[str, Any] = {
                     "state": "queued",
                     "ended_at": None,
@@ -20024,6 +20057,23 @@ class Store:
             row = conn.execute(
                 "SELECT * FROM active_work_action_uses WHERE action_use_id = ?",
                 (action_use_id,),
+            ).fetchone()
+        return self._row(row)
+
+    def get_completed_active_work_action_receipt(
+        self, *, tenant_id: str, owner_id: str, work_ref: str,
+        idempotency_key: str, action: str, payload_digest: str,
+    ) -> dict[str, Any] | None:
+        """Read one exact finished receipt without reserving or changing an effect."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM active_work_action_uses
+                WHERE tenant_id = ? AND owner_id = ? AND work_ref = ?
+                  AND idempotency_key = ? AND action = ? AND payload_digest = ?
+                  AND status IN ('completed', 'failed') AND response_json <> ''
+                """,
+                (tenant_id, owner_id, work_ref, idempotency_key, action, payload_digest),
             ).fetchone()
         return self._row(row)
 
@@ -23464,9 +23514,20 @@ class Store:
                         "terminate_worker",
                     }
                     and not (
-                        requested_kind == "steer_run"
-                        and target is not None
+                        target is not None
                         and str(target["state"] or "") == "queued"
+                        and (
+                            requested_kind == "steer_run"
+                            or (
+                                requested_kind == "pause_run"
+                                and not str(target["started_at"] or "")
+                                and not active_leases
+                                and conn.execute(
+                                    "SELECT 1 FROM host_run_leases WHERE run_id = ? LIMIT 1",
+                                    (requested_target,),
+                                ).fetchone() is None
+                            )
+                        )
                     )
                 )
             ):
@@ -25042,12 +25103,32 @@ class Store:
             now = utc_now()
             target_state = str(target["state"] or "")
             replacement_state = str(existing["state"] or "")
-            if target_state == "interrupted":
-                # The runtime/process owner can publish the exact interrupted
-                # source before this transaction commits.  That is a partial
-                # steer success, not a terminal-winner race.  Preserve the
-                # already-created replacement even if it later timed out while
-                # the service was down.
+            if target_state in {"interrupted", "completed", "failed"}:
+                # Settled source truth stays immutable. Its accepted correction
+                # still owns the reserved replacement; completion is not Stop.
+                moved_delegation = conn.execute(
+                    "SELECT 1 FROM delegations WHERE worker_id = ? "
+                    "AND current_run_id NOT IN (?, ?) LIMIT 1",
+                    (worker_id, clean_target, clean_replacement),
+                ).fetchone()
+                other_active = conn.execute(
+                    "SELECT 1 FROM runs WHERE worker_id = ? AND run_id NOT IN (?, ?) "
+                    "AND state IN ('claimed', 'admitted', 'running', 'settling', 'paused', 'needs_input') LIMIT 1",
+                    (worker_id, clean_target, clean_replacement),
+                ).fetchone()
+                if (str(worker["work_stop_id"] or "")
+                        or str(worker["state"] or "") in {"stopping", "terminating", "termination_failed", "terminated"}
+                        or moved_delegation is not None or other_active is not None):
+                    conn.execute("COMMIT")
+                    return None
+                if (target_state != "interrupted"
+                        and not self.worker_control_runtime_proof_matches(worker)
+                        and conn.execute(
+                            "SELECT 1 FROM host_run_leases WHERE worker_id = ? AND run_id = ? "
+                            "AND status = 'active' LIMIT 1", (worker_id, clean_target)
+                        ).fetchone() is not None):
+                    conn.execute("COMMIT")
+                    return None
                 conn.execute(
                     """
                     UPDATE delegations SET current_run_id = ?, updated_at = ?
@@ -25074,8 +25155,11 @@ class Store:
                     operation_kind="steer_run",
                     worker=worker,
                     run_id=clean_target,
-                    event_type="run.interrupted",
-                    message="Worker interrupted for operator steer",
+                    event_type=("run.interrupted" if target_state == "interrupted"
+                                else "control.source_settled"),
+                    message=("Worker interrupted for operator steer" if target_state == "interrupted"
+                             else "Settled source preserved its accepted steer replacement"),
+                    payload={"source_state": target_state, "replacement_run_id": clean_replacement},
                 )
                 self._insert_lifecycle_event(
                     conn,
@@ -26689,13 +26773,46 @@ class Store:
         else:
             result_revision = 0
 
+        delegation = conn.execute(
+            """
+            SELECT origin_ref, work_ref, project_id, tenant_id, current_run_id
+            FROM delegations
+            WHERE worker_id = ?
+            LIMIT 1
+            """,
+            (worker_id,),
+        ).fetchone()
         if "run_input" in payload:
-            # Validate against the same run inside the outbox transaction, so
-            # a stale or forged source cannot join an otherwise valid result.
+            # Bind accepted input to this exact terminal result or current
+            # non-terminal attention run inside the same outbox transaction.
+            terminal_input = (
+                str(exact_run["state"] or "") in TERMINAL_RUN_STATES
+                and bool(str(exact_run["ended_at"] or ""))
+                and bool(_terminal_callback_wire_state(str(exact_run["state"] or ""), event_type))
+            )
+            pending_input = payload.get("pending_native_input")
+            bound_native_input = (
+                isinstance(pending_input, dict)
+                and pending_input.get("version") == 1
+                and pending_input.get("state") == "pending"
+                and pending_input.get("kind") in {"permission", "question"}
+                and pending_input.get("runId") == run_id
+                and bool(str(exact_run["active_attempt_id"] or ""))
+                and pending_input.get("attemptId") == str(exact_run["active_attempt_id"])
+                and bool(pending_input.get("requestId"))
+                and bool(pending_input.get("sessionId"))
+                and isinstance(pending_input.get("requestFingerprint"), str)
+                and len(pending_input["requestFingerprint"]) == 64
+            )
+            attention_input = (
+                event_type == "run.needs_input"
+                and (str(exact_run["state"] or "") == "needs_input"
+                     or (str(exact_run["state"] or "") == "running" and bound_native_input))
+                and not str(exact_run["ended_at"] or "")
+                and (delegation is None or str(delegation["current_run_id"] or "") == run_id)
+            )
             if (
-                str(exact_run["state"] or "") not in TERMINAL_RUN_STATES
-                or not str(exact_run["ended_at"] or "")
-                or not _terminal_callback_wire_state(str(exact_run["state"] or ""), event_type)
+                not (terminal_input or attention_input)
                 or json.dumps(payload["run_input"], sort_keys=True, ensure_ascii=False)
                 != json.dumps(accepted_run_input(dict(exact_run)), sort_keys=True, ensure_ascii=False)
             ):
@@ -26723,15 +26840,6 @@ class Store:
         ):
             raise ValueError("Callback intent requires a stable callback timestamp")
 
-        delegation = conn.execute(
-            """
-            SELECT origin_ref, work_ref, project_id, tenant_id
-            FROM delegations
-            WHERE worker_id = ?
-            LIMIT 1
-            """,
-            (worker_id,),
-        ).fetchone()
         if delegation is not None:
             expected_project = str(delegation["project_id"] or "")
             if str(intent.get("project_id") or "") != expected_project:
@@ -28491,6 +28599,7 @@ class Store:
         now: str | None = None,
         inactivity_seconds: float = 900.0,
         limit: int = 100,
+        native_input_waiting: Callable[[dict[str, Any], dict[str, Any]], bool] | None = None,
     ) -> list[dict[str, Any]]:
         observed = str(now or utc_now())
         observed_time = _parse_utc(observed)
@@ -28499,73 +28608,98 @@ class Store:
         transitioned: list[dict[str, Any]] = []
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                """
-                SELECT * FROM runs
-                WHERE state = 'running'
-                  AND COALESCE(
+            remaining = limit
+            cursor_anchor = None
+            cursor_run_id = ""
+            while remaining:
+                page_limit = remaining
+                rows = conn.execute(
+                    """
+                    SELECT * FROM runs
+                    WHERE state = 'running'
+                      AND COALESCE(
+                            meaningful_progress_at, liveness_started_at, runtime_invoked_at
+                          ) IS NOT NULL
+                      AND (? IS NULL OR (
+                            COALESCE(meaningful_progress_at, liveness_started_at, runtime_invoked_at), run_id
+                          ) > (?, ?))
+                    ORDER BY COALESCE(
                         meaningful_progress_at, liveness_started_at, runtime_invoked_at
-                      ) IS NOT NULL
-                ORDER BY COALESCE(
-                    meaningful_progress_at, liveness_started_at, runtime_invoked_at
-                ) ASC, run_id ASC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-            for run in rows:
-                anchor = str(
-                    run["meaningful_progress_at"]
-                    or run["liveness_started_at"]
-                    or run["runtime_invoked_at"]
-                    or ""
-                )
-                if not anchor or (
-                    observed_time - _parse_utc(anchor)
-                ).total_seconds() < inactivity_seconds:
-                    continue
-                attempt_id = str(run["active_attempt_id"] or "")
-                event_ref = "provider_liveness_timeout_sha256:" + hashlib.sha256(
-                    f"{run['run_id']}:{attempt_id}:{anchor}:{inactivity_seconds:g}".encode()
-                ).hexdigest()
-                worker = conn.execute(
-                    "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
-                ).fetchone()
-                if worker is None:
-                    continue
-                runtime = str(
-                    run["provider_route_runtime"] or worker["runtime"] or ""
-                )
-                model = str(run["provider_route_model"] or worker["model"] or "")
-                updated = self._transition_provider_liveness_attention_conn(
-                    conn,
-                    run=run,
-                    observed_at=observed,
-                    operation_token=event_ref,
-                )
-                if updated is not None:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO provider_liveness_events (
-                            event_ref, run_id, attempt_id, kind, failure_class,
-                            runtime, model, source_sequence, source_digest,
-                            observed_at, created_at
-                        ) VALUES (?, ?, ?, 'inactivity_timeout',
-                                  'provider_progress_stalled', ?, ?, 0, ?, ?, ?)
-                        """,
-                        (
-                            event_ref,
-                            str(run["run_id"]),
-                            attempt_id,
-                            runtime,
-                            model,
-                            hashlib.sha256(event_ref.encode("utf-8")).hexdigest(),
-                            observed,
-                            utc_now(),
-                        ),
+                    ) ASC, run_id ASC
+                    LIMIT ?
+                    """,
+                    (cursor_anchor, cursor_anchor, cursor_run_id, remaining),
+                ).fetchall()
+                if not rows:
+                    break
+                for run in rows:
+                    anchor = str(
+                        run["meaningful_progress_at"]
+                        or run["liveness_started_at"]
+                        or run["runtime_invoked_at"]
+                        or ""
                     )
-                    updated["_attention_transitioned"] = True
-                    transitioned.append(updated)
+                    if not anchor or (
+                        observed_time - _parse_utc(anchor)
+                    ).total_seconds() < inactivity_seconds:
+                        remaining -= 1
+                        continue
+                    attempt_id = str(run["active_attempt_id"] or "")
+                    event_ref = "provider_liveness_timeout_sha256:" + hashlib.sha256(
+                        f"{run['run_id']}:{attempt_id}:{anchor}:{inactivity_seconds:g}".encode()
+                    ).hexdigest()
+                    worker = conn.execute(
+                        "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
+                    ).fetchone()
+                    if worker is None:
+                        remaining -= 1
+                        continue
+                    # A current native request is waiting for its owner, not a silent
+                    # provider. All transition/lease fences below still use these rows.
+                    if native_input_waiting and native_input_waiting(self._row(run), self._row(worker)):
+                        continue
+                    remaining -= 1
+                    runtime = str(
+                        run["provider_route_runtime"] or worker["runtime"] or ""
+                    )
+                    model = str(run["provider_route_model"] or worker["model"] or "")
+                    updated = self._transition_provider_liveness_attention_conn(
+                        conn,
+                        run=run,
+                        observed_at=observed,
+                        operation_token=event_ref,
+                    )
+                    if updated is not None:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO provider_liveness_events (
+                                event_ref, run_id, attempt_id, kind, failure_class,
+                                runtime, model, source_sequence, source_digest,
+                                observed_at, created_at
+                            ) VALUES (?, ?, ?, 'inactivity_timeout',
+                                      'provider_progress_stalled', ?, ?, 0, ?, ?, ?)
+                            """,
+                            (
+                                event_ref,
+                                str(run["run_id"]),
+                                attempt_id,
+                                runtime,
+                                model,
+                                hashlib.sha256(event_ref.encode("utf-8")).hexdigest(),
+                                observed,
+                                utc_now(),
+                            ),
+                        )
+                        updated["_attention_transitioned"] = True
+                        transitioned.append(updated)
+                if len(rows) < page_limit:
+                    break
+                last = rows[-1]
+                # Match SQL COALESCE exactly, including a retained empty string.
+                cursor_anchor = next(last[field] for field in (
+                    "meaningful_progress_at", "liveness_started_at", "runtime_invoked_at"
+                ) if last[field] is not None)
+                cursor_run_id = str(last["run_id"])
             conn.execute("COMMIT")
         return transitioned
 

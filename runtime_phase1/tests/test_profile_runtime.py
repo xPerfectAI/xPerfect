@@ -7730,7 +7730,9 @@ def test_parallel_clean_room_run_exits_after_secret_scrub_without_takeover_shell
             {
                 "execution_policy": PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
                 "env": {
-                    "GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant"
+                    "GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant",
+                    "GLASSHIVE_PEER_TOKEN": "synthetic-peer-grant",
+                    "GLASSHIVE_CONTEXT_TOKEN": "synthetic-context-grant"
                 },
             }
         ),
@@ -7798,6 +7800,9 @@ def test_parallel_clean_room_run_exits_after_secret_scrub_without_takeover_shell
         assert "synthetic-run-grant" not in script
         assert f"/run/glasshive/{run_id}/secret-runtime.env" in script
         assert '$HOME/.glasshive/secret-runtime.env' not in script
+        assert "synthetic-peer-grant" not in script
+        assert "synthetic-context-grant" not in script
+        assert "while IFS= read -r key" in script
         assert "scrub_run_secrets()" in script
         assert 'abort_run() { scrub_run_secrets; write_exit "${1:-130}"' in script
         deadline_line = next(
@@ -7831,7 +7836,9 @@ def test_parallel_clean_room_run_exits_after_secret_scrub_without_takeover_shell
             "expected_container_id": "d" * 64,
             "run_id": run_id,
             "env": {
-                "GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant"
+                "GLASSHIVE_CAPABILITY_BROKER_TOKEN": "synthetic-run-grant",
+                    "GLASSHIVE_PEER_TOKEN": "synthetic-peer-grant",
+                    "GLASSHIVE_CONTEXT_TOKEN": "synthetic-context-grant"
             },
         }
     ]
@@ -11343,7 +11350,7 @@ def test_claude_capability_projection_merges_registries_without_replacing_worker
     }
 
 
-def test_codex_resume_flags_change_only_for_conversation_mode(tmp_path):
+def test_codex_resume_keeps_native_json_for_missions_and_conversations(tmp_path):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "private-state"))
     life = tmp_path / "Life"
     life.mkdir()
@@ -11388,8 +11395,7 @@ def test_codex_resume_flags_change_only_for_conversation_mode(tmp_path):
         "--skip-git-repo-check",
     ]
     assert Path(mission_command[0]).name == "codex"
-    assert mission_command[1:3] == ["exec", "resume"]
-    assert "--json" not in mission_command
+    assert mission_command[1:4] == ["exec", "resume", "--json"]
     assert "--skip-git-repo-check" not in mission_command
 
 
@@ -13062,3 +13068,17 @@ def test_host_claude_conversation_refreshes_system_authority_when_snapshot_flag_
     assert ("--system-prompt-snapshot" in command) is supported
     if supported: assert command[command.index("--system-prompt-snapshot") + 1] == "off"
     assert ("--resume" in command) is bool(session_key)
+
+
+@pytest.mark.parametrize('failure', ['terminated', 'unknown_cli', 'evidence', 'unknown_runtime'])
+def test_failure_recovery_uses_existing_workspace_without_requiring_an_operator_page(failure):
+    from workers_projects_runtime.failure_classification import classify_cli_failure, classify_runtime_error
+    if failure in {'terminated', 'unknown_cli'}:
+        result = classify_cli_failure(stdout='', stderr='Synthetic native failure', runtime_name='codex-cli',
+                                      exit_code=143 if failure == 'terminated' else 1)
+    else:
+        result = classify_runtime_error(RuntimeError('GlassHive evidence check failed' if failure == 'evidence' else 'Synthetic failure'),
+                                        runtime_name='codex-cli')
+    assert 'View / Steer' not in result.recommended_recovery
+    assert 'workspace_continue' in result.recommended_recovery
+    assert 'Inspect' in result.recommended_recovery

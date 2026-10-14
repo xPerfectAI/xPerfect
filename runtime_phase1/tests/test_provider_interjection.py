@@ -143,6 +143,51 @@ def test_automatic_unframed_decline_preserves_ordinary_worker_interject(owned_re
     assert f.store.get_run(f.run['run_id'])['state'] == 'running'
 
 
+@pytest.mark.parametrize('case', ['matched', 'no_capability', 'wrong_graph', 'freeform', 'malformed_graph', 'stale_state', 'invalid_delivery'])
+def test_automatic_graph_input_requires_matching_live_native_output_owner(owned_request, case, monkeypatch):
+    f = owned_request
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    decision = json.loads(f.store.get_provider_request(f.record['request_id'])['replay_decision_json'])
+    contract = decision['completion_contract_v1']
+    contract['delivery_control'] = {'version': 2, 'audio_eligible': True} if case == 'invalid_delivery' else None
+    contract['graph_control'] = None if case == 'freeform' else {'version': 0, 'tools': graph['tools']} if case == 'malformed_graph' else graph
+    f.store.update_provider_request(f.record['request_id'], replay_decision_json=json.dumps(decision))
+    monkeypatch.setattr(f.runtime, 'supports_native_control', lambda worker, action, **kwargs:
+        action == 'interject' or (action == 'interject_graph_output' and case != 'no_capability'), raising=False)
+    native_graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_other', 'description': 'Other.'}]} if case == 'wrong_graph' else graph
+    monkeypatch.setattr(f.runtime, 'native_control_state', lambda worker, **kwargs: {
+        'run_id': f.run['run_id'], 'attempt_id': 'foreign' if case == 'stale_state' else f.run['active_attempt_id'],
+        'interject_graph_control': native_graph}, raising=False)
+    before = f.store.get_provider_request(f.record['request_id'])
+    result = post(f)
+    assert result.status_code == 200, result.text
+    assert result.json()['status'] == ('queued' if case == 'matched' else 'unsupported')
+    assert len(f.runtime.controls) == (1 if case == 'matched' else 0)
+    assert f.store.get_provider_request(f.record['request_id']) == before
+    assert len(f.store.list_nonterminal_runs_for_worker(f.worker['worker_id'])) == 1
+
+
+def test_codex_structured_items_preserve_latest_public_graph_result_without_control_leak():
+    from workers_projects_runtime.conversation_provider import _native_authored_preview, _native_terminal_text
+    from workers_projects_runtime.agent_builder_control import parse_conversation_output
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    old = {'type': 'assistant_response', 'tool_name': None, 'content': 'Earlier complete response.'}
+    revised = {**old, 'content': 'Useful newly supplied worker evidence.'}
+    events = [{'type': 'turn.started'}]
+    for identity, value in [('item-old', old), ('item-revised', revised)]:
+        events.extend([{'type': 'item.started', 'item': {'type': 'agent_message', 'id': identity}},
+            {'type': 'item.completed', 'item': {'type': 'agent_message', 'id': identity, 'text': json.dumps(value)}}])
+    stdout = '\n'.join(json.dumps(event) for event in events)
+    assert _native_terminal_text('codex-cli', stdout) is None
+    preview = _native_authored_preview('codex-cli', stdout, graph, None)
+    assert preview['text'] == revised['content']
+    terminal = _native_terminal_text('codex-cli', stdout + '\n' + json.dumps({'type': 'turn.completed'}))
+    decision = parse_conversation_output(terminal, graph, None)
+    assert decision['content'] == revised['content']
+    assert 'delivery_disposition' not in decision
+    assert 'tool_name' not in preview['text'] and 'assistant_response' not in preview['text']
+
+
 @pytest.mark.parametrize('key,value', [('stream_id', 'other'), ('message_id', 'other'),
                                       ('body_sha256', 'd' * 64)])
 def test_wrong_admitted_identity_refuses_without_native_call(owned_request, key, value):

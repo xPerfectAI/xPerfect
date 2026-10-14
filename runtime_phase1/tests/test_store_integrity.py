@@ -70,8 +70,9 @@ def _project(store: Store, suffix: str) -> dict:
     )
 
 
+@pytest.mark.parametrize("schema_shape", ["legacy", "scoped"])
 @pytest.mark.parametrize("migration_mode", ["normal", "rollback", "concurrent"])
-def test_provider_session_scope_migration_preserves_legacy_identity_and_dependants(tmp_path, monkeypatch, migration_mode):
+def test_provider_session_scope_migration_preserves_legacy_identity_and_dependants(tmp_path, monkeypatch, migration_mode, schema_shape):
     db_path = tmp_path / "runtime.db"
     store = Store(str(db_path))
     project = _project(store, "session scopes")
@@ -93,36 +94,51 @@ def test_provider_session_scope_migration_preserves_legacy_identity_and_dependan
     with store._connect() as conn:
         conn.execute("INSERT INTO provider_session_visible_admissions VALUES (?, ?, ?, ?)",
                      (legacy["session_id"], "msg:retained", "retained-turn:1", "2026-01-01T00:00:00Z"))
-    # Materialize the actual pre-scope table, retaining its rows and referencing request.
+    # Cover both the pre-scope rebuild and a scoped table retaining old explicit indices.
     store.close()
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys=OFF")
-        conn.execute("CREATE TABLE legacy_sessions (session_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'local', owner_id TEXT NOT NULL, conversation_id TEXT NOT NULL, agent_id TEXT NOT NULL, model_id TEXT NOT NULL, project_id TEXT NOT NULL, worker_id TEXT NOT NULL, workspace_dir TEXT NOT NULL, access_mode TEXT NOT NULL, history_count INTEGER NOT NULL DEFAULT 0, context_manifest_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(tenant_id,owner_id,conversation_id,agent_id), FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(worker_id) REFERENCES workers(worker_id))")
-        fields = [row[1] for row in conn.execute("PRAGMA table_info(legacy_sessions)")]
-        columns = ",".join(fields)
-        conn.execute(f"INSERT INTO legacy_sessions ({columns}) SELECT {columns} FROM provider_sessions")
-        conn.execute("DROP TABLE provider_sessions")
-        conn.execute("ALTER TABLE legacy_sessions RENAME TO provider_sessions")
-        conn.execute("UPDATE glasshive_schema_versions SET version=7 WHERE component='runtime_store'")
+        if schema_shape == "legacy":
+            conn.execute("CREATE TABLE legacy_sessions (session_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'local', owner_id TEXT NOT NULL, conversation_id TEXT NOT NULL, agent_id TEXT NOT NULL, model_id TEXT NOT NULL, project_id TEXT NOT NULL, worker_id TEXT NOT NULL, workspace_dir TEXT NOT NULL, access_mode TEXT NOT NULL, history_count INTEGER NOT NULL DEFAULT 0, context_manifest_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(tenant_id,owner_id,conversation_id,agent_id), FOREIGN KEY(project_id) REFERENCES projects(project_id), FOREIGN KEY(worker_id) REFERENCES workers(worker_id))")
+            fields = [row[1] for row in conn.execute("PRAGMA table_info(legacy_sessions)")]
+            columns = ",".join(fields)
+            conn.execute(f"INSERT INTO legacy_sessions ({columns}) SELECT {columns} FROM provider_sessions")
+            conn.execute("DROP TABLE provider_sessions")
+            conn.execute("ALTER TABLE legacy_sessions RENAME TO provider_sessions")
+            conn.execute("UPDATE glasshive_schema_versions SET version=7 WHERE component='runtime_store'")
+        else:
+            fields = [row[1] for row in conn.execute("PRAGMA table_info(provider_sessions)")]
+        old_version = conn.execute("SELECT version FROM glasshive_schema_versions WHERE component='runtime_store'").fetchone()[0]
+        conn.execute("CREATE UNIQUE INDEX idx_provider_sessions_identity ON provider_sessions(tenant_id, owner_id, conversation_id, agent_id)")
+        # Equivalent uniqueness is structural even with another name and column order.
+        conn.execute('CREATE UNIQUE INDEX "legacy ""identity""" ON provider_sessions(agent_id, conversation_id, owner_id, tenant_id)')
         conn.execute("CREATE INDEX scoped_legacy_index ON provider_sessions(history_count)")
+        conn.execute("CREATE INDEX scoped_nonunique_identity ON provider_sessions(tenant_id, owner_id, conversation_id, agent_id)")
+        conn.execute("CREATE UNIQUE INDEX scoped_partial_identity ON provider_sessions(tenant_id, owner_id, conversation_id, agent_id) WHERE history_count > 10")
+        conn.execute("CREATE UNIQUE INDEX scoped_worker_identity ON provider_sessions(worker_id)")
         conn.execute("CREATE TABLE scope_migration_audit(session_id TEXT)")
         conn.execute("CREATE TRIGGER scoped_legacy_trigger AFTER UPDATE ON provider_sessions BEGIN INSERT INTO scope_migration_audit VALUES (NEW.session_id); END")
+        if migration_mode == "rollback":
+            conn.execute("DELETE FROM schema_migrations WHERE name = 'provider_session_scope_identity_v1'")
 
     if migration_mode == "rollback":
-        migrate = Store._migrate_provider_session_scopes
+        reconcile = Store._reconcile_provider_session_scope_indexes
 
-        def fail_after_rebuild(conn):
-            migrate(conn)
-            raise RuntimeError("Synthetic failure after rebuilding sessions")
+        def fail_after_reconciliation(conn):
+            reconcile(conn)
+            raise RuntimeError("Synthetic failure after reconciling session indices")
 
         with monkeypatch.context() as patch:
-            patch.setattr(Store, "_migrate_provider_session_scopes", staticmethod(fail_after_rebuild))
+            patch.setattr(Store, "_reconcile_provider_session_scope_indexes", staticmethod(fail_after_reconciliation))
             with pytest.raises(RuntimeError, match="Synthetic failure"):
                 Store(str(db_path))
         with sqlite3.connect(db_path) as conn:
-            assert "actor_kind" not in {row[1] for row in conn.execute("PRAGMA table_info(provider_sessions)")}
-            assert conn.execute("SELECT version FROM glasshive_schema_versions WHERE component='runtime_store'").fetchone()[0] == 7
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(provider_sessions)")}
+            assert ("actor_kind" in columns) is (schema_shape == "scoped")
+            assert conn.execute("SELECT version FROM glasshive_schema_versions WHERE component='runtime_store'").fetchone()[0] == old_version
             assert conn.execute("SELECT COUNT(*) FROM provider_session_visible_admissions").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_provider_sessions_identity'").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE name = 'provider_session_scope_identity_v1'").fetchone()[0] == 0
     if migration_mode == "concurrent":
         begin = store_module.begin_schema_migration
         barrier = Barrier(2)
@@ -153,17 +169,48 @@ def test_provider_session_scope_migration_preserves_legacy_identity_and_dependan
             project_id=project["project_id"], worker_id=other_worker["worker_id"], workspace_dir=str(tmp_path), access_mode="workspace",
         )
         assert scheduled["session_id"] != legacy["session_id"]
+        duplicate = reopened.upsert_provider_session(
+            tenant_id="local", owner_id="owner", conversation_id="same-conversation", agent_id="same-agent",
+            actor_kind="system", origin="scheduler", model_id="codex-cli:gpt-5.6-sol",
+            project_id=project["project_id"], worker_id=other_worker["worker_id"], workspace_dir=str(tmp_path), access_mode="workspace",
+        )
+        assert duplicate["session_id"] == scheduled["session_id"]
         assert reopened.get_provider_session(tenant_id="local", owner_id="owner", conversation_id="same-conversation", agent_id="same-agent")["session_id"] == legacy["session_id"]
         with reopened._connect() as conn:
             assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE name = 'provider_session_scope_identity_v1'").fetchone()[0] == 1
             assert conn.execute("SELECT message_key FROM provider_session_visible_admissions").fetchone()[0] == "msg:retained"
-            assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('scoped_legacy_index', 'scoped_legacy_trigger')")} == {"scoped_legacy_index", "scoped_legacy_trigger"}
+            retained_objects = {"scoped_legacy_index", "scoped_legacy_trigger", "scoped_nonunique_identity", "scoped_partial_identity", "scoped_worker_identity"}
+            assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE tbl_name = 'provider_sessions'")} >= retained_objects
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('idx_provider_sessions_identity', 'legacy \"identity\"')").fetchone()[0] == 0
+            # The full six-field constraint still rejects a second row with the same scope.
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                conn.execute(
+                    "UPDATE provider_sessions SET actor_kind = 'external_user', origin = 'interactive' WHERE session_id = ?",
+                    (scheduled["session_id"],),
+                )
         reopened.update_provider_session_history(legacy["session_id"], history_count=8)
         with reopened._connect() as conn:
-            assert conn.execute("SELECT session_id FROM scope_migration_audit").fetchone()[0] == legacy["session_id"]
+            assert conn.execute("SELECT session_id FROM scope_migration_audit WHERE session_id = ?", (legacy["session_id"],)).fetchone()[0] == legacy["session_id"]
+        retained_sessions = reopened.list_provider_sessions(owner_id="owner")
+        reopened.close()
+        reopened = Store(str(db_path))
+        assert reopened.list_provider_sessions(owner_id="owner") == retained_sessions
+        assert reopened.get_provider_request(request["request_id"])["session_id"] == legacy["session_id"]
     finally:
         reopened.close()
+
+
+def test_provider_session_scope_reconciliation_requires_complete_six_field_uniqueness():
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE provider_sessions(tenant_id TEXT, owner_id TEXT, conversation_id TEXT, agent_id TEXT, actor_kind TEXT, origin TEXT)")
+        conn.execute("CREATE UNIQUE INDEX obsolete_identity ON provider_sessions(tenant_id, owner_id, conversation_id, agent_id)")
+        conn.execute("CREATE UNIQUE INDEX partial_scope ON provider_sessions(tenant_id, owner_id, conversation_id, agent_id, actor_kind, origin) WHERE actor_kind = 'system'")
+        with pytest.raises(RuntimeError, match="authoring-scope uniqueness is unavailable"):
+            Store._reconcile_provider_session_scope_indexes(conn)
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'obsolete_identity'").fetchone()[0] == 1
 
 
 def test_provider_session_advancement_is_exactly_once_and_cursor_guarded(tmp_path):

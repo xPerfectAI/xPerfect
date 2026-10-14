@@ -426,6 +426,29 @@ class ActiveWorkSourceContextRequest(BaseModel):
     ]
     output_contract: ContinuationOutputContractRequest = Field(alias="outputContract")
 
+class NativeHumanInputRequest(BaseModel):
+    """Current human source attested by the existing signed host request body."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", strict=True)
+
+    version: Literal[1]
+    actor_kind: Literal["external_user"] = Field(alias="actorKind")
+    origin: Literal["interactive"]
+    source_event_id: str = Field(alias="sourceEventId", min_length=1, max_length=512)
+    source_index: int = Field(alias="sourceIndex", ge=0)
+    source_message_id: str = Field(alias="sourceMessageId", min_length=1, max_length=512)
+    authoring_revision: int = Field(alias="authoringRevision", gt=0)
+    logical_turn_id: str = Field(alias="logicalTurnId", min_length=1, max_length=512)
+    conversation_id: str = Field(alias="conversationId", min_length=1, max_length=512)
+    received_at: int = Field(alias="receivedAt", gt=0, le=9007199254740991)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_human_version(cls, value):
+        if isinstance(value, dict) and type(value.get("version")) is not int:
+            raise ValueError("Human source version must be an integer")
+        return value
+
+
 class NativeInputResponseRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -463,6 +486,7 @@ class ActiveWorkActionRequest(BaseModel):
         "dismiss",
     ]
     native_input: NativeInputResponseRequest | None = Field(default=None, alias="nativeInput")
+    native_human_input: NativeHumanInputRequest | None = Field(default=None, alias="nativeHumanInput")
     instruction: str | None = Field(default=None, max_length=100000)
     capability_reauthorization: CapabilityReauthorizationRequest | None = Field(
         default=None, alias="capabilityReauthorization"
@@ -481,6 +505,8 @@ class ActiveWorkActionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_context_action(self) -> "ActiveWorkActionRequest":
+        if self.native_human_input is not None and self.native_input is None:
+            raise ValueError("Human native input requires an exact native response")
         if self.file_inputs:
             if self.action not in {"steer", "queue", "message"} or self.source_context is None:
                 raise ValueError("Selected files require an exact source-owned follow-up")

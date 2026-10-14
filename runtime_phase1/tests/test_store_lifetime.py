@@ -201,7 +201,8 @@ def test_worker_reconciliation_stops_between_rows_on_shutdown(
     seen: list[str] = []
     monkeypatch.setattr(store, "reconcile_invalid_running_runs", lambda: None)
     monkeypatch.setattr(service, "reconcile_terminal_artifact_observations", lambda: None)
-    monkeypatch.setattr(store, "list_all_workers", lambda: [{"worker_id": "first"}, {"worker_id": "next"}])
+    monkeypatch.setattr(store, "list_worker_ids", lambda: ["first", "next"])
+    monkeypatch.setattr(store, "get_worker", lambda worker_id: {"worker_id": worker_id})
 
     def reconcile(worker) -> None:
         seen.append(worker["worker_id"])

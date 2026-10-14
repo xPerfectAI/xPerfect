@@ -96,3 +96,129 @@ def test_existing_callback_without_run_input_remains_byte_exact(account_client):
     replay = emit_terminal(service, store, record)
     assert replay['payload_json'] == old['payload_json']
     assert 'run_input' not in json.loads(replay['payload_json'])
+
+
+def emit_needs_input(service, store, record, *, supplied=None, persist=True, callback_id=""):
+    run = store.get_run(record['current_run_id'])
+    return service._emit_callback(store.get_worker(record['worker_id']), 'run.needs_input',
+        run=supplied or run, callback_id=callback_id, insert_once=bool(callback_id),
+        submit_delivery=False, persist_callback=persist)
+
+
+def insert_attention_intent(store, intent):
+    return store.insert_callback_outbox_once(**{key: intent[key] for key in (
+        'callback_id', 'project_id', 'worker_id', 'run_id', 'attempt_number',
+        'event_type', 'url', 'payload_json')})
+
+
+@pytest.mark.parametrize('continuation', [False, True])
+def test_current_needs_input_callback_carries_exact_accepted_goal(account_client, continuation):
+    service, store, record = accepted_run(account_client)
+    prior = store.get_run(record['current_run_id'])
+    if continuation:
+        store.finalize_run(prior['run_id'], 'completed', output_text='Prior observation')
+        store.update_worker_state(record['worker_id'], 'ready')
+        response = account_client.post(f"/v1/work/{record['work_ref']}/actions", headers=account_headers(), json={
+            'action': 'message', 'instruction': 'Add an accessible sign-off. Keep original constraints.',
+            'idempotencyKey': 'accepted-attention-continuation',
+        })
+        assert response.status_code == 202, response.text
+        record = store.get_delegation(record['work_ref'], tenant_id='tenant-a', owner_id='owner-a')
+    exact = store.update_run(record['current_run_id'], state='needs_input',
+        failure_class='capability_authorization_horizon_expired',
+        failure_user_message='The deferred capability authorization has expired.')
+    callback = emit_needs_input(service, store, record, supplied={**exact, 'instruction': 'Caller forged input'})
+    payload = json.loads(callback['payload_json'])
+    expected = {'version': 1, 'run_id': exact['run_id'], 'instruction': exact['instruction']}
+    if continuation:
+        expected['continuation_context'] = json.loads(exact['continuation_context_json'])
+        assert expected['continuation_context']['base_instruction'] == prior['instruction']
+    assert payload['run_input'] == expected
+    assert payload['work_terminal'] is False
+    assert payload.get('result_revision', 0) == 0
+    assert not payload.get('result_digest')
+    assert not exact['runtime_invoked_at']
+
+
+@pytest.mark.parametrize('field', ['run_id', 'instruction', 'continuation_context'])
+def test_attention_outbox_transaction_rejects_forged_accepted_goal(account_client, field):
+    service, store, record = accepted_run(account_client)
+    store.update_run(record['current_run_id'], state='needs_input')
+    intent = emit_needs_input(service, store, record, persist=False)
+    payload = json.loads(intent['payload_json'])
+    payload['run_input'][field] = {'version': 1, 'guidance': ['Foreign input']} if field == 'continuation_context' else 'foreign-input'
+    intent['payload_json'] = json.dumps(payload)
+    with pytest.raises(CallbackIntentGenerationConflictError, match='accepted run input'):
+        insert_attention_intent(store, intent)
+    assert store.get_callback_outbox(intent['callback_id']) is None
+
+
+def test_attention_outbox_transaction_rejects_resumed_run(account_client):
+    service, store, record = accepted_run(account_client)
+    store.update_run(record['current_run_id'], state='needs_input')
+    intent = emit_needs_input(service, store, record, persist=False)
+    store.update_run(record['current_run_id'], state='queued')
+    assert store.get_run(record['current_run_id'])['state'] == 'queued'
+    assert 'run_input' in json.loads(intent['payload_json'])
+    with pytest.raises(CallbackIntentGenerationConflictError, match='accepted run input'):
+        insert_attention_intent(store, intent)
+    assert store.get_callback_outbox(intent['callback_id']) is None
+
+
+def test_legacy_attention_outbox_keeps_original_bytes_without_accepted_goal(account_client):
+    service, store, record = accepted_run(account_client)
+    store.update_run(record['current_run_id'], state='needs_input')
+    callback_id = 'cb_legacy_attention_input'
+    intent = emit_needs_input(service, store, record, persist=False, callback_id=callback_id)
+    payload = json.loads(intent['payload_json']);payload.pop('run_input')
+    intent['payload_json'] = json.dumps(payload, ensure_ascii=False)
+    original = insert_attention_intent(store, intent)
+    replay = emit_needs_input(service, store, record, callback_id=callback_id)
+    assert replay['payload_json'] == original['payload_json']
+    assert 'run_input' not in json.loads(replay['payload_json'])
+
+
+@pytest.mark.parametrize('kind', ['permission', 'question'])
+def test_current_running_native_attention_carries_exact_goal(account_client, monkeypatch, kind):
+    from test_account_api import _truthfully_invoke_run
+    service, store, record = accepted_run(account_client)
+    run = _truthfully_invoke_run(store, record['current_run_id'], suffix='bound-attention')
+    pending = {'version': 1, 'runId': run['run_id'], 'attemptId': run['active_attempt_id'],
+        'sessionId': 'session-attention', 'requestId': 'request-attention',
+        'requestFingerprint': 'a' * 64, 'expiresAt': '2099-01-01T00:00:00+00:00',
+        'kind': kind, 'state': 'pending', 'mode': 'form'}
+    monkeypatch.setattr(service.runtime, 'pending_native_input', lambda *a, **k: pending, raising=False)
+    callback = service._emit_callback_parallel(store.get_worker(record['worker_id']), 'run.needs_input',
+        run=run, pending_native_input=pending, submit_delivery=False)
+    payload = json.loads(callback['payload_json'])
+    assert payload['run_input'] == {'version': 1, 'run_id': run['run_id'], 'instruction': run['instruction']}
+    assert payload['pending_native_input']['kind'] == kind
+    assert payload['work_terminal'] is False
+    assert store.get_run(run['run_id'])['state'] == 'running'
+
+
+@pytest.mark.parametrize('change', ['unbound', 'attempt', 'run', 'kind', 'state', 'current_run'])
+def test_running_attention_goal_requires_exact_current_native_binding(account_client, monkeypatch, change):
+    from test_account_api import _truthfully_invoke_run
+    service, store, record = accepted_run(account_client)
+    run = _truthfully_invoke_run(store, record['current_run_id'], suffix='bound-rejection')
+    pending = {'version': 1, 'runId': run['run_id'], 'attemptId': run['active_attempt_id'],
+        'sessionId': 'session-attention', 'requestId': 'request-attention',
+        'requestFingerprint': 'a' * 64, 'expiresAt': '2099-01-01T00:00:00+00:00',
+        'kind': 'question', 'state': 'pending', 'mode': 'form'}
+    monkeypatch.setattr(service.runtime, 'pending_native_input', lambda *a, **k: pending, raising=False)
+    intent = service._emit_callback_parallel(store.get_worker(record['worker_id']), 'run.needs_input',
+        run=run, pending_native_input=pending, submit_delivery=False, persist_callback=False)
+    payload = json.loads(intent['payload_json'])
+    if change == 'unbound': payload.pop('pending_native_input')
+    elif change == 'current_run':
+        later = store.create_run(record['worker_id'], record['project_id'], 'Later accepted goal')
+        with store._connect() as conn:
+            conn.execute('UPDATE delegations SET current_run_id = ? WHERE work_ref = ?', (later['run_id'], record['work_ref']))
+    else:
+        field = {'attempt': 'attemptId', 'run': 'runId', 'kind': 'kind', 'state': 'state'}[change]
+        payload['pending_native_input'][field] = 'foreign'
+    intent['payload_json'] = json.dumps(payload)
+    with pytest.raises(CallbackIntentGenerationConflictError, match='accepted run input'):
+        insert_attention_intent(store, intent)
+    assert store.get_callback_outbox(intent['callback_id']) is None

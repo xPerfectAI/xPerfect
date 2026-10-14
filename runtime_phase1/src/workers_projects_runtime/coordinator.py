@@ -92,7 +92,7 @@ class Dispatch(StrictModel):
 
 
 class Control(StrictModel):
-    action: Literal["pause", "resume", "stop", "steer", "retry"]
+    action: Literal["queue", "message", "pause", "resume", "stop", "steer", "retry", "dismiss"]
     run_id: str = ""
     idempotency_key: str = Field(min_length=1, max_length=160)
     message: str = Field(default="", max_length=524288)
@@ -764,6 +764,27 @@ class CoordinatorService:
                     started_at=run.get("started_at", ...),
                 )
             )
+        if goal["work_ref"]:
+            delegation = self.store.get_delegation(goal["work_ref"], tenant_id=tenant, owner_id=owner)
+            result["actions"] = []
+            action_mask = getattr(self.service, "_active_work_service_actions", None)
+            state = getattr(self.service, "_active_work_service_state", None)
+            if delegation and delegation.get("worker_id") == goal["worker_id"]:
+                result["dismissed"] = bool(delegation.get("dismissed_at"))
+            if (delegation and delegation.get("worker_id") == goal["worker_id"]
+                    and callable(action_mask) and callable(state)):
+                control_run_id = str(delegation.get("run_id") or delegation.get("current_run_id") or "")
+                with self.store._connect() as conn:
+                    owned_control = self._owned_goal_result_run(
+                        conn, tenant, owner, conversation_id, goal_id, control_run_id,
+                    )
+                if owned_control:
+                    result["control_run_id"] = control_run_id
+                    result["control_state"] = state(delegation)
+                    actions = action_mask(delegation, state(delegation))
+                    if goal["intent_state"] == "cancelled":
+                        actions = actions & {"stop", "dismiss"}
+                    result["actions"] = sorted(actions)
         return result
 
     def snapshot(self, tenant: str, owner: str, conversation_id: str) -> dict:
@@ -801,6 +822,8 @@ class CoordinatorService:
     def control(self, tenant: str, owner: str, conversation_id: str, goal_id: str, control: Control) -> dict:
         self._assert_not_restore_held(self._conversation(tenant, owner, conversation_id))
         goal = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
+        if control.action in {"queue", "message", "steer"} and not control.message.strip():
+            raise CoordinatorConflict("Guidance is required for this action")
         if control.run_id:
             with self.store._connect() as conn:
                 sharing = conn.execute("SELECT COUNT(*) FROM coordinator_goals WHERE conversation_id=? AND run_id=?", (conversation_id, control.run_id)).fetchone()[0]
@@ -822,9 +845,11 @@ class CoordinatorService:
                 raise CoordinatorConflict("Control idempotency key changed content")
             if previous and previous["response_json"]:
                 return json.loads(previous["response_json"])
-            if control.run_id != held["run_id"] and not previous:
+            if not previous and control.action in {"queue", "message", "dismiss"} and control.action not in goal.get("actions", []):
+                raise CoordinatorConflict("This action is unavailable for the exact work")
+            if control.run_id != goal.get("control_run_id", held["run_id"]) and not previous:
                 raise CoordinatorConflict("Control targets a stale or unrelated run")
-            if held["intent_state"] == "cancelled" and not previous:
+            if held["intent_state"] == "cancelled" and not previous and control.action not in {"dismiss", "stop"}:
                 raise CoordinatorConflict("Goal was already stopped")
             if control.action == "retry":
                 if not control.run_id or control.message:
@@ -846,11 +871,13 @@ class CoordinatorService:
                 conn.execute(
                     "UPDATE coordinator_goals SET intent_state='cancelled' "
                     "WHERE conversation_id=? AND goal_id=? AND run_id=?",
-                    (conversation_id, goal_id, control.run_id),
+                    (conversation_id, goal_id, held["run_id"]),
                 )
             conn.execute("INSERT OR IGNORE INTO coordinator_actions(conversation_id,goal_id,idempotency_key,payload_json) VALUES(?,?,?,?)", (conversation_id, goal_id, control.idempotency_key, payload))
         if control.action == "retry":
             return self._retry_goal(tenant, owner, conversation_id, goal_id, control)
+        if control.action in {"queue", "message", "dismiss"}:
+            return self._delegated_goal_control(tenant, owner, conversation_id, goal_id, control)
         worker_id = goal["worker_id"]
         stop_outcome = None
         if control.run_id:
@@ -874,11 +901,28 @@ class CoordinatorService:
                         raise CoordinatorConflict("Invalid steer replacement receipt")
                     with self.store._connect() as conn:
                         conn.execute("UPDATE coordinator_goals SET run_id=? WHERE conversation_id=? AND goal_id=?", (replacement, conversation_id, goal_id))
-        response = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
         if stop_outcome is not None:
-            terminal = response["state"] in {"completed", "failed", "cancelled", "interrupted"}
+            stopped = self.store.get_run(control.run_id)
+            terminal = bool(stopped and stopped["state"] in {"completed", "failed", "cancelled", "interrupted"})
             if not stop_outcome.get("accepted") and not terminal:
                 raise CoordinatorConflict("Exact Stop was not accepted; retry this work")
+            if terminal and not stop_outcome.get("confirmation_pending"):
+                # These queued effects belong to this stopped goal, not another mission.
+                # Use existing exact pending-run cancellation; keep every result/history row.
+                with self.store._connect() as conn:
+                    effects = conn.execute(
+                        "SELECT json_extract(response_json,'$.run_id') FROM coordinator_actions "
+                        "WHERE conversation_id=? AND goal_id=? AND json_valid(response_json) "
+                        "AND json_valid(payload_json) AND json_extract(payload_json,'$.action') IN ('queue','message')",
+                        (conversation_id, goal_id),
+                    ).fetchall()
+                    pending = [run_id for run_id in dict.fromkeys([goal["run_id"], *(row[0] for row in effects)])
+                               if run_id and (owned := self._owned_goal_result_run(conn, tenant, owner, conversation_id, goal_id, run_id))
+                               and owned["state"] == "queued"]
+                for run_id in pending:
+                    self.service.cancel_run(worker_id, run_id)
+        response = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
+        if stop_outcome is not None:
             if stop_outcome.get("confirmation_pending") or not terminal:
                 # A pending stop is not a completed idempotent response. The
                 # same key must be able to retry after exact termination proof.
@@ -886,6 +930,126 @@ class CoordinatorService:
         with self.store._connect() as conn:
             conn.execute("UPDATE coordinator_actions SET response_json=? WHERE conversation_id=? AND goal_id=? AND idempotency_key=?", (canonical(response), conversation_id, goal_id, control.idempotency_key))
         return response
+
+    def _delegated_goal_control(self, tenant: str, owner: str, conversation_id: str,
+                                goal_id: str, control: Control) -> dict:
+        goal = self._goal(conversation_id, goal_id)
+        delegation = self.store.get_delegation(goal["work_ref"], tenant_id=tenant, owner_id=owner)
+        if not delegation or delegation.get("worker_id") != goal["worker_id"]:
+            raise CoordinatorScopeError("Bound work unavailable")
+        effect_key = f"coordinator-{control.action}:{conversation_id}:{goal_id}:{control.idempotency_key}"
+        replacement = None
+        if control.action in {"queue", "message"}:
+            replacement_id = self.service.active_work_effect_run_id(delegation, idempotency_key=effect_key)
+            replacement = self.store.get_run(replacement_id)
+        if replacement is None:
+            try:
+                outcome = self.service.execute_active_work_action(
+                    delegation, action=control.action, instruction=control.message,
+                    idempotency_key=effect_key, expected_run_id=control.run_id,
+                    start_processor=False,
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise CoordinatorConflict("This action is unavailable for the exact work") from exc
+            replacement_id = str(outcome.get("run_id") or control.run_id)
+        else:
+            if (replacement["state"] in {"completed", "failed", "cancelled", "interrupted"}
+                    and not replacement.get("started_at") and goal["run_id"] != replacement_id):
+                raise CoordinatorConflict("Reserved follow-up is terminal; refresh the exact work")
+            outcome = {"status": replacement["state"] if replacement["state"] in {"completed", "failed", "cancelled", "interrupted"} else "queued",
+                       "run_id": replacement_id,
+                       "delivery_mode": "queued_next_boundary" if control.action == "message" else "queued"}
+        if control.action in {"queue", "message"}:
+            source = self.store.get_run(control.run_id)
+            replacement = self.store.get_run(replacement_id)
+            if (not source or not replacement or replacement_id == control.run_id
+                    or replacement.get("worker_id") != goal["worker_id"]
+                    or replacement.get("project_id") != source.get("project_id")
+                    or replacement.get("tenant_id", "local") != tenant):
+                raise CoordinatorConflict("Invalid follow-up receipt")
+            self._bind_goal_replacement(tenant, owner, conversation_id, goal_id,
+                                        goal, goal["run_id"], replacement_id, preserve_newer_effect=True)
+        response = {**self.goal_snapshot(tenant, owner, conversation_id, goal_id),
+                    "action": control.action, "status": str(outcome.get("status") or "accepted")}
+        if control.action in {"queue", "message"}:
+            # A later action may already be current. This receipt owns this exact effect,
+            # so admission/history must never inherit the later goal snapshot's run ID.
+            effect = self.store.get_run(replacement_id)
+            response.update({"run_id": replacement_id, "state": effect["state"],
+                             "output_text": effect.get("output_text", ""),
+                             "error_text": effect.get("error_text", ""),
+                             "failure_class": effect.get("failure_class", ""),
+                             "active_attempt_id": effect.get("active_attempt_id", "")})
+        if outcome.get("delivery_mode"):
+            response["delivery_mode"] = outcome["delivery_mode"]
+        with self.store._connect() as conn:
+            conn.execute("UPDATE coordinator_actions SET response_json=? WHERE conversation_id=? AND goal_id=? AND idempotency_key=?",
+                         (canonical(response), conversation_id, goal_id, control.idempotency_key))
+        if control.action in {"queue", "message"}:
+            # Successful effect authority must exist before waking native admission,
+            # including a recovered predecessor that is no longer the latest result.
+            self.service.start_assigned_run(goal["worker_id"])
+        return response
+
+    def _bind_goal_replacement(self, tenant: str, owner: str, conversation_id: str,
+                               goal_id: str, goal: dict, source_run_id: str, replacement_id: str,
+                               *, preserve_newer_effect: bool = False) -> None:
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if preserve_newer_effect:
+                # Re-read attachment authority while holding the native transaction.
+                # Concurrent or recovered follow-ups keep reservation order, including
+                # the gap between another attachment and its successful receipt.
+                current = conn.execute(
+                    "SELECT current.first_queued_at,current.run_id,replacement.first_queued_at AS replacement_queued_at "
+                    "FROM coordinator_goals g JOIN runs current ON current.run_id=g.run_id "
+                    "JOIN runs replacement ON replacement.run_id=? "
+                    "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+                    "JOIN workers w ON w.worker_id=current.worker_id "
+                    "WHERE g.conversation_id=? AND g.goal_id=? AND g.intent_state='accepted' "
+                    "AND g.restore_hold=0 AND c.restore_hold=0 AND c.tenant_id=? AND c.owner_id=? "
+                    "AND current.worker_id=? AND replacement.worker_id=current.worker_id "
+                    "AND current.tenant_id=? AND replacement.tenant_id=current.tenant_id "
+                    "AND w.tenant_id=current.tenant_id AND w.owner_id=?",
+                    (replacement_id, conversation_id, goal_id, tenant, owner, goal["worker_id"], tenant, owner),
+                ).fetchone()
+                if current:
+                    if current["run_id"] == replacement_id:
+                        return
+                    receipts = conn.execute(
+                        "SELECT idempotency_key,json_extract(payload_json,'$.action') AS action "
+                        "FROM coordinator_actions WHERE conversation_id=? AND goal_id=? "
+                        "AND json_valid(payload_json) AND json_extract(payload_json,'$.action') IN ('queue','message')",
+                        (conversation_id, goal_id),
+                    ).fetchall()
+                    owns_effect = any(current["run_id"] == self.service.active_work_effect_run_id(
+                        goal, idempotency_key=f"coordinator-{receipt['action']}:{conversation_id}:{goal_id}:{receipt['idempotency_key']}",
+                    ) for receipt in receipts)
+                    if owns_effect:
+                        if datetime.fromisoformat(current["first_queued_at"]) >= datetime.fromisoformat(current["replacement_queued_at"]):
+                            return
+                        source_run_id = current["run_id"]
+            updated = conn.execute(
+                "UPDATE coordinator_goals SET run_id=?,blocker='' "
+                "WHERE conversation_id=? AND goal_id=? AND run_id=? "
+                "AND intent_state='accepted' AND restore_hold=0 "
+                "AND (SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?)=0",
+                (replacement_id, conversation_id, goal_id, source_run_id, conversation_id),
+            ).rowcount
+            if updated and not conn.execute(
+                "UPDATE delegations SET current_run_id=?,updated_at=? "
+                "WHERE work_ref=? AND tenant_id=? AND owner_id=? AND current_run_id IN (?,?)",
+                (replacement_id, utc_now(), goal["work_ref"], tenant, owner, source_run_id, replacement_id),
+            ).rowcount:
+                conn.execute("ROLLBACK")
+                updated = 0
+            current = conn.execute(
+                "SELECT run_id,intent_state FROM coordinator_goals WHERE conversation_id=? AND goal_id=?",
+                (conversation_id, goal_id),
+            ).fetchone()
+        if not updated and (not current or current["run_id"] != replacement_id or current["intent_state"] != "accepted"):
+            self.service.stop_run(goal["worker_id"], replacement_id)
+            raise CoordinatorConflict("Goal changed before follow-up attachment")
 
     def _follow_recorded_retry(self, tenant: str, owner: str, conversation_id: str, goal_id: str,
                                work_ref: str, run_id: str) -> None:
@@ -966,32 +1130,8 @@ class CoordinatorService:
             or str(replacement.get("tenant_id") or "local") != tenant
         ):
             raise CoordinatorConflict("Invalid retry replacement receipt")
-        with self.store._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            updated = conn.execute(
-                "UPDATE coordinator_goals SET run_id=?,blocker='' "
-                "WHERE conversation_id=? AND goal_id=? AND run_id=? "
-                "AND intent_state='accepted' AND restore_hold=0 "
-                "AND (SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?)=0",
-                (replacement_id, conversation_id, goal_id, control.run_id, conversation_id),
-            ).rowcount
-            # Active Work reads this goal's work through its delegation; it follows the same
-            # replacement, or a later Retry of that replacement targets a stale generation.
-            if updated and not conn.execute(
-                "UPDATE delegations SET current_run_id=?,updated_at=? "
-                "WHERE work_ref=? AND tenant_id=? AND owner_id=? AND current_run_id=?",
-                (replacement_id, utc_now(), goal["work_ref"], tenant, owner, control.run_id),
-            ).rowcount:
-                conn.execute("ROLLBACK")
-                updated = 0
-            current = conn.execute(
-                "SELECT run_id,intent_state FROM coordinator_goals WHERE conversation_id=? AND goal_id=?",
-                (conversation_id, goal_id),
-            ).fetchone()
-        if not updated and (not current or current["run_id"] != replacement_id or current["intent_state"] != "accepted"):
-            self.service.stop_run(goal["worker_id"], replacement_id)
-            raise CoordinatorConflict("Retry lost the exact goal binding")
-        # The replacement was reserved without submitting its processor.
+        self._bind_goal_replacement(tenant, owner, conversation_id, goal_id,
+                                    goal, control.run_id, replacement_id)
         # Exact Stop now targets this bound run and can win before native start.
         self.service.start_assigned_run(goal["worker_id"])
         response = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
@@ -1141,10 +1281,29 @@ class CoordinatorService:
         for goal in snapshot["goals"]:
             if goal["state"] == "restore_held":
                 continue
-            if goal["run_id"] and goal["state"] in {"completed", "failed", "cancelled", "interrupted"}:
-                receipt = {k: goal[k] for k in ("goal_id", "run_id", "state")}
-                with self.store._connect() as conn:
-                    conn.execute("INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)", (conversation_id, "result_available", goal["run_id"], canonical(receipt), now()))
+            with self.store._connect() as conn:
+                # Queue/Message preserve the source run. Its result is still evidence for this
+                # exact goal after a follow-up becomes current; the existing action receipt owns it.
+                sources = conn.execute(
+                    "SELECT json_extract(payload_json,'$.run_id'),json_extract(response_json,'$.run_id') FROM coordinator_actions "
+                    "WHERE conversation_id=? AND goal_id=? AND response_json<>'' "
+                    "AND json_valid(payload_json) AND json_valid(response_json) "
+                    "AND json_extract(payload_json,'$.action') IN ('queue','message')",
+                    (conversation_id, goal["goal_id"]),
+                ).fetchall()
+                for run_id in dict.fromkeys([goal["run_id"], *(run_id for row in sources for run_id in row)]):
+                    if not run_id:
+                        continue
+                    run = self._owned_goal_result_run(conn, tenant, owner, conversation_id, goal["goal_id"], run_id)
+                    # Message can retire a queued reservation into its replacement before
+                    # it starts. That predecessor has no independent worker result to surface.
+                    # Genuine admission failures still belong to the exact goal, even historically.
+                    if (run and run_id != goal["run_id"] and run["state"] == "cancelled"
+                            and not run.get("started_at")):
+                        continue
+                    if run and run["state"] in {"completed", "failed", "cancelled", "interrupted"}:
+                        receipt = {"goal_id": goal["goal_id"], "run_id": run_id, "state": run["state"]}
+                        conn.execute("INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)", (conversation_id, "result_available", run_id, canonical(receipt), now()))
         return self.snapshot(tenant, owner, conversation_id)
 
     def native_identity(self, principal: dict) -> tuple[str, str, str]:
@@ -1228,16 +1387,6 @@ class CoordinatorService:
                 (t.request_id='' OR p.request_id IS NULL OR p.state NOT IN ('failed','cancelled','completed')) LIMIT 1""", (conversation_id,)).fetchone()
             if pending:
                 return None
-            # A result wake uses the same configured assistant account as its helpers.
-            # Do not let an early result occupy that account while another dispatched
-            # helper is still queued or running. Keep its event durable for one joined
-            # continuation after the outstanding helpers settle.
-            active_helpers = conn.execute("""SELECT 1 FROM coordinator_goals g
-                JOIN runs r ON r.run_id=g.run_id
-                WHERE g.conversation_id=? AND g.restore_hold=0
-                AND r.state IN ('queued','running') LIMIT 1""", (conversation_id,)).fetchone()
-            if active_helpers:
-                return None
             events = conn.execute("SELECT * FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' ORDER BY sequence", (conversation_id,)).fetchall()
             if not events:
                 return None
@@ -1270,14 +1419,9 @@ class CoordinatorService:
             for event in events:
                 item = json.loads(event["payload_json"])
                 if event["kind"] == "result_available" and item.get("goal_id") and item.get("run_id"):
-                    run = conn.execute(
-                        "SELECT r.output_text,r.failure_class FROM coordinator_goals g "
-                        "JOIN runs r ON r.run_id=g.run_id "
-                        "JOIN workers w ON w.worker_id=r.worker_id "
-                        "WHERE g.conversation_id=? AND g.goal_id=? AND g.run_id=? "
-                        "AND r.tenant_id=? AND w.tenant_id=? AND w.owner_id=?",
-                        (conversation_id, item["goal_id"], item["run_id"], tenant, tenant, owner),
-                    ).fetchone()
+                    run = self._owned_goal_result_run(
+                        conn, tenant, owner, conversation_id, item["goal_id"], item["run_id"],
+                    )
                     if run:
                         output = str(run["output_text"] or "")
                         length = min(len(output), 12000, inline_remaining)
@@ -1424,7 +1568,7 @@ class CoordinatorService:
         return outcomes
 
     def recover_retry_actions(self, tenant: str, owner: str, conversation_id: str) -> None:
-        """Finish a recorded Retry after a process exits before goal rebinding."""
+        """Finish a recorded control after a process exits before goal rebinding."""
 
         self._conversation(tenant, owner, conversation_id)
         with self.store._connect() as conn:
@@ -1438,7 +1582,7 @@ class CoordinatorService:
                 control = Control.model_validate_json(row["payload_json"])
             except ValueError:
                 continue
-            if control.action != "retry":
+            if control.action not in {"retry", "queue", "message", "dismiss"}:
                 continue
             try:
                 self.control(tenant, owner, conversation_id, row["goal_id"], control)
@@ -1535,11 +1679,36 @@ class CoordinatorService:
         return {**{k: v for k, v in goal.items() if k not in {"output_text", "error_text"}},
                 "has_result": bool(goal.get("output_text") or goal.get("error_text"))}
 
+    @staticmethod
+    def _owned_goal_result_run(conn: Any, tenant: str, owner: str, conversation_id: str,
+                               goal_id: str, run_id: str) -> dict | None:
+        row = conn.execute(
+            "SELECT r.* FROM coordinator_goals g JOIN runs r ON r.worker_id=g.worker_id "
+            "JOIN workers w ON w.worker_id=r.worker_id "
+            "WHERE g.conversation_id=? AND g.goal_id=? AND r.run_id=? "
+            "AND r.tenant_id=? AND w.tenant_id=? AND w.owner_id=? "
+            "AND (g.run_id=r.run_id OR EXISTS (SELECT 1 FROM coordinator_actions a "
+            "WHERE a.conversation_id=g.conversation_id AND a.goal_id=g.goal_id "
+            "AND json_valid(a.payload_json) "
+            "AND json_extract(a.payload_json,'$.action') IN ('queue','message') "
+            "AND (json_extract(a.payload_json,'$.run_id')=r.run_id "
+            "OR (json_valid(a.response_json) AND json_extract(a.response_json,'$.run_id')=r.run_id))))",
+            (conversation_id, goal_id, run_id, tenant, tenant, owner),
+        ).fetchone()
+        return dict(row) if row else None
+
     def read_result(self, tenant: str, owner: str, conversation_id: str, goal_id: str,
-                    offset: int = 0, max_chars: int = 12000) -> dict:
+                    offset: int = 0, max_chars: int = 12000, run_id: str = "") -> dict:
         if offset < 0 or not 1 <= max_chars <= 64000:
             raise CoordinatorConflict("Invalid result page")
         goal = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
+        if run_id and run_id != goal["run_id"]:
+            with self.store._connect() as conn:
+                result = self._owned_goal_result_run(conn, tenant, owner, conversation_id, goal_id, run_id)
+            if result is None:
+                raise CoordinatorScopeError("Bound result unavailable")
+            goal = {**goal, "run_id": run_id, "state": result["state"],
+                    "output_text": result["output_text"], "failure_class": result["failure_class"]}
         text = goal.get("output_text", "")
         if offset > len(text):
             raise CoordinatorConflict("Result offset exceeds source")

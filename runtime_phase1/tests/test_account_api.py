@@ -2422,7 +2422,9 @@ def test_recent_terminal_work_is_pinned_then_ages_into_history(account_client, m
         completed["workRef"],
         failed["workRef"],
     }
-    assert all(item["actions"] == [] for item in history["work"])
+    historical_actions = {item["workRef"]: item["actions"] for item in history["work"]}
+    assert historical_actions[completed["workRef"]] == ["queue", "message", "dismiss"]
+    assert historical_actions[failed["workRef"]] == ["retry", "queue", "message", "dismiss"]
 
 
 def test_active_work_keeps_only_a_bounded_recent_set_per_terminal_state(
@@ -4248,11 +4250,11 @@ def test_active_work_action_reconciles_crash_after_effect_without_duplicate(
             assert len(runs) == 2
 
 
-def test_steer_terminal_winner_lost_response_replays_authoritative_source(
+def test_steer_source_completion_lost_response_replays_reserved_correction(
     tmp_path,
     monkeypatch,
 ):
-    """A cancelled steer reservation must never replace terminal source truth."""
+    """Accepted correction survives source completion and lost response, exactly once."""
 
     monkeypatch.setenv("WPR_API_TOKEN", API_TOKEN)
     monkeypatch.setenv(
@@ -4350,13 +4352,13 @@ def test_steer_terminal_winner_lost_response_replays_authoritative_source(
         replacement_run_id = app.state.service.active_work_effect_run_id(
             source, idempotency_key=idempotency_key
         )
-        assert direct["control_outcome"] == "terminal_won"
-        assert direct["run_id"] == source["run_id"]
-        assert direct["state"] == "completed"
-        assert store.get_run(replacement_run_id)["state"] == "cancelled"
+        assert direct["run_id"] == replacement_run_id
+        assert direct["state"] == "queued"
+        assert store.get_run(replacement_run_id)["state"] == "queued"
+        assert store.get_run(source["run_id"])["state"] == "completed"
         assert store.get_delegation(
             accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a"
-        )["current_run_id"] == source["run_id"]
+        )["current_run_id"] == replacement_run_id
         assert store.get_active_work_action(reservation["action_use_id"])[
             "status"
         ] == "pending"
@@ -4386,9 +4388,8 @@ def test_steer_terminal_winner_lost_response_replays_authoritative_source(
             source_run_id=source["run_id"],
             action_use_id=reservation["action_use_id"],
         )
-        assert reconciled["control_outcome"] == "terminal_won"
-        assert reconciled["run_id"] == source["run_id"]
-        assert reconciled["state"] == "completed"
+        assert reconciled["run_id"] == replacement_run_id
+        assert reconciled["state"] == "queued"
 
         body = {
             "action": "steer",
@@ -4407,7 +4408,7 @@ def test_steer_terminal_winner_lost_response_replays_authoritative_source(
         )
 
         assert replay.status_code == 202, replay.text
-        assert replay.json()["state"] == "completed"
+        assert replay.json()["state"] == "queued"
         assert replay.json()["idempotentReplay"] is True
         assert repeated.status_code == 202
         assert repeated.json() == replay.json()
@@ -4415,14 +4416,16 @@ def test_steer_terminal_winner_lost_response_replays_authoritative_source(
         authoritative = restarted.state.store.get_delegation(
             accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a"
         )
-        assert authoritative["current_run_id"] == source["run_id"]
-        assert authoritative["run_state"] == "completed"
-        assert restarted.state.store.get_run(replacement_run_id)["state"] == "cancelled"
+        assert authoritative["current_run_id"] == replacement_run_id
+        assert authoritative["run_state"] == "queued"
+        assert restarted.state.store.get_run(replacement_run_id)["state"] == "queued"
+        assert restarted.state.store.get_run(source["run_id"])["output_text"] == "Authoritative completion"
+        assert len(restarted.state.store.list_runs_for_worker(source["worker_id"])) == 2
         action_row = restarted.state.store.get_active_work_action(
             reservation["action_use_id"]
         )
         assert action_row["status"] == "completed"
-        assert json.loads(action_row["response_json"])["state"] == "completed"
+        assert json.loads(action_row["response_json"])["state"] == "queued"
 
 
 @pytest.mark.parametrize("action", ["pause", "resume"])
@@ -6099,6 +6102,29 @@ def test_active_work_cursor_pagination_is_stable_and_complete(
     assert invalid.json()["detail"]["code"] == "active_work_cursor_invalid"
 
 
+def test_callback_association_current_run_precedes_action_receipt(account_client):
+    service = account_client.app.state.service
+    service.executor.submit = lambda *_args, **_kwargs: None
+    accepted = account_client.post("/v1/delegations", headers=account_headers(idempotency_key="early-callback"),
+        json=delegation_payload_with_origin())
+    assert accepted.status_code == 202
+    store = account_client.app.state.store
+    delegation = store.get_delegation(accepted.json()["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    old_run = delegation["initial_run_id"]
+    new_run = store.create_run(delegation["worker_id"], delegation["project_id"], "Current continuation")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET state = 'completed' WHERE run_id = ?", (old_run,))
+        conn.execute("UPDATE runs SET state = 'running' WHERE run_id = ?", (new_run["run_id"],))
+    response = account_client.post("/v1/callback-associations/verify", headers=account_headers(), json={
+        "originRef": "ghi_synthetic_origin_0001", "workRef": accepted.json()["workRef"],
+        "workerId": delegation["worker_id"], "runId": new_run["run_id"]})
+    assert response.status_code == 200
+    assert response.json()["runId"] == new_run["run_id"]
+    assert response.json()["currentRunId"] == new_run["run_id"]
+    assert response.json()["currentRunState"] == "running"
+    assert store.get_delegation_by_origin("ghi_synthetic_origin_0001", tenant_id="tenant-a", owner_id="owner-a")["current_run_id"] == old_run
+
+
 def test_callback_association_is_authoritative_owner_scoped_and_non_oracular(account_client):
     service = account_client.app.state.service
     service.executor.submit = lambda *_args, **_kwargs: None
@@ -6132,6 +6158,8 @@ def test_callback_association_is_authoritative_owner_scoped_and_non_oracular(acc
         "workRef": accepted.json()["workRef"],
         "runId": initial_run_id,
         "attemptId": str(store.get_run(initial_run_id).get("active_attempt_id") or ""),
+        "currentRunId": initial_run_id,
+        "currentRunState": store.get_run(initial_run_id)["state"],
     }
 
     linked_run = store.create_run(
@@ -6144,6 +6172,13 @@ def test_callback_association_is_authoritative_owner_scoped_and_non_oracular(acc
     )
     assert linked.status_code == 200
     assert linked.json()["runId"] == linked_run["run_id"]
+    assert linked.json()["currentRunId"] == linked_run["run_id"]
+    store.update_delegation_current_run(accepted.json()["workRef"], tenant_id="tenant-a", owner_id="owner-a", run_id=linked_run["run_id"])
+    historical = account_client.post("/v1/callback-associations/verify", headers=account_headers(), json=request_body)
+    assert historical.status_code == 200
+    assert historical.json()["runId"] == initial_run_id
+    assert historical.json()["currentRunId"] == linked_run["run_id"]
+    assert historical.json()["currentRunState"] == linked_run["state"]
     assert linked.json()["attemptId"] == str(store.get_run(linked_run["run_id"]).get("active_attempt_id") or "")
 
     mismatches = [
@@ -6582,7 +6617,7 @@ def test_active_work_view_skips_credentialed_or_untrusted_origin_values(
     assert "synthetic-user" not in accepted["viewRef"]
 
 
-def test_active_work_history_is_owner_scoped_terminal_and_read_only(account_client):
+def test_active_work_history_retains_current_owner_controls_without_execution(account_client):
     accepted = account_client.post(
         "/v1/delegations",
         headers=account_headers(idempotency_key="delegation-history-owner-a"),
@@ -6618,9 +6653,88 @@ def test_active_work_history_is_owner_scoped_terminal_and_read_only(account_clie
     assert len(history.json()["work"]) == 1
     assert history.json()["work"][0]["workRef"] == accepted["workRef"]
     assert history.json()["work"][0]["state"] == "completed"
-    assert history.json()["work"][0]["actions"] == []
+    assert history.json()["work"][0]["actions"] == ["queue", "message", "dismiss"]
+    current = account_client.get(f"/v1/work/{accepted['workRef']}?projection=actions", headers=account_headers())
+    assert current.status_code == 200
+    assert history.json()["work"][0]["actions"] == current.json()["actions"]
+    assert store.get_run(delegation["current_run_id"])["state"] == "completed"
+    assert len(store.list_runs_for_worker(delegation["worker_id"])) == 1
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM active_work_action_uses WHERE work_ref = ?",
+            (accepted["workRef"],)).fetchone()[0] == 0
     assert foreign.status_code == 200
     assert foreign.json()["work"] == []
+
+    for action in ("retry", "stop"):
+        rejected = account_client.post(
+            f"/v1/work/{accepted['workRef']}/actions",
+            headers=account_headers(),
+            json={"action": action, "idempotencyKey": f"history-completed-{action}"},
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"]["code"] == "active_work_action_not_available"
+    assert store.get_run(delegation["current_run_id"])["state"] == "completed"
+    assert len(store.list_runs_for_worker(delegation["worker_id"])) == 1
+
+
+def test_history_defers_workspace_inventory_but_retains_exact_detail_files(
+    account_client, monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "synthetic-history-link-secret")
+    accepted = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="history-lazy-files"),
+        json=delegation_payload(title="Retained document"),
+    ).json()
+    store = account_client.app.state.store
+    record = store.get_delegation(accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    workspace = tmp_path / "retained-workspace"
+    workspace.mkdir()
+    content = b"Synthetic retained result\n"
+    (workspace / "result.txt").write_bytes(content)
+    store.update_worker(record["worker_id"], workspace_dir=str(workspace))
+    store.finalize_run(record["current_run_id"], "completed", output_text="Document ready")
+    now = datetime.now(timezone.utc).isoformat()
+    with store._connect() as conn:
+        conn.execute("UPDATE delegations SET dismissed_at = ? WHERE work_ref = ?",
+            (now, accepted["workRef"]))
+
+    scans = []
+    scandir = api_module.os.scandir
+    def tracked_scandir(path):
+        if Path(path) == workspace:
+            scans.append(Path(path))
+        return scandir(path)
+    monkeypatch.setattr(api_module.os, "scandir", tracked_scandir)
+    signed_kinds = []
+    sign_link = api_module.sign_link_token
+    def tracked_sign_link(**values):
+        signed_kinds.append(values["kind"])
+        return sign_link(**values)
+    monkeypatch.setattr(api_module, "sign_link_token", tracked_sign_link)
+
+    history = account_client.get("/v1/active-work/history", headers=account_headers()).json()
+    item = history["work"][0]
+    assert history["snapshot"] == "fresh"
+    assert item["workRef"] == accepted["workRef"]
+    assert item["title"] == "Retained document"
+    assert item["actions"] == ["queue", "message", "dismiss"]
+    assert item["viewRef"]
+    assert "artifactLinks" not in item
+    assert scans == []
+    assert "artifact_open" not in signed_kinds
+    assert "artifact_download" not in signed_kinds
+
+    detail = account_client.get(f"/v1/work/{accepted['workRef']}", headers=account_headers()).json()
+    assert scans
+    assert "artifact_open" in signed_kinds
+    assert "artifact_download" in signed_kinds
+    assert detail["actions"] == item["actions"]
+    assert [file["path"] for file in detail["artifactLinks"]["items"]] == ["result.txt"]
+    download = account_client.get(detail["artifactLinks"]["items"][0]["downloadUrl"])
+    assert download.status_code == 200
+    assert download.content == content
+    assert account_client.get(f"/v1/work/{accepted['workRef']}",
+        headers=account_headers(owner_id="owner-b")).status_code == 404
 
 
 @pytest.mark.parametrize("terminal_state", ["completed", "failed", "cancelled"])
@@ -7057,6 +7171,29 @@ def test_background_preferences_persist_exact_model_effort_and_fallback(account_
     assert persisted["project_definition"] == "Updated accepted context"
     assert persisted["env"]["WPR_CLAUDE_CODE_EFFORT"] == "medium"
     assert store.get_run(run["run_id"])["state"] == "queued"
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "default"])
+def test_grok_background_preferences_preserve_supported_native_effort(
+    account_client, execution_mode, fallback, effort
+):
+    prefix = "fallback_worker" if fallback else "worker"
+    bundle = {"viventium_launch_authority": {
+        f"{prefix}_model": "grok-build:grok-4.7-build-fast",
+        f"{prefix}_reasoning_effort": effort,
+    }, "env": {"UNRELATED_SETTING": "retained"}}
+    model, resolved = account_client.app.state.service._configured_parallel_worker_route(
+        "grok-build", execution_mode, bundle, fallback=fallback,
+    )
+    assert model == resolved["provider_model"] == "grok-4.7-build-fast"
+    assert resolved["env"]["UNRELATED_SETTING"] == "retained"
+    assert resolved["viventium_launch_authority"] == bundle["viventium_launch_authority"]
+    if effort == "default":
+        assert "WPR_GROK_REASONING_EFFORT" not in resolved["env"]
+    else:
+        assert resolved["env"]["WPR_GROK_REASONING_EFFORT"] == effort
 
 
 @pytest.mark.parametrize("preferences", [

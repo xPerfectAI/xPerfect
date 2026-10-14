@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
 
@@ -11,7 +11,8 @@ from workers_projects_runtime.grok_acp import AcpClient, AcpError, GrokSession
 
 
 @pytest.mark.parametrize('second', ['The answer.', 'A useful addition.'])
-def test_prompt_frames_complete_same_turn_native_generations(second):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_prompt_frames_complete_same_turn_native_generations(second, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     def envelope(text):
         return json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': text})
@@ -30,13 +31,16 @@ def test_prompt_frames_complete_same_turn_native_generations(second):
     session = GrokSession(GenerationPeer())
     session.open(cwd='/workspace', model='grok-selected', effort='high')
     result = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
-        None, messaging_delivery_control(audio_eligible=True))))
-    assert result['content'] == ('The answer.' if second == 'The answer.' else 'The answer.\n\nA useful addition.')
+        None, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=minimal_wire))
+    assert result['content'] == 'The answer.\n\n' + second
     assert result['voice'] == 'eligible'
+    assert session.delivery_disposition_ranges() == [{'start': 0, 'end': len(result['content']),
+        'disposition': {'version': 1, 'audio': 'eligible', 'required': True, 'valid': True, 'source': 'model'}}]
 
 
 @pytest.mark.parametrize('change', ['prompt', 'turn', 'unfinished', 'invalid_voice', 'unavailable_graph'])
-def test_prompt_rejects_unsupported_native_generation_controls(change):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_prompt_rejects_unsupported_native_generation_controls(change, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
     class GenerationPeer(ProtocolPeer):
@@ -59,12 +63,13 @@ def test_prompt_rejects_unsupported_native_generation_controls(change):
     session.open(cwd='/workspace', model='grok-selected', effort='high')
     with pytest.raises(AcpError):
         session.prompt('Synthetic request', output_schema=conversation_output_schema(
-            graph, messaging_delivery_control(audio_eligible=True)))
+            graph, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=minimal_wire)
 
 
 @pytest.mark.parametrize('first_voice', ['eligible', 'skip'])
 @pytest.mark.parametrize('final_voice', ['eligible', 'skip'])
-def test_prompt_keeps_native_tool_retirement_separate_from_new_generation(first_voice, final_voice):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_prompt_keeps_native_tool_retirement_separate_from_new_generation(first_voice, final_voice, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     class ToolGenerationPeer(ProtocolPeer):
         def request(self, method, params, timeout=30, **kwargs):
@@ -88,14 +93,15 @@ def test_prompt_keeps_native_tool_retirement_separate_from_new_generation(first_
     session = GrokSession(ToolGenerationPeer())
     session.open(cwd='/workspace', model='grok-selected', effort='high')
     result = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
-        None, messaging_delivery_control(audio_eligible=True))))
-    assert result == {'type': 'assistant_response', 'tool_name': None, 'voice': final_voice,
-                      'content': ('Same public text.\n\n' if first_voice == 'eligible' else '') + 'Same public text.'}
+        None, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=minimal_wire))
+    assert result == {'type': 'assistant_response', 'tool_name': None, 'voice': 'skip' if 'skip' in (first_voice, final_voice) else 'eligible',
+                      'content': 'Same public text.\n\nSame public text.'}
 
 
 @pytest.mark.parametrize('boundary', ['tool', 'generation'])
 @pytest.mark.parametrize('kind,voice', [('assistant_response', 'skip'), ('tool_call', 'eligible'), ('tool_call', 'skip')])
-def test_prompt_native_generation_terminal_preserves_existing_part_controls(boundary, kind, voice):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_prompt_native_generation_terminal_preserves_existing_part_controls(boundary, kind, voice, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
     first = json.dumps({'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': 'I will check.'})
@@ -117,12 +123,13 @@ def test_prompt_native_generation_terminal_preserves_existing_part_controls(boun
     session = GrokSession(GenerationPeer())
     session.open(cwd='/workspace', model='grok-selected', effort='high')
     output = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
-        graph, messaging_delivery_control(audio_eligible=True))))
+        graph, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=minimal_wire))
     assert output == {**final, 'content': 'I will check.\n\nThe final contribution.'}
 
 
 @pytest.mark.parametrize('voice', ['eligible', 'skip'])
-def test_prompt_silent_predecessor_does_not_fail_optional_generation(voice):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_prompt_silent_predecessor_does_not_fail_optional_generation(voice, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     class GenerationPeer(ProtocolPeer):
         def request(self, method, params, timeout=30, **kwargs):
@@ -139,12 +146,15 @@ def test_prompt_silent_predecessor_does_not_fail_optional_generation(voice):
     session = GrokSession(GenerationPeer())
     session.open(cwd='/workspace', model='grok-selected', effort='high')
     output = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
-        None, messaging_delivery_control(audio_eligible=True))))
-    assert output == {'type': 'assistant_response', 'tool_name': None, 'voice': voice, 'content': 'Later contribution.'}
+        None, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=minimal_wire))
+    assert output == {'type': 'assistant_response', 'tool_name': None, 'voice': 'skip',
+                      'content': 'Silent body.\n\nLater contribution.'}
+    assert [r['disposition']['audio'] for r in session.delivery_disposition_ranges()] == (['skip'] if voice == 'skip' else ['skip', 'eligible'])
 
 
 @pytest.mark.parametrize('voice', ['eligible', 'skip'])
-def test_graph_terminal_declines_pending_interject_and_preserves_main(voice, tmp_path):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_graph_terminal_declines_pending_interject_and_preserves_main(voice, tmp_path, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     from workers_projects_runtime.grok_control import ControlMailbox, submit_control
     graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
@@ -181,7 +191,7 @@ def test_graph_terminal_declines_pending_interject_and_preserves_main(voice, tmp
     session = GrokSession(client, reviewed_interject=True)
     session.open(cwd='/workspace', model='grok-selected', effort='high')
     output = json.loads(session.prompt('Synthetic request', output_schema=conversation_output_schema(
-        graph, messaging_delivery_control(audio_eligible=True))))
+        graph, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=minimal_wire))
     assert output == terminal
     assert session._output_error is None and session.cancel_requested is False
     assert len([method for method, _ in client.calls if method == 'session/prompt']) == 1
@@ -1192,7 +1202,8 @@ def test_system_rules_use_native_session_authority_not_user_prompt(session_id):
 
 
 @pytest.mark.parametrize("handoff", [False, True])
-def test_prompt_retains_typed_public_narration_through_native_tools(handoff):
+@pytest.mark.parametrize('minimal_wire', [False, True])
+def test_prompt_retains_typed_public_narration_through_native_tools(handoff, minimal_wire):
     from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
     graph = {"version": 1, "tools": [{"name": "lc_transfer_to_specialist", "description": "Consult."}]}
     delivery = messaging_delivery_control(audio_eligible=True)
@@ -1214,7 +1225,7 @@ def test_prompt_retains_typed_public_narration_through_native_tools(handoff):
             return {'stopReason': 'end_turn'}
     session = GrokSession(ToolPeer())
     session.open(cwd='/workspace', model='grok-selected', effort='high')
-    output = session.prompt('Synthetic state check', output_schema=conversation_output_schema(graph, delivery))
+    output = session.prompt('Synthetic state check', output_schema=conversation_output_schema(graph, delivery), minimal_wire_output=minimal_wire)
     payload = json.loads(output)
     assert payload['content'] == 'I will check the current state.\n\n' + ('' if handoff else 'The check is complete.')
     assert 'Private progress' not in output
@@ -1604,3 +1615,737 @@ def test_cancel_overtakes_interjection_waiting_for_transport_write():
     assert not operation.is_alive() and not cancellation.is_alive()
     assert 'cancelled' in result.get('error', '')
     assert [message['method'] for message in wire] == ['session/cancel']
+
+
+@pytest.mark.parametrize('constrain', [True, False])
+@pytest.mark.parametrize('terminal', ['assistant', 'transfer', 'invalid_pair', 'invalid_voice'])
+def test_declared_contract_survives_native_constraint_transport_choice(constrain, terminal):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    schema = conversation_output_schema(graph, messaging_delivery_control(audio_eligible=True))
+    envelope = {'type': 'tool_call' if terminal == 'transfer' else 'assistant_response',
+                'tool_name': 'lc_transfer_to_specialist' if terminal in ('transfer', 'invalid_pair') else None,
+                'voice': 'invalid' if terminal == 'invalid_voice' else 'eligible', 'content': 'Useful result.'}
+    events = []
+    class EnvelopePeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt':
+                return super().request(method, params, timeout, **kwargs)
+            self.calls.append((method, params))
+            # Native functions use their own typed protocol before the final envelope.
+            self.notification('session/update', {'sessionId': 'native-exact', 'update': {
+                'sessionUpdate': 'tool_call', 'toolCallId': 'synthetic-tool', 'status': 'completed'}})
+            self.notification('session/update', {'sessionId': 'native-exact', '_meta': {
+                'promptId': 'synthetic-prompt', 'turnStartMs': 10, 'streamStartMs': 20}, 'update': {
+                'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(envelope)}}})
+            return {'stopReason': 'end_turn'}
+    client = EnvelopePeer();session = GrokSession(client, event=events.append)
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    if terminal in ('invalid_pair', 'invalid_voice'):
+        with pytest.raises(AcpError, match='invalid public response envelope'):
+            session.prompt('Synthetic request', output_schema=schema, minimal_wire_output=not constrain)
+    else:
+        output = session.prompt('Synthetic request', output_schema=schema, minimal_wire_output=not constrain)
+        assert json.loads(output) == envelope
+    request = next(params for method, params in reversed(client.calls) if method == 'session/prompt')
+    assert '_meta' in request
+    assert ('description' not in request['_meta']['outputSchema']) is (not constrain)
+    assert session._interject_schema_supported is True
+    assert session._conversation_parts.controls[0]['tools'][0]['name'] == 'lc_transfer_to_specialist'
+    assert any(event.get('update', {}).get('sessionUpdate') == 'tool_call' for event in events)
+
+
+@pytest.mark.parametrize('invalid', ['not_boolean', 'no_schema', 'unknown_schema', 'restricted'])
+def test_minimal_wire_output_contract_rejects_unbound_or_restricted_controls_before_rpc(invalid):
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    client = ProtocolPeer();session = GrokSession(client)
+    session.open(cwd='/workspace', model='grok-selected')
+    if invalid == 'restricted':
+        session._native_tools_disabled = True
+    schema = conversation_output_schema(None, messaging_delivery_control(audio_eligible=True))
+    if invalid == 'no_schema': schema = None
+    if invalid == 'unknown_schema': schema = {'type': 'object'}
+    before = len(client.calls)
+    with pytest.raises(AcpError):
+        session.prompt('Synthetic request', output_schema=schema, minimal_wire_output='false' if invalid == 'not_boolean' else True)
+    assert len(client.calls) == before
+
+
+@pytest.mark.parametrize('missing', ['schema', 'authority', 'native_tools', 'known_controls'])
+def test_runner_minimal_wire_contract_requires_composed_admitted_inputs(tmp_path, monkeypatch, missing):
+    from io import StringIO
+    from workers_projects_runtime import grok_acp_runner as runner
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    monkeypatch.setenv('GROK_HOME', str(tmp_path / 'home'))
+    monkeypatch.setattr(sys, 'stdin', StringIO('Synthetic request.'))
+    monkeypatch.setattr(runner.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('Invalid input reached native launch'))
+    schema = tmp_path / 'schema.json';schema.write_text(json.dumps(
+        {'type': 'object'} if missing == 'known_controls' else conversation_output_schema(None, messaging_delivery_control(audio_eligible=True))))
+    authority = tmp_path / 'authority.txt';authority.write_text('Synthetic authority.')
+    args = ['--binary', 'synthetic-grok', '--model', 'grok-selected', '--output-schema-minimal-wire']
+    if missing != 'schema': args += ['--output-schema-file', str(schema)]
+    if missing != 'authority': args += ['--system-prompt-file', str(authority)]
+    if missing == 'native_tools':
+        workspace = tmp_path / 'empty';workspace.mkdir(mode=0o700)
+        args += ['--native-tools-disabled', '--restricted-workspace', str(workspace)]
+    with pytest.raises(ValueError, match='minimal-wire'):
+        runner.main(args)
+
+
+@pytest.mark.parametrize('minimal_wire', [False, True])
+@pytest.mark.parametrize('cancel_after', [False, True])
+def test_runner_keeps_declared_controls_with_minimal_wire_constraint(tmp_path, monkeypatch, capfd, minimal_wire, cancel_after):
+    import hashlib
+    from contextlib import contextmanager
+    from io import StringIO
+    from workers_projects_runtime import grok_acp_runner as runner
+    from workers_projects_runtime.agent_builder_control import (
+        conversation_output_schema, conversation_output_contract_instructions, messaging_delivery_control)
+    schema = conversation_output_schema(None, messaging_delivery_control(audio_eligible=True))
+    schema_file = tmp_path / 'schema.json';schema_file.write_text(json.dumps(schema))
+    authority_file = tmp_path / 'authority.txt';authority_file.write_text(conversation_output_contract_instructions(schema))
+    monkeypatch.setenv('GROK_HOME', str(tmp_path / 'home'))
+    monkeypatch.setattr(sys, 'stdin', StringIO('Synthetic request.'))
+    monkeypatch.setattr(runner.subprocess, 'Popen', lambda *args, **kwargs: object())
+    envelope = {'type': 'assistant_response', 'tool_name': None, 'voice': 'eligible', 'content': 'Useful result.'}
+    class EnvelopePeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt': return super().request(method, params, timeout, **kwargs)
+            self.calls.append((method, params))
+            self.notification('session/update', {'sessionId': 'native-exact', 'update': {
+                'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(envelope)}}})
+            return {'stopReason': 'end_turn'}
+    client = EnvelopePeer()
+    @contextmanager
+    def fake_client(*args, **kwargs): yield client
+    monkeypatch.setattr(runner, 'AcpClient', fake_client)
+    args = ['--binary', 'synthetic-grok', '--model', 'grok-selected', '--effort', 'high',
+            '--system-prompt-file', str(authority_file), '--output-schema-file', str(schema_file)]
+    if minimal_wire: args += ['--output-schema-minimal-wire']
+    if cancel_after:
+        original_prompt = runner.GrokSession.prompt
+        def stopped_prompt(session, *args, **kwargs):
+            output = original_prompt(session, *args, **kwargs)
+            session.cancel()
+            return output
+        monkeypatch.setattr(runner.GrokSession, 'prompt', stopped_prompt)
+    assert runner.main(args) == (2 if cancel_after else 0)
+    request = next(params for method, params in client.calls if method == 'session/prompt')
+    assert '_meta' in request
+    assert ('description' not in request['_meta']['outputSchema']) is minimal_wire
+    events = [json.loads(line) for line in capfd.readouterr().out.splitlines()]
+    contract = next(event for event in events if event['type'] == 'grok.output_contract')
+    assert contract['mode'] == ('minimal_wire_constraint' if minimal_wire else 'native_constraint')
+    assert contract['declared_schema_sha256'] == hashlib.sha256(json.dumps(schema,
+        sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    assert 'output_schema_sha256' not in contract
+    assert contract['wire_schema_sha256'] == hashlib.sha256(json.dumps(request['_meta']['outputSchema'],
+        sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    if cancel_after:
+        assert not any(event['type'] == 'grok.result' for event in events)
+        assert any(event.get('failure_class') == 'native_turn_cancelled' for event in events)
+        return
+    terminal = next(event for event in events if event['type'] == 'grok.result')
+    assert json.loads(terminal['output']) == envelope
+    assert terminal['deliveryDispositionRanges'] == [{'start': 0, 'end': len(envelope['content']),
+        'disposition': {'version': 1, 'audio': 'eligible', 'required': True, 'valid': True, 'source': 'model'}}]
+    assert 'Synthetic request.' not in json.dumps(events)
+
+
+def test_graph_only_grok_command_reaches_runner_with_original_strict_metadata(tmp_path, monkeypatch, capfd):
+    from pathlib import Path
+    from contextlib import contextmanager
+    from io import StringIO
+    from types import SimpleNamespace
+    from workers_projects_runtime import grok_acp_runner as runner
+    from workers_projects_runtime.grok_runtime import HostGrokBuildRuntime
+    from workers_projects_runtime.openclaw_runtime import RuntimeInfo
+    graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}
+    bundle = {'run_mode': 'conversation', 'developer_instructions': 'Synthetic authority.',
+              'agent_builder_control': graph, 'provider_capabilities': {'native_tools': True}}
+    worker = {'worker_id': 'synthetic-grok', 'owner_id': 'local', 'profile': 'grok-build',
+              'model': 'grok-selected', 'workspace_dir': str(tmp_path / 'workspace'),
+              'execution_mode': 'host', 'trusted_run_lane': 'conversation',
+              'bootstrap_bundle_json': json.dumps(bundle)}
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    runtime.sandbox = SimpleNamespace(home_mount='/workspace/home', box=None)
+    info = RuntimeInfo('grok-build', 'grok-selected', '', None, None, None,
+                       str(tmp_path / 'state'), str(tmp_path / 'workspace'), None)
+    command = runtime._grok_command(worker, info, host=True)
+    assert '--output-schema-minimal-wire' not in command
+    schema = json.loads(Path(command[command.index('--output-schema-file') + 1]).read_text())
+    assert 'voice' not in schema['properties']
+    monkeypatch.setenv('GROK_HOME', str(tmp_path / 'native-home'))
+    monkeypatch.setattr(sys, 'stdin', StringIO('Synthetic request.'))
+    monkeypatch.setattr(runner.subprocess, 'Popen', lambda *args, **kwargs: object())
+    envelope = {'type': 'assistant_response', 'tool_name': None, 'content': 'Useful result.'}
+    class EnvelopePeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method != 'session/prompt': return super().request(method, params, timeout, **kwargs)
+            self.calls.append((method, params))
+            self.notification('session/update', {'sessionId': 'native-exact', 'update': {
+                'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': json.dumps(envelope)}}})
+            return {'stopReason': 'end_turn'}
+    client = EnvelopePeer()
+    @contextmanager
+    def fake_client(*args, **kwargs): yield client
+    monkeypatch.setattr(runner, 'AcpClient', fake_client)
+    assert runner.main(command[2:]) == 0
+    request = next(params for method, params in client.calls if method == 'session/prompt')
+    assert request['_meta']['outputSchema'] == schema
+    events = [json.loads(line) for line in capfd.readouterr().out.splitlines()]
+    assert next(event for event in events if event['type'] == 'grok.output_contract')['mode'] == 'native_constraint'
+    assert json.loads(next(event for event in events if event['type'] == 'grok.result')['output']) == envelope
+
+
+def test_minimal_wire_cancelled_turn_never_prompts_or_replays():
+    from workers_projects_runtime.agent_builder_control import conversation_output_schema, messaging_delivery_control
+    client = ProtocolPeer()
+    session = GrokSession(client)
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    session.cancel()
+    with pytest.raises(AcpError, match='cancelled before prompting'):
+        session.prompt('Synthetic task.', output_schema=conversation_output_schema(
+            None, messaging_delivery_control(audio_eligible=True)), minimal_wire_output=True)
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+
+
+class McpReadyPeer(ProtocolPeer):
+    def __init__(self, initial=None):
+        super().__init__()
+        self.initial = initial
+
+    def manifest(self, tools, identity='native-exact'):
+        self.notification('session/update', {'sessionId': identity, 'update': {
+            'sessionUpdate': 'available_commands_update', '_meta': {'tools': tools}}})
+
+    def request(self, method, params, timeout=30, **kwargs):
+        if method in ('session/new', 'session/load'):
+            self.manifest(self.initial)
+        return super().request(method, params, timeout, **kwargs)
+
+
+MCP_SERVERS = [{'name': 'authorized-broker', 'type': 'stdio', 'command': 'synthetic'}]
+REQUIRED_MCP_SERVERS = ['authorized-broker']
+READY_BROKER_TOOLS = ['authorized-broker__capabilities_list']
+
+
+@pytest.mark.parametrize('session_id', [None, 'native-exact'])
+def test_required_mcp_inventory_waits_for_current_session_before_inference(session_id):
+    client = McpReadyPeer(['read_file', 'search_tool'])
+    session = GrokSession(client)
+    waiting = Event()
+    finished = Event()
+    failures = []
+    wait = session._native_mcp_observation.wait
+    def observed_wait(timeout):
+        assert timeout == 30
+        waiting.set()
+        return wait(timeout=2)
+    session._native_mcp_observation.wait = observed_wait
+    def open_session():
+        try:
+            session.open(cwd='/workspace', model='grok-selected', effort='high',
+                         session_id=session_id, mcp_servers=MCP_SERVERS,
+                         required_mcp_servers=REQUIRED_MCP_SERVERS)
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+    thread = Thread(target=open_session)
+    thread.start()
+    try:
+        assert waiting.wait(timeout=1)
+        assert not finished.is_set()
+        client.manifest(READY_BROKER_TOOLS, 'foreign-session')
+        assert not session._native_tools_manifest.is_set()
+        client.manifest(['authorized-broker__'])
+        assert not session._native_tools_manifest.is_set()
+        client.manifest(['read_file', *READY_BROKER_TOOLS])
+        assert finished.wait(timeout=1)
+        assert failures == []
+        assert not any(method == 'session/prompt' for method, _ in client.calls)
+        assert session.prompt('Resume the same authorized work.') == 'native output'
+        assert session.session_id == 'native-exact' and session.configured_model == 'grok-selected'
+    finally:
+        client.manifest(READY_BROKER_TOOLS)
+        thread.join(timeout=3)
+
+
+@pytest.mark.parametrize('tools', [None, [], ['read_file'], ['authorized-broker__'], ['foreign__active_work_action'],
+                                 [*READY_BROKER_TOOLS, {'name': 'malformed'}]])
+def test_missing_required_mcp_inventory_is_typed_before_prompt(monkeypatch, tools):
+    session = GrokSession(McpReadyPeer(tools))
+    monkeypatch.setattr(session._native_mcp_observation, 'wait', lambda timeout: False)
+    with pytest.raises(AcpError) as error:
+        session.open(cwd='/workspace', model='grok-selected', mcp_servers=MCP_SERVERS,
+                     required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert error.value.code == -32000 and error.value.stop_reason == 'mcp_unavailable'
+    assert not any(method == 'session/prompt' for method, _ in session.client.calls)
+
+
+@pytest.mark.parametrize('servers', [None, [{'name': 'resource-only', 'type': 'stdio', 'command': 'synthetic'}]])
+def test_no_required_tool_projection_adds_no_native_readiness_wait(monkeypatch, servers):
+    session = GrokSession(ProtocolPeer())
+    def unexpected_wait(*_args, **_kwargs):
+        raise AssertionError('Optional or absent MCP introduced a tool barrier')
+    monkeypatch.setattr(session._native_mcp_observation, 'wait', unexpected_wait)
+    session.open(cwd='/workspace', model='grok-selected', mcp_servers=servers)
+    assert session.prompt('Synthetic ordinary request.') == 'native output'
+
+
+def test_ready_current_mcp_manifest_proceeds_without_waiting(monkeypatch):
+    session = GrokSession(McpReadyPeer(READY_BROKER_TOOLS))
+    monkeypatch.setattr(session._native_mcp_observation, 'wait',
+                        lambda timeout: session._native_tools_manifest.is_set())
+    session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                 mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert session.prompt('Continue.') == 'native output'
+
+
+def test_required_mcp_rechecks_model_reload_and_missing_final_inventory(monkeypatch):
+    class ReloadPeer(McpReadyPeer):
+        def __init__(self):
+            super().__init__(READY_BROKER_TOOLS)
+            self.model = 'old-model'
+        def request(self, method, params, timeout=30, **kwargs):
+            if method == 'session/load':
+                self.initial = ['read_file']
+            if method == 'session/set_config_option' and params['configId'] == 'model':
+                self.model = params['value']
+            result = super().request(method, params, timeout, **kwargs)
+            if method in ('session/new', 'session/load'):
+                result['configOptions'].append({'id': 'model', 'currentValue': self.model,
+                    'options': [{'value': 'old-model'}, {'value': 'grok-selected'}]})
+            return result
+    session = GrokSession(ReloadPeer())
+    monkeypatch.setattr(session._native_mcp_observation, 'wait',
+                        lambda timeout: session._native_tools_manifest.is_set())
+    with pytest.raises(AcpError, match='did not become ready'):
+        session.open(cwd='/workspace', model='grok-selected', mcp_servers=MCP_SERVERS,
+                     required_mcp_servers=REQUIRED_MCP_SERVERS, system_prompt_override='Current authority.')
+    assert not any(method == 'session/prompt' for method, _ in session.client.calls)
+
+
+def test_required_mcp_inventory_disappearing_after_open_blocks_prompt(monkeypatch):
+    client = McpReadyPeer(READY_BROKER_TOOLS)
+    session = GrokSession(client)
+    monkeypatch.setattr(session._native_mcp_observation, 'wait',
+                        lambda timeout: session._native_tools_manifest.is_set())
+    session.open(cwd='/workspace', model='grok-selected', mcp_servers=MCP_SERVERS,
+                 required_mcp_servers=REQUIRED_MCP_SERVERS)
+    client.manifest(['read_file'])
+    with pytest.raises(AcpError, match='did not become ready'):
+        session.prompt('Continue.')
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+
+
+def test_mcp_readiness_failure_preserves_typed_runner_and_runtime_contract():
+    from workers_projects_runtime.grok_acp_runner import _stopped_turn
+    from workers_projects_runtime.failure_classification import classify_cli_failure
+    error = AcpError('Private diagnostic is not the user message', code=-32000, stop_reason='mcp_unavailable')
+    failure, message = _stopped_turn(error, GrokSession(ProtocolPeer()), None)
+    assert failure == 'native_mcp_unavailable'
+    result = classify_cli_failure(stdout=json.dumps({'type': 'grok.error', 'failure_class': failure,
+        'message': 'synthetic untrusted diagnostic'}), stderr='', runtime_name='grok-build', exit_code=2)
+    assert result.structured and result.failure_class == failure and result.retryable is False
+    assert result.user_message == 'The configured tool connection was not ready before the model turn.'
+
+
+@pytest.mark.parametrize('required', [['foreign'], ['authorized-broker__'], [{}]])
+def test_required_mcp_identity_cannot_expand_projected_servers(required):
+    client = ProtocolPeer()
+    with pytest.raises(AcpError, match='identity is not configured'):
+        GrokSession(client).open(cwd='/workspace', model='grok-selected',
+                                mcp_servers=MCP_SERVERS, required_mcp_servers=required)
+    assert client.calls == []
+
+
+def test_cancelled_mcp_readiness_does_not_become_a_ready_turn(monkeypatch):
+    session = GrokSession(McpReadyPeer(['read_file']))
+    def cancel_wait(timeout):
+        session.cancel()
+        return session._native_tools_manifest.is_set()
+    monkeypatch.setattr(session._native_mcp_observation, 'wait', cancel_wait)
+    with pytest.raises(AcpError) as error:
+        session.open(cwd='/workspace', model='grok-selected', mcp_servers=MCP_SERVERS,
+                     required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert error.value.stop_reason == 'cancelled'
+    assert not any(method == 'session/prompt' for method, _ in session.client.calls)
+
+
+
+def test_broker_connection_readiness_allows_policy_omitted_control_tools():
+    client = McpReadyPeer(['read_file', 'authorized-broker__capabilities_list'])
+    session = GrokSession(client)
+    session.open(cwd='/workspace', model='grok-selected', mcp_servers=MCP_SERVERS,
+                 required_mcp_servers=['authorized-broker'])
+    assert session.prompt('Use only the granted capabilities.') == 'native output'
+    assert 'authorized-broker__active_work_action' not in client.initial
+
+
+# Native completion usage is bounded to the current session and prompt.
+NATIVE_RESPONSE_USAGE = {'input_tokens': 147824, 'output_tokens': 614,
+    'cache_read_input_tokens': 1152, 'cache_creation_input_tokens': 0, 'reasoning_tokens': 591}
+
+
+@pytest.mark.parametrize('usage,expected', [
+    (NATIVE_RESPONSE_USAGE, {'prompt_tokens': 148976, 'completion_tokens': 614, 'total_tokens': 149590}),
+    ({'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': 12,
+      'cache_creation_input_tokens': 3}, {'prompt_tokens': 15, 'completion_tokens': 0, 'total_tokens': 15}),
+    ({'input_tokens': 0, 'output_tokens': 0}, {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
+    (None, None), ({}, None), ([], None),
+    ({'input_tokens': -1, 'output_tokens': 2}, None),
+    ({'input_tokens': True, 'output_tokens': 2}, None),
+    ({'input_tokens': '12', 'output_tokens': 2}, None),
+    ({'input_tokens': 12.5, 'output_tokens': 2}, None),
+    ({'input_tokens': 12, 'output_tokens': 2, 'cache_read_input_tokens': None}, None),
+    ({'input_tokens': 12, 'output_tokens': False}, None),
+])
+def test_native_response_usage_preserves_cache_and_reasoning_semantics(usage, expected):
+    from workers_projects_runtime.grok_acp import _native_response_usage
+    assert _native_response_usage(usage) == expected
+
+
+@pytest.mark.parametrize('model_calls,expected', [
+    (1, {'prompt_tokens': 148976, 'completion_tokens': 614, 'total_tokens': 149590}),
+    (2, None), (0, None), (True, None), ('1', None), (None, None),
+])
+def test_turn_usage_fallback_never_counts_cache_or_tool_loops_twice(model_calls, expected):
+    from workers_projects_runtime.grok_acp import _native_single_call_turn_usage
+    assert _native_single_call_turn_usage({'inputTokens': 148976, 'outputTokens': 614,
+        'cachedReadTokens': 1152, 'cacheCreationTokens': 0, 'reasoningTokens': 591,
+        'modelCalls': model_calls}) == expected
+
+
+@pytest.mark.parametrize('updates,expected', [
+    ([('response_completed', NATIVE_RESPONSE_USAGE)], 148976),
+    ([('response_completed', {'input_tokens': 10, 'output_tokens': 2}),
+      ('response_completed', NATIVE_RESPONSE_USAGE),
+      ('turn_completed', {'inputTokens': 999999, 'outputTokens': 616, 'modelCalls': 2})], 148976),
+    ([('response_completed', NATIVE_RESPONSE_USAGE),
+      ('response_completed', {'input_tokens': 'bad', 'output_tokens': 2})], None),
+    ([('turn_completed', {'inputTokens': 148976, 'outputTokens': 614,
+                         'cachedReadTokens': 1152, 'modelCalls': 1})], 148976),
+    ([('turn_completed', {'inputTokens': 148976, 'outputTokens': 614, 'modelCalls': 2})], None),
+])
+def test_usage_is_the_latest_current_prompt_measurement(updates, expected):
+    class UsagePeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            result = super().request(method, params, timeout, **kwargs)
+            if method == 'session/prompt':
+                for kind, usage in updates:
+                    self.notification('session/update', {'sessionId': 'native-exact',
+                        'update': {'sessionUpdate': kind, 'usage': usage}})
+            return result
+    session = GrokSession(UsagePeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    session.prompt('Synthetic request')
+    assert (session.native_usage or {}).get('prompt_tokens') == expected
+    retained = session.native_usage
+    # Foreign sessions and late current-session notifications cannot replace it.
+    for identity in ['foreign', 'native-exact']:
+        session._update('session/update', {'sessionId': identity,
+            'update': {'sessionUpdate': 'response_completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    assert session.native_usage == retained
+
+
+def test_new_prompt_does_not_reuse_previous_usage_and_foreign_active_update_is_ignored():
+    class UsagePeer(ProtocolPeer):
+        generation = 0
+        def request(self, method, params, timeout=30, **kwargs):
+            result = super().request(method, params, timeout, **kwargs)
+            if method == 'session/prompt':
+                self.generation += 1
+                self.notification('session/update', {'sessionId': 'foreign',
+                    'update': {'sessionUpdate': 'response_completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+                if self.generation == 1:
+                    self.notification('session/update', {'sessionId': 'native-exact',
+                        'update': {'sessionUpdate': 'response_completed', 'usage': NATIVE_RESPONSE_USAGE}})
+            return result
+    session = GrokSession(UsagePeer())
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    session._update('session/update', {'sessionId': 'native-exact',
+        'update': {'sessionUpdate': 'response_completed', 'usage': NATIVE_RESPONSE_USAGE}})
+    assert session.native_usage is None
+    session.prompt('First synthetic request')
+    assert session.native_usage['prompt_tokens'] == 148976
+    session.prompt('Second synthetic request')
+    assert session.native_usage is None
+
+
+def test_interjection_keeps_latest_response_usage_without_readding_turn_total():
+    class InterjectionPeer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            result = super().request(method, params, timeout, **kwargs)
+            if method == 'session/prompt':
+                self.notification('session/update', {'sessionId': 'native-exact',
+                    'update': {'sessionUpdate': 'response_completed',
+                               'usage': {'input_tokens': 20, 'output_tokens': 3}}})
+                session.interject('One synthetic clarification', 'synthetic-interjection')
+                self.notification('session/update', {'sessionId': 'native-exact',
+                    'update': {'sessionUpdate': 'response_completed', 'usage': NATIVE_RESPONSE_USAGE}})
+                self.notification('session/update', {'sessionId': 'native-exact',
+                    'update': {'sessionUpdate': 'turn_completed',
+                               'usage': {'inputTokens': 148996, 'outputTokens': 617, 'modelCalls': 2}}})
+            return result
+    session = GrokSession(InterjectionPeer(), reviewed_interject=True)
+    session.open(cwd='/workspace', model='grok-selected', effort='high')
+    session.prompt('Synthetic request')
+    assert session.native_usage == {'prompt_tokens': 148976, 'completion_tokens': 614, 'total_tokens': 149590}
+
+
+def test_native_runner_emits_one_usage_from_latest_response_without_tool_loop_double_count(tmp_path):
+    import os
+    import workers_projects_runtime.grok_acp_runner as runner
+    fake = tmp_path / 'native-peer'
+    fake.write_text(f'#!{sys.executable}\n' + '''import sys,json
+for line in sys.stdin:
+ m=json.loads(line);method=m.get('method');params=m.get('params',{});result={}
+ def emit(kind,usage=None):
+  update={'sessionUpdate':kind}
+  if usage is not None:update['usage']=usage
+  if kind=='agent_message_chunk':update['content']={'type':'text','text':'Native answer.'}
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native-exact','update':update}}),flush=True)
+ if method=='initialize':result={'protocolVersion':1,'agentCapabilities':{'loadSession':True},'authMethods':[{'id':'cached_token'}],'_meta':{'grokShell':True,'defaultAuthMethodId':'cached_token'}}
+ elif method=='session/new':result={'sessionId':'native-exact','models':{'currentModelId':'grok-selected'}}
+ elif method=='session/prompt':
+  emit('agent_message_chunk')
+  emit('response_completed',{'input_tokens':10,'cache_read_input_tokens':2,'output_tokens':3})
+  emit('response_completed',{'input_tokens':20,'cache_read_input_tokens':4,'cache_creation_input_tokens':1,'output_tokens':5,'reasoning_tokens':4})
+  emit('turn_completed',{'inputTokens':37,'outputTokens':8,'modelCalls':2})
+  result={'stopReason':'end_turn'}
+ if 'id' in m:print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':result}),flush=True)
+''')
+    fake.chmod(0o700)
+    process = subprocess.run([sys.executable, runner.__file__, '--binary', str(fake),
+        '--model', 'grok-selected'], input='Synthetic request', text=True, capture_output=True,
+        timeout=10, env={**os.environ, 'GROK_HOME': str(tmp_path / 'native-home')})
+    assert process.returncode == 0, process.stderr
+    events = [json.loads(line) for line in process.stdout.splitlines()]
+    measured = [event for event in events if isinstance(event.get('usage'), dict)]
+    assert len(measured) == 1
+    assert measured[0]['type'] == 'grok.result'
+    assert measured[0]['usage'] == {'prompt_tokens': 25, 'completion_tokens': 5, 'total_tokens': 30}
+
+
+@pytest.mark.parametrize('method,fields,expected', [
+    ('_x.ai/mcp/server_status', {'name': 'broker', 'status': 'ready', 'tools': None}, {'server': 'broker', 'status': 'ready'}),
+    ('_x.ai/mcp/init_progress', {'total': 1, 'connected': 1}, {'total': 1, 'connected': 1}),
+    ('_x.ai/mcp_initialized', {'mcpToolCount': 23, 'elapsedMs': 65}, {'mcpToolCount': 23, 'elapsedMs': 65}),
+    ('_x.ai/mcp/tools_changed', {'serverName': 'broker', 'tools': ['private-tool-name']}, {'server': 'broker', 'tool_count': 1}),
+])
+def test_mcp_lifecycle_events_keep_only_current_redacted_metadata(method, fields, expected):
+    events = []
+    session = GrokSession(ProtocolPeer(), event=events.append)
+    session.session_id = 'current-session'
+    session._required_mcp_servers = ('broker',)
+    session._update(method, {'sessionId': 'current-session', **fields,
+                            'url': 'private-url', 'headers': {'Authorization': 'private-bearer'},
+                            'reason': 'private-reason', 'arguments': 'private-arguments'})
+    assert events == [{'type': 'grok.mcp.lifecycle', 'session_id': 'current-session',
+                       'method': method, **expected}]
+    assert not session._native_tools_manifest.is_set()
+    assert 'private' not in json.dumps(events)
+
+
+@pytest.mark.parametrize('params', [
+    {'sessionId': 'foreign-session', 'name': 'broker', 'status': 'ready'},
+    {'sessionId': 'current-session', 'name': 'foreign-server', 'status': 'ready'},
+    {'sessionId': 'current-session', 'name': 'broker', 'status': 'private-status'},
+])
+def test_mcp_lifecycle_rejects_foreign_identity_and_unknown_status(params):
+    events = []
+    session = GrokSession(ProtocolPeer(), event=events.append)
+    session.session_id = 'current-session'
+    session._required_mcp_servers = ('broker',)
+    session._update('_x.ai/mcp/server_status', params)
+    assert events == []
+
+
+def test_mcp_lifecycle_rejects_malformed_counts_without_affecting_readiness():
+    events = []
+    session = GrokSession(ProtocolPeer(), event=events.append)
+    session.session_id = 'current-session'
+    session._update('_x.ai/mcp_initialized', {'sessionId': 'current-session', 'mcpToolCount': True,
+                                             'elapsedMs': -1, 'connected': 'private-count'})
+    assert events == [{'type': 'grok.mcp.lifecycle', 'session_id': 'current-session',
+                       'method': '_x.ai/mcp_initialized'}]
+    assert not session._native_tools_manifest.is_set()
+
+
+def native_ready_registry(name='authorized-broker', **changes):
+    state = {'enabled': True, 'status': 'ready', 'tools': [{'name': 'active_work_list', 'enabled': True}]}
+    state.update(changes)
+    return {'result': {'sessionMcpResolved': True, 'servers': [{'name': name, 'session': state}]}}
+
+
+class NativeRegistryPeer(McpReadyPeer):
+    def __init__(self, registry):
+        super().__init__(['read_file', 'search_tool'])
+        self.registry = registry
+    def request(self, method, params, timeout=30, **kwargs):
+        if method == '_x.ai/mcp/list':
+            self.calls.append((method, params))
+            assert 0 < timeout <= 30
+            return self.registry
+        result = super().request(method, params, timeout, **kwargs)
+        if method in ('session/load', 'session/new'):
+            self.notification('_x.ai/mcp_initialized', {'sessionId': 'native-exact', 'mcpToolCount': 23, 'elapsedMs': 65})
+        return result
+
+
+@pytest.mark.parametrize('session_id', [None, 'native-exact'])
+def test_live_native_registry_admits_required_tools_without_cosmetic_catalogue(session_id):
+    client = NativeRegistryPeer(native_ready_registry())
+    session = GrokSession(client)
+    session.open(cwd='/workspace', model='grok-selected', session_id=session_id,
+                 mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert not session._native_tools_manifest.is_set()
+    assert [call for call in client.calls if call[0] == '_x.ai/mcp/list'] == [
+        ('_x.ai/mcp/list', {'sessionId': 'native-exact', 'cache': True})]
+    assert session.prompt('Synthetic allowed goal.') == 'native output'
+
+
+@pytest.mark.parametrize('registry', [
+    {}, {'result': None}, {'error': 'synthetic', 'result': native_ready_registry()['result']},
+    {'result': {'sessionMcpResolved': False, 'servers': native_ready_registry()['result']['servers']}},
+    native_ready_registry(name='foreign-broker'), native_ready_registry(enabled=False),
+    native_ready_registry(status='initializing'), native_ready_registry(tools=[]),
+    native_ready_registry(tools=[{'name': 'active_work_list', 'enabled': False}]),
+    native_ready_registry(tools=[{'name': '', 'enabled': True}]),
+    native_ready_registry(tools=[{'name': 'active_work_list', 'enabled': 'true'}]),
+    native_ready_registry(authRequired=True), native_ready_registry(setupRequired=True),
+    {'result': {'sessionMcpResolved': True, 'servers': native_ready_registry()['result']['servers'] * 2}},
+])
+def test_live_native_registry_fails_closed_for_missing_foreign_disabled_or_zero_tools(monkeypatch, registry):
+    client = NativeRegistryPeer(registry)
+    session = GrokSession(client)
+    monkeypatch.setattr(session._native_tools_manifest, 'wait', lambda timeout: False)
+    with pytest.raises(AcpError) as error:
+        session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                     mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert error.value.stop_reason == 'mcp_unavailable'
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+
+
+def test_native_registry_inspection_keeps_shared_deadline_and_cancellation(monkeypatch):
+    client = NativeRegistryPeer(native_ready_registry())
+    session = GrokSession(client)
+    def cancel_request(method, params, timeout=30, **kwargs):
+        if method == '_x.ai/mcp/list':
+            session.cancel_requested = True
+        return NativeRegistryPeer.request(client, method, params, timeout, **kwargs)
+    client.request = cancel_request
+    with pytest.raises(AcpError) as error:
+        session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                     mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert error.value.stop_reason == 'cancelled'
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+
+
+def test_native_registry_is_not_queried_for_ready_cosmetic_inventory():
+    client = McpReadyPeer(READY_BROKER_TOOLS)
+    session = GrokSession(client)
+    session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                 mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert not any(method == '_x.ai/mcp/list' for method, _ in client.calls)
+
+
+@pytest.mark.parametrize('identity,count', [('foreign-session', 23), ('', 23),
+    ('native-exact', True), ('native-exact', -1), ('native-exact', '23')])
+def test_registry_inspection_requires_current_typed_initialization(monkeypatch, identity, count):
+    class InvalidInitPeer(McpReadyPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            result = super().request(method, params, timeout, **kwargs)
+            if method in ('session/load', 'session/new'):
+                self.notification('_x.ai/mcp_initialized', {'sessionId': identity, 'mcpToolCount': count})
+            return result
+    client = InvalidInitPeer(['read_file'])
+    session = GrokSession(client)
+    monkeypatch.setattr(session._native_mcp_observation, 'wait', lambda timeout: False)
+    with pytest.raises(AcpError) as error:
+        session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                     mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert error.value.stop_reason == 'mcp_unavailable'
+    assert not any(method in ('_x.ai/mcp/list', 'session/prompt') for method, _ in client.calls)
+
+
+def test_native_registry_inspection_cannot_extend_readiness_deadline(monkeypatch):
+    import workers_projects_runtime.grok_acp as acp_module
+    client = NativeRegistryPeer(native_ready_registry())
+    session = GrokSession(client)
+    session.session_id = 'native-exact'
+    session._required_mcp_servers = tuple(REQUIRED_MCP_SERVERS)
+    session._native_mcp_initialized = True
+    session._native_mcp_observation.set()
+    ticks = iter([10.0, 40.0])
+    monkeypatch.setattr(acp_module.time, 'monotonic', lambda: next(ticks))
+    with pytest.raises(AcpError) as error:
+        session._require_mcp_tools()
+    assert error.value.stop_reason == 'mcp_unavailable'
+    assert client.calls == []
+
+
+@pytest.mark.parametrize('cosmetic_ready', [False, True])
+def test_unsupported_registry_inspection_preserves_remaining_cosmetic_deadline(monkeypatch, cosmetic_ready):
+    class UnsupportedRegistryPeer(NativeRegistryPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if method == '_x.ai/mcp/list':
+                self.calls.append((method, params))
+                raise AcpError('Unsupported native extension', code=-32601)
+            return super().request(method, params, timeout, **kwargs)
+    client = UnsupportedRegistryPeer(native_ready_registry())
+    session = GrokSession(client)
+    observed_budget = []
+    def remaining_wait(timeout):
+        assert 0 < timeout <= 30
+        observed_budget.append(timeout)
+        if cosmetic_ready:
+            client.manifest(READY_BROKER_TOOLS)
+        return session._native_tools_manifest.is_set()
+    monkeypatch.setattr(session._native_tools_manifest, 'wait', remaining_wait)
+    if cosmetic_ready:
+        session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                     mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    else:
+        with pytest.raises(AcpError) as error:
+            session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                         mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+        assert error.value.stop_reason == 'mcp_unavailable'
+    assert len(observed_budget) == 1
+    assert len([method for method, _ in client.calls if method == '_x.ai/mcp/list']) == 1
+    assert not any(method == 'session/prompt' for method, _ in client.calls)
+
+
+def test_actual_cancel_wakes_blocked_mcp_observation_without_registry_or_prompt():
+    client = McpReadyPeer(['read_file'])
+    session = GrokSession(client)
+    waiting = Event()
+    finished = Event()
+    failures = []
+    wait = session._native_mcp_observation.wait
+    def observed_wait(timeout):
+        waiting.set()
+        return wait(timeout)
+    session._native_mcp_observation.wait = observed_wait
+    def open_session():
+        try:
+            session.open(cwd='/workspace', model='grok-selected', session_id='native-exact',
+                         mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+        except AcpError as error:
+            failures.append(error.stop_reason)
+        finally:
+            finished.set()
+    thread = Thread(target=open_session)
+    thread.start()
+    try:
+        assert waiting.wait(timeout=1)
+        assert not finished.is_set()
+        session.cancel()
+        assert finished.wait(timeout=1)
+        assert failures == ['cancelled']
+        assert not any(method in ('_x.ai/mcp/list', 'session/prompt') for method, _ in client.calls)
+    finally:
+        session.cancel()
+        thread.join(timeout=2)

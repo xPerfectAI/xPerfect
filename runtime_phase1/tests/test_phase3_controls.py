@@ -1150,7 +1150,8 @@ def test_steer_terminal_wins_without_creating_replacement(tmp_path):
         service.shutdown()
 
 
-def test_inflight_steer_terminal_wins_and_does_not_report_queued_success(tmp_path):
+@pytest.mark.parametrize("settled_state", ["completed", "failed", "cancelled"])
+def test_inflight_steer_preserves_accepted_direction_unless_cancelled(tmp_path, settled_state):
     runtime = _BlockingControlRuntime("interrupt")
     store, service, worker, run = _worker_with_run(tmp_path, runtime)
     service._ensure_worker_processor = lambda _worker_id: None  # type: ignore[method-assign]
@@ -1160,7 +1161,7 @@ def test_inflight_steer_terminal_wins_and_does_not_report_queued_success(tmp_pat
         target=lambda: results.append(
             service.steer_worker(
                 worker["worker_id"],
-                "Replacement must be suppressed",
+                "Apply this accepted correction",
                 run_id=run["run_id"],
                 idempotency_key="phase3-steer-completion-wins",
             )
@@ -1172,8 +1173,8 @@ def test_inflight_steer_terminal_wins_and_does_not_report_queued_success(tmp_pat
         assert store.finalize_run_if_state(
             run["run_id"],
             "running",
-            "completed",
-            output_text="COMPLETION WON",
+            settled_state,
+            output_text="SOURCE SETTLED",
             **_exact_terminal_generation(store, run["run_id"]),
         )
     finally:
@@ -1181,11 +1182,62 @@ def test_inflight_steer_terminal_wins_and_does_not_report_queued_success(tmp_pat
         thread.join(timeout=2)
         service.shutdown()
 
-    assert results[0]["_control_outcome"] == "terminal_won"
-    assert results[0]["state"] == "completed"
+    assert (store.get_run(run["run_id"]) or {})["state"] == settled_state
+    assert (store.get_run(run["run_id"]) or {})["output_text"] == "SOURCE SETTLED"
     runs = store.list_runs_for_worker(worker["worker_id"])
     replacement = next(item for item in runs if item["run_id"] != run["run_id"])
-    assert replacement["state"] == "cancelled"
+    assert replacement["state"] == ("cancelled" if settled_state == "cancelled" else "queued")
+    if settled_state == "cancelled":
+        assert results[0]["_control_outcome"] == "terminal_won"
+    else:
+        assert results[0]["run_id"] == replacement["run_id"]
+        assert results[0]["state"] == "queued"
+        events = store.list_events(worker_id=worker["worker_id"])
+        assert any(item["event_type"] == "control.source_settled" for item in events)
+
+
+@pytest.mark.parametrize("fence", ["stop", "closure", "new_generation", "new_mission_attachment"])
+def test_settled_source_steer_never_overrides_new_authority(tmp_path, fence):
+    runtime = _BlockingControlRuntime("interrupt")
+    store, service, worker, run = _worker_with_run(tmp_path, runtime)
+    service._ensure_worker_processor = lambda _worker_id: None
+    other = store.create_run(worker["worker_id"], worker["project_id"], "Other objective", state="queued") if fence == "new_mission_attachment" else None
+    errors = []
+    def steer():
+        try:
+            service.steer_worker(worker["worker_id"], "Preserve the accepted correction",
+                                 run_id=run["run_id"], idempotency_key="fenced-correction")
+        except RuntimeErrorBase as exc:
+            errors.append(str(exc))
+    thread = Thread(target=steer)
+    thread.start()
+    try:
+        assert runtime.entered.wait(2)
+        claim = store.get_worker(worker["worker_id"])
+        replacement_id = claim["compute_release_replacement_run_id"]
+        assert store.finalize_run_if_state(run["run_id"], "running", "completed",
+            output_text="Preserve this original result", **_exact_terminal_generation(store, run["run_id"]))
+        if fence == "stop":
+            store.update_worker(worker["worker_id"], work_stop_id="synthetic-new-stop", state="stopping")
+        elif fence == "closure":
+            store.update_worker(worker["worker_id"], state="termination_failed")
+        elif fence == "new_generation":
+            store.update_worker(worker["worker_id"], compute_release_epoch=int(claim["compute_release_epoch"])+1)
+        else:
+            with store._connect() as conn:
+                conn.execute("INSERT INTO delegations(work_ref,tenant_id,owner_id,idempotency_key,request_digest,origin_surface,project_id,worker_id,initial_run_id,current_run_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("synthetic-new-attachment","local","owner-a","synthetic-attachment","synthetic-digest","web",worker["project_id"],worker["worker_id"],run["run_id"],other["run_id"],"Other work","synthetic","synthetic"))
+        runtime.release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert errors
+        assert store.get_run(run["run_id"])["output_text"] == "Preserve this original result"
+        assert store.get_run(replacement_id)["state"] == "queued"
+        assert store.get_worker(worker["worker_id"])["compute_release_token"]
+    finally:
+        runtime.release.set()
+        thread.join(2)
+        service.shutdown()
 
 
 def test_active_work_pause_terminal_winner_is_returned_instead_of_false_paused(tmp_path):
@@ -2005,11 +2057,11 @@ def test_active_work_file_real_steer_queued_inputs_never_publish_before_stop(tmp
         assert not thread.is_alive() and not errors,errors
         assert store.get_worker(worker['worker_id'])['compute_release_token']==''
         assert _file_input_manifest(store,worker,replacement)==manifest
+        assert results[0]['fileDisposition']=='accepted_for_run'
+        assert store.get_run(replacement)['state']=='queued'
         if terminal_wins:
-            assert results[0]['controlOutcome']=='terminal_won' and results[0]['fileDisposition']=='not_bound_target_finished'
-            assert store.get_run(replacement)['state']=='cancelled' and store.get_run(run['run_id'])['output_text']=='Synthetic original draft'
-            assert store.claim_next_queued_run(worker['worker_id']) is None
-        else:assert store.get_run(run['run_id'])['state']=='interrupted' and store.get_run(replacement)['state']=='queued'
+            assert store.get_run(run['run_id'])['state']=='completed' and store.get_run(run['run_id'])['output_text']=='Synthetic original draft'
+        else:assert store.get_run(run['run_id'])['state']=='interrupted'
         assert list(Path(worker['workspace_dir']).rglob('*'))==[]
         with store._connect() as conn:
             assert conn.execute("SELECT COUNT(*) FROM workspace_file_pins WHERE kind='run' AND reference_id=?",(replacement,)).fetchone()[0]==2
@@ -2021,18 +2073,17 @@ def test_active_work_file_real_steer_queued_inputs_never_publish_before_stop(tmp
         assert len(store.list_runs_for_worker(worker['worker_id']))==2
     finally:service.shutdown()
     reopened=Store(store.db_path);assert _file_input_manifest(reopened,worker,replacement)==manifest
-    if not terminal_wins:
-        again=WorkersProjectsService(reopened,runtime,reconcile_on_startup=False,start_background_consumers=False);again._ensure_worker_processor=lambda _id:None
-        try:
-            admitted=_file_input_admit_next(reopened,worker);assert admitted['run_id']==replacement
-            selected=again._run_local_worker(reopened.get_worker(worker['worker_id']),admitted);bundle=json.loads(selected['bootstrap_bundle_json'])
-            index=json.loads(next(x['content'] for x in bundle['files'] if x['path']==selected['_run_input_manifest_path']))['files']
-            assert [(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in index]==[(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in inputs]
-            assert [x['name'] for x in index]==[name for name,_,_ in payloads]
-            assert selected['_run_input_manifest_path'] in again._runtime_instruction_for_run(selected,'Use the selected files')
-            entries=[x for x in bundle['files'] if x.get('managed_upload_id')];assert len(entries)==2
-            for entry,(_,body,_) in zip(entries,payloads):materialize_managed_file(Path(worker['workspace_dir']),entry,selected);assert (Path(worker['workspace_dir'])/entry['path']).read_bytes()==body
-        finally:again.shutdown()
+    again=WorkersProjectsService(reopened,runtime,reconcile_on_startup=False,start_background_consumers=False);again._ensure_worker_processor=lambda _id:None
+    try:
+        admitted=_file_input_admit_next(reopened,worker);assert admitted['run_id']==replacement
+        selected=again._run_local_worker(reopened.get_worker(worker['worker_id']),admitted);bundle=json.loads(selected['bootstrap_bundle_json'])
+        index=json.loads(next(x['content'] for x in bundle['files'] if x['path']==selected['_run_input_manifest_path']))['files']
+        assert [(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in index]==[(x['source_file_id'],x['input_kind'],x['media_group_index']) for x in inputs]
+        assert [x['name'] for x in index]==[name for name,_,_ in payloads]
+        assert selected['_run_input_manifest_path'] in again._runtime_instruction_for_run(selected,'Use the selected files')
+        entries=[x for x in bundle['files'] if x.get('managed_upload_id')];assert len(entries)==2
+        for entry,(_,body,_) in zip(entries,payloads):materialize_managed_file(Path(worker['workspace_dir']),entry,selected);assert (Path(worker['workspace_dir'])/entry['path']).read_bytes()==body
+    finally:again.shutdown()
 
 
 @pytest.mark.parametrize('recovery',['interrupted','expired'])

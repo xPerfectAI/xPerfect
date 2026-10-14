@@ -84,6 +84,25 @@ uses the same boundary and never invents missing historical evidence. Declared o
 still has to be readable and belong to the exact run. An unavailable internal diagnostic names
 that missing diagnostic in the warning; it must not emit an unexplained empty warning.
 
+### Native file delivery
+
+The existing immutable artifact publisher returns files selected by final Markdown links and
+files proved written or edited by the current native run. For Grok host execution, only completed
+ACP write/edit calls in the exact attempt-owned, session-validated transcript supply native file
+paths. ACP v1 diffs supply new file content, which must match the complete file byte digest.
+The [ACP v1 diff contract](https://agentclientprotocol.com/protocol/v1/tool-calls#diffs) permits a
+null original value for a new file. Fragment-only or subsequently changed bytes return the existing
+`unreadable` rejection. A completed typed write/edit can return equal original and new content;
+its full bytes still qualify when the current file digest matches. Equality does not cancel the
+successful operation's file evidence. Reads, pending/failed calls,
+foreign sessions, stale attempts, operational paths, symlinks, other roots, or changed bytes do not
+become output files. No final-prose filename extraction or shared-workspace scan is used.
+
+Mission callbacks and canonical conversation responses carry the same verified file descriptors,
+even when the final answer uses ordinary prose. The existing signed download, owner/run/attempt
+scope, immutable snapshot, and callback replay remain the delivery owners. File delivery does not
+change model selection, prompts, native permission acknowledgement, or execution authority.
+
 ## Core Worker Operating Instructions
 
 This document owns the standalone worker contract. Integrations may add their own narrower
@@ -172,6 +191,21 @@ A coordinator uses the existing native conversation role. It can answer directly
 worker delegation. Native model selection, account leases, runtime capacity and exact controls keep
 the same owners as ordinary work. LibreChat, Viventium and external callback services are optional.
 
+The native coordinator exposes the same Queue, Message, Steer, Pause/Resume, Stop, Retry and
+Dismiss work controls through the existing work service. Exact work and run identities, native
+lifecycle action masks and idempotency stay authoritative. Message reports queued-next-boundary
+when the selected native adapter has no proved live-message capability. Dismiss hides the card;
+original goals and results remain readable. Queue/Message source results remain tied to their exact
+goal through the existing action receipt, even after its follow-up is current. Result notices and
+the paged result API/tool retain the exact source run; no result history is discarded.
+Worker-result notices may wake Queen while unrelated
+helpers continue; actual account and capacity admission owns contention, not a blanket wait for
+all helpers. A still-pending foreground reply keeps its existing single-owner admission priority.
+Hosts supply authorized context and capabilities, persist and present channel output, and carry
+native controls faithfully. They must not add a second planner, worker scheduler or goal manager.
+The standalone coordinator and hosted native Main are distinct existing entry points; a host must
+reuse one native management owner rather than run both goal ledgers for the same work.
+
 The runtime stores the raw user message before inference. A complete structured goal batch is
 accepted atomically before worker admission; capacity or a missing prerequisite cannot silently
 remove later siblings. Goals link to authoritative conversation or worker runs. The model owns
@@ -202,3 +236,10 @@ every child project, worker and run. A child project's
 default cannot widen its origin. If a selected origin disappears, new starts stop; the owner can
 still read saved status and results and stop work. Connection readiness and execution placement
 remain separate from permission, and the native binder confirms the actual account at start.
+
+
+When a native Grok session ends with an unanswered current question, the runtime reports that no
+owner response was recorded. Provider completion text does not prove that the owner declined.
+An owner answer that wins the existing mailbox lock keeps its exact ACK and replay. Native Write
+permission remains a separate owner decision. A request expiry is the xPerfect authorization
+ceiling; it is not an inferred provider response timeout.
