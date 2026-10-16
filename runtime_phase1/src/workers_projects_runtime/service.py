@@ -25,7 +25,8 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS
+from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, WORKER_EFFORT_ENV_VALUES
+from .run_notifications import RunNotifications
 
 from .peer_collaboration import PeerCollaboration
 from .auth import multi_user_security_enabled
@@ -333,6 +334,7 @@ def worker_prompt_layer_actual_producers() -> tuple[object, ...]:
     from .mcp_server import create_mcp_server, glasshive_workers_server_instructions
     from .coordinator import prompt_manifest
     from .grok_runtime import grok_native_authority_instructions
+    from .direct_runtime import direct_authority_instructions
     from .profile_runtime import (
         HostNativeCliMixin,
         _apply_codex_developer_instructions,
@@ -342,6 +344,7 @@ def worker_prompt_layer_actual_producers() -> tuple[object, ...]:
     return (
         prompt_manifest,
         grok_native_authority_instructions,
+        direct_authority_instructions,
         canonicalize_viventium_feeling_projection,
         glasshive_project_agents_md,
         glasshive_project_claude_md,
@@ -510,17 +513,7 @@ PROMPT_WORKBENCH_SCHEDULED_AUTHORITY_REQUEST = (
 PROMPT_WORKBENCH_SCHEDULED_ALIAS_NAMESPACE = "prompt-workbench-scheduled"
 PARALLEL_CLEAN_ROOM_BROKER_NAME = "glasshive-user-capabilities"
 PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV = "GLASSHIVE_CAPABILITY_BROKER_TOKEN"
-PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES = {
-    "WPR_CODEX_CLI_REASONING_EFFORT": {
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    },
-    "WPR_CLAUDE_CODE_EFFORT": {"default", "max"},
-}
+PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES = WORKER_EFFORT_ENV_VALUES
 PARALLEL_CLEAN_ROOM_FORBIDDEN_BUNDLE_KEYS = {
     "anthropicapikey",
     "apikey",
@@ -1068,21 +1061,9 @@ def _decode_workspace_cursor(cursor: str | None) -> tuple[int | None, str, str]:
     return favorite, activity, worker_id
 
 
-def _workspace_native_skill_path(relative_path: Path) -> bool:
-    """Claude Code's project skills folder, `.claude/skills`, or the `.claude` folder leading to it."""
-    parts = [part.casefold() for part in relative_path.parts]
-    return bool(parts) and parts[0] == ".claude" and (len(parts) == 1 or parts[1] == "skills")
-
-
 def _workspace_duplicate_path_is_excluded(relative_path: Path) -> bool:
-    # A copied expert keeps its ordinary native skill files. The rest of the Claude project
-    # folder (settings, credentials, session state) stays excluded, and the ordinary name
-    # exclusions below still apply inside the skills folder.
-    native_skill_path = _workspace_native_skill_path(relative_path)
-    for index, part in enumerate(relative_path.parts):
+    for part in relative_path.parts:
         normalized = part.casefold()
-        if index == 0 and native_skill_path:
-            continue
         if normalized in _DUPLICATE_EXCLUDED_PATH_NAMES:
             return True
         if normalized == ".env" or normalized.startswith(".env."):
@@ -1162,11 +1143,6 @@ def _workspace_copy_plan(source_root: Path) -> tuple[list[tuple[Path, Path]], in
                 item_stat = item.lstat()
             except OSError as exc:
                 raise ValueError(f"workspace item could not be inspected: {relative}") from exc
-            if stat.S_ISLNK(item_stat.st_mode) and _workspace_native_skill_path(relative):
-                # The Claude project folder was skipped by name before; a link inside the part a
-                # copy now keeps is still never followed or copied, and does not fail the copy.
-                skipped_items += 1
-                continue
             if stat.S_ISLNK(item_stat.st_mode):
                 try:
                     link_target = Path(os.readlink(item))
@@ -1280,16 +1256,6 @@ def _duplicate_bootstrap_bundle(bundle: dict | None) -> dict | None:
     return {"project_definition": project_definition}
 
 
-def saved_workspace_alias(profile: str, name: str) -> str:
-    """A fresh alias in the form workspace_launch gives a saved workspace.
-
-    Copies and template starts are saved workspaces too; with their own alias, their exact
-    name resolves to them and alias-based tools (reuse, schedule) reach them.
-    """
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{profile}-{name}".lower()).strip("-")[:67].strip("-")
-    return f"{slug or 'glasshive-task'}-{uuid.uuid4().hex[:12]}"
-
-
 WORK_TRACE_SCHEMA_DIGEST = (
     "sha256:ba9b15e022a451c62be0c0f30a02d6615bea83e868b2ffdd349beff75002e790"
 )
@@ -1356,19 +1322,7 @@ PARALLEL_CLEAN_ROOM_BROKER_NAME = "glasshive-user-capabilities"
 
 PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV = "GLASSHIVE_CAPABILITY_BROKER_TOKEN"
 
-PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES = {
-    "WPR_CODEX_CLI_REASONING_EFFORT": {
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    },
-    "WPR_CLAUDE_CODE_EFFORT": frozenset(CLAUDE_CODE_EFFORT_LEVELS),
-}
+PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES = WORKER_EFFORT_ENV_VALUES
 
 PARALLEL_CLEAN_ROOM_FORBIDDEN_BUNDLE_KEYS = {
     "anthropicapikey",
@@ -1890,6 +1844,7 @@ class WorkersProjectsService:
         )
         self._shutdown_event = Event()
         self._scheduler_wake_event = Event()
+        self.run_notifications = RunNotifications()
         self._processors_lock = Lock()
         self._active_processors: set[str] = set()
         self._retained_restart_run_ids: set[str] = set()
@@ -2280,6 +2235,13 @@ class WorkersProjectsService:
         # Stop owned running generations before releasing their dispatch fences. Unknown
         # termination keeps the exact lease for startup reconciliation to prove safe later.
         self.release_owned_host_run_leases()
+        close_native_warm = getattr(self.runtime, "close_native_warm", None)
+        native_warm_cleanup_error = None
+        if callable(close_native_warm):
+            try:
+                close_native_warm()
+            except Exception as exc:
+                native_warm_cleanup_error = exc
         with self._run_local_bundles_lock:
             self._run_local_bundles.clear()
             self._run_local_grant_waiters.clear()
@@ -2315,6 +2277,8 @@ class WorkersProjectsService:
             )
         self.executor.shutdown(wait=True, cancel_futures=False)
         self.conversation_executor.shutdown(wait=True, cancel_futures=False)
+        if native_warm_cleanup_error is not None:
+            raise RuntimeError("Native idle process cleanup remains unconfirmed") from native_warm_cleanup_error
 
     def set_provider_request_reconciler(
         self,
@@ -3982,11 +3946,13 @@ class WorkersProjectsService:
         """Fence every adapter CLI preflight behind durable, live capacity."""
 
         has_preflight = hasattr(self.runtime, "preflight_worker_profile")
-        uses_cli_subprocess = bool(
-            getattr(self.runtime, "preflight_uses_cli_subprocess", True)
-        )
         if not has_preflight and not require_capacity_snapshot:
             return {}
+        preflight_usage = getattr(self.runtime, "preflight_uses_cli_subprocess_for", None)
+        uses_cli_subprocess = bool(
+            preflight_usage(profile, execution_mode) if callable(preflight_usage)
+            else getattr(self.runtime, "preflight_uses_cli_subprocess", True)
+        )
         if has_preflight and not uses_cli_subprocess and not require_capacity_snapshot:
             self._ensure_runtime_available(profile, execution_mode)
             return {}
@@ -4293,10 +4259,7 @@ class WorkersProjectsService:
             logger.warning("Could not resolve model for worker %s profile %s: %s", worker_id, profile, exc)
             return worker
         current_model = str(worker.get("model") or "").strip()
-        # Codex without a configured model runs the native default, so a model saved
-        # under an earlier configuration must not outlive that configuration.
-        native_default = not resolved_model and profile == "codex-cli"
-        if (not resolved_model and not native_default) or resolved_model == current_model:
+        if not resolved_model or resolved_model == current_model:
             return worker
         updated = self.store.update_worker(worker_id, model=resolved_model) or worker
         self.store.add_event(
@@ -4304,8 +4267,7 @@ class WorkersProjectsService:
             worker_id,
             None,
             "worker.model_refreshed",
-            f"Worker model refreshed from {current_model or '<unset>'} to "
-            f"{resolved_model or '<native default>'}",
+            f"Worker model refreshed from {current_model or '<unset>'} to {resolved_model}",
         )
         return updated
 
@@ -4989,6 +4951,12 @@ class WorkersProjectsService:
                  or (durable_state == "running" and "pending_native_input" in payload))
             and (not delegation or str(delegation.get("current_run_id") or "") == run_id)
         )
+        if current_needs_input and delegation:
+            # A native process remains running while its validated current form
+            # waits for its owner. Publish that work-level attention state so
+            # consumers can adjudicate the question without changing run life.
+            payload["work_state"] = "needs_input"
+            payload["work_terminal"] = False
         if terminal_event or current_needs_input:
             retained_callback = self.store.get_callback_outbox(resolved_callback_id)
             if retained_callback is None:
@@ -6587,7 +6555,7 @@ class WorkersProjectsService:
     ) -> dict | None:
         route = self._provider_route(worker)
         runtime_family = str(route.get("runtime") or "").strip()
-        if runtime_family not in {"codex-cli", "claude-code", "grok-build", "openclaw"}:
+        if runtime_family not in {"codex-cli", "claude-code", "grok-build", "openclaw", "direct-openai", "direct-anthropic", "direct-xai"}:
             return None
         if not all(route.values()):
             return None
@@ -7232,36 +7200,39 @@ class WorkersProjectsService:
         limits = [
             (
                 "GLASSHIVE_MAX_ACTIVE_WORKERS_PER_USER",
-                self.store.count_workers(tenant_id=tenant_id, owner_id=owner_id, states=active_states),
+                lambda: self.store.count_workers(tenant_id=tenant_id, owner_id=owner_id, states=active_states),
                 "active workers for this user",
                 active_states,
                 None,
             ),
             (
                 "GLASSHIVE_MAX_ACTIVE_WORKERS_PER_TENANT",
-                self.store.count_workers(tenant_id=tenant_id, states=active_states),
+                lambda: self.store.count_workers(tenant_id=tenant_id, states=active_states),
                 "active workers for this tenant",
                 active_states,
                 None,
             ),
             (
                 "GLASSHIVE_MAX_WORKSPACES_PER_USER",
-                self.store.count_workers(tenant_id=tenant_id, owner_id=owner_id, exclude_states={"terminated"}),
+                lambda: self.store.count_workers(tenant_id=tenant_id, owner_id=owner_id, exclude_states={"terminated"}),
                 "workspaces for this user",
                 None,
                 {"terminated"},
             ),
             (
                 "GLASSHIVE_MAX_WORKSPACES_PER_TENANT",
-                self.store.count_workers(tenant_id=tenant_id, exclude_states={"terminated"}),
+                lambda: self.store.count_workers(tenant_id=tenant_id, exclude_states={"terminated"}),
                 "workspaces for this tenant",
                 None,
                 {"terminated"},
             ),
         ]
-        for env_name, current_count, label, option_states, option_exclude_states in limits:
+        for env_name, count_current, label, option_states, option_exclude_states in limits:
             limit = self._limit_env(env_name)
-            if limit and current_count >= limit:
+            if not limit:
+                continue
+            current_count = count_current()
+            if current_count >= limit:
                 options = self._quota_workspace_options(
                     tenant_id=tenant_id,
                     owner_id=owner_id,
@@ -7429,7 +7400,7 @@ class WorkersProjectsService:
                 and {"version", "kind", "execution_mode"} <= launch_authority_keys
                 and launch_authority_keys <= {
                     "version", "kind", "execution_mode", "fallback_worker_profile",
-                    "worker_model", "worker_reasoning_effort",
+                    "worker_model", "worker_reasoning_effort", "worker_access",
                     "fallback_worker_model", "fallback_worker_reasoning_effort",
                 }
                 and all(
@@ -7444,6 +7415,7 @@ class WorkersProjectsService:
                     )
                     or "fallback_worker_profile" in launch_authority_keys
                 )
+                and launch_authority.get("worker_access", "ask") in {"ask", "full"}
                 and launch_authority.get("version") == 1
                 and not isinstance(launch_authority.get("version"), bool)
                 and launch_authority.get("kind") == "conversation_orchestrator"
@@ -9131,6 +9103,7 @@ class WorkersProjectsService:
                 runtime=self._initial_runtime_label(profile, execution_mode),
                 model=model,
                 execution_mode=execution_mode,
+                trusted_run_lane=clean_trusted_lane,
                 resource_class=clean_resource_class,
                 resource_memory_bytes=resource_memory_bytes,
                 alias=alias,
@@ -11021,66 +10994,6 @@ class WorkersProjectsService:
         self._ensure_worker_processor(worker_id)
         return run
 
-    def _retained_provider_account_problem(
-        self,
-        *,
-        account_id: str,
-        tenant_id: str,
-        owner_id: str,
-        profile: str,
-    ) -> str:
-        """Why an account reference cannot be kept for new work: '' when it can.
-
-        One rule for templates and copies: the account belongs to this owner, its provider
-        serves this worker profile, and it is ready. Nothing else is carried; the account's
-        own credential home stays where it is.
-        """
-        if self.control_plane_store is None:
-            return "unavailable"
-        account = self.control_plane_store.get_provider_account(
-            account_id=account_id,
-            tenant_id=tenant_id,
-            owner_id=owner_id,
-        )
-        if account is None:
-            return "unavailable"
-        if str(account.get("provider") or "").strip().lower() not in PROFILE_ACCOUNT_PROVIDERS.get(profile, set()):
-            return "mismatch"
-        if str(account.get("status") or "").strip().lower() != "ready":
-            return "not_ready"
-        return ""
-
-    def _retained_duplicate_provider_selection(
-        self,
-        source_worker: dict,
-        *,
-        owner_id: str,
-        profile: str,
-    ) -> dict[str, str] | None:
-        """The source's personal account for its copy, under the same rule templates use.
-
-        A copy that cannot keep it (another owner, a mismatched or unready account) keeps the
-        existing reapproval or refusal instead; nothing is silently substituted.
-        """
-        bundle = self._bootstrap_bundle_for(source_worker)
-        selection = bundle.get("provider_account") if isinstance(bundle, dict) else None
-        if not isinstance(selection, dict):
-            return None
-        policy = str(selection.get("policy") or "").strip().lower()
-        account_id = str(selection.get("account_id") or "").strip()
-        if policy not in {"personal_preferred", "personal_required"} or not account_id:
-            return None
-        if str(source_worker.get("owner_id") or "") != str(owner_id or ""):
-            return None
-        if self._retained_provider_account_problem(
-            account_id=account_id,
-            tenant_id=str(source_worker.get("tenant_id") or "local"),
-            owner_id=str(owner_id or ""),
-            profile=profile,
-        ):
-            return None
-        return {"policy": policy, "account_id": account_id}
-
     def duplicate_worker(
         self,
         source_worker_id: str,
@@ -11089,7 +11002,6 @@ class WorkersProjectsService:
         name: str,
         role: str,
         reapproval_items: list[dict[str, object]] | None = None,
-        alias_scope: Callable[[str], str] | None = None,
     ) -> dict:
         source_worker = self.require_worker(source_worker_id)
         required_items = [dict(item) for item in (reapproval_items or []) if isinstance(item, dict)]
@@ -11104,14 +11016,6 @@ class WorkersProjectsService:
         bootstrap_bundle = _duplicate_bootstrap_bundle(self._bootstrap_bundle_for(source_worker))
         profile = str(source_worker.get("profile") or "codex-cli")
         execution_mode = str(source_worker.get("execution_mode") or "docker")
-        retained_selection = self._retained_duplicate_provider_selection(
-            source_worker,
-            owner_id=owner_id,
-            profile=profile,
-        )
-        if retained_selection is not None:
-            bootstrap_bundle = {**(bootstrap_bundle or {}), "provider_account": retained_selection}
-        alias = saved_workspace_alias(profile, name)
         duplicated = self.create_worker(
             project_id=project_id,
             tenant_id=str(source_worker.get("tenant_id") or "local"),
@@ -11121,7 +11025,7 @@ class WorkersProjectsService:
             profile=profile,
             backend=self._legacy_backend_label(profile, execution_mode, str(source_worker.get("backend") or "")),
             execution_mode=execution_mode,
-            alias=alias_scope(alias) if alias_scope else alias,
+            alias=None,
             workspace_root=None,
             bootstrap_profile=str(source_worker.get("bootstrap_profile") or "") or None,
             bootstrap_bundle=bootstrap_bundle,
@@ -11306,7 +11210,6 @@ class WorkersProjectsService:
         owner_id: str,
         idempotency_key: str,
         name: str | None = None,
-        alias_scope: Callable[[str], str] | None = None,
     ) -> dict[str, object] | None:
         if self.control_plane_store is None:
             raise RuntimeError("Workspace templates require the user control plane")
@@ -11378,17 +11281,17 @@ class WorkersProjectsService:
                     raise ValueError("Workspace template requires a selected personal provider account")
                 provider_account_selection = {"policy": policy}
             else:
-                problem = self._retained_provider_account_problem(
+                account = self.control_plane_store.get_provider_account(
                     account_id=account_id,
                     tenant_id=tenant_id,
                     owner_id=owner_id,
-                    profile=profile,
                 )
-                if problem == "unavailable":
+                supported = PROFILE_ACCOUNT_PROVIDERS.get(profile, set())
+                if account is None:
                     raise ValueError("Workspace template provider account is not available for this user")
-                if problem == "mismatch":
+                if str(account.get("provider") or "").strip().lower() not in supported:
                     raise ValueError("Workspace template provider account does not match the worker profile")
-                if problem == "not_ready":
+                if str(account.get("status") or "").strip().lower() != "ready":
                     raise ValueError("Workspace template provider account must be reconnected before use")
                 provider_account_selection = {"policy": policy, "account_id": account_id}
         requested_name = str(name or worker_spec.get("name") or template.get("name") or "Workspace").strip()[:160]
@@ -11431,7 +11334,6 @@ class WorkersProjectsService:
             )
             if provider_account_selection is not None:
                 template_bootstrap["provider_account"] = provider_account_selection
-            alias = saved_workspace_alias(profile, requested_name)
             worker = self.create_worker(
                 project_id=str(project["project_id"]),
                 tenant_id=tenant_id,
@@ -11441,7 +11343,7 @@ class WorkersProjectsService:
                 profile=profile,
                 backend="",
                 execution_mode=execution_mode,
-                alias=alias_scope(alias) if alias_scope else alias,
+                alias=None,
                 workspace_root=None,
                 bootstrap_profile=str(worker_spec.get("bootstrap_profile") or "") or None,
                 bootstrap_bundle=template_bootstrap or None,
@@ -12969,8 +12871,9 @@ class WorkersProjectsService:
                 # cancel it from the state it is in now.
                 return self.cancel_run(worker_id, run_id)
             # The exact cancellation CAS committed its event and callback effect
-            # with terminal truth; deliver them from the durable outbox.
-            self._replay_pending_lifecycle_effects()
+            # with terminal truth. Deliver that kind immediately; the existing
+            # recovery owner drains unrelated durable lifecycle effects.
+            self._replay_pending_lifecycle_effects(effect_kinds=("callback.run_cancelled",))
             if outcome.get("run"):
                 self.store.finalize_schedule_for_run(
                     run_id,
@@ -13463,6 +13366,10 @@ class WorkersProjectsService:
             not _reclaim_existing
             and str(observed.get("state") or "") in {"terminating", "terminated"}
         ):
+            if str(observed.get("state") or "") == "terminated":
+                # Retained worker-only effects may already be retired. The
+                # idempotent owner Stop still owns exact terminal sink repair.
+                self._reconcile_terminal_callback_intents(worker_id=worker_id)
             return observed
         with self._runtime_start_lock(worker_id):
             return self._terminate_worker_with_start_fence(
@@ -13484,10 +13391,18 @@ class WorkersProjectsService:
         ):
             return worker
         active_run = self.store.get_active_run(worker_id)
+        active_run_id = str((active_run or {}).get("run_id") or "")
         runtime_worker = {
-            **worker,
-            "_active_run_id": str((active_run or {}).get("run_id") or ""),
+            **self._worker_with_host_lease(worker, active_run_id),
+            "_active_run_id": active_run_id,
+            "_run_attempt_id": str((active_run or {}).get("active_attempt_id") or ""),
         }
+        if not active_run_id:
+            retained = self.store.get_run(str(worker.get("last_run_id") or ""))
+            if (retained and retained.get("worker_id") == worker_id
+                    and retained.get("state") in TERMINAL_RUN_STATES):
+                runtime_worker["_terminal_run_id"] = str(retained["run_id"])
+                runtime_worker["_run_attempt_id"] = str(retained.get("active_attempt_id") or "")
         self.store.cancel_pending_runs(worker_id, error_text="Worker terminated by operator", state="cancelled")
         try:
             info = self.runtime.terminate_worker(runtime_worker)
@@ -17011,6 +16926,7 @@ class WorkersProjectsService:
         *,
         created_before: str | None = None,
         limit: int = 50,
+        worker_id: str | None = None,
     ) -> int:
         """Create missing terminal outbox rows from exact durable generations."""
 
@@ -17023,6 +16939,7 @@ class WorkersProjectsService:
             runs = self.store.list_terminal_runs_missing_callback_intent(
                 created_before=created_before,
                 limit=remaining,
+                worker_id=worker_id,
             )
             if not runs:
                 break
@@ -17347,11 +17264,12 @@ class WorkersProjectsService:
                 return
 
     def _replay_pending_lifecycle_effects(
-        self, *, created_before: str | None = None
+        self, *, created_before: str | None = None,
+        effect_kinds: tuple[str, ...] | None = None,
     ) -> None:
         """Drain every durable sink kind independently with leased ownership."""
 
-        effect_kinds = (
+        all_effect_kinds = (
             # Revocation must commit before a terminal callback is visible.
             "signed_links.revoke_worker",
             "callback.worker_terminated",
@@ -17367,6 +17285,7 @@ class WorkersProjectsService:
             "callback.worker_paused",
             "callback.worker_resumed",
         )
+        selected_effect_kinds = all_effect_kinds if effect_kinds is None else effect_kinds
         # Visit one row per kind per round. A retry-wait row cannot block a
         # different effect kind, worker, or sink.
         faulted_kinds: set[str] = set()
@@ -17374,7 +17293,7 @@ class WorkersProjectsService:
             if self._shutdown_event.is_set():
                 return
             claimed_any = False
-            for effect_kind in effect_kinds:
+            for effect_kind in selected_effect_kinds:
                 if self._shutdown_event.is_set():
                     return
                 if effect_kind in faulted_kinds:
@@ -17491,6 +17410,24 @@ class WorkersProjectsService:
             return
 
         run_id = str(effect.get("run_id") or "")
+        if effect_kind == "callback.worker_terminated" and not run_id:
+            # Recover retained pre-upgrade cancelled runs through the same exact
+            # terminal sink; do not invent a run for a worker-only notice.
+            self._reconcile_terminal_callback_intents(worker_id=str(worker["worker_id"]))
+            if self.store.list_terminal_runs_missing_callback_intent(worker_id=str(worker["worker_id"]), limit=1):
+                self._retry_lifecycle_effect(effect, "callback_enqueue_failed")
+                return
+            self.store.mark_lifecycle_effect_applied(
+                effect_id, self._executor_id, lease_epoch=lease_epoch,
+            )
+            return
+        if (effect_kind == "callback.run_cancelled"
+                and str(effect.get("operation_kind") or "") == "terminate_worker"
+                and str(worker.get("state") or "") != "terminated"):
+            # Legacy termination cancels queued/running rows before the native
+            # stop returns. Publish only after compute termination is confirmed.
+            self._retry_lifecycle_effect(effect, "transient_dependency")
+            return
         run = self.store.get_run(run_id) if run_id else None
         run_required = effect_kind not in {
             "callback.worker_paused",
@@ -17596,7 +17533,9 @@ class WorkersProjectsService:
                 event_type,
                 run=run,
                 message=message,
-                callback_id=callback_id,
+                callback_id=("" if effect_kind == "callback.run_cancelled"
+                             and str(effect.get("operation_kind") or "") == "terminate_worker"
+                             else callback_id),
                 insert_once=True,
                 submit_delivery=False,
             )
@@ -18753,6 +18692,8 @@ class WorkersProjectsService:
 
     def _host_runtime_family(self, worker: dict) -> str:
         profile = str(worker.get("profile") or worker.get("runtime") or "host").lower()
+        if profile in {"direct-openai", "direct-anthropic", "direct-xai"}:
+            return profile
         if profile.startswith("codex"):
             return "codex"
         if profile.startswith("claude"):
@@ -19112,6 +19053,9 @@ class WorkersProjectsService:
                 "glasshive_capability_broker": grant.broker_projection(),
             },
         ) or {}
+        # Public/durable canonicalization removes admitted grant metadata too.
+        # Restore the verified projection only on this invocation-local object.
+        run_bundle["glasshive_capability_broker"] = grant.broker_projection()
         # Clean-room canonicalization deliberately removes bearer material from
         # every durable/public bundle. Overlay the exact admitted run grant only
         # after that projection so ProfiledWorkerRuntime can place it in the
@@ -20089,6 +20033,15 @@ class WorkersProjectsService:
             return
         run = self.store.get_run(run_id)
         if not run or str(run.get("worker_id") or "") != worker_id:
+            return
+        if event_type == "provider.output.available":
+            # A hint may wake only this exact active attempt. It carries no public content,
+            # grants no authority and does not replace the stream's source-of-truth reads.
+            if (str(observation.get("attempt_id") or "")
+                    == str(run.get("active_attempt_id") or "")
+                    and str(run.get("active_attempt_id") or "")
+                    and str(run.get("state") or "") == "running"):
+                self.run_notifications.notify(run_id)
             return
         worker = self.store.get_worker(worker_id)
         if not worker:
@@ -21150,6 +21103,9 @@ class WorkersProjectsService:
             artifact_refs=artifact_refs,
             **fields,
         )
+        if finalized is not None:
+            # Durable terminal state is enough to wake readers; projection still owns truth.
+            self.run_notifications.notify(str(run_id))
         if (
             finalized is not None
             and (state in TERMINAL_RUN_STATES or state == "interrupted")
@@ -21221,7 +21177,8 @@ class WorkersProjectsService:
                 raise BackgroundWorkerConfigurationError("Configured background reasoning effort is unsupported by its exact model.")
             effort_env = {"codex-cli": "WPR_CODEX_CLI_REASONING_EFFORT",
                           "claude-code": "WPR_CLAUDE_CODE_EFFORT",
-                          "grok-build": "WPR_GROK_REASONING_EFFORT"}.get(profile)
+                          "grok-build": "WPR_GROK_REASONING_EFFORT", "direct-openai": "WPR_CODEX_CLI_REASONING_EFFORT",
+                          "direct-anthropic": "WPR_CLAUDE_CODE_EFFORT", "direct-xai": "WPR_GROK_REASONING_EFFORT"}.get(profile)
             if effort_env is None:
                 raise BackgroundWorkerConfigurationError("Configured background worker does not support reasoning effort.")
             if effort_env is not None and not (profile == "grok-build" and effort == "default"):
@@ -21923,13 +21880,6 @@ class WorkersProjectsService:
                 and not record_operator_pause_only
             ):
                 return worker
-            if (
-                not record_operator_pause_only
-                and str(worker.get("execution_mode") or "docker") == "host"
-            ):
-                raise RuntimeErrorBase(
-                    "The exact host process identity is not confirmed; control remains pending"
-                )
             claim = self.store.try_claim_worker_compute_release(
                 worker_id,
                 expected_updated_at=str(worker.get("updated_at") or ""),
@@ -21950,7 +21900,17 @@ class WorkersProjectsService:
                 runtime_worker = self._require_claimed_container_generation(
                     claimed_worker
                 )
-                info = self.runtime.pause_worker(runtime_worker)
+                if str(claimed_worker.get("execution_mode") or "docker") == "host":
+                    # No active run needs suspension. Reuse exact idle native cleanup;
+                    # it rejects any live, foreign or unknown session generation.
+                    last_run_id = str(claimed_worker.get("last_run_id") or "")
+                    last_run = self.store.get_run(last_run_id) if last_run_id else None
+                    if (last_run and last_run.get("worker_id") == worker_id
+                            and last_run.get("state") in TERMINAL_RUN_STATES):
+                        runtime_worker = {**runtime_worker, "_terminal_run_id": last_run_id}
+                    info = self.runtime.terminate_worker(runtime_worker)
+                else:
+                    info = self.runtime.pause_worker(runtime_worker)
                 if not self._runtime_control_info_is_confirmed(info):
                     raise RuntimeErrorBase(
                         "Runtime pause did not confirm the exact compute state"

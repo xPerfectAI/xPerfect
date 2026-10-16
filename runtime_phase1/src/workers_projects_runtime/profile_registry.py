@@ -12,7 +12,7 @@ class WorkerProfile:
     profile: str
     label: str
     runtime_attribute: str
-    native_transport: Literal['cli', 'gateway', 'acp']
+    native_transport: Literal['cli', 'gateway', 'acp', 'api']
     model_environment: str
     primary: bool = True
     mcp_tool_access_prompt_id: str | None = None
@@ -24,6 +24,9 @@ class WorkerProfile:
 
 
 PROFILES = (
+    WorkerProfile('direct-openai', 'Direct / OpenAI API', 'direct_openai', 'api', 'WPR_MODEL_DIRECT_OPENAI'),
+    WorkerProfile('direct-anthropic', 'Direct / Anthropic API', 'direct_anthropic', 'api', 'WPR_MODEL_DIRECT_ANTHROPIC'),
+    WorkerProfile('direct-xai', 'Direct / xAI API', 'direct_xai', 'api', 'WPR_MODEL_DIRECT_XAI'),
     WorkerProfile('codex-cli', 'Codex CLI', 'codex', 'cli', 'WPR_MODEL_CODEX_CLI'),
     WorkerProfile('claude-code', 'Claude Code', 'claude', 'cli', 'WPR_MODEL_CLAUDE_CODE'),
     WorkerProfile('openclaw-general', 'OpenClaw', 'openclaw', 'gateway', 'WPR_MODEL_OPENCLAW_GENERAL'),

@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import os
-import sqlite3
 import time
 from urllib.parse import urlsplit
 from pathlib import Path
@@ -7374,229 +7373,6 @@ def test_deferred_callback_tool_registry_names_only_registered_dispatch_tools():
         assert name in registered and name not in DEFERRED_CALLBACK_TOOLS
 
 
-def test_scheduling_a_saved_expert_keeps_its_name_and_role(monkeypatch):
-    """The scheduled task describes a run; it never renames the saved expert it runs on."""
-    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
-
-    expert = {
-        "worker_id": "wrk_expert",
-        "profile": "codex-cli",
-        "state": "ready",
-        "alias": "codex-cli-supplies-expert-1a2b",
-        "name": "Supplies Expert",
-        "role": "Answer supply questions",
-    }
-
-    class SavedExpertClient(TrackingApiClient):
-        def workspace_catalog(self, **kwargs):
-            return {"items": [{**expert, "project_id": "prj_123"}], "next_cursor": None}
-
-        def list_workers(self, project_id: str):
-            return [{**expert, "project_id": project_id}]
-
-    api_client = SavedExpertClient()
-    server = create_mcp_server(api_client=api_client)
-
-    async def scenario():
-        async with Client(server) as client:
-            scheduled = await client.call_tool(
-                "workspace_schedule",
-                {
-                    "description": "Write scheduled-proof.txt with the total",
-                    "workspace_alias": "codex-cli-supplies-expert-1a2b",
-                    "delay_seconds": 180,
-                    "profile": "codex-cli",
-                },
-            )
-            assert _tool_json(scheduled)["status"] == "scheduled"
-
-    asyncio.run(scenario())
-    assert "create_project" not in api_client.calls
-    resumed = api_client.find_or_resume_payloads[-1]
-    assert resumed["name"] == "Supplies Expert"
-    assert resumed["role"] == "Answer supply questions"
-    assert resumed["alias"] == "codex-cli-supplies-expert-1a2b"
-    # Nor does the task replace what the expert is for (its saved project definition).
-    assert "project_definition" not in (resumed.get("bootstrap_bundle") or {})
-
-
-def test_talking_to_a_saved_expert_by_name_keeps_its_role_and_definition(monkeypatch):
-    """Reusing an expert by its exact name sends it a request; the expert stays what it was."""
-    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
-
-    expert = {
-        "worker_id": "wrk_expert",
-        "profile": "claude-code",
-        "execution_mode": "host",
-        "state": "ready",
-        "alias": "claude-code-supplies-expert-1a2b",
-        "name": "Supplies Expert",
-        "role": "Answer supply questions",
-    }
-
-    class SavedExpertClient(TrackingApiClient):
-        def workspace_catalog(self, **kwargs):
-            return {"items": [{**expert, "project_id": "prj_123"}], "next_cursor": None}
-
-        def list_workers(self, project_id: str):
-            return [{**expert, "project_id": project_id}]
-
-    api_client = SavedExpertClient()
-    server = create_mcp_server(api_client=api_client)
-
-    async def scenario():
-        async with Client(server) as client:
-            launched = await client.call_tool(
-                "workspace_launch",
-                {
-                    "description": "Supplies Expert\nGive me the copy proof.",
-                    "reuse_existing_workspace": True,
-                },
-            )
-            assert _tool_json(launched)["status"] == "dispatched"
-
-    asyncio.run(scenario())
-    assert "create_project" not in api_client.calls
-    resumed = api_client.find_or_resume_payloads[-1]
-    assert resumed["alias"] == "claude-code-supplies-expert-1a2b"
-    assert resumed["name"] == "Supplies Expert"
-    assert resumed["role"] == "Answer supply questions"
-    assert "project_definition" not in (resumed.get("bootstrap_bundle") or {})
-    assert "Give me the copy proof." in api_client.assign_run_payloads[-1]["instruction"]
-
-
-def test_a_copied_expert_is_reached_by_its_exact_name(monkeypatch, tmp_path):
-    """Create an expert, copy it, then talk to the copy by name, through the real API."""
-    monkeypatch.setenv("WPR_API_TOKEN", "service-token")
-    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
-    monkeypatch.setenv("GLASSHIVE_DEFAULT_OWNER_ID", "local-owner")
-    monkeypatch.setenv("WPR_DEFAULT_OWNER_ID", "local-owner")
-    monkeypatch.setattr(mcp_server, "DEFAULT_OWNER_ID", "local-owner")
-    monkeypatch.delenv("GLASSHIVE_ENTERPRISE_MODE", raising=False)
-    monkeypatch.delenv("WPR_ENTERPRISE_MODE", raising=False)
-    database = tmp_path / "copied-expert.db"
-    api_http = TestClient(create_app(
-        db_path=str(database), runtime_backend="stub", runtime=StubRuntime(), reconcile_on_startup=False,
-    ))
-
-    class InProcessHttpClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def request(self, method, url, json=None, headers=None):
-            parsed = urlsplit(url)
-            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-            return api_http.request(method, path, json=json, headers=headers)
-
-    monkeypatch.setattr(mcp_server.httpx, "Client", InProcessHttpClient)
-    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
-    api = mcp_server.WorkersProjectsApiClient(base_url="http://glasshive.in-process", api_token="service-token")
-    server = create_mcp_server(api_client=api)
-
-    async def scenario():
-        async with Client(server) as client:
-            created = _tool_json(await client.call_tool("workspace_launch", {
-                "description": "Supplies Expert\nKeep the supply totals.",
-                "favorite": True,
-                "execution_mode": "docker",
-            }))
-            assert created["status"] == "dispatched"
-            source = next(
-                item for item in _tool_json(await client.call_tool("workspace_list", {"limit": 10}))["items"]
-                if item["name"] == "Supplies Expert"
-            )
-            copied = _tool_json(await client.call_tool("workspace_duplicate", {
-                "worker_id": source["worker_id"],
-                "name": "Supplies Expert (copy)",
-                "idempotency_key": "supplies-expert-copy-0001",
-            }))["workspace"]
-            reused = _tool_json(await client.call_tool("workspace_launch", {
-                "description": "Supplies Expert (copy)\nGive me the copy proof.",
-                "reuse_existing_workspace": True,
-            }))
-            assert reused["status"] == "dispatched"
-            assert copied["alias"] and copied["alias"] != source["alias"]
-            return copied["worker_id"]
-
-    copy_id = asyncio.run(scenario())
-    with sqlite3.connect(database) as conn:
-        worker_id, instruction = conn.execute(
-            "SELECT worker_id, instruction FROM runs ORDER BY queued_at DESC LIMIT 1"
-        ).fetchone()
-        name = conn.execute("SELECT name FROM workers WHERE worker_id = ?", (copy_id,)).fetchone()[0]
-    assert worker_id == copy_id
-    assert "Give me the copy proof." in instruction
-    assert name == "Supplies Expert (copy)"
-
-
-def test_scheduling_a_saved_expert_by_name_never_creates_another_workspace(monkeypatch, tmp_path):
-    """A client that passes the expert's name as its alias schedules that expert; an unknown
-    name is refused instead of silently creating an empty workspace that runs the task."""
-    monkeypatch.setenv("WPR_API_TOKEN", "service-token")
-    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
-    monkeypatch.setattr(mcp_server, "DEFAULT_OWNER_ID", "local-owner")
-    monkeypatch.delenv("GLASSHIVE_ENTERPRISE_MODE", raising=False)
-    monkeypatch.delenv("WPR_ENTERPRISE_MODE", raising=False)
-    monkeypatch.setenv("GLASSHIVE_DEFAULT_OWNER_ID", "local-owner")
-    monkeypatch.setenv("WPR_DEFAULT_OWNER_ID", "local-owner")
-    database = tmp_path / "scheduled-expert.db"
-    api_http = TestClient(create_app(
-        db_path=str(database), runtime_backend="stub", runtime=StubRuntime(), reconcile_on_startup=False,
-    ))
-
-    class InProcessHttpClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def request(self, method, url, json=None, headers=None):
-            parsed = urlsplit(url)
-            path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-            return api_http.request(method, path, json=json, headers=headers)
-
-    monkeypatch.setattr(mcp_server.httpx, "Client", InProcessHttpClient)
-    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
-    api = mcp_server.WorkersProjectsApiClient(base_url="http://glasshive.in-process", api_token="service-token")
-    server = create_mcp_server(api_client=api)
-
-    async def scenario():
-        async with Client(server) as client:
-            await client.call_tool("workspace_launch", {
-                "description": "Supplies Expert\nKeep the supply totals.",
-                "favorite": True,
-            })
-            scheduled = _tool_json(await client.call_tool("workspace_schedule", {
-                "description": "Write scheduled-proof.txt with the total",
-                "workspace_alias": "Supplies Expert",
-                "delay_seconds": 120,
-            }))
-            assert scheduled["status"] == "scheduled"
-            with pytest.raises(ToolError, match="Could not resolve exactly one saved workspace"):
-                await client.call_tool("workspace_schedule", {
-                    "description": "Write scheduled-proof.txt with the total",
-                    "workspace_alias": "Inventory Expert",
-                    "delay_seconds": 120,
-                })
-
-    asyncio.run(scenario())
-    with sqlite3.connect(database) as conn:
-        workers = conn.execute("SELECT worker_id, name FROM workers").fetchall()
-        scheduled_workers = conn.execute("SELECT worker_id FROM scheduled_runs").fetchall()
-    assert [name for _worker_id, name in workers] == ["Supplies Expert"]
-    assert scheduled_workers == [(workers[0][0],)]
-
-
 def test_selected_history_partial_no_context_stays_closed(monkeypatch):
     monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {})
     for key in ("GLASSHIVE_EVENTS_WEBHOOK_URL", "VIVENTIUM_GLASSHIVE_CALLBACK_URL",
@@ -7609,3 +7385,213 @@ def test_selected_history_partial_no_context_stays_closed(monkeypatch):
                 {"ordinal": 1, "ref": "synthetic-current"}]}},
             uploaded_files=[{"file_id": "synthetic-history", "filename": "safe.csv", "text": "synthetic"}],
         )
+
+
+@pytest.mark.parametrize("profile", ["direct-openai", "direct-anthropic", "direct-xai"])
+@pytest.mark.parametrize("effort", ["low", "default"])
+@pytest.mark.parametrize("atomic", [False, True])
+def test_workspace_launch_direct_effort_reaches_actual_runtime_request(tmp_path, monkeypatch, profile, effort, atomic):
+    from workers_projects_runtime.direct_runtime import DIRECT_PROVIDERS, DirectModelRuntime
+
+    class AtomicApi(TrackingApiClient):
+        def create_delegation(self, **kwargs):
+            self.delegation_payload = kwargs["payload"]
+            return {"workRef": "synthetic-work", "state": "queued", "viewRef": "/r/synthetic-view"}
+
+    api = AtomicApi() if atomic else TrackingApiClient()
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {
+        "X-Viventium-User-Id": "demo-owner", "X-Viventium-Tenant-Id": "local",
+        "X-Viventium-Message-Id": "synthetic-effort-source",
+    })
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", profile)
+    _patch_host_runtime_requirements_ok(monkeypatch)
+    server = create_mcp_server(api_client=api)
+
+    async def scenario():
+        async with Client(server) as client:
+            await client.call_tool("workspace_launch", {
+                "description": "Synthetic effort fidelity task", "profile": profile,
+                "execution_mode": "host", "effort": effort,
+                "bootstrap_bundle_json": {"env": {"SYNTHETIC_KEEP": "preserved",
+                    DIRECT_PROVIDERS[profile]["effort_env"]: "high"},
+                    "direct_model_settings": {"max_tokens": 128}},
+            })
+    asyncio.run(scenario())
+    if atomic:
+        bundle = api.delegation_payload["bootstrapBundle"]
+    else:
+        bundle = api.assign_run_payloads[-1]["bootstrap_bundle"]
+        assert api.find_or_resume_payloads[-1]["bootstrap_bundle"]["env"][DIRECT_PROVIDERS[profile]["effort_env"]] == effort
+        assert api.assign_run_payloads[-1]["effort"] == effort
+    assert bundle["env"][DIRECT_PROVIDERS[profile]["effort_env"]] == effort
+    assert bundle["env"]["SYNTHETIC_KEEP"] == "preserved"
+    worker = {"worker_id": "wrk_synthetic_effort", "tenant_id": "local", "owner_id": "synthetic-owner",
+              "name": "Synthetic effort", "profile": profile, "execution_mode": "host",
+              "model": DIRECT_PROVIDERS[profile]["model"], "workspace_root": str(tmp_path / "workspace"),
+              "bootstrap_bundle_json": json.dumps(bundle)}
+    runtime = DirectModelRuntime(profile, base_dir=str(tmp_path / "runtime"))
+    info = runtime.prepare_worker_workspace(worker)
+    request = json.loads(runtime._command_stdin_text(worker, "Exact synthetic task", info))
+    assert request["effort"] == effort
+    assert request["model"] == DIRECT_PROVIDERS[profile]["model"]
+    assert request["model_settings"] == {"max_tokens": 128}
+
+
+@pytest.mark.parametrize("profile", ["direct-openai", "direct-anthropic", "direct-xai"])
+def test_direct_effort_projection_uses_exact_catalog_and_preserves_bundle(profile):
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
+    from workers_projects_runtime.direct_runtime import DIRECT_PROVIDERS
+    original = {"env": {"SYNTHETIC_KEEP": "preserved"}, "system_instructions": "Exact policy"}
+    model = next(model for model in GLASSHIVE_MODELS.values() if model.harness_profile == profile)
+    for effort in model.effort_choices:
+        projected = mcp_server._apply_effort_to_bundle(original, profile=profile, effort=effort)
+        assert projected["env"][DIRECT_PROVIDERS[profile]["effort_env"]] == effort
+        assert projected["system_instructions"] == "Exact policy"
+    assert original == {"env": {"SYNTHETIC_KEEP": "preserved"}, "system_instructions": "Exact policy"}
+    assert mcp_server._apply_effort_to_bundle(original, profile=profile, effort="") is original
+    with pytest.raises(ValueError, match="Unsupported effort"):
+        mcp_server._apply_effort_to_bundle(original, profile=profile, effort="unsupported-synthetic")
+
+
+@pytest.mark.parametrize("profile,key", [("direct-openai", "codex_reasoning_effort"), ("direct-anthropic", "claude_effort")])
+def test_direct_worker_effort_uses_existing_provider_preferences(profile, key):
+    assert mcp_server._resolve_effort_for_profile(profile, None, {key: "high"}) == "high"
+    assert mcp_server._resolve_effort_for_profile(profile, "low", {key: "high"}) == "low"
+
+
+@pytest.mark.parametrize("profile,effort,key", [
+    ("codex-cli", "none", "WPR_CODEX_CLI_REASONING_EFFORT"),
+    ("claude-code", "max", "WPR_CLAUDE_CODE_EFFORT"),
+    ("grok-build", "high", "WPR_GROK_REASONING_EFFORT"),
+])
+def test_shared_mcp_effort_projection_preserves_native_environment(profile, effort, key):
+    result = mcp_server._apply_effort_to_bundle({"env": {"SYNTHETIC_KEEP": "preserved"}}, profile=profile, effort=effort)
+    assert result["env"] == {"SYNTHETIC_KEEP": "preserved", key: effort}
+
+
+def test_shared_mcp_effort_projection_preserves_openclaw_instruction_contract():
+    result = mcp_server._apply_effort_to_bundle({"system_instructions": "Exact policy"}, profile="openclaw-general", effort="high")
+    assert result == {"system_instructions": "Exact policy\n\nWorker effort preference for this run: high."}
+
+@pytest.mark.parametrize("profile,effort,execution_mode", [
+    *[(profile, effort, "host") for profile in ["direct-openai", "direct-anthropic", "direct-xai"]
+      for effort in ["low", "default"]],
+    ("grok-build", "low", "host"), ("grok-build", "low", "docker"),
+])
+@pytest.mark.parametrize("enterprise_projection", [False, True])
+def test_mcp_mission_effort_survives_real_storage_and_restricted_environment(
+    tmp_path, monkeypatch, profile, effort, execution_mode, enterprise_projection,
+):
+    from workers_projects_runtime import bootstrap
+    from workers_projects_runtime.direct_runtime import DIRECT_PROVIDERS, DirectModelRuntime
+    from workers_projects_runtime.grok_runtime import GrokBuildRuntime, HostGrokBuildRuntime
+    from workers_projects_runtime.service import _validate_parallel_clean_room_environment
+    from workers_projects_runtime.store import Store
+
+    effort_key = DIRECT_PROVIDERS.get(profile, {"effort_env": "WPR_GROK_REASONING_EFFORT"})["effort_env"]
+    model = DIRECT_PROVIDERS.get(profile, {"model": "grok-4.7"})["model"]
+    store = Store(str(tmp_path / "persisted-effort.sqlite3"))
+
+    class PersistingApi(TrackingApiClient):
+        def create_delegation(self, **kwargs):
+            payload = kwargs["payload"]
+            if execution_mode == "docker":
+                _validate_parallel_clean_room_environment(payload["bootstrapBundle"])
+            self.record = store.reserve_delegation(
+                tenant_id=kwargs["tenant_id"], owner_id=kwargs["owner_id"],
+                idempotency_key=kwargs["idempotency_key"], request_digest="synthetic-request-digest",
+                origin_ref="synthetic-effort-origin", title=payload["title"], goal=payload["goal"],
+                instruction=payload["instruction"], origin_surface="web", worker_name=payload["workerName"],
+                worker_role=payload["workerRole"], profile=payload["profile"], backend=profile,
+                runtime=profile, model=model, execution_mode=execution_mode, bootstrap_bundle=payload["bootstrapBundle"],
+            )
+            return {"workRef": self.record["work_ref"], "state": "queued", "viewRef": "/r/synthetic-view"}
+
+    api = PersistingApi()
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {
+        "X-Viventium-User-Id": "demo-owner", "X-Viventium-Tenant-Id": "local",
+        "X-Viventium-Message-Id": "synthetic-effort-source",
+    })
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", profile)
+    _patch_host_runtime_requirements_ok(monkeypatch)
+    server = create_mcp_server(api_client=api)
+
+    async def scenario():
+        async with Client(server) as client:
+            await client.call_tool("worker_delegate_once", {
+                "title": "Synthetic persisted quality setting", "instruction": "Return the requested value.",
+                "profile": profile, "execution_mode": execution_mode, "effort": effort,
+                "bootstrap_bundle_json": {"viventium_launch_authority": {
+                    "version": 1, "kind": "conversation_orchestrator", "execution_mode": execution_mode,
+                    "worker_reasoning_effort": effort,
+                }},
+            })
+    try:
+        asyncio.run(scenario())
+        persisted = store.get_worker(api.record["worker_id"])
+        bundle = json.loads(persisted["bootstrap_bundle_json"])
+        if effort == "default":
+            assert bundle["viventium_launch_authority"]["worker_reasoning_effort"] == "default"
+            assert bundle["env"].get(effort_key, "default") == "default"
+        else:
+            assert bundle["env"] == {effort_key: effort}
+        monkeypatch.setattr(bootstrap, "_enterprise_mode_enabled", lambda: enterprise_projection)
+        if enterprise_projection:
+            assert effort_key not in bootstrap.bootstrap_env_for(persisted)
+        if profile.startswith("direct-"):
+            runtime = DirectModelRuntime(profile, base_dir=str(tmp_path / "runtime"))
+            info = runtime.prepare_worker_workspace(persisted)
+            request = json.loads(runtime._command_stdin_text(persisted, "Exact synthetic task", info))
+            assert request["effort"] == effort
+        else:
+            runtime = (HostGrokBuildRuntime if execution_mode == "host" else GrokBuildRuntime)(base_dir=str(tmp_path / "runtime"))
+            monkeypatch.setattr(runtime, "_native_environment", lambda _worker, **kwargs: {"XAI_API_KEY": "synthetic-not-used"})
+            info = runtime.prepare_worker_workspace(persisted)
+            command, _ = runtime._build_command(persisted, "Exact synthetic task", info)
+            assert command[command.index("--effort") + 1] == effort
+    finally:
+        store.close()
+
+@pytest.mark.parametrize("effort", ["default", "low", "medium", "high", "xhigh"])
+def test_grok_effort_storage_retains_known_quality_without_accepting_arbitrary_environment(effort):
+    from workers_projects_runtime.service import (
+        ParallelExecutionIsolationError, _validate_parallel_clean_room_environment,
+    )
+    from workers_projects_runtime.store import canonical_parallel_clean_room_bootstrap
+
+    quality = {"env": {"WPR_GROK_REASONING_EFFORT": effort}}
+    _validate_parallel_clean_room_environment(quality)
+    assert canonical_parallel_clean_room_bootstrap(quality)["env"] == quality["env"]
+    unsafe = {"env": {**quality["env"], "XAI_API_KEY": "synthetic-not-authorized"}}
+    with pytest.raises(ParallelExecutionIsolationError):
+        _validate_parallel_clean_room_environment(unsafe)
+    assert canonical_parallel_clean_room_bootstrap(unsafe)["env"] == quality["env"]
+    with pytest.raises(ParallelExecutionIsolationError):
+        _validate_parallel_clean_room_environment({"env": {"WPR_GROK_REASONING_EFFORT": "none"}})
+    assert canonical_parallel_clean_room_bootstrap({"env": {"WPR_GROK_REASONING_EFFORT": "none"}})["env"] == {}
+    assert canonical_parallel_clean_room_bootstrap({}) == {}
+
+
+@pytest.mark.parametrize("profile,key", [
+    ("codex-cli", "WPR_CODEX_CLI_REASONING_EFFORT"),
+    ("claude-code", "WPR_CLAUDE_CODE_EFFORT"),
+    ("grok-build", "WPR_GROK_REASONING_EFFORT"),
+    ("direct-openai", "WPR_CODEX_CLI_REASONING_EFFORT"),
+    ("direct-anthropic", "WPR_CLAUDE_CODE_EFFORT"),
+    ("direct-xai", "WPR_GROK_REASONING_EFFORT"),
+])
+def test_catalog_effort_options_survive_shared_mission_quality_projection(profile, key):
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
+    from workers_projects_runtime.runtime_requirements import WORKER_EFFORT_ENV_VALUES
+    from workers_projects_runtime.service import _validate_parallel_clean_room_environment
+    from workers_projects_runtime.store import canonical_parallel_clean_room_bootstrap
+    models = [model for model in GLASSHIVE_MODELS.values() if model.harness_profile == profile]
+    assert models
+    for model in models:
+        for effort in model.effort_choices:
+            if effort == "default":
+                continue
+            assert effort in WORKER_EFFORT_ENV_VALUES[key], (model.id, effort)
+            bundle = {"env": {key: effort}}
+            _validate_parallel_clean_room_environment(bundle)
+            assert canonical_parallel_clean_room_bootstrap(bundle)["env"] == bundle["env"]

@@ -792,6 +792,12 @@ def test_native_continuation_changes_guidance_without_changing_authority(with_de
     assert "ends your work for this turn" not in continued["description"]
     assert "continue this same turn" in continued["description"]
     assert "full prior goal, context, tool results and work" in continued["description"]
+    assert "After native function or MCP tool results" in continued["description"]
+    assert "complete schema envelope" in continued["description"]
+    assert "only useful new information" in continued["description"]
+    assert "Internal setup and tool discovery alone do not require a public update" in continued["description"]
+    assert "When the user requests repetition or a full replacement, honor that request; otherwise" in continued["description"]
+    assert "necessary questions, corrections, completed results and artifacts" in continued["description"]
     assert "unless the user requests repetition or a full replacement" in continued["description"]
     assert "not proof that text, preview or speech reached the user" in continued["description"]
     assert "not a substitute for answering an unanswered user request" in continued["description"]
@@ -943,3 +949,83 @@ def test_minimal_wire_keeps_declared_controls_and_strict_pair_validation(graph_e
             parse_conversation_output(json.dumps(malformed), graph, delivery)
     with pytest.raises(ValueError, match='messaging controls'):
         minimal_conversation_output_schema(conversation_output_schema(graph, None) or {'type': 'object'})
+
+
+
+@pytest.mark.parametrize("voice,content", [("eligible", "Answer 🙂"), ("skip", "Private text"), ("skip", "")])
+def test_completed_public_envelope_remains_terminal_after_native_tools(voice, content):
+    parts=NativeConversationParts(None,messaging_delivery_control(audio_eligible=True))
+    raw=json.dumps({"type":"assistant_response","tool_name":None,"voice":voice,"content":content})
+    parts.update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":raw}},
+        {"promptId":"exact","turnStartMs":1,"streamStartMs":2})
+    parts.update({"sessionUpdate":"response_completed"})
+    parts.update({"sessionUpdate":"tool_call","toolCallId":"actual"})
+    parts.update({"sessionUpdate":"tool_call_update","toolCallId":"actual","status":"completed"})
+    assert json.loads(parts.finish())==json.loads(raw)
+    ranges=parts.delivery_disposition_ranges()
+    assert not ranges if not content else ranges[0]["disposition"]["audio"]==voice
+
+
+@pytest.mark.parametrize("later", ['{"type":"assistant_response","voice":"eligible","content":"Unfinished', 'not a public envelope'])
+def test_retired_envelope_cannot_replace_invalid_later_public_generation(later):
+    parts=NativeConversationParts(None,messaging_delivery_control(audio_eligible=True))
+    raw=json.dumps({"type":"assistant_response","tool_name":None,"voice":"eligible","content":"Earlier answer"})
+    for text,stream in [(raw,2),(later,3)]:
+        parts.update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}},
+            {"promptId":"exact","turnStartMs":1,"streamStartMs":stream})
+        parts.update({"sessionUpdate":"response_completed"})
+        if stream==2:parts.update({"sessionUpdate":"tool_call","toolCallId":"actual"})
+    with pytest.raises(ValueError):parts.finish()
+
+
+@pytest.mark.parametrize("voice", ["eligible", "skip"])
+def test_public_prefix_optional_control_identity_keeps_default_contract(voice):
+    from workers_projects_runtime.agent_builder_control import public_conversation_prefix
+    payload={"type":"assistant_response","tool_name":None,"voice":voice,"content":"Partial 🙂 content"}
+    raw=json.dumps(payload,ensure_ascii=True)
+    control=messaging_delivery_control(audio_eligible=True)
+    for end in range(len(raw)+1):
+        default=public_conversation_prefix(raw[:end],None,control,include_skipped=True)
+        typed=public_conversation_prefix(raw[:end],None,control,include_skipped=True,include_control_identity=True)
+        if default is None:assert typed is None
+        else:
+            assert set(default)=={"text","complete","delivery_disposition"}
+            identity=typed.pop("control_identity")
+            assert typed==default
+            assert identity=={key:payload[key]for key in ("type","tool_name","voice")}
+
+
+@pytest.mark.parametrize('surface', ['voice'])
+def test_live_call_final_protocol_excludes_optional_messaging_heuristic(surface):
+    schema = conversation_output_schema(None, messaging_delivery_control(audio_eligible=True), surface=surface)
+    description = schema['description']
+    assert 'ordinary public content' in description
+    assert 'unless the user explicitly requests text-only or silent delivery' in description
+    assert 'when returning completed specialist work' in description.lower()
+    assert 'Where messaging audio is optional' not in description
+    assert schema['properties']['voice']['enum'] == ['eligible', 'skip']
+
+
+@pytest.mark.parametrize('surface', ['', 'web', 'telegram', 'scheduler'])
+def test_other_surfaces_retain_optional_messaging_audio_judgment(surface):
+    schema = conversation_output_schema(None, messaging_delivery_control(audio_eligible=True), surface=surface)
+    assert 'Where messaging audio is optional' in schema['description']
+    assert schema['properties']['voice']['enum'] == ['eligible', 'skip']
+
+
+@pytest.mark.parametrize('profile', ['codex-cli', 'claude-code', 'direct-openai', 'direct-anthropic', 'direct-xai'])
+@pytest.mark.parametrize('surface', ['voice', 'telegram'])
+def test_all_host_conversation_profiles_reuse_surface_scoped_final_protocol(tmp_path, profile, surface):
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime, HostClaudeCodeRuntime
+    from workers_projects_runtime.direct_runtime import DirectModelRuntime
+    runtime_class = {'codex-cli': HostCodexCliRuntime, 'claude-code': HostClaudeCodeRuntime}.get(profile, DirectModelRuntime)
+    runtime = (runtime_class(profile, str(tmp_path / 'state')) if runtime_class is DirectModelRuntime
+        else runtime_class(str(tmp_path / 'state')))
+    bundle = {'run_mode': 'conversation', 'surface': surface,
+        'messaging_delivery_control': messaging_delivery_control(audio_eligible=True)}
+    worker = {'worker_id': 'wrk_surface', 'profile': profile, 'execution_mode': 'host',
+        'trusted_run_lane': 'conversation',
+        'bootstrap_bundle_json': json.dumps(bundle)}
+    schema = runtime._conversation_output_schema(worker)
+    assert ('Where messaging audio is optional' in schema['description']) is (surface == 'telegram')
+    assert schema['properties']['voice']['enum'] == ['eligible', 'skip']

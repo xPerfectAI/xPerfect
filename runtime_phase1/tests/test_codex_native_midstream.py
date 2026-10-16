@@ -168,7 +168,7 @@ for line in sys.stdin:
  if method == 'turn/steer':
   notify('item/completed', turnId='turn-synthetic', item={'type': 'commandExecution', 'id': 'tool-a', 'command': 'read file', 'aggregatedOutput': 'Tool data', 'exitCode': 0, 'status': 'completed'})
   notify('item/completed', turnId='turn-synthetic', item={'type': 'agentMessage', 'id': 'agent-a', 'text': v['params']['input'][0]['text']})
-  notify('thread/tokenUsage/updated', turnId='turn-synthetic', tokenUsage={'last': {'inputTokens': 12, 'cachedInputTokens': 4, 'outputTokens': 3}})
+  notify('thread/tokenUsage/updated', turnId='turn-synthetic', tokenUsage={'modelContextWindow': 475000, 'last': {'inputTokens': 12, 'cachedInputTokens': 4, 'outputTokens': 3}})
   notify('turn/completed', turn={'id': 'turn-synthetic', 'status': 'completed'})
 ''')
     return cli
@@ -251,8 +251,12 @@ def test_real_relay_process_mailbox_replays_once_and_terminal_fences(tmp_path, m
         stdout, stderr = process.communicate(timeout=5)
         assert process.returncode == 0, stderr
         events = [json.loads(line) for line in stdout.splitlines()]
-        assert events[:2] == [{'type': 'thread.started', 'thread_id': 'session-synthetic'}, {'type': 'turn.started'}]
-        assert events[-1] == {'type': 'turn.completed', 'usage': {'input_tokens': 12, 'cached_input_tokens': 4, 'output_tokens': 3}}
+        lifecycle = [event for event in events if event['type'] in {'thread.started', 'turn.started', 'turn.completed'}]
+        assert lifecycle[0] == {'type': 'thread.started', 'thread_id': 'session-synthetic'}
+        assert lifecycle[1]['turn_id'] == 'turn-synthetic'
+        assert lifecycle[-1]['usage'] == {'input_tokens': 12, 'cached_input_tokens': 4, 'output_tokens': 3}
+        assert lifecycle[-1]['context_window_tokens'] == 475000
+        assert lifecycle[-1]['observed_at_ms'] > 0
         assert 'Completed worker evidence' in stdout
         assert owner.read_object(context_path)['nativeSessionActive'] is False
         calls = [json.loads(line) for line in receipt.read_text().splitlines()]

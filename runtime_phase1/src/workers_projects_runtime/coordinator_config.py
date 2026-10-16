@@ -40,7 +40,7 @@ def configured_coordinator(service, provider, tenant_id: str = "local", owner_id
     preferences = service.store.get_user_preferences(tenant_id, owner_id) if owner_id else {}
     preferences = preferences or {}
     profile = selected_profile or preferences.get("default_worker_profile") or os.environ.get("GLASSHIVE_DEFAULT_WORKER_PROFILE") or os.environ.get("WPR_DEFAULT_WORKER_PROFILE") or "codex-cli"
-    mode = "docker" if selected_profile else os.environ.get("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    mode = "host" if profile in {"direct-openai", "direct-anthropic", "direct-xai"} else "docker" if selected_profile else os.environ.get("WPR_DEFAULT_EXECUTION_MODE", "docker")
     model = service._resolve_worker_model(profile, mode, tenant_id=tenant_id, owner_id=owner_id)
     from .conversation_provider import GLASSHIVE_MODELS, _configured_grok_conversation_model
     configured_grok = _configured_grok_conversation_model(model) if profile == "grok-build" else None
@@ -51,8 +51,8 @@ def configured_coordinator(service, provider, tenant_id: str = "local", owner_id
     selected = matches[0]
     # Grok's native effort is applied by its ACP runner, not the conversation
     # model catalog, whose only route effort is "default".
-    effort_variable = {"codex-cli": "WPR_CODEX_CLI_REASONING_EFFORT", "claude-code": "WPR_CLAUDE_CODE_EFFORT"}.get(profile)
-    preference_key = {"codex-cli": "codex_reasoning_effort", "claude-code": "claude_effort"}.get(profile, "")
+    effort_variable = {"codex-cli": "WPR_CODEX_CLI_REASONING_EFFORT", "claude-code": "WPR_CLAUDE_CODE_EFFORT", "direct-openai": "WPR_CODEX_CLI_REASONING_EFFORT", "direct-anthropic": "WPR_CLAUDE_CODE_EFFORT", "direct-xai": "WPR_GROK_REASONING_EFFORT"}.get(profile)
+    preference_key = {"codex-cli": "codex_reasoning_effort", "claude-code": "claude_effort", "direct-openai": "codex_reasoning_effort", "direct-anthropic": "claude_effort", "direct-xai": "grok_effort"}.get(profile, "")
     effort = preferences.get(preference_key) or (os.environ.get(effort_variable, "") if effort_variable else "")
     effort = effort or selected.recommended_effort
     if effort not in selected.effort_choices:

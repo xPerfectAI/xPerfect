@@ -8,6 +8,7 @@ from workers_projects_runtime.worker_configuration import (
     WorkerConfiguration,
     ConfigurationUpdate,
     ConfigurationError,
+    PerformanceConfig,
 )
 from workers_projects_runtime.native_context_projection import (
     materialize_native_context,
@@ -79,6 +80,27 @@ def test_owner_revision_and_unavailable_selection(configured):
                 tools={"mode": "selected", "mcp_server_ids": ["invented"]},
             ),
         )
+
+
+def test_performance_settings_save_reload_project_and_preserve_older_clients(configured):
+    core, worker = configured
+    saved = core.put("local", "owner", worker["worker_id"], ConfigurationUpdate(
+        expected_revision=1, performance={"native_warm_servers": 2, "native_warm_idle_seconds": 60}))
+    assert saved["requested"]["performance"] == {"native_warm_servers": 2, "native_warm_idle_seconds": 60}
+    reopened = WorkerConfiguration(core.store, core.peers)
+    assert reopened.get("local", "owner", worker["worker_id"])["requested"]["performance"] == saved["requested"]["performance"]
+    # Old clients saving the previous three sections do not turn warming off.
+    previous_client = reopened.put("local", "owner", worker["worker_id"], ConfigurationUpdate(expected_revision=2))
+    assert previous_client["requested"]["performance"]["native_warm_servers"] == 2
+    projected = reopened.prepare_run(worker, {"run_id": "run", "active_attempt_id": "attempt"})
+    assert json.loads(projected["bootstrap_bundle_json"])["runtime_performance"] == saved["requested"]["performance"]
+    assert previous_client["effective"]["performance"]["native_warm_status"]["supported"] is False
+
+
+@pytest.mark.parametrize("count", [True, -1, 9, 1.5, "1"])
+def test_performance_native_server_count_is_typed_and_bounded(count):
+    with pytest.raises(ValueError):
+        PerformanceConfig(native_warm_servers=count)
 
 
 def test_exact_overflow_durable_and_revocation(configured):
@@ -599,3 +621,23 @@ def test_required_clean_room_broker_is_not_falsely_disabled(configured):
                 expected_revision=1, tools={"mode": "selected", "mcp_server_ids": []}
             ),
         )
+
+
+@pytest.mark.parametrize("run_id", ["run_current", None])
+def test_native_context_manifest_uses_current_runtime_run_without_environment(monkeypatch, run_id):
+    from workers_projects_runtime.worker_configuration import contextual_instruction
+
+    monkeypatch.delenv("GLASSHIVE_RUN_ID", raising=False)
+    context = {"inline_chars": 17, "retrievable_chars": 23, "sources": ["source"], "run_id": "run_stale"}
+    projection = {"inline": [{"id": "source", "text": "Exact context é\n"}], "manifest": {"context": context}}
+    worker = {"_context_projection": projection, "_active_run_id": run_id}
+    instruction = "Exact current request é\n  no normalization"
+    envelope = json.loads(contextual_instruction(instruction, worker))
+    assert set(envelope) == {"instruction", "context", "context_manifest"}
+    assert envelope["instruction"] == instruction
+    assert envelope["context"] == projection["inline"]
+    expected = {key: value for key, value in context.items() if key != "run_id"}
+    if run_id:
+        expected["run_id"] = run_id
+    assert envelope["context_manifest"] == expected
+    assert context["run_id"] == "run_stale"  # Shared saved projection stays unchanged.

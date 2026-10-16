@@ -66,7 +66,7 @@ export function mountWorkerConfiguration(disclosure, member, { requestHeaders = 
   }
   function render(value) {
     const content = root.querySelector('[data-config-content]');
-    content.innerHTML = '<form class="worker-config-form"><fieldset><legend>Context</legend><label>Use<select name="contextMode"><option value="inherit">All available context</option><option value="selected">Choose sources</option></select></label><div data-source-choices></div></fieldset><fieldset><legend>Connected tools</legend><label>Use<select name="toolMode"><option value="inherit">All authorized connections</option><option value="selected">Choose connected tools</option></select></label><div data-tool-choices></div><p class="member-note">The assistant’s own tools stay available.</p></fieldset><fieldset><legend>Background work</legend><label><input type="checkbox" name="backgroundEnabled"> Allow new background work</label><p class="member-note">Turning this off does not stop work already running.</p></fieldset><details class="worker-config-limits"><summary>Limits</summary><label>Concurrent runs<input type="number" name="parallel" min="1" max="32" step="1" required></label><label>Context characters included with each turn<input type="number" name="inline" min="0" max="262144" step="1" required></label><p class="member-note">Other capacity limits still apply. Remaining context uses the runtime’s retrieval path.</p></details><button type="submit">Save</button></form><details class="worker-config-effective"><summary>Current configuration</summary><p class="member-note">This shows configured access. Run activity shows what the worker actually used.</p><div data-effective></div></details>';
+    content.innerHTML = '<form class="worker-config-form"><fieldset><legend>Context</legend><label>Use<select name="contextMode"><option value="inherit">All available context</option><option value="selected">Choose sources</option></select></label><div data-source-choices></div></fieldset><fieldset><legend>Connected tools</legend><label>Use<select name="toolMode"><option value="inherit">All authorized connections</option><option value="selected">Choose connected tools</option></select></label><div data-tool-choices></div><p class="member-note">The assistant’s own tools stay available.</p></fieldset><fieldset><legend>Background work</legend><label><input type="checkbox" name="backgroundEnabled"> Allow new background work</label><p class="member-note">Turning this off does not stop work already running.</p></fieldset><details class="worker-config-limits"><summary>Startup and limits</summary><fieldset data-native-warm><legend>Keep this worker ready</legend><label>Idle native servers per worker<input type="number" name="warmServers" min="0" max="8" step="1" required></label><label>Keep idle servers for (seconds)<input type="number" name="warmExpiry" min="10" max="3600" step="1" required></label><p class="member-note">0 starts normally. 1 keeps a native server ready for this worker’s next turn. It does no model work while idle. Host Grok can keep its native server ready; Direct can preload the SDK. Fresh tools and account access are checked for each run.</p><p class="member-note" role="status" data-native-warm-status></p></fieldset><label>Concurrent runs<input type="number" name="parallel" min="1" max="32" step="1" required></label><label>Context characters included with each turn<input type="number" name="inline" min="0" max="262144" step="1" required></label><p class="member-note">Other capacity limits still apply. Remaining context uses the runtime’s retrieval path.</p></details><button type="submit">Save</button></form><details class="worker-config-effective"><summary>Current configuration</summary><p class="member-note">This shows configured access. Run activity shows what the worker actually used.</p><div data-effective></div></details>';
     const form = content.querySelector('form');
     const selected = value.requested;
     form.elements.contextMode.value=selected.context.mode;
@@ -79,6 +79,17 @@ export function mountWorkerConfiguration(disclosure, member, { requestHeaders = 
     form.elements.backgroundEnabled.checked=selected.background.enabled;
     form.elements.parallel.value=selected.background.max_parallel_runs;
     form.elements.inline.value=selected.context.inline_chars;
+    const performance = selected.performance || { native_warm_servers:0, native_warm_idle_seconds:120 };
+    const warmStatus = value.effective.performance?.native_warm_status;
+    form.elements.warmServers.value=performance.native_warm_servers;
+    form.elements.warmExpiry.value=performance.native_warm_idle_seconds;
+    if (warmStatus?.supported !== true) {
+      form.elements.warmServers.disabled=true;
+      form.elements.warmExpiry.disabled=true;
+    }
+    content.querySelector('[data-native-warm-status]').textContent = warmStatus?.supported === true
+      ? `${Number(warmStatus.idle) || 0} ready · ${Number(warmStatus.starting) || 0} starting · ${Number(warmStatus.leased) || 0} in use${warmStatus.reason ? ` · ${warmStatus.reason}` : ''}`
+      : warmStatus?.reason || 'Native server preparation is unavailable in this runtime.';
     const sources = content.querySelector('[data-source-choices]');
     const tools = content.querySelector('[data-tool-choices]');
     choices(sources,value.available_sources,selected.context.source_ids,'source');
@@ -116,7 +127,8 @@ export function mountWorkerConfiguration(disclosure, member, { requestHeaders = 
       const payload = { expected_revision:current.revision,
         context:{ mode:form.elements.contextMode.value, source_ids:form.elements.contextMode.value === 'selected' ? values('source') : [], inline_chars:Number(form.elements.inline.value) },
         tools:{ mode:form.elements.toolMode.value, mcp_server_ids:form.elements.toolMode.value === 'selected' ? values('tool') : [] },
-        background:{ enabled:form.elements.backgroundEnabled.checked, max_parallel_runs:Number(form.elements.parallel.value) } };
+        background:{ enabled:form.elements.backgroundEnabled.checked, max_parallel_runs:Number(form.elements.parallel.value) },
+        ...(selected.performance ? { performance:{ native_warm_servers:Number(form.elements.warmServers.value), native_warm_idle_seconds:Number(form.elements.warmExpiry.value) } } : {}) };
       busy=true; reload.disabled=true;
       for (const control of form.elements) control.disabled=true;
       status('Saving settings…');

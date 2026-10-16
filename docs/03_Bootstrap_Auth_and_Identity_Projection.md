@@ -229,6 +229,9 @@ The conversation processor pool uses the existing service dispatch budget. Accou
 mission limits cannot cap that pool across CLI families. Dispatch still requires the exact
 configured conversation lane and measured resource reservation; a full service pool can still queue
 work. This does not give Main priority over another admitted conversation.
+This is a pool of service execution threads, not initialized native CLI processes. Saved native
+session history and a retained workspace likewise do not establish a live idle agent process;
+see [native startup and reuse](02_Architecture_and_Components.md#native-startup-retained-sessions-and-idle-process-preparation).
 The legacy generated `GLASSHIVE_CONVERSATION_EXECUTOR_WORKERS` value is not read by this runtime;
 it does not set the service dispatch budget.
 

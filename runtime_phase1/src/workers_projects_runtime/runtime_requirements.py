@@ -13,6 +13,15 @@ from typing import Any
 # Native CLI values; launch-time help checks retain compatibility with installed versions.
 CLAUDE_CODE_EFFORT_LEVELS = ("default", "low", "medium", "high", "xhigh", "max")
 
+# Bounded quality controls are data, not permission to project arbitrary process environment.
+WORKER_EFFORT_ENV_VALUES = {
+    "WPR_CODEX_CLI_REASONING_EFFORT": frozenset({
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    }),
+    "WPR_CLAUDE_CODE_EFFORT": frozenset(CLAUDE_CODE_EFFORT_LEVELS),
+    "WPR_GROK_REASONING_EFFORT": frozenset({"default", "low", "medium", "high", "xhigh"}),
+}
+
 
 DEFAULT_HOST_RUNTIME_REQUIREMENTS: dict[str, list[dict[str, Any]]] = {
     "codex-cli": [

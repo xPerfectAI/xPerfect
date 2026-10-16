@@ -19,6 +19,13 @@ from .bootstrap import (
 )
 
 
+def native_context_authority(bundle: dict) -> str:
+    """Compose the existing worker/project authority for every executor."""
+    return "\n\n".join(str(value) for value in (
+        glasshive_project_agents_md(bundle), bundle.get("developer_instructions"),
+    ) if value)
+
+
 def materialize_native_context(
     placement: dict, bundle: dict, *, projection: dict | None = None
 ) -> dict:
@@ -27,19 +34,16 @@ def materialize_native_context(
     private = home / ".glasshive" / "native"
     native_private = native_home / ".glasshive" / "native"
     # Private replacement never truncates an existing (possibly hard-linked) inode.
-    mcp = claude_project_mcp_payload_for_bundle(
-        bundle, bundle.get("claude_project_mcp") or {}
+    from .profile_runtime import _native_tools_disabled
+    mcp = (
+        {"mcpServers": {}} if placement.get("host_native") and _native_tools_disabled(bundle)
+        else claude_project_mcp_payload_for_bundle(
+            bundle, bundle.get("claude_project_mcp") or {}
+        )
     )
     settings = dict(bundle.get("claude_settings_local") or {})
     settings["autoMemoryDirectory"] = str(native_private / "memory")
-    authority = "\n\n".join(
-        str(v)
-        for v in (
-            glasshive_project_agents_md(bundle),
-            bundle.get("developer_instructions"),
-        )
-        if v
-    )
+    authority = native_context_authority(bundle)
     values = {
         "mcp.json": json.dumps(mcp, ensure_ascii=False),
         "settings.json": json.dumps(settings, ensure_ascii=False),
@@ -160,9 +164,22 @@ def private_refresh(
     if not placement:
         return False
     from .bootstrap import _write_claude_project_files
+    if placement.get("host_native"):
+        from .profile_runtime import _host_native_context_bundle
+        bundle = _host_native_context_bundle(bundle)
 
     # Legacy direct-authority validators inspect these same private files. Shared cwd
     # stays unchanged, and native CLI selectors point at private home files.
+    private_project = Path(placement["private_project_dir"])
+    try:
+        relative_project = private_project.relative_to(home_dir)
+    except ValueError:
+        # Workspace boxes create their separately owned private project at admission.
+        relative_project = None
+    if relative_project is not None:
+        from .bootstrap import _sandbox_parent_descriptor
+        with _sandbox_parent_descriptor(home_dir, relative_project / "AGENTS.md"):
+            pass
     _write_claude_project_files(
         Path(placement["private_project_dir"]), bundle, private=True,
         grok_acp=str(worker.get("profile") or "") == "grok-build",
@@ -185,5 +202,8 @@ def prepare_private_command(runtime, worker: dict, bundle: dict) -> dict | None:
             worker,
             bundle,
         )
+        if placement.get("host_native"):
+            runtime._write_host_project_mcp_files(
+                worker, Path(placement["private_project_dir"]), bundle)
         selectors = worker["_native_context_selectors"]
     return selectors

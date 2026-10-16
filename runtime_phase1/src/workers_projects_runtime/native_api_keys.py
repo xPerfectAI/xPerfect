@@ -26,7 +26,7 @@ _PROVIDERS = {
     "grok": ("XAI_API_KEY", "https://api.x.ai/v1/models"),
     "xai": ("XAI_API_KEY", "https://api.x.ai/v1/models"),
 }
-_RUNTIME_PROVIDERS = {"codex-cli": "codex", "claude-code": "claude", "grok-build": "grok"}
+_RUNTIME_PROVIDERS = {"direct-openai": "codex", "direct-anthropic": "claude", "direct-xai": "grok", "codex-cli": "codex", "claude-code": "claude", "grok-build": "grok"}
 
 
 def enabled() -> bool:
@@ -60,7 +60,7 @@ def support(provider: str, homes=None) -> str:
             return "isolated_substrate_required"
     elif os.environ.get("XPERFECT_EXECUTION_PROFILE", "") in {"hosted-xfs", "local-linux"}:
         return "isolated_substrate_required"
-    return "supported" if provider_setup_binary(provider) else "setup_cli_required"
+    return "supported"
 
 
 def native_key_account(account: dict) -> bool:
@@ -113,7 +113,7 @@ def project_key(worker: dict, env: dict[str, str], runtime_name: str) -> None:
     if worker.get("execution_mode") != "host":
         raise ControlPlaneError("Native API keys require a supported execution substrate")
     env[_PROVIDERS[provider][0]] = read_key(Path(str(path)))
-    if provider == "claude":
+    if provider == "claude" and runtime_name == "claude-code":
         _require_claude_key_route(env, Path(str(path)).parent)
     # Codex exec reads CODEX_API_KEY directly; OPENAI_API_KEY remains its native
     # provider setting. Neither value is placed on the stored worker record.
@@ -158,6 +158,10 @@ def _require_claude_key_route(env: dict[str, str], home: Path, homes=None, lease
 
 def _prepare_native_key(provider: str, value: str, home: Path, homes, lease_id: str = "") -> None:
     from .provider_accounts import PROVIDER_SETUP_ENV_ALLOWLIST, provider_setup_binary
+    # API access is usable by Direct without a native CLI. If the CLI is
+    # installed, retain its existing initialization for native profile parity.
+    if not provider_setup_binary(provider):
+        return
     env = {name: content for name, content in os.environ.items() if name in PROVIDER_SETUP_ENV_ALLOWLIST}
     env.update(homes.runtime_environment(provider=provider, account_home=home))
     env["HOME"] = str(home)

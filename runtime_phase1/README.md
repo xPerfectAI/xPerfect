@@ -139,7 +139,11 @@ callable by LibreChat or any ordinary Chat Completions client:
   Responses request, response, streaming-event, and `previous_response_id` shapes
 - provider usage-quota and rate-limit failures remain explicit across both APIs: non-streaming
   requests return OpenAI-compatible HTTP `429` errors and streams emit `rate_limit_exceeded`
-  failure events; xPerfect never substitutes another model or silently retries an authoring turn
+  failure events; xPerfect never substitutes another model or silently retries an authoring turn.
+  Native Codex `codexErrorInfo` can nest the status under `httpStatusCode`; the shared failure
+  classifier reads this field only inside trusted provider control events. It does not infer a
+  rate limit from assistant/task JSON or prose, invent a reset time, or label HTTP 429 as weekly
+  quota exhaustion. A later fallback authentication failure remains a separate cause.
 - an audio-eligible messaging request may set the compatibility header
   `X-Viventium-Audio-Eligible: true`; xPerfect then
   requires the native Codex or Claude worker to return a versioned `skip` or `eligible` delivery
@@ -167,6 +171,10 @@ grant full access, which disables harness sandbox and approval gates.
 Conversation streams never expose hidden chain-of-thought. Claude stream-json currently provides
 assistant-text deltas. Codex exec JSON currently provides safe activity while running and the
 assistant message on completion; this is declared as `incremental_text: false` in model metadata.
+The trusted Voice surface is a scoped exception: native App Server final-answer deltas can use
+the existing public-envelope decoder before completion. Commentary stays private, unknown phases
+wait for completion, and exact thread/turn/item identities bind the text. See the
+[native call speed contract](../docs/capability-matrix.md#native-call-speed-options).
 
 Grok audio-eligible conversation turns can stream the model's public response before terminal
 completion. The existing output schema puts graph and audio controls before `content`; the decoder

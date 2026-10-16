@@ -7,39 +7,15 @@ Raw models and harnesses alone can’t take over a full-time expert’s role. xP
 xPerfect runs the AI tools you already use, such as Codex, Claude Code and Grok, and keeps each
 task's files, progress and results together. It works on its own, on your computer or your server.
 
-**New here? [Follow the visual user guide](https://www.xperfect.ai/docs/)** — short steps, screenshots,
-light/dark themes, UI and MCP routes. [Guide source](docs/user-guide/README.md).
-
 **Choose how to start**
 - **On your computer:** `./xperfect start` gives one person a private web app. See below and the
   [quickstart](docs/quickstart.md).
 - **On a server for several people:** people sign in with your identity provider, and each gets a
   5 GB file quota. See [hosted setup](docs/deployment-hosted.md) and its current limits.
 - **From another AI app or your own code:** connect over MCP or the API. See the
-  [developer walkthrough](docs/developer.md).
+  [developer walkthrough](docs/developer.md) or the [LiveKit voice reference](integrations/livekit/README.md).
 
 ## Start locally
-
-### With Docker
-
-Get the [public source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip)
-and open a terminal in its folder. With Python 3.11 or newer and Docker running,
-start the reviewed container package:
-
-```sh
-./xperfect start --docker
-```
-
-The launcher downloads its release images automatically and keeps private state
-under `~/xperfect-local`. Open the printed URL and use `ui_password` from the
-private credentials file it prints. Connect your AI account in **Connections**.
-Keep that file private; it also holds the MCP credentials.
-
-The current image release is `linux/arm64`. Actual Windows startup and additional
-CPU architectures remain under construction. [Package details and optional
-settings](docs/deployment.md#packaged-linux).
-
-### With tools installed on your computer
 
 Requires macOS or Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/),
 and the command-line tool of one AI provider you use: [Codex](https://developers.openai.com/codex/cli/),
@@ -75,7 +51,7 @@ shows whether your account is ready. This local app is for one person; the AI wo
 user account's permissions. It is not a public multi-user deployment.
 
 [Quickstart](docs/quickstart.md) · [Account and state setup](docs/host-setup.md) ·
-[Deployment and recovery](docs/deployment.md) · [Changelog](CHANGELOG.md)
+[Deployment and recovery](docs/deployment.md)
 
 ## Work together or separately
 

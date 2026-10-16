@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -37,6 +37,8 @@ from .provider_native_input import NativeInputResponse, native_input_state, subm
 
 from .agent_builder_control import (
     graph_transfer_control,
+    PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT as _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT,
+    private_machine_state_output_schema,
     messaging_delivery_control,
     normalized_messaging_delivery_control,
     normalized_graph_transfer_control,
@@ -162,9 +164,6 @@ CONVERSATION_MAX_CHARS_PER_TOKEN = 8.0
 _GRAPH_CONTROL_UNSET = object()
 
 # This typed capability is admitted only from the signed trusted-host bootstrap.
-_PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT = {
-    "version": 1, "visibility": "private_machine_state", "format": "json_object",
-}
 
 def _private_machine_state_response_contract(metadata: CompletionMetadata | None) -> dict[str, Any] | None:
     if metadata is None:
@@ -277,6 +276,7 @@ _PUBLIC_FAILURE_CODES = frozenset({
     "provider_quota_exhausted",
     "provider_temporarily_unavailable",
     "provider_response_failed",
+    "provider_request_rejected",
     "native_output_files_identity_unavailable",
     "provider_progress_stalled",
     "host_capacity",
@@ -344,9 +344,20 @@ class HarnessModel:
             "display_name": self.display_name,
             "harness_profile": self.harness_profile,
             "native_model": self.native_model,
+            **({"service_tier_choices": ["default", "priority", "ultrafast"]}
+               if self.id == "direct-openai:gpt-6.1-sol" else
+               {"service_tier_choices": ["default", "priority"]}
+               if self.id == "codex-cli:gpt-6.1-sol" else {}),
             "effort_choices": effort_choices,
             "recommended_effort": self.recommended_effort,
             "context_window": self.context_window,
+            "native_history_admission_v1": {
+                # Discovery uses the model/config budget owner at minimum calibration.
+                # A smaller observed native session window remains authoritative at admission.
+                "replay_budget_floor_bytes": _conversation_replay_budget_bytes(
+                    self, observed_chars_per_token=CONVERSATION_MIN_CHARS_PER_TOKEN,
+                ),
+            },
             "readiness": dict(readiness) if readiness is not None else _harness_readiness(self.harness_profile),
             "capabilities": {
                 "main_chat": True,
@@ -359,15 +370,17 @@ class HarnessModel:
                 "automatic_fallback_target": False,
                 "workspace_binding": True,
                 "conversation_session": True,
-                "native_tools": True,
+                "native_tools": self.harness_profile not in DIRECT_PROFILES,
+                "connected_tools": True,
+                "execution_backend": "direct_api" if self.harness_profile in DIRECT_PROFILES else "native_harness",
                 "activity_stream": True,
                 "chat_completions": True,
                 "responses_api": True,
                 "messaging_delivery_disposition": True,
                 "messaging_delivery_disposition_version": 1,
                 # Grok validates its model-authored audio/graph header before early public text.
-                "incremental_text": self.harness_profile == "grok-build",
-                "incremental_text_requires_audio_eligibility": self.harness_profile == "grok-build",
+                "incremental_text": _native_event_profile(self.harness_profile) == "grok-build",
+                "incremental_text_requires_audio_eligibility": _native_event_profile(self.harness_profile) == "grok-build",
             },
         }
 
@@ -391,11 +404,82 @@ class DeferredContextRecoveryStart:
     request_record: dict[str, Any]
     run: dict[str, Any]
 
+DIRECT_PROFILES = frozenset({"direct-openai", "direct-anthropic", "direct-xai"})
+
+
+def _direct_core_archive_projection(payload, model):
+    """Project one accepted typed archive, never infer ownership from user text."""
+    metadata = payload.metadata
+    if not (model.harness_profile in DIRECT_PROFILES and metadata
+            and metadata.main_context_protocol == "main_context_v1"
+            and metadata.main_context_owner == "core"
+            and metadata.main_context_snapshot_sha256):
+        return None
+    text = str(getattr(metadata, "turn_context", "") or "")
+    opening, closing = "<viventium_main_continuity_v1>", "</viventium_main_continuity_v1>"
+    if text.count(opening) != 1 or text.count(closing) != 1:
+        return None
+    start, end = text.index(opening), text.index(closing) + len(closing)
+    block = text[start:end]
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(block)
+        archives = root.findall("semantic_compaction")
+        if len(archives) != 1 or archives[0].attrib != {"version": "1"}:
+            return None
+        if not isinstance(json.loads(archives[0].text or ""), dict):
+            return None
+    except (ET.ParseError, ValueError):
+        return None
+    archive_open, archive_close = '<semantic_compaction version="1">', '</semantic_compaction>'
+    if block.count(archive_open) != 1 or block.count(archive_close) != 1:
+        return None
+    raw = block[block.index(archive_open):block.index(archive_close) + len(archive_close)]
+    return {"protocol": metadata.main_context_protocol, "owner": metadata.main_context_owner,
+            "snapshot_sha256": metadata.main_context_snapshot_sha256, "archive": raw,
+            "archive_sha256": hashlib.sha256(raw.encode()).hexdigest()}
+
+
+def _core_state_block_data(metadata):
+    if not metadata or not metadata.main_context_state_blocks:
+        return []
+    if (metadata.main_context_protocol != "main_context_v1" or metadata.main_context_owner != "core"
+            or not metadata.main_context_snapshot_sha256 or not metadata.main_context_epoch):
+        raise ValueError("Current-state data requires its complete trusted Core binding")
+    source = metadata.turn_context.encode("utf-8")
+    blocks = []
+    for block in metadata.main_context_state_blocks:
+        data = source[block.start_utf8:block.start_utf8 + block.length_utf8]
+        if len(data) != block.length_utf8 or hashlib.sha256(data).hexdigest() != block.sha256:
+            raise ValueError("Current-state data range does not match its accepted source")
+        text = data.decode("utf-8")
+        blocks.append({"kind": block.kind, "text": text, "sha256": block.sha256})
+    return blocks
+
+
+def _direct_core_state_projection(payload, model):
+    if model.harness_profile not in DIRECT_PROFILES:
+        return None
+    blocks = _core_state_block_data(payload.metadata)
+    if not blocks:
+        return None
+    metadata = payload.metadata
+    return {"protocol": metadata.main_context_protocol, "owner": metadata.main_context_owner,
+        "snapshot_sha256": metadata.main_context_snapshot_sha256,
+        "context_epoch": metadata.main_context_epoch, "blocks": blocks}
+
+
+def _native_event_profile(profile: str) -> str:
+    # Direct translates official SDK events into the retained session vocabulary.
+    # This changes only event decoding; account/model/runtime identity stays Direct.
+    return "grok-build" if profile in DIRECT_PROFILES else profile
+
+
 GLASSHIVE_MODELS: dict[str, HarnessModel] = {
     "codex-cli:gpt-6.1-sol": HarnessModel(
         id="codex-cli:gpt-6.1-sol", display_name="OpenAI / GPT-6.1 Sol", harness_profile="codex-cli",
         native_model="gpt-6.1-sol", effort_choices=("low", "medium", "high", "xhigh", "max"),
-        recommended_effort="high", context_window=1_050_000,
+        recommended_effort="high", context_window=475_000,
     ),
     "grok-build:grok-4.7": HarnessModel(
         id="grok-build:grok-4.7", display_name="Grok / Grok 4.7", harness_profile="grok-build",
@@ -510,6 +594,19 @@ GLASSHIVE_MODELS: dict[str, HarnessModel] = {
         recommended_effort="medium",
         context_window=1_050_000,
     ),
+    "direct-openai:gpt-6.1-sol": HarnessModel(
+        id="direct-openai:gpt-6.1-sol", display_name="Direct / OpenAI / GPT-6.1 Sol",
+        harness_profile="direct-openai", native_model="gpt-6.1-sol",
+        effort_choices=("default", "low", "medium", "high", "xhigh", "max"), recommended_effort="high", context_window=1_050_000),
+    "direct-anthropic:claude-opus-5-5": HarnessModel(
+        id="direct-anthropic:claude-opus-5-5", display_name="Direct / Anthropic / Opus 5.5",
+        harness_profile="direct-anthropic", native_model="claude-opus-5-5",
+        effort_choices=("default", "low", "medium", "high", "max"), recommended_effort="high", context_window=1_000_000),
+    "direct-xai:grok-4.7": HarnessModel(
+        id="direct-xai:grok-4.7", display_name="Direct / xAI / Grok 4.7",
+        harness_profile="direct-xai", native_model="grok-4.7",
+        effort_choices=("default", "low", "medium", "high", "xhigh"), recommended_effort="high", context_window=500_000),
+
 }
 
 
@@ -586,6 +683,15 @@ def _harness_auth_configured(profile: str) -> bool:
 
 
 def _harness_readiness(profile: str) -> dict[str, Any]:
+    if profile in DIRECT_PROFILES:
+        import importlib.util
+        from .direct_runtime import DIRECT_PROVIDERS
+        installed = importlib.util.find_spec("pydantic_ai") is not None
+        key = str(os.environ.get(DIRECT_PROVIDERS[profile]["key"]) or "").strip()
+        ready = installed and bool(key) and key != "user_provided" and "${" not in key
+        return {"status": "ready_to_try" if ready else "authentication_required" if installed else "unavailable",
+                "detail": "Direct API connection is configured; model access is checked on request." if ready else "Connect this provider's API key. CLI subscription sign-in is separate.",
+                "binary_available": installed, "auth_configured": bool(key)}
     binary_ready = bool(_configured_binary(profile))
     auth_ready = _harness_auth_configured(profile)
     if binary_ready and auth_ready:
@@ -635,7 +741,7 @@ def _require_native_access_support(
         return
     supported = execution_mode == "host" and (
         model.harness_profile == "codex-cli" or (
-            model.harness_profile == "grok-build" and native_tools_disabled
+            (model.harness_profile == "grok-build" or model.harness_profile in DIRECT_PROFILES) and native_tools_disabled
         ) or (
             model.harness_profile == "claude-code" and _host_claude_read_only_supported()
         )
@@ -664,6 +770,14 @@ class NativePredecessorSupersession(BaseModel):
     accepted_sources: list[SupersededAcceptedSource] = Field(min_length=1, max_length=512)
     # Core proves every skipped revision was cancelled before native admission.
     unadmitted_revisions: list[int] = Field(default_factory=list, max_length=8)
+
+
+class MainContextStateBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["active_work"]
+    start_utf8: int = Field(ge=0, strict=True)
+    length_utf8: int = Field(gt=0, le=128 * 1024, strict=True)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class CompletionMetadata(BaseModel):
@@ -699,6 +813,7 @@ class CompletionMetadata(BaseModel):
     main_context_snapshot_sha256: str = Field(default="", pattern=r"^[a-f0-9]{64}$|^$")
 
     main_context_epoch: str = Field(default="", pattern=r"^[a-f0-9]{64}$|^$")
+    main_context_state_blocks: list[MainContextStateBlock] = Field(default_factory=list, max_length=1)
 
     continuity_domain_id: str = Field(default="", pattern=r"^[a-f0-9]{64}$|^$")
 
@@ -724,7 +839,7 @@ class CompletionMetadata(BaseModel):
 
     fallback_reasoning_effort: str = ""
 
-    response_timeout_s: float | None = Field(default=None, gt=0)
+    response_timeout_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Start of the logical revision this request answers. A successor that waited for its
     # predecessor's release keeps the deadline of when it began, not of when it was dispatched.
@@ -784,6 +899,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)
+    parallel_tool_calls: bool | None = Field(default=None, strict=True)
     max_completion_tokens: int | None = Field(default=None, gt=0)
     presence_penalty: float | None = Field(default=None, ge=-2, le=2)
     frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
@@ -1301,10 +1417,26 @@ def _normalized_chars_per_token(value: float | int | None) -> float:
 def _conversation_output_reserve_tokens(model: HarnessModel) -> int:
     return min(32_768, max(8_192, int(model.context_window * 0.10)))
 
+def _effective_native_context_window(
+    model: HarnessModel, manifest: dict[str, Any],
+) -> tuple[int, bool]:
+    reported = manifest.get("native_context_window_tokens")
+    epoch = str(manifest.get("native_context_epoch") or "")
+    valid = (
+        type(reported) is int and reported > 0
+        and manifest.get("native_context_window_model_id") == model.id
+        and bool(epoch)
+        and str(manifest.get("native_occupancy_native_context_epoch") or "") == epoch
+    )
+    return (min(model.context_window, reported), True) if valid else (model.context_window, False)
+
+
 def _conversation_replay_budget_bytes(
-    model: HarnessModel, *, observed_chars_per_token: float
+    model: HarnessModel, *, observed_chars_per_token: float,
+    context_window: int | None = None,
 ) -> int:
-    input_budget_tokens = int(model.context_window * CONVERSATION_BOOTSTRAP_MAX_RATIO)
+    window = min(model.context_window, context_window) if type(context_window) is int and context_window > 0 else model.context_window
+    input_budget_tokens = int(window * CONVERSATION_BOOTSTRAP_MAX_RATIO)
     calibrated_limit = int(input_budget_tokens * observed_chars_per_token)
     configured = str(os.environ.get("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES") or "").strip()
     if configured:
@@ -1313,8 +1445,8 @@ def _conversation_replay_budget_bytes(
         except ValueError:
             pass
     return min(
-        CONVERSATION_REPLAY_MAX_BYTES_DEFAULT,
-        max(32 * 1024, model.context_window * 2),
+        CONVERSATION_REPLAY_MAX_BYTES,
+        max(32 * 1024, window * 2),
         calibrated_limit,
     )
 
@@ -1490,6 +1622,7 @@ def _admit_conversation_history(
     model: HarnessModel,
     owner_main_context: str = "",
     observed_chars_per_token: float | None = None,
+    context_window: int | None = None,
     include_indices: set[int] | None = None,
     protected_indices: set[int] | None = None,
     current_input_indices: set[int] | None = None,
@@ -1534,8 +1667,9 @@ def _admit_conversation_history(
     admitted_ids = {index for index, _ in admitted}
     omitted = [(index, message) for index, message in eligible if index not in admitted_ids]
     chars_per_token = _normalized_chars_per_token(observed_chars_per_token)
+    effective_window = min(model.context_window, context_window) if type(context_window) is int and context_window > 0 else model.context_window
     budget_bytes = _conversation_replay_budget_bytes(
-        model, observed_chars_per_token=chars_per_token
+        model, observed_chars_per_token=chars_per_token, context_window=effective_window,
     )
 
     def render(selected: list[tuple[int, ChatMessage]], compacted: list[tuple[int, ChatMessage]]):
@@ -1699,10 +1833,10 @@ def _admit_conversation_history(
             ).strip()
             if call_id:
                 tool_result_ids.add(call_id)
-    input_budget_tokens = int(model.context_window * CONVERSATION_BOOTSTRAP_MAX_RATIO)
+    input_budget_tokens = int(effective_window * CONVERSATION_BOOTSTRAP_MAX_RATIO)
     output_reserve_tokens = _conversation_output_reserve_tokens(model)
     compaction_trigger_tokens = int(
-        model.context_window * CONVERSATION_COMPACTION_TRIGGER_RATIO
+        effective_window * CONVERSATION_COMPACTION_TRIGGER_RATIO
     )
     decision = {
         "version": 1,
@@ -2180,6 +2314,9 @@ def _hydrate_metadata(
 
     try:
         hydrated = CompletionMetadata.model_validate(metadata)
+        if hydrated.main_context_state_blocks and not auth.trust_identity_headers:
+            raise HTTPException(status_code=403, detail="Current-state data requires a trusted host transport")
+        _core_state_block_data(hydrated)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return payload.model_copy(update={"metadata": hydrated})
@@ -2411,6 +2548,7 @@ def _usage(messages: list[ChatMessage], output: str) -> dict[str, int]:
 def _native_authored_preview(profile: str, stdout: str, graph_control: Any,
                              delivery_control: Any) -> dict[str, Any] | None:
     """A complete typed public answer is a replaceable preview, never final authority."""
+    profile = _native_event_profile(profile)
     latest = None
     grok_parts = NativeConversationParts(graph_control, delivery_control)
     grok_session_id = ""
@@ -2523,17 +2661,14 @@ def _mutable_native_file_link_start(text: str, *, incomplete: bool) -> int | Non
     return None
 
 
-def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
-                           delivery_control: Any) -> dict[str, Any] | None:
-    """Project ordered public ACP parts, with exact native session identity."""
-    if profile != "grok-build" or not delivery_control:
-        return None
+def _native_public_updates(profile: str, stdout: str) -> list[tuple[int, dict, Any]] | None:
+    """Normalize declared native message identities, never commentary or prose."""
+    profile = _native_event_profile(profile)
     session_id = ""
-    parts = NativeConversationParts(graph_control, delivery_control)
-    candidate = None
-    completed_parts: dict[int, int] = {}
-    completed_dispositions: dict[int, dict[str, Any]] = {}
-    presentation_parts: dict[int, dict[str, Any]] = {}
+    turn_id = ""
+    items: dict[str, dict] = {}
+    current_item = ""
+    updates = []
     for sequence, line in enumerate(str(stdout or "").splitlines(), 1):
         try:
             event = json.loads(line)
@@ -2541,19 +2676,85 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") == "grok.session.started":
-            if session_id or not isinstance(event.get("session_id"), str) or not event["session_id"]:
+        kind = event.get("type")
+        if kind == ("grok.session.started" if profile == "grok-build" else "thread.started"):
+            identity = event.get("session_id" if profile == "grok-build" else "thread_id")
+            if session_id or not isinstance(identity, str) or not identity:
                 return None
-            session_id = event["session_id"]
+            session_id = identity
             continue
-        if (event.get("type") != "grok.session.update" or not session_id
-                or event.get("session_id") != session_id):
+        if profile == "grok-build":
+            if kind == "grok.session.update" and session_id and event.get("session_id") == session_id:
+                update = event.get("update")
+                if isinstance(update, dict):
+                    updates.append((sequence, update, event.get("meta")))
             continue
-        update = event.get("update")
-        if not isinstance(update, dict):
+        if kind == "turn.started":
+            if not session_id or event.get("thread_id") != session_id or turn_id:
+                return None
+            turn_id = event.get("turn_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                return None
             continue
+        if (not session_id or not turn_id or event.get("thread_id") != session_id
+                or event.get("turn_id") != turn_id or kind not in {
+                    "codex.message.started", "codex.message.delta", "codex.message.completed"}):
+            continue
+        item_id = event.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            return None
+        if kind == "codex.message.started":
+            if item_id in items:
+                return None
+            items[item_id] = {"phase": event.get("phase"), "text": "", "complete": False}
+            continue
+        state = items.get(item_id)
+        if not state:
+            return None
+        if state["complete"]:
+            continue
+        if kind == "codex.message.delta":
+            if state["phase"] != "final_answer" or event.get("phase") != "final_answer":
+                return None
+            text = event.get("delta")
+        else:
+            if state["phase"] not in {None, "final_answer"} or event.get("phase") not in {None, "final_answer"}:
+                continue
+            authoritative = event.get("text")
+            if not isinstance(authoritative, str) or not authoritative.startswith(state["text"]):
+                return None
+            text = authoritative[len(state["text"]):]
+            state["complete"] = True
+        if not isinstance(text, str):
+            return None
+        if current_item and item_id != current_item:
+            if not items[current_item]["complete"]:
+                return None
+            updates.append((sequence, {"sessionUpdate": "tool_call"}, None))
+        current_item = item_id
+        state["text"] += text
+        updates.append((sequence, {"sessionUpdate": "agent_message_chunk",
+                                  "content": {"type": "text", "text": text}}, None))
+    return updates if session_id else None
+
+
+def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
+                           delivery_control: Any) -> dict[str, Any] | None:
+    """Use the same public envelope owner for bound ACP and Codex final items."""
+    profile = _native_event_profile(profile)
+    if profile not in {"grok-build", "codex-cli"} or not delivery_control:
+        return None
+    updates = _native_public_updates(profile, stdout)
+    if updates is None:
+        return None
+    parts = NativeConversationParts(graph_control, delivery_control)
+    candidate = None
+    completed_parts: dict[int, int] = {}
+    completed_dispositions: dict[int, dict[str, Any]] = {}
+    presentation_parts: dict[int, dict[str, Any]] = {}
+    for sequence, update, meta in updates:
         try:
-            parts.update(update, event.get("meta"))
+            parts.update(update, meta)
         except ValueError:
             return None
         if update.get("sessionUpdate") == "tool_call":
@@ -2609,8 +2810,10 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
 
 
 def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
-                          delivery_control: Any = None) -> str | None:
+                          delivery_control: Any = None, response_contract: Any = None) -> str | None:
     """Keep a completed empty authored terminal distinct from an absent terminal."""
+    profile = _native_event_profile(profile)
+    private_state = private_machine_state_output_schema(response_contract) is not None
 
     assistant_parts: list[str] = []
     result_parts: list[str] = []
@@ -2687,7 +2890,8 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
     if profile == "claude-code":
         # Each Claude `result` ends one authored turn. A later turn (one a finished background
         # task starts, for example) may refer to an earlier one, so the reply carries every turn.
-        return "\n\n".join(_select_user_facing_agent_output([part]) for part in result_parts) or None
+        return "\n\n".join(part if private_state else _select_user_facing_agent_output([part])
+                           for part in result_parts) or None
     if profile == "codex-cli" and codex_terminal_text is not None:
         if normalized_messaging_delivery_control(delivery_control):
             terminal = parse_conversation_output(codex_terminal_text, graph_control, delivery_control)
@@ -2708,9 +2912,9 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
                         dispositions.append(disposition)
                 return ordered_conversation_output(public_parts, codex_terminal_text,
                     graph_control, delivery_control, part_dispositions=dispositions)
-        return _select_user_facing_agent_output([codex_terminal_text])
+        return codex_terminal_text if private_state else _select_user_facing_agent_output([codex_terminal_text])
     if profile == "grok-build" and len(grok_results) == 1:
-        return _select_user_facing_agent_output(grok_results) or None
+        return (grok_results[0] if private_state else _select_user_facing_agent_output(grok_results)) or None
     return None
 
 
@@ -2727,6 +2931,7 @@ def _provider_log_worker(worker: dict[str, Any], run: dict[str, Any]) -> dict[st
 
 
 def _native_usage(profile: str, stdout: str) -> dict[str, int] | None:
+    profile = _native_event_profile(profile)
     if profile == "codex-cli":
         usage = _codex_usage_from_output(str(stdout or ""))
         if not usage:
@@ -2770,6 +2975,55 @@ def _native_usage(profile: str, stdout: str) -> dict[str, int] | None:
         "completion_tokens": max(0, completion_tokens),
         "total_tokens": max(0, prompt_tokens) + max(0, completion_tokens),
     }
+
+
+def _native_context_usage(
+    profile: str, stdout: str, billing_usage: dict[str, int] | None, *, context_window: int,
+) -> tuple[dict[str, int] | None, str]:
+    if profile not in DIRECT_PROFILES:
+        if profile == "codex-cli" and billing_usage:
+            for line in reversed(str(stdout or "").splitlines()):
+                try:
+                    event = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") in {"turn.started", "turn.failed"}:
+                    break
+                if event.get("type") != "turn.completed":
+                    continue
+                window = event.get("context_window_tokens")
+                if type(window) is int and window > 0:
+                    return {**billing_usage, "context_window_tokens": window}, "native_prompt_tokens"
+                break
+        return billing_usage, "native_prompt_tokens"
+    terminal = None
+    for line in reversed(str(stdout or "").splitlines()):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "grok.result":
+            terminal = event
+            break
+    measured = terminal.get("context_usage") if isinstance(terminal, dict) else None
+    unmeasured_tools = isinstance(measured, dict) and measured.get("unmeasured_tool_results") is True
+    if (isinstance(measured, dict) and not unmeasured_tools and terminal.get("executor") == "direct"
+            and measured.get("source") == "sdk_last_response"):
+        prompt, output = measured.get("input_tokens"), measured.get("output_tokens")
+        if (type(prompt) is int and prompt > 0 and type(output) is int and output >= 0
+                and (billing_usage is None or (prompt <= billing_usage["prompt_tokens"]
+                    and output <= billing_usage["completion_tokens"]))):
+            return {"prompt_tokens": prompt, "completion_tokens": output,
+                    "total_tokens": prompt + output}, "native_prompt_tokens"
+    # Run usage sums its request inputs, so it is only an upper bound on the last
+    # materialized request. An absent bound uses the selected window, never zero.
+    upper_bound = billing_usage if not unmeasured_tools and billing_usage and billing_usage.get("prompt_tokens", 0) > 0 else (
+        {"prompt_tokens": context_window, "completion_tokens": 0, "total_tokens": context_window}
+        if context_window > 0 else None
+    )
+    return upper_bound, "native_prompt_tokens_upper_bound"
 
 
 def _native_log_excluded_prefix_bytes(stdout: str) -> int:
@@ -2902,6 +3156,7 @@ def _public_activity_delta_fields(event: dict[str, Any]) -> dict[str, Any]:
 
 def _normalized_harness_activity(profile: str, stdout: str) -> list[dict[str, Any]]:
     """Convert native JSONL into safe observable steps, never model chain-of-thought or tool inputs."""
+    profile = _native_event_profile(profile)
 
     normalized: list[dict[str, Any]] = []
     codex_terminal_tool_calls: set[str] = set()
@@ -3163,6 +3418,7 @@ def _codex_async_question_content(stdout: str, content: str) -> str:
 
 def _native_tool_evidence(profile: str, stdout: str) -> dict[str, Any]:
     """Project only this run's native tool records, with the existing replay output bounds."""
+    profile = _native_event_profile(profile)
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     pending: dict[str, dict[str, Any]] = {}
@@ -3347,6 +3603,32 @@ def _is_transient_store_contention(error: BaseException) -> bool:
     code = getattr(error, "sqlite_errorcode", None)
     return (isinstance(error, sqlite3.OperationalError) and isinstance(code, int)
             and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _provider_admission_event(payload, phase, started_ns, *, status="completed", identity=None):
+    if started_ns is None:
+        return
+    turn_id, invocation_id = identity or (
+        getattr(payload.metadata, "message_id", ""),
+        getattr(payload.metadata, "native_invocation_id", ""),
+    )
+    native_timing_event(
+        "provider_admission_" + phase,
+        turnHash=native_timing_hash("turn", turn_id),
+        invocationHash=native_timing_hash("invocation", invocation_id),
+        status=status, durationMs=(time.monotonic_ns() - started_ns) / 1_000_000,
+    )
+
+
+@contextmanager
+def _provider_admission_phase(payload, phase, *, identity=None):
+    started_ns = time.monotonic_ns() if native_timing_enabled() else None
+    status = "failed"
+    try:
+        yield
+        status = "completed"
+    finally:
+        _provider_admission_event(payload, phase, started_ns, status=status, identity=identity)
 
 
 class ConversationProvider:
@@ -3544,14 +3826,15 @@ class ConversationProvider:
     def _model(self, model_id: str, *, tenant_id: str = "local", owner_id: str = "",
                trusted_history: bool = False) -> HarnessModel:
         clean_id = str(model_id or "").strip()
+        model = GLASSHIVE_MODELS.get(clean_id)
+        if model is not None:
+            return model
         configured_grok = self._selected_grok_model(tenant_id, owner_id)
         if trusted_history and clean_id.startswith("grok-build:"):
             historical = _configured_grok_conversation_model(clean_id.removeprefix("grok-build:"))
             if historical is not None:
                 return historical
-        model = GLASSHIVE_MODELS.get(clean_id) or (
-            configured_grok if configured_grok is not None and configured_grok.id == clean_id else None
-        )
+        model = configured_grok if configured_grok is not None and configured_grok.id == clean_id else None
         # Discovery may use the service catalog. A turn must use the selected worker's
         # actual ACP account options; optional Fast absence selects Standard before output.
         if model is None:
@@ -3634,11 +3917,11 @@ class ConversationProvider:
             incoming_env[GLASSHIVE_PROVIDER_SESSION_MODE_ENV] = "stateless"
         effort_env = (
             {"WPR_CODEX_CLI_REASONING_EFFORT": effort}
-            if model.harness_profile == "codex-cli" else
+            if model.harness_profile in {"codex-cli", "direct-openai"} else
             {"WPR_CLAUDE_CODE_EFFORT": effort}
-            if model.harness_profile == "claude-code" else
+            if model.harness_profile in {"claude-code", "direct-anthropic"} else
             {"WPR_GROK_REASONING_EFFORT": effort}
-            if model.harness_profile == "grok-build" and effort != "default" else {}
+            if model.harness_profile in {"grok-build", "direct-xai"} and effort != "default" else {}
         )
         bootstrap_instructions = _bootstrap_developer_instructions(
             incoming, model.harness_profile
@@ -3671,7 +3954,7 @@ class ConversationProvider:
             isinstance(incoming_capabilities, dict)
             and incoming_capabilities.get("native_tools") is False
         )
-        if not native_tools and model.harness_profile not in {"codex-cli", "grok-build", "claude-code"}:
+        if not native_tools and model.harness_profile not in {"codex-cli", "grok-build", "claude-code", *DIRECT_PROFILES}:
             raise HTTPException(status_code=400, detail="Native tool restriction is unsupported by this harness")
         if not native_tools:
             incoming_env[GLASSHIVE_PROVIDER_SESSION_MODE_ENV] = "stateless"
@@ -3679,6 +3962,9 @@ class ConversationProvider:
             "self_delegation": False,
             "native_tools": native_tools,
         }
+        private_contract = _private_machine_state_response_contract(payload.metadata)
+        if private_machine_state_output_schema(private_contract) is not None:
+            provider_capabilities["response_contract"] = private_contract
         delivery_control = messaging_delivery_control(
             audio_eligible=payload.metadata.audio_eligible,
         )
@@ -3696,6 +3982,7 @@ class ConversationProvider:
         bundle = {
             **incoming,
             "run_mode": "conversation",
+            "surface": payload.metadata.surface,
             "provider_model": model.native_model,
             "access_mode": payload.metadata.glasshive_options.access,
             # Mutable application authority stays in Codex's native developer role. It must never
@@ -3705,6 +3992,35 @@ class ConversationProvider:
             "env": {**incoming_env, **effort_env},
             "provider_capabilities": provider_capabilities,
         }
+        bundle.pop("direct_core_state", None)
+        state_projection = _direct_core_state_projection(payload, model)
+        if state_projection is not None:
+            bundle["direct_core_state"] = state_projection
+        bundle.pop("direct_core_archive", None)
+        archive_projection = _direct_core_archive_projection(payload, model)
+        if archive_projection is not None:
+            bundle["direct_core_archive"] = archive_projection
+        if model.harness_profile in DIRECT_PROFILES:
+            settings = dict(incoming.get("direct_model_settings") or {})
+            for key in ("temperature", "top_p", "parallel_tool_calls", "presence_penalty", "frequency_penalty", "seed"):
+                value = getattr(payload, key)
+                if value is not None:
+                    settings[key] = value
+            limit = payload.max_completion_tokens if payload.max_completion_tokens is not None else payload.max_tokens
+            if limit is not None:
+                settings["max_tokens"] = limit
+            if payload.stop is not None:
+                settings["stop_sequences"] = [payload.stop] if isinstance(payload.stop, str) else payload.stop
+            if payload.service_tier is not None:
+                settings["service_tier"] = payload.service_tier
+            bundle["direct_model_settings"] = settings
+        # Speed is an explicit native turn option, separate from model/effort.
+        bundle.pop("service_tier", None)
+        if model.harness_profile == "codex-cli" and payload.service_tier is not None:
+            tier = payload.service_tier
+            if not tier or not tier.isascii() or not tier.replace("_", "").isalnum():
+                raise HTTPException(status_code=400, detail="Invalid native service tier")
+            bundle["service_tier"] = "priority" if tier == "fast" else tier
         origin_scope = payload.metadata.allowed_ai_origin_scope
         origin_connection = (
             str(origin_scope.get("connection_id") or "").strip()
@@ -3919,6 +4235,8 @@ class ConversationProvider:
             chars_per_token = _normalized_chars_per_token(float(observed))
         except (TypeError, ValueError):
             chars_per_token = CONVERSATION_DEFAULT_CHARS_PER_TOKEN
+        seed_tokens = (math.ceil(max(0, int(manifest.get("native_context_seed_bytes") or 0)) / chars_per_token)
+            if previous_prompt_tokens == 0 else 0)
         instruction_bytes = max(0, int(decision.get("instruction_bytes") or 0))
         admitted_delta_tokens = max(
             1, math.ceil(instruction_bytes / chars_per_token)
@@ -3933,14 +4251,16 @@ class ConversationProvider:
         output_reserve_tokens = max(
             0, int(decision.get("output_reserve_tokens") or 0)
         )
-        trigger_tokens = int(model.context_window * CONVERSATION_COMPACTION_TRIGGER_RATIO)
+        effective_window, observed_window_valid = _effective_native_context_window(model, manifest)
+        trigger_tokens = int(effective_window * CONVERSATION_COMPACTION_TRIGGER_RATIO)
         projected_occupancy_tokens = (
             previous_prompt_tokens
+            + seed_tokens
             + admitted_delta_tokens
             + carrier_overhead_tokens
             + output_reserve_tokens
         )
-        if previous_prompt_tokens <= 0:
+        if previous_prompt_tokens <= 0 and not seed_tokens:
             state = "unmeasured"
         elif projected_occupancy_tokens >= trigger_tokens:
             state = "pressure"
@@ -3950,15 +4270,18 @@ class ConversationProvider:
             "version": 1,
             "state": state,
             "previous_native_prompt_tokens": previous_prompt_tokens,
+            "retained_tool_seed_tokens": seed_tokens,
             "admitted_delta_tokens": admitted_delta_tokens,
             "carrier_overhead_tokens": carrier_overhead_tokens,
             "output_reserve_tokens": output_reserve_tokens,
             "projected_occupancy_tokens": projected_occupancy_tokens,
             "trigger_tokens": trigger_tokens,
+            "effective_context_window_tokens": effective_window,
+            "context_window_source": "native_observed" if observed_window_valid else "model_catalog",
             "chars_per_token": chars_per_token,
             "measurement_scope": str(
-                manifest.get("usage_calibration_scope")
-                or manifest.get("native_occupancy_scope")
+                manifest.get("native_occupancy_scope")
+                or manifest.get("usage_calibration_scope")
                 or "unmeasured_native_prompt"
             ),
         }
@@ -4016,6 +4339,7 @@ class ConversationProvider:
         self,
         session: dict[str, Any],
         session_manifest: dict[str, Any],
+        *, direct_replay_proof: dict[str, Any] | None = None,
     ) -> bool:
         """Keep the native epoch when an older authorized run has unreplayed tool evidence.
 
@@ -4098,6 +4422,19 @@ class ConversationProvider:
         worker = self.store.get_worker(worker_id, owner_id=str(session.get("owner_id") or ""))
         if not worker:
             return False
+        direct_replay = None
+        if str(worker.get("profile") or "") in DIRECT_PROFILES:
+            if self.store.list_nonterminal_runs_for_worker(worker_id):
+                return False
+            resolver = getattr(self.service.runtime, "provider_context_replay", None)
+            try:
+                direct_replay = resolver(worker) if callable(resolver) else None
+            except (OSError, RuntimeError, ValueError, TypeError):
+                return False
+            if not isinstance(direct_replay, dict) or direct_replay.get("source_epoch") != current_epoch:
+                return False
+            if direct_replay_proof is not None:
+                direct_replay_proof.update(direct_replay)
         for candidate, decision in candidates:
             run_id = str(candidate.get("run_id") or "").strip()
             run = self.store.get_run(run_id)
@@ -4116,12 +4453,19 @@ class ConversationProvider:
                 profile, stdout = collector(_provider_log_worker(worker, run), run_id, **kwargs)
             except (OSError, RuntimeError, ValueError, TypeError):
                 return False
-            if str(profile or "") not in {"codex-cli", "claude-code"} or not str(stdout or "").strip():
+            if str(profile or "") not in {"codex-cli", "claude-code", *DIRECT_PROFILES} or not str(stdout or "").strip():
                 return False
             evidence = _native_tool_evidence(str(profile), str(stdout))
+            if str(profile or "") in DIRECT_PROFILES:
+                if direct_replay is None or any(
+                    result.get("id") not in direct_replay["tool_call_ids"]
+                    for result in evidence.get("results", [])
+                ):
+                    return False
+            elif evidence.get("results"):
+                return False
             if (
-                evidence.get("results")
-                or int(evidence.get("omitted_results") or 0) > 0
+                int(evidence.get("omitted_results") or 0) > 0
                 or int(evidence.get("excluded_log_prefix_bytes") or 0) > 0
                 or not _native_visible_text(str(profile), str(stdout))
             ):
@@ -4135,6 +4479,7 @@ class ConversationProvider:
         model: HarnessModel,
         effort: str,
         manifest: dict[str, Any],
+        *, direct_replay_proof: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Advance the existing private native epoch without replacing its worker."""
 
@@ -4151,6 +4496,21 @@ class ConversationProvider:
             ).encode()
         ).hexdigest()
         bundle = self._native_bundle(payload, model, effort)
+        replay = None
+        if model.harness_profile in DIRECT_PROFILES:
+            try:
+                worker = self.store.get_worker(str(session["worker_id"]), owner_id=str(session.get("owner_id") or ""))
+                if self.store.list_nonterminal_runs_for_worker(str(session["worker_id"])):
+                    return session, old_epoch
+                replay = direct_replay_proof or self.service.runtime.provider_context_replay(worker)
+                if not replay or replay.get("source_epoch") != old_epoch:
+                    return session, old_epoch
+                frozen = self.service.runtime.freeze_provider_context_replay(worker, replay)
+                if not frozen:
+                    return session, old_epoch
+            except (OSError, RuntimeError, ValueError, TypeError):
+                return session, old_epoch
+            bundle["direct_context_replay"] = {**frozen, "target_epoch": new_epoch}
         bundle.setdefault("env", {})[GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV] = new_epoch
         self.store.update_worker(
             str(session["worker_id"]),
@@ -4166,9 +4526,11 @@ class ConversationProvider:
             "context_generation": generation,
             "last_rotation_reason": "native_occupancy_pressure",
             "previous_native_context_epoch": old_epoch,
+            "native_context_seed_bytes": int((replay or {}).get("bytes") or 0),
             # Old-epoch usage cannot be charged to the new context.
             "latest_native_prompt_tokens": 0,
             "latest_native_total_tokens": 0,
+            "native_context_window_tokens": 0,
         }
         updated = self.store.update_provider_session_history(
             str(session["session_id"]),
@@ -4523,13 +4885,15 @@ class ConversationProvider:
             bundle = self._native_bundle(payload, model, effort)
             if native_epoch:
                 bundle.setdefault("env", {})[GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV] = native_epoch
+            try:
+                existing_bundle = json.loads(str((existing_worker or {}).get("bootstrap_bundle_json") or "{}"))
+            except json.JSONDecodeError:
+                existing_bundle = {}
+            replay = existing_bundle.get("direct_context_replay")
+            if (not branch_changed and model.harness_profile in DIRECT_PROFILES
+                    and isinstance(replay, dict) and replay.get("target_epoch") == native_epoch):
+                bundle["direct_context_replay"] = replay
             if not authority_update_present and existing_worker:
-                try:
-                    existing_bundle = json.loads(
-                        str(existing_worker.get("bootstrap_bundle_json") or "{}")
-                    )
-                except json.JSONDecodeError:
-                    existing_bundle = {}
                 application_instructions = str(
                     (existing_bundle.get("application_developer_instructions")
                      if "application_developer_instructions" in existing_bundle
@@ -4782,8 +5146,11 @@ class ConversationProvider:
 
     def start(self, payload: ChatCompletionRequest, *, tenant_id: str = "local") -> dict[str, Any]:
         received_at = datetime.now(timezone.utc)
-        with self._session_start_lock(payload, tenant_id):
-            return self._start_impl(payload, tenant_id=tenant_id, received_at=received_at)
+        with _provider_admission_phase(payload, "start_total"):
+            lock_started = time.monotonic_ns() if native_timing_enabled() else None
+            with self._session_start_lock(payload, tenant_id):
+                _provider_admission_event(payload, "session_lock_acquired", lock_started)
+                return self._start_impl(payload, tenant_id=tenant_id, received_at=received_at)
 
     def _start_impl(
         self,
@@ -4796,10 +5163,13 @@ class ConversationProvider:
         # uses the per-session guard above plus durable Store uniqueness, so one
         # blocked conversation cannot hold unrelated starts at model selection.
         with nullcontext():
-            self._maybe_apply_retention_policy()
-            model = self._model(payload.model, tenant_id=tenant_id, owner_id=payload.metadata.owner_id)
-            effort = self._effort(payload, model)
-            fallback_model, fallback_effort = self._fallback_selection(payload, model, tenant_id=tenant_id)
+            with _provider_admission_phase(payload, "retention_check"):
+                self._maybe_apply_retention_policy()
+            with _provider_admission_phase(payload, "model_fallback_selection"):
+                model = self._model(payload.model, tenant_id=tenant_id, owner_id=payload.metadata.owner_id)
+                effort = self._effort(payload, model)
+                fallback_model, fallback_effort = self._fallback_selection(payload, model, tenant_id=tenant_id)
+            identity_started = time.monotonic_ns() if native_timing_enabled() else None
             idempotency_key = _idempotency_key(payload)
             base_key = _versioned_idempotency_key(
                 str(payload.metadata.idempotency_key or payload.metadata.message_id or idempotency_key),
@@ -4910,6 +5280,9 @@ class ConversationProvider:
             protected = _protected_source_indices(payload, keys)
             current_input = _protected_source_indices(payload, keys, current_input=True)
             workspace = _resolve_workspace(payload.metadata.glasshive_options)
+            _provider_admission_event(payload, "identity_source_prepared", identity_started)
+            session_started = time.monotonic_ns() if native_timing_enabled() else None
+            session_status = "failed"
             try:
                 session, new_native_session = self._session(
                     payload,
@@ -4918,6 +5291,7 @@ class ConversationProvider:
                     effort,
                     tenant_id=tenant_id,
                 )
+                session_status = "completed"
             except HostCapacityError as exc:
                 metadata = payload.metadata
                 if (metadata.native_invocation_id and metadata.native_body_sha256
@@ -4938,6 +5312,9 @@ class ConversationProvider:
                             "message_id": metadata.message_id,
                         }
                 raise
+            finally:
+                _provider_admission_event(payload, "session_ready", session_started, status=session_status)
+            context_started = time.monotonic_ns() if native_timing_enabled() else None
             turn_context = str(getattr(payload.metadata, "turn_context", "") or "")
             attachment_context = self._request_attachment_context(payload)
             # Bounded admission: the same durable decision (ReplayDecisionV1) and the admitted
@@ -4972,8 +5349,10 @@ class ConversationProvider:
                     keys,
                     new_native_session=new_native_session,
                 )
+                direct_replay_proof: dict[str, Any] = {}
                 native_tool_evidence_coverage_proven = (
-                    self._native_tool_evidence_coverage_proven(session, session_manifest)
+                    self._native_tool_evidence_coverage_proven(session, session_manifest,
+                        direct_replay_proof=direct_replay_proof)
                 )
                 source_coverage_proven = (
                     visible_source_coverage_proven
@@ -4999,6 +5378,7 @@ class ConversationProvider:
                 instruction, replay_decision, _compaction = _admit_conversation_history(
                     payload.messages, start_at=start_at, turn_context=turn_context, model=model,
                     observed_chars_per_token=session_manifest.get("observed_chars_per_token"),
+                    context_window=_effective_native_context_window(model, session_manifest)[0],
                     include_indices=include_indices, protected_indices=protected,
                     current_input_indices=current_input, source_ordinals_by_index=source_ordinals_by_index, attachment_context=attachment_context,
                     delivery_by_index=_message_delivery_indices(payload, keys),
@@ -5008,29 +5388,35 @@ class ConversationProvider:
                 )
                 if occupancy["state"] == "pressure" and pressure_transition is None:
                     pressure_projection = occupancy
-                    # Validate the complete source before any durable worker or session
-                    # mutation. A rejected admission therefore leaves the old epoch and
-                    # its occupancy calibration untouched. A successful render is enough to
-                    # prove admission, but only a payload carrying the prior source is enough
-                    # to prove that rotation will preserve it.
-                    replay_instruction, replay_source_decision, replay_compaction = (
-                        _admit_conversation_history(
-                            payload.messages,
-                            start_at=0,
-                            turn_context=turn_context,
-                            model=model,
-                            observed_chars_per_token=session_manifest.get(
-                                "observed_chars_per_token"
-                            ),
-                            include_indices=None,
-                            protected_indices=protected,
-                            current_input_indices=current_input,
-                            source_ordinals_by_index=source_ordinals_by_index,
-                            attachment_context=attachment_context,
-                            delivery_by_index=_message_delivery_indices(payload, keys),
+                    if source_coverage_proven:
+                        # Only a coverage-proved rotation consumes a complete replay. An
+                        # unproved delta keeps its existing native history; an unused larger
+                        # replay must not reject that already-bounded admission.
+                        replay_instruction, replay_source_decision, replay_compaction = (
+                            _admit_conversation_history(
+                                payload.messages,
+                                start_at=0,
+                                turn_context=turn_context,
+                                model=model,
+                                observed_chars_per_token=session_manifest.get(
+                                    "observed_chars_per_token"
+                                ),
+                                context_window=_effective_native_context_window(model, session_manifest)[0],
+                                include_indices=None,
+                                protected_indices=protected,
+                                current_input_indices=current_input,
+                                source_ordinals_by_index=source_ordinals_by_index,
+                                attachment_context=attachment_context,
+                                delivery_by_index=_message_delivery_indices(payload, keys),
+                            )
                         )
-                    )
-                    if not source_coverage_proven:
+                    tool_seed_pressure = False
+                    if source_coverage_proven and model.harness_profile in DIRECT_PROFILES:
+                        tool_seed_pressure = self._native_occupancy_projection(model, {
+                            "native_context_seed_bytes": int(direct_replay_proof.get("bytes") or 0),
+                            "observed_chars_per_token": session_manifest.get("observed_chars_per_token"),
+                        }, replay_source_decision)["state"] == "pressure"
+                    if not source_coverage_proven or tool_seed_pressure:
                         # A delta admission carries only the new turn. Rotating the native
                         # epoch here would discard the already accepted source, so leave the
                         # current context in place until the authenticated visible-message
@@ -5040,33 +5426,42 @@ class ConversationProvider:
                         replay_decision = {
                             **replay_decision,
                             "native_context_pressure_deferred": True,
+                            "native_context_pressure_deferred_reason": (
+                                "retained_tool_evidence_pressure" if tool_seed_pressure else "source_coverage_unproven"
+                            ),
                         }
                     else:
                         prior_epoch = native_context_epoch
                         session, native_context_epoch = self._advance_native_context_epoch_for_pressure(
-                            session, payload, model, effort, session_manifest
+                            session, payload, model, effort, session_manifest,
+                            direct_replay_proof=direct_replay_proof,
                         )
-                        session_manifest = self._session_manifest(session)
-                        advancement_key = (
-                            f"{payload.metadata.logical_turn_id}:{payload.metadata.logical_turn_revision}"
-                        )
-                        if native_context_epoch:
-                            advancement_key = f"{advancement_key}:{native_context_epoch}"
-                        pressure_transition = {
-                            "version": 1,
-                            "reason": "native_occupancy_pressure",
-                            "from_epoch": prior_epoch,
-                            "to_epoch": native_context_epoch,
-                            "worker_id": str(session.get("worker_id") or ""),
-                        }
-                        instruction, replay_decision, _compaction = (
-                            replay_instruction,
-                            replay_source_decision,
-                            replay_compaction,
-                        )
-                        occupancy = self._native_occupancy_projection(
-                            model, session_manifest, replay_decision
-                        )
+                        if native_context_epoch == prior_epoch:
+                            replay_decision = {**replay_decision,
+                                "native_context_pressure_deferred": True,
+                                "native_context_pressure_deferred_reason": "context_replay_unavailable"}
+                        else:
+                            session_manifest = self._session_manifest(session)
+                            advancement_key = (
+                                f"{payload.metadata.logical_turn_id}:{payload.metadata.logical_turn_revision}"
+                            )
+                            if native_context_epoch:
+                                advancement_key = f"{advancement_key}:{native_context_epoch}"
+                            pressure_transition = {
+                                "version": 1,
+                                "reason": "native_occupancy_pressure",
+                                "from_epoch": prior_epoch,
+                                "to_epoch": native_context_epoch,
+                                "worker_id": str(session.get("worker_id") or ""),
+                            }
+                            instruction, replay_decision, _compaction = (
+                                replay_instruction,
+                                replay_source_decision,
+                                replay_compaction,
+                            )
+                            occupancy = self._native_occupancy_projection(
+                                model, session_manifest, replay_decision
+                            )
                 predecessor_qualifier = ""
                 if predecessor_id and payload.metadata.native_predecessor_supersession:
                     disposition = {"version": 1, "message_id": payload.metadata.native_predecessor_supersession.previous_response_message_id,
@@ -5100,6 +5495,10 @@ class ConversationProvider:
                     ],
                     "input_visible_message_keys": list(keys.values()),
                 })
+                # Only an explicit provider-owned context declaration enables this path.
+                # Core follow-ups may omit Core headers; omission is not provider authority.
+                if not stable_admission and payload.metadata.main_context_owner == "provider_legacy":
+                    replay_decision["main_context_owner"] = "provider_legacy"
                 if stable_admission:
                     replay_decision.update({
                         "main_context_protocol": payload.metadata.main_context_protocol,
@@ -5125,6 +5524,7 @@ class ConversationProvider:
                     fallback_instruction, _fallback_decision, _fallback_compaction = _admit_conversation_history(
                         payload.messages, start_at=0, turn_context=turn_context, model=fallback_model,
                         observed_chars_per_token=session_manifest.get("observed_chars_per_token"),
+                        context_window=_effective_native_context_window(fallback_model, session_manifest)[0],
                         protected_indices=protected,
                         current_input_indices=current_input,
                         source_ordinals_by_index=source_ordinals_by_index,
@@ -5132,25 +5532,28 @@ class ConversationProvider:
                         delivery_by_index=_message_delivery_indices(payload, keys),
                     )
                     fallback_instruction = predecessor_qualifier + fallback_instruction
+                _provider_admission_event(payload, "context_admission_prepared", context_started)
                 try:
-                    request_record, created = self.store.create_provider_request(
-                        tenant_id=tenant_id, owner_id=payload.metadata.owner_id,
-                        session_id=session["session_id"], idempotency_key=idempotency_key,
-                        message_id=payload.metadata.message_id, stream_id=payload.metadata.stream_id,
-                        requested_history_count=len(payload.messages),
-                        fallback_model_id=fallback_model.id if fallback_model is not None else "",
-                        fallback_reasoning_effort=fallback_effort if fallback_model is not None else "",
-                        fallback_instruction=fallback_instruction, replay_decision=replay_decision,
-                        admitted_instruction=instruction, base_idempotency_key=base_key,
-                        native_invocation_id=payload.metadata.native_invocation_id,
-                        native_body_sha256=payload.metadata.native_body_sha256,
-                        response_timeout_s=response_timeout_s,
-                        response_deadline_at=response_deadline_at,
-                    )
+                    with _provider_admission_phase(payload, "request_record_write"):
+                        request_record, created = self.store.create_provider_request(
+                            tenant_id=tenant_id, owner_id=payload.metadata.owner_id,
+                            session_id=session["session_id"], idempotency_key=idempotency_key,
+                            message_id=payload.metadata.message_id, stream_id=payload.metadata.stream_id,
+                            requested_history_count=len(payload.messages),
+                            fallback_model_id=fallback_model.id if fallback_model is not None else "",
+                            fallback_reasoning_effort=fallback_effort if fallback_model is not None else "",
+                            fallback_instruction=fallback_instruction, replay_decision=replay_decision,
+                            admitted_instruction=instruction, base_idempotency_key=base_key,
+                            native_invocation_id=payload.metadata.native_invocation_id,
+                            native_body_sha256=payload.metadata.native_body_sha256,
+                            response_timeout_s=response_timeout_s,
+                            response_deadline_at=response_deadline_at,
+                        )
                     break
                 except (ProviderInvocationConflictError, ProviderFamilyStoppedError) as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
                 except ProviderAdmissionConflictError as exc:
+                    context_started = time.monotonic_ns() if native_timing_enabled() else None
                     if admission_attempt == 2:
                         raise HTTPException(status_code=409, detail="The accepted source context advanced during admission") from exc
             if not created:
@@ -5211,6 +5614,7 @@ class ConversationProvider:
         # Streaming, activity polling, and detached reconciliation can observe the same
         # request concurrently. Serialize the idempotent transition so terminal activity and
         # session history are each committed exactly once.
+        before = dict(request_record)
         timeout = self._request_timeout_seconds(request_record)
         if timeout is None or timeout <= 0:
             timeout = self._configured_response_timeout_seconds() or 660.0
@@ -5223,18 +5627,31 @@ class ConversationProvider:
         if isinstance(outcome, DeferredFallbackStart):
             # Start the serial fallback outside the sync lock: provisioning the fallback worker
             # must not block concurrent pollers, and the durable claim already elected one starter.
-            return self._start_serial_fallback(
+            self._notify_request_transition(before, outcome.request_record)
+            outcome = self._start_serial_fallback(
                 outcome.request_record,
                 outcome.run,
                 claimed_request=outcome.request_record,
             )
-        if isinstance(outcome, DeferredContextRecoveryStart):
-            return self._start_context_recovery(
+        elif isinstance(outcome, DeferredContextRecoveryStart):
+            self._notify_request_transition(before, outcome.request_record)
+            outcome = self._start_context_recovery(
                 outcome.request_record,
                 outcome.run,
                 claimed_request=outcome.request_record,
             )
+        self._notify_request_transition(before, outcome)
         return outcome
+
+    def _notify_request_transition(self, before: dict[str, Any], after: dict[str, Any]) -> None:
+        """Wake attached readers after a durable lifecycle change, including replacement runs."""
+        keys = ("run_id", "state", "fallback_state")
+        if tuple(before.get(key) for key in keys) == tuple(after.get(key) for key in keys):
+            return
+        notifications = getattr(self.service, "run_notifications", None)
+        if notifications is not None:
+            for run_id in {str(before.get("run_id") or ""), str(after.get("run_id") or "")} - {""}:
+                notifications.notify(run_id)
 
     @staticmethod
     def _fallback_claim_stale(request_record: dict[str, Any]) -> bool:
@@ -5732,7 +6149,7 @@ class ConversationProvider:
             return None
         try:
             profile, stdout = collector(_provider_log_worker(worker, run), str(run.get("run_id") or ""))
-            raw = _native_terminal_text(profile, stdout) if profile == "grok-build" else None
+            raw = _native_terminal_text(profile, stdout) if _native_event_profile(profile) == "grok-build" else None
             if raw is None:
                 return None
             event = next((json.loads(line) for line in reversed(stdout.splitlines())
@@ -5795,7 +6212,7 @@ class ConversationProvider:
             return None
         contract = self._saved_completion_contract(request_record) or {}
         return _native_terminal_text(str(profile or ""), str(stdout or ""),
-            contract.get("graph_control"), contract.get("delivery_control"))
+            contract.get("graph_control"), contract.get("delivery_control"), contract.get("response_contract"))
 
     def _native_effective_model(
         self, record: dict[str, Any], run: dict[str, Any], contract: dict[str, Any],
@@ -5951,6 +6368,41 @@ class ConversationProvider:
             current = prior
         return False
 
+    def _provider_owned_spoken_request(self, record: dict[str, Any], run: dict[str, Any],
+                                      payload: ChatCompletionRequest) -> bool:
+        """Use native API admission, never the absence of a Core invocation, as speech authority."""
+        metadata = payload.metadata
+        try:
+            decision = json.loads(str(record.get("replay_decision_json") or "{}"))
+        except (TypeError, ValueError):
+            return False
+        if (not isinstance(decision, dict) or decision.get("main_context_owner") != "provider_legacy"
+                or decision.get("main_context_protocol") or decision.get("family_continuation_v1")
+                or record.get("native_invocation_id") or record.get("native_body_sha256")
+                or not metadata or metadata.main_context_protocol
+                or metadata.main_context_owner != "provider_legacy"
+                or metadata.audio_eligible is not True
+                or metadata.owner_id != record.get("owner_id")
+                or not record.get("message_id") or metadata.message_id != record["message_id"]
+                or not record.get("stream_id") or metadata.stream_id != record["stream_id"]
+                or not decision.get("request_authority_sha256")):
+            return False
+        contract = decision.get("completion_contract_v1")
+        if (not isinstance(contract, dict) or contract.get("version") != 1
+                or contract.get("surface") != "voice"
+                or contract.get("delivery_control") != {"version": 1, "audio_eligible": True}):
+            return False
+        lookup = getattr(self.store, "current_provider_speech_request", None)
+        if not callable(lookup):
+            return False
+        fresh = lookup(str(record.get("request_id") or ""), str(run.get("run_id") or ""),
+                       str(run.get("active_attempt_id") or ""))
+        keys = ("request_id", "run_id", "tenant_id", "owner_id", "session_id", "message_id",
+                "stream_id", "replay_decision_json", "native_invocation_id", "native_body_sha256")
+        return bool(fresh and all(fresh.get(key) == record.get(key) for key in keys)
+                    and fresh.get("speech_conversation_id") == metadata.conversation_id
+                    and fresh.get("speech_agent_id") == metadata.agent_id)
+
     def _native_spoken_snapshot(self, record: dict[str, Any], run: dict[str, Any],
                                 payload: ChatCompletionRequest, graph_control: Any,
                                 delivery_control: Any) -> dict[str, Any] | None:
@@ -5961,11 +6413,14 @@ class ConversationProvider:
                 or str(record.get("run_id") or "") != str(run.get("run_id") or "")):
             return None
         family = not record.get("native_invocation_id")
-        if family and not self._accepted_spoken_family(record):
+        def current_owner():
+            return (self._accepted_spoken_family(record)
+                    or self._provider_owned_spoken_request(record, run, payload))
+        if family and not current_owner():
             return None
         spoken = self._native_spoken_content_snapshot(record, run, graph_control, delivery_control)
         # The transcript projection may race newer input; recheck its existing admission owner.
-        if spoken and family and not self._accepted_spoken_family(record):
+        if spoken and family and not current_owner():
             return None
         return spoken
 
@@ -5983,6 +6438,8 @@ class ConversationProvider:
             profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]))
         except (OSError, RuntimeError, ValueError):
             return None
+        if profile == "codex-cli" and (self._saved_completion_contract(record) or {}).get("surface") != "voice":
+            return None
         return _native_spoken_content(str(profile), str(stdout), graph_control, delivery_control)
 
     def _native_usage_snapshot(
@@ -5990,20 +6447,31 @@ class ConversationProvider:
         request_record: dict[str, Any],
         run: dict[str, Any],
     ) -> dict[str, int] | None:
+        return self._native_usage_snapshots(request_record, run)[0]
+
+    def _native_usage_snapshots(
+        self,
+        request_record: dict[str, Any],
+        run: dict[str, Any],
+    ) -> tuple[dict[str, int] | None, dict[str, int] | None, str]:
         collector = getattr(self.service.runtime, "provider_activity_log", None)
         if not callable(collector):
-            return None
+            return None, None, ""
         session = self.store.get_provider_session_by_id(str(request_record["session_id"]))
         if not session:
-            return None
+            return None, None, ""
         worker = self.store.get_worker(str(run.get("worker_id") or ""))
         if not worker:
-            return None
+            return None, None, ""
         try:
             profile, stdout = collector(_provider_log_worker(worker, run), str(run.get("run_id") or ""))
         except (OSError, RuntimeError, ValueError):
-            return None
-        return _native_usage(str(profile or ""), str(stdout or ""))
+            return None, None, ""
+        billing = _native_usage(str(profile or ""), str(stdout or ""))
+        model = GLASSHIVE_MODELS.get(str(session.get("model_id") or ""))
+        context, scope = _native_context_usage(str(profile or ""), str(stdout or ""), billing,
+            context_window=model.context_window if model else 0)
+        return billing, context, scope
 
     def _conversation_output(
         self,
@@ -6121,6 +6589,7 @@ class ConversationProvider:
             "version": 1, "model": payload.model,
             **({"response_contract": private_contract} if private_contract else {}),
             "reasoning_effort": payload.reasoning_effort,
+            "surface": payload.metadata.surface if payload.metadata else "web",
             "graph_control": self._graph_transfer_control(payload),
             "delivery_control": messaging_delivery_control(
                 audio_eligible=bool(payload.metadata and payload.metadata.audio_eligible)
@@ -6213,15 +6682,15 @@ class ConversationProvider:
                 "code": "provider_response_failed",
                 "message": "The model returned no answer. Please retry this turn.",
             })
-        usage = self._native_usage_snapshot(request_record, run)
+        usage, context_usage, context_scope = self._native_usage_snapshots(request_record, run)
         usage_source = "native" if usage else "estimated"
         if not usage:
             prompt_tokens = max(1, int(contract.get("prompt_tokens") or 1))
             completion_tokens = max(1, (len(visible_output) + 3) // 4)
             usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                      "total_tokens": prompt_tokens + completion_tokens}
-        if usage_source == "native":
-            self._record_native_usage_calibration(request_record, usage)
+        if context_usage:
+            self._record_native_usage_calibration(request_record, context_usage, measurement_scope=context_scope)
         if decision["type"] == "tool_call":
             tool_name = str(decision["tool_name"])
             message = {
@@ -6320,7 +6789,7 @@ class ConversationProvider:
                 kwargs = {"instruction_sha256": str(admission.get("instruction_sha256") or "")} if callable(
                     getattr(self.service.runtime, "provider_tool_evidence_log", None)) else {}
                 profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]), **kwargs)
-                if profile not in {"codex-cli", "claude-code", "grok-build"} or not stdout:
+                if profile not in {"codex-cli", "claude-code", "grok-build", *DIRECT_PROFILES} or not stdout:
                     return response
                 evidence = _native_tool_evidence(str(profile), str(stdout))
                 response["glasshive"]["tool_evidence"] = {
@@ -6391,7 +6860,7 @@ class ConversationProvider:
                     kwargs = {"instruction_sha256": str(decision["instruction_sha256"])} if callable(
                         getattr(self.service.runtime, "provider_tool_evidence_log", None)) else {}
                     profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]), **kwargs)
-                    if profile in {"codex-cli", "claude-code", "grok-build"} and stdout:
+                    if profile in {"codex-cli", "claude-code", "grok-build", *DIRECT_PROFILES} and stdout:
                         evidence = _native_tool_evidence(profile, stdout)
                         available = True
                 except (OSError, RuntimeError, ValueError):
@@ -6446,6 +6915,32 @@ class ConversationProvider:
         payload: ChatCompletionRequest,
         request: Request,
     ):
+        notifications = getattr(self.service, "run_notifications", None)
+        subscription = notifications.subscribe() if notifications is not None else None
+        tracing = subscription is not None and native_timing_enabled()
+        started = time.monotonic() if tracing else 0.0
+        if tracing:
+            subscription.metrics = {"observationPasses": 0, "deliveredHints": 0,
+                "coalescedHints": 0, "hintWokenWaits": 0, "timedOutWaits": 0, "waitMs": 0}
+        try:
+            async for chunk in self._stream_chunks_observed(request_record, payload, request, subscription):
+                yield chunk
+        finally:
+            if subscription is not None:
+                subscription.close()
+                if tracing:
+                    native_timing_event("stream_observation_completed",
+                        requestHash=native_timing_hash("request", request_record["request_id"]),
+                        elapsedMs=(time.monotonic() - started) * 1000,
+                        **subscription.metrics)
+
+    async def _stream_chunks_observed(
+        self,
+        request_record: dict[str, Any],
+        payload: ChatCompletionRequest,
+        request: Request,
+        subscription,
+    ):
         request_id = str(request_record["request_id"])
         try:
             agent_builder_control = self._graph_transfer_control(payload)
@@ -6482,9 +6977,14 @@ class ConversationProvider:
         native_snapshot = ""
         emitted_public_parts: set[tuple[str, int]] = set()
         emitted_content = ""
+        first_voice_public_seen = False
         execution_started_seen = False
         last_heartbeat = time.monotonic()
         while True:
+            if subscription is not None:
+                subscription.observe(str(request_record.get("run_id") or ""))
+                if subscription.metrics is not None:
+                    subscription.metrics["observationPasses"] += 1
             if await request.is_disconnected():
                 # A browser/SSE disconnect is not cancellation. The same idempotency key can
                 # reattach while the native run continues.
@@ -6503,8 +7003,12 @@ class ConversationProvider:
                     extra={"sqlite_errorcode": error.sqlite_errorcode})
                 yield ": heartbeat\n\n"
                 last_heartbeat = time.monotonic()
-                await asyncio.sleep(0.2)
+                await self._wait_for_stream_update(subscription)
                 continue
+            if subscription is not None and subscription.run_id != str(record.get("run_id") or ""):
+                # Fallback can move this request to a new run. Subscribe before its content read.
+                subscription.observe(str(record.get("run_id") or ""))
+            request_record = record
             model_contract = self._saved_completion_contract(record) or {"model": payload.model}
             run = await asyncio.to_thread(
                 self.store.get_run,
@@ -6564,12 +7068,20 @@ class ConversationProvider:
                             extra={"sqlite_errorcode": error.sqlite_errorcode})
                         yield ": heartbeat\n\n"
                         last_heartbeat = time.monotonic()
-                        await asyncio.sleep(0.2)
+                        await self._wait_for_stream_update(subscription)
                         continue
                 redactor = pending_redactor
                 emitted_public_parts.update(pending_public_parts)
                 native_snapshot = spoken["text"]
                 for visible_delta, completion, part_disposition in pieces:
+                    if (not first_voice_public_seen and visible_delta
+                            and payload.metadata and payload.metadata.surface == "voice"
+                            and part_disposition and part_disposition.get("audio") == "eligible"):
+                        first_voice_public_seen = True
+                        native_timing_event("public_voice_text_emitted",
+                            requestHash=native_timing_hash("request", request_id),
+                            runHash=native_timing_hash("run", run["run_id"]),
+                            charCount=len(visible_delta))
                     emitted_content += visible_delta
                     yield "data: " + json.dumps({
                         "id": request_id, "object": "chat.completion.chunk", "created": created,
@@ -6699,7 +7211,10 @@ class ConversationProvider:
                             "model": canonical["model"], "choices": [{"index": 0,
                                 "delta": {"content": terminal_delta, **({
                                     "provider_specific_fields": {"viventium": {
-                                        "delivery_disposition": delivery_disposition}}
+                                        "delivery_disposition": delivery_disposition,
+                                        **({"deliveryDispositionRanges": message["provider_specific_fields"]["viventium"]["deliveryDispositionRanges"],
+                                            "delivery_range_text": output}
+                                           if "deliveryDispositionRanges" in message.get("provider_specific_fields", {}).get("viventium", {}) else {})}}
                                 } if delivery_disposition is not None else {})}, "finish_reason": None}],
                         }, separators=(",", ":")) + "\n\n"
                     if message.get("tool_calls"):
@@ -6785,7 +7300,14 @@ class ConversationProvider:
             if time.monotonic() - last_heartbeat >= 15:
                 yield ": heartbeat\n\n"
                 last_heartbeat = time.monotonic()
+            await self._wait_for_stream_update(subscription)
+
+    @staticmethod
+    async def _wait_for_stream_update(subscription) -> None:
+        if subscription is None:
             await asyncio.sleep(0.2)
+        else:
+            await subscription.wait()
 
     def activity_payload(self, request_id: str, *, after_sequence: int = 0) -> dict[str, Any]:
         record = self.store.get_provider_request(request_id)
@@ -6860,6 +7382,7 @@ class ConversationProvider:
             # Persist client intent before touching the runtime so concurrent poll/reconnect
             # paths observe an irreversible cancellation boundary.
             updated = self.store.update_provider_request(request_id, state="cancelled") or record
+            self._notify_request_transition(record, updated)
             existing_types = {
                 item["event_type"]
                 for item in self.store.list_provider_activity(request_id)
@@ -7059,7 +7582,11 @@ class ConversationProvider:
         configured = self._configured_response_timeout_seconds()
         requested = payload.metadata.response_timeout_s if payload.metadata else None
         if configured is None:
-            return float(requested) if requested is not None else None
+            if requested is not None:
+                return float(requested)
+            private_contract = _private_machine_state_response_contract(payload.metadata)
+            return (self.effective_response_timeout_seconds()
+                if private_machine_state_output_schema(private_contract) is not None else None)
         return min(configured, float(requested)) if requested is not None else configured
 
     @staticmethod
@@ -7154,6 +7681,8 @@ class ConversationProvider:
             ),
         )
         settled = arbitration.get("request") or {}
+        if settled:
+            self._notify_request_transition(request, settled)
         if arbitration.get("newly_expired"):
             self.store.add_provider_activity(
                 str(request["request_id"]), "failed", ACTIVITY_SUMMARIES["failed"],
@@ -7254,6 +7783,7 @@ class ConversationProvider:
             )
             claimed = arbitration.get("request") or current
             run = arbitration.get("run") or {}
+            self._notify_request_transition(current, claimed)
             if not arbitration.get("deadline_exceeded"):
                 return claimed, run
             newly_expired = bool(arbitration.get("newly_expired"))
@@ -7495,6 +8025,8 @@ class ConversationProvider:
         native_descriptor.pop("developer_instructions", None)
         authoring_input = payload.model_dump(mode="json")
         authoring_metadata = dict(authoring_input.get("metadata") or {})
+        if not authoring_metadata.get("main_context_state_blocks"):
+            authoring_metadata.pop("main_context_state_blocks", None)
         # The broker bearer is intentionally invocation-local and may be
         # refreshed for the exact same queued request after restart. Every
         # other authoring input must remain byte-equivalent under one
@@ -7603,14 +8135,15 @@ class ConversationProvider:
         )
         incoming_env = bundle.get("env") if isinstance(bundle.get("env"), dict) else {}
         env = dict(incoming_env)
+        bundle.pop("service_tier", None)
         env.pop("WPR_CODEX_CLI_REASONING_EFFORT", None)
         env.pop("WPR_CLAUDE_CODE_EFFORT", None)
         env.pop("WPR_GROK_REASONING_EFFORT", None)
-        if model.harness_profile == "codex-cli":
+        if model.harness_profile in {"codex-cli", "direct-openai"}:
             env["WPR_CODEX_CLI_REASONING_EFFORT"] = effort
-        elif model.harness_profile == "claude-code":
+        elif model.harness_profile in {"claude-code", "direct-anthropic"}:
             env["WPR_CLAUDE_CODE_EFFORT"] = effort
-        elif model.harness_profile == "grok-build" and effort != "default":
+        elif model.harness_profile in {"grok-build", "direct-xai"} and effort != "default":
             env["WPR_GROK_REASONING_EFFORT"] = effort
         return {
             **bundle,
@@ -7801,6 +8334,7 @@ class ConversationProvider:
                     start_at=0,
                     turn_context=str(source["turn_context"]), model=model,
                     observed_chars_per_token=source.get("observed_chars_per_token"),
+                    context_window=_effective_native_context_window(model, current_manifest)[0],
                     protected_indices=set(source["protected_indices"]),
                     current_input_indices=set(source["current_input_indices"]),
                     source_ordinals_by_index=source["source_ordinals_by_index"],
@@ -7923,6 +8457,7 @@ class ConversationProvider:
                     "provider_context_epoch": provider_context_epoch,
                     "latest_native_prompt_tokens": 0,
                     "latest_native_total_tokens": 0,
+                    "native_context_window_tokens": 0,
                     "last_rotation_reason": recovery_reason,
                     "rotated_from_run_id": failed_run_id,
                     "rotated_with_semantic_compaction": bool(
@@ -8284,6 +8819,7 @@ class ConversationProvider:
         self,
         request_record: dict[str, Any],
         usage: dict[str, int],
+        *, measurement_scope: str = "native_prompt_tokens",
     ) -> None:
         prompt_tokens = max(0, int(usage.get("prompt_tokens") or 0))
         if prompt_tokens <= 0:
@@ -8327,11 +8863,16 @@ class ConversationProvider:
             prompt_tokens=prompt_tokens,
             total_tokens=total_tokens,
             measurement_epoch=measured_epoch,
-            measurement_scope="native_prompt_tokens",
+            measurement_scope=measurement_scope,
             measurement_created_at=measurement_created_at,
+            context_window_tokens=usage.get("context_window_tokens"),
+            context_window_model_id=(str(request_record.get("fallback_model_id") or "")
+                if request_record.get("fallback_state") == "started"
+                else str((self._saved_completion_contract(request_record) or {}).get("model") or "")),
         )
         if (
-            str(replay_decision.get("mode") or "") == "bootstrap"
+            measurement_scope == "native_prompt_tokens"
+            and str(replay_decision.get("mode") or "") == "bootstrap"
             and str(replay_decision.get("native_source_coverage") or "") == "complete"
             and instruction_bytes > 0
         ):
@@ -8672,6 +9213,19 @@ def _http_error_code(status_code: int) -> str:
     }.get(status_code, "server_error" if status_code >= 500 else "invalid_request")
 
 
+def _admitted_response_headers(record: dict[str, Any]) -> dict[str, str]:
+    """Publish only the admitted request owner's stored absolute deadline."""
+    headers = {"X-GlassHive-Request-Id": str(record["request_id"])}
+    raw = str(record.get("response_deadline_at") or "").strip()
+    try:
+        deadline = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if deadline.tzinfo is not None and deadline.utcoffset() is not None:
+            headers["X-GlassHive-Response-Deadline-At"] = deadline.isoformat()
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return headers
+
+
 def install_conversation_provider_routes(
     app,
     *,
@@ -8771,15 +9325,23 @@ def install_conversation_provider_routes(
 
     @app.post("/v1/chat/completions")
     async def glasshive_chat_completions(payload: ChatCompletionRequest, request: Request):
-        auth = require_provider_auth(request)
-        payload = _hydrate_metadata(payload, request, auth)
-        if bool(payload.metadata.native_invocation_id) != bool(payload.metadata.native_body_sha256):
-            raise HTTPException(status_code=400, detail="Native invocation requires its exact body digest")
-        if payload.metadata.native_invocation_id and not hmac.compare_digest(
-            hashlib.sha256(await request.body()).hexdigest(), payload.metadata.native_body_sha256,
-        ):
-            raise HTTPException(status_code=400, detail="Native invocation body digest mismatch")
-        record = await asyncio.to_thread(provider.start, payload, tenant_id=auth.tenant_id)
+        route_started = time.monotonic_ns() if native_timing_enabled() else None
+        trace_identity = (
+            _header(request, "x-viventium-message-id") or getattr(payload.metadata, "message_id", ""),
+            _header(request, "x-viventium-native-invocation-id") or getattr(payload.metadata, "native_invocation_id", ""),
+        ) if route_started is not None else None
+        _provider_admission_event(payload, "route_enter", route_started, status="started", identity=trace_identity)
+        with _provider_admission_phase(payload, "auth_hydrate_digest", identity=trace_identity):
+            auth = require_provider_auth(request)
+            payload = _hydrate_metadata(payload, request, auth)
+            if bool(payload.metadata.native_invocation_id) != bool(payload.metadata.native_body_sha256):
+                raise HTTPException(status_code=400, detail="Native invocation requires its exact body digest")
+            if payload.metadata.native_invocation_id and not hmac.compare_digest(
+                hashlib.sha256(await request.body()).hexdigest(), payload.metadata.native_body_sha256,
+            ):
+                raise HTTPException(status_code=400, detail="Native invocation body digest mismatch")
+        with _provider_admission_phase(payload, "thread_dispatch_start", identity=trace_identity):
+            record = await asyncio.to_thread(provider.start, payload, tenant_id=auth.tenant_id)
         if payload.stream:
             return StreamingResponse(
                 provider.stream(record, payload, request),
@@ -8788,11 +9350,12 @@ def install_conversation_provider_routes(
                     "Cache-Control": "no-cache, no-transform",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
-                    "X-GlassHive-Request-Id": str(record["request_id"]),
+                    **_admitted_response_headers(record),
                 },
             )
         record, run = await asyncio.to_thread(provider.wait, str(record["request_id"]))
-        return JSONResponse(provider.response_payload(record, run, payload))
+        return JSONResponse(provider.response_payload(record, run, payload),
+            headers=_admitted_response_headers(record))
 
     @app.post("/v1/responses")
     async def glasshive_responses(payload: ResponsesRequest, request: Request):
@@ -8822,12 +9385,13 @@ def install_conversation_provider_routes(
                     "Cache-Control": "no-cache, no-transform",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
-                    "X-GlassHive-Request-Id": str(record["request_id"]),
+                    **_admitted_response_headers(record),
                 },
             )
         record, run = await asyncio.to_thread(provider.wait, str(record["request_id"]))
         chat_response = provider.response_payload(record, run, chat_payload)
-        return JSONResponse(_responses_from_chat(chat_response, payload))
+        return JSONResponse(_responses_from_chat(chat_response, payload),
+            headers=_admitted_response_headers(record))
 
     @app.post("/v1/requests/by-invocation/{invocation_id}/interject")
     def glasshive_interject(invocation_id: str, payload: NativeInterjectionRequest, request: Request):

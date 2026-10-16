@@ -1,6 +1,7 @@
 """Requires the O07 shared hooks; executes native command construction without a provider."""
 
 import json
+from pathlib import Path
 import pytest
 from workers_projects_runtime.bootstrap import refresh_project_runtime_files_for_worker
 from workers_projects_runtime.profile_runtime import ClaudeCodeRuntime, CodexCliRuntime
@@ -149,7 +150,7 @@ def test_same_owner_dispatch_shares_exact_main_background_only(tmp_path):
     store = Store(tmp_path / "data.db")
     ControlPlaneStore(tmp_path / "data.db")
     provider = SimpleNamespace(
-        _model=lambda _: SimpleNamespace(effort_choices=("high",))
+        _model=lambda _, **_scope: SimpleNamespace(effort_choices=("high",))
     )
     coordinator = CoordinatorService(store, SimpleNamespace(), provider)
     conversation = coordinator.create(
@@ -237,3 +238,165 @@ def test_owner_mcp_configuration_reuses_existing_write_scope_and_revision():
         getter.description
         == context_tool_manifest()["tools"]["worker_configuration_get"]
     )
+
+
+@pytest.mark.parametrize("profile", ["codex-cli", "claude-code", "grok-build"])
+@pytest.mark.parametrize("native_tools", [True, False])
+def test_host_mission_configuration_stays_private_with_shared_project(tmp_path, monkeypatch, profile, native_tools):
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime, HostClaudeCodeRuntime
+    from workers_projects_runtime.grok_runtime import HostGrokBuildRuntime
+    runtime_type = {"codex-cli": HostCodexCliRuntime, "claude-code": HostClaudeCodeRuntime,
+                    "grok-build": HostGrokBuildRuntime}[profile]
+    owner_home = tmp_path / "owner"
+    (owner_home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(owner_home))
+    monkeypatch.setenv("CODEX_HOME", str(owner_home / ".codex"))
+    runtime = runtime_type(str(tmp_path / "state"))
+    monkeypatch.setattr(runtime, "_host_plugin_denylist", lambda: [])
+    monkeypatch.setattr(runtime, "_host_codex_personality", lambda: "inherit")
+    monkeypatch.setattr(runtime, "_project_host_codex_capability_roots", lambda _: None)
+    monkeypatch.setattr(runtime, "_project_host_claude_capability_roots", lambda _: None)
+    monkeypatch.setattr(runtime, "_copy_host_codex_auth", lambda _: None)
+    workspace = tmp_path / "shared"
+    workspace.mkdir()
+    owned = {"AGENTS.md": b"Owner project rules", "CLAUDE.md": b"Owner Claude rules",
+             ".mcp.json": b'{"mcpServers":{"owner-tool":{"url":"https://example.test/owner"}}}'}
+    for name, data in owned.items():
+        (workspace / name).write_bytes(data)
+    bundle = {"agents_md": "Exact synthetic worker instructions.",
+              "provider_capabilities": {"native_tools": native_tools},
+              "claude_project_mcp": {"scoped-tools": {"type": "http", "url": "https://example.test/scoped"}}}
+    if profile == "codex-cli":
+        bundle["codex_config_append"] = '[mcp_servers.scoped-tools]\nurl="https://example.test/scoped"\n'
+    worker = {"worker_id": "worker-" + profile, "owner_id": "local", "profile": profile,
+              "model": "synthetic-model", "trusted_run_lane": "mission", "execution_mode": "host",
+              "workspace_dir": str(workspace), "workspace_root": str(workspace),
+              "bootstrap_bundle_json": json.dumps(bundle)}
+    actual_workspace = runtime._host_workspace_dir(worker)
+    runtime._materialize_workspace(worker, actual_workspace)
+    assert all((workspace / name).read_bytes() == data for name, data in owned.items())
+    assert Path(runtime._host_native_mission_placement(worker)["workspace_dir"]) == actual_workspace
+    selectors = worker["_native_context_selectors"]
+    config = Path(selectors["host_root"]) / "mcp.json"
+    assert config.is_file() and config.stat().st_mode & 0o777 == 0o600
+    assert json.loads(config.read_text())["mcpServers"] == (bundle["claude_project_mcp"] if native_tools else {})
+    assert "Exact synthetic worker instructions." in Path(selectors["codex_instructions"]).read_text()
+    if profile == "codex-cli":
+        private_codex = runtime._home_dir(worker["worker_id"]) / ".codex/config.toml"
+        assert ("[mcp_servers.scoped-tools]" in private_codex.read_text()) is native_tools
+    assert (actual_workspace / "glasshive-host-tools/capture-front-window.sh").is_file()
+    assert json.loads(worker["bootstrap_bundle_json"]) == bundle
+    # An existing worker may still have earlier generated log mandates. A later
+    # run refreshes its private authority without changing owner project files.
+    stale = "Keep `work-log.md` current with concise progress, blockers, and completion notes."
+    for path in [Path(selectors["codex_instructions"]),
+                 Path(selectors["claude_instructions"]),
+                 runtime._home_dir(worker["worker_id"]) / ".grok/AGENTS.md"]:
+        path.write_text(stale)
+    refresh_project_runtime_files_for_worker(runtime._home_dir(worker["worker_id"]), actual_workspace, worker)
+    assert all((workspace / name).read_bytes() == data for name, data in owned.items())
+    # Reproduce the original-worker command path after ensure_worker_ready copied it.
+    from workers_projects_runtime.native_context_projection import prepare_private_command
+    from workers_projects_runtime.profile_runtime import HOST_DEFAULT_AGENTS_MD, HOST_DEFAULT_CLAUDE_MD
+    worker.pop("_native_context_selectors", None)
+    final = prepare_private_command(runtime, worker, bundle)
+    selected_authority = Path(final["codex_instructions"]).read_text()
+    assert HOST_DEFAULT_AGENTS_MD in selected_authority
+    assert "Exact synthetic worker instructions." in selected_authority
+    assert HOST_DEFAULT_CLAUDE_MD in Path(final["claude_instructions"]).read_text()
+    for path in [Path(final["codex_instructions"]), Path(final["claude_instructions"]),
+                 runtime._home_dir(worker["worker_id"]) / ".grok/AGENTS.md"]:
+        assert stale not in path.read_text()
+        assert "keep `work-log.md` updated" not in path.read_text()
+    assert all((workspace / name).read_bytes() == data for name, data in owned.items())
+    if profile == "claude-code":
+        runtime._assert_host_claude_mcp_config(worker, Path(final["mcp_config"]))
+    if profile == "codex-cli":
+        runtime._assert_host_codex_worker_policy(worker)
+
+
+def test_mixed_host_missions_never_replace_shared_native_config(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime, HostClaudeCodeRuntime
+    from workers_projects_runtime.grok_runtime import HostGrokBuildRuntime
+    owner = tmp_path / "owner"
+    (owner / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(owner))
+    monkeypatch.setenv("CODEX_HOME", str(owner / ".codex"))
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    user_config = b'{"mcpServers":{"owner-tool":{"url":"https://example.test/owner"}}}'
+    (shared / ".mcp.json").write_bytes(user_config)
+    pairs = []
+    for profile, runtime_type in [("codex-cli", HostCodexCliRuntime), ("claude-code", HostClaudeCodeRuntime), ("grok-build", HostGrokBuildRuntime)]:
+        runtime = runtime_type(str(tmp_path / "state"))
+        for method in ("_project_host_codex_capability_roots", "_project_host_claude_capability_roots", "_copy_host_codex_auth"):
+            monkeypatch.setattr(runtime, method, lambda _: None)
+        monkeypatch.setattr(runtime, "_host_plugin_denylist", lambda: [])
+        monkeypatch.setattr(runtime, "_host_codex_personality", lambda: "inherit")
+        bundle = {"agents_md": "Shared synthetic task authority.", "claude_project_mcp": {"scoped-tools": {"type": "http", "url": "https://example.test/scoped"}}}
+        worker = {"worker_id": "mixed-" + profile, "profile": profile, "owner_id": "local", "execution_mode": "host", "trusted_run_lane": "mission", "workspace_dir": str(shared), "bootstrap_bundle_json": json.dumps(bundle)}
+        pairs.append((runtime, worker))
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        list(executor.map(lambda pair: pair[0]._materialize_workspace(pair[1], shared), pairs))
+    assert (shared / ".mcp.json").read_bytes() == user_config
+    assert len({worker["_native_context_selectors"]["mcp_config"] for _, worker in pairs}) == 3
+    for runtime, worker in pairs:
+        config = Path(worker["_native_context_selectors"]["mcp_config"])
+        assert json.loads(config.read_text())["mcpServers"]["scoped-tools"]["url"] == "https://example.test/scoped"
+        assert runtime._host_native_mission_placement({**worker, "profile": "opencode"}) is None
+
+
+@pytest.mark.parametrize('lane,bundle_mode', [('conversation', None), ('conversation', 'conversation'), ('mission', 'conversation')])
+def test_creation_preserves_trusted_lane_before_host_native_materialization(tmp_path, monkeypatch, lane, bundle_mode):
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    from workers_projects_runtime.grok_runtime import HostGrokBuildRuntime
+    from workers_projects_runtime.service import WorkersProjectsService
+    from workers_projects_runtime.store import Store
+    import workers_projects_runtime.profile_runtime as profiles
+    monkeypatch.setattr(profiles, 'require_native_installed_owner', lambda _: None)
+    native = HostGrokBuildRuntime(str(tmp_path / 'native'))
+    store = Store(str(tmp_path / 'state.db'))
+    runtime = StubRuntime()
+    observed = []
+    def prepare(worker):
+        # This is the real service create -> Store -> native preparation boundary,
+        # before provider-session upsert can repair a wrongly defaulted lane.
+        observed.append((worker['trusted_run_lane'], store.get_worker(worker['worker_id'])['trusted_run_lane']))
+        return native.prepare_worker_workspace(worker)
+    runtime.prepare_worker_workspace = prepare
+    service = WorkersProjectsService(store, runtime, reconcile_on_startup=False)
+    service.executor.submit(lambda: None).result(timeout=2)
+    service.executor.submit = lambda *args, **kwargs: None
+    monkeypatch.setattr(service, '_reserved_runtime_preflight', lambda *args, **kwargs: {})
+    monkeypatch.setattr(service, '_ensure_execution_allowed', lambda *args, **kwargs: None)
+    project = store.create_project('owner', 'Native context', 'Keep purpose at creation', 'grok-build')
+    bundle = {'provider_model': 'grok-selected', 'developer_instructions': 'Exact conversation authority.'}
+    if bundle_mode: bundle['run_mode'] = bundle_mode
+    try:
+        worker = service.create_worker(project['project_id'], 'owner', 'Synthetic agent', 'assistant',
+            'grok-build', '', execution_mode='host', workspace_root=str(tmp_path / 'workspace'),
+            bootstrap_bundle=bundle, start_synchronously=False, _trusted_run_lane=lane)
+        assert observed == [(lane, lane)]
+        home = native._home_dir(worker['worker_id'])
+        global_rules = home / '.grok/AGENTS.md'
+        assert global_rules.exists() is (lane == 'mission')
+        if lane == 'conversation':
+            # Native global user instructions are outside runtime-owned authority.
+            # A final refresh must neither replace nor remove such a file.
+            global_rules.parent.mkdir(parents=True, exist_ok=True)
+            global_rules.write_text('User-owned global policy.')
+            final = {**store.get_worker(worker['worker_id']),
+                     'bootstrap_bundle_json': json.dumps({**bundle, 'run_mode': 'conversation'})}
+            assert native._host_native_mission_placement(final) is None
+            native.prepare_worker_workspace(final)
+            assert global_rules.read_text() == 'User-owned global policy.'
+            # No native mission defaults can be appended after the exact override.
+            command = native._grok_command(final, native._host_runtime_info(final, pid=None), host=True)
+            selected = Path(command[command.index('--system-prompt-file') + 1]).read_text()
+            assert selected == 'Exact conversation authority.'
+        else:
+            assert 'Exact conversation authority.' in global_rules.read_text()
+            assert native._host_native_mission_placement(worker) is not None
+    finally:
+        service.shutdown()

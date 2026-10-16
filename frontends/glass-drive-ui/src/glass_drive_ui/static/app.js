@@ -519,6 +519,9 @@ function workspaceProfileLabel(profile) {
     'codex-cli': 'Codex',
     'claude-code': 'Claude Code',
     'grok-build': 'Grok Build',
+    'direct-openai': 'Direct / OpenAI API',
+    'direct-anthropic': 'Direct / Anthropic API',
+    'direct-xai': 'Direct / xAI API',
     'openclaw-general': 'OpenClaw',
   }[profile] || profile || 'Worker';
 }
@@ -1629,6 +1632,9 @@ function workspaceMeta(selectValue, data) {
     'codex-cli': 'Codex',
     'claude-code': 'Claude Code',
     'grok-build': 'Grok Build',
+    'direct-openai': 'Direct / OpenAI API',
+    'direct-anthropic': 'Direct / Anthropic API',
+    'direct-xai': 'Direct / xAI API',
     'openclaw-general': 'OpenClaw',
   }[profile] || profile;
   const workspaceType = document.getElementById('workspace-type')?.value || 'sandboxed';
@@ -1644,6 +1650,10 @@ function selectedWorkerEffort(selectValue, controls) {
   const profile = (selectValue || '').startsWith('new:')
     ? String(selectValue).split(':', 2)[1] || ''
     : '';
+  if (profile.startsWith('direct-')) {
+    const effort = document.getElementById('direct-effort');
+    return effort && !effort.disabled && effort.dataset.profile === profile ? effort.value : '';
+  }
   if (profile === 'codex-cli') return controls.codexEffort?.value || '';
   if (profile === 'claude-code') return controls.claudeEffort?.value || '';
   if (profile === 'grok-build') return controls.grokEffort?.value || '';
@@ -1658,9 +1668,43 @@ function syncWorkspaceUI(select, data, button, help) {
   return meta;
 }
 
+let directProfileCatalogPromise;
+async function syncDirectEffort(profile, selector) {
+  const field = document.querySelector('[data-direct-effort]');
+  const effort = document.getElementById('direct-effort');
+  if (!field || !effort) return;
+  const direct = ['direct-openai', 'direct-anthropic', 'direct-xai'].includes(profile);
+  field.hidden = !direct;
+  if (!direct) return;
+  effort.disabled = true;
+  try {
+    directProfileCatalogPromise ||= fetch('/api/worker-profiles', { credentials:'same-origin', cache:'no-store' })
+      .then(response => { if (!response.ok) throw new Error('Model options unavailable'); return response.json(); })
+      .catch(error => { directProfileCatalogPromise = null; throw error; });
+    const catalog = await directProfileCatalogPromise;
+    if (String(selector.value) !== `new:${profile}`) return;
+    const model = catalog.items?.find(item => item.profile === profile)?.models?.[0];
+    if (!model || !Array.isArray(model.effort_choices) || !model.effort_choices.length) throw new Error('Model options unavailable');
+    const previous = effort.dataset.profile === profile ? effort.value : model.recommended_effort;
+    effort.replaceChildren(...model.effort_choices.map(value => {
+      const option = document.createElement('option'); option.value = value;
+      option.textContent = value === 'default' ? 'Provider default' : value[0].toUpperCase() + value.slice(1);
+      return option;
+    }));
+    effort.value = model.effort_choices.includes(previous) ? previous : model.recommended_effort;
+    effort.dataset.profile = profile;
+    effort.disabled = false;
+  } catch (_) {
+    if (String(selector.value) !== `new:${profile}`) return;
+    const option = document.createElement('option'); option.value = ''; option.textContent = 'Model options unavailable';
+    effort.replaceChildren(option);
+  }
+}
+
 function syncLaunchChoiceUI(select, accountSelect, policySelect, summary) {
   const isNew = String(select?.value || '').startsWith('new:');
   const profile = isNew ? String(select.value).split(':', 2)[1] : '';
+  syncDirectEffort(profile, select);
   const supportsPersonalAccounts = isNew && policySelect?.dataset.forcedLegacy !== 'true';
   const accountField = document.getElementById('worker-account-field');
   const policyField = document.getElementById('provider-account-policy-field');
@@ -2365,6 +2409,17 @@ async function main() {
     const meta = syncWorkspaceUI(select, bootstrap, button, help);
     const fileRefs = fileDraft.readyRefs();
     status.textContent = wantsSchedule ? 'Saving schedule...' : meta.statusText;
+    if (String(select.value).startsWith('new:direct-')) {
+      const directProfile = String(select.value).split(':', 2)[1];
+      await syncDirectEffort(directProfile, select);
+      const effort = document.getElementById('direct-effort');
+      if (!effort || effort.disabled || effort.dataset.profile !== directProfile || select.value !== `new:${directProfile}`) {
+        status.textContent = 'Model options are not ready. Check the selected model and try again.';
+        button.disabled = false;
+        if (scheduleButton) scheduleButton.disabled = false;
+        return;
+      }
+    }
     const payload = {
       description: document.getElementById('description').value.trim(),
       success_criteria: document.getElementById('success_criteria').value.trim(),

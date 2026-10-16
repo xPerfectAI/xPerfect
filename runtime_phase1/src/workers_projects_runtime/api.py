@@ -7,7 +7,6 @@ import logging
 import mimetypes
 import os
 import hmac
-import ipaddress
 import re
 import sqlite3
 import stat
@@ -34,7 +33,6 @@ from .workspace_files import FileAdmissionError
 from .workspace_api import install_execution_workspace_routes
 
 from .auth import (
-    INTERNAL_ASSERTION_HEADER,
     AuthContext,
     EnterpriseAuthSettings,
     GlassHiveAuthError,
@@ -431,6 +429,7 @@ def create_app(
         app.state.allowed_ai = allowed_ai
         app.state.provider_setup = provider_setup
         app.state.capability_broker = capability_broker
+        await asyncio.to_thread(service.worker_configuration.restore_native_preparation)
         service.start_background_consumers()
         acknowledge_local_qa_service("glasshive-runtime")
         from . import native_transport
@@ -843,27 +842,6 @@ def create_app(
             )
         )
 
-    def _package_idle_release_request(request: Request, token: str) -> bool:
-        """The package's own upgrade, run inside the runtime container, stopping idle compute.
-
-        A hosted request otherwise needs a person's signed assertion, but this is one
-        package-wide operator action. Only the exact route, the exact service credential and
-        the container's own loopback qualify; any network peer still needs an assertion.
-        """
-        if (
-            request.method.upper() != "POST"
-            or request.url.path != "/v1/admin/maintenance/release-idle-compute"
-            or not _token_matches(token, api_token)
-            or str(request.headers.get(INTERNAL_ASSERTION_HEADER) or "").strip()
-        ):
-            return False
-        try:
-            peer = ipaddress.ip_address(str(getattr(request.client, "host", "") or ""))
-        except ValueError:
-            return False
-        mapped = getattr(peer, "ipv4_mapped", None)
-        return bool(peer.is_loopback or (mapped is not None and mapped.is_loopback))
-
     def _service_token_from_headers(headers) -> str:
         for name in ("x-wpr-token", "x-glasshive-service-token", "x-glasshive-mcp-service-token"):
             token = str(headers.get(name) or "").strip()
@@ -1115,9 +1093,6 @@ def create_app(
                     },
                 )
             return Response(status_code=401, content="Unauthorized")
-        if auth_settings.enterprise and _package_idle_release_request(request, token):
-            request.state.auth_context = AuthContext(auth_mode="service", enterprise=True)
-            return await call_next(request)
         try:
             request.state.auth_context = _service_auth_context_from_headers(
                 request.headers
@@ -1273,6 +1248,13 @@ def create_app(
         if not effort:
             return None
         profile = str(worker.get("profile") or "").strip()
+        if profile in {"direct-openai", "direct-anthropic", "direct-xai"}:
+            from .direct_runtime import DIRECT_PROVIDERS
+            from .conversation_provider import GLASSHIVE_MODELS
+            choices = {choice for model in GLASSHIVE_MODELS.values() if model.harness_profile == profile for choice in model.effort_choices}
+            if effort not in choices:
+                raise HTTPException(status_code=400, detail="Unsupported effort for this Direct provider")
+            return {"env": {DIRECT_PROVIDERS[profile]["effort_env"]: effort}}
         if profile == "codex-cli":
             if effort not in PARALLEL_CLEAN_ROOM_EFFORT_ENV_VALUES["WPR_CODEX_CLI_REASONING_EFFORT"]:
                 raise HTTPException(status_code=400, detail="Codex effort must be none, minimal, low, medium, high, xhigh, max, or ultra")
@@ -3927,19 +3909,28 @@ def create_app(
         work_ref: str, payload: ActiveWorkActionRequest, request: Request,
     ) -> dict[str, object]:
         tenant_id, owner_id = _account_scope(request)
-        if not store.get_delegation(work_ref, tenant_id=tenant_id, owner_id=owner_id):
+        record = store.get_delegation(work_ref, tenant_id=tenant_id, owner_id=owner_id)
+        if not record:
             raise HTTPException(status_code=404, detail="Active work not found")
-        receipt = store.get_completed_active_work_action_receipt(
+        receipt = store.get_active_work_action_receipt(
             tenant_id=tenant_id, owner_id=owner_id, work_ref=work_ref,
             idempotency_key=payload.idempotency_key, action=payload.action,
             payload_digest=_canonical_digest(_active_work_action_request(payload)),
         )
         unavailable = {
             "code": "active_work_idempotency_conflict",
-            "message": "The exact completed active-work receipt is unavailable.",
+            "message": "The exact active-work receipt is unavailable.",
         }
         if receipt is None:
             raise HTTPException(status_code=409, detail=unavailable)
+        if receipt["status"] == "pending":
+            # A reservation alone is not accepted execution. Only its exact durable
+            # control claim can prove that the native executor is handling it.
+            if not service.active_work_action_claim_is_pending(receipt):
+                raise HTTPException(status_code=409, detail=unavailable)
+            return {"workRef": work_ref, "action": payload.action, "status": "pending",
+                    "state": _active_work_state(record), "confirmationPending": True,
+                    "idempotentReplay": True}
         try:
             saved = json.loads(str(receipt["response_json"]))
             if not isinstance(saved, dict):
@@ -3953,7 +3944,9 @@ def create_app(
                 return saved
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=409, detail=unavailable) from exc
-        raise HTTPException(status_code=status, detail=detail, headers=saved.get("headers"))
+        raise HTTPException(status_code=status, detail=detail,
+                            headers={**(saved.get("headers") or {}),
+                                     "X-xPerfect-Action-Receipt": "failed-v1"})
 
     @app.post("/v1/active-work/{work_ref}/actions", status_code=202, include_in_schema=False)
     @app.post("/v1/work/{work_ref}/actions", status_code=202)
@@ -4372,6 +4365,7 @@ def create_app(
             raise HTTPException(status_code=401, detail="Missing authenticated user assertion")
         allowed = allowed_worker_profiles()
         items = []
+        from .conversation_provider import GLASSHIVE_MODELS
         shared_profile_support = getattr(
             service.runtime, "shared_workspace_profile_support", None
         )
@@ -4395,6 +4389,11 @@ def create_app(
                 "execution_modes": modes,
                 "adapter_registered": bool(modes),
                 "shared_workspace": shared_workspace,
+                "models": [{"id": model.id, "native_model": model.native_model,
+                            "effort_choices": list(model.effort_choices),
+                            "recommended_effort": model.recommended_effort}
+                           for model in GLASSHIVE_MODELS.values()
+                           if model.harness_profile == descriptor.profile],
             })
         # Registration describes code availability, not binary, account or provider readiness.
         return {"items": items}
@@ -4464,10 +4463,6 @@ def create_app(
         if ctx.enterprise and not owner_id:
             raise HTTPException(status_code=401, detail="Missing authenticated user assertion")
         return ctx, tenant_id, owner_id
-
-    def _saved_alias_scope(ctx: AuthContext):
-        # A copy or template start stores its alias in the caller's namespace, as find-or-resume does.
-        return (lambda alias: scoped_alias(ctx, alias)) if ctx.is_user_scoped else None
 
     def _allowed_ai_scope(
         scope: str,
@@ -4639,7 +4634,8 @@ def create_app(
             raise HTTPException(status_code=403, detail="An authenticated human confirmation session is required")
 
     service.worker_configuration = WorkerConfiguration(store, service.peers,
-        source_resolver=lambda worker: authorized_sources(store, service.peers, worker))
+        source_resolver=lambda worker: authorized_sources(store, service.peers, worker),
+        performance_runtime=service.runtime)
     install_worker_configuration_routes(app, service.worker_configuration,
         lambda request: coordinator_owner_scope(*_current_principal(request)))
     context_mcp = native_context_server(service.worker_configuration)
@@ -4915,7 +4911,6 @@ def create_app(
                 duplicate_name,
                 str(source.get("role") or "main"),
                 reapproval_items=reapproval_items,
-                alias_scope=_saved_alias_scope(ctx),
             )
             workspace = _workspace_catalog_item(worker)
             response: dict[str, object] = {"project": project, "workspace": workspace}
@@ -5032,7 +5027,7 @@ def create_app(
         payload: InstantiateWorkspaceTemplateRequest,
         request: Request,
     ) -> dict[str, object]:
-        ctx, tenant_id, owner_id = _current_principal(request)
+        _, tenant_id, owner_id = _current_principal(request)
         try:
             result = service.instantiate_workspace_template(
                 template_id,
@@ -5040,7 +5035,6 @@ def create_app(
                 owner_id=owner_id,
                 idempotency_key=payload.idempotency_key,
                 name=payload.name,
-                alias_scope=_saved_alias_scope(ctx),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5757,7 +5751,6 @@ def create_app(
             payload.name,
             payload.role,
             reapproval_items=reapproval_items,
-            alias_scope=_saved_alias_scope(ctx),
         )
         return WorkerResponse(**worker)
 

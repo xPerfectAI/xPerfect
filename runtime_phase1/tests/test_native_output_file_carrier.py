@@ -296,5 +296,6 @@ def test_identityless_selected_assistant_still_rejects_export(tmp_path, monkeypa
     for key in missing:
         payload['metadata'].pop(key)
     response = client.post('/v1/chat/completions', headers=AUTH, json=payload)
-    assert response.status_code == 502 and 'output_files' not in response.json().get('glasshive', {})
+    assert response.status_code == 409 and 'output_files' not in response.json().get('glasshive', {})
+    assert response.json()['error']['code'] == 'native_output_files_identity_unavailable'
     assert runtime.calls == 1

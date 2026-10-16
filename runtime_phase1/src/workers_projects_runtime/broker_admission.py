@@ -53,6 +53,7 @@ _GRANT_KEYS = {
     "allowedHostTools",
     "scopes",
 }
+_DISCOVERY_KEYS = {"eagerServers", "deferredServers"}
 _OPAQUE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{7,191}$")
 _CONTAINER_GENERATION_ID = re.compile(r"^[a-f0-9]{64}$")
 
@@ -85,6 +86,8 @@ class BrokerAdmissionGrant:
     allowed_host_tools: tuple[str, ...]
     scopes: dict[str, object]
     max_expires_at: str
+    eager_servers: tuple[str, ...] | None = None
+    deferred_servers: tuple[str, ...] | None = None
     container_generation_id: str = ""
     host_startup_lease_id: str = ""
 
@@ -96,6 +99,9 @@ class BrokerAdmissionGrant:
             "grant_id": self.grant_id,
             "grant_expires_at": self.expires_at,
             "allowed_servers": list(self.allowed_servers),
+            **({"eager_servers": list(self.eager_servers),
+                "deferred_servers": list(self.deferred_servers)}
+               if self.eager_servers is not None and self.deferred_servers is not None else {}),
             "allowed_host_tools": list(self.allowed_host_tools),
             "scopes": dict(self.scopes),
             "scope_fingerprint": self.scope_fingerprint,
@@ -507,7 +513,9 @@ def admit_capability_grant(
         raise _invalid_response() from exc
     grant = payload.get("grant")
     max_expiry = _parse_max_expiry(payload.get("maxExpiresAt"))
-    if not isinstance(grant, dict) or set(grant) != _GRANT_KEYS or max_expiry is None:
+    if (not isinstance(grant, dict)
+            or set(grant) not in (_GRANT_KEYS, _GRANT_KEYS | _DISCOVERY_KEYS)
+            or max_expiry is None):
         raise _invalid_response()
     if expected_max_expires_at is not None and max_expiry[0] != expected_max_expires_at:
         raise _invalid_response()
@@ -522,6 +530,15 @@ def admit_capability_grant(
     scopes = _safe_scopes(grant.get("scopes"))
     if not grant_id or allowed_servers is None or allowed_host_tools is None or scopes is None:
         raise _invalid_response()
+    eager_servers = deferred_servers = None
+    if _DISCOVERY_KEYS <= set(grant):
+        eager_servers = _safe_string_list(grant["eagerServers"])
+        deferred_servers = _safe_string_list(grant["deferredServers"])
+        if (eager_servers is None or deferred_servers is None
+                or set(eager_servers) & set(deferred_servers)
+                or len(set(eager_servers + deferred_servers)) != len(eager_servers + deferred_servers)
+                or set(eager_servers + deferred_servers) != set(allowed_servers)):
+            raise _invalid_response()
     return BrokerAdmissionGrant(
         grant_token=grant_token,
         broker_url=broker_url,
@@ -532,6 +549,8 @@ def admit_capability_grant(
         allowed_host_tools=allowed_host_tools,
         scopes=scopes,
         max_expires_at=max_expiry[0],
+        eager_servers=eager_servers,
+        deferred_servers=deferred_servers,
         container_generation_id=body.get("containerGenerationId", ""),
         host_startup_lease_id=body.get("hostStartupLeaseId", ""),
     )

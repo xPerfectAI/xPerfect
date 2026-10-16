@@ -159,3 +159,40 @@ def test_configuration_distinguishes_unavailable_selection_from_stale_revision()
         response = client.put("/api/workers/synthetic/configuration", json=PAYLOAD)
     assert response.status_code == 409
     assert response.json() == {"detail": {"code": "selection_unavailable"}}
+
+
+def test_native_performance_save_and_reload_pass_through_one_runtime_owner():
+    from unittest.mock import Mock
+    app = FastAPI()
+    payload = {**PAYLOAD, "performance": {"native_warm_servers": 2, "native_warm_idle_seconds": 60}}
+    saved = {"revision": 5, "requested": {key: value for key, value in payload.items()
+                                            if key != "expected_revision"},
+             "effective": {"performance": {"native_warm_status": {
+                 "supported": True, "idle": 2, "starting": 0, "leased": 0}}}}
+    upstream = Mock()
+    upstream._request.side_effect = [saved, saved]
+    calls = []
+    def client(request, human_confirmation=False):
+        calls.append(human_confirmation)
+        return upstream
+    install_worker_configuration_ui_routes(app, client)
+    with TestClient(app) as browser:
+        response = browser.put("/api/workers/synthetic/configuration", json=payload)
+        assert response.status_code == 200 and response.json() == saved
+        reloaded = browser.get("/api/workers/synthetic/configuration")
+        assert reloaded.status_code == 200 and reloaded.json() == saved
+    assert calls == [True, False]
+    assert upstream._request.call_args_list[0].args == (
+        "PUT", "/v1/workers/synthetic/configuration")
+    assert upstream._request.call_args_list[0].kwargs["json_body"] == payload
+    assert upstream._request.call_args_list[1].args == (
+        "GET", "/v1/workers/synthetic/configuration")
+
+
+@pytest.mark.parametrize("performance", ["2", 2, [], True])
+def test_native_performance_must_be_structured_before_forwarding(performance):
+    client, calls = harness()
+    with client:
+        assert client.put("/api/workers/synthetic/configuration",
+                          json={**PAYLOAD, "performance": performance}).status_code == 422
+    assert calls == []

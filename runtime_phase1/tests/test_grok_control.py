@@ -329,7 +329,7 @@ def test_registered_permission_cannot_allow_while_cancel_notification_is_in_flig
 
     transport.notify = notify
     session = SimpleNamespace(session_id='native-exact', cancel_requested=False, client=transport,
-                              _native_tools_manifest=Event())
+                              _native_tools_manifest=Event(), _native_mcp_observation=Event())
     session.cancel = lambda: GrokSession.cancel(session)
     mailbox = ControlMailbox(tmp_path, run_id='run-1', attempt_id='attempt-1',
                              session=session, event=emit, permission_timeout=30)
@@ -433,3 +433,28 @@ def test_declared_elicitation_outcomes_are_typed(tmp_path, response, failure_cla
     finally:
         mailbox.close()
         thread.join(2)
+
+
+@pytest.mark.parametrize('state', ['active', 'expired', 'cancelled', 'stopped', 'wrong_session', 'unrelated', 'native_write'])
+def test_broker_transport_permission_keeps_exact_scope_and_deadline(tmp_path, state):
+    import time
+    name = 'authorized-broker__capability_invoke'
+    events = []
+    mailbox = ControlMailbox(tmp_path, run_id='run-1', attempt_id='attempt-1', session=Session(),
+        event=events.append, permission_timeout=.01, auto_allow_tools={name},
+        permission_deadline_at=time.time() + (-1 if state == 'expired' else 60))
+    params = {'sessionId': 'other' if state == 'wrong_session' else 'native-exact',
+        'toolCall': {'rawInput': {'tool_name': 'other__write' if state == 'unrelated' else name},
+            '_meta': {'x.ai/tool': {'name': 'write' if state == 'native_write' else 'use_tool', 'kind': 'use_tool'}}},
+        'options': [{'optionId': 'always', 'kind': 'allow_always'}, {'optionId': 'once', 'kind': 'allow_once'}]}
+    if state == 'cancelled': mailbox.cancel_turn()
+    elif state == 'stopped': mailbox.stopped.set()
+    if state in {'unrelated', 'native_write'}:
+        # Ordinary requests still go to the owner; avoid waiting 60 seconds here.
+        mailbox.permission_timeout = .001
+        mailbox._permission_deadline = time.monotonic() + .001
+    result = mailbox.permission(params)
+    assert result == ('once' if state == 'active' else None)
+    assert any(e['type'] == 'grok.permission.auto_granted' for e in events) == (state == 'active')
+    if state in {'expired', 'cancelled', 'stopped'}:
+        assert not any(e['type'] == 'grok.permission.requested' for e in events)

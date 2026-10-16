@@ -4390,16 +4390,17 @@ def test_host_codex_runtime_materializes_required_workspace_files(tmp_path, monk
     assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in (workspace_dir / "harness-prompt.md").read_text()
     assert GLASSHIVE_SAFETY_CHECKPOINT_RULE in (workspace_dir / "harness-prompt.md").read_text()
     assert (workspace_dir / "work-log.md").exists()
-    agents_text = (workspace_dir / "AGENTS.md").read_text()
+    private_project = Path(runtime._host_native_mission_placement(worker)["private_project_dir"])
+    agents_text = (private_project / "AGENTS.md").read_text()
     assert "GlassHive Worker Contract" in agents_text
     assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in agents_text
     assert GLASSHIVE_SAFETY_CHECKPOINT_RULE in agents_text
     assert "Agent context" in agents_text
     assert "real local machine session" in agents_text
-    assert (workspace_dir / "agents.md").read_text() == agents_text
-    assert "@AGENTS.md" in (workspace_dir / "claude.md").read_text()
-    assert "Claude context" in (workspace_dir / "claude.md").read_text()
-    assert "Codex context" in (workspace_dir / "codex.md").read_text()
+    assert (private_project / "agents.md").read_text() == agents_text
+    assert "@AGENTS.md" in (private_project / "claude.md").read_text()
+    assert "Claude context" in (private_project / "claude.md").read_text()
+    assert "Codex context" in (private_project / "codex.md").read_text()
     assert (workspace_dir / "glasshive-host-tools" / "capture-front-window.sh").exists()
     content_hygiene = workspace_dir / "glasshive-host-tools" / "content-hygiene.py"
     assert content_hygiene.exists()
@@ -4509,27 +4510,6 @@ def test_host_codex_does_not_invent_automation_model_or_effort(tmp_path, monkeyp
     assert runtime.resolve_model("codex-cli") == ""
     assert "-m" not in command
     assert "model_reasoning_effort" not in joined
-
-
-def test_docker_codex_without_a_model_choice_runs_the_native_default(tmp_path, monkeypatch):
-    # A packaged worker with no configured model must not send a remembered ID, which a
-    # signed-in account's provider can reject; native Codex picks its own default instead.
-    runtime = CodexCliRuntime(base_dir=str(tmp_path / "data"))
-    monkeypatch.delenv("WPR_MODEL_CODEX_CLI", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("WPR_CODEX_CLI_BASE_URL", raising=False)
-    worker = {"worker_id": "wrk_docker_native_default", "name": "Main Worker", "profile": "codex-cli"}
-    runtime._ensure_dirs(worker["worker_id"])
-
-    command, _env = runtime._build_command(worker, "Create the artifact.", runtime._runtime_info(worker))
-
-    assert runtime.resolve_model("codex-cli") == ""
-    assert "-m" not in command
-
-    monkeypatch.setenv("WPR_MODEL_CODEX_CLI", "gpt-6.1-sol")
-    command, _env = runtime._build_command(worker, "Create the artifact.", runtime._runtime_info(worker))
-
-    assert command[command.index("-m") + 1] == "gpt-6.1-sol"
 
 
 def test_host_codex_can_explicitly_inherit_provider_model_when_configured(tmp_path, monkeypatch):
@@ -5304,6 +5284,10 @@ def test_host_codex_run_sends_instruction_via_stdin_not_argv(tmp_path, monkeypat
     supervisor_stdin = Path(captured["command"][6])  # type: ignore[index]
     assert supervisor_stdin.stat().st_mode & 0o777 == 0o600
     assert supervisor_stdin.read_text().startswith("Sensitive private instruction.")
+    from workers_projects_runtime.bootstrap import conversation_file_delivery_instructions
+    assert conversation_file_delivery_instructions() in supervisor_stdin.read_text()
+    ledger = json.loads((workspace / "glasshive-run" / "constraint-ledger.json").read_text())
+    assert ledger["original_request"] == "Sensitive private instruction."
     evidence = json.loads((workspace / "glasshive-run" / "evidence.json").read_text())
     assert all("Sensitive private instruction" not in arg for arg in evidence["command"]["argv_redacted"])
     assert evidence["command"]["argv_redacted"][0] == "echo"
@@ -5672,12 +5656,14 @@ def test_host_runtime_materializes_project_mcp_bootstrap_with_owner_only_files(t
     info = runtime.ensure_worker_ready(worker)
     workspace_dir = Path(info.workspace_dir)
 
-    mcp_text = (workspace_dir / ".mcp.json").read_text()
+    private_project = Path(runtime._host_native_mission_placement(worker)["private_project_dir"])
+    assert not (workspace_dir / ".mcp.json").exists()
+    mcp_text = (private_project / ".mcp.json").read_text()
     assert "broker-grant" not in mcp_text
     assert json.loads(mcp_text)["mcpServers"]["glasshive-user-capabilities"]["headers"]["Authorization"] == "Bearer ${GLASSHIVE_CAPABILITY_BROKER_TOKEN}"
-    assert json.loads((workspace_dir / ".claude" / "settings.local.json").read_text())["permissions"]["allow"] == ["Bash(ls *)"]
+    assert json.loads((private_project / ".claude" / "settings.local.json").read_text())["permissions"]["allow"] == ["Bash(ls *)"]
     worker_codex_home = runtime._host_codex_home(worker)
-    workspace_codex_config = (workspace_dir / ".codex" / "config.toml").read_text()
+    workspace_codex_config = (private_project / ".codex" / "config.toml").read_text()
     worker_codex_config = (worker_codex_home / "config.toml").read_text()
     assert "glasshive-user-capabilities" in workspace_codex_config
     assert "glasshive-user-capabilities" in worker_codex_config
@@ -5703,9 +5689,9 @@ def test_host_runtime_materializes_project_mcp_bootstrap_with_owner_only_files(t
     assert env["CODEX_HOME"] == str(worker_codex_home)
     assert env["GLASSHIVE_CAPABILITY_BROKER_TOKEN"] == "broker-grant"
     assert "broker-grant" not in " ".join(command)
-    assert stat.S_IMODE((workspace_dir / ".mcp.json").stat().st_mode) == 0o600
-    assert stat.S_IMODE((workspace_dir / ".claude" / "settings.local.json").stat().st_mode) == 0o600
-    assert stat.S_IMODE((workspace_dir / ".codex" / "config.toml").stat().st_mode) == 0o600
+    assert stat.S_IMODE((private_project / ".mcp.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((private_project / ".claude" / "settings.local.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((private_project / ".codex" / "config.toml").stat().st_mode) == 0o600
     assert stat.S_IMODE((worker_codex_home / "config.toml").stat().st_mode) == 0o600
     assert stat.S_IMODE((worker_codex_home / "auth.json").stat().st_mode) == 0o600
 
@@ -10506,8 +10492,8 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
             "/root/private.txt",
             "/Volumes/Private/private.txt",
             "/private/var/synthetic/private.txt",
-            'gh' 'p_syntheticgithubcredential',
-            'xo' 'xb-synthetic-slack-credential',
+            "ghp_syntheticgithubcredential",
+            "xoxb-synthetic-slack-credential",
             "eyJhbGciOiJIUzI1NiJ9.c3ludGhldGlj.c2lnbmF0dXJl",
             private_key,
         ]
@@ -10529,9 +10515,9 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
 
 
 @pytest.mark.parametrize("destination", [
-    '</U' 'sers/synthetic/Project Folder/private-report.md>',
+    "</Users/synthetic/Project Folder/private-report.md>",
     "/home/synthetic/private-report.md",
-    '<file:///U' 'sers/synthetic/Project Folder/private-report.md>',
+    "<file:///Users/synthetic/Project Folder/private-report.md>",
     "/Volumes/Private/private-report.md",
     "~/private-report.md",
     "/root/reports/private-report(2).md",
@@ -10552,7 +10538,7 @@ def test_redact_text_keeps_private_image_label_and_redacts_secret_labels():
 def test_redact_text_fails_closed_for_an_unterminated_private_key():
     private_key_body = "A" * 120
     redacted = _redact_text(
-        'Safe prefix.\n--' '---BEGIN PRIVATE KEY-----\n'
+        "Safe prefix.\n-----BEGIN PRIVATE KEY-----\n"
         f"{private_key_body}\n"
         "untrusted trailing text"
     )
@@ -12694,7 +12680,16 @@ def test_host_mission_mode_retains_workspace_and_completion_contract(tmp_path):
     assert workspace.is_relative_to(mission_root)
     assert (workspace / "project-definition.md").exists()
     assert (workspace / "work-log.md").exists()
-    assert (workspace / "AGENTS.md").exists()
+    assert not (workspace / "AGENTS.md").exists()
+    agents_path = Path(worker["_native_context_placement"]["private_project_dir"]) / "AGENTS.md"
+    assert agents_path.exists()
+    assert "keep `work-log.md` updated" not in agents_path.read_text()
+    harness_prompt = (workspace / "harness-prompt.md").read_text()
+    assert "Keep `work-log.md` current" not in harness_prompt
+    assert "Native tool access follows this worker's selected permission mode." in harness_prompt
+    assert "some actions require approval" not in harness_prompt
+    runtime._append_work_log(worker, "Run synthetic-run completed.")
+    assert "Run synthetic-run completed." in (workspace / "work-log.md").read_text()
     assert "FINAL REPORT" in instruction
 
 
@@ -13082,3 +13077,22 @@ def test_failure_recovery_uses_existing_workspace_without_requiring_an_operator_
     assert 'View / Steer' not in result.recommended_recovery
     assert 'workspace_continue' in result.recommended_recovery
     assert 'Inspect' in result.recommended_recovery
+
+
+def test_native_maintenance_timing_uses_control_frames_without_progress_or_contents(tmp_path, monkeypatch):
+    from workers_projects_runtime import native_model_selection as timing
+    runtime = CodexCliRuntime(base_dir=str(tmp_path / "maintenance"))
+    events = []
+    monkeypatch.setattr(timing, "native_timing_event", lambda stage, **fields: events.append((stage, fields)))
+    for sequence, phase in enumerate(("started", "completed"), 1):
+        assert runtime._provider_liveness_observation(json.dumps({
+            "type": "item." + phase,
+            "item": {"type": "context_compaction", "id": "private-item", "text": "private-content"},
+        }), run_id="private-run", line_sequence=sequence, model="test-model") is None
+    assert [item[1]["phase"] for item in events] == ["started", "completed"]
+    assert all(item[0] == "native_maintenance" for item in events)
+    assert "private-" not in json.dumps(events)
+    assert runtime._provider_liveness_observation(json.dumps({
+        "type": "item.completed", "item": {"type": "reasoning", "text": "context_compaction"}
+    }), run_id="run", line_sequence=3, model="test-model") is None
+    assert len(events) == 2

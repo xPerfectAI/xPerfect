@@ -103,10 +103,16 @@ class BackgroundConfig(Strict):
     max_parallel_runs: int = Field(default=32, ge=1, le=32, strict=True)
 
 
+class PerformanceConfig(Strict):
+    native_warm_servers: int = Field(default=0, ge=0, le=8, strict=True)
+    native_warm_idle_seconds: int = Field(default=120, ge=10, le=3600, strict=True)
+
+
 class WorkerConfig(Strict):
     context: ContextConfig = Field(default_factory=ContextConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     background: BackgroundConfig = Field(default_factory=BackgroundConfig)
+    performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
 
     @model_validator(mode="after")
     def selection(self):
@@ -204,6 +210,8 @@ def configured_connections(bundle, *, profile=None):
             name: value for name, value in declarations.items()
             if value.get("disabled") is not True and value.get("enabled") is not False
         }
+    if profile in {"direct-openai", "direct-anthropic", "direct-xai"}:
+        return enabled(claude) | enabled(codex) | enabled(grok)
     if profile == "claude-code":
         return enabled(claude)
     if profile == "codex-cli":
@@ -237,8 +245,9 @@ def restrict_codex_connections(text, removed):
 
 
 class WorkerConfiguration:
-    def __init__(self, store, peers, *, source_resolver=None):
+    def __init__(self, store, peers, *, source_resolver=None, performance_runtime=None):
         self.store, self.peers = store, peers
+        self.performance_runtime = performance_runtime
         # Trusted host extension may supply additional currently-authorized source bytes.
         # The same resolver is called for each retrieval, not just at projection time.
         self.source_resolver = source_resolver
@@ -260,6 +269,35 @@ class WorkerConfiguration:
                     "UPDATE worker_configurations SET context_revision=revision"
                 )
             record_schema_version(conn, component="worker_configuration", version=2)
+
+    def restore_native_preparation(self):
+        """Restore only saved positive options; preparation does no model work."""
+        # Orphan ownership is independent of count, profile, credentials or pause.
+        recover = getattr(self.performance_runtime, "recover_native_preparation", None)
+        if callable(recover):
+            recover()
+        configure = getattr(self.performance_runtime, "configure_native_warm", None)
+        counts = {"requested": 0, "unavailable": 0}
+        if not callable(configure):
+            return counts
+        with self.store._connect() as conn:
+            rows = [dict(row) for row in conn.execute(
+                "SELECT w.*, c.config_json FROM workers w JOIN worker_configurations c USING(worker_id)"
+            ).fetchall()]
+        for worker in rows:
+            if worker["state"] in CLOSED_WORKER_STATES or worker["state"] == "paused":
+                continue
+            config = WorkerConfig.model_validate_json(worker.pop("config_json"))
+            if not config.performance.native_warm_servers:
+                continue
+            counts["requested"] += 1
+            try:
+                status = configure(worker, config.performance.model_dump())
+                if not status.get("supported"):
+                    counts["unavailable"] += 1
+            except (OSError, ValueError, RuntimeError):
+                counts["unavailable"] += 1
+        return counts
 
     @staticmethod
     def _config(conn, worker_id):
@@ -371,7 +409,7 @@ class WorkerConfiguration:
             if config.tools.mode == "inherit"
             else [s for s in servers if s in config.tools.mcp_server_ids]
         )
-        supported_profile = profile in {"claude-code", "codex-cli", "grok-build"}
+        supported_profile = profile in {"claude-code", "codex-cli", "grok-build", "direct-openai", "direct-anthropic", "direct-xai"}
         fixed_broker = bundle.get("execution_policy") == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
         selection_supported = supported_profile and not fixed_broker
         unsupported_message = (
@@ -461,6 +499,7 @@ class WorkerConfiguration:
                     "native_capabilities": "not_restricted_by_this_setting",
                 },
                 "background": config.background.model_dump(),
+                "performance": config.performance.model_dump(),
                 "issues": issues,
             },
         )
@@ -470,6 +509,13 @@ class WorkerConfiguration:
             worker = _worker(conn, worker_id, tenant, owner)
             revision, config = self._config(conn, worker_id)
         sources, _, servers, effective = self._effective(worker, config)
+        status = getattr(self.performance_runtime, "native_warm_status", None)
+        effective["performance"]["native_warm_status"] = (
+            status(worker, config.performance.model_dump()) if callable(status) else {
+                "supported": False, "state": "unavailable", "idle": 0,
+                "reason": "Native warm execution is unavailable in this runtime",
+            }
+        )
         return {
             "worker_id": worker_id,
             "revision": revision,
@@ -491,6 +537,10 @@ class WorkerConfiguration:
             revision, previous = self._config(conn, worker_id)
             if revision != update.expected_revision:
                 raise ConfigurationError("configuration_changed")
+            # Older clients save Context/Tools/Background without this new
+            # optional section. Preserve their existing performance choice.
+            if "performance" not in update.model_fields_set:
+                config.performance = previous.performance
             if any(
                 issue["code"] != CONTEXT_ROUTE_ISSUE
                 for issue in self._effective(worker, config)[3]["issues"]
@@ -506,6 +556,9 @@ class WorkerConfiguration:
                 "INSERT INTO worker_configurations(worker_id,revision,config_json,context_revision) VALUES(?,?,?,?) ON CONFLICT(worker_id) DO UPDATE SET revision=excluded.revision,config_json=excluded.config_json,context_revision=excluded.context_revision",
                 (worker_id, revision + 1, _json(config.model_dump()), generation),
             )
+        prepare = getattr(self.performance_runtime, "configure_native_warm", None)
+        if callable(prepare):
+            prepare(worker, config.performance.model_dump())
         return self.get(tenant, owner, worker_id)
 
     @staticmethod
@@ -546,6 +599,9 @@ class WorkerConfiguration:
         if blocking:
             raise configuration_needs_attention(blocking)
         bundle = json.loads(_json(bootstrap_bundle_for(worker)))
+        # Derived execution settings have one owner: this worker's saved config.
+        # Both conversation/provider-session and ordinary workers use this path.
+        bundle["runtime_performance"] = config.performance.model_dump()
         # Restrict only owner-configured external servers; keep required runtime control tools.
         servers = mcp_servers(bundle)
         if config.tools.mode == "selected":
@@ -700,11 +756,18 @@ def contextual_instruction(instruction: str, worker: dict) -> str:
     projection = worker.get("_context_projection")
     if not projection:
         return instruction
+    manifest = dict(projection["manifest"]["context"])
+    # The runtime binds this identity before projection. A warm native process has no
+    # per-turn environment, so recovery must use this current envelope, not its shell.
+    manifest.pop("run_id", None)
+    run_id = str(worker.get("_active_run_id") or "").strip()
+    if run_id:
+        manifest["run_id"] = run_id
     return _json(
         {
             "instruction": instruction,
             "context": projection["inline"],
-            "context_manifest": projection["manifest"]["context"],
+            "context_manifest": manifest,
         }
     )
 

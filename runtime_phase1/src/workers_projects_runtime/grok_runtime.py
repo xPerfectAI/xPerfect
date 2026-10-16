@@ -10,6 +10,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from datetime import datetime
 
 from .bootstrap import bootstrap_env_for, bootstrap_bundle_for, native_profile_tool_access_instructions, native_instruction_before_tail, worker_prompt_layer_producer
@@ -17,6 +18,7 @@ from .agent_builder_control import conversation_output_schema, conversation_outp
 from .mission_provider_accounts import apply_bound_provider_account_environment, native_current_account_allowed
 from .auth import _env_bool, multi_user_security_enabled, native_installed_owner_id
 from .grok_acp import validated_session_model
+from .grok_native_warm import GrokNativeWarmMixin
 from .openclaw_runtime import ProviderAuthenticationMissingError, RuntimeConfigurationError, RuntimeDependencyMissingError, RuntimeErrorBase
 from .profile_runtime import BaseCliWorkerRuntime, HostNativeCliMixin, _atomic_write_private_text, _native_tools_disabled
 
@@ -98,6 +100,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             return None
         return _grok_conversation_output_schema(conversation_output_schema(
             bundle.get('agent_builder_control'), bundle.get('messaging_delivery_control'),
+            surface=str(bundle.get('surface') or ''),
             same_turn_continuation=(worker.get('trusted_run_lane') == 'conversation'
                                     and not _native_tools_disabled(bundle))))
 
@@ -105,7 +108,8 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         target = self._home_dir(worker['worker_id']) / '.xperfect-grok'
         target.mkdir(parents=True, exist_ok=True, mode=0o700)
         target.chmod(0o700)
-        for name in ('grok_acp.py', 'grok_acp_runner.py', 'grok_control.py', 'agent_builder_control.py'):
+        for name in ('grok_acp.py', 'grok_acp_runner.py', 'grok_control.py', 'agent_builder_control.py',
+                     'grok_websocket.py', 'native_warm_pool.py'):
             _atomic_write_private_text(target / name, Path(__file__).with_name(name).read_text())
         return target
 
@@ -228,6 +232,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
                 control.mkdir(parents=True, exist_ok=True, mode=0o700)
             control_path = str(control) if host else f'{self.sandbox.home_mount}/.xperfect-grok/controls/{control.name}'
             command += ['--control-dir', control_path, '--run-id', run_id, '--attempt-id', attempt_id]
+        admitted_mission = False
         deadline = worker.get('_native_input_deadline_at')
         if str(worker.get('trusted_run_lane') or '') == 'mission' and deadline is not None:
             binding = worker.get('_run_local_capability_binding')
@@ -241,6 +246,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
                     or isinstance(deadline, bool) or not isinstance(deadline, (int, float))
                     or not math.isfinite(deadline) or deadline <= 0):
                 raise RuntimeErrorBase('Grok mission input authority does not match the admitted run')
+            admitted_mission = True
             command += ['--permission-deadline-at', str(deadline)]
         reviewed = os.environ.get('WPR_GROK_REVIEWED_BINARY_SHA256' if host else 'WPR_GROK_CONTAINER_REVIEWED_BINARY_SHA256', '')
         if reviewed:
@@ -259,6 +265,17 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             command += ['--effort', effort]
         if restricted:
             command += ['--yolo-mode', 'false']
+        elif admitted_mission:
+            authority = bundle.get('viventium_launch_authority') or {}
+            command += ['--yolo-mode', 'true' if (
+                isinstance(authority, dict)
+                and authority.get('version') == 1
+                and not isinstance(authority.get('version'), bool)
+                and float(deadline) > time.time()
+                and authority.get('kind') == 'conversation_orchestrator'
+                and authority.get('execution_mode') == ('host' if host else 'docker')
+                and authority.get('worker_access') == 'full'
+            ) else 'false']
         elif (run_id and attempt_id
                 and str(worker.get('trusted_run_lane') or '').strip().lower() == 'conversation'
                 and bundle.get('run_mode') == 'conversation'):
@@ -291,6 +308,20 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
             command += ['--mcp-file', str(path) if host else f'{self.sandbox.home_mount}/.xperfect-grok/mcp-servers.json']
             for name in required_servers:
                 command += ['--required-mcp-server', name]
+            # Admission authorizes this transport only. Core still checks each
+            # capability's scope, effect and confirmation using the signed grant.
+            broker = bundle.get('glasshive_capability_broker')
+            token = bundle.get('env', {}).get('GLASSHIVE_CAPABILITY_BROKER_TOKEN') if isinstance(bundle.get('env'), dict) else None
+            broker_servers = [server for server in servers if isinstance(broker, dict) and server.get('name') == broker.get('name')]
+            if (admitted_mission and not restricted and isinstance(broker, dict)
+                    and broker.get('grant_id') == binding.get('grantId') and binding.get('grantId')
+                    and broker.get('grant_expires_at') == deadline and deadline > time.time()
+                    and isinstance(token, str) and token
+                    and len(broker_servers) == 1 and broker_servers[0].get('url') == broker.get('url')
+                    and [header for header in broker_servers[0].get('headers', [])
+                         if isinstance(header, dict) and header.get('name', '').lower() == 'authorization']
+                    == [{'name': 'Authorization', 'value': 'Bearer ' + token}]):
+                command += ['--allow-mcp-server', broker['name']]
             projection = worker.get('_coordinator_native_projection')
             from .native_transport import is_projected_stdio
             token = str(projection.get('token') or '') if isinstance(projection, dict) else ''
@@ -599,8 +630,12 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
                 runtime_name=self.runtime_name, profile=profile, execution_mode=execution_mode)
 
 
-class HostGrokBuildRuntime(HostNativeCliMixin, GrokBuildRuntime):
+class HostGrokBuildRuntime(GrokNativeWarmMixin, HostNativeCliMixin, GrokBuildRuntime):
     worker_root_name = 'host_grok_build_runtime'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._init_native_warm()
 
     def _conversation_output_schema(self, worker):
         schema = super()._conversation_output_schema(worker)
@@ -609,6 +644,7 @@ class HostGrokBuildRuntime(HostNativeCliMixin, GrokBuildRuntime):
         bundle = self._bootstrap_bundle_for_worker(worker)
         return _grok_conversation_output_schema(conversation_output_schema(
             bundle.get('agent_builder_control'), bundle.get('messaging_delivery_control'),
+            surface=str(bundle.get('surface') or ''),
             same_turn_continuation=(worker.get('trusted_run_lane') == 'conversation'
                                     and not _native_tools_disabled(bundle))))
 

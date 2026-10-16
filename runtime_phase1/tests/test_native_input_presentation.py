@@ -1,4 +1,4 @@
-"""Native presentation uses offered labels and existing model-authored purpose."""
+"""Native action prose stays separate from exact permission controls."""
 import hashlib
 import json
 import time
@@ -63,11 +63,30 @@ def test_permission_presentation_uses_native_purpose_and_retains_command_detail(
     request = permission()
     original = json.dumps(request, sort_keys=True)
     result = project(request)
-    assert result["prompt"] == "Check the selected file\nYes, proceed; No, stop."
+    assert result["prompt"] == "Check the selected file\nMay I proceed?"
     assert result["operationTitle"] == "Execute `test -f selected.txt`"
     assert result["choices"] == [{"value": "allow-once", "label": "Yes, proceed", "kind": "allow_once"}, {"value": "reject-once", "label": "No, stop", "kind": "reject_once"}]
     assert json.dumps(request, sort_keys=True) == original
     assert request["request"]["toolCall"]["rawInput"]["command"] == "test -f selected.txt"
+
+
+def test_permission_prose_keeps_operation_separate_from_all_exact_native_controls():
+    request = permission()
+    request["request"]["options"].extend([
+        {"optionId": "always", "name": "Allow for this session", "kind": "allow_always"},
+        {"optionId": "never", "name": "Never allow this command", "kind": "reject_always"},
+    ])
+    before = json.dumps(request, sort_keys=True)
+    result = project(request)
+    assert result["prompt"] == "Check the selected file\nMay I proceed?"
+    assert result["operationTitle"] == "Execute `test -f selected.txt`"
+    assert result["choices"] == [
+        {"value": option["optionId"], "label": option["name"], "kind": option["kind"]}
+        for option in request["request"]["options"]
+    ]
+    assert result["requestFingerprint"] == hashlib.sha256(
+        json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert json.dumps(request, sort_keys=True) == before
 
 
 @pytest.mark.parametrize("invalid", ["missing", "version", "boolean_version", "kind", "unknown_tool", "description_type", "description_oversized"])
@@ -83,7 +102,7 @@ def test_permission_without_supported_native_purpose_keeps_existing_title(invali
     elif invalid == "description_type": meta["input"]["description"] = ["invented"]
     else: meta["input"]["description"] = "X" * 8001
     result = project(request)
-    assert result["prompt"] == "Execute `test -f selected.txt`\nYes, proceed; No, stop."
+    assert result["prompt"] == "Execute `test -f selected.txt`\nMay I proceed?"
 
 
 def test_permission_at_cap_keeps_original_valid_prompt_and_choices():
@@ -92,6 +111,7 @@ def test_permission_at_cap_keeps_original_valid_prompt_and_choices():
     request["request"]["toolCall"]["title"] = title
     result = project(request)
     assert result["prompt"] == title
+    assert result["operationTitle"] == title
     assert [item["value"] for item in result["choices"]] == ["allow-once", "reject-once"]
 
 
@@ -107,7 +127,7 @@ def test_foreground_choice_envelope_keeps_purpose_title_and_exact_choices(at_cap
             'attempt_id': run['active_attempt_id'], 'session_id': 'session-synthetic', 'pending_requests': [request]}))
     record = {'state': 'running', 'run_id': run['run_id'], **{key: worker[key] for key in ('owner_id', 'tenant_id')}}
     pending = native_input_state(provider, record)['pending'][0]
-    assert pending['prompt'] == 'Check the selected file\nYes, proceed; No, stop.'
+    assert pending['prompt'] == 'Check the selected file\nMay I proceed?'
     assert pending['operationTitle'] == title and 'kind' not in pending
     assert pending['choices'] == project(request)['choices']
     assert pending['requestFingerprint'] == project(request)['requestFingerprint']

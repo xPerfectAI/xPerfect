@@ -132,7 +132,7 @@ class ControlMailbox:
         self._thread.start()
 
     def permission(self, params):
-        # An exact run-bound xPerfect coordinator grant already authorizes these
+        # An exact run-bound internal transport grant already authorizes these
         # internal tools. Select only this turn's allow-once option. Every other
         # native tool or MCP server keeps the ordinary owner prompt.
         call = params.get('toolCall') if isinstance(params, dict) else None
@@ -141,7 +141,8 @@ class ControlMailbox:
         meta = call.get('_meta') if isinstance(call, dict) else None
         native = meta.get('x.ai/tool') if isinstance(meta, dict) else None
         with self._lock:
-            can_allow = not self._turn_cancelled and not self.stopped.is_set()
+            can_allow = (not self._turn_cancelled and not self.stopped.is_set()
+                         and (self._permission_deadline is None or time.monotonic() < self._permission_deadline))
         if (can_allow and isinstance(params, dict) and params.get('sessionId') == self.session.session_id
                 and isinstance(tool_name, str) and tool_name in self.auto_allow_tools
                 and isinstance(native, dict) and native.get('name') == 'use_tool'

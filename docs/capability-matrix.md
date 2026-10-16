@@ -59,8 +59,8 @@ built-in tools stay available; these settings choose connections, not the harnes
 | Local storage | Use private persistent state outside the checkout. | Unlimited by default; available disk space still applies. |
 | Hosted storage | Each person has a storage limit, 5,000,000,000 bytes by default (`storage_limit_bytes` at install). The runtime lets a tenant administrator set, raise or restore any person's limit; a person can lower their own. | No default per-file or file-count cap; the XFS project limit enforces it for uploads (a worker writing past the limit has not been verified yet). When the operator sets a `role_map` (off by default), a mapped administrator can raise or restore their own limit over MCP. A tenant administrator sets another person's total and optional per-file limit, or restores the default, in **Connections → Team file storage**; MCP does not offer that. |
 | Standalone deployment | Run xPerfect on a host or server. | Hosted multi-user operation needs separate identity and isolation configuration. |
-| Exact models | Choose the exact model a worker type uses (`--model grok-build=<model>`). | Grok needs one; xPerfect never guesses or swaps a model. Without a choice, Codex uses its own default model (a connection through the model gateway needs an exact `--model codex-cli=<model>`) and Claude Code is asked for its `opus` alias; `./xperfect doctor` shows each. The public container release records tested model settings; explicit choices override them. |
-| Packaged upgrade | Move a packaged install to a new image, then commit or roll back. | Running, queued, paused or waiting work refuses the upgrade. The package stops the compute of idle open workspaces; they keep their files and history and start again on their next instruction. Earlier hosted releases need those workspaces closed first. Rollback returns service state to the upgrade and discards later records; owner files are not copied. |
+| Exact models | Choose the exact model a worker type uses (`--model grok-build=<model>`). | Grok needs one; xPerfect never guesses or swaps a model. Without a choice, local Codex uses its own configured model and Claude Code is asked for its `opus` alias; `./xperfect doctor` shows each. |
+| Packaged upgrade | Move a packaged install to a new image, then commit or roll back. | Running, queued, paused or waiting work refuses the upgrade. A local package stops the compute of idle open workspaces; they keep their files and history and start again on their next instruction. A hosted package needs them closed first. Rollback returns service state to the upgrade and discards later records; owner files are not copied. |
 
 Local storage is not local-only AI processing. Connected providers can receive task content and
 tool results needed for their requests. Check the selected provider's terms and your access policy.
@@ -78,3 +78,43 @@ are shown by the running connection catalog.
 
 [Quickstart](quickstart.md) · [Account setup](host-setup.md) · [Deployment](deployment.md) ·
 [Architecture](02_Architecture_and_Components.md)
+
+### Native call speed options
+
+A host may select a Codex `service_tier` for one admitted conversation turn independently of
+model and reasoning effort. The native App Server uses `serviceTierForTurn`; this does not change
+its global configuration or the resumed thread's speed default. `fast` is the native `priority`
+alias. The GPT-6.1 Sol catalog exposes Standard (`default`) and Fast (`priority`). Other explicit
+native-supported choices remain possible; account availability and actual serving still depend on
+the native provider. An accepted requested tier is not proof of the tier that served a response.
+Fallback starts with its own speed authority, not the primary Codex speed choice.
+
+For the trusted `voice` conversation surface, Codex's typed `final_answer` message deltas use the
+existing ordered public-envelope and speech-disposition parser. Exact native thread, turn and item
+IDs bind each part. Commentary is never streamed as speech; a missing phase waits for the completed
+item. Completed text reconciles the emitted prefix once. `voice=skip` remains silent, and private
+citations and mutable file references wait for their established projections. Web and Telegram
+keep their existing completion path. This does not claim instant response, glitch-free audio or a
+latency target; measure the delivered call, including transcription, context, native execution,
+speech synthesis and received audio.
+
+
+### Standalone LiveKit reference
+
+The [LiveKit adapter](../integrations/livekit/README.md) uses the existing conversation endpoint
+and official pinned SDK. Valid model-authored speech decisions release eligible text immediately;
+quiet public text, internal activity and metadata stay out of TTS. Mixed terminal audio ranges
+travel on the same content delta, including exact UTF-16 offsets, before a consumer may speak it.
+The final range metadata remains present for existing clients.
+
+A standalone API admission explicitly declaring `main_context_owner=provider_legacy` can stream
+under its own existing provider-owned context. Omitting Core headers does not establish this owner. One joined
+read verifies the exact active request/session/run/attempt, current worker, owner, tenant and
+project, then the proof is checked again after transcript projection. Missing ownership, restore
+holds, cancellation and stale attempts remain silent. Core-owned invocation/family requirements
+are unchanged; no forged Core identity or external host is required.
+
+Loaded isolated rooms passed synthetic input, transcription, native replies, TTS and active PCM.
+Partial native text arrived before completion; speech interruption, the correct next answer and
+same-conversation recall passed with echo-free input settings. In-flight native cancellation,
+reconnect and background callback parity remain separate acceptance gates. See the integration guide for exact limits.

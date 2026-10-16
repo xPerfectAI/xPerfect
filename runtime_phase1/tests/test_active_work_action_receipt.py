@@ -75,6 +75,7 @@ def test_failed_receipt_returns_original_status_without_retry(account_client, mo
     result = account_client.post(f'/v1/work/{work}/actions/receipt', headers=account_headers(), json=body)
     assert result.status_code == saved['statusCode'], result.text
     assert result.json() == {'detail': saved['detail']}
+    assert result.headers.get('x-xperfect-action-receipt')=='failed-v1'
     assert snapshot(store) == before
 
 
@@ -90,6 +91,7 @@ def test_receipt_rejects_mismatch_and_unfinished_without_effects(account_client,
     before = snapshot(store);forbid_effects(service, store, monkeypatch)
     result = account_client.post(f'/v1/work/{work}/actions/receipt', headers=headers, json=changed)
     assert result.status_code == (404 if change in {'owner', 'tenant'} else 409), result.text
+    assert result.headers.get('x-xperfect-action-receipt') is None
     if result.status_code == 409: assert result.json()['detail']['code'] == 'active_work_idempotency_conflict'
     assert snapshot(store) == before
 
@@ -137,4 +139,32 @@ def test_receipt_reuses_real_action_digest_and_saved_response(account_client, mo
     result=account_client.post(f"/v1/work/{accepted['workRef']}/actions/receipt",headers=account_headers(),json=body)
     assert result.status_code==202,result.text
     assert result.json()==json.loads(row['response_json'])
+    assert snapshot(store)==before
+
+
+@pytest.mark.parametrize("executor_current", [True, False])
+def test_exact_bound_control_receipt_can_report_pending_without_any_effect(account_client, monkeypatch, executor_current):
+    body={'action':'steer','instruction':'Keep the same synthetic planner.','idempotencyKey':'pending-bound-control'}
+    service,store,work,body,_=fixture(account_client,body,state='pending')
+    record=store.get_delegation(work,tenant_id='tenant-a',owner_id='owner-a')
+    worker=store.get_worker(record['worker_id']);run=store.get_run(record['current_run_id'])
+    with store._connect() as conn:
+        action=dict(conn.execute('SELECT * FROM active_work_action_uses WHERE work_ref=?',(work,)).fetchone())
+    claim=service._claim_exact_run_control(worker,run,kind='steer_run',
+        replacement_run={**run,'run_id':'run_receipt_replacement','instruction':body['instruction']},
+        action_use_id=action['action_use_id'])
+    assert claim and service.active_work_action_claim_is_pending(action)
+    if not executor_current: service._executor_id='different-synthetic-executor'
+    before=snapshot(store);forbid_effects(service,store,monkeypatch)
+    result=account_client.post(f'/v1/work/{work}/actions/receipt',headers=account_headers(),json=body)
+    if not executor_current:
+        assert result.status_code==409,result.text
+        assert snapshot(store)==before
+        return
+    assert result.status_code==202,result.text
+    assert result.json()=={'workRef':work,'action':'steer','status':'pending','state':'accepted',
+                          'confirmationPending':True,'idempotentReplay':True}
+    assert snapshot(store)==before
+    changed={**body,'instruction':'A different goal.'}
+    assert account_client.post(f'/v1/work/{work}/actions/receipt',headers=account_headers(),json=changed).status_code==409
     assert snapshot(store)==before

@@ -16,6 +16,7 @@ dependencies = [
   "rfc3339-validator>=0.1.4,<1.0",
   "rfc3986-validator>=0.1.1,<1.0",
   "openpyxl>=3.1,<4.0",
+  "pydantic-ai-slim[openai,anthropic,mcp]==2.56.0",
   "pyjwt[crypto]>=2.10,<3.0",
   "python-docx>=1.1,<2.0",
   "python-dateutil>=2.9,<3.0",
