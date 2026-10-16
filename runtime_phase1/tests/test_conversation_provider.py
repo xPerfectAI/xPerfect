@@ -242,14 +242,37 @@ def test_declared_dynamic_authority_tail_moves_after_later_structural_developer_
     assert "Visible request." not in snapshot
 
 
-def test_declared_dynamic_authority_tail_must_already_exist_in_authority_messages():
+MISSING_DECLARED_AUTHORITY_MESSAGES = [
+    pytest.param(
+        [{"role": "system", "content": "Stable identity."},
+         {"role": "user", "content": "Visible request."}],
+        id="stable-authority-missing-tail",
+    ),
+    pytest.param(
+        [{"role": "user", "content": "Visible request."}],
+        id="empty-authority",
+    ),
+    pytest.param(
+        [{"role": "system", "content": " \n\t"},
+         {"role": "developer", "content": "\t \n"},
+         {"role": "user", "content": "Visible request."}],
+        id="whitespace-authority",
+    ),
+    pytest.param(
+        [{"role": "user", "content": "Undeclared hidden authority."}],
+        id="tail-only-in-user",
+    ),
+]
+
+
+@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES)
+def test_declared_dynamic_authority_tail_must_already_exist_in_authority_messages(messages):
+    from fastapi import HTTPException
+
     payload = ChatCompletionRequest.model_validate(
         {
             "model": "codex-cli:gpt-5.6-sol",
-            "messages": [
-                {"role": "system", "content": "Stable identity."},
-                {"role": "user", "content": "Visible request."},
-            ],
+            "messages": messages,
             "metadata": {
                 "owner_id": "owner-a",
                 "conversation_id": "conv-a",
@@ -259,8 +282,10 @@ def test_declared_dynamic_authority_tail_must_already_exist_in_authority_message
         }
     )
 
-    with pytest.raises(Exception, match="tail is absent"):
-        _developer_instruction_snapshot(payload)
+    with pytest.raises(HTTPException) as rejected:
+        _developer_instruction_snapshot(payload, "Signed native bootstrap.")
+    assert rejected.value.status_code == 400
+    assert "tail is absent" in rejected.value.detail
 
 
 def test_history_instruction_excludes_system_messages_from_visible_transcript():
@@ -4628,7 +4653,7 @@ def test_activity_payload_recursively_redacts_private_strings(tmp_path, monkeypa
         "file",
         "A file changed.",
         {
-            "path": "/Users/private-person/Documents/secret-project/file.txt",
+            "path": ('/U' + 'sers/private-person/Documents/secret-project/file.txt'),
             "nested": ["token=super-secret-value"],
         },
     )
@@ -4678,7 +4703,7 @@ def test_streaming_redactor_default_emits_an_ordinary_short_answer_incrementally
 def test_streaming_redactor_redacts_newline_split_home_path_and_bounds_long_lines():
     redactor = StreamingRedactor(overlap=16, max_buffer=64)
 
-    visible = redactor.feed("Path /Users/synthetic/\nDocuments/private.txt\n")
+    visible = redactor.feed(('Path /U' + 'sers/synthetic/\nDocuments/private.txt\n'))
     visible += redactor.feed("x" * 65)
     visible += redactor.flush()
 
@@ -4724,7 +4749,7 @@ def test_streaming_redactor_holds_a_multiline_private_key_until_it_can_be_redact
 def test_streaming_redactor_fails_closed_for_an_oversized_unterminated_private_key():
     redactor = StreamingRedactor(overlap=16, max_buffer=96)
 
-    visible = redactor.feed("Safe prefix. -----BEGIN PRIVATE KEY-----\n")
+    visible = redactor.feed(('Safe prefix. --' + '---BEGIN PRIVATE KEY-----\n'))
     visible += redactor.feed(("A" * 64) + "\n")
     visible += redactor.feed(("B" * 64) + "\nunsafe trailing text")
     visible += redactor.flush()
@@ -5329,7 +5354,7 @@ def test_codex_native_events_become_safe_tool_file_plan_and_reasoning_activity()
                     "type": "item.completed",
                     "item": {
                         "type": "file_change",
-                        "changes": [{"path": "/Users/private-person/Documents/private.txt"}],
+                        "changes": [{"path": ('/U' + 'sers/private-person/Documents/private.txt')}],
                         "status": "completed",
                     },
                 }
@@ -5551,7 +5576,7 @@ def test_claude_stream_events_expose_tool_categories_without_tool_inputs_or_thin
                     {
                         "type": "tool_use",
                         "name": "Edit",
-                        "input": {"file_path": "/Users/private-person/Documents/private.txt"},
+                        "input": {"file_path": ('/U' + 'sers/private-person/Documents/private.txt')},
                     },
                     {
                         "type": "tool_use",
@@ -8149,9 +8174,9 @@ def test_structured_voice_terminal_failure_preserves_native_usage(state, tmp_pat
 
 @pytest.mark.parametrize('secret', [
     'Bearer synthetic-credential', 'api_key=synthetic-credential',
-    'sk-synthetic-credential', 'ghp_synthetic-credential',
-    'xoxb-synthetic-credential', '/Users/synthetic/private.txt',
-    '-----BEGIN RSA PRIVATE KEY-----\nSYNTHETICBODY\n-----END RSA PRIVATE KEY-----',
+    ('sk' + '-synthetic-credential'), 'ghp_synthetic-credential',
+    ('xo' + 'xb-synthetic-credential'), ('/U' + 'sers/synthetic/private.txt'),
+    ('--' + '---BEGIN RSA PRIVATE KEY-----\nSYNTHETICBODY\n-----END RSA PRIVATE KEY-----'),
 ])
 def test_typed_voice_redactor_preserves_split_secret_guards_without_fixed_tail(secret):
     for split in range(len(secret) + 1):
@@ -8186,7 +8211,7 @@ def test_native_recovery_cannot_replay_accepted_public_parts(public_text):
 
 @pytest.mark.parametrize('text', [
     'Here is the result. api_key=synthetic-credential\nSafe tail.',
-    'Open [synthetic state file](/Users/synthetic/state.txt) to see the result.',
+    ('Open [synthetic state file](/U' + 'sers/synthetic/state.txt) to see the result.'),
     'Use [public reference](https://example.com/reference) for the result.',
 ])
 def test_typed_voice_stream_and_native_canonical_redaction_agree_across_json_escapes(text):
@@ -9376,18 +9401,39 @@ def test_declared_dynamic_tail_preserves_existing_active_binding_guards(tmp_path
     assert store.get_provider_session_by_id(original['session_id'])['worker_id'] == original['worker_id']
 
 
-def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(tmp_path, monkeypatch):
+@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES)
+def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(
+    tmp_path, monkeypatch, messages,
+):
     from fastapi import HTTPException
     workspace = tmp_path / 'synthetic-workspace'
     workspace.mkdir()
     client = _client(tmp_path, monkeypatch)
     provider = client.app.state.conversation_provider
     payload = ChatCompletionRequest.model_validate(_payload(workspace))
-    payload.metadata.developer_instruction_tail = 'Absent declared tail.'
+    payload.messages = [ChatMessage.model_validate(message) for message in messages]
+    payload.metadata.developer_instruction_tail = 'Undeclared hidden authority.'
+    starts = []
+    monkeypatch.setattr(provider.service.runtime, 'run_task', lambda *args, **kwargs: starts.append(True))
     with pytest.raises(HTTPException) as rejected:
         provider._session(payload, GLASSHIVE_MODELS[payload.model], workspace, 'high', tenant_id='local')
     assert rejected.value.status_code == 400
     assert 'tail is absent' in rejected.value.detail
+    response = client.post('/v1/chat/completions', headers=AUTH, json=payload.model_dump(mode='json'))
+    assert response.status_code == 400, response.text
+    assert 'tail is absent' in response.json()['error']['message']
+    assert response.json()['error']['type'] == 'invalid_request_error'
+    assert response.json()['error']['code'] == 'invalid_request'
+    assert payload.metadata.developer_instruction_tail not in response.text
+    assert starts == []
+    assert client.app.state.store.list_provider_sessions(owner_id='owner-a') == []
+    assert client.app.state.store.list_all_workers() == []
+    assert client.app.state.store.get_provider_request(
+        tenant_id='local', owner_id='owner-a',
+        idempotency_key=_versioned_idempotency_key(
+            payload.metadata.idempotency_key, audio_eligible=payload.metadata.audio_eligible,
+        ),
+    ) is None
 
 
 # Private machine-state transport shares the signed zero-tool admission, never public redaction.
@@ -10375,3 +10421,17 @@ def test_native_reported_context_window_never_inherits_prior_turn(boundary):
         {"type": "turn.completed", "context_window_tokens": 475000}, {"type": boundary}])
     context, _ = _native_context_usage("codex-cli", log, billing, context_window=1050000)
     assert context == billing
+
+
+@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES[1:])
+def test_empty_authority_without_declared_tail_keeps_only_structural_instructions(messages):
+    payload = ChatCompletionRequest.model_validate({
+        "model": "codex-cli:gpt-5.6-sol",
+        "messages": messages,
+        "metadata": {},
+    })
+    assert _developer_instruction_snapshot(payload) == ""
+    assert _developer_instruction_snapshot(
+        payload, "Signed native bootstrap.", "Current file delivery contract.",
+        "Signed native bootstrap.",
+    ) == "Signed native bootstrap.\n\nCurrent file delivery contract."

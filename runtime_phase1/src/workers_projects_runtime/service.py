@@ -1061,9 +1061,21 @@ def _decode_workspace_cursor(cursor: str | None) -> tuple[int | None, str, str]:
     return favorite, activity, worker_id
 
 
+def _workspace_native_skill_path(relative_path: Path) -> bool:
+    """Claude Code's project skills folder, `.claude/skills`, or the `.claude` folder leading to it."""
+    parts = [part.casefold() for part in relative_path.parts]
+    return bool(parts) and parts[0] == ".claude" and (len(parts) == 1 or parts[1] == "skills")
+
+
 def _workspace_duplicate_path_is_excluded(relative_path: Path) -> bool:
-    for part in relative_path.parts:
+    # A copied expert keeps its ordinary native skill files. The rest of the Claude project
+    # folder (settings, credentials, session state) stays excluded, and the ordinary name
+    # exclusions below still apply inside the skills folder.
+    native_skill_path = _workspace_native_skill_path(relative_path)
+    for index, part in enumerate(relative_path.parts):
         normalized = part.casefold()
+        if index == 0 and native_skill_path:
+            continue
         if normalized in _DUPLICATE_EXCLUDED_PATH_NAMES:
             return True
         if normalized == ".env" or normalized.startswith(".env."):
@@ -1143,6 +1155,11 @@ def _workspace_copy_plan(source_root: Path) -> tuple[list[tuple[Path, Path]], in
                 item_stat = item.lstat()
             except OSError as exc:
                 raise ValueError(f"workspace item could not be inspected: {relative}") from exc
+            if stat.S_ISLNK(item_stat.st_mode) and _workspace_native_skill_path(relative):
+                # The Claude project folder was skipped by name before; a link inside the part a
+                # copy now keeps is still never followed or copied, and does not fail the copy.
+                skipped_items += 1
+                continue
             if stat.S_ISLNK(item_stat.st_mode):
                 try:
                     link_target = Path(os.readlink(item))
@@ -1254,6 +1271,16 @@ def _duplicate_bootstrap_bundle(bundle: dict | None) -> dict | None:
     if not isinstance(project_definition, str) or not project_definition.strip():
         return None
     return {"project_definition": project_definition}
+
+
+def saved_workspace_alias(profile: str, name: str) -> str:
+    """A fresh alias in the form workspace_launch gives a saved workspace.
+
+    Copies and template starts are saved workspaces too; with their own alias, their exact
+    name resolves to them and alias-based tools (reuse, schedule) reach them.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{profile}-{name}".lower()).strip("-")[:67].strip("-")
+    return f"{slug or 'glasshive-task'}-{uuid.uuid4().hex[:12]}"
 
 
 WORK_TRACE_SCHEMA_DIGEST = (
@@ -4259,7 +4286,10 @@ class WorkersProjectsService:
             logger.warning("Could not resolve model for worker %s profile %s: %s", worker_id, profile, exc)
             return worker
         current_model = str(worker.get("model") or "").strip()
-        if not resolved_model or resolved_model == current_model:
+        # Codex without a configured model runs the native default, so a model saved
+        # under an earlier configuration must not outlive that configuration.
+        native_default = not resolved_model and profile == "codex-cli"
+        if (not resolved_model and not native_default) or resolved_model == current_model:
             return worker
         updated = self.store.update_worker(worker_id, model=resolved_model) or worker
         self.store.add_event(
@@ -4267,7 +4297,8 @@ class WorkersProjectsService:
             worker_id,
             None,
             "worker.model_refreshed",
-            f"Worker model refreshed from {current_model or '<unset>'} to {resolved_model}",
+            f"Worker model refreshed from {current_model or '<unset>'} to "
+            f"{resolved_model or '<native default>'}",
         )
         return updated
 
@@ -10994,6 +11025,66 @@ class WorkersProjectsService:
         self._ensure_worker_processor(worker_id)
         return run
 
+    def _retained_provider_account_problem(
+        self,
+        *,
+        account_id: str,
+        tenant_id: str,
+        owner_id: str,
+        profile: str,
+    ) -> str:
+        """Why an account reference cannot be kept for new work: '' when it can.
+
+        One rule for templates and copies: the account belongs to this owner, its provider
+        serves this worker profile, and it is ready. Nothing else is carried; the account's
+        own credential home stays where it is.
+        """
+        if self.control_plane_store is None:
+            return "unavailable"
+        account = self.control_plane_store.get_provider_account(
+            account_id=account_id,
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+        )
+        if account is None:
+            return "unavailable"
+        if str(account.get("provider") or "").strip().lower() not in PROFILE_ACCOUNT_PROVIDERS.get(profile, set()):
+            return "mismatch"
+        if str(account.get("status") or "").strip().lower() != "ready":
+            return "not_ready"
+        return ""
+
+    def _retained_duplicate_provider_selection(
+        self,
+        source_worker: dict,
+        *,
+        owner_id: str,
+        profile: str,
+    ) -> dict[str, str] | None:
+        """The source's personal account for its copy, under the same rule templates use.
+
+        A copy that cannot keep it (another owner, a mismatched or unready account) keeps the
+        existing reapproval or refusal instead; nothing is silently substituted.
+        """
+        bundle = self._bootstrap_bundle_for(source_worker)
+        selection = bundle.get("provider_account") if isinstance(bundle, dict) else None
+        if not isinstance(selection, dict):
+            return None
+        policy = str(selection.get("policy") or "").strip().lower()
+        account_id = str(selection.get("account_id") or "").strip()
+        if policy not in {"personal_preferred", "personal_required"} or not account_id:
+            return None
+        if str(source_worker.get("owner_id") or "") != str(owner_id or ""):
+            return None
+        if self._retained_provider_account_problem(
+            account_id=account_id,
+            tenant_id=str(source_worker.get("tenant_id") or "local"),
+            owner_id=str(owner_id or ""),
+            profile=profile,
+        ):
+            return None
+        return {"policy": policy, "account_id": account_id}
+
     def duplicate_worker(
         self,
         source_worker_id: str,
@@ -11002,6 +11093,7 @@ class WorkersProjectsService:
         name: str,
         role: str,
         reapproval_items: list[dict[str, object]] | None = None,
+        alias_scope: Callable[[str], str] | None = None,
     ) -> dict:
         source_worker = self.require_worker(source_worker_id)
         required_items = [dict(item) for item in (reapproval_items or []) if isinstance(item, dict)]
@@ -11016,6 +11108,14 @@ class WorkersProjectsService:
         bootstrap_bundle = _duplicate_bootstrap_bundle(self._bootstrap_bundle_for(source_worker))
         profile = str(source_worker.get("profile") or "codex-cli")
         execution_mode = str(source_worker.get("execution_mode") or "docker")
+        retained_selection = self._retained_duplicate_provider_selection(
+            source_worker,
+            owner_id=owner_id,
+            profile=profile,
+        )
+        if retained_selection is not None:
+            bootstrap_bundle = {**(bootstrap_bundle or {}), "provider_account": retained_selection}
+        alias = saved_workspace_alias(profile, name)
         duplicated = self.create_worker(
             project_id=project_id,
             tenant_id=str(source_worker.get("tenant_id") or "local"),
@@ -11025,7 +11125,7 @@ class WorkersProjectsService:
             profile=profile,
             backend=self._legacy_backend_label(profile, execution_mode, str(source_worker.get("backend") or "")),
             execution_mode=execution_mode,
-            alias=None,
+            alias=alias_scope(alias) if alias_scope else alias,
             workspace_root=None,
             bootstrap_profile=str(source_worker.get("bootstrap_profile") or "") or None,
             bootstrap_bundle=bootstrap_bundle,
@@ -11210,6 +11310,7 @@ class WorkersProjectsService:
         owner_id: str,
         idempotency_key: str,
         name: str | None = None,
+        alias_scope: Callable[[str], str] | None = None,
     ) -> dict[str, object] | None:
         if self.control_plane_store is None:
             raise RuntimeError("Workspace templates require the user control plane")
@@ -11281,17 +11382,17 @@ class WorkersProjectsService:
                     raise ValueError("Workspace template requires a selected personal provider account")
                 provider_account_selection = {"policy": policy}
             else:
-                account = self.control_plane_store.get_provider_account(
+                problem = self._retained_provider_account_problem(
                     account_id=account_id,
                     tenant_id=tenant_id,
                     owner_id=owner_id,
+                    profile=profile,
                 )
-                supported = PROFILE_ACCOUNT_PROVIDERS.get(profile, set())
-                if account is None:
+                if problem == "unavailable":
                     raise ValueError("Workspace template provider account is not available for this user")
-                if str(account.get("provider") or "").strip().lower() not in supported:
+                if problem == "mismatch":
                     raise ValueError("Workspace template provider account does not match the worker profile")
-                if str(account.get("status") or "").strip().lower() != "ready":
+                if problem == "not_ready":
                     raise ValueError("Workspace template provider account must be reconnected before use")
                 provider_account_selection = {"policy": policy, "account_id": account_id}
         requested_name = str(name or worker_spec.get("name") or template.get("name") or "Workspace").strip()[:160]
@@ -11334,6 +11435,7 @@ class WorkersProjectsService:
             )
             if provider_account_selection is not None:
                 template_bootstrap["provider_account"] = provider_account_selection
+            alias = saved_workspace_alias(profile, requested_name)
             worker = self.create_worker(
                 project_id=str(project["project_id"]),
                 tenant_id=tenant_id,
@@ -11343,7 +11445,7 @@ class WorkersProjectsService:
                 profile=profile,
                 backend="",
                 execution_mode=execution_mode,
-                alias=None,
+                alias=alias_scope(alias) if alias_scope else alias,
                 workspace_root=None,
                 bootstrap_profile=str(worker_spec.get("bootstrap_profile") or "") or None,
                 bootstrap_bundle=template_bootstrap or None,

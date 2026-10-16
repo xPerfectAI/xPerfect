@@ -17,6 +17,10 @@ Calm dark glass over a bright signal core, like a modern appliance or Tesla cont
 
 ## Interaction Thesis
 
+- packaged onboarding presents one xPerfect start command, then the app and account
+  connection; internal service and worker images are installation details, not
+  separate products, required choices, or setup lessons
+
 - the centered project composer should feel like the only thing the user needs to understand
 - after submit, the interface should hand off immediately into live watch mode
 - advanced controls stay tucked away until the user explicitly asks for them

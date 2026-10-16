@@ -22,9 +22,38 @@ does not make remote inference offline, local-only, or independent of the provid
 
 ### Packaged Linux
 
-The standalone Linux package uses the explicit Docker endpoint and a private, owner-only
-credentials file. It creates one fixed local owner and a generated password; the ordinary receipt
-contains URLs and image identities only.
+Download the [public source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip)
+and open a terminal in its folder. With Python 3.11 or newer and Docker running,
+use the same xPerfect entry point:
+
+```sh
+./xperfect start --docker
+```
+
+The launcher reads the saved release references, downloads missing images, and
+creates private state under `~/xperfect-local`. Open the printed app URL, use
+`ui_password` from the private credentials file, and connect your AI account in
+**Connections**. No image names or IDs are required. The MCP URL and token are in
+that same private file; do not share it.
+
+For this local container package, connect an MCP client to `mcp_url` with the
+private `mcp_api_key` as its bearer token. This route needs no hosted OAuth client
+registration. The UI's automatic AI-app setup currently applies to the host
+launcher; use the private credentials file for the container package.
+
+The container package creates one fixed local owner and a generated password;
+the ordinary receipt contains URLs and image identities only. Existing state is
+never replaced by rerunning startup. For a second separate instance, choose a new
+`--name` and unused `--ui-port`/`--mcp-port`; `--state-dir` chooses its private output
+directory. The release records exact supported Codex and Claude model defaults;
+`--model PROFILE=MODEL` overrides a profile without changing other choices. Fully
+explicit image deployments and hosted inputs keep their own model configuration.
+
+The current saved release is `linux/arm64`: Apple silicon Macs and Arm Linux hosts.
+Windows startup and additional CPU image support remain intentionally under
+construction. Docker/WSL is the shared route; it is not evidence of a tested OS.
+
+Advanced deployments can still use the explicit launcher:
 
 ```sh
 python3 deployment/linux/launch.py \
@@ -36,8 +65,30 @@ python3 deployment/linux/launch.py \
   --credentials /private/xperfect-local.credentials.json
 ```
 
-To use Grok, add `--model grok-build=<model>` with an exact ID from `grok models`. The launcher
-never picks a model; the choice is saved in the package and kept across restarts and upgrades.
+To use Grok, add `--model grok-build=<model>` with an exact ID from `grok models`.
+The launcher carries the saved release configuration and explicit choices; it
+does not guess model IDs. Choices stay in the package across restarts and upgrades.
+
+The shared container route uses Docker Desktop on supported Macs or a Linux Docker
+host. Windows uses Docker Desktop's WSL 2 integration in the design; actual Windows
+startup is still unverified. Run Unix commands inside the WSL distro, whose Docker
+endpoint is `unix:///var/run/docker.sock`. If a launch stops without creating
+anything, correct the reported cause and run the same command again.
+
+**Docker has no free network range.** A Docker host with many networks can run out of default
+address ranges. Give the package's two networks unused private ranges instead, for example
+`--subnet frontend=10.201.0.0/24 --subnet workers=10.201.1.0/24`. The launcher refuses a range that
+overlaps a route this computer uses (your LAN, a VPN or a VM) and Docker refuses one another
+network holds, so pick others if either says so.
+
+**After Docker or the computer restarts,** the package stays stopped until you start it:
+
+```sh
+docker start xperfect-local-runtime xperfect-local-ui xperfect-local-mcp
+```
+
+State and files stay in the package's volumes, and the unlock password in the credentials file is
+unchanged.
 
 By default a conversation's helpers use the account chosen for the conversation, so they queue on
 that one account. To let helpers run on other connected accounts at the same time, give the

@@ -206,9 +206,10 @@ as a direct model declaration. A late ACP inventory notification is not a readin
 Managed Viventium records this access mechanism as one registered native-profile fact for
 Grok Worker and conversation authority, only when native tools are enabled and the existing
 authorized MCP projection is nonempty. The host's deferred capability-server fields retain
-their separate meaning and grants stay unchanged. The host's
-[prompt architecture owner](../../../docs/requirements_and_learnings/49_Prompt_Architecture_and_Token_Efficiency.md#native-profile-mcp-access-facts)
-owns registration, Workbench visibility, publication and final authority checks.
+their separate meaning and grants stay unchanged. The host's prompt architecture owner,
+`docs/requirements_and_learnings/49_Prompt_Architecture_and_Token_Efficiency.md`
+(section "Native Profile MCP Access Facts"), owns registration, Workbench visibility,
+publication and final authority checks.
 
 Canonical conversation tool evidence uses the existing owner-, message-, invocation-, request-
 and run-bound version 1 carrier for Codex, Claude and Grok. Grok evidence pairs typed ACP tool
@@ -248,6 +249,10 @@ Native file previews and downloads use the selected filename only when the exact
 run, owner, callback, revision, digest and stored bytes identify one unique name for that artifact.
 Missing, invalid, stale or ambiguous metadata keeps the storage basename. This presentation rule
 does not change signed-link scope, file access, immutable bytes or range downloads.
+A mission view lists only model-selected completed outputs under Result files. Other
+authorized files remain in the separate collapsed Workspace files section, labeled as
+reusable workspace content that may come from other work. Neither section grants new
+file access or worker controls.
 
 Host native file selections may use the admitted workspace or the current worker's managed
 `TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes
@@ -389,6 +394,12 @@ Support:
 Prefer remote HTTP MCP with auth in front of the server when not loopback-only.
 
 ### Hosted user connection
+
+**Current launcher limit (29 September 2026):** the hosted input does not expose the UI's per-client
+registration fields or pass MCP discovery settings to the UI role. Connections therefore cannot
+generate native Codex/Claude setup on that profile. A ready worker account or a working authenticated
+MCP endpoint does not prove that client setup. Do not add unrecognized hosted JSON keys, edit
+generated container config, copy tokens or create a custom OAuth callback as the user workaround.
 
 The designed Glass Drive **Use xPerfect from another AI app** panel is the source of truth for a
 deployment's public HTTPS MCP URL and the exact clients that deployment has completely registered.

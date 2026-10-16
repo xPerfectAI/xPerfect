@@ -14900,3 +14900,40 @@ def test_direct_profile_model_options_come_from_runtime_catalog(tmp_path, monkey
             assert item['models']==[{'id':models[0].id,'native_model':models[0].native_model,
                 'effort_choices':list(models[0].effort_choices),'recommended_effort':models[0].recommended_effort}]
             assert 'none' not in item['models'][0]['effort_choices']
+
+
+def test_assign_run_drops_a_saved_codex_model_once_no_model_is_configured(
+    tmp_path,
+    background_consumers_disabled,
+    request,
+):
+    # A saved worker keeps the model of the configuration it was created under. Once no
+    # model is configured, its next run must use native Codex's own default, not that ID.
+    _ = background_consumers_disabled
+    store = Store(str(tmp_path / "runtime.db"))
+    runtime = RefreshingModelRuntime("gpt-5.4")
+    service = WorkersProjectsService(store, runtime)
+    request.addfinalizer(service.shutdown)
+    service._ensure_worker_processor = lambda worker_id: None  # type: ignore[method-assign]
+    project = service.create_project("demo-owner", "Native Default", "Follow the model choice.", "codex-cli")
+    worker = service.create_worker(
+        project_id=project["project_id"],
+        owner_id="demo-owner",
+        name="Saved Expert",
+        role="coder",
+        profile="codex-cli",
+        backend="openclaw",
+        start_synchronously=False,
+    )
+    assert worker["model"] == "gpt-5.4"
+
+    runtime.model = ""
+    run = service.assign_run(worker["worker_id"], "Use the current configuration.")
+
+    assert run["state"] == "queued"
+    assert store.get_worker(worker["worker_id"])["model"] == ""
+    refreshed = [
+        event["message"] for event in store.list_events(worker["worker_id"])
+        if event["event_type"] == "worker.model_refreshed"
+    ]
+    assert refreshed == ["Worker model refreshed from gpt-5.4 to <native default>"]
