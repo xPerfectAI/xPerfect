@@ -12,10 +12,11 @@ from workers_projects_runtime.signed_links import sign_link_token
 from test_account_api import (
     account_client, account_headers, delegation_payload_with_origin, _truthfully_invoke_run,
 )
+from test_native_media import JPEG, PNG
 
 
 @pytest.fixture
-def completed_file(account_client, tmp_path, monkeypatch):
+def completed_file(account_client, tmp_path, monkeypatch, request):
     service = account_client.app.state.service
     service.executor.submit = lambda *_a, **_k: None
     monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "synthetic-artifact-name-secret")
@@ -31,11 +32,10 @@ def completed_file(account_client, tmp_path, monkeypatch):
     workspace.mkdir()
     worker = store.update_worker(work["worker_id"], workspace_dir=str(workspace))
     native = profile_runtime.HostCodexCliRuntime(base_dir=str(tmp_path / "native"))
-    data = b"mode,cost\nWalking,low\nCycling,low\nBus,fare\n"
+    name, data = getattr(request, "param", ("trip-modes.csv", b"mode,cost\nWalking,low\nCycling,low\nBus,fare\n"))
     scope = {"run_id": run["run_id"], "worker_id": worker["worker_id"], "owner_id": worker["owner_id"],
              "workspace_dir": str(workspace), "attempt_id": run["active_attempt_id"],
              "file_output_transport": "artifact_sha256"}
-    name = "trip-modes.csv"
     (workspace / name).write_bytes(data)
     native._capture_native_output_files({**worker, "_run_attempt_id": run["active_attempt_id"]},
         str(workspace), scope, run["run_id"], f"[CSV]({name})")
@@ -44,9 +44,39 @@ def completed_file(account_client, tmp_path, monkeypatch):
                            ended_at=datetime.now(timezone.utc).isoformat())
     callback = service._emit_callback(worker, "run.completed", run=run, submit_delivery=False)
     payload = json.loads(callback["payload_json"])
-    relative = f"artifacts/native-media/{run['run_id']}/{hashlib.sha256(data).hexdigest()}.csv"
+    descriptor = payload["output_files"]["files"][0]
+    delivered_name = descriptor["filename"]
+    suffix = profile_runtime.NATIVE_IMAGE_SUFFIXES.get(descriptor["mime_type"]) or Path(delivered_name).suffix
+    relative = f"artifacts/native-media/{run['run_id']}/{hashlib.sha256(data).hexdigest()}{suffix}"
     return {"client": account_client, "store": store, "worker": worker, "run": run,
-            "payload": payload, "relative": relative, "data": data, "name": name}
+            "payload": payload, "relative": relative, "data": data, "name": delivered_name,
+            "source_name": name}
+
+
+@pytest.mark.parametrize("completed_file,expected_name,expected_mime", [
+    (("capture.png", JPEG), "capture.jpg", "image/jpeg"),
+    (("capture.jpg", PNG), "capture.png", "image/png"),
+    (("capture.jpeg", JPEG), "capture.jpeg", "image/jpeg"),
+], indirect=["completed_file"])
+def test_selected_image_download_uses_captured_type_and_correct_name(
+    completed_file, expected_name, expected_mime,
+):
+    case = completed_file
+    descriptor = case['payload']['output_files']['files'][0]
+    assert descriptor['filename'] == expected_name and descriptor['mime_type'] == expected_mime
+    source = Path(case['worker']['workspace_dir']) / case['source_name']
+    assert source.read_bytes() == case['data']
+    response = case['client'].get(descriptor['download_url'])
+    assert response.status_code == 200 and response.content == case['data']
+    assert response.headers['content-type'] == expected_mime
+    assert f'filename="{expected_name}"' in response.headers['content-disposition']
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    ranged = case['client'].get(descriptor['download_url'], headers={'Range': 'bytes=2-9'})
+    assert ranged.status_code == 206 and ranged.content == case['data'][2:10]
+    assert ranged.headers['content-type'] == expected_mime
+    opened = case['client'].get(artifact_url(case, 'artifact_open'))
+    assert f'data:{expected_mime};base64,' in opened.text
+    assert f'<h1>{expected_name}</h1>' in opened.text
 
 
 def artifact_url(case, kind):

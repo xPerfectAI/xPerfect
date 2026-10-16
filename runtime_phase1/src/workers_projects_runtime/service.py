@@ -4384,6 +4384,24 @@ class WorkersProjectsService:
         ):
             raise RuntimeErrorBase("Native image output does not match the request owner and run")
         projected, images = resolver(worker, run, output)
+        source_names = {(Path(path).name, mime) for path, mime, _data in images}
+        delivery_names = {key: key[0] for key in source_names}
+        used_names = {name for name, _mime in source_names}
+        for name, mime in sorted(source_names):
+            suffix = NATIVE_IMAGE_SUFFIXES.get(mime)
+            source_suffix = Path(name).suffix.lower()
+            if (not suffix or source_suffix == suffix
+                    or (mime == "image/jpeg" and source_suffix in {".jpeg", ".jpe", ".jfif"})):
+                continue
+            stem = Path(name).stem
+            candidate = stem[:255 - len(suffix)] + suffix
+            index = 2
+            while candidate in used_names:
+                ending = f" ({index}){suffix}"
+                candidate = stem[:255 - len(ending)] + ending
+                index += 1
+            delivery_names[(name, mime)] = candidate
+            used_names.add(candidate)
         rejection_reader = getattr(self.runtime, "provider_native_output_file_rejections", None)
         if output_rejections is not None and callable(rejection_reader):
             output_rejections.extend(rejection_reader(worker, run))
@@ -4432,7 +4450,7 @@ class WorkersProjectsService:
                     if not isinstance(data, NativeFileSnapshot):
                         selected = [(path, mime, data)]
                     for file_path, file_mime, file_data in selected:
-                        filename = Path(file_path).name
+                        filename = delivery_names[(Path(file_path).name, file_mime)]
                         digest = reference.split(":", 1)[1]
                         identity = (filename, file_mime, digest)
                         if identity in described:

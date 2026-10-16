@@ -12,6 +12,36 @@ from workers_projects_runtime.openclaw_runtime import RuntimeInfo, RuntimeErrorB
 
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6pAAAAABJRU5ErkJggg==")
+JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwg"
+    "JC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIy"
+    "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAED"
+    "ASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAA"
+    "AAAAAAAAAAAAAAAABf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AIUAyGf/2Q=="
+)
+
+
+@pytest.mark.parametrize("data,mime", [
+    (PNG, "image/png"), (JPEG, "image/jpeg"),
+    (b"GIF89a" + b"\x00" * 10, "image/gif"),
+    (b"RIFF\x00\x00\x00\x00WEBP", "image/webp"),
+    (b"ordinary text", None),
+])
+def test_captured_image_type_comes_from_snapshot_not_source_name(tmp_path, data, mime):
+    source = tmp_path / "source"
+    source.mkdir()
+    relative = Path("wrong-extension.bin")
+    (source / relative).write_bytes(data)
+    snapshot = deliverables.copy_native_file(source, relative, tmp_path / "captured")
+    (source / relative).unlink()
+    assert deliverables.native_file_image_mime(snapshot) == mime
+    assert (snapshot.root / snapshot.relative).read_bytes() == data
+    if mime:
+        encoded = base64.b64encode(data).decode()
+        assert deliverables._native_image_bytes(mime, encoded)[0] == data
+        other_mime = "image/jpeg" if mime == "image/png" else "image/png"
+        with pytest.raises(ValueError, match="Invalid native inline image bytes"):
+            deliverables._native_image_bytes(other_mime, encoded)
 
 
 def transcript(data=PNG, *, call_id="call_one", source_type="base64"):

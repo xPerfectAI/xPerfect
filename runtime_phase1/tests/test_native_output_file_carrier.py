@@ -1,4 +1,5 @@
 """The existing native selected-file publisher supplies normal host attachments."""
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ from workers_projects_runtime.openclaw_runtime import StubRuntime
 from test_conversation_provider import AUTH, _client, _payload, lifecycle_owned_test_clients
 from test_conversation_provider_recovery import _post_bound, _result
 from test_account_api import account_client, account_headers, delegation_payload_with_origin, _truthfully_invoke_run
+from test_native_media import JPEG
 
 
 class SelectedFileRuntime(StubRuntime):
@@ -147,6 +149,58 @@ def test_canonical_native_files_keep_selected_names_verified_bytes_and_exact_rec
     assert _result(client, digest).json()['response'] == canonical
     duplicate, _ = _post_bound(client, payload)
     assert duplicate.json() == canonical and runtime.calls == 1
+
+
+def test_recognized_image_names_remain_distinct_and_replay_exactly(tmp_path, monkeypatch):
+    names = ('chart.png', 'chart.gif', 'chart.jpg', 'chart (2).jpg')
+    output = '\n'.join(f'[Image](<{name}>)' for name in names)
+    client, runtime, _ = prepare(tmp_path, monkeypatch, authored_output=output)
+    for name in names:
+        (tmp_path / name).write_bytes(JPEG)
+    payload = _payload(tmp_path)
+    response, digest = _post_bound(client, payload)
+    assert response.status_code == 200, response.text
+    canonical = response.json()
+    files = canonical['glasshive']['output_files']['files']
+    assert len(files) == 4
+    assert {file['filename'] for file in files} == {
+        'chart.jpg', 'chart (2).jpg', 'chart (3).jpg', 'chart (4).jpg',
+    }
+    for file in files:
+        assert file['mime_type'] == 'image/jpeg'
+        assert file['sha256'] == hashlib.sha256(JPEG).hexdigest()
+        download = client.get(file['download_url'])
+        assert download.content == JPEG
+        assert download.headers['content-type'] == 'image/jpeg'
+    assert all((tmp_path / name).read_bytes() == JPEG for name in names)
+    for name in names:
+        (tmp_path / name).write_text('later working copy')
+    assert _result(client, digest).json()['response'] == canonical
+    duplicate, _ = _post_bound(client, payload)
+    assert duplicate.json() == canonical and runtime.calls == 1
+
+
+@pytest.mark.parametrize("name,data,mime", [
+    ("chart.webp", base64.b64decode(
+        "UklGRjgAAABXRUJQVlA4ICwAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+9Ykf/izkYjs83/zNDPJR44AAAA=="
+    ), "image/webp"),
+    ("chart.gif", base64.b64decode(
+        "R0lGODdhAQABAIEAAH8yCgAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw=="
+    ), "image/gif"),
+    ("chart.jfif", JPEG, "image/jpeg"),
+    ("chart.JPE", JPEG, "image/jpeg"),
+])
+def test_correct_image_names_do_not_depend_on_host_mime_table(tmp_path, monkeypatch, name, data, mime):
+    client, _runtime, _ = prepare(tmp_path, monkeypatch, authored_output=f'[Image](<{name}>)')
+    (tmp_path / name).write_bytes(data)
+    with monkeypatch.context() as absent_mime_table:
+        absent_mime_table.setattr(profile_runtime.mimetypes, "guess_type", lambda _path: (None, None))
+        response, _digest = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200, response.text
+    descriptor = response.json()['glasshive']['output_files']['files'][0]
+    assert descriptor['filename'] == name and descriptor['mime_type'] == mime
+    download = client.get(descriptor['download_url'])
+    assert download.content == data and download.headers['content-type'] == mime
 
 
 def test_terminal_stream_carries_whole_files_beside_text_and_canonical_response(tmp_path, monkeypatch):
