@@ -113,6 +113,7 @@ from .openclaw_runtime import (
     runtime_start_boundary,
 )
 from .openclaw_release import reviewed_openclaw_env
+from .native_model_selection import gateway_codex_model_required
 from .provider_accounts import ProviderAccountHomeManager
 from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, host_runtime_requirement_issue
 from .run_evidence import (
@@ -148,6 +149,8 @@ from .bootstrap import (
     GLASSHIVE_NATIVE_CAPABILITY_INVENTORY,
     GLASSHIVE_SAFETY_CHECKPOINT_RULE,
     GLASSHIVE_WORKER_COMPLETION_CONTRACT,
+    HOST_CLAUDE_CAPABILITY_REGISTRIES,
+    HOST_CLAUDE_CAPABILITY_ROOTS,
     PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
     _split_viventium_feeling_capsules,
     _write_clean_room_file,
@@ -2617,6 +2620,8 @@ class ProfiledWorkerRuntime:
             or runtime.resolve_model(str(worker.get("profile") or "codex-cli"))
             or ""
         ).strip()
+        if not model:
+            raise gateway_codex_model_required()
 
         def execute_reserved_route(routed_worker: dict) -> str:
             mission_dispatched = False
@@ -8442,7 +8447,10 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def resolve_model(self, profile: str) -> str:
         if profile == "codex-cli":
-            return os.environ.get("WPR_MODEL_CODEX_CLI", "gpt-5.4")
+            # Only an explicit choice (--model codex-cli=<id>) names a model. Without one,
+            # native Codex runs its own default for the signed-in account, as host Codex
+            # does; a remembered ID would be a silent substitution providers retire.
+            return os.environ.get("WPR_MODEL_CODEX_CLI", "").strip()
         return os.environ.get("WPR_MODEL_OPENCLAW_CODEX", "openai-codex/gpt-5.3-codex")
 
     def _default_session_key(self, worker: dict) -> str | None:
@@ -8745,7 +8753,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
             return
         subprocess.run(["git", "init", "-q"], cwd=workspace_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(
-            ["git", "config", "user.email", "worker@glasshive.local"],
+            ["git", "config", "user.email", ('worker@' + 'glasshive.local')],
             cwd=workspace_dir,
             check=False,
             stdout=subprocess.DEVNULL,
@@ -12098,15 +12106,16 @@ raise SystemExit(exit_code)
 
     def _project_host_claude_capability_roots(self, target_claude_home: Path) -> None:
         source_home = self._source_host_claude_home()
-        for relative in (Path("plugins/cache"), Path("plugins/marketplaces"), Path("skills")):
+        for relative in HOST_CLAUDE_CAPABILITY_ROOTS:
             self._project_private_capability_directory(
                 source_home / relative,
                 target_claude_home / relative,
             )
-        for filename in ("installed_plugins.json", "known_marketplaces.json"):
-            source = source_home / "plugins" / filename
-            target = target_claude_home / "plugins" / filename
-            self._merge_private_capability_registry(source, target)
+        for relative in HOST_CLAUDE_CAPABILITY_REGISTRIES:
+            self._merge_private_capability_registry(
+                source_home / relative,
+                target_claude_home / relative,
+            )
 
     def _host_codex_native_mcp_allowlist(self) -> set[str]:
         raw = os.environ.get(

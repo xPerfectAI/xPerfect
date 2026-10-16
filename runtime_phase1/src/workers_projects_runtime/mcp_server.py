@@ -2737,6 +2737,46 @@ def _fresh_worker_alias(alias: str) -> str:
     return f"{base}-{uuid.uuid4().hex[:12]}"
 
 
+def _resolve_saved_workspace(client: Any, lookup_name: str, *, supplied_alias: str = "") -> dict[str, Any]:
+    """The one open, owner-scoped saved workspace an alias or exact saved name names.
+
+    Refuses when there is no single match; callers never create a workspace for it.
+    """
+    supplied_unscoped_alias = _request_unscoped_alias(supplied_alias) if supplied_alias else ""
+    catalog = client.workspace_catalog(search=lookup_name, kind="", limit=100)
+    items = catalog.get("items") if isinstance(catalog, dict) else None
+    next_cursor = catalog.get("next_cursor") if isinstance(catalog, dict) else None
+    active_items = [
+        item
+        for item in (items if isinstance(items, list) else [])
+        if isinstance(item, dict)
+        and str(item.get("state") or "").strip().lower() not in CLOSED_WORKER_STATES
+        and str(item.get("alias") or "").strip()
+    ]
+    refusal = ValueError(
+        f"Could not resolve exactly one saved workspace matching {lookup_name!r}; "
+        "use workspace_list once and retry with its workspace_alias"
+    )
+    direct_alias_matches = [
+        item
+        for item in active_items
+        if supplied_unscoped_alias
+        and _request_unscoped_alias(str(item.get("alias") or "").strip()) == supplied_unscoped_alias
+    ]
+    if direct_alias_matches:
+        if len(direct_alias_matches) != 1 or next_cursor:
+            raise refusal
+        return direct_alias_matches[0]
+    exact_name_matches = [
+        item
+        for item in active_items
+        if str(item.get("name") or "").strip().casefold() == lookup_name.casefold()
+    ]
+    if len(exact_name_matches) != 1 or next_cursor:
+        raise refusal
+    return exact_name_matches[0]
+
+
 def _default_project_definition(*, title: str, goal: str, instruction: str) -> str:
     sections = [f"# {title.strip() or 'GlassHive Task'}"]
     clean_goal = goal.strip()
@@ -5288,6 +5328,9 @@ def create_mcp_server(
             )
 
         bundle = _normalize_bootstrap_bundle(bootstrap_bundle_json) or {}
+        caller_project_definition = "project_definition" in bundle or isinstance(
+            bundle.get("viventium_delegation_packet"), dict
+        )
         default_project_definition = _default_project_definition(
             title=clean_title,
             goal=clean_goal,
@@ -5471,6 +5514,10 @@ def create_mcp_server(
             raise ValueError(
                 "Existing workspaces keep their saved provider account policy"
             )
+        if existing_workspace and not caller_project_definition:
+            # Reusing a saved workspace sends it this request as the run's instruction; it
+            # must not replace what the workspace is for (its saved project definition).
+            bundle.pop("project_definition", None)
         project = (
             existing_workspace["project"]
             if existing_workspace
@@ -5492,12 +5539,16 @@ def create_mcp_server(
         if not resolved_project_id:
             raise ValueError("GlassHive project creation did not return project_id")
 
+        # A reused saved workspace keeps its own name and role unless the caller sets them.
+        existing_worker = existing_workspace["worker"] if existing_workspace else {}
         try:
             worker = client.find_or_resume_worker(
                 project_id=resolved_project_id,
                 owner_id=resolved_owner_id,
-                name=(worker_name or clean_title).strip(),
-                role=(worker_role or clean_goal or clean_instruction).strip(),
+                name=(worker_name or str(existing_worker.get("name") or "") or clean_title).strip(),
+                role=(
+                    worker_role or str(existing_worker.get("role") or "") or clean_goal or clean_instruction
+                ).strip(),
                 alias=resolved_alias,
                 profile=resolved_profile,
                 backend=backend,
@@ -5787,64 +5838,10 @@ def create_mcp_server(
         resolved_catalog_item: dict[str, Any] | None = None
         if reuse_existing_workspace:
             supplied_alias = str(delegate_alias or "").strip()
-            lookup_name = supplied_alias or title
-            supplied_unscoped_alias = (
-                _request_unscoped_alias(supplied_alias) if supplied_alias else ""
+            resolved_catalog_item = _resolve_saved_workspace(
+                client, supplied_alias or title, supplied_alias=supplied_alias
             )
-            resolved_catalog_alias = ""
-            catalog = client.workspace_catalog(
-                search=lookup_name,
-                kind="",
-                limit=100,
-            )
-            items = catalog.get("items") if isinstance(catalog, dict) else None
-            next_cursor = catalog.get("next_cursor") if isinstance(catalog, dict) else None
-            active_items = [
-                item
-                for item in (items if isinstance(items, list) else [])
-                if isinstance(item, dict)
-                and str(item.get("state") or "").strip().lower()
-                not in CLOSED_WORKER_STATES
-                and str(item.get("alias") or "").strip()
-            ]
-            direct_alias_matches = [
-                item
-                for item in active_items
-                if supplied_unscoped_alias
-                and _request_unscoped_alias(
-                    str(item.get("alias") or "").strip()
-                )
-                == supplied_unscoped_alias
-            ]
-            if direct_alias_matches and (len(direct_alias_matches) != 1 or next_cursor):
-                raise ValueError(
-                    f"Could not resolve exactly one saved workspace matching {lookup_name!r}; "
-                    "use workspace_list once and retry with its workspace_alias"
-                )
-            if len(direct_alias_matches) == 1:
-                resolved_catalog_item = direct_alias_matches[0]
-                resolved_catalog_alias = str(resolved_catalog_item["alias"]).strip()
-            else:
-                exact_name_matches = [
-                    item
-                    for item in active_items
-                    if str(item.get("name") or "").strip().casefold()
-                    == lookup_name.casefold()
-                ]
-                if exact_name_matches and (len(exact_name_matches) != 1 or next_cursor):
-                    raise ValueError(
-                        f"Could not resolve exactly one saved workspace matching {lookup_name!r}; "
-                        "use workspace_list once and retry with its workspace_alias"
-                    )
-                if len(exact_name_matches) == 1:
-                    resolved_catalog_item = exact_name_matches[0]
-                    resolved_catalog_alias = str(resolved_catalog_item["alias"]).strip()
-            if not resolved_catalog_alias:
-                raise ValueError(
-                    f"Could not resolve exactly one saved workspace matching {lookup_name!r}; "
-                    "use workspace_list once and retry with its workspace_alias"
-                )
-            delegate_alias = resolved_catalog_alias
+            delegate_alias = str(resolved_catalog_item["alias"]).strip()
         effective_profile = profile
         effective_execution_mode = execution_mode
         if resolved_catalog_item is not None:
@@ -5963,6 +5960,19 @@ def create_mcp_server(
         clean_context = (context or "").strip()
         if not clean_description:
             raise ValueError("description is required")
+        # An alias or exact saved name names one existing workspace: it runs with its own profile
+        # and execution mode, and scheduling never creates a workspace for a name it cannot resolve.
+        clean_workspace_alias = str(workspace_alias or "").strip()
+        saved_workspace = (
+            _resolve_saved_workspace(client, clean_workspace_alias, supplied_alias=clean_workspace_alias)
+            if clean_workspace_alias
+            else None
+        )
+        if saved_workspace is not None:
+            if not str(profile or "").strip():
+                profile = str(saved_workspace.get("profile") or "").strip()
+            if execution_mode is None:
+                execution_mode = str(saved_workspace.get("execution_mode") or "").strip() or None
         requested_execution_mode = str(execution_mode or "").strip()
         brief_sections = [
             "Scheduled project description:",
@@ -5998,6 +6008,11 @@ def create_mcp_server(
         resolved_profile = _resolve_profile_from_preferences(profile, preferences)
         resolved_effort = _resolve_effort_for_profile(resolved_profile, effort, preferences)
         title = clean_description.splitlines()[0].strip()[:120] or "GlassHive scheduled workspace"
+        resolved_alias = _request_unscoped_alias(
+            str(saved_workspace["alias"]).strip()
+            if saved_workspace is not None
+            else _slugify_alias(resolved_profile, title)
+        )
         blocked = _runtime_dependency_blocked_payload(
             profile=resolved_profile,
             execution_mode=resolved_execution_mode,
@@ -6026,11 +6041,10 @@ def create_mcp_server(
                 profile=resolved_profile,
                 execution_mode=resolved_execution_mode,
                 effort=resolved_effort,
-                alias=_request_unscoped_alias(
-                    workspace_alias or _slugify_alias(resolved_profile, title)
-                ),
+                alias=resolved_alias,
             )
         bundle = _normalize_bootstrap_bundle(bootstrap_bundle_json) or {}
+        caller_project_definition = "project_definition" in bundle
         bundle.setdefault(
             "project_definition",
             _default_project_definition(title=title, goal=clean_success_criteria, instruction=scheduled_instruction),
@@ -6063,20 +6077,26 @@ def create_mcp_server(
                 ),
             }
 
-        resolved_alias = _request_unscoped_alias(
-            workspace_alias or _slugify_alias(resolved_profile, title)
-        )
         existing_workspace = None
-        if workspace_alias:
+        if saved_workspace is not None:
             existing_workspace = client.find_worker_by_alias_across_projects(
                 owner_id=resolved_owner_id,
                 alias=resolved_alias,
                 execution_mode=resolved_execution_mode,
             )
+            if existing_workspace is None:
+                raise ValueError(
+                    f"Could not resolve existing workspace alias {resolved_alias!r} for "
+                    f"execution_mode={resolved_execution_mode!r}; no workspace was created"
+                )
         if existing_workspace and provider_selection is not None:
             raise ValueError(
                 "Existing workspaces keep their saved provider account policy"
             )
+        if existing_workspace and not caller_project_definition:
+            # A saved workspace keeps its own project definition; the scheduled task is this
+            # run's instruction and must not replace what the workspace is for.
+            bundle.pop("project_definition", None)
         project = existing_workspace["project"] if existing_workspace else client.create_project(
             owner_id=resolved_owner_id,
             title=title,
@@ -6084,11 +6104,14 @@ def create_mcp_server(
             default_worker_profile=resolved_profile,
         )
         project_id = str(project.get("project_id") or "")
+        # Scheduling a saved workspace keeps its own name and role; the scheduled task's
+        # description is the run's instruction, not a new identity for the workspace.
+        existing_worker = existing_workspace["worker"] if existing_workspace else {}
         worker = client.find_or_resume_worker(
             project_id=project_id,
             owner_id=resolved_owner_id,
-            name=title,
-            role=clean_success_criteria,
+            name=str(existing_worker.get("name") or title),
+            role=str(existing_worker.get("role") or clean_success_criteria),
             alias=resolved_alias,
             profile=resolved_profile,
             backend=None,

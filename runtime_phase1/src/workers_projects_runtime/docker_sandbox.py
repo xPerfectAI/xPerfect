@@ -435,8 +435,8 @@ AI_WORKER_BROWSER_EXTENSION_POLICY_PATHS = (
 from .grok_artifact import GROK_ARTIFACT_PROVENANCE, docker_install_instruction as grok_docker_install_instruction
 
 AI_WORKER_CODEX_NPM_SPEC = (
-    os.environ.get("WPR_SANDBOX_CODEX_NPM_SPEC", "@openai/codex@0.155.0-alpha.9.2").strip()
-    or "@openai/codex@0.155.0-alpha.9.2"
+    os.environ.get("WPR_SANDBOX_CODEX_NPM_SPEC", "@openai/codex@0.159.0").strip()
+    or "@openai/codex@0.159.0"
 )
 AI_WORKER_CLAUDE_CODE_NPM_SPEC = (
     os.environ.get("WPR_SANDBOX_CLAUDE_CODE_NPM_SPEC", "@anthropic-ai/claude-code@2.1.280").strip()
@@ -3469,6 +3469,7 @@ screen -ls | awk -v target="$target" '
             copy_file=self._copy_file,
             copy_tree=self._copy_tree,
             trusted_state_dir=trusted_state_dir,
+            copy_capability_tree=self._copy_capability_tree,
         )
 
     def _copy_file(self, src: Path, dest: Path) -> None:
@@ -3481,6 +3482,12 @@ screen -ls | awk -v target="$target" '
         if not src.exists() or dest.exists():
             return
         shutil.copytree(src, dest, dirs_exist_ok=True)
+
+    def _copy_capability_tree(self, src: Path, dest: Path) -> None:
+        """Copy an optional shared capability catalog; a link whose target is gone is skipped."""
+        if not src.exists() or dest.exists():
+            return
+        shutil.copytree(src, dest, dirs_exist_ok=True, ignore_dangling_symlinks=True)
 
     def _require_docker(self) -> None:
         if shutil.which("docker") is None:
