@@ -385,9 +385,9 @@ def codex_app_launch(command: list[str]) -> dict | None:
 
 class CodexRpc:
     """One native stdio connection; control responses never block event reading."""
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], **process_options):
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        text=True, bufsize=1)
+                                        text=True, bufsize=1, **process_options)
         self.events = queue.Queue()
         self.lock = threading.Lock()
         self.waiters = {}
@@ -629,16 +629,18 @@ def codex_exec_response(event: dict) -> dict:
     return {"id": event["id"], "error": {"code": -32000, "message": message, "data": None}}
 
 
-def codex_relay(context_path: Path, command: list[str]) -> int:
+def codex_relay(context_path: Path, command: list[str], *, initialized_rpc=None,
+                instruction=None, start_thread=None) -> int:
     try:
         from .grok_control import ControlMailbox
     except ImportError:
         from grok_control import ControlMailbox
     context = read_object(context_path)
-    instruction = sys.stdin.buffer.read().decode()
+    if instruction is None:
+        instruction = sys.stdin.buffer.read().decode()
     launch = context["launch"]
     process_started_ms = time.monotonic_ns() / 1_000_000
-    rpc = CodexRpc(command)
+    rpc = initialized_rpc if initialized_rpc is not None else CodexRpc(command)
     process_ready_ms = time.monotonic_ns() / 1_000_000
     turn = mailbox = None
     usage = None
@@ -668,17 +670,20 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
     def stopped(signum, _frame):
         raise SystemExit(128 + signum)
 
-    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-        signal.signal(signum, stopped)
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, stopped)
     try:
         emit({"type": "codex.runtime.phase", "phase": "process_ready",
               "observed_at_ms": time.time_ns() / 1_000_000,
               "duration_ms": process_ready_ms - process_started_ms})
-        timed_call("initialize", {"clientInfo": {"name": "xperfect-native", "version": "1"},
-                                "capabilities": {"experimentalApi": True}})
-        rpc.send({"method": "initialized", "params": {}})
+        if initialized_rpc is None:
+            timed_call("initialize", {"clientInfo": {"name": "xperfect-native", "version": "1"},
+                                    "capabilities": {"experimentalApi": True}})
+            rpc.send({"method": "initialized", "params": {}})
         options = launch["thread"]
-        result = timed_call("thread/resume" if launch["resumed"] else "thread/start", options)
+        method = "thread/resume" if launch["resumed"] else "thread/start"
+        result = start_thread(timed_call, method, options) if start_thread else timed_call(method, options)
         session_id = (result.get("thread") or {}).get("id")
         if not isinstance(session_id, str) or not session_id or (launch["resumed"] and session_id != options["threadId"]):
             raise NativeInputError("native_session_mismatch")

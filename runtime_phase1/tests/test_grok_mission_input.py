@@ -431,7 +431,7 @@ def test_resolved_permission_publishes_next_overlapping_question(account_client,
                 assert time.monotonic() < deadline
                 time.sleep(.01)
         first = runtime.pending_native_input(worker, run_id=run['run_id'])
-        assert first['message'] == 'First operation\nallow_once.'
+        assert first['message'] == 'First operation\nMay I proceed?'
         assert runtime.respond_native_input(worker, run_id=run['run_id'], request_id=first['requestId'],
             request_fingerprint=first['requestFingerprint'], action='accept',
             content={'optionId': 'allow-once'})['status'] == 'accepted'
@@ -443,7 +443,7 @@ def test_resolved_permission_publishes_next_overlapping_question(account_client,
         assert len(callbacks) == (1 if mismatch else 2)
         if mismatch is None:
             second = runtime.pending_native_input(worker, run_id=run['run_id'])
-            assert second['message'] == ('Second operation\nallow_once.' if next_kind == 'permission'
+            assert second['message'] == ('Second operation\nMay I proceed?' if next_kind == 'permission'
                 else 'Second operation\nNorth; Other.')
             assert second['kind'] == next_kind
             assert {item['pending_native_input']['requestId'] for item in callbacks} == {

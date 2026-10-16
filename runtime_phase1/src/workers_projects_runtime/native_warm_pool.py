@@ -71,7 +71,7 @@ _STATIC_ENVIRONMENT_KEYS = frozenset({
 })
 
 
-def native_environment_digest(environment: dict[str, str], *, lane: str) -> str:
+def native_environment_digest(environment: dict[str, str], *, lane: str, profile: str = "grok-build") -> str:
     """Hash declared non-secret mode/path settings, never credentials or tokens.
 
     Adapters must additionally compare their complete static environment in memory
@@ -79,7 +79,7 @@ def native_environment_digest(environment: dict[str, str], *, lane: str) -> str:
     """
     if lane not in {"conversation", "mission"}:
         raise ValueError("Unsupported native warm lane")
-    if lane == "conversation" and any(environment.get(key) != "0" for key in ("GROK_SUBAGENTS", "GROK_WORKFLOWS")):
+    if profile == "grok-build" and lane == "conversation" and any(environment.get(key) != "0" for key in ("GROK_SUBAGENTS", "GROK_WORKFLOWS")):
         raise ValueError("Conversation native warm mode must disable ephemeral native background work")
     values = {key: value for key, value in environment.items() if key in _STATIC_ENVIRONMENT_KEYS}
     return hashlib.sha256(json.dumps([lane, values], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -139,7 +139,7 @@ def read_native_warm_lease(path: Path, *, worker_id: str, run_id: str,
     if (value.get("version") != 1 or not isinstance(scope, dict) or not isinstance(child, dict)
             or not value.get("lease_id") or value.get("run_id") != run_id
             or value.get("attempt_id") != attempt_id or scope.get("worker_id") != worker_id
-            or profile not in {"grok-build", "direct-openai", "direct-anthropic", "direct-xai"}
+            or profile not in {"grok-build", "codex-cli", "direct-openai", "direct-anthropic", "direct-xai"}
             or scope.get("profile") != profile or scope.get("execution_mode") != "host"
             or (model is not None and scope.get("model") != model)
             or type(child.get("pid")) is not int or child["pid"] <= 0
@@ -223,8 +223,8 @@ def listener_owned_by(pid: int, port: int) -> bool:
 
 
 @contextmanager
-def _native_state_lock(directory: Path):
-    """Serialize guard admission with orphan classification across processes."""
+def _native_state_lock(directory: Path, *, timeout: float | None = None):
+    """Serialize native state mutation in one private directory across processes."""
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / ".native-warm.lock"
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -233,7 +233,18 @@ def _native_state_lock(directory: Path):
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_nlink != 1 or info.st_mode & 0o077):
             raise PermissionError("Native warm state lock is not private")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Native configuration is busy")
+                    time.sleep(.01)
         yield
     finally:
         os.close(fd)

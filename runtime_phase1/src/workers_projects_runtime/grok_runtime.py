@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import fcntl
 import math
 import os
 from pathlib import Path
@@ -20,7 +21,47 @@ from .auth import _env_bool, multi_user_security_enabled, native_installed_owner
 from .grok_acp import validated_session_model
 from .grok_native_warm import GrokNativeWarmMixin
 from .openclaw_runtime import ProviderAuthenticationMissingError, RuntimeConfigurationError, RuntimeDependencyMissingError, RuntimeErrorBase
-from .profile_runtime import BaseCliWorkerRuntime, HostNativeCliMixin, _atomic_write_private_text, _native_tools_disabled
+from .profile_runtime import BaseCliWorkerRuntime, HostNativeCliMixin, _atomic_write_private_text, _native_tools_disabled, tomllib
+
+
+def _grok_conversation_skill_config(text):
+    """Insert one native policy value without rewriting unrelated TOML bytes."""
+    skill = 'long-running-background-tasks'
+    original = tomllib.loads(text)
+    skills = original.get('skills', {})
+    if not isinstance(skills, dict):
+        raise ValueError('Grok skills configuration must be a table')
+    disabled = skills.get('disabled', [])
+    if not isinstance(disabled, list) or any(not isinstance(item, str) for item in disabled):
+        raise ValueError('Grok disabled skills must be a list of names')
+    if skill in disabled:
+        return text
+    expected = {**original, 'skills': {**skills, 'disabled': [*disabled, skill]}}
+    value = json.dumps(skill)
+    # TOML permits multiline arrays, quoted/dotted tables and inline tables.
+    # Accept an insertion only when its parsed document changes this one list.
+    # This preserves comments, whitespace and all other caller-owned bytes.
+    candidates = []
+    if 'skills' not in original:
+        candidates.append((len(text), '\n[skills]\ndisabled = [' + value + ']\n'))
+    elif 'disabled' not in skills:
+        candidates.append((0, 'skills.disabled = [' + value + ']\n'))
+        candidates.append((len(text), '\ndisabled = [' + value + ']\n'))
+        candidates.extend((i + 1, 'disabled = [' + value + ']\n')
+                          for i, char in enumerate(text) if char == '\n')
+        candidates.extend((i, prefix + 'disabled = [' + value + ']')
+                          for i, char in enumerate(text) if char == '}' for prefix in ('', ', '))
+    else:
+        candidates.extend((i, addition) for i, char in enumerate(text) if char == ']'
+                          for addition in (value, ', ' + value, value + ','))
+    for offset, addition in candidates:
+        candidate = text[:offset] + addition + text[offset:]
+        try:
+            if tomllib.loads(candidate) == expected:
+                return candidate
+        except tomllib.TOMLDecodeError:
+            continue
+    raise ValueError('Grok skill policy could not preserve the existing TOML document')
 
 
 def _grok_conversation_output_schema(schema):
@@ -116,6 +157,38 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
     def _grok_home(self, worker):
         return self._home_dir(worker['worker_id']) / '.grok'
 
+    def _prepare_conversation_skills(self, worker, home):
+        # This is the persisted worker lane, not a run-local bootstrap option.
+        # Mission homes and the shared native account home are never changed.
+        if worker.get('trusted_run_lane') != 'conversation':
+            return
+        path = home / 'config.toml'
+        try:
+            if home.is_symlink() or path.is_symlink():
+                raise ValueError('Native worker config must not be a symlink')
+            # Reuse Grok's own config-init flock so its settings writer cannot
+            # race the one-time policy insertion. No per-turn config toggle.
+            descriptor = os.open(home / '.config-init.lock',
+                                 os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, 'w') as lock:
+                deadline = time.monotonic() + 1
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeErrorBase('Grok native configuration is busy; retry startup')
+                        time.sleep(.02)
+                if path.is_symlink():
+                    raise ValueError('Native worker config changed to a symlink')
+                before = path.read_bytes().decode('utf-8') if path.exists() else ''
+                after = _grok_conversation_skill_config(before)
+                if after != before:
+                    _atomic_write_private_text(path, after)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise RuntimeErrorBase('Grok worker skill configuration could not be preserved safely') from exc
+
     def _current_host_auth_path(self, worker: dict) -> Path | None:
         # Keep the existing local current-account boundary. Named accounts and
         # hosted runtimes retain their validated credential projection.
@@ -151,6 +224,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         home = self._grok_home(worker)
         home.mkdir(parents=True, exist_ok=True, mode=0o700)
         home.chmod(0o700)
+        self._prepare_conversation_skills(worker, home)
         env.pop('GROK_AUTH_PATH', None)
         env['GROK_HOME'] = str(home) if host else f'{self.sandbox.home_mount}/.grok'
         # Native titles have a separate sampler. Keep its default current while

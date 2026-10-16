@@ -59,6 +59,13 @@ class GrokNativeWarmMixin:
         binary_stat = binary.stat()
         revision = [str(binary), binary_stat.st_dev, binary_stat.st_ino,
                     binary_stat.st_size, binary_stat.st_mtime_ns]
+        native_config = Path(environment['GROK_HOME']) / 'config.toml'
+        if native_config.is_file():
+            config_stat = native_config.stat()
+            # Native config is loaded at process startup. Its file generation
+            # joins the existing reuse identity; never hash secret-bearing values.
+            revision += [str(native_config), config_stat.st_dev, config_stat.st_ino,
+                         config_stat.st_size, config_stat.st_mtime_ns]
         auth = Path(environment.get('GROK_AUTH_PATH') or Path(environment['GROK_HOME']) / 'auth.json')
         if auth.is_file():
             info = auth.stat()
@@ -172,7 +179,7 @@ class GrokNativeWarmMixin:
             else:
                 base.setdefault('state', 'not_prepared')
         if not base['supported']:
-            base.setdefault('reason', 'Idle native processes are supported for host Grok only')
+            base.setdefault('reason', 'This runtime has no safe idle-process adapter; ordinary startup remains available')
         return base
 
     def _prepare_native_authority_command(self, worker, command, *, run_root, timeout_sec):
