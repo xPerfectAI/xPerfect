@@ -103,6 +103,7 @@ from .profile_runtime import (
 )
 
 from .run_evidence import markdown_body_lines
+from .deliverables import NATIVE_MARKDOWN_LINK_OR_ESCAPE
 
 from .store import (
     ProviderAdmissionConflictError,
@@ -2640,7 +2641,8 @@ def _mutable_native_file_link_start(text: str, *, incomplete: bool) -> int | Non
     """Keep model-selected local references behind their canonical artifact projection."""
     for offset, line in markdown_body_lines(text):
         literals = [match.span() for match in re.finditer(r"(`+)(?!`)(.*?)\1(?!`)", line)]
-        links = list(re.finditer(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", line))
+        links = [match for match in NATIVE_MARKDOWN_LINK_OR_ESCAPE.finditer(line)
+                 if match.group(2) is not None]
         if incomplete:
             pending = re.search(r"\[[^\]\n]*$|\[[^\]\n]*\](?:\([^\)\n]*$)?$", line)
             if pending is not None:

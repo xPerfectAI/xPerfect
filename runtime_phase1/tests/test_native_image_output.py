@@ -261,6 +261,7 @@ def test_provider_plain_and_graph_outputs_share_signed_artifact_route(tmp_path, 
     request = {"run_id": run["run_id"], "owner_id": worker["owner_id"], "tenant_id": worker["tenant_id"]}
     router = object.__new__(profile_runtime.ProfiledWorkerRuntime)
     router._runtime_for_worker = lambda _w: runtime
+    router._native_warm_adapters = lambda: ()  # This file-only router starts no native processes.
     service.runtime = router
     provider = ConversationProvider(store, service)
     native = f"{label}({path.as_uri()})\n\n[Official source](https://docs.example.test/)"
@@ -281,7 +282,7 @@ def test_provider_plain_and_graph_outputs_share_signed_artifact_route(tmp_path, 
         assert response.status_code == 200 and response.content == data
         assert response.headers["content-type"].startswith(mime)
         if lane == "mission":
-            monkeypatch.setattr(service, "_callback_config_for_event", lambda *_a: {
+            monkeypatch.setattr(service, "_callback_config_for_event", lambda *_a, **_kw: {
                 "events_webhook_url": "http://callback.local/xperfect", "surface": "telegram"
             })
             completed = store.update_run(run["run_id"], state="completed", ended_at="2026-01-01T12:00:00Z",
@@ -447,6 +448,66 @@ def test_selected_managed_tmp_file_keeps_true_root_and_replays_immutable_bytes(t
     ) == []
 
 
+@pytest.mark.parametrize("harness", ["codex", "claude", "grok"])
+@pytest.mark.parametrize("source_kind", ["workspace", "managed_tmp"])
+def test_padded_angle_selection_keeps_exact_root_and_encoded_filename(tmp_path, harness, source_kind):
+    runtime, worker, info, scope, _ = fixture(tmp_path, harness)
+    if harness == "grok":
+        runtime = HostGrokBuildRuntime(base_dir=str(tmp_path / "state"))
+    scope.update(images=[], file_output_transport="artifact_sha256")
+    root = (Path(info.workspace_dir) if source_kind == "workspace" else
+            runtime._home_dir(worker["worker_id"]) / ".tmp")
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / " chart résumé.png "
+    path.write_bytes(PNG)
+    raw = f"![Chart](< \t{quote(str(path))}\t >)\n[Source](https://docs.example.test/)"
+    expected = (f"![Chart](artifact_sha256:{hashlib.sha256(PNG).hexdigest()})"
+                "\n[Source](https://docs.example.test/)")
+    assert project(runtime, worker, info, raw, scope) == expected
+    assert scope["rejected_output_files"] == []
+    assert scope["output_files"][0]["source_root"] == source_kind
+    assert scope["output_files"][0]["root_path"] == path.name
+    path.write_bytes(b"changed working copy")
+    restored, files = runtime.provider_native_image_output(
+        worker, {"run_id": scope["run_id"], "worker_id": worker["worker_id"]}, raw)
+    assert restored == expected and files[0][0] == path
+    assert (files[0][2].root / files[0][2].relative).read_bytes() == PNG
+
+
+@pytest.mark.parametrize("selection", ["missing", "private", "outside"])
+@pytest.mark.parametrize("uri", [False, True])
+def test_unavailable_selected_link_keeps_label_without_local_path_fragments(tmp_path, selection, uri):
+    runtime, worker, info, scope, _ = fixture(tmp_path)
+    scope.update(images=[], file_output_transport="artifact_sha256")
+    root = runtime._home_dir(worker["worker_id"]) / ".tmp"
+    if selection == "outside":
+        root = tmp_path / "outside"
+    path = root / "Application Support" / "workers" / "wrk_synthetic" / (
+        "cookies" if selection == "private" else "missing.png")
+    path.parent.mkdir(parents=True)
+    if selection != "missing":
+        path.write_bytes(PNG)
+    target = path.as_uri() if uri else str(path)
+    valid = Path(info.workspace_dir) / "valid.png"
+    valid.write_bytes(PNG)
+    references = "\n".join([
+        "[HTTPS](https://docs.example.test/a%20b)", "[HTTP](http://docs.example.test/)",
+        "[Network](//docs.example.test/reference)", "[Anchor](#details)",
+        "[Query](?format=pdf)", "[Page](reference#details)", "[Email](mailto:test@example.test)",
+    ])
+    raw = f"![Unavailable](< {target} >)\n[Available](valid.png)\n{references}"
+    expected = (f"Unavailable\n[Available](artifact_sha256:{hashlib.sha256(PNG).hexdigest()})"
+                f"\n{references}")
+    assert project(runtime, worker, info, raw, scope) == expected
+    assert len(scope["output_files"]) == 1
+    code = {"missing": "unreadable", "private": "not_deliverable", "outside": "source_root_unsupported"}[selection]
+    assert scope["rejected_output_files"] == [{"name": path.name, "code": code}]
+    restored, files = runtime.provider_native_image_output(
+        worker, {"run_id": scope["run_id"], "worker_id": worker["worker_id"]}, raw)
+    assert restored == expected and len(files) == 1
+    assert "Application Support" not in restored and "wrk_synthetic" not in restored
+
+
 def test_rejected_explicit_selections_are_typed_without_paths_and_remote_links_are_unchanged(tmp_path):
     runtime, worker, info, scope, _ = fixture(tmp_path)
     scope.update(images=[], file_output_transport="artifact_sha256")
@@ -480,7 +541,8 @@ def test_rejected_explicit_selections_are_typed_without_paths_and_remote_links_a
     ("private_name", "not_deliverable"),
     ("private_directory", "not_deliverable"),
 ])
-def test_managed_tmp_selected_source_retains_isolation_and_sensitive_path_policy(tmp_path, kind, code):
+@pytest.mark.parametrize("padding", ["", " \t"])
+def test_managed_tmp_selected_source_retains_isolation_and_sensitive_path_policy(tmp_path, kind, code, padding):
     runtime, worker, info, scope, _ = fixture(tmp_path)
     scope.update(images=[], file_output_transport="artifact_sha256")
     home = runtime._home_dir(worker["worker_id"])
@@ -513,7 +575,7 @@ def test_managed_tmp_selected_source_retains_isolation_and_sensitive_path_policy
         (tmp_path / "result.csv").write_text("private")
     elif kind != "traversal":
         path.parent.mkdir(parents=True, exist_ok=True); path.write_text("selected")
-    assert "artifact_sha256:" not in project(runtime, worker, info, f"[File](<{path}>)", scope)
+    assert "artifact_sha256:" not in project(runtime, worker, info, f"[File](<{padding}{path}{padding}>)", scope)
     assert scope["output_files"] == []
     assert scope["rejected_output_files"] == [{"name": path.name, "code": code}]
 

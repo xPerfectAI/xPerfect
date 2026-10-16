@@ -268,6 +268,15 @@ legal. Automatic discovery still omits those folders. Both paths reject traversa
 private profiles and reserved instruction or credential files, and selected sources must be
 ordinary files without symlinks or hardlinks.
 
+Selected Markdown destinations normalize padding inside angle brackets before URL decoding,
+both when capturing the file and when rendering its immutable reference. Percent-encoded
+filename spaces remain exact. This syntax normalization does not widen permitted source roots
+or bypass the existing owner, run, attempt, traversal, private-file or link checks.
+When the file carrier cannot resolve a local selection, visible text keeps its label only; the
+existing typed attachment failure still reports the cause. This prevents private path fragments
+from leaking through a broken link. Public URLs, anchors and other non-file references remain
+unchanged, and a valid selection still renders its verified immutable artifact reference.
+
 Host-native conversations consume the registered `worker.conversation_file_delivery` declaration
 once after the signed profile instructions and before the exact pinned Feeling tail. A local
 Markdown link selects delivery; a path in code is a citation. Authorized files outside the supported
