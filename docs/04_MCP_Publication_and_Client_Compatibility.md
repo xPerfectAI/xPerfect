@@ -70,6 +70,12 @@ a failed receipt returns its saved status and detail. Missing, mismatched or unf
 return `active_work_idempotency_conflict`. This read never reserves, resumes, recovers or executes
 work. Clients use it only to recover an exact completed operation after a normal action conflict.
 
+Active-work pages and their overflow counts use the same effective current run. A live
+continuation remains visible even when the delegation's stored run pointer still names an older
+terminal run. Counts retain the same account scope, terminal recency and cursor boundaries as
+listed rows, so a false zero cannot hide the next page. The account API regression covers
+completed/failed predecessors, waiting continuations, tenant/owner isolation and tied cursors.
+
 ## Client Strategy
 
 ### LiveKit voice clients

@@ -6102,6 +6102,78 @@ def test_active_work_cursor_pagination_is_stable_and_complete(
     assert invalid.json()["detail"]["code"] == "active_work_cursor_invalid"
 
 
+@pytest.mark.parametrize("old_state", ["completed", "failed"])
+def test_active_work_count_uses_effective_continuation_for_pagination(
+    account_client, old_state
+):
+    store = account_client.app.state.store
+    expected_refs = set()
+    for index, (tenant_id, owner_id) in enumerate([
+        ("tenant-a", "owner-a"),
+        ("tenant-a", "owner-a"),
+        ("tenant-a", "owner-a"),
+        ("tenant-a", "owner-b"),
+        ("tenant-b", "owner-a"),
+    ]):
+        response = account_client.post(
+            "/v1/delegations",
+            headers=account_headers(
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                idempotency_key=f"effective-roster-{index}",
+            ),
+            json=delegation_payload(title=f"Continued task {index}"),
+        )
+        assert response.status_code == 202
+        work_ref = response.json()["workRef"]
+        delegation = store.get_delegation(
+            work_ref, tenant_id=tenant_id, owner_id=owner_id
+        )
+        old_run_id = delegation["current_run_id"]
+        continuation = store.create_run(
+            delegation["worker_id"], delegation["project_id"], "Continue this task"
+        )
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute(
+                "UPDATE runs SET state = ?, ended_at = ? WHERE run_id = ?",
+                (old_state, "2000-01-01T00:00:00+00:00", old_run_id),
+            )
+            conn.execute(
+                "UPDATE runs SET state = 'needs_input' WHERE run_id = ?",
+                (continuation["run_id"],),
+            )
+            # The effective current run can advance before the stored pointer.
+            assert conn.execute(
+                "SELECT current_run_id FROM delegations WHERE work_ref = ?",
+                (work_ref,),
+            ).fetchone()[0] == old_run_id
+        if (tenant_id, owner_id) == ("tenant-a", "owner-a"):
+            expected_refs.add(work_ref)
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE delegations SET updated_at = ?, created_at = ?",
+            ("2026-08-12T12:00:00+00:00", "2026-08-12T12:00:00+00:00"),
+        )
+
+    collected = []
+    cursor = None
+    for expected_overflow in [2, 1, 0]:
+        suffix = f"&cursor={cursor}" if cursor else ""
+        page = account_client.get(
+            f"/v1/active-work?limit=1{suffix}", headers=account_headers()
+        )
+        assert page.status_code == 200
+        body = page.json()
+        assert len(body["work"]) == 1
+        assert body["overflowCount"] == expected_overflow
+        collected.append(body["work"][0]["workRef"])
+        cursor = body.get("cursor")
+        assert bool(cursor) is (expected_overflow > 0)
+    assert len(collected) == len(set(collected)) == 3
+    assert set(collected) == expected_refs
+
+
 def test_callback_association_current_run_precedes_action_receipt(account_client):
     service = account_client.app.state.service
     service.executor.submit = lambda *_args, **_kwargs: None
