@@ -289,8 +289,16 @@ def test_live_capability_is_exact_typed_and_generation_bound(tmp_path, mutation,
     assert not runtime.supports_native_control({'worker_id': 'worker-synthetic'}, action, run_id='run-synthetic', attempt_id='attempt-synthetic')
 
 
-def test_claude_retains_truthful_unsupported_same_turn_input():
-    assert not callable(getattr(object.__new__(HostClaudeCodeRuntime), 'native_control', None))
+def test_claude_native_control_requires_current_hook_context():
+    runtime = object.__new__(HostClaudeCodeRuntime)
+    runtime._native_midstream_context = lambda *args, **kwargs: {}
+    worker = {'worker_id': 'worker-synthetic'}
+    assert not runtime.supports_native_control(worker, 'interject', run_id='run', attempt_id='attempt')
+    with pytest.raises(RuntimeError, match='ended or unsupported'):
+        runtime.native_control(worker, run_id='run', attempt_id='attempt', action='interject')
+    runtime._native_midstream_context = lambda *args, **kwargs: {'nativeSessionId': 'session'}
+    assert runtime.supports_native_control(worker, 'interject', run_id='run', attempt_id='attempt')
+    assert not runtime.supports_native_control(worker, 'cancel', run_id='run', attempt_id='attempt')
 
 
 def test_native_model_mismatch_is_refused_before_user_turn(tmp_path, monkeypatch):

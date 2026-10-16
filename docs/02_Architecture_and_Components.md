@@ -207,9 +207,10 @@ process idle. A timing row called “native startup” therefore needs separate 
 creation, protocol initialization, authentication, session creation/resume, tool setup and prompt
 submission. It is not all OS startup or model inference.
 
-**Optional process preparation supports host Grok and Direct API profiles. It defaults to off.**
-The bounded `native_warm_pool.py` uses Grok's own authenticated localhost WebSocket server and
-the existing WebSocket dependency. It opens no session, MCP server or user prompt while preparing.
+**Optional process preparation supports eligible host Codex, Grok and Direct API profiles. It defaults to off.**
+The bounded `native_warm_pool.py` uses Grok's own authenticated localhost WebSocket server;
+Codex and Direct use authenticated local holders over the existing WebSocket dependency.
+Codex retains native stdio inside its holder. Preparation opens no thread, MCP server or user prompt.
 The saved configuration owner is `WorkerConfig.performance.native_warm_servers`;
 `native_warm_idle_seconds` controls expiry. `0` retains the current
 stdio path; a positive count prepares actual idle processes, not folders or profile checks.
@@ -232,7 +233,29 @@ worker is sufficient. More idle servers consume memory; they do not create more 
 | Host Grok, static current native account or worker key | Supported |
 | Grok named account with per-attempt projection | Unavailable; normal native startup remains available |
 | Direct OpenAI, Anthropic or xAI, host | Import-only SDK process; account is unbound until the admitted run |
-| Codex, Claude or container | Not implemented; status declares unavailable |
+| Host Codex, current native file account and supported app-server schema | Initialized native stdio; fresh thread authority binds after lease |
+| Codex named account, startup-only override or unsupported environment binding | Unavailable; exact normal startup remains available |
+| Claude or container | No adapter; normal native startup remains available |
+
+
+Codex prepares the selected executable with its existing authenticated native account and
+`initialize` only. It performs no model request or MCP connection while idle; native account
+refresh and telemetry can still occur. The existing binary/schema compatibility check and
+static account/configuration identity guard reuse. At admission, the existing relay retains
+thread start/resume, full history and authority, model, effort, policy, images, schema and
+control mailbox. Fresh MCP grants enter thread configuration in memory only. A bounded,
+separate per-worker config lock removes only their environment lookups from the generated
+file during native thread creation, then restores the exact original bytes before the turn.
+All generated Codex config writers share this lock; Stop does not. Changed file bytes are
+preserved rather than overwritten. No global MCP discovery or reload is added, and optional
+MCP startup remains native asynchronous behavior.
+
+Unprojectable user/project bindings, hooks requiring fresh process environment and unsupported
+CLI settings retain the exact cold command and capabilities. No accepted or uncertain native
+thread dispatch is replayed. Claude's official SDK has a fresh-session prewarm/claim protocol,
+but its prewarm API rejects resume/continue/forkSession; this runtime has no adapter that preserves
+its existing resumed authority and history contract. That is an adapter parity limit, not a claim
+that the provider has no prewarming protocol.
 
 Direct uses this same pool, count, expiry, exact worker/profile/model/source identity and
 single-use lease. Its idle interpreter imports the official SDK only, with a small OS/Python
@@ -245,7 +268,7 @@ Exact host-run cancellation drains its own cancellation callback effect after te
 other lifecycle effects remain with the existing durable recovery owner. It does not synchronously
 sweep unrelated lifecycle kinds before returning capacity release.
 
-The Profiled runtime shares one pool across Grok and Direct, so the 16-global/8-owner bounds are
+The Profiled runtime shares one pool across Codex, Grok and Direct, so the 16-global/8-owner bounds are
 aggregate. A ready process helps its existing worker, such as a persistent Queen. A brand-new
 worker remains cold unless it was configured and became ready beforehand. Missing ready capacity
 uses the exact normal cold command without waiting. Import readiness does not warm an API client,
@@ -413,6 +436,18 @@ including their foreground use. The existing MCP worker delegation remains avail
 background work when authorized by the owner. Mission runs retain their configured native Task
 and Workflow capabilities. Native background shell commands
 still have process-local lifetime; they do not gain durable worker completion or callback delivery.
+
+The persisted conversation-worker lane also disables the native bundled
+`long-running-background-tasks` skill in that worker's isolated `GROK_HOME/config.toml`.
+That vendor skill requires foreground supervision until background work finishes, which conflicts
+with xPerfect's durable worker receipt and automatic return path. This policy uses Grok's documented
+`[skills].disabled` setting before cold or warm startup; it does not disable skill discovery,
+foreground shell tools or MCP tools. The edit preserves other configuration bytes and disabled
+choices, uses Grok's own config-write lock, and never changes mission-worker or shared-account homes.
+Native config file identity participates in warm-process reuse. Exact native session history remains
+intact on resume; old recorded skill text is not erased, so resumed model behavior still requires its
+own acceptance evidence. This removes a conflicting default; it does not force delegation or promise
+a latency improvement.
 
 Native updates, exact session identity and terminal results use separate typed envelopes. Unknown
 native child events remain native data; they do not invent xPerfect workers. Usage is unavailable

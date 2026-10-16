@@ -1964,11 +1964,11 @@ class ProfiledWorkerRuntime:
         return status(worker, performance) if callable(status) else {
             "supported": False, "state": "unavailable", "idle": 0,
             "configured": performance.get("native_warm_servers", 0),
-            "reason": "Idle native processes are supported for host Grok only",
+            "reason": "This runtime has no safe idle-process adapter; ordinary startup remains available",
         }
 
     def _native_warm_adapters(self):
-        return (self.host_grok, self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai)
+        return (self.host_grok, self.host_codex, self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai)
 
     def _shared_native_warm_pool_for_adapters(self):
         from .native_warm_pool import NativeWarmPool
@@ -12511,14 +12511,16 @@ raise SystemExit(exit_code)
             )
             target = workspace / ".codex" / "config.toml"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(codex_config + "\n")
-            target.chmod(0o600)
             codex_home = self._host_codex_home(worker)
             codex_home.mkdir(parents=True, exist_ok=True)
             codex_home.chmod(0o700)
             codex_target = codex_home / "config.toml"
-            codex_target.write_text(codex_config + "\n")
-            codex_target.chmod(0o600)
+            from .native_warm_pool import _native_state_lock
+            with _native_state_lock(codex_home, timeout=2.0):
+                target.write_text(codex_config + "\n")
+                target.chmod(0o600)
+                codex_target.write_text(codex_config + "\n")
+                codex_target.chmod(0o600)
             if native_current_account_allowed(worker):
                 self._copy_host_codex_auth(codex_home)
             self._project_host_codex_capability_roots(codex_home)
@@ -12542,8 +12544,10 @@ raise SystemExit(exit_code)
                 ),
             )
             config_path = codex_home / "config.toml"
-            config_path.write_text((codex_config.rstrip() + "\n") if codex_config else "")
-            config_path.chmod(0o600)
+            from .native_warm_pool import _native_state_lock
+            with _native_state_lock(codex_home, timeout=2.0):
+                config_path.write_text((codex_config.rstrip() + "\n") if codex_config else "")
+                config_path.chmod(0o600)
             if native_current_account_allowed(worker):
                 self._copy_host_codex_auth(codex_home)
             if not _native_tools_disabled(bundle):
@@ -15636,7 +15640,10 @@ def _codex_binary_with_discoverable_companion(binary: str) -> str:
         return str(canonical)
     return binary
 
-class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
+from .codex_native_warm import CodexNativeWarmMixin
+
+
+class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRuntime):
     worker_root_name = "host_codex_cli_runtime"
     binary_env_var = "WPR_CODEX_BIN"
 
@@ -15650,6 +15657,7 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
         # Standalone GlassHive installs may not pass through Viventium's config
         # compiler. Keep the runtime's own host-worker boundary capability-aware.
         self.binary = _codex_binary_with_discoverable_companion(self.binary)
+        self._init_native_warm()
         self._provider_control_cache_lock = Lock()
         self._provider_control_cache: dict[
             tuple[str, str], tuple[float, tuple[dict[str, object], dict[str, object]]]

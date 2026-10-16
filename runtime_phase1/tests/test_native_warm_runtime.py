@@ -166,7 +166,7 @@ def test_foreign_attempt_and_missing_descriptor_cannot_claim_cleanup_proof(lease
 
 def test_other_native_profiles_have_explicit_unavailable_capability(tmp_path):
     runtime = ProfiledWorkerRuntime(str(tmp_path / 'runtime'))
-    for profile in ['codex-cli', 'claude-code']:
+    for profile in ['claude-code']:
         status = runtime.native_warm_status({'profile': profile, 'execution_mode': 'host'}, {'native_warm_servers': 2})
         assert status['supported'] is False and status['idle'] == 0
 

@@ -149,7 +149,7 @@ def test_profiled_adapters_share_one_existing_aggregate_capacity_owner(tmp_path)
         pools = [adapter._native_warm_pool_factory() for adapter in runtime._native_warm_adapters()]
         assert all(pool is pools[0] for pool in pools)
         assert pools[0].global_limit == 16 and pools[0].owner_limit == 8
-        assert len(runtime._native_warm_adapters()) == 4
+        assert len(runtime._native_warm_adapters()) == 5
     finally:
         runtime.close_native_warm()
 
