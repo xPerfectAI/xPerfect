@@ -11473,7 +11473,7 @@ raise SystemExit(exit_code)
         for destination, expected_digest in destinations:
             if expected_digest is None:
                 if destination.startswith("<") and destination.endswith(">"):
-                    destination = destination[1:-1]
+                    destination = destination[1:-1].strip()
                 destination = unquote(destination)
                 try:
                     parsed = urlsplit(destination)
@@ -11582,7 +11582,10 @@ raise SystemExit(exit_code)
             return output, []
         workspace_dir = str(worker.get("workspace_dir") or "")
         images = self._native_image_output_files(worker, workspace_dir, scope, run_id)
-        return self._render_native_image_paths(output, images, workspace_dir), images
+        return self._render_native_image_paths(
+            output, images, workspace_dir,
+            file_transport=scope.get("file_output_transport") == "artifact_sha256",
+        ), images
 
     def _project_native_image_output(
         self, worker: dict, info: RuntimeInfo, output: str, scope: object, run_id: str
@@ -11611,10 +11614,15 @@ raise SystemExit(exit_code)
                 run_id,
                 output,
             )
-        return self._render_native_image_paths(output, images, str(info.workspace_dir or ""))
+        return self._render_native_image_paths(
+            output, images, str(info.workspace_dir or ""),
+            file_transport=isinstance(scope, dict) and scope.get("file_output_transport") == "artifact_sha256",
+        )
 
     @staticmethod
-    def _render_native_image_paths(output: str, images, workspace_dir: str) -> str:
+    def _render_native_image_paths(
+        output: str, images, workspace_dir: str, *, file_transport: bool = False,
+    ) -> str:
         workspace = Path(workspace_dir)
         references: dict[str, str] = {}
         for path, _mime_type, data in images:
@@ -11629,18 +11637,26 @@ raise SystemExit(exit_code)
         def render(match: re.Match[str]) -> str:
             destination = match.group(2).strip()
             if destination.startswith("<") and destination.endswith(">"):
-                destination = destination[1:-1]
+                destination = destination[1:-1].strip()
             destination = unquote(destination)
-            if destination.startswith("file://"):
-                try:
-                    parsed = urlsplit(destination)
-                except ValueError:
-                    return match.group(0)
+            if destination.startswith("artifact_sha256:"):
+                return match.group(0)  # Existing signed-artifact resolver owns this reference.
+            try:
+                parsed = urlsplit(destination)
+            except ValueError:
+                return match.group(0)
+            if parsed.scheme == "file":
                 if parsed.netloc not in {"", "localhost"} or parsed.query or parsed.fragment:
-                    return match.group(0)
+                    return match.group(1).removeprefix("!")[1:-1] if file_transport else match.group(0)
                 destination = parsed.path
+            elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+                return match.group(0)
             reference = references.get(destination)
-            return f"{match.group(1)}({reference})" if reference else match.group(0)
+            if reference:
+                return f"{match.group(1)}({reference})"
+            # The declared file carrier owns failure detail. An unresolved local
+            # selection must not expose its destination as a broken public link.
+            return match.group(1).removeprefix("!")[1:-1] if file_transport else match.group(0)
 
         return re.sub(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", render, output)
 

@@ -164,6 +164,25 @@ def test_terminal_stream_carries_whole_files_beside_text_and_canonical_response(
     assert canonical['choices'][0]['message']['content'] and runtime.calls == 1
 
 
+def test_padded_selected_destination_publishes_canonical_file_and_exact_download(tmp_path, monkeypatch):
+    raw = f'[CSV](< \t{tmp_path / "result.csv"}\t >)'
+    client, runtime, data = prepare(tmp_path, monkeypatch, authored_output=raw)
+    response, digest = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200, response.text
+    canonical = response.json()
+    carrier = canonical['glasshive']['output_files']
+    assert carrier.get('rejected', []) == []
+    assert len(carrier['files']) == 1
+    selected = carrier['files'][0]
+    assert selected['filename'] == 'result.csv'
+    assert selected['bytes'] == len(data)
+    assert selected['sha256'] == hashlib.sha256(data).hexdigest()
+    assert client.get(selected['download_url']).content == data
+    assert str(tmp_path) not in canonical['choices'][0]['message']['content']
+    assert _result(client, digest).json()['response'] == canonical
+    assert runtime.calls == 1
+
+
 def test_reading_or_referring_to_workspace_files_does_not_publish_them(tmp_path, monkeypatch):
     client, runtime, _ = prepare(tmp_path, monkeypatch, publish=False)
     response, digest = _post_bound(client, _payload(tmp_path))
@@ -231,7 +250,8 @@ def test_rejected_selected_file_keeps_answer_terminal_carrier_and_exact_recovery
     carrier = canonical['glasshive']['output_files']
     assert carrier['files'] == []
     assert carrier['rejected'] == [{'name': 'outside.csv', 'code': 'not_deliverable'}]
-    assert canonical['choices'][0]['message']['content'].startswith('The result is ready.')
+    assert canonical['choices'][0]['message']['content'] == (
+        'The result is ready. Download\n[Official source](https://docs.example.test/)')
     assert str(tmp_path) not in json.dumps(carrier)
     chunks = [json.loads(row[6:]) for row in response.text.splitlines() if row.startswith('data: {')]
     terminal = [choice['delta']['provider_specific_fields']['viventium']['output_files']
