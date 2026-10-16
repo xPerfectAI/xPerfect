@@ -19138,15 +19138,12 @@ class Store:
             - timedelta(seconds=_active_work_terminal_recency_seconds())
         ).isoformat()
         terminal_per_state = _active_work_terminal_per_state_limit()
-        query = """
-            SELECT COUNT(*)
-            FROM delegations
-            JOIN runs ON runs.run_id = delegations.current_run_id
+        query = self._delegation_select() + """
             WHERE delegations.tenant_id = ?
               AND delegations.owner_id = ?
               AND delegations.dismissed_at IS NULL
               AND (
-                    runs.state NOT IN ('completed', 'failed', 'cancelled')
+                    COALESCE(runs.state, 'queued') NOT IN ('completed', 'failed', 'cancelled')
                  OR (
                         COALESCE(runs.ended_at, delegations.updated_at) >= ?
                     AND (
@@ -19192,7 +19189,7 @@ class Store:
                 [updated_at, updated_at, created_at, updated_at, created_at, work_ref]
             )
         with self._connect() as conn:
-            row = conn.execute(query, params).fetchone()
+            row = conn.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()
         return int(row[0] if row else 0)
 
     def list_delegation_history(
