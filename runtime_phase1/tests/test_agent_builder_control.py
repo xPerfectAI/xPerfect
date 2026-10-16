@@ -321,28 +321,40 @@ def test_graph_control_schema_and_native_choice_fail_closed():
         )
 
 
+@pytest.mark.parametrize("same_turn_continuation", [False, True])
 @pytest.mark.parametrize(
     "with_graph,with_delivery",
     [(True, False), (False, True), (True, True), (False, False)],
 )
 def test_conversation_schema_declares_final_work_and_async_receipt_boundary(
-    with_graph, with_delivery
+    with_graph, with_delivery, same_turn_continuation
 ):
     graph = graph_transfer_control(_payload().tools) if with_graph else None
     delivery = messaging_delivery_control(audio_eligible=True) if with_delivery else None
-    schema = conversation_output_schema(graph, delivery)
+    schema = conversation_output_schema(graph, delivery, same_turn_continuation=same_turn_continuation)
     if not with_graph and not with_delivery:
         assert schema is None
         return
 
     description = schema["description"]
-    assert "Returning type=assistant_response ends your work for this turn." in description
-    assert "complete authorized work you can do now, or report its actual blocker" in description
-    assert "a promise is not a result" in description
-    assert (
-        "A real accepted asynchronous work receipt may be acknowledged without waiting for completion."
-        in description
+    assert ("Returning type=assistant_response ends your work for this turn." in description) is not same_turn_continuation
+    truthful_result_boundary = (
+        "Report actual results, a real accepted asynchronous work receipt, or a blocker. "
+        "Never substitute a promise for one of these."
     )
+    assert description.count(truthful_result_boundary) == 1
+    assert "First complete authorized work you can do now" not in description
+    assert "Complete remaining authorized work and report actual results or blockers." not in description
+    continuation_work_boundary = (
+        "Continue remaining authorized work and report actual results, "
+        "a real accepted asynchronous work receipt, or blockers."
+    )
+    assert (continuation_work_boundary in description) is same_turn_continuation
+    # Continuation affects guidance, not graph, voice or required envelope controls.
+    ordinary = conversation_output_schema(graph, delivery)
+    assert {key: value for key, value in schema.items() if key != "description"} == {
+        key: value for key, value in ordinary.items() if key != "description"
+    }
     assert schema["additionalProperties"] is False
     assert schema["properties"]["type"]["enum"] == (
         ["assistant_response", "tool_call"] if with_graph else ["assistant_response"]

@@ -418,8 +418,12 @@ Native updates, exact session identity and terminal results use separate typed e
 native child events remain native data; they do not invent xPerfect workers. Usage is unavailable
 unless independently projected from an authoritative native event. A terminal error, cancellation,
 protocol mismatch or exceeded output limit cannot become a successful empty result.
-The conversation output schema describes only the final host-graph result. It does not replace
-or restrict authorized native function and MCP execution before that result. An assistant result
+The conversation output schema describes only the final host-graph result. It reports actual
+results, a real accepted asynchronous work receipt, or a blocker; a promise cannot replace them.
+The owning Main or worker instructions choose the execution path. The output protocol does not
+require completing work directly before acknowledging an accepted handoff. This contract clarifies
+responsibility; it does not promise lower latency or model compliance.
+It does not replace or restrict authorized native function and MCP execution before that result. An assistant result
 requires a null transfer name; a graph-transfer result requires one listed transfer name. Host
 and container Grok adapters declare these pairs with complete disjoint `anyOf` branches while
 retaining the top-level fields used by streaming. In an admitted conversation with native tools
