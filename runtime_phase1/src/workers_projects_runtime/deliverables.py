@@ -16,6 +16,13 @@ from functools import lru_cache
 from urllib.parse import quote
 
 
+# Escape tokens must be consumed outside links too, so malformed or escaped opening
+# brackets are not repeatedly rescanned as fresh labels. Label branches are disjoint.
+NATIVE_MARKDOWN_LINK_OR_ESCAPE = re.compile(
+    r"\\.|(!?\[(?:\\.|[^\\[\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)"
+)
+
+
 SANDBOX_WORKSPACE_MOUNT = Path(os.environ.get("WPR_SANDBOX_WORKSPACE", "/workspace/project"))
 LOCALHOST_URL_PATTERN = re.compile(
     r"://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?:[:/]|$)",

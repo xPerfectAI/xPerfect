@@ -319,3 +319,28 @@ def test_identityless_selected_assistant_still_rejects_export(tmp_path, monkeypa
     assert response.status_code == 409 and 'output_files' not in response.json().get('glasshive', {})
     assert response.json()['error']['code'] == 'native_output_files_identity_unavailable'
     assert runtime.calls == 1
+
+
+@pytest.mark.parametrize(('output', 'selected_count'), [
+    (r'[escaped\]label](result.csv)', 1),
+    (r'\[literal](result.csv)', 0),
+    (r'\\[real](result.csv)', 1),
+])
+def test_selected_file_escapes_survive_selection_and_both_artifact_renderers(
+    tmp_path, monkeypatch, output, selected_count,
+):
+    client, runtime, data = prepare(tmp_path, monkeypatch, authored_output=output)
+    response, digest = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200, response.text
+    canonical = response.json()
+    files = canonical.get('glasshive', {}).get('output_files', {}).get('files', [])
+    assert len(files) == selected_count
+    content = canonical['choices'][0]['message']['content']
+    if selected_count:
+        assert files[0]['filename'] == 'result.csv'
+        assert client.get(files[0]['download_url']).content == data
+        assert output.split('](')[0] in content
+    else:
+        assert content == output
+    assert _result(client, digest).json()['response'] == canonical
+    assert runtime.calls == 1

@@ -70,7 +70,7 @@ from .deliverables import (
     capture_native_media, _native_media_snapshot, _native_file_reader, NATIVE_IMAGE_SUFFIXES,
     NATIVE_MEDIA_MAX_ITEMS, NATIVE_MEDIA_MAX_BYTES, NATIVE_MEDIA_MAX_TOTAL_BYTES,
     NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256,
-    is_user_deliverable_relative_path,
+    is_user_deliverable_relative_path, NATIVE_MARKDOWN_LINK_OR_ESCAPE,
 )
 from .failure_classification import (
     FailureClassification,
@@ -11467,8 +11467,9 @@ raise SystemExit(exit_code)
             re.sub(r"(`+)(?!`)(.*?)\1(?!`)", "", line)
             for _offset, line in markdown_body_lines(output)
         )
-        destinations = [(match.group(2).strip(), None) for match in re.finditer(
-            r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", body)]
+        destinations = [(match.group(2).strip(), None)
+                        for match in NATIVE_MARKDOWN_LINK_OR_ESCAPE.finditer(body)
+                        if match.group(2) is not None]
         destinations.extend(native_edits)
         for destination, expected_digest in destinations:
             if expected_digest is None:
@@ -11635,6 +11636,8 @@ raise SystemExit(exit_code)
                 references[alias] = reference
 
         def render(match: re.Match[str]) -> str:
+            if match.group(2) is None:
+                return match.group(0)  # An escaped token is literal text, not a link.
             destination = match.group(2).strip()
             if destination.startswith("<") and destination.endswith(">"):
                 destination = destination[1:-1].strip()
@@ -11658,7 +11661,7 @@ raise SystemExit(exit_code)
             # selection must not expose its destination as a broken public link.
             return match.group(1).removeprefix("!")[1:-1] if file_transport else match.group(0)
 
-        return re.sub(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", render, output)
+        return NATIVE_MARKDOWN_LINK_OR_ESCAPE.sub(render, output)
 
     def _native_input_image_files(self, worker: dict, info: RuntimeInfo | str) -> list[tuple[Path, str, bytes]]:
         if not self._conversation_mode_from_worker(worker):

@@ -517,6 +517,13 @@ plain answers without files and accepted unchanged published-file references; it
 artifact, scan a workspace or add a second publisher. Conversation, restricted and deferred provider
 paths keep their existing composition.
 
+Native selected-file selection, the public-stream link barrier and both artifact renderers share
+the same Markdown scan grammar. Escaped
+characters are literal tokens outside links; escaped and ordinary label characters have disjoint
+branches. Nested JSON strings and unmatched brackets must not cause regex backtracking to block
+reply delivery or synchronous provider recovery at API startup. Recognized links retain the same
+snapshot, source-root, owner and immutable-download checks; text is not clipped to avoid the scan.
+
 Artifact mismatch disables only optional interject; ordinary generation still uses the selected
 native model and authority. The runner hashes the executable once at startup with a bounded buffer,
 then publishes effective interject capability in `grok.session.started`. The existing active-session

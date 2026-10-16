@@ -42,6 +42,7 @@ from .deliverables import (
     native_media_observations,
     NATIVE_MEDIA_PREFIX, NATIVE_IMAGE_SUFFIXES, _publish_native_media, _native_media_snapshot,
     NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256,
+    NATIVE_MARKDOWN_LINK_OR_ESCAPE,
 )
 from .control_plane import (
     PROFILE_ACCOUNT_PROVIDERS,
@@ -4445,6 +4446,8 @@ class WorkersProjectsService:
             return selected_urls[reference]
 
         def render(match: re.Match[str]) -> str:
+            if match.group(2) is None:
+                return match.group(0)
             reference = match.group(2).strip().removeprefix("<").removesuffix(">")
             if not reference.startswith("artifact_sha256:"):
                 return match.group(0)
@@ -4452,7 +4455,7 @@ class WorkersProjectsService:
                 raise RuntimeErrorBase("Selected native image is unavailable for this request")
             return f"{match.group(1)}({describe(reference)})"
 
-        rendered = re.sub(r"(!?\[(?:\\.|[^\]\r\n])*\])\((<[^>\r\n]*>|[^()\r\n]*)\)", render, projected)
+        rendered = NATIVE_MARKDOWN_LINK_OR_ESCAPE.sub(render, projected)
         if include_captured_files:
             for reference in authorized:
                 describe(reference)
