@@ -496,6 +496,8 @@ def classify_cli_failure(
                 "the original task and any files already produced."
             ),
             diagnostic_summary=diagnostic_summary,
+            structured=True,
+            provider_event_source="provider_native",
         )
     if structured_authentication_failed:
         return FailureClassification(
@@ -1139,7 +1141,7 @@ _STRUCTURED_PROVIDER_CONTENT_FILTER_CODES = frozenset(
 )
 
 _STRUCTURED_STATUS_KEYS = frozenset(
-    {"apierrorstatus", "errorstatus", "httpstatus", "statuscode"}
+    {"apierrorstatus", "errorstatus", "httpstatus", "httpstatuscode", "statuscode"}
 )
 
 _STRUCTURED_CODE_KEYS = frozenset(

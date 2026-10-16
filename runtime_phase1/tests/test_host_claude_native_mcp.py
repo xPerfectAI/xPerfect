@@ -53,7 +53,8 @@ def test_restricted_claude_does_not_read_or_add_host_capabilities(source, tmp_pa
     runtime, _, _ = source
     monkeypatch.setattr(runtime, '_host_codex_worker_config', lambda *_: pytest.fail('restricted worker read host config'))
     broker = {'type': 'http', 'url': 'http://127.0.0.1:9000/scoped'}
-    assert materialize(runtime, tmp_path, {**restricted, 'claude_project_mcp': {'broker': broker}}, 'conversation') == {'broker': broker}
+    expected = {} if restricted.get('provider_capabilities', {}).get('native_tools') is False else {'broker': broker}
+    assert materialize(runtime, tmp_path, {**restricted, 'claude_project_mcp': {'broker': broker}}, 'conversation') == expected
 
 
 def test_claude_keeps_explicit_server_home_and_selected_env_only(source, tmp_path, monkeypatch):

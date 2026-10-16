@@ -2487,3 +2487,44 @@ def test_coordinator_api_maps_only_exact_native_generation_conflict(coordinator,
         assert response.json()['detail']['code'] == 'active_work_generation_changed'
     else:
         assert code not in response.text
+
+
+def test_direct_default_coordinator_uses_host_and_exact_provider_effort(coordinator, monkeypatch):
+    from workers_projects_runtime.coordinator_config import configured_coordinator
+    monkeypatch.delenv('GLASSHIVE_COORDINATOR_CONFIG_JSON', raising=False)
+    coordinator.store.get_user_preferences = lambda *_: {'default_worker_profile':'direct-xai','grok_effort':'low'}
+    coordinator.service.store = coordinator.store
+    seen=[]
+    coordinator.service._resolve_worker_model=lambda profile,mode,**_: seen.append((profile,mode)) or 'grok-4.7'
+    result=configured_coordinator(coordinator.service,coordinator.provider,'local','owner','direct-xai')
+    assert seen==[('direct-xai','host')]
+    assert result.model=='direct-xai:grok-4.7' and result.effort=='low'
+    assert result.scope.execution_mode=='host' and result.routes[0].execution_mode=='host'
+
+
+def test_direct_coordinator_api_account_uses_protected_key_and_preserves_host_scope(coordinator, monkeypatch):
+    import json
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.coordinator_api import install_coordinator_routes
+    from workers_projects_runtime.coordinator_config import configured_coordinator
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
+    account={'account_id':'api-fixture','provider':'xai','status':'ready','auth_method':'api_key','secret_locator':'native-home://api-key'}
+    coordinator.service.control_plane_store=SimpleNamespace(get_provider_account=lambda **_: dict(account),list_connections=lambda **_:[])
+    coordinator.service.store=coordinator.store
+    coordinator.provider._model=lambda model_id,**_: GLASSHIVE_MODELS[model_id]
+    config=CoordinatorConfig(model='direct-xai:grok-4.7',effort='high',scope=CoordinatorScope(execution_mode='host'))
+    monkeypatch.setenv('GLASSHIVE_COORDINATOR_CONFIG_JSON',config.model_dump_json())
+    monkeypatch.setattr('workers_projects_runtime.native_api_keys.enabled',lambda:True)
+    app=FastAPI()
+    install_coordinator_routes(app,coordinator,lambda _:('local','owner'),lambda tenant,owner,profile='':configured_coordinator(coordinator.service,coordinator.provider,tenant,owner,profile))
+    client=TestClient(app)
+    response=client.post('/v1/coordinator/conversations',json={'account_id':'api-fixture','scope':{'execution_mode':'host'}})
+    assert response.status_code==200,response.text
+    with coordinator.store._connect() as conn:
+        saved=json.loads(conn.execute('SELECT config_json FROM coordinator_conversations WHERE conversation_id=?',(response.json()['conversation_id'],)).fetchone()[0])
+    assert saved['model']=='direct-xai:grok-4.7' and saved['scope']['execution_mode']=='host'
+    assert saved['routes'][0]['profile']=='direct-xai' and saved['routes'][0]['connection_id']=='api-fixture'
+    assert client.post('/v1/coordinator/conversations',json={'account_id':'api-fixture','scope':{'execution_mode':'docker'}}).status_code==409
+    account['auth_method']='subscription'
+    assert client.post('/v1/coordinator/conversations',json={'account_id':'api-fixture'}).status_code==409

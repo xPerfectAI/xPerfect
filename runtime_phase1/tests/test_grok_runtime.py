@@ -29,7 +29,6 @@ def info(tmp_path, session=None):
 def test_adapters_reuse_existing_exact_generation_lifecycle():
     assert HostGrokBuildRuntime.run_task is HostNativeCliMixin.run_task
     assert HostGrokBuildRuntime.interrupt_worker is HostNativeCliMixin.interrupt_worker
-    assert HostGrokBuildRuntime.terminate_worker is HostNativeCliMixin.terminate_worker
     assert GrokBuildRuntime.run_task is BaseCliWorkerRuntime.run_task
     assert GrokBuildRuntime.interrupt_worker is BaseCliWorkerRuntime.interrupt_worker
 
@@ -1505,3 +1504,122 @@ def test_malformed_required_broker_tool_keeps_existing_runtime_configuration_wra
     record = {**worker(tmp_path), 'bootstrap_bundle_json': json.dumps(bundle)}
     with pytest.raises(RuntimeErrorBase, match='Declared broker server identity is invalid'):
         runtime._grok_command(record, info(tmp_path), host=True)
+
+
+@pytest.mark.parametrize('surface', ['voice', 'telegram'])
+@pytest.mark.parametrize('runtime_class', [GrokBuildRuntime, HostGrokBuildRuntime])
+def test_grok_final_contract_uses_the_existing_typed_surface(tmp_path, runtime_class, surface):
+    from types import SimpleNamespace
+    from workers_projects_runtime.agent_builder_control import messaging_delivery_control
+    runtime = runtime_class(str(tmp_path / 'state'))
+    runtime.sandbox = SimpleNamespace(home_mount='/workspace/home', box=None,
+        paths=lambda _: {'home_dir': tmp_path / 'native-home'})
+    bundle = {'run_mode': 'conversation', 'surface': surface,
+        'messaging_delivery_control': messaging_delivery_control(audio_eligible=True),
+        'provider_capabilities': {'native_tools': True}}
+    record = {**worker(tmp_path), 'trusted_run_lane': 'conversation',
+        'bootstrap_bundle_json': json.dumps(bundle)}
+    schema = runtime._conversation_output_schema(record)
+    assert ('Where messaging audio is optional' in schema['description']) is (surface == 'telegram')
+    assert schema['properties']['voice']['enum'] == ['eligible', 'skip']
+    assert 'text-only or silent delivery' in schema['description']
+    assert json.loads(record['bootstrap_bundle_json']) == bundle
+
+
+@pytest.mark.parametrize('host', [True, False])
+@pytest.mark.parametrize('invalid', [None, 'grant', 'expiry', 'expired', 'token', 'url', 'duplicate', 'duplicate_header', 'untrusted', 'restricted'])
+def test_signed_mission_allows_only_admitted_broker_transport(tmp_path, monkeypatch, host, invalid):
+    import copy
+    from types import SimpleNamespace
+    import workers_projects_runtime.grok_runtime as module
+    monkeypatch.setattr(module.time, 'time', lambda: 1000)
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    runtime.sandbox = SimpleNamespace(home_mount='/workspace/home', box=None)
+    broker = {'name': 'authorized-broker', 'url': 'https://example.test/mcp',
+              'grant_id': 'synthetic-grant', 'grant_expires_at': 2000}
+    server = {'name': 'authorized-broker', 'type': 'http', 'url': broker['url'],
+              'headers': [{'name': 'Authorization', 'value': 'Bearer synthetic-token'}]}
+    bundle = {'glasshive_capability_broker': broker,
+              'env': {'GLASSHIVE_CAPABILITY_BROKER_TOKEN': 'synthetic-token'},
+              'grok_mcp_servers': [server, {'name': 'unrelated', 'type': 'http', 'url': 'https://other.test/mcp'}]}
+    record = {**worker(tmp_path), 'trusted_run_lane': 'mission',
+              '_active_run_id': 'run-1', '_run_attempt_id': 'attempt-1',
+              '_run_startup_token_digest': 'a' * 64, '_native_input_deadline_at': 2000,
+              '_run_local_capability_binding': {'workerId': 'worker-grok', 'runId': 'run-1',
+                  'grantId': 'synthetic-grant',
+                  ('hostStartupLeaseId' if host else 'containerGenerationId'): 'a' * 64}}
+    if invalid == 'grant': broker['grant_id'] = 'other-grant'
+    elif invalid == 'expiry': broker['grant_expires_at'] = 2100
+    elif invalid == 'expired':
+        broker['grant_expires_at'] = record['_native_input_deadline_at'] = 999
+    elif invalid == 'token': server['headers'][0]['value'] = 'Bearer other-token'
+    elif invalid == 'url': server['url'] = 'https://other.test/mcp'
+    elif invalid == 'duplicate': bundle['grok_mcp_servers'].append(copy.deepcopy(server))
+    elif invalid == 'duplicate_header': server['headers'].append({'name': 'authorization', 'value': 'Bearer other-token'})
+    elif invalid == 'untrusted': record.pop('_native_input_deadline_at')
+    elif invalid == 'restricted': bundle['provider_capabilities'] = {'native_tools': False}
+    record['bootstrap_bundle_json'] = json.dumps(copy.deepcopy(bundle))
+    command = runtime._grok_command(record, info(tmp_path), host=host)
+    if invalid:
+        assert '--allow-mcp-server' not in command
+    else:
+        assert command[command.index('--allow-mcp-server') + 1] == 'authorized-broker'
+        assert command.count('--allow-mcp-server') == 1
+    assert '--yolo-mode' not in command or command[command.index('--yolo-mode') + 1] == 'false'
+    assert '--allow-mcp-tool' not in command
+
+
+def test_runner_uses_admitted_server_inventory_for_one_time_transport_permission(tmp_path, monkeypatch, capfd):
+    import io, time
+    from workers_projects_runtime import grok_acp_runner as runner
+    fake = tmp_path / 'native-peer'
+    fixture = PERMISSION_FIXTURE.replace('PYTHON', sys.executable)
+    # Notify readiness, then return the native enabled-tool registry. The broker
+    # permission is still a normal ACP request, answered by the existing mailbox.
+    fixture = fixture.replace(" elif method=='session/prompt':", """ elif method=='_x.ai/mcp/list': result={'result':{'sessionMcpResolved':True,'servers':[{'name':'authorized-broker','session':{'enabled':True,'status':'ready','tools':[{'name':'capability_invoke','enabled':True},{'name':'disabled','enabled':False}]}}]}}
+ elif method=='session/prompt':""")
+    fixture = fixture.replace("'toolCall':{'title':'Run a command'}", "'toolCall':{'title':'Transport','rawInput':{'tool_name':'authorized-broker__capability_invoke'},'_meta':{'x.ai/tool':{'name':'use_tool','kind':'use_tool'}}}")
+    fixture = fixture.replace(" print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)", " print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)\n if method in ('session/new','session/load'): print(json.dumps({'jsonrpc':'2.0','method':'_x.ai/mcp_initialized','params':{'sessionId':'native-id','connected':1,'mcpToolCount':2}}),flush=True)")
+    fake.write_text(fixture); fake.chmod(0o700)
+    config = tmp_path / 'mcp.json'
+    config.write_text(json.dumps([{'name': 'authorized-broker', 'command': 'synthetic-mcp', 'args': [], 'env': []}]))
+    monkeypatch.setenv('GROK_HOME', str(tmp_path / 'home'))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO('Synthetic authorized task.'))
+    returned = runner.main(['--binary', str(fake), '--model', 'grok-selected',
+        '--control-dir', str(tmp_path / 'control'), '--run-id', 'run-1', '--attempt-id', 'attempt-1',
+        '--permission-deadline-at', str(time.time() + 60), '--mcp-file', str(config),
+        '--required-mcp-server', 'authorized-broker', '--allow-mcp-server', 'authorized-broker'])
+    events = [json.loads(line) for line in capfd.readouterr().out.splitlines() if line.startswith('{')]
+    assert returned == 0, events[-3:]
+    assert any(event['type'] == 'grok.permission.auto_granted' for event in events)
+    assert not any(event['type'] == 'grok.permission.requested' for event in events)
+    assert not list((tmp_path / 'control').glob('*.pending'))
+
+
+@pytest.mark.parametrize('case', ['full', 'ask', 'absent', 'raw_full', 'untrusted', 'restricted', 'wrong_kind', 'wrong_substrate', 'expired', 'boolean_version', 'caller_no_authority'])
+def test_native_mission_full_access_requires_owner_authority_and_admitted_generation(tmp_path, case):
+    bundle = {'viventium_launch_authority': {'version': 1, 'kind': 'conversation_orchestrator',
+              'execution_mode': 'host', 'worker_access': 'full'}}
+    record = {**worker(tmp_path), 'trusted_run_lane': 'mission',
+              '_active_run_id': 'run-1', '_run_attempt_id': 'attempt-1',
+              '_run_startup_token_digest': 'a' * 64, '_native_input_deadline_at': 9999999999,
+              '_run_local_capability_binding': {'workerId': 'worker-grok', 'runId': 'run-1',
+                  'hostStartupLeaseId': 'a' * 64}}
+    if case == 'ask': bundle['viventium_launch_authority']['worker_access'] = 'ask'
+    if case in {'absent', 'raw_full'}: bundle['viventium_launch_authority'].pop('worker_access')
+    if case == 'raw_full': bundle['access_mode'] = 'full'
+    if case == 'untrusted': record.pop('_native_input_deadline_at')
+    if case == 'restricted': bundle['provider_capabilities'] = {'native_tools': False}
+    if case == 'wrong_kind': bundle['viventium_launch_authority']['kind'] = 'caller-authored'
+    if case == 'wrong_substrate': bundle['viventium_launch_authority']['execution_mode'] = 'docker'
+    if case == 'expired': record['_native_input_deadline_at'] = 1
+    if case == 'boolean_version': bundle['viventium_launch_authority']['version'] = True
+    if case == 'caller_no_authority':
+        bundle.pop('viventium_launch_authority')
+        bundle['access_mode'] = 'full'
+    record['bootstrap_bundle_json'] = json.dumps(bundle)
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))
+    command = runtime._grok_command(record, info(tmp_path), host=True)
+    mode = command[command.index('--yolo-mode') + 1] if '--yolo-mode' in command else None
+    assert (mode == 'true') is (case == 'full')

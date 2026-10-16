@@ -2186,3 +2186,13 @@ def test_bound_codex_mission_never_copies_process_global_auth_into_worker_state(
     )
 
     assert not (runtime._host_codex_home(worker) / "auth.json").exists()
+
+
+@pytest.mark.parametrize('profile,provider',[('direct-openai','codex'),('direct-anthropic','claude'),('direct-xai','grok')])
+def test_direct_binding_rejects_incompatible_account_before_native_route(tmp_path,profile,provider):
+    database=tmp_path/'runtime.db'
+    store=ControlPlaneStore(str(database))
+    account=_account(store,provider=provider,auth_method='subscription')
+    runtime=ProfiledWorkerRuntime(base_dir=str(tmp_path),provider_account_db_path=str(database))
+    with pytest.raises(RuntimeErrorBase,match='API-key account'):
+        runtime.run_task(_worker(account['account_id'],profile=profile),'Synthetic task',run_id='run_direct_incompatible')

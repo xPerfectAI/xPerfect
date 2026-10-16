@@ -72,6 +72,23 @@ work. Clients use it only to recover an exact completed operation after a normal
 
 ## Client Strategy
 
+### LiveKit voice clients
+
+The [standalone LiveKit reference](../integrations/livekit/README.md) connects the official
+OpenAI-compatible LiveKit plugin directly to xPerfect's existing conversation API. It preserves
+requested model/effort and native workspace/session/tools, and projects only typed eligible text
+into speech. Quiet public text and file/activity metadata remain available to the host separately.
+No LibreChat dependency or second orchestrator is introduced. Each SDK stream keeps a stable
+per-turn request identity through retries; the sample disables blind retries and speculative
+generation and uses an explicit response budget. Provider-owned early speech uses xPerfect's
+exact native admission guard, while Core-owned source/family authority stays unchanged.
+
+The tested boundary is LiveKit Agents/OpenAI plugin 1.5.10, the OpenAI SDK 2.32.0 and a real
+isolated local room with synthetic speech input, transcription, a native model reply, TTS and
+received active audio. Interruption, reconnect and background callback speech acceptance remain open;
+do not claim production voice parity or a latency guarantee from this reference. Host-owned
+memory, Feelings and other modules still require their existing configured projections.
+
 ### LibreChat / Viventium / Standalone-Compatible Clients
 Use xPerfect as an external MCP server. The standalone external-MCP path is config-only and
 requires no LibreChat application-code changes. Optional Viventium/LibreChat account, inference,
@@ -118,6 +135,13 @@ standalone/plain LibreChat deployments must still work without them by using:
 - `workspace_preferences_get` and `workspace_preferences_set` for per-user worker and effort
   defaults
 - the returned View / Steer URL for operator visibility and takeover
+
+Explicit worker effort must survive MCP launch, schedule and continuation into the actual
+runtime request. Direct OpenAI, Anthropic and xAI use their existing exact model catalog choices
+and provider effort environment keys; `default` is an explicit supported value. Direct OpenAI
+and Anthropic also reuse the existing provider preference fields when effort is omitted. An
+explicit override wins; it must not become a prompt hint or silently fall back to provider default.
+These rules apply to atomic delegation and the older create/assign path alike.
 
 Default `workspace_launch`, `workspace_wait`, and `workspace_status` payloads are intentionally
 compact. They return user-actionable state, result tools, output text, artifact short links, and a
@@ -182,10 +206,9 @@ as a direct model declaration. A late ACP inventory notification is not a readin
 Managed Viventium records this access mechanism as one registered native-profile fact for
 Grok Worker and conversation authority, only when native tools are enabled and the existing
 authorized MCP projection is nonempty. The host's deferred capability-server fields retain
-their separate meaning and grants stay unchanged. The host's prompt architecture owner,
-`docs/requirements_and_learnings/49_Prompt_Architecture_and_Token_Efficiency.md`
-(section "Native Profile MCP Access Facts"), owns registration, Workbench visibility,
-publication and final authority checks.
+their separate meaning and grants stay unchanged. The host's
+[prompt architecture owner](../../../docs/requirements_and_learnings/49_Prompt_Architecture_and_Token_Efficiency.md#native-profile-mcp-access-facts)
+owns registration, Workbench visibility, publication and final authority checks.
 
 Canonical conversation tool evidence uses the existing owner-, message-, invocation-, request-
 and run-bound version 1 carrier for Codex, Claude and Grok. Grok evidence pairs typed ACP tool
@@ -225,10 +248,6 @@ Native file previews and downloads use the selected filename only when the exact
 run, owner, callback, revision, digest and stored bytes identify one unique name for that artifact.
 Missing, invalid, stale or ambiguous metadata keeps the storage basename. This presentation rule
 does not change signed-link scope, file access, immutable bytes or range downloads.
-A mission view lists only model-selected completed outputs under Result files. Other
-authorized files remain in the separate collapsed Workspace files section, labeled as
-reusable workspace content that may come from other work. Neither section grants new
-file access or worker controls.
 
 Host native file selections may use the admitted workspace or the current worker's managed
 `TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes
@@ -370,12 +389,6 @@ Support:
 Prefer remote HTTP MCP with auth in front of the server when not loopback-only.
 
 ### Hosted user connection
-
-**Current launcher limit (29 September 2026):** the hosted input does not expose the UI's per-client
-registration fields or pass MCP discovery settings to the UI role. Connections therefore cannot
-generate native Codex/Claude setup on that profile. A ready worker account or a working authenticated
-MCP endpoint does not prove that client setup. Do not add unrecognized hosted JSON keys, edit
-generated container config, copy tokens or create a custom OAuth callback as the user workaround.
 
 The designed Glass Drive **Use xPerfect from another AI app** panel is the source of truth for a
 deployment's public HTTPS MCP URL and the exact clients that deployment has completely registered.

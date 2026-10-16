@@ -33,7 +33,11 @@ def test_stream_retries_observation_of_same_admitted_request(tmp_path, monkeypat
         return sync(record)
 
     monkeypatch.setattr(provider, "_sync", observe)
-    response, digest = _post_bound(client, _payload(tmp_path, stream=True))
+    payload = _payload(tmp_path, stream=True)
+    # Test an actual requested deadline, independent of whether an instant native result
+    # finishes before the next observation can anchor an optional default timeout.
+    payload["metadata"]["response_timeout_s"] = 60
+    response, digest = _post_bound(client, payload)
     assert response.status_code == 200
     assert response.text.endswith("data: [DONE]\n\n")
     assert len(calls) >= 2

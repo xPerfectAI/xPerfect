@@ -320,3 +320,205 @@ def test_retained_stop_recovery_keeps_control_and_payload_fences(account_client,
     assert response.status_code in (200, 404), response.text
     assert row(store, {"callbackId": original["callback_id"]}) == before
     assert account_client.post("/v1/callback-associations/recover", json=body).status_code == 401
+
+
+def _owned_cancellation_fixture(client, *, key):
+    service, store = client.app.state.service, client.app.state.store
+    service.executor.submit = lambda *args, **kwargs: None
+    payload = delegation_payload_with_origin()
+    payload['bootstrapBundle']['callbacks']['hmac_secret'] = 'synthetic-secret'
+    accepted = client.post('/v1/delegations', headers=account_headers(idempotency_key=key), json=payload)
+    assert accepted.status_code == 202, accepted.text
+    work = store.get_delegation(accepted.json()['workRef'], tenant_id='tenant-a', owner_id='owner-a')
+    return store, service, work, store.get_worker(work['worker_id'])
+
+
+@pytest.mark.parametrize('state', ['queued', 'running', 'needs_input', 'paused'])
+def test_owner_termination_publishes_each_actual_cancelled_run_once(account_client, state):
+    store, service, work, worker = _owned_cancellation_fixture(account_client, key='termination-' + state)
+    run_id = work['current_run_id']
+    if state != 'queued':
+        _truthfully_invoke_run(store, run_id, suffix='termination-' + state)
+        if state != 'running': store.update_run(run_id, state=state)
+    # A pre-existing terminal result must not be overwritten or reclassified.
+    prior = store.create_run(worker['worker_id'], worker['project_id'], 'Prior completed result', state='completed')
+    old_prior = store.get_run(prior['run_id'])
+    result = service.terminate_worker(worker['worker_id'])
+    assert result['state'] == 'terminated'
+    service._replay_pending_lifecycle_effects()
+    service.terminate_worker(worker['worker_id'])
+    service._replay_pending_lifecycle_effects()
+    with store._connect() as connection:
+        callbacks = connection.execute("SELECT * FROM callback_outbox WHERE run_id=? AND event_type='run.cancelled'", (run_id,)).fetchall()
+        worker_effects = connection.execute("SELECT status FROM lifecycle_operation_effects WHERE worker_id=? AND effect_kind='callback.worker_terminated'", (worker['worker_id'],)).fetchall()
+    assert len(callbacks) == 1
+    receipt = dict(callbacks[0]); terminal = store.get_run(run_id)
+    body = json.loads(receipt['payload_json'])
+    assert body['event'] == 'run.cancelled'
+    assert body['run_id'] == run_id
+    assert receipt['result_revision'] == terminal['terminal_result_revision'] > 0
+    assert receipt['result_digest']
+    assert store.get_run(prior['run_id']) == old_prior
+    assert worker_effects and all(effect['status'] == 'applied' for effect in worker_effects)
+
+
+def test_termination_cancellation_sink_waits_for_compute_confirmation(account_client, monkeypatch):
+    store, service, work, worker = _owned_cancellation_fixture(account_client, key='termination-failed-compute')
+    run_id = work['current_run_id']
+    def failed_stop(_worker): raise RuntimeError('Synthetic native compute is still active')
+    original = service.runtime.terminate_worker
+    monkeypatch.setattr(service.runtime, 'terminate_worker', failed_stop)
+    with pytest.raises(RuntimeError, match='still active'):
+        service.terminate_worker(worker['worker_id'])
+    service._replay_pending_lifecycle_effects()
+    assert service._reconcile_terminal_callback_intents() == 0
+    with store._connect() as connection:
+        assert not connection.execute("SELECT 1 FROM callback_outbox WHERE run_id=? AND event_type='run.cancelled'", (run_id,)).fetchone()
+    monkeypatch.setattr(service.runtime, 'terminate_worker', original)
+    service.terminate_worker(worker['worker_id'])
+    # Skip the retry delay only in this synthetic local fixture.
+    with store._connect() as connection:
+        connection.execute("UPDATE lifecycle_operation_effects SET next_attempt_at=NULL WHERE worker_id=?", (worker['worker_id'],))
+    service._replay_pending_lifecycle_effects()
+    with store._connect() as connection:
+        assert connection.execute("SELECT count(*) FROM callback_outbox WHERE run_id=? AND event_type='run.cancelled'", (run_id,)).fetchone()[0] == 1
+
+
+def test_claim_termination_enqueues_all_cancelled_run_sinks_atomically(account_client):
+    store, service, work, worker = _owned_cancellation_fixture(account_client, key='termination-exact-claim')
+    run_id = work['current_run_id']
+    current = store.get_worker(worker['worker_id'])
+    claim = store.try_claim_worker_compute_release(worker['worker_id'],
+        expected_updated_at=current['updated_at'], expected_last_run_id=current.get('last_run_id') or '',
+        expected_state=current['state'], expected_container_id='', owner=service.executor_id,
+        ttl_s=30, kind='terminate_worker', target_run_id=run_id, expected_target_started_at='')
+    assert claim
+    result = store.finalize_worker_termination_claim(worker['worker_id'], claim['token'], claim['epoch'],
+        compute_released_at=datetime.now(timezone.utc).isoformat(), runtime_fields={}, error_text='Synthetic owner termination')
+    assert result and result['state'] == 'terminated'
+    service._replay_pending_lifecycle_effects()
+    with store._connect() as connection:
+        rows = connection.execute("SELECT * FROM callback_outbox WHERE run_id=? AND event_type='run.cancelled'", (run_id,)).fetchall()
+    assert len(rows) == 1
+    assert dict(rows[0])['result_digest']
+    assert store.finalize_worker_termination_claim(worker['worker_id'], claim['token'], claim['epoch'],
+        compute_released_at=datetime.now(timezone.utc).isoformat(), runtime_fields={}, error_text='Duplicate') is None
+
+
+@pytest.mark.parametrize('canonical_origin_only', [False, True])
+@pytest.mark.parametrize('legacy_effect_applied', [False, True])
+def test_retained_worker_only_termination_effect_recovers_legacy_cancelled_result(account_client, monkeypatch, canonical_origin_only, legacy_effect_applied):
+    store, service, work, worker = _owned_cancellation_fixture(account_client, key='termination-legacy-recovery')
+    run_id = work['current_run_id']
+    if canonical_origin_only:
+        bundle = json.loads(worker['bootstrap_bundle_json'])
+        bundle['callbacks'] = {'origin_ref': bundle['callbacks']['origin_ref']}
+        store.update_worker(worker['worker_id'], bootstrap_bundle_json=json.dumps(bundle))
+        monkeypatch.setenv('GLASSHIVE_EVENTS_WEBHOOK_URL', 'https://callback.example.invalid/events')
+        monkeypatch.setenv('GLASSHIVE_EVENTS_HMAC_SECRET', 'synthetic-canonical-signer')
+    _truthfully_invoke_run(store, run_id, suffix='legacy-termination')
+    store.update_worker(worker['worker_id'], last_run_id=run_id)
+    if canonical_origin_only:
+        for historical_state in ('completed', 'failed', 'cancelled'):
+            historical = store.create_run(worker['worker_id'], worker['project_id'],
+                'Synthetic historical result', state=historical_state)
+            store.update_run(historical['run_id'], ended_at=datetime.now(timezone.utc).isoformat())
+        store.update_worker(worker['worker_id'], last_run_id=run_id)
+        store.update_worker_state(worker['worker_id'], 'paused')
+        assert store.list_terminal_runs_missing_callback_intent(worker_id=worker['worker_id']) == []
+    # Reproduce the former durable split: terminal run and worker-only effect,
+    # with no per-run callback sink. No new termination is issued to recover it.
+    store.update_run(run_id, state='cancelled', ended_at=datetime.now(timezone.utc).isoformat(), error_text='Synthetic old owner stop')
+    store.update_worker_state(worker['worker_id'], 'terminating')
+    store.complete_worker_termination(worker['worker_id'])
+    if canonical_origin_only:
+        # A global restart scan must not revive retained historical origins;
+        # the existing exact worker termination effect owns this repair.
+        assert run_id not in {
+            row['run_id'] for row in store.list_terminal_runs_missing_callback_intent()
+        }
+        assert [row['run_id'] for row in store.list_terminal_runs_missing_callback_intent(
+            worker_id=worker['worker_id']
+        )] == [run_id]
+    released_at = store.get_worker(worker['worker_id'])['compute_released_at']
+    if legacy_effect_applied:
+        # Exact retained prior defect: worker-only effect was retired before
+        # canonical origin-only callback recovery was supported.
+        with store._connect() as connection:
+            connection.execute("UPDATE lifecycle_operation_effects SET status='applied' WHERE worker_id=?", (worker['worker_id'],))
+        for _ in range(2): service.terminate_worker(worker['worker_id'])
+    else:
+        for _ in range(2): service._replay_pending_lifecycle_effects()
+    assert store.get_worker(worker['worker_id'])['compute_released_at'] == released_at
+    with store._connect() as connection:
+        rows = connection.execute("SELECT * FROM callback_outbox WHERE run_id=? AND event_type='run.cancelled'", (run_id,)).fetchall()
+        effects = connection.execute("SELECT status FROM lifecycle_operation_effects WHERE worker_id=? AND effect_kind='callback.worker_terminated'", (worker['worker_id'],)).fetchall()
+    assert len(rows) == 1 and dict(rows[0])['result_digest']
+    assert dict(rows[0])['result_revision'] == store.get_run(run_id)['terminal_result_revision']
+    assert all(effect['status'] == 'applied' for effect in effects)
+    assert store.list_terminal_runs_missing_callback_intent(worker_id=worker['worker_id']) == []
+
+
+@pytest.mark.parametrize('mode', ['active', 'retry', 'dead', 'wrong_run', 'wrong_attempt', 'reused_pid', 'wrong_worker'])
+def test_exact_host_worker_termination_preserves_target_after_legacy_split(account_client, monkeypatch, tmp_path, mode):
+    import os, subprocess
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    store, service, work, worker = _owned_cancellation_fixture(account_client, key='exact-host-close-' + mode)
+    worker_id, run_id = worker['worker_id'], work['current_run_id']
+    store.update_worker(worker_id, execution_mode='host', workspace_root=str(tmp_path / 'workspace'),
+                        workspace_dir=str(tmp_path / 'workspace'), last_run_id=run_id)
+    native = HostCodexCliRuntime(str(tmp_path / 'native'))
+    process = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)
+    unrelated = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)
+    try:
+        claimed = store.claim_next_queued_run(worker_id, executor_id=service.executor_id)
+        assert claimed and claimed['run_id'] == run_id
+        lease = store.acquire_host_run_lease(runtime_family='codex', lane='mission', tenant_id='tenant-a',
+            owner_id='owner-a', worker_id=worker_id, run_id=run_id, executor_id=service.executor_id,
+            conversation_limit=2, mission_limit=64, account_mission_limit=64, tenant_mission_limit=64, lease_ttl_s=300)
+        assert store.admit_claimed_run(run_id, lease_id=lease['lease_id'], executor_id=service.executor_id)
+        invoked = store.mark_run_runtime_invoked(run_id, lease_id=lease['lease_id'], executor_id=service.executor_id)
+        identity = native._process_start_identity(process.pid)
+        session_name = native._session_name_for_run_id(run_id)
+        assert store.confirm_host_run_start(worker_id=worker_id, run_id=run_id,
+            run_started_at=invoked['runtime_invoked_at'], lease_id=lease['lease_id'], startup_token=lease['startup_token'],
+            executor_id=service.executor_id, identity_kind='host_process', pid=process.pid,
+            process_group=os.getpgid(process.pid), process_start_identity=identity, container_id='', session_id=session_name)
+        run = store.get_run(run_id)
+        root = native._run_root(worker_id, run_id); root.mkdir(parents=True, exist_ok=True)
+        (root / 'stdout.log').write_text(''); (root / 'stderr.log').write_text('')
+        session = {'session_name': session_name, 'run_id': run_id, 'attempt_id': run['active_attempt_id'],
+            'stdout_path': str(root / 'stdout.log'), 'stderr_path': str(root / 'stderr.log'), 'exit_path': str(root / 'exit_code'),
+            'model': 'synthetic-model', 'process_pid': process.pid, 'process_group': os.getpgid(process.pid),
+            'process_start_identity': identity, 'started_at': datetime.now(timezone.utc).isoformat()}
+        if mode != 'active':
+            # Exact former product split: cancelled result + ended lease while
+            # its original native process/session still waits for permission.
+            store.update_run(run_id, state='cancelled', ended_at=datetime.now(timezone.utc).isoformat(), error_text='Synthetic old stop')
+            store.release_host_run_lease(lease['lease_id'], executor_id=service.executor_id, reason='synthetic legacy split')
+            store.update_worker_state(worker_id, 'termination_failed')
+        else: store.update_worker_state(worker_id, 'running')
+        if mode == 'dead': process.terminate(); process.wait(timeout=3)
+        elif mode == 'wrong_run': session['run_id'] = 'run-unrelated'
+        elif mode == 'wrong_attempt': session['attempt_id'] = 'attempt-unrelated'
+        elif mode == 'reused_pid': session['process_start_identity'] = 'ps-lstart:synthetic-old-incarnation'
+        elif mode == 'wrong_worker':
+            other = store.create_worker(worker['project_id'], 'owner-a', 'Other', 'assistant', 'codex-cli', '', 'stub', 'synthetic', tenant_id='tenant-a')
+            foreign = store.create_run(other['worker_id'], worker['project_id'], 'Other owned worker', state='completed')
+            store.update_worker(worker_id, last_run_id=foreign['run_id'])
+        native._write_active_session(worker_id, session)
+        monkeypatch.setattr(service.runtime, 'terminate_worker', native.terminate_worker)
+        if mode in {'wrong_run', 'wrong_attempt', 'wrong_worker', 'reused_pid'}:
+            with pytest.raises(Exception, match='identity|ownership'):
+                service.terminate_worker(worker_id)
+            assert process.poll() is None
+        else:
+            result = service.terminate_worker(worker_id)
+            assert result['state'] == 'terminated' and result['compute_released_at']
+            process.wait(timeout=3); assert process.poll() is not None
+            assert not native._active_session_meta_path(worker_id).exists()
+        assert unrelated.poll() is None
+    finally:
+        for child in [process, unrelated]:
+            if child.poll() is None: child.terminate()
+            child.wait(timeout=3)

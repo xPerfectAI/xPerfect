@@ -13,7 +13,7 @@ from threading import Condition, Event, Lock, Thread
 from typing import Callable, Iterator
 
 from .auth import multi_user_security_enabled
-from .control_plane import ControlPlaneConflict, ControlPlaneError, ControlPlaneStore, PROFILE_ACCOUNT_PROVIDERS, ProviderProjectionPending
+from .control_plane import ControlPlaneConflict, ControlPlaneError, ControlPlaneStore, PROFILE_ACCOUNT_PROVIDERS, ProviderProjectionPending, profile_provider_account_issue
 from .openclaw_runtime import HostCapacityError, RuntimeErrorBase
 from .provider_accounts import ProviderAccountHomeManager
 from .account_native_launch import GuardedAccountLauncher
@@ -58,6 +58,9 @@ def provider_account_capabilities() -> dict[str, list[str]]:
     """Advertise the same profile/account compatibility used by native binding."""
     return {profile: sorted(providers) for profile, providers in _PROFILE_PROVIDERS.items()}
 _EXPECTED_HOME_KEYS = {
+    "direct-openai": frozenset({"CODEX_HOME"}),
+    "direct-anthropic": frozenset({"CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"}),
+    "direct-xai": frozenset({"GROK_AUTH_PATH"}),
     "grok-build": frozenset({"GROK_AUTH_PATH"}),
     "codex-cli": frozenset({"CODEX_HOME"}),
     "claude-code": frozenset(
@@ -904,6 +907,12 @@ class MissionProviderAccountBinder:
         if selection is not None and self.store is not None:
             from .native_api_keys import enabled, native_key_account
             selected_account = self.selected_account_record(worker, selection)
+            from .profile_registry import require_worker_profile
+            if (selected_account is not None and runtime_name in _PROFILE_PROVIDERS
+                    and require_worker_profile(runtime_name).native_transport == "api"):
+                issue = profile_provider_account_issue(runtime_name, selected_account)
+                if issue:
+                    raise RuntimeErrorBase(issue)
             if selected_account is not None and native_key_account(selected_account):
                 if not enabled():
                     raise RuntimeErrorBase("Native API keys require the validated native account route")
@@ -991,10 +1000,9 @@ class MissionProviderAccountBinder:
                 return
             raise RuntimeErrorBase("Selected provider account is not available for this user")
         provider = str(account.get("provider") or "").strip().lower()
-        if provider not in _PROFILE_PROVIDERS[runtime_name]:
-            raise RuntimeErrorBase(
-                "Selected provider account does not match this worker profile"
-            )
+        issue = profile_provider_account_issue(runtime_name, account)
+        if issue:
+            raise RuntimeErrorBase(issue)
         if self.store.pending_provider_projections(account_id=selection.account_id):
             raise ProviderProjectionPending("Native credential recovery must finish before using this account")
         if str(account.get("status") or "").strip().lower() != "ready":

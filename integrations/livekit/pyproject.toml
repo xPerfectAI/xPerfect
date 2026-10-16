@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xperfect-livekit"
+version = "0.1.0"
+description = "Small xPerfect speech-disposition adapter for LiveKit Agents"
+requires-python = ">=3.11"
+dependencies = ["livekit-agents==1.5.10", "livekit-plugins-openai==1.5.10", "openai==2.32.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["xperfect_livekit*"]

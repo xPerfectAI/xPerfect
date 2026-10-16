@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .native_log_notifications import NativeLogNotifications
+
 from .native_context_projection import apply_claude_context, prepare_private_command
 from .worker_configuration import contextual_instruction, enforce_context_tools
 
@@ -49,6 +51,7 @@ from .bootstrap import (
     GLASSHIVE_WORKER_COMPLETION_CONTRACT,
     _worker_prompt,
     bootstrap_env_for,
+    conversation_file_delivery_instructions,
     canonicalize_viventium_feeling_projection,
     claude_project_mcp_payload_for_bundle,
     glasshive_project_agents_md,
@@ -110,7 +113,6 @@ from .openclaw_runtime import (
     runtime_start_boundary,
 )
 from .openclaw_release import reviewed_openclaw_env
-from .native_model_selection import gateway_codex_model_required
 from .provider_accounts import ProviderAccountHomeManager
 from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, host_runtime_requirement_issue
 from .run_evidence import (
@@ -146,8 +148,6 @@ from .bootstrap import (
     GLASSHIVE_NATIVE_CAPABILITY_INVENTORY,
     GLASSHIVE_SAFETY_CHECKPOINT_RULE,
     GLASSHIVE_WORKER_COMPLETION_CONTRACT,
-    HOST_CLAUDE_CAPABILITY_REGISTRIES,
-    HOST_CLAUDE_CAPABILITY_ROOTS,
     PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
     _split_viventium_feeling_capsules,
     _write_clean_room_file,
@@ -706,6 +706,18 @@ _CODEX_RESTRICTED_NATIVE_FEATURES = (
 def _native_tools_disabled(bundle: dict[str, object]) -> bool:
     capabilities = bundle.get("provider_capabilities")
     return isinstance(capabilities, dict) and capabilities.get("native_tools") is False
+
+
+def _host_native_context_bundle(bundle: dict) -> dict:
+    """Retain the existing host instruction composition in its private channel."""
+    native = dict(bundle)
+    native["agents_md"] = merge_glasshive_worker_instructions(
+        HOST_DEFAULT_AGENTS_MD, bundle.get("agents_md"))
+    if not str(native.get("claude_md") or "").strip():
+        native["claude_md"] = HOST_DEFAULT_CLAUDE_MD
+    if not str(native.get("codex_md") or "").strip():
+        native["codex_md"] = HOST_DEFAULT_CODEX_MD
+    return native
 
 
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off", "none", "disabled"}
@@ -1650,13 +1662,12 @@ HOST_NATIVE_HARNESS_PROMPT = _worker_prompt("worker.host_native_harness", f"""# 
 
 You are running directly on the user's main computer, not inside a sandbox.
 You may use the local browser, filesystem, shell, and installed OS tools.
-Default execution is no-approval/full-access for this worker class.
+Native tool access follows this worker's selected permission mode.
 
 {GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS}
 
 Operational requirements:
 - Treat the workspace directory as the primary project root.
-- Keep `work-log.md` current with concise progress, blockers, and completion notes.
 - Write task files inside the workspace by default; use another location when the user's request or applicable prior authorization calls for it. The workspace is a working location, not an additional permission boundary.
 - Apply the safety boundary below to the action's effects and existing authorization. A path outside the workspace does not by itself make an action destructive.
 - Do not print credentials, tokens, cookies, personal data, or private local paths unless absolutely required for the local operator.
@@ -1665,7 +1676,7 @@ Operational requirements:
 - For web research or document-generation tasks, prefer `python3 glasshive-host-tools/content-hygiene.py readable <html-file>` before putting page text into structured files, and run `python3 glasshive-host-tools/content-hygiene.py check <csv-or-json-file>...` before final delivery when the output contains sourced research fields.
 - If you create research plans, specs, subagent prompts, or delegation notes, carry the user's source/date/auth/scope constraints forward exactly instead of widening, weakening, or rewriting them.
 - Keep source publication/evidence dates distinct from retrieval/access timestamps; an access date must not widen or replace a user-limited source window.
-- When `glasshive-run/constraint-ledger.json` exists, use its original admitted request, continuation context, and typed authority as input. Interpret the user’s goals and constraints yourself; the runtime does not extract semantic requirements from prose.
+- Use the current run’s supplied admitted request, context, and typed authority as input; the completion contract below governs recovery of missing context. Interpret the user’s goals and constraints yourself; the runtime does not extract semantic requirements from prose.
 - `glasshive-run/` is internal harness evidence, not a user-facing artifact directory.
 - For host browser or desktop tasks, first use the user's existing local app/session when the task asks for the main computer, Chrome, browser profile, local files, or installed OS tools. Do not claim host control is unavailable until you have checked the available local shell/desktop/browser automation paths.
 
@@ -1690,9 +1701,9 @@ Required context files in this workspace:
     "safety_checkpoint": GLASSHIVE_SAFETY_CHECKPOINT_RULE,
 })
 HOST_DEFAULT_AGENTS_MD = (
-    "Follow these AGENTS.md project instructions and keep `work-log.md` updated.\n"
+    "Follow these AGENTS.md project instructions.\n"
     "When the task involves the host browser, desktop, files, shell, or installed apps, operate on the real local machine session unless the project definition explicitly says sandbox.\n"
-    "If `glasshive-run/constraint-ledger.json` exists, use it as the canonical run constraint reminder and keep `glasshive-run/` out of user-facing deliverables.\n"
+    "Use the current run's supplied request, context, and typed authority directly; do not reread a duplicate ledger. If required context is missing, take the current run ID from `context_manifest.run_id` in the supplied native envelope (or `GLASSHIVE_RUN_ID` when no envelope is supplied), consult only `glasshive-run/runs/<run_id>/constraint-ledger.json`, and verify the ledger has that exact `run_id`. If the current run ID is unavailable, report the missing context instead of guessing. Never use the workspace-wide `glasshive-run/constraint-ledger.json`, which may belong to another run. Retained evidence does not replace later authorized guidance. Keep `glasshive-run/` out of user-facing deliverables.\n"
     "For sourced work, keep source publication/evidence dates distinct from retrieval/access timestamps; an access date must not widen or replace a user-limited source window.\n"
     f"{GLASSHIVE_NATIVE_CAPABILITY_INVENTORY}\n"
     "Before `FINAL REPORT:`, inspect the concrete output, files/artifacts, tool results, or visible state you produced; compare it with the user's request and success criteria; then continue, fix, or report the exact blocker.\n"
@@ -1907,6 +1918,14 @@ class ProfiledWorkerRuntime:
         from .grok_runtime import GrokBuildRuntime, HostGrokBuildRuntime
         self.grok = GrokBuildRuntime(base_dir=base_dir, create_directories=create_directories)
         self.host_grok = HostGrokBuildRuntime(base_dir=base_dir, create_directories=create_directories)
+        from .direct_runtime import DirectModelRuntime
+        self.host_direct_openai = DirectModelRuntime('direct-openai', base_dir=base_dir, create_directories=create_directories)
+        self.host_direct_anthropic = DirectModelRuntime('direct-anthropic', base_dir=base_dir, create_directories=create_directories)
+        self.host_direct_xai = DirectModelRuntime('direct-xai', base_dir=base_dir, create_directories=create_directories)
+        self._shared_native_warm_pool = None
+        self._shared_native_warm_lock = Lock()
+        for adapter in self._native_warm_adapters():
+            adapter._native_warm_pool_factory = self._shared_native_warm_pool_for_adapters
         self._provider_log_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self._provider_log_cache_lock = Lock()
         provider_home_root = Path(
@@ -1930,6 +1949,47 @@ class ProfiledWorkerRuntime:
         if runtime is None:
             raise UnsupportedWorkerProfileError("Worker profile adapter is not installed")
         return runtime
+
+    def configure_native_warm(self, worker: dict, performance: dict) -> dict:
+        runtime = self._runtime_for_worker(worker)
+        configure = getattr(runtime, "configure_native_warm", None)
+        return configure(worker, performance) if callable(configure) else self.native_warm_status(worker, performance)
+
+    def native_warm_status(self, worker: dict, performance: dict) -> dict:
+        runtime = self._runtime_for_worker(worker)
+        status = getattr(runtime, "native_warm_status", None)
+        return status(worker, performance) if callable(status) else {
+            "supported": False, "state": "unavailable", "idle": 0,
+            "configured": performance.get("native_warm_servers", 0),
+            "reason": "Idle native processes are supported for host Grok only",
+        }
+
+    def _native_warm_adapters(self):
+        return (self.host_grok, self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai)
+
+    def _shared_native_warm_pool_for_adapters(self):
+        from .native_warm_pool import NativeWarmPool
+        with self._shared_native_warm_lock:
+            if self._shared_native_warm_pool is None:
+                self._shared_native_warm_pool = NativeWarmPool()
+            return self._shared_native_warm_pool
+
+    def recover_native_preparation(self) -> dict:
+        totals = {"stopped": 0, "pending": 0, "active": 0}
+        for adapter in self._native_warm_adapters():
+            for key, value in adapter.recover_native_preparation().items():
+                totals[key] += value
+        return totals
+
+    def close_native_warm(self) -> None:
+        errors = []
+        for adapter in self._native_warm_adapters():
+            try:
+                adapter.close_native_warm()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("Native warm cleanup remains unconfirmed") from errors[0]
 
     def supports_native_control(self, worker: dict, action: str, *, run_id: str = "", attempt_id: str = "") -> bool:
         runtime = self._runtime_for_worker(worker)
@@ -1994,7 +2054,8 @@ class ProfiledWorkerRuntime:
         sandbox = getattr(runtime, "sandbox", None)
         box = getattr(sandbox, "box", None)
         if box is None:
-            return None
+            placement = getattr(runtime, "_host_native_mission_placement", None)
+            return placement(worker) if callable(placement) else None
         workspace = self._shared_workspace_runtimes.store.get_execution_workspace(
             worker["workspace_id"], worker["tenant_id"], worker["owner_id"])
         paths = box.paths()
@@ -2075,6 +2136,10 @@ class ProfiledWorkerRuntime:
 
     def resolve_model(self, profile: str, execution_mode: str = "docker") -> str:
         return self._runtime_for_profile(profile, execution_mode).resolve_model(profile)
+
+    def preflight_uses_cli_subprocess_for(self, profile: str, execution_mode: str = "docker") -> bool:
+        runtime = self._runtime_for_profile(profile, execution_mode)
+        return bool(getattr(runtime, "preflight_uses_cli_subprocess", True))
 
     def preflight_worker_profile(self, profile: str, execution_mode: str = "docker") -> None:
         runtime = self._runtime_for_profile(profile, execution_mode)
@@ -2552,8 +2617,6 @@ class ProfiledWorkerRuntime:
             or runtime.resolve_model(str(worker.get("profile") or "codex-cli"))
             or ""
         ).strip()
-        if not model:
-            raise gateway_codex_model_required()
 
         def execute_reserved_route(routed_worker: dict) -> str:
             mission_dispatched = False
@@ -2956,6 +3019,7 @@ class ProfiledWorkerRuntime:
             self.host_claude,
             self.grok,
             self.host_grok,
+            self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai,
         ):
             setter = getattr(runtime, "set_host_process_observer", None)
             if callable(setter):
@@ -2971,6 +3035,7 @@ class ProfiledWorkerRuntime:
             self.host_claude,
             self.grok,
             self.host_grok,
+            self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai,
         ):
             setter = getattr(runtime, "set_run_start_observer", None)
             if callable(setter):
@@ -2985,6 +3050,7 @@ class ProfiledWorkerRuntime:
             self.host_claude,
             self.grok,
             self.host_grok,
+            self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai,
         ):
             setter = getattr(runtime, "set_native_event_observer", None)
             if callable(setter):
@@ -2998,6 +3064,7 @@ class ProfiledWorkerRuntime:
             self.host_claude,
             self.grok,
             self.host_grok,
+            self.host_direct_openai, self.host_direct_anthropic, self.host_direct_xai,
         ):
             setter = getattr(runtime, "set_provider_liveness_observer", None)
             if callable(setter):
@@ -3250,6 +3317,14 @@ class ProfiledWorkerRuntime:
         runtime = self._runtime_for_worker(worker)
         resolver = getattr(runtime, "provider_native_output_file_rejections", None)
         return resolver(worker, run) if callable(resolver) else []
+
+    def provider_context_replay(self, worker: dict) -> dict | None:
+        resolver = getattr(self._runtime_for_worker(worker), "provider_context_replay", None)
+        return resolver(worker) if callable(resolver) else None
+
+    def freeze_provider_context_replay(self, worker: dict, proof: dict) -> dict | None:
+        resolver = getattr(self._runtime_for_worker(worker), "freeze_provider_context_replay", None)
+        return resolver(worker, proof) if callable(resolver) else None
 
     def provider_tool_evidence_log(self, worker: dict, run_id: str, *, instruction_sha256: str = "") -> tuple[str, str]:
         profile, stdout = self.provider_activity_log(worker, run_id)
@@ -4551,6 +4626,7 @@ class BaseCliWorkerRuntime:
             "native_session_id": str(data.get("native_session_id") or "").strip(),
             "native_image_scope": data.get("native_image_scope"),
             "host_slot_token": str(data.get("host_slot_token") or ""),
+            "external_native_lease_path": str(data.get("external_native_lease_path") or ""),
             "termination_unconfirmed": bool(data.get("termination_unconfirmed")),
             "container_id": str(data.get("container_id") or "").strip(),
             "startup_token_digest": str(
@@ -7153,6 +7229,19 @@ class BaseCliWorkerRuntime:
         kind = ""
         failure_class = ""
         if self.runtime_name == "codex-cli":
+            # Native control frames identify maintenance without inspecting assistant prose.
+            # Reuse this already-parsed event; timing must not extend the liveness lease.
+            if (event_type in {"item.started", "item.completed"}
+                    and isinstance(event.get("item"), dict)
+                    and event["item"].get("type") == "context_compaction"):
+                from .native_model_selection import native_timing_event, native_timing_hash
+                native_timing_event(
+                    "native_maintenance", provider="codex-cli", maintenance="context_compaction",
+                    phase="started" if event_type == "item.started" else "completed",
+                    runHash=native_timing_hash("run", run_id),
+                    itemHash=native_timing_hash("maintenance", event["item"].get("id")),
+                    sourceSequence=line_sequence,
+                )
             if event_type == "error":
                 kind = "internal_retry"
                 failure_class = "provider_internal_retry"
@@ -7209,7 +7298,7 @@ class BaseCliWorkerRuntime:
                     for block in content
                 ):
                     kind = "meaningful_progress"
-        elif self.runtime_name == "grok-build" and event_type == "grok.session.update":
+        elif (self.runtime_name == "grok-build" or getattr(self, "activity_protocol", None) == "grok-build") and event_type == "grok.session.update":
             update = event.get("update")
             if isinstance(update, dict):
                 update_kind = update.get("sessionUpdate")
@@ -7294,7 +7383,10 @@ class BaseCliWorkerRuntime:
                     except json.JSONDecodeError:
                         native_event = {}
                     provider_event = (
-                        (
+                        (getattr(self, "activity_protocol", None) == "grok-build"
+                         and native_event.get("type") == "grok.session.started"
+                         and native_event.get("session_id") == session_id)
+                        or (
                             self.runtime_name == "codex-cli"
                             and native_event.get("type") == "thread.started"
                             and native_event.get("thread_id") == session_id
@@ -7395,35 +7487,48 @@ class BaseCliWorkerRuntime:
                         effective_run_id,
                     )
 
-        while True:
-            chunk = ""
-            try:
-                with stdout_path.open("r") as handle:
-                    stat_result = os.fstat(handle.fileno())
-                    current_identity = (stat_result.st_dev, stat_result.st_ino)
-                    if file_identity is not None and current_identity != file_identity:
-                        offset = 0
-                        buffered = ""
-                    if stat_result.st_size < offset:
-                        offset = 0
-                        buffered = ""
-                    file_identity = current_identity
-                    handle.seek(offset)
-                    chunk = handle.read()
-                    offset = handle.tell()
-            except FileNotFoundError:
-                pass
-            if chunk:
-                buffered += chunk
-                complete = buffered.split("\n")
-                buffered = complete.pop()
-                for line in complete:
-                    observe_line(line.strip())
-            if stop_event.is_set():
-                if buffered.strip():
-                    observe_line(buffered.strip())
-                return
-            stop_event.wait(0.05)
+        with NativeLogNotifications(stdout_path) as log_notifications:
+            while True:
+                log_notifications.prepare()
+                chunk = ""
+                try:
+                    with stdout_path.open("r") as handle:
+                        stat_result = os.fstat(handle.fileno())
+                        current_identity = (stat_result.st_dev, stat_result.st_ino)
+                        if file_identity is not None and current_identity != file_identity:
+                            offset = 0
+                            buffered = ""
+                        if stat_result.st_size < offset:
+                            offset = 0
+                            buffered = ""
+                        file_identity = current_identity
+                        handle.seek(offset)
+                        chunk = handle.read()
+                        offset = handle.tell()
+                except FileNotFoundError:
+                    pass
+                if chunk:
+                    buffered += chunk
+                    complete = buffered.split("\n")
+                    buffered = complete.pop()
+                    for line in complete:
+                        observe_line(line.strip())
+                    observer = self._native_event_observer
+                    if callable(observer) and run_id and attempt_id:
+                        try:
+                            # Coalesce one wake per durable read batch, not one store query per token.
+                            observer({
+                                "worker_id": worker_id, "run_id": run_id,
+                                "attempt_id": attempt_id, "provider": self._agent_type(),
+                                "event": {"event_type": "provider.output.available", "payload": {}},
+                            })
+                        except Exception:
+                            logger.exception("Native output wake failed for worker %s run %s", worker_id, run_id)
+                if stop_event.is_set():
+                    if buffered.strip():
+                        observe_line(buffered.strip())
+                    return
+                log_notifications.wait(stop_event)
 
     @staticmethod
     def _active_session_fingerprint(session: dict[str, object] | None) -> tuple[object, ...]:
@@ -7445,6 +7550,7 @@ class BaseCliWorkerRuntime:
             str(session.get("container_id") or ""),
             str(session.get("startup_token_digest") or ""),
             str(session.get("host_slot_token") or ""),
+            str(session.get("external_native_lease_path") or ""),
         )
 
 
@@ -8336,10 +8442,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def resolve_model(self, profile: str) -> str:
         if profile == "codex-cli":
-            # Only an explicit choice (--model codex-cli=<id>) names a model. Without one,
-            # native Codex runs its own default for the signed-in account, as host Codex
-            # does; a remembered ID would be a silent substitution providers retire.
-            return os.environ.get("WPR_MODEL_CODEX_CLI", "").strip()
+            return os.environ.get("WPR_MODEL_CODEX_CLI", "gpt-5.4")
         return os.environ.get("WPR_MODEL_OPENCLAW_CODEX", "openai-codex/gpt-5.3-codex")
 
     def _default_session_key(self, worker: dict) -> str | None:
@@ -8642,7 +8745,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
             return
         subprocess.run(["git", "init", "-q"], cwd=workspace_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(
-            ["git", "config", "user.email", ('worker@' + 'glasshive.local')],
+            ["git", "config", "user.email", "worker@glasshive.local"],
             cwd=workspace_dir,
             check=False,
             stdout=subprocess.DEVNULL,
@@ -8808,6 +8911,19 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
         if self._worker_env_flag(worker, "WPR_CODEX_CLI_IGNORE_USER_CONFIG", False):
             command.append("--ignore-user-config")
 
+    def _append_codex_service_tier_config(self, command: list[str], worker: dict) -> None:
+        raw = worker.get("bootstrap_bundle_json")
+        try:
+            bundle = json.loads(raw) if isinstance(raw, str) and raw.strip() else worker.get("bootstrap_bundle", {})
+        except (ValueError, TypeError):
+            return
+        tier = bundle.get("service_tier") if isinstance(bundle, dict) else None
+        if tier is None:
+            return
+        if not isinstance(tier, str) or not tier or not tier.isascii() or not tier.replace("_", "").isalnum():
+            raise RuntimeErrorBase("Invalid native Codex service tier")
+        command.extend(["-c", "service_tier=" + json.dumps("priority" if tier == "fast" else tier)])
+
     def _append_codex_compatible_provider_config(
         self,
         command: list[str],
@@ -8916,6 +9032,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
                 include_reasoning_effort=False,
             )
         self._append_codex_reasoning_effort_config(command, worker)
+        self._append_codex_service_tier_config(command, worker)
         if dangerous_mode:
             if is_resume:
                 command.append("--dangerously-bypass-approvals-and-sandbox")
@@ -10710,6 +10827,8 @@ class HostNativeCliMixin:
                     and not self._native_child_proven_gone(native_child)
                 ):
                     return False
+                if not self._external_native_generation_gone(worker_id, expected_session):
+                    return False
                 if clear_session and current_session is not None:
                     try:
                         session_path.unlink()
@@ -10883,6 +11002,7 @@ class HostNativeCliMixin:
         native_input_context: dict[str, object] | None = None,
         response_deadline_at: str = "",
         child_record_path: Path | None = None,
+        external_native_lease_path: str | None = None,
     ) -> list[str]:
         """Wrap a native CLI so the surviving process owns its terminal marker.
 
@@ -10922,6 +11042,7 @@ child_record_path = Path(sys.argv[7]) if sys.argv[7] else None
 command = sys.argv[8:]
 # Captured before any fork: a child orphaned before it records must still name this supervisor.
 SUPERVISOR_PID = os.getpid()
+EXTERNAL_NATIVE_LEASE_PATH = None
 child: subprocess.Popen[bytes] | None = None
 requested_signal = 0
 
@@ -10948,7 +11069,10 @@ def write_child_record(child_identity: dict | None) -> None:
     if child_record_path is None:
         return
     temp_path = child_record_path.with_name(f"{child_record_path.name}.tmp.{os.getpid()}")
-    temp_path.write_text(json.dumps({"supervisor_pid": SUPERVISOR_PID, "child": child_identity}))
+    record = {"supervisor_pid": SUPERVISOR_PID, "child": child_identity}
+    if EXTERNAL_NATIVE_LEASE_PATH:
+        record["external_native_lease_path"] = EXTERNAL_NATIVE_LEASE_PATH
+    temp_path.write_text(json.dumps(record))
     temp_path.chmod(0o600)
     os.replace(temp_path, child_record_path)
 
@@ -11090,7 +11214,8 @@ finally:
     write_exit(exit_code)
 
 raise SystemExit(exit_code)
-"""
+""".replace("EXTERNAL_NATIVE_LEASE_PATH = None",
+            "EXTERNAL_NATIVE_LEASE_PATH = " + repr(external_native_lease_path))
         )
         wrapper_path.chmod(0o700)
         return [
@@ -11215,6 +11340,16 @@ raise SystemExit(exit_code)
             return str(instruction or "").strip()
         return self._instruction_with_completion_contract(instruction)
 
+    def _host_mission_instruction(self, worker: dict, instruction: str, output_scope: dict) -> str:
+        """Compose the registered file contract only for its declared native transport."""
+        if (output_scope.get("file_output_transport") != "artifact_sha256"
+                or self._host_native_mission_placement(worker) is None
+                or _native_tools_disabled(self._bootstrap_bundle_for_worker(worker))):
+            return instruction
+        return "\n\n".join(part for part in (
+            str(instruction or "").strip(), conversation_file_delivery_instructions(),
+        ) if part)
+
     def _native_image_output_files(self, worker: dict, workspace_dir: str, scope: object, run_id: str):
         image_transport = (
             isinstance(scope, dict)
@@ -11311,6 +11446,7 @@ raise SystemExit(exit_code)
         records: list[dict[str, object]] = []
         rejected: list[dict[str, str]] = []
         seen: set[tuple[str, Path]] = set()
+        omitted_native_edits = 0
 
         def reject(candidate: Path, code: str):
             name = candidate.name
@@ -11357,7 +11493,12 @@ raise SystemExit(exit_code)
             else:
                 relative = candidate
             if not is_user_deliverable_relative_path(relative, explicit_selection=expected_digest is None):
-                reject(candidate, "not_deliverable")
+                if expected_digest is None:
+                    reject(candidate, "not_deliverable")
+                else:
+                    # Discovery of an operational edit is not an explicit
+                    # output selection and must not create an attachment error.
+                    omitted_native_edits += 1
                 continue
             key = (source_kind, relative)
             if key in seen:
@@ -11385,6 +11526,12 @@ raise SystemExit(exit_code)
                 }
             )
             selected.append((source_root / relative, mime_type, data))
+        if omitted_native_edits:
+            logger.info(
+                "Operational native output candidates omitted",
+                extra={"selection_source": "verified_native_edit",
+                       "code": "not_deliverable", "candidate_count": omitted_native_edits},
+            )
         if records or rejected:
             durable_scope = {**scope, "output_files": records, "rejected_output_files": rejected}
             _atomic_write_private_text(
@@ -11732,6 +11879,7 @@ raise SystemExit(exit_code)
         schema = conversation_output_schema(
             bundle.get("agent_builder_control"),
             bundle.get("messaging_delivery_control"),
+            surface=str(bundle.get("surface") or ""),
         )
         return schema if isinstance(schema, dict) else None
 
@@ -11950,16 +12098,15 @@ raise SystemExit(exit_code)
 
     def _project_host_claude_capability_roots(self, target_claude_home: Path) -> None:
         source_home = self._source_host_claude_home()
-        for relative in HOST_CLAUDE_CAPABILITY_ROOTS:
+        for relative in (Path("plugins/cache"), Path("plugins/marketplaces"), Path("skills")):
             self._project_private_capability_directory(
                 source_home / relative,
                 target_claude_home / relative,
             )
-        for relative in HOST_CLAUDE_CAPABILITY_REGISTRIES:
-            self._merge_private_capability_registry(
-                source_home / relative,
-                target_claude_home / relative,
-            )
+        for filename in ("installed_plugins.json", "known_marketplaces.json"):
+            source = source_home / "plugins" / filename
+            target = target_claude_home / "plugins" / filename
+            self._merge_private_capability_registry(source, target)
 
     def _host_codex_native_mcp_allowlist(self) -> set[str]:
         raw = os.environ.get(
@@ -12150,6 +12297,9 @@ raise SystemExit(exit_code)
             and "developer_instructions" in bundle
             else None
         )
+        if (worker.get("_native_context_placement") or {}).get("host_native"):
+            from .native_context_projection import native_context_authority
+            developer_instructions = native_context_authority(_host_native_context_bundle(bundle))
         if _native_tools_disabled(bundle):
             env = bundle.get("env")
             if "glasshive_capability_broker" in bundle and (
@@ -12286,8 +12436,15 @@ raise SystemExit(exit_code)
         """
         require_native_installed_owner(worker.get("owner_id"))
         project_mcp = bundle.get("claude_project_mcp")
-        if isinstance(project_mcp, dict) or worker.get("profile") == "claude-code":
-            target = workspace / ".mcp.json"
+        # Codex owns private CODEX_HOME config; Grok owns its ACP declaration.
+        # Neither writes a Claude-compatible declaration into a shared project.
+        if (worker.get("profile") == "claude-code"
+                or (worker.get("profile") not in {"codex-cli", "grok-build"}
+                    and isinstance(project_mcp, dict))):
+            selectors = worker.get("_native_context_selectors")
+            target = (Path(selectors["host_root"]) / "mcp.json"
+                      if selectors and worker.get("profile") == "claude-code"
+                      else workspace / ".mcp.json")
             if worker.get("profile") == "claude-code":
                 self._write_host_claude_mcp_config(
                     worker, target, bundle, project_mcp if isinstance(project_mcp, dict) else {})
@@ -12309,6 +12466,9 @@ raise SystemExit(exit_code)
             if "developer_instructions" in bundle
             else None
         )
+        if (worker.get("_native_context_placement") or {}).get("host_native"):
+            from .native_context_projection import native_context_authority
+            developer_instructions = native_context_authority(_host_native_context_bundle(bundle))
         if (
             codex_config_append
             or self._host_plugin_denylist()
@@ -12317,6 +12477,7 @@ raise SystemExit(exit_code)
         ):
             codex_config = self._host_codex_worker_config(
                 codex_config_append,
+                capability_bundle=bundle,
                 developer_instructions=developer_instructions,
             )
             target = workspace / ".codex" / "config.toml"
@@ -12437,6 +12598,20 @@ raise SystemExit(exit_code)
             else:
                 raise RuntimeErrorBase(f"Bootstrap file {path} is missing content or source_path")
 
+    def _host_native_mission_placement(self, worker: dict) -> dict | None:
+        """Use the existing private native selectors without moving the host cwd."""
+        if (worker.get("profile") not in {"codex-cli", "claude-code", "grok-build"}
+                or self._conversation_mode_from_worker(worker)):
+            return None
+        home = self._home_dir(str(worker["worker_id"]))
+        workspace = self._host_workspace_dir(worker)
+        private_project = home / ".glasshive" / "native" / "project"
+        return {"mode": "shared", "file_placement": "common", "host_native": True,
+                "home_dir": str(home), "native_home": str(home),
+                "workspace_dir": str(workspace), "native_workspace": str(workspace),
+                "private_project_dir": str(private_project),
+                "native_private_project": str(private_project)}
+
     def _materialize_workspace(self, worker: dict, workspace: Path) -> None:
         root = self._host_workspace_root(worker)
         root.mkdir(parents=True, exist_ok=True)
@@ -12452,6 +12627,12 @@ raise SystemExit(exit_code)
             )
             return
         bundle = self._bootstrap_bundle_for_worker(worker)
+        placement = self._host_native_mission_placement(worker)
+        if placement is not None:
+            worker["_native_context_placement"] = placement
+            from .native_context_projection import private_refresh
+            private_refresh(self._home_dir(str(worker["worker_id"])), workspace, worker, bundle)
+        authority_workspace = Path(placement["private_project_dir"]) if placement else workspace
         self._write_workspace_file(workspace, "project-definition.md", self._host_project_definition(worker), overwrite=False)
         if not (workspace / "work-log.md").exists():
             self._write_workspace_file(
@@ -12479,8 +12660,8 @@ raise SystemExit(exit_code)
             ("codex.md", codex_md),
             ("CODEX.md", codex_md),
         ):
-            self._write_workspace_file(workspace, name, content, overwrite=True)
-        self._write_host_project_mcp_files(worker, workspace, bundle)
+            self._write_workspace_file(authority_workspace, name, content, overwrite=True)
+        self._write_host_project_mcp_files(worker, authority_workspace, bundle)
 
         self._write_workspace_file(
             workspace,
@@ -13096,7 +13277,22 @@ raise SystemExit(exit_code)
         elif run_id or (terminal_run_id and active_session):
             exact_run_id = run_id or terminal_run_id
             active_status = self.host_active_process_status(worker)
-            if not active_session:
+            retained_close = bool(
+                not run_id and terminal_run_id == exact_run_id
+                and str(worker.get("state") or "") == "terminating"
+                and active_session
+                and str(active_session.get("run_id") or "") == exact_run_id
+                and str(worker.get("_run_attempt_id") or "")
+                and str(active_session.get("attempt_id") or "") == str(worker["_run_attempt_id"])
+                and active_status.get("run_id") == exact_run_id
+                and active_status.get("state") == "active"
+            )
+            if retained_close:
+                # Whole-worker close still owns this exact retained generation
+                # after its old run lease ended. The normal stop path rechecks
+                # captured session, attempt, PID start identity and descendants.
+                run_id = exact_run_id
+            elif not active_session:
                 if active_status.get("state") != "absent":
                     raise RuntimeErrorBase(
                         "The exact host process identity is not confirmed"
@@ -13192,7 +13388,7 @@ raise SystemExit(exit_code)
             stop_reason="terminated",
             error_text="Worker was terminated by the operator",
         )
-        self._append_work_log(worker, "Worker terminated by operator.")
+        self._append_work_log(worker, "Worker paused by operator." if operation == "pause_worker" else "Worker terminated by operator.")
         return self._host_runtime_info(worker, pid=None)
 
     def reconcile_worker(self, worker: dict) -> RuntimeInfo:
@@ -13328,6 +13524,15 @@ raise SystemExit(exit_code)
                 return True
         return False
 
+    def _signal_external_native_generation(self, worker_id: str, session: dict | None, sig: signal.Signals) -> bool:
+        return True
+
+    def _stop_external_native_generation(self, worker_id: str, session: dict | None) -> bool:
+        return True
+
+    def _external_native_generation_gone(self, worker_id: str, session: dict | None) -> bool:
+        return True
+
     def _session_native_child(
         self, worker_id: str, session: dict[str, object] | None
     ) -> dict[str, object] | None | bool:
@@ -13394,6 +13599,21 @@ raise SystemExit(exit_code)
         identity, while the tree still links them; ending those is the caller's.
         """
 
+        for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
+            if self._native_child_proven_gone(child):
+                return True
+            if not self._signal_recorded_native_child(child, sig, remember=remember):
+                return False
+            deadline = time.monotonic() + wait
+            while not self._native_child_proven_gone(child) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        return self._native_child_proven_gone(child)
+
+    def _signal_recorded_native_child(
+        self, child: dict[str, object], sig: signal.Signals,
+        remember: Callable[[dict[int, str]], None] | None = None,
+    ) -> bool:
+        """Send one exact native signal and retain descendants, without waiting."""
         try:
             pid = int(child.get("pid") or 0)
             group = int(child.get("process_group") or 0)
@@ -13402,33 +13622,26 @@ raise SystemExit(exit_code)
         identity = str(child.get("process_start_identity") or "").strip()
         if pid <= 0 or group <= 0:
             return False
-        for sig, wait in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
-            if self._native_child_proven_gone(child):
-                return True
-            if (
-                self._pid_is_live(pid)
-                and not self._pid_is_zombie(pid)
-                and (not identity or self._process_start_identity(pid) != identity)
-            ):
-                return False  # never signal an unverified incarnation
-            if remember is not None:
-                members = self._host_process_group_members(group)
-                if members is None:
-                    return False
-                escaped = self._host_escaped_descendants(members, group) if members else {}
-                if escaped is None:
-                    return False
-                remember(escaped)
-            try:
-                os.killpg(group, sig)
-            except ProcessLookupError:
-                pass
-            except OSError:
+        if self._native_child_proven_gone(child):
+            return True
+        if (self._pid_is_live(pid) and not self._pid_is_zombie(pid)
+                and (not identity or self._process_start_identity(pid) != identity)):
+            return False
+        if remember is not None:
+            members = self._host_process_group_members(group)
+            if members is None:
                 return False
-            deadline = time.monotonic() + wait
-            while not self._native_child_proven_gone(child) and time.monotonic() < deadline:
-                time.sleep(0.05)
-        return self._native_child_proven_gone(child)
+            escaped = self._host_escaped_descendants(members, group) if members else {}
+            if escaped is None:
+                return False
+            remember(escaped)
+        try:
+            os.killpg(group, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return False
+        return True
 
     def _clear_active_session(
         self,
@@ -13444,6 +13657,8 @@ raise SystemExit(exit_code)
             remembered = self._read_stop_descendant_ledger(worker_id, bound)
             if remembered is None or (remembered and not self._end_remembered_descendants(remembered)):
                 return False
+        if not self._external_native_generation_gone(worker_id, bound):
+            return False
         released = super()._clear_active_session(worker_id, expected_session=expected_session)
         if released and bound is not None:
             self._clear_stop_descendant_ledger(worker_id)
@@ -13682,6 +13897,8 @@ raise SystemExit(exit_code)
             """End the native child this session's supervisor recorded, then every
             remembered descendant, including the ones that left the child's own group."""
 
+            if not self._stop_external_native_generation(worker_id, identity_session):
+                return False
             native_child = self._session_native_child(worker_id, identity_session)
             if native_child is False or (
                 isinstance(native_child, dict)
@@ -13789,6 +14006,11 @@ raise SystemExit(exit_code)
                     elif current_process and current_process.poll() is None:
                         return "changed"
 
+                    # Signal the exact native lease together with its runner.
+                    # Full descendant proof/escalation runs outside this lock.
+                    if not self._signal_external_native_generation(worker_id, identity_session, sig):
+                        return "uncertain"
+
                     current_members = self._host_process_group_members(recorded_group)
                     if current_members is None:
                         return "uncertain"
@@ -13817,29 +14039,62 @@ raise SystemExit(exit_code)
                         return "uncertain"
                     return "sent"
 
+        from .native_model_selection import native_timing_event, native_timing_hash
+
+        phase_started = time.monotonic()
         signal_state = signal_exact_generation(signal.SIGTERM)
+        native_timing_event(
+            "host_control_signal", runHash=native_timing_hash("run", run_id),
+            durationMs=(time.monotonic() - phase_started) * 1000,
+            signal="term", outcome=signal_state,
+        )
         if signal_state in {"changed", "uncertain"}:
             return False
+        # The group and escaped descendants received the same signal together.
+        # Give them one shared grace period, not a fresh wait for each target.
+        phase_started = time.monotonic()
+        grace_deadline = phase_started + 5
         group_gone = signal_state == "gone" or self._wait_for_host_process_group_exit(
             recorded_group, 5
         )
-        descendants_gone = escaped_descendants_gone(5)
+        descendants_gone = escaped_descendants_gone(max(0.0, grace_deadline - time.monotonic()))
+        native_timing_event(
+            "host_control_wait", runHash=native_timing_hash("run", run_id),
+            durationMs=(time.monotonic() - phase_started) * 1000,
+            signal="term", groupGone=group_gone, descendantsGone=descendants_gone,
+        )
         if not (group_gone and descendants_gone):
             if not group_gone:
                 kill_state = signal_exact_generation(signal.SIGKILL)
                 if kill_state in {"changed", "uncertain"}:
                     return False
-                group_gone = kill_state == "gone" or self._wait_for_host_process_group_exit(
-                    recorded_group, 2
-                )
             elif not signal_escaped_descendants(signal.SIGKILL):
                 # The group is gone, so its own process bookkeeping may already
                 # be reaped; remembered descendants escalate by exact identity.
                 return False
-            descendants_gone = escaped_descendants_gone(2)
+            phase_started = time.monotonic()
+            grace_deadline = phase_started + 2
+            if not group_gone:
+                group_gone = kill_state == "gone" or self._wait_for_host_process_group_exit(
+                    recorded_group, 2
+                )
+            descendants_gone = escaped_descendants_gone(max(0.0, grace_deadline - time.monotonic()))
+            native_timing_event(
+                "host_control_wait", runHash=native_timing_hash("run", run_id),
+                durationMs=(time.monotonic() - phase_started) * 1000,
+                signal="kill", groupGone=group_gone, descendantsGone=descendants_gone,
+            )
         confirmed = group_gone and descendants_gone
-        if confirmed and not end_native_child_tree():
-            return False
+        if confirmed:
+            phase_started = time.monotonic()
+            child_tree_gone = end_native_child_tree()
+            native_timing_event(
+                "host_control_child_cleanup", runHash=native_timing_hash("run", run_id),
+                durationMs=(time.monotonic() - phase_started) * 1000,
+                confirmed=child_tree_gone,
+            )
+            if not child_tree_gone:
+                return False
         if confirmed and local_process is not None:
             try:
                 local_process.wait(timeout=2)
@@ -14142,6 +14397,15 @@ raise SystemExit(exit_code)
     ) -> list[str]:
         return command
 
+    def _prepare_native_authority_command(
+        self, worker: dict, command: list[str], *, run_root: Path,
+        timeout_sec: float | None,
+    ) -> list[str]:
+        if self._conversation_mode_from_worker(worker):
+            return self._prepare_conversation_authority_command(
+                worker, command, run_root=run_root, timeout_sec=timeout_sec)
+        return command
+
     def _run_conversation_task(
         self,
         worker: dict,
@@ -14217,7 +14481,7 @@ raise SystemExit(exit_code)
                 raw_stderr.chmod(0o600)
                 # Only the fresh transcript is this launch's; its attempt may read it from here.
                 self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
-                prepared_command = self._prepare_conversation_authority_command(
+                prepared_command = self._prepare_native_authority_command(
                     worker, command, run_root=run_root, timeout_sec=run_timeout_sec,
                 )
                 process_command = self._durable_host_process_command(
@@ -14227,6 +14491,7 @@ raise SystemExit(exit_code)
                     timeout_sec=run_timeout_sec,
                     stdin_path=host_stdin if stdin_text is not None else None,
                     response_deadline_at=str(worker.get("_provider_response_deadline_at") or ""),
+                    external_native_lease_path=worker.get("_external_native_lease_path"),
                     child_record_path=self._native_child_record_path(
                         run_root, str(worker.get("_run_attempt_id") or "")
                     ),
@@ -14258,6 +14523,7 @@ raise SystemExit(exit_code)
                         "argv_for_evidence_json": json.dumps([_redact_command_arg(part) for part in command]),
                         "started_at": _utc_iso(),
                         "process_pid": process.pid,
+                        "external_native_lease_path": worker.get("_external_native_lease_path"),
                         "timeout_seconds": run_timeout_sec,
                         "instruction": instruction,
                         "run_mode": "conversation",
@@ -14357,14 +14623,22 @@ raise SystemExit(exit_code)
                     "detail": detail,
                 },
             )
-            error = RuntimeErrorBase(f"{self.runtime_name} exited with code {exit_code}: {detail}")
+            error = self._provider_process_exit_error_for_run(
+                worker=worker, run_id=effective_run_id, exit_code=exit_code,
+                stdout=stdout, stderr=stderr,
+                message=f"{self.runtime_name} exited with code {exit_code}: {detail}",
+            )
+            classification = getattr(error, "failure_classification", None)
+            if not isinstance(classification, FailureClassification):
+                classification = classify_cli_failure(
+                    stdout=stdout, stderr=stderr, runtime_name=self.runtime_name, exit_code=exit_code,
+                )
             error.failure_classification = _private_cli_failure_classification(
-                classify_cli_failure(stdout=stdout, stderr=stderr,
-                                     runtime_name=self.runtime_name, exit_code=exit_code),
-                exit_code=exit_code, stdout=stdout, stderr=stderr,
+                classification, exit_code=exit_code, stdout=stdout, stderr=stderr,
             )
             authority_failure = codex_authority.read_json(run_root / "native-authority-failure.json")
             if authority_failure.get("code") == "authority_update_unconfirmed":
+                error = RuntimeErrorBase(str(error))
                 error.failure_classification = FailureClassification(
                     failure_class="authority_update_unconfirmed", retryable=True,
                     user_message="The current assistant context could not be confirmed. Please retry.",
@@ -14423,9 +14697,6 @@ raise SystemExit(exit_code)
         }
         info = self.ensure_worker_ready(worker)
         worker = {**worker, "workspace_dir": info.workspace_dir}
-        command, env = self._build_command(worker, instruction, info)
-        stdin_text = self._command_stdin_text(worker, instruction, info)
-        env["GLASSHIVE_RUN_ID"] = effective_run_id
         workspace = Path(str(info.workspace_dir or self._host_workspace_dir(worker)))
         native_image_scope = {
             "run_id": effective_run_id, "worker_id": worker["worker_id"],
@@ -14433,6 +14704,10 @@ raise SystemExit(exit_code)
             "attempt_id": str(worker.get("_run_attempt_id") or ""),
             "file_output_transport": "artifact_sha256",
         }
+        native_instruction = self._host_mission_instruction(worker, instruction, native_image_scope)
+        command, env = self._build_command(worker, native_instruction, info)
+        stdin_text = self._command_stdin_text(worker, native_instruction, info)
+        env["GLASSHIVE_RUN_ID"] = effective_run_id
         constraint_ledger, constraint_ledger_path = _write_constraint_ledger_for_run(
             worker=worker,
             instruction=instruction,
@@ -14504,14 +14779,18 @@ raise SystemExit(exit_code)
                 raw_stderr.chmod(0o600)
                 # Only the fresh transcript is this launch's; its attempt may read it from here.
                 self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
+                prepared_command = self._prepare_native_authority_command(
+                    worker, command, run_root=run_root, timeout_sec=run_timeout_sec,
+                )
                 process_command = self._durable_host_process_command(
-                    command,
+                    prepared_command,
                     run_root=run_root,
                     exit_path=exit_path,
                     timeout_sec=run_timeout_sec,
                     stdin_path=host_stdin if stdin_text is not None else None,
                     native_input_context=self._native_input_context(worker),
                     response_deadline_at=str(worker.get("_provider_response_deadline_at") or ""),
+                    external_native_lease_path=worker.get("_external_native_lease_path"),
                     child_record_path=self._native_child_record_path(
                         run_root, str(worker.get("_run_attempt_id") or "")
                     ),
@@ -14545,6 +14824,7 @@ raise SystemExit(exit_code)
                         "argv_for_evidence_json": json.dumps([_redact_command_arg(part) for part in command]),
                         "started_at": started_at_iso,
                         "process_pid": process.pid,
+                        "external_native_lease_path": worker.get("_external_native_lease_path"),
                         "heartbeat_path": str(heartbeat_path),
                         "timeout_seconds": run_timeout_sec,
                         "instruction": instruction,
@@ -15130,6 +15410,11 @@ raise SystemExit(exit_code)
                 or number(record.get("supervisor_pid")) != supervisor_pid
             ):
                 return False
+            if not self._external_native_generation_gone(worker_id, {
+                "run_id": run_id, "attempt_id": attempt_id, "process_pid": supervisor_pid,
+                "external_native_lease_path": record.get("external_native_lease_path"),
+            }):
+                return False
             child = record["child"]
             if child is None:
                 return True  # the supervisor never started its native child
@@ -15386,7 +15671,10 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
             return command
         bundle = self._bootstrap_bundle_for_worker(worker)
         graph = normalized_graph_transfer_control(bundle.get("agent_builder_control"))
-        expected_schema = conversation_output_schema(graph, bundle.get("messaging_delivery_control"))
+        if bundle.get("surface") == "voice":
+            launch["surface"] = "voice"
+        expected_schema = conversation_output_schema(
+            graph, bundle.get("messaging_delivery_control"), surface=str(bundle.get("surface") or ""))
         # Bind this output capability to the actual translated native turn schema.
         if graph and launch["turn"].get("outputSchema") == expected_schema:
             launch["interject_graph_control"] = graph
@@ -15850,6 +16138,7 @@ class HostCodexCliRuntime(HostNativeCliMixin, CodexCliRuntime):
             )
         self._append_codex_reasoning_effort_config(command, worker)
         native_web_locked = _host_native_web_access() == "disabled"
+        self._append_codex_service_tier_config(command, worker)
         if restricted:
             has_broker = "glasshive_capability_broker" in self._bootstrap_bundle_for_worker(worker)
             command.extend(["--strict-config", "--ignore-rules",
@@ -16253,7 +16542,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         model = self._provider_model_for_worker(worker)
         native_web_locked = _host_native_web_access() == "disabled"
         permission_mode = os.environ.get("WPR_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions")
-        selectors = None if restricted else prepare_private_command(self, worker, bundle)
+        selectors = prepare_private_command(self, worker, bundle)
         access_mode = (
             str(bundle.get("access_mode") or "full").strip().lower()
             if self._conversation_mode_from_worker(worker) else "full"

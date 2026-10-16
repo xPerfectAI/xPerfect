@@ -208,16 +208,6 @@ CLEAN_ROOM_WORKSPACE_AUTHORITY_PATHS = (
     ".claude/settings.local.json",
 )
 
-# Installed capability catalogs the owner's Claude home shares with a worker: host workers link
-# them, container workers receive a copy. Paths are relative to that home.
-HOST_CLAUDE_CAPABILITY_ROOTS = ("plugins/cache", "plugins/marketplaces", "skills")
-HOST_CLAUDE_CAPABILITY_REGISTRIES = (
-    "plugins/installed_plugins.json",
-    "plugins/known_marketplaces.json",
-)
-# The container worker's Claude sign-in and settings.
-HOST_CLAUDE_REQUIRED_FILES = (".credentials.json", "settings.json")
-
 GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE = (
     "3. PROPORTIONAL VERIFICATION: Choose verification depth from the user's explicit success "
     "criteria, requested rigor, the risk of a wrong result, and concrete defects found. Use the "
@@ -328,7 +318,7 @@ GLASSHIVE_WORKER_COMPLETION_CONTRACT = _worker_prompt("worker.completion_contrac
     "GlassHive completion contract:\n"
     "- Do the requested work before reporting completion.\n"
     "- Before `FINAL REPORT:`, inspect the concrete output/artifacts/tool results/visible state you produced against the user's request, success criteria, constraints, and files. Correct a detected mismatch. Report a concrete blocker only when you cannot complete it.\n"
-    "- For research/source-gathering work, preserve citations and evidence, respect the user's source/date/auth/scope constraints, and do not dump large raw webpages, docs, logs, or command outputs into the conversation context. If a source/date/auth/scope constraint excludes an item, do not use that item to support facts, scoring, or deliverables; record it only as rejected or out-of-scope evidence when useful. Keep source publication/evidence dates distinct from retrieval/access timestamps; an access date must not widen or replace a user-limited source window. If `glasshive-run/constraint-ledger.json` exists, read it before planning, delegation, source collection, and final delivery; its original request and typed continuation authority preserve the admitted input, which you must interpret yourself. If you create research plans, specs, subagent prompts, or delegation notes, carry the user's constraints forward literally and exactly instead of widening, weakening, summarizing away, or rewriting them. If a plan/spec/delegation conflicts with the admitted user request or typed authority, correct that file before continuing. Save working notes/excerpts to files when useful and bring back concise source-grounded summaries so the task can continue without overflowing or destabilizing the provider route.\n"
+    "- For research/source-gathering work, preserve citations and evidence, respect the user's source/date/auth/scope constraints, and do not dump large raw webpages, docs, logs, or command outputs into the conversation context. If a source/date/auth/scope constraint excludes an item, do not use that item to support facts, scoring, or deliverables; record it only as rejected or out-of-scope evidence when useful. Keep source publication/evidence dates distinct from retrieval/access timestamps; an access date must not widen or replace a user-limited source window. Use the current run's admitted request, supplied context, and typed continuation authority directly; do not reread a duplicate ledger. If required context is missing, take the current run ID from `context_manifest.run_id` in the supplied native envelope (or `GLASSHIVE_RUN_ID` when no envelope is supplied), consult only `glasshive-run/runs/<run_id>/constraint-ledger.json`, and verify the ledger has that exact `run_id`. If the current run ID is unavailable, report the missing context instead of guessing. Never use the workspace-wide `glasshive-run/constraint-ledger.json`, which may belong to another run. Retained evidence does not replace later authorized guidance. If you create research plans, specs, subagent prompts, or delegation notes, carry the user's constraints forward literally and exactly instead of widening, weakening, summarizing away, or rewriting them. If a plan/spec/delegation conflicts with the admitted user request or typed authority, correct that file before continuing. Save working notes/excerpts to files when useful and bring back concise source-grounded summaries so the task can continue without overflowing or destabilizing the provider route.\n"
     "- `glasshive-run/` is reserved for internal harness support evidence, not user-facing artifacts. Save every user-facing artifact outside `glasshive-run/` so GlassHive can discover and deliver it.\n"
     "- For long-running work, keep durable checkpoints in workspace files and prioritize a usable core result before optional expansion. If time, tool, auth, or dependency limits prevent the full requested deliverable, stop with an honest partial artifact/report and the exact blocker instead of spending the entire run on private notes.\n"
     "- If you spawn any child agent, join every spawned child and incorporate its result before writing `FINAL REPORT:`. Do not report completion while a child remains running, open, or aborted.\n"
@@ -1025,25 +1015,6 @@ def bootstrap_env_for(
     return env
 
 
-def _copy_host_claude_home(
-    home_dir: Path,
-    copy_file: Callable[[Path, Path], None],
-    copy_capability_tree: Callable[[Path, Path], None],
-) -> None:
-    """Give a container worker the owner's Claude sign-in, settings and shared capabilities.
-
-    The host Claude home also holds other projects' transcripts, history and debug logs; none of
-    that reaches the worker. Sign-in and settings keep their ordinary copy, so a missing sign-in
-    still fails at the harness exactly as before.
-    """
-    source = Path.home() / ".claude"
-    target = home_dir / ".claude"
-    for relative in HOST_CLAUDE_REQUIRED_FILES + HOST_CLAUDE_CAPABILITY_REGISTRIES:
-        copy_file(source / relative, target / relative)
-    for relative in HOST_CLAUDE_CAPABILITY_ROOTS:
-        copy_capability_tree(source / relative, target / relative)
-
-
 def apply_bootstrap(
     *,
     home_dir: Path,
@@ -1053,14 +1024,12 @@ def apply_bootstrap(
     copy_file: Callable[[Path, Path], None],
     copy_tree: Callable[[Path, Path], None],
     trusted_state_dir: Path | None = None,
-    copy_capability_tree: Callable[[Path, Path], None] | None = None,
 ) -> None:
     """Materialize login/config/files for a fresh sandbox worker.
 
     Local developer mode may copy existing CLI auth so the worker can run with the owner's tools.
     Enterprise mode does not copy host auth files; it projects only the scoped bundle/env allowed by
-    policy and writes MCP grants into owner-only files. `copy_capability_tree` copies optional
-    shared capability catalogs; it defaults to `copy_tree`.
+    policy and writes MCP grants into owner-only files.
     """
     profile = bootstrap_profile_for(worker, runtime_name)
     bundle = canonicalize_viventium_feeling_projection(
@@ -1101,7 +1070,7 @@ def apply_bootstrap(
         if profile in {"host-login", "full-local", "claude-host"} or runtime_name in {"claude-code", "openclaw"}:
             copy_file(Path.home() / ".claude.json", home_dir / ".claude.json")
         if profile in {"host-login", "full-local", "claude-host"} and runtime_name == "claude-code":
-            _copy_host_claude_home(home_dir, copy_file, copy_capability_tree or copy_tree)
+            copy_tree(Path.home() / ".claude", home_dir / ".claude")
         if profile in {"host-login", "full-local", "claude-host"} and runtime_name == "openclaw":
             copy_file(Path.home() / ".claude" / "settings.json", home_dir / ".claude" / "settings.json")
         if profile in {"host-login", "full-local", "codex-host", "claude-host"}:

@@ -213,3 +213,41 @@ def test_unavailable_expected_native_bytes_keep_existing_rejection_contract(tmp_
     assert runtime.provider_native_output_file_rejections(worker, run) == [
         {'name': 'drawing.svg', 'code': 'unreadable'}]
     assert runtime.provider_native_image_output(worker, run, 'Created the file.')[1] == []
+
+
+@pytest.mark.parametrize('selection', ['automatic', 'explicit', 'both'])
+@pytest.mark.parametrize('internal_path', ['work-log.md', '.private/notes.md'])
+def test_operational_native_edit_is_not_a_failed_selected_attachment(
+    tmp_path, caplog, selection, internal_path,
+):
+    runtime, worker, info, root, stdout, drawing = fixture(tmp_path)
+    internal = Path(worker['workspace_dir']) / internal_path
+    internal.parent.mkdir(parents=True, exist_ok=True)
+    internal.write_text('Internal execution note.')
+    events = list(runtime._events(stdout))
+    if selection in {'automatic', 'both'}:
+        call = json.loads(json.dumps(events[1]))
+        call['update']['toolCallId'] = 'call-internal'
+        call['update']['_meta']['x.ai/tool']['input']['path'] = str(internal)
+        done = json.loads(json.dumps(events[2]))
+        done['update']['toolCallId'] = 'call-internal'
+        done['update']['content'] = [{'type': 'diff', 'path': str(internal),
+                                     'oldText': '', 'newText': internal.read_text()}]
+        events[-1:-1] = [call, done]
+    if selection in {'explicit', 'both'}:
+        events[-1]['output'] += f'\n[Requested file]({internal_path})'
+    stdout = '\n'.join(map(json.dumps, events))
+    (root / 'stdout.log').write_text(stdout)
+    with caplog.at_level('INFO'):
+        runtime._parse_output(worker, stdout, '', info)
+    scope = json.loads((root / 'native-image-scope.json').read_text())
+    assert [item['root_path'] for item in scope['output_files']] == ['drawing.svg']
+    expected = [] if selection == 'automatic' else [
+        {'name': internal.name, 'code': 'not_deliverable'}]
+    assert scope.get('rejected_output_files', []) == expected
+    run = {'run_id': 'run-test', 'worker_id': 'worker-test', 'active_attempt_id': 'attempt-test'}
+    assert runtime.provider_native_output_file_rejections(worker, run) == expected
+    if selection in {'automatic', 'both'}:
+        omitted = [r for r in caplog.records if getattr(r, 'selection_source', '') == 'verified_native_edit']
+        assert len(omitted) == 1 and omitted[0].candidate_count == 1
+        assert str(internal) not in omitted[0].getMessage()

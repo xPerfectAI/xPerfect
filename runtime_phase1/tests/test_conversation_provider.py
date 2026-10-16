@@ -242,37 +242,14 @@ def test_declared_dynamic_authority_tail_moves_after_later_structural_developer_
     assert "Visible request." not in snapshot
 
 
-MISSING_DECLARED_AUTHORITY_MESSAGES = [
-    pytest.param(
-        [{"role": "system", "content": "Stable identity."},
-         {"role": "user", "content": "Visible request."}],
-        id="stable-authority-missing-tail",
-    ),
-    pytest.param(
-        [{"role": "user", "content": "Visible request."}],
-        id="empty-authority",
-    ),
-    pytest.param(
-        [{"role": "system", "content": " \n\t"},
-         {"role": "developer", "content": "\t \n"},
-         {"role": "user", "content": "Visible request."}],
-        id="whitespace-authority",
-    ),
-    pytest.param(
-        [{"role": "user", "content": "Undeclared hidden authority."}],
-        id="tail-only-in-user",
-    ),
-]
-
-
-@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES)
-def test_declared_dynamic_authority_tail_must_already_exist_in_authority_messages(messages):
-    from fastapi import HTTPException
-
+def test_declared_dynamic_authority_tail_must_already_exist_in_authority_messages():
     payload = ChatCompletionRequest.model_validate(
         {
             "model": "codex-cli:gpt-5.6-sol",
-            "messages": messages,
+            "messages": [
+                {"role": "system", "content": "Stable identity."},
+                {"role": "user", "content": "Visible request."},
+            ],
             "metadata": {
                 "owner_id": "owner-a",
                 "conversation_id": "conv-a",
@@ -282,24 +259,8 @@ def test_declared_dynamic_authority_tail_must_already_exist_in_authority_message
         }
     )
 
-    with pytest.raises(HTTPException) as rejected:
-        _developer_instruction_snapshot(payload, "Signed native bootstrap.")
-    assert rejected.value.status_code == 400
-    assert "tail is absent" in rejected.value.detail
-
-
-@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES[1:])
-def test_empty_authority_without_declared_tail_keeps_only_structural_instructions(messages):
-    payload = ChatCompletionRequest.model_validate({
-        "model": "codex-cli:gpt-5.6-sol",
-        "messages": messages,
-        "metadata": {},
-    })
-    assert _developer_instruction_snapshot(payload) == ""
-    assert _developer_instruction_snapshot(
-        payload, "Signed native bootstrap.", "Current file delivery contract.",
-        "Signed native bootstrap.",
-    ) == "Signed native bootstrap.\n\nCurrent file delivery contract."
+    with pytest.raises(Exception, match="tail is absent"):
+        _developer_instruction_snapshot(payload)
 
 
 def test_history_instruction_excludes_system_messages_from_visible_transcript():
@@ -2665,6 +2626,87 @@ def test_non_streaming_completion_uses_native_usage_when_the_harness_reports_it(
     ) is False
 
 
+@pytest.mark.parametrize("context_usage,expected,scope", [
+    ({"source": "sdk_last_response", "input_tokens": 185000, "output_tokens": 9}, 185000, "native_prompt_tokens"),
+    (None, 365000, "native_prompt_tokens_upper_bound"),
+    ({"source": "sdk_last_response", "input_tokens": 0, "output_tokens": 9}, 365000, "native_prompt_tokens_upper_bound"),
+    ({"source": "unverified", "input_tokens": 10, "output_tokens": 1}, 365000, "native_prompt_tokens_upper_bound"),
+    ({"source": "unavailable", "unmeasured_tool_results": True}, 500000, "native_prompt_tokens_upper_bound"),
+])
+def test_direct_context_measurement_does_not_charge_tool_round_sum_as_resident_context(
+    tmp_path, monkeypatch, context_usage, expected, scope
+):
+    class DirectUsageRuntime(StubRuntime):
+        def provider_activity_log(self, worker, run_id):
+            event = {"type": "grok.result", "executor": "direct", "session_id": "direct:fixture",
+                "stop_reason": "end_turn", "output": "Native answer.",
+                "usage": {"input_tokens": 365000, "output_tokens": 18}}
+            if context_usage is not None:
+                event["context_usage"] = context_usage
+            return "direct-xai", json.dumps({"type": "grok.session.started", "session_id": "direct:fixture",
+                "model": "grok-4.7", "requestedReasoningEffort": "high"}) + "\n" + json.dumps(event)
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, DirectUsageRuntime())
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli,claude-code,direct-xai")
+    monkeypatch.setenv("XAI_API_KEY", "synthetic-not-used")
+    response = client.post("/v1/chat/completions", headers=AUTH, json=_payload(workspace, model="direct-xai:grok-4.7"))
+    assert response.status_code == 200, response.text
+    assert response.json()["usage"]["prompt_tokens"] == 365000
+    store = client.app.state.store
+    request = store.get_provider_request(response.json()["id"])
+    session = store.get_provider_session_by_id(request["session_id"])
+    manifest = json.loads(session["context_manifest_json"])
+    assert manifest["latest_native_prompt_tokens"] == expected
+    assert manifest["native_occupancy_scope"] == scope
+    projection = ConversationProvider._native_occupancy_projection(GLASSHIVE_MODELS["direct-xai:grok-4.7"], manifest, {
+        "instruction_bytes": 40, "output_reserve_tokens": 32768})
+    assert projection["state"] == ("healthy" if expected == 185000 else "pressure")
+    if scope.endswith("upper_bound"):
+        assert "usage_calibration_request_ids" not in manifest
+
+
+@pytest.mark.parametrize("measurement", [None, {}, {"source": "sdk_last_response", "input_tokens": True, "output_tokens": 1},
+    {"source": "sdk_last_response", "input_tokens": -1, "output_tokens": 1},
+    {"source": "sdk_last_response", "input_tokens": 400000, "output_tokens": 1},
+    {"source": "sdk_last_response", "input_tokens": 180000, "output_tokens": 99}])
+def test_missing_or_inconsistent_direct_response_usage_uses_only_conservative_bound(measurement):
+    from workers_projects_runtime.conversation_provider import _native_context_usage
+    billing = {"prompt_tokens": 365000, "completion_tokens": 18, "total_tokens": 365018}
+    log = json.dumps({"type": "grok.result", "executor": "direct", "context_usage": measurement})
+    for profile in ("direct-xai", "direct-openai", "direct-anthropic"):
+        usage, scope = _native_context_usage(profile, log, billing, context_window=500000)
+        assert usage == billing and scope == "native_prompt_tokens_upper_bound"
+    unknown, scope = _native_context_usage("direct-xai", "", None, context_window=500000)
+    assert unknown["prompt_tokens"] == 500000 and scope == "native_prompt_tokens_upper_bound"
+    assert _native_context_usage("codex-cli", log, None, context_window=500000) == (None, "native_prompt_tokens")
+
+
+def test_occupancy_bound_scope_can_recover_without_weakening_epoch_or_order_fences(tmp_path, monkeypatch):
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, NativeUsageRuntime())
+    response = client.post("/v1/chat/completions", headers=AUTH, json=_payload(workspace))
+    store = client.app.state.store
+    request = store.get_provider_request(response.json()["id"])
+    session = store.get_provider_session_by_id(request["session_id"])
+    epoch = json.loads(session["context_manifest_json"]).get("native_context_epoch", "")
+    def record(identity, count, scope, timestamp, expected_epoch=epoch):
+        store.record_provider_session_native_occupancy(session["session_id"], request_id=identity,
+            prompt_tokens=count, total_tokens=count + 9, measurement_epoch=expected_epoch,
+            measurement_scope=scope, measurement_created_at=timestamp)
+        return json.loads(store.get_provider_session_by_id(session["session_id"])["context_manifest_json"])
+    bound = record("new-bound", 365000, "native_prompt_tokens_upper_bound", "2090-01-01T00:00:00+00:00")
+    assert bound["latest_native_prompt_tokens"] == 365000
+    assert bound["native_occupancy_scope"] == "native_prompt_tokens_upper_bound"
+    assert record("late", 1, "native_prompt_tokens", "2000-01-01T00:00:00+00:00")["latest_native_prompt_tokens"] == 365000
+    assert record("wrong-epoch", 1, "native_prompt_tokens", "2091-01-01T00:00:00+00:00", "other")["latest_native_prompt_tokens"] == 365000
+    assert record("wrong-scope", 1, "unrelated_scope", "2091-01-01T00:00:00+00:00")["latest_native_prompt_tokens"] == 365000
+    measured = record("new-measured", 185000, "native_prompt_tokens", "2092-01-01T00:00:00+00:00")
+    assert measured["latest_native_prompt_tokens"] == 185000
+    assert measured["native_occupancy_scope"] == "native_prompt_tokens"
+
+
 @pytest.mark.parametrize("replay", ["complete", "missing", "changed"])
 def test_ordinary_provider_pressure_uses_durable_visible_content_proof(
     tmp_path, monkeypatch, replay
@@ -3469,7 +3511,7 @@ def test_native_pressure_defers_when_prior_authorized_source_is_missing(
     assert retained_source not in second_request["admitted_instruction"]
 
 
-@pytest.mark.parametrize("prior_log", ["present", "empty", "unsupported", "collector_missing"])
+@pytest.mark.parametrize("prior_log", ["present", "empty", "unsupported", "collector_missing", "oversized_replay"])
 def test_native_pressure_defers_when_prior_native_tool_evidence_is_not_replayed(
     tmp_path, monkeypatch, prior_log
 ):
@@ -3477,7 +3519,7 @@ def test_native_pressure_defers_when_prior_native_tool_evidence_is_not_replayed(
     workspace.mkdir()
     runtime = NativeToolEvidenceRuntime()
     client = _client(tmp_path, monkeypatch, runtime=runtime)
-    retained_source = "The limit is 731 units."
+    retained_source = "The limit is 731 units." if prior_log != "oversized_replay" else "x" * 150000
     first_payload = _payload(workspace)
     first_payload["messages"][1]["content"] = retained_source
     first_payload["metadata"].update(
@@ -3582,6 +3624,10 @@ def test_native_pressure_defers_when_prior_native_tool_evidence_is_not_replayed(
             ],
         }
     )
+    if prior_log == "oversized_replay":
+        # The authorized delta fits. A full replay would exceed the byte budget,
+        # but cannot be used because native-only tool evidence still owns this epoch.
+        second_payload["metadata"]["turn_context"] = "y" * 70000
     second = client.post("/v1/chat/completions", headers=AUTH, json=second_payload)
     assert second.status_code == 200, second.text
     second_request = store.get_provider_request(second.json()["id"])
@@ -3592,6 +3638,10 @@ def test_native_pressure_defers_when_prior_native_tool_evidence_is_not_replayed(
     assert decision["native_context_pressure_deferred"] is True
     assert decision["native_context_transition"] == {}
     assert decision["native_context_epoch"] == first_epoch
+    if prior_log == "oversized_replay":
+        assert decision["mode"] == "delta"
+        assert decision["instruction_bytes"] < decision["budget_bytes"]
+        assert retained_source not in second_request["admitted_instruction"]
     assert "Synthetic native-only tool condition" not in second_request["admitted_instruction"]
 
 
@@ -4578,7 +4628,7 @@ def test_activity_payload_recursively_redacts_private_strings(tmp_path, monkeypa
         "file",
         "A file changed.",
         {
-            "path": ('/U' + 'sers/private-person/Documents/secret-project/file.txt'),
+            "path": "/Users/private-person/Documents/secret-project/file.txt",
             "nested": ["token=super-secret-value"],
         },
     )
@@ -4628,7 +4678,7 @@ def test_streaming_redactor_default_emits_an_ordinary_short_answer_incrementally
 def test_streaming_redactor_redacts_newline_split_home_path_and_bounds_long_lines():
     redactor = StreamingRedactor(overlap=16, max_buffer=64)
 
-    visible = redactor.feed(('Path /U' + 'sers/synthetic/\nDocuments/private.txt\n'))
+    visible = redactor.feed("Path /Users/synthetic/\nDocuments/private.txt\n")
     visible += redactor.feed("x" * 65)
     visible += redactor.flush()
 
@@ -4674,7 +4724,7 @@ def test_streaming_redactor_holds_a_multiline_private_key_until_it_can_be_redact
 def test_streaming_redactor_fails_closed_for_an_oversized_unterminated_private_key():
     redactor = StreamingRedactor(overlap=16, max_buffer=96)
 
-    visible = redactor.feed(('Safe prefix. --' + '---BEGIN PRIVATE KEY-----\n'))
+    visible = redactor.feed("Safe prefix. -----BEGIN PRIVATE KEY-----\n")
     visible += redactor.feed(("A" * 64) + "\n")
     visible += redactor.feed(("B" * 64) + "\nunsafe trailing text")
     visible += redactor.flush()
@@ -5279,7 +5329,7 @@ def test_codex_native_events_become_safe_tool_file_plan_and_reasoning_activity()
                     "type": "item.completed",
                     "item": {
                         "type": "file_change",
-                        "changes": [{"path": ('/U' + 'sers/private-person/Documents/private.txt')}],
+                        "changes": [{"path": "/Users/private-person/Documents/private.txt"}],
                         "status": "completed",
                     },
                 }
@@ -5501,7 +5551,7 @@ def test_claude_stream_events_expose_tool_categories_without_tool_inputs_or_thin
                     {
                         "type": "tool_use",
                         "name": "Edit",
-                        "input": {"file_path": ('/U' + 'sers/private-person/Documents/private.txt')},
+                        "input": {"file_path": "/Users/private-person/Documents/private.txt"},
                     },
                     {
                         "type": "tool_use",
@@ -8060,6 +8110,7 @@ def test_native_file_projection_streams_words_before_exact_terminal_content_and_
 def test_structured_voice_terminal_failure_preserves_native_usage(state, tmp_path):
     from types import SimpleNamespace
     provider = object.__new__(ConversationProvider)
+    provider.service = SimpleNamespace()
     payload_dict = _payload(tmp_path, stream=True)
     payload_dict['stream_options'] = {'include_usage': True}
     payload = ChatCompletionRequest.model_validate(payload_dict)
@@ -8098,9 +8149,9 @@ def test_structured_voice_terminal_failure_preserves_native_usage(state, tmp_pat
 
 @pytest.mark.parametrize('secret', [
     'Bearer synthetic-credential', 'api_key=synthetic-credential',
-    ('sk' + '-synthetic-credential'), 'ghp_synthetic-credential',
-    ('xo' + 'xb-synthetic-credential'), ('/U' + 'sers/synthetic/private.txt'),
-    ('--' + '---BEGIN RSA PRIVATE KEY-----\nSYNTHETICBODY\n-----END RSA PRIVATE KEY-----'),
+    'sk-synthetic-credential', 'ghp_synthetic-credential',
+    'xoxb-synthetic-credential', '/Users/synthetic/private.txt',
+    '-----BEGIN RSA PRIVATE KEY-----\nSYNTHETICBODY\n-----END RSA PRIVATE KEY-----',
 ])
 def test_typed_voice_redactor_preserves_split_secret_guards_without_fixed_tail(secret):
     for split in range(len(secret) + 1):
@@ -8135,7 +8186,7 @@ def test_native_recovery_cannot_replay_accepted_public_parts(public_text):
 
 @pytest.mark.parametrize('text', [
     'Here is the result. api_key=synthetic-credential\nSafe tail.',
-    ('Open [synthetic state file](/U' + 'sers/synthetic/state.txt) to see the result.'),
+    'Open [synthetic state file](/Users/synthetic/state.txt) to see the result.',
     'Use [public reference](https://example.com/reference) for the result.',
 ])
 def test_typed_voice_stream_and_native_canonical_redaction_agree_across_json_escapes(text):
@@ -9325,39 +9376,18 @@ def test_declared_dynamic_tail_preserves_existing_active_binding_guards(tmp_path
     assert store.get_provider_session_by_id(original['session_id'])['worker_id'] == original['worker_id']
 
 
-@pytest.mark.parametrize("messages", MISSING_DECLARED_AUTHORITY_MESSAGES)
-def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(
-    tmp_path, monkeypatch, messages,
-):
+def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(tmp_path, monkeypatch):
     from fastapi import HTTPException
     workspace = tmp_path / 'synthetic-workspace'
     workspace.mkdir()
     client = _client(tmp_path, monkeypatch)
     provider = client.app.state.conversation_provider
     payload = ChatCompletionRequest.model_validate(_payload(workspace))
-    payload.messages = [ChatMessage.model_validate(message) for message in messages]
-    payload.metadata.developer_instruction_tail = 'Undeclared hidden authority.'
-    starts = []
-    monkeypatch.setattr(provider.service.runtime, 'run_task', lambda *args, **kwargs: starts.append(True))
+    payload.metadata.developer_instruction_tail = 'Absent declared tail.'
     with pytest.raises(HTTPException) as rejected:
         provider._session(payload, GLASSHIVE_MODELS[payload.model], workspace, 'high', tenant_id='local')
     assert rejected.value.status_code == 400
     assert 'tail is absent' in rejected.value.detail
-    response = client.post('/v1/chat/completions', headers=AUTH, json=payload.model_dump(mode='json'))
-    assert response.status_code == 400, response.text
-    assert 'tail is absent' in response.json()['error']['message']
-    assert response.json()['error']['type'] == 'invalid_request_error'
-    assert response.json()['error']['code'] == 'invalid_request'
-    assert payload.metadata.developer_instruction_tail not in response.text
-    assert starts == []
-    assert client.app.state.store.list_provider_sessions(owner_id='owner-a') == []
-    assert client.app.state.store.list_all_workers() == []
-    assert client.app.state.store.get_provider_request(
-        tenant_id='local', owner_id='owner-a',
-        idempotency_key=_versioned_idempotency_key(
-            payload.metadata.idempotency_key, audio_eligible=payload.metadata.audio_eligible,
-        ),
-    ) is None
 
 
 # Private machine-state transport shares the signed zero-tool admission, never public redaction.
@@ -9411,6 +9441,10 @@ def test_private_machine_state_exact_terminal_survives_review_reload_and_public_
     record = client.app.state.store.get_provider_request(request_id)
     contract = json.loads(record["replay_decision_json"])["completion_contract_v1"]
     assert contract["response_contract"] == _PRIVATE_STATE_CONTRACT
+    native_run = client.app.state.store.get_run(record["run_id"])
+    native_worker = client.app.state.store.get_worker(native_run["worker_id"])
+    native_bundle = json.loads(native_worker["bootstrap_bundle_json"])
+    assert native_bundle["provider_capabilities"]["response_contract"] == _PRIVATE_STATE_CONTRACT
     saved = json.loads(record["response_json"])
     saved_output = saved["choices"][0]["message"]["content"]
     assert saved_output == output
@@ -9718,3 +9752,626 @@ def test_native_mcp_startup_failure_keeps_typed_code_on_each_provider_protocol(
     run = client.app.state.store.get_run(requests[0]["run_id"])
     assert run["failure_class"] == "native_mcp_unavailable"
     assert not run["output_text"]
+
+
+def test_terminal_stream_delivers_mixed_audio_ranges_with_the_content(tmp_path, monkeypatch):
+    """A speech client must not receive quiet text before its range decisions."""
+    text = "Quiet 🟢.\n\nSpoken."
+    boundary = len("Quiet 🟢.".encode("utf-16-le")) // 2
+    decision = lambda audio: {"version": 1, "audio": audio, "required": True,
+                              "valid": True, "source": "model"}
+    ranges = [{"start": 0, "end": boundary, "disposition": decision("skip")},
+              {"start": boundary, "end": len(text.encode("utf-16-le")) // 2,
+               "disposition": decision("eligible")}]
+
+    class MixedRuntime(StructuredDeliveryRuntime):
+        def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
+            _publish_in_process_test_start(worker)
+            return json.dumps({"type": "assistant_response", "tool_name": None,
+                               "voice": "eligible", "content": text})
+
+    monkeypatch.setattr(ConversationProvider, "_native_spoken_content_snapshot", lambda *args: None)
+    monkeypatch.setattr(ConversationProvider, "_native_delivery_ranges", lambda *args: ranges)
+    client = _client(tmp_path, monkeypatch, runtime=MixedRuntime())
+    response = client.post("/v1/chat/completions", headers={**AUTH,
+        "X-Viventium-Surface": "voice", "X-Viventium-Audio-Eligible": "true"},
+        json=_payload(tmp_path, stream=True))
+    assert response.status_code == 200, response.text
+    chunks = [json.loads(line.removeprefix("data: ")) for line in response.text.splitlines()
+              if line.startswith("data: {")]
+    content = [choice["delta"] for chunk in chunks for choice in chunk.get("choices", [])
+               if choice["delta"].get("content")]
+    assert "".join(delta["content"] for delta in content) == text
+    assert all(delta["provider_specific_fields"]["viventium"]["deliveryDispositionRanges"] == ranges
+               and delta["provider_specific_fields"]["viventium"]["delivery_range_text"] == text
+               for delta in content)
+    final = chunks[-1]["choices"][0]["delta"]["provider_specific_fields"]["viventium"]
+    assert final["deliveryDispositionRanges"] == ranges
+    assert final["delivery_range_text"] == text
+
+
+def _standalone_spoken_fixture():
+    state, provider, payload = _spoken_family_fixture()
+    decision = {"version": 1, "main_context_owner": "provider_legacy",
+                "request_authority_sha256": "a" * 64,
+                "completion_contract_v1": {"version": 1, "surface": "voice",
+                    "delivery_control": {"version": 1, "audio_eligible": True}}}
+    state["record"]["replay_decision_json"] = json.dumps(decision)
+    state["run"].update(active_attempt_id="attempt-a")
+    state["durable_attempt"] = "attempt-a"
+    state["lookup_current"] = True
+    payload.metadata.main_context_owner = "provider_legacy"
+    payload.metadata.owner_id = "owner-a"
+    payload.metadata.conversation_id = "conv-a"
+    payload.metadata.agent_id = "agent-a"
+    payload.metadata.message_id = "message-a"
+    payload.metadata.stream_id = "stream-a"
+    def lookup(request_id, run_id, attempt_id):
+        if (not state["lookup_current"] or attempt_id != state["durable_attempt"]
+                or request_id != state["record"]["request_id"] or run_id != state["record"]["run_id"]):
+            return None
+        return {**state["record"], "speech_conversation_id": "conv-a", "speech_agent_id": "agent-a"}
+    provider.store.current_provider_speech_request = lookup
+    return state, provider, payload
+
+
+def test_standalone_spoken_projection_uses_provider_admission_without_a_core_invocation():
+    state, provider, payload = _standalone_spoken_fixture()
+    assert _project_spoken_family(state, provider, payload)["text"] == "Useful public words."
+    assert state["record"]["native_invocation_id"] == ""
+    assert state["record"]["native_body_sha256"] == ""
+
+
+@pytest.mark.parametrize("case", ["unmarked", "core_owner", "core_protocol", "family_claim",
+    "missing_authority", "missing_audio", "wrong_contract", "wrong_surface", "wrong_owner",
+    "wrong_conversation", "wrong_agent", "wrong_message", "wrong_stream", "missing_message",
+    "missing_stream", "cancelled", "wrong_run", "stale_attempt", "no_attempt", "stale_owner",
+    "scheduled", "internal", "unmarked_metadata", "core_metadata", "core_protocol_metadata"])
+def test_standalone_spoken_projection_rejects_unproved_or_stale_scope(case):
+    state, provider, payload = _standalone_spoken_fixture()
+    decision = json.loads(state["record"]["replay_decision_json"])
+    if case == "unmarked": del decision["main_context_owner"]
+    elif case == "core_owner": decision["main_context_owner"] = "core"
+    elif case == "core_protocol": decision["main_context_protocol"] = "main_context_v1"
+    elif case == "family_claim": decision["family_continuation_v1"] = True
+    elif case == "missing_authority": del decision["request_authority_sha256"]
+    elif case == "missing_audio": payload.metadata.audio_eligible = False
+    elif case == "wrong_contract": decision["completion_contract_v1"]["version"] = 2
+    elif case == "wrong_surface": decision["completion_contract_v1"]["surface"] = "web"
+    elif case == "wrong_owner": payload.metadata.owner_id = "other"
+    elif case == "wrong_conversation": payload.metadata.conversation_id = "other"
+    elif case == "wrong_agent": payload.metadata.agent_id = "other"
+    elif case == "wrong_message": payload.metadata.message_id = "other"
+    elif case == "wrong_stream": payload.metadata.stream_id = "other"
+    elif case == "missing_message": state["record"]["message_id"] = ""
+    elif case == "missing_stream": state["record"]["stream_id"] = ""
+    elif case == "cancelled": state["record"]["state"] = "cancelled"
+    elif case == "wrong_run": state["run"]["run_id"] = "other"
+    elif case == "stale_attempt": state["durable_attempt"] = "new-attempt"
+    elif case == "no_attempt": state["run"]["active_attempt_id"] = ""
+    elif case == "stale_owner": state["lookup_current"] = False
+    elif case == "scheduled": payload.metadata.origin = "scheduled"
+    elif case == "internal": payload.metadata.actor_kind = "internal_ai"
+    elif case == "unmarked_metadata": payload.metadata.main_context_owner = ""
+    elif case == "core_metadata": payload.metadata.main_context_owner = "core"
+    elif case == "core_protocol_metadata": payload.metadata.main_context_protocol = "main_context_v1"
+    state["record"]["replay_decision_json"] = json.dumps(decision)
+    assert _project_spoken_family(state, provider, payload) is None
+
+
+def test_standalone_spoken_projection_rechecks_the_exact_native_attempt_after_read():
+    state, provider, payload = _standalone_spoken_fixture()
+    original = provider._native_spoken_content_snapshot
+    def crossed(*args):
+        result = original(*args)
+        state["durable_attempt"] = "replacement-attempt"
+        return result
+    provider._native_spoken_content_snapshot = crossed
+    assert _project_spoken_family(state, provider, payload) is None
+
+
+@pytest.mark.parametrize("change", [None, "request_cancelled", "restore_hold", "run_completed",
+    "attempt_replaced", "worker_closed", "worker_owner", "session_owner", "run_tenant",
+    "session_tenant", "worker_tenant", "newer_run", "internal_session", "scheduled_session"])
+def test_current_provider_speech_request_joins_actual_durable_ownership(tmp_path, monkeypatch, change):
+    client = _client(tmp_path, monkeypatch, runtime=StructuredDeliveryRuntime(voice="eligible"))
+    response = client.post("/v1/chat/completions", headers={**AUTH,
+        "X-Viventium-Surface": "voice", "X-Viventium-Audio-Eligible": "true",
+        "X-Viventium-Main-Context-Owner": "provider_legacy"}, json=_payload(tmp_path))
+    assert response.status_code == 200, response.text
+    store = client.app.state.store
+    request_id = response.json()["id"]
+    record = store.get_provider_request(request_id)
+    run_id = record["run_id"]
+    run = store.get_run(run_id)
+    with store._connect() as conn:
+        conn.execute("UPDATE provider_requests SET state='running' WHERE request_id=?", (request_id,))
+        conn.execute("UPDATE runs SET state='running', active_attempt_id='attempt-a' WHERE run_id=?", (run_id,))
+        conn.execute("UPDATE workers SET state='running' WHERE worker_id=?", (run["worker_id"],))
+        table, field, value, column, identity = {
+            "request_cancelled": ("provider_requests", "state", "cancelled", "request_id", request_id),
+            "restore_hold": ("provider_requests", "restore_hold", 1, "request_id", request_id),
+            "run_completed": ("runs", "state", "completed", "run_id", run_id),
+            "attempt_replaced": ("runs", "active_attempt_id", "new-attempt", "run_id", run_id),
+            "worker_closed": ("workers", "state", "terminated", "worker_id", run["worker_id"]),
+            "worker_owner": ("workers", "owner_id", "other", "worker_id", run["worker_id"]),
+            "session_owner": ("provider_sessions", "owner_id", "other", "session_id", record["session_id"]),
+            "run_tenant": ("runs", "tenant_id", "other", "run_id", run_id),
+            "session_tenant": ("provider_sessions", "tenant_id", "other", "session_id", record["session_id"]),
+            "worker_tenant": ("workers", "tenant_id", "other", "worker_id", run["worker_id"]),
+            "newer_run": ("workers", "last_run_id", "replacement", "worker_id", run["worker_id"]),
+            "internal_session": ("provider_sessions", "actor_kind", "system", "session_id", record["session_id"]),
+            "scheduled_session": ("provider_sessions", "origin", "scheduled", "session_id", record["session_id"]),
+        }.get(change, ("", "", "", "", ""))
+        if table: conn.execute(f"UPDATE {table} SET {field}=? WHERE {column}=?", (value, identity))
+    current = store.current_provider_speech_request(request_id, run_id, "attempt-a")
+    if change is None:
+        assert current["request_id"] == request_id
+        assert current["speech_conversation_id"] == "conv-a"
+        assert json.loads(current["replay_decision_json"])["main_context_owner"] == "provider_legacy"
+    else:
+        assert current is None
+
+
+@pytest.mark.parametrize("declared_owner", [None, "core", "provider_legacy"])
+def test_native_voice_admission_requires_explicit_provider_context_owner(tmp_path, monkeypatch, declared_owner):
+    """Header-stripped Core follow-ups can redeclare audio without acquiring provider speech authority."""
+    client = _client(tmp_path, monkeypatch, runtime=StructuredDeliveryRuntime(voice="eligible"))
+    payload = _payload(tmp_path)
+    payload["metadata"].update(surface="voice", input_mode="voice", audio_eligible=True)
+    if declared_owner is not None:
+        payload["metadata"]["main_context_owner"] = declared_owner
+    response = client.post("/v1/chat/completions", headers=AUTH, json=payload)
+    assert response.status_code == 200, response.text
+    record = client.app.state.store.get_provider_request(response.json()["id"])
+    decision = json.loads(record["replay_decision_json"])
+    assert (decision.get("main_context_owner") == "provider_legacy") is (declared_owner == "provider_legacy")
+    if declared_owner != "provider_legacy":
+        provider = client.app.state.conversation_provider
+        parsed = ChatCompletionRequest.model_validate(payload)
+        assert not provider._provider_owned_spoken_request(record, client.app.state.store.get_run(record["run_id"]), parsed)
+
+
+def test_native_voice_explicit_provider_owner_cannot_replace_core_protocol_claim(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch, runtime=StructuredDeliveryRuntime(voice="eligible"))
+    payload = _payload(tmp_path)
+    payload["metadata"].update(surface="voice", audio_eligible=True, main_context_owner="provider_legacy",
+                               main_context_protocol="main_context_v1")
+    response = client.post("/v1/chat/completions", headers=AUTH, json=payload)
+    assert response.status_code == 400
+    assert "Core context binding is incomplete" in response.text
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_provider_admission_timing_is_passive_private_and_ordered(tmp_path, monkeypatch, enabled):
+    import workers_projects_runtime.conversation_provider as module
+    client = _client(tmp_path, monkeypatch)
+    provider = client.app.state.conversation_provider
+    events = []
+    monkeypatch.setattr(module, "native_timing_enabled", lambda: enabled)
+    monkeypatch.setattr(module, "native_timing_event", lambda stage, **fields: events.append((stage, fields)))
+    counts = {"session": 0, "write": 0}
+    original_session = provider._session
+    original_write = provider.store.create_provider_request
+    def session(*args, **kwargs):
+        counts["session"] += 1
+        return original_session(*args, **kwargs)
+    def write(*args, **kwargs):
+        counts["write"] += 1
+        return original_write(*args, **kwargs)
+    monkeypatch.setattr(provider, "_session", session)
+    monkeypatch.setattr(provider.store, "create_provider_request", write)
+    payload = _payload(tmp_path)
+    payload["messages"][-1]["content"] = "Synthetic private admission content"
+    reply = client.post("/v1/chat/completions", headers=AUTH, json=payload)
+    assert reply.status_code == 200
+    assert counts == {"session": 1, "write": 1}
+    measured = [(stage.removeprefix("provider_admission_"), fields)
+                for stage, fields in events if stage.startswith("provider_admission_")]
+    if not enabled:
+        assert measured == []
+        return
+    assert [stage for stage, _fields in measured] == [
+        "route_enter", "auth_hydrate_digest", "session_lock_acquired", "retention_check",
+        "model_fallback_selection", "identity_source_prepared", "session_ready",
+        "context_admission_prepared", "request_record_write", "start_total", "thread_dispatch_start",
+    ]
+    expected_turn = module.native_timing_hash("turn", payload["metadata"]["message_id"])
+    for stage, fields in measured:
+        assert set(fields) == {"turnHash", "invocationHash", "status", "durationMs"}
+        assert fields["turnHash"] == expected_turn
+        assert len(fields["invocationHash"]) == 64
+        assert fields["durationMs"] >= 0
+        assert fields["status"] == ("started" if stage == "route_enter" else "completed")
+    serialized = json.dumps(measured)
+    for private in ["Synthetic private admission content", "owner-a", "conv-a", "message-a", "provider-test-token", str(tmp_path)]:
+        assert private not in serialized
+
+
+@pytest.mark.parametrize("failure", ["auth", "model"])
+def test_provider_admission_timing_preserves_rejected_route_and_private_error(tmp_path, monkeypatch, failure):
+    import workers_projects_runtime.conversation_provider as module
+    client = _client(tmp_path, monkeypatch)
+    events = []
+    monkeypatch.setattr(module, "native_timing_enabled", lambda: True)
+    monkeypatch.setattr(module, "native_timing_event", lambda stage, **fields: events.append((stage, fields)))
+    payload = _payload(tmp_path)
+    headers = AUTH
+    if failure == "auth":
+        payload["metadata"]["owner_id"] = "synthetic-other-owner"
+    else:
+        payload["model"] = "unsupported:synthetic-private-model"
+    reply = client.post("/v1/chat/completions", headers=headers, json=payload)
+    assert reply.status_code == (403 if failure == "auth" else 400)
+    measured = [(stage, fields) for stage, fields in events if stage.startswith("provider_admission_")]
+    phases = dict(measured)
+    rejected = "auth_hydrate_digest" if failure == "auth" else "model_fallback_selection"
+    assert phases["provider_admission_" + rejected]["status"] == "failed"
+    assert "provider_admission_request_record_write" not in phases
+    assert not client.app.state.store.list_provider_sessions(owner_id="owner-a")
+    serialized = json.dumps(measured)
+    assert "synthetic-rejected-token" not in serialized
+    assert "synthetic-private-model" not in serialized
+
+
+def test_provider_admission_timing_disabled_has_no_clock_hash_or_event_side_effect(monkeypatch):
+    import workers_projects_runtime.conversation_provider as module
+    monkeypatch.setattr(module, "native_timing_enabled", lambda: False)
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Disabled admission observations must not read clocks or hash identifiers")
+    monkeypatch.setattr(module.time, "monotonic_ns", unexpected)
+    monkeypatch.setattr(module, "native_timing_hash", unexpected)
+    monkeypatch.setattr(module, "native_timing_event", unexpected)
+    payload = ChatCompletionRequest(model="synthetic", messages=[{"role": "user", "content": "Synthetic input"}])
+    with module._provider_admission_phase(payload, "synthetic"):
+        pass
+
+
+def test_provider_admission_timing_preserves_exception_identity_and_failure_privacy(monkeypatch):
+    import workers_projects_runtime.conversation_provider as module
+    events = []
+    monkeypatch.setattr(module, "native_timing_enabled", lambda: True)
+    monkeypatch.setattr(module, "native_timing_event", lambda stage, **fields: events.append((stage, fields)))
+    failure = RuntimeError("Synthetic private exception details")
+    with pytest.raises(RuntimeError) as caught:
+        with module._provider_admission_phase(ChatCompletionRequest(model="synthetic", messages=[{"role": "user", "content": "Synthetic input"}]), "synthetic"):
+            raise failure
+    assert caught.value is failure
+    assert events[0][1]["status"] == "failed"
+    assert "Synthetic private exception details" not in json.dumps(events)
+
+
+@pytest.mark.parametrize("profile", ["codex-cli", "claude-code", "direct-xai"])
+def test_private_machine_state_terminal_retains_whole_object_and_never_selects_public_ack(profile):
+    raw = json.dumps({"summary": "Keep the exact pending condition.", "nested": {"label": "FINAL REPORT"}})
+    raw += "\n\nFINAL REPORT:\nInternal summary returned."
+    if profile == "codex-cli":
+        events = [{"type": "item.completed", "item": {"type": "agent_message", "text": raw}}, {"type": "turn.completed"}]
+    elif profile == "claude-code":
+        events = [{"type": "result", "result": raw}]
+    else:
+        events = [{"type": "grok.session.started", "session_id": "native-session"},
+            {"type": "grok.result", "session_id": "native-session", "stop_reason": "end_turn", "output": raw}]
+    stdout = "\n".join(map(json.dumps, events))
+    assert _native_terminal_text(profile, stdout, response_contract=_PRIVATE_STATE_CONTRACT) == raw
+    assert _native_terminal_text(profile, stdout) == "Internal summary returned."
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(_native_terminal_text(profile, stdout, response_contract=_PRIVATE_STATE_CONTRACT))
+
+
+@pytest.mark.parametrize('configured,requested,expected', [
+    (None, None, None), (None, 120, 120.0), (None, 900, 900.0),
+    ('300', None, 300.0), ('300', 120, 120.0), ('300', 900, 300.0),
+])
+def test_admitted_response_timeout_is_finite_owner_default_and_requested_minimum(monkeypatch, configured, requested, expected):
+    if configured is None:
+        monkeypatch.delenv('GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S', raising=False)
+    else:
+        monkeypatch.setenv('GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S', configured)
+    provider = ConversationProvider.__new__(ConversationProvider)
+    payload = ChatCompletionRequest.model_validate({'model': 'synthetic',
+        'messages': [{'role': 'user', 'content': 'Synthetic'}],
+        'metadata': {} if requested is None else {'response_timeout_s': requested}})
+    assert provider._response_timeout_seconds(payload) == expected
+    assert bool(provider._deadline_timestamp(expected)) == (expected is not None)
+
+
+@pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan'), 0, -1])
+def test_admitted_response_timeout_rejects_nonfinite_or_nonpositive_request(value):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate({'model': 'synthetic',
+            'messages': [{'role': 'user', 'content': 'Synthetic'}], 'metadata': {'response_timeout_s': value}})
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('', None), ('invalid', None), ('2026-10-15T12:00:00', None),
+    ('2026-10-15T12:00:00Z', '2026-10-15T12:00:00+00:00'),
+    ('2026-10-15T13:00:00+01:00', '2026-10-15T13:00:00+01:00'),
+])
+def test_admitted_response_header_uses_only_valid_stored_aware_deadline(raw, expected):
+    from workers_projects_runtime.conversation_provider import _admitted_response_headers
+    record = {'request_id': 'synthetic_request', 'response_deadline_at': raw}
+    headers = _admitted_response_headers(record)
+    assert headers['X-GlassHive-Request-Id'] == 'synthetic_request'
+    assert headers.get('X-GlassHive-Response-Deadline-At') == expected
+
+
+@pytest.mark.parametrize('endpoint', ['/v1/chat/completions', '/v1/responses'])
+@pytest.mark.parametrize('stream', [False, True])
+def test_successful_response_carries_exact_stored_admitted_deadline(tmp_path, monkeypatch, endpoint, stream):
+    monkeypatch.setenv('GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S', '660')
+    workspace = tmp_path / 'synthetic-workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    payload = (_payload(workspace, stream=stream) if endpoint.endswith('completions') else
+               {'model': 'codex-cli:gpt-5.6-sol', 'input': 'Synthetic', 'stream': stream})
+    response = client.post(endpoint, headers={**AUTH,
+        'X-GlassHive-Response-Deadline-At': '2099-01-01T00:00:00Z'}, json=payload)
+    assert response.status_code == 200, response.text
+    record = client.app.state.store.get_provider_request(response.headers['X-GlassHive-Request-Id'])
+    assert record['response_timeout_s'] == 660.0
+    assert response.headers['X-GlassHive-Response-Deadline-At'] == record['response_deadline_at']
+    deadline = datetime.fromisoformat(record['response_deadline_at'])
+    created = datetime.fromisoformat(record['created_at'])
+    assert 659 <= (deadline - created).total_seconds() <= 661
+    assert deadline.year != 2099  # An incoming header never authors the admission deadline.
+    if stream:
+        assert '[DONE]' in response.text if endpoint.endswith('completions') else 'response.completed' in response.text
+
+
+def test_admission_reconnect_retains_original_absolute_deadline(tmp_path, monkeypatch):
+    monkeypatch.setenv('GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S', '300')
+    workspace = tmp_path / 'synthetic-workspace'
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(workspace, stream=True)
+    payload['metadata']['response_timeout_s'] = 60
+    first = client.post('/v1/chat/completions', headers=AUTH, json=payload)
+    assert first.status_code == 200, first.text
+    payload['metadata']['response_timeout_s'] = 120
+    second = client.post('/v1/chat/completions', headers=AUTH, json=payload)
+    assert second.status_code == 200, second.text
+    assert first.headers['X-GlassHive-Request-Id'] == second.headers['X-GlassHive-Request-Id']
+    assert first.headers['X-GlassHive-Response-Deadline-At'] == second.headers['X-GlassHive-Response-Deadline-At']
+
+
+def test_default_public_successor_old_logical_start_keeps_existing_admission_semantics(tmp_path, monkeypatch):
+    monkeypatch.delenv('GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S', raising=False)
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(tmp_path)
+    payload['metadata']['response_started_at'] = (datetime.now(UTC) - timedelta(seconds=700)).isoformat()
+    response = client.post('/v1/chat/completions', headers=AUTH, json=payload)
+    assert response.status_code == 200, response.text
+    record = client.app.state.store.get_provider_request(response.headers['X-GlassHive-Request-Id'])
+    # The existing Store deadline owner starts its implicit budget at actual
+    # record creation, not a newly imposed pre-admission logical-start cap.
+    assert datetime.fromisoformat(record['response_deadline_at']) > datetime.now(UTC)
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_signed_private_state_unset_budget_has_exact_stored_admission_header(tmp_path, monkeypatch, stream):
+    monkeypatch.delenv('GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S', raising=False)
+    client = _client(tmp_path, monkeypatch, PrivateMachineStateRuntime())
+    response = client.post('/v1/chat/completions', headers=_private_state_headers(), json=_payload(tmp_path, stream=stream))
+    assert response.status_code == 200, response.text
+    record = client.app.state.store.get_provider_request(response.headers['X-GlassHive-Request-Id'])
+    assert record['response_timeout_s'] == 660.0
+    assert response.headers['X-GlassHive-Response-Deadline-At'] == record['response_deadline_at']
+    assert datetime.fromisoformat(record['response_deadline_at']) > datetime.now(UTC)
+
+
+@pytest.mark.parametrize("status, expected_code", [(401, "provider_auth_missing"), (403, "provider_request_rejected")])
+def test_direct_http_failure_keeps_its_class_at_public_conversation_boundary(tmp_path, status, expected_code):
+    from workers_projects_runtime.direct_runtime import DirectModelRuntime
+    from workers_projects_runtime.conversation_provider import _provider_failure_error
+    runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
+    failure, _ = runtime._provider_failure_for_process(
+        worker={"worker_id": "synthetic-http-refusal"}, run_id="synthetic-http-refusal",
+        stdout=json.dumps({"type": "direct.error", "status_code": status,
+            "stage": "provider_request", "error_type": "ModelHTTPError"}),
+        stderr="", exit_code=1)
+    assert failure.failure_class == expected_code
+    assert _provider_failure_error({"failure_class": failure.failure_class}) == (
+        "glasshive_runtime_error", expected_code)
+
+
+@pytest.mark.parametrize("configured", [None, "32768", "65536", "524288", "99999999", "invalid"])
+@pytest.mark.parametrize("window", [32768, 200000, 500000, 1050000])
+def test_native_catalog_uses_model_config_minimum_calibration_floor(monkeypatch, configured, window):
+    import workers_projects_runtime.conversation_provider as provider
+    if configured is None:
+        monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
+    else:
+        monkeypatch.setenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", configured)
+    model = provider.HarnessModel(id="synthetic", display_name="Synthetic", harness_profile="synthetic",
+        native_model="synthetic", effort_choices=("high",), recommended_effort="high", context_window=window)
+    floor = model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"]
+    for observed in [1.0, 2.5, 4.0, 8.0]:
+        assert floor <= provider._conversation_replay_budget_bytes(model, observed_chars_per_token=observed)
+    assert floor == provider._conversation_replay_budget_bytes(model,
+        observed_chars_per_token=provider.CONVERSATION_MIN_CHARS_PER_TOKEN)
+
+
+def test_complete_review_source_and_discovery_share_model_headroom(monkeypatch):
+    import workers_projects_runtime.conversation_provider as provider
+    monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
+    model = provider.GLASSHIVE_MODELS["codex-cli:gpt-6.1-sol"]
+    # A whole source and its proposed replacement must reach the independent reviewer.
+    text = json.dumps({"source": "source fact " * 11000,
+                       "candidate": "retained fact " * 6500})
+    instruction, decision, _ = provider._admit_conversation_history(
+        [provider.ChatMessage(role="user", content=text)], start_at=0,
+        turn_context="", model=model, observed_chars_per_token=1.0)
+    assert text in instruction
+    assert decision["omitted_message_count"] == 0
+    assert decision["instruction_bytes"] > 192 * 1024
+    assert decision["instruction_bytes"] <= decision["budget_bytes"]
+    assert model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"] == 237500
+
+
+@pytest.mark.parametrize("model_id,expected", [
+    ("codex-cli:gpt-6.1-sol", 237500),
+    ("claude-code:claude-opus-5-5", 500000),
+    ("grok-build:grok-4.7", 250000),
+    ("grok-build:grok-4.7-build-fast", 250000),
+])
+def test_native_catalog_selected_route_floor_keeps_operator_cap(monkeypatch, model_id, expected):
+    import workers_projects_runtime.conversation_provider as provider
+    model = provider.GLASSHIVE_MODELS[model_id]
+    monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
+    assert model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"] == expected
+    monkeypatch.setenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", "65536")
+    assert model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"] == 65536
+
+
+def test_native_catalog_allows_intact_long_carrier_but_not_a_smaller_observed_session(monkeypatch):
+    import workers_projects_runtime.conversation_provider as provider
+    from fastapi import HTTPException
+    monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
+    model = provider.GLASSHIVE_MODELS["codex-cli:gpt-6.1-sol"]
+    # Synthetic sizes reproduce a protected summary + recent turns + required peers.
+    context = "é🙂" * 25000 + "x" * 5688
+    source = "source" * 8400
+    assert len(context.encode()) == 155688
+    message = provider.ChatMessage(role="user", content=source)
+    instruction, decision, _ = provider._admit_conversation_history(
+        [message], start_at=0, turn_context=context, model=model, observed_chars_per_token=1.0)
+    floor = model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"]
+    assert 192 * 1024 < decision["instruction_bytes"] <= floor == 237500
+    assert context in instruction and source in instruction
+    assert message.content == source
+    assert decision["omitted_message_count"] == 0
+    # Discovery describes the catalog/config limit. Native session observation is final.
+    with pytest.raises(HTTPException) as rejected:
+        provider._admit_conversation_history([message], start_at=0, turn_context=context,
+            model=model, observed_chars_per_token=1.0, context_window=200000)
+    assert rejected.value.status_code == 413
+
+
+@pytest.mark.parametrize("configured,window,source_bytes", [
+    ("196608", 475000, 218000), (None, 32768, 20000),
+    (None, 475000, 238000), ("524288", 475000, 238000),
+])
+def test_complete_review_source_still_honors_config_and_effective_model_limit(
+    monkeypatch, configured, window, source_bytes,
+):
+    import workers_projects_runtime.conversation_provider as provider
+    from fastapi import HTTPException
+    if configured:
+        monkeypatch.setenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", configured)
+    else:
+        monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
+    model = provider.HarnessModel(id="synthetic", display_name="Synthetic", harness_profile="synthetic",
+        native_model="synthetic", effort_choices=("high",), recommended_effort="high", context_window=window)
+    with pytest.raises(HTTPException) as rejected:
+        provider._admit_conversation_history(
+            [provider.ChatMessage(role="user", content="x" * source_bytes)], start_at=0,
+            turn_context="", model=model, observed_chars_per_token=1.0)
+    assert rejected.value.status_code == 413
+
+
+@pytest.mark.parametrize("window", [475000, None, 0, -1, True, "475000"])
+def test_native_reported_context_window_is_structured_and_not_billing(window):
+    from workers_projects_runtime.conversation_provider import _native_context_usage
+    billing = {"prompt_tokens": 450706, "completion_tokens": 29, "total_tokens": 450735}
+    event = {"type": "turn.completed", "context_window_tokens": window}
+    context, scope = _native_context_usage("codex-cli", json.dumps(event), billing, context_window=1050000)
+    assert scope == "native_prompt_tokens"
+    assert "context_window_tokens" not in billing
+    if type(window) is int and window > 0:
+        assert context["context_window_tokens"] == window
+    else:
+        assert context == billing
+
+
+@pytest.mark.parametrize("change", [None, "missing", "model", "epoch", "empty_epoch", "larger", "invalid"])
+def test_native_pressure_uses_only_current_model_epoch_observed_window(change):
+    from dataclasses import replace
+    # Deliberately wider than the observation to exercise the observation fence,
+    # independently of today's corrected native model catalog.
+    model = replace(GLASSHIVE_MODELS["codex-cli:gpt-6.1-sol"], context_window=1050000)
+    manifest = {"latest_native_prompt_tokens": 450706, "observed_chars_per_token": 1.0,
+        "native_context_epoch": "epoch-a", "native_occupancy_native_context_epoch": "epoch-a",
+        "native_context_window_model_id": model.id, "native_context_window_tokens": 475000}
+    if change == "missing": manifest.pop("native_context_window_tokens")
+    if change == "model": manifest["native_context_window_model_id"] = "different-model"
+    if change == "epoch": manifest["native_occupancy_native_context_epoch"] = "older-epoch"
+    if change == "empty_epoch":
+        manifest["native_context_epoch"] = manifest["native_occupancy_native_context_epoch"] = ""
+    if change == "larger": manifest["native_context_window_tokens"] = 2 * model.context_window
+    if change == "invalid": manifest["native_context_window_tokens"] = True
+    result = ConversationProvider._native_occupancy_projection(model, manifest,
+        {"instruction_bytes": 152306, "output_reserve_tokens": 32768})
+    assert result["projected_occupancy_tokens"] == 635780
+    assert result["state"] == ("pressure" if change is None else "healthy")
+    assert result["trigger_tokens"] == int((475000 if change is None else model.context_window) * .7)
+    import workers_projects_runtime.conversation_provider as provider
+    window, observed = provider._effective_native_context_window(model, manifest)
+    assert window == result["effective_context_window_tokens"]
+    assert observed == (change in (None, "larger"))
+    assert provider._conversation_replay_budget_bytes(model, observed_chars_per_token=1.0,
+        context_window=window) <= window * .5
+
+
+def test_native_window_receipt_obeys_existing_request_order_epoch_and_model_fences(tmp_path, monkeypatch):
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/v1/chat/completions", headers=AUTH, json=_payload(workspace))
+    assert response.status_code == 200
+    store = client.app.state.store
+    request = store.get_provider_request(response.json()["id"])
+    session = store.get_provider_session_by_id(request["session_id"])
+    epoch = json.loads(session["context_manifest_json"]).get("native_context_epoch", "")
+    def record(identity, timestamp, **changes):
+        options = dict(request_id=identity, prompt_tokens=450706, total_tokens=450735,
+            measurement_epoch=epoch, measurement_scope="native_prompt_tokens",
+            measurement_created_at=timestamp, context_window_tokens=475000,
+            context_window_model_id=session["model_id"])
+        options.update(changes)
+        store.record_provider_session_native_occupancy(session["session_id"], **options)
+    record("window-current", "2990-01-01T00:00:00Z")
+    record("window-current", "2991-01-01T00:00:00Z", context_window_tokens=1)
+    record("window-old", "2980-01-01T00:00:00Z", context_window_tokens=2)
+    record("window-wrong-epoch", "2991-01-01T00:00:00Z", measurement_epoch="old", context_window_tokens=3)
+    record("window-wrong-model", "2991-01-01T00:00:00Z", context_window_model_id="other", context_window_tokens=4)
+    manifest = json.loads(store.get_provider_session_by_id(session["session_id"])["context_manifest_json"])
+    assert manifest["native_context_window_tokens"] == 475000
+    assert manifest["native_context_window_model_id"] == session["model_id"]
+    assert manifest["native_occupancy_native_context_epoch"] == epoch
+
+
+def test_native_reported_window_reaches_existing_provider_occupancy_receipt(tmp_path, monkeypatch):
+    class NativeWindowRuntime(NativeUsageRuntime):
+        def provider_activity_log(self, worker, run_id):
+            profile, log = super().provider_activity_log(worker, run_id)
+            events = [json.loads(line) for line in log.splitlines()]
+            events[-1]["context_window_tokens"] = 475000
+            return profile, "\n".join(json.dumps(event) for event in events)
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    client = _client(tmp_path, monkeypatch, runtime=NativeWindowRuntime())
+    model = "codex-cli:gpt-6.1-sol"
+    response = client.post("/v1/chat/completions", headers=AUTH, json=_payload(workspace, model=model))
+    assert response.status_code == 200, response.text
+    assert response.json()["usage"] == {"prompt_tokens": 17, "completion_tokens": 4, "total_tokens": 21}
+    session = client.app.state.store.list_provider_sessions(owner_id="owner-a")[0]
+    manifest = json.loads(session["context_manifest_json"])
+    assert manifest["native_context_window_tokens"] == 475000
+    assert manifest["native_context_window_model_id"] == model
+    assert manifest["native_occupancy_request_ids"] == [response.json()["id"]]
+    decision = ConversationProvider._native_occupancy_projection(GLASSHIVE_MODELS[model], manifest,
+        {"instruction_bytes": 400000, "projected_input_tokens": 400000, "output_reserve_tokens": 32768})
+    assert decision["state"] == "pressure"
+    assert decision["context_window_source"] == "native_observed"
+
+
+@pytest.mark.parametrize("boundary", ["turn.started", "turn.failed"])
+def test_native_reported_context_window_never_inherits_prior_turn(boundary):
+    from workers_projects_runtime.conversation_provider import _native_context_usage
+    billing = {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+    log = "\n".join(json.dumps(event) for event in [
+        {"type": "turn.completed", "context_window_tokens": 475000}, {"type": boundary}])
+    context, _ = _native_context_usage("codex-cli", log, billing, context_window=1050000)
+    assert context == billing

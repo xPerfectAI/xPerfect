@@ -1935,7 +1935,7 @@ def _file_input_owning_endpoint(store,service):
     from fastapi import Request
     from hashlib import sha256
     tree=ast.parse(Path(service_module.__file__).with_name('api.py').read_text())
-    names={'_auth_context','_account_scope','_canonical_digest','_active_work_state','active_work_action'}
+    names={'_auth_context','_account_scope','_canonical_digest','_active_work_state','_active_work_action_request','active_work_action'}
     nodes=[n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name in names]
     assert {n.name for n in nodes}==names
     for node in nodes:node.decorator_list=[]

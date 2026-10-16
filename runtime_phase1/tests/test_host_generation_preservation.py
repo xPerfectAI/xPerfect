@@ -334,9 +334,10 @@ def test_pidless_host_release_requires_exact_terminal_artifact_before_absence(
     assert signals == []
     assert rejected_without_artifact is True
 
-    attempt_root = runtime._attempt_run_root(worker_id, run_id, attempt_id)
-    attempt_root.mkdir(parents=True, exist_ok=True)
-    exit_path = attempt_root / "exit_code"
+    run_root = runtime._run_root(worker_id, run_id)
+    run_root.mkdir(parents=True, exist_ok=True)
+    runtime._claim_run_transcript(run_root, attempt_id)
+    exit_path = run_root / "exit_code"
     exit_path.write_text("0")
     assert runtime._write_active_session(
         worker_id,
@@ -1276,3 +1277,72 @@ def test_current_supervisor_finally_keeps_same_run_replacement(tmp_path, monkeyp
     assert runtime._host_slot_tokens()[worker["worker_id"]] == slot
     assert runtime._active_session_fingerprint(runtime._read_active_session(worker["worker_id"])) == runtime._active_session_fingerprint(replacement)
     assert replacement_process.wait_calls == 0
+
+
+@pytest.mark.parametrize("proven_after_kill", [True, False])
+def test_host_stop_signalled_targets_share_each_grace_period(
+    tmp_path, monkeypatch, caplog, proven_after_kill
+):
+    """A group and its escaped child were signalled together, so their grace
+    periods must overlap. Unknown death still retains the session and ledger."""
+    import time
+
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "runtime-shared-grace"))
+    monkeypatch.setenv("VIVENTIUM_VOICE_LOG_LATENCY", "1")
+    caplog.set_level("INFO", logger="uvicorn.error")
+    worker_id, run_id = "wrk_shared_grace", "run_shared_grace"
+    session = _write_exact_finished_host_session(
+        runtime, worker_id=worker_id, run_id=run_id, suffix="shared-grace"
+    )
+    leader, escaped = 43101, 43201
+    identities = {leader: "ps-lstart:recorded-process", escaped: "ps-lstart:escaped"}
+    clock = [0.0]
+    killed_at = {}
+    signals = []
+    released = []
+
+    def gone(pid):
+        return (proven_after_kill and pid in killed_at
+                and clock[0] >= killed_at[pid] + 2.0)
+
+    def signal_target(pid, sig):
+        if sig == 0:
+            if gone(pid):
+                raise ProcessLookupError
+            return
+        signals.append((pid, sig, clock[0]))
+        if sig == signal.SIGKILL:
+            killed_at[pid] = clock[0]
+
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(os, "killpg", signal_target)
+    monkeypatch.setattr(os, "kill", signal_target)
+    monkeypatch.setattr(os, "getpgrp", lambda: 99999)
+    monkeypatch.setattr(runtime, "_process_start_identity", lambda pid: identities.get(pid, ""))
+    monkeypatch.setattr(runtime, "_recorded_process_is_running", lambda *args: True)
+    monkeypatch.setattr(runtime, "_host_process_group_members", lambda group: {} if gone(group) else {group: identities[group]})
+    monkeypatch.setattr(runtime, "_host_escaped_descendants", lambda *args: {escaped: identities[escaped]})
+    monkeypatch.setattr(runtime, "_recorded_pid_is_proven_gone", lambda pid, *args: gone(pid))
+    monkeypatch.setattr(runtime, "_finalize_owned_host_generation", lambda *args, **kwargs: released.append(kwargs) or True)
+
+    assert runtime._stop_active_process(
+        worker_id, worker={"worker_id": worker_id}, run_id=run_id
+    ) is proven_after_kill
+    assert clock[0] <= 7.2, "simultaneously signalled targets received serial grace periods"
+    assert [sig for pid, sig, at in signals if pid == leader] == [signal.SIGTERM, signal.SIGKILL]
+    assert [sig for pid, sig, at in signals if pid == escaped] == [signal.SIGTERM, signal.SIGKILL]
+    assert all(at <= 5.1 for pid, sig, at in signals if sig == signal.SIGKILL)
+    assert bool(released) is proven_after_kill
+    events = [json.loads(record.getMessage().split("[NativeP0] ", 1)[1])
+              for record in caplog.records if "[NativeP0] " in record.getMessage()]
+    waits = [event for event in events if event["stage"] == "host_control_wait"]
+    assert [event["signal"] for event in waits] == ["term", "kill"]
+    assert waits[0]["durationMs"] <= 5100
+    assert waits[1]["durationMs"] <= 2100
+    assert all(event["runHash"] != run_id for event in events)
+    assert all(run_id not in json.dumps(event) and worker_id not in json.dumps(event)
+               for event in events)
+    if not proven_after_kill:
+        assert runtime._active_session_fingerprint(runtime._read_active_session(worker_id)) == runtime._active_session_fingerprint(session)
+        assert runtime._stop_descendant_ledger_path(worker_id).exists()

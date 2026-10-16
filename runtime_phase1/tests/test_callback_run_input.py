@@ -193,6 +193,10 @@ def test_current_running_native_attention_carries_exact_goal(account_client, mon
     payload = json.loads(callback['payload_json'])
     assert payload['run_input'] == {'version': 1, 'run_id': run['run_id'], 'instruction': run['instruction']}
     assert payload['pending_native_input']['kind'] == kind
+    # The process stays running while its exact current offer blocks work.
+    # Core uses this public work state to admit Main's natural question.
+    assert payload['run_state'] == 'running'
+    assert payload['work_state'] == 'needs_input'
     assert payload['work_terminal'] is False
     assert store.get_run(run['run_id'])['state'] == 'running'
 

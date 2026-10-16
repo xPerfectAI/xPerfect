@@ -20,7 +20,7 @@ from .worker_configuration import guard_worker_configuration
 from .coordinator import guard_coordinator_run
 from .workspace_continuation import accepted_run_input
 
-from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS
+from .runtime_requirements import WORKER_EFFORT_ENV_VALUES
 
 from .models import WorkspaceKind, normalize_workspace_kind, normalize_workspace_tags, utc_now
 from .parallel_orchestration_schema import ensure_parallel_orchestration_schema
@@ -422,19 +422,7 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
             result.pop("viventium_run_liveness", None)
 
     if "env" in result:
-        effort_values = {
-            "WPR_CODEX_CLI_REASONING_EFFORT": {
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultra",
-            },
-            "WPR_CLAUDE_CODE_EFFORT": frozenset(CLAUDE_CODE_EFFORT_LEVELS),
-        }
+        effort_values = WORKER_EFFORT_ENV_VALUES
         result["env"] = {
             key: item
             for key, item in _scalar_fields(
@@ -506,7 +494,7 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
         ),
         "viventium_launch_authority": frozenset(
             {"version", "kind", "execution_mode", "fallback_worker_profile",
-             "worker_model", "worker_reasoning_effort",
+             "worker_model", "worker_reasoning_effort", "worker_access",
              "fallback_worker_model", "fallback_worker_reasoning_effort"}
         ),
         "viventium_run_liveness": frozenset({"version", "long_mission"}),
@@ -591,6 +579,7 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
             "fallback_worker_profile": str,
             "worker_model": str,
             "worker_reasoning_effort": str,
+            "worker_access": str,
             "fallback_worker_model": str,
             "fallback_worker_reasoning_effort": str,
         },
@@ -10176,9 +10165,21 @@ class Store:
         *,
         created_before: str | None = None,
         limit: int = 50,
+        worker_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return terminal generations with no durable callback sink."""
+        """Return terminal generations with no durable callback sink.
 
+        Canonical origin-only recovery requires an exact worker owner. The
+        global legacy scan must not revive old origin-only conversation work.
+        """
+
+        origin_callback_sql = (
+            "CASE WHEN runs.state = 'cancelled' "
+            "AND runs.run_id = workers.last_run_id "
+            "AND workers.state = 'terminated' "
+            "THEN json_extract(workers.bootstrap_bundle_json, '$.callbacks.origin_ref') END"
+            if worker_id else "NULL"
+        )
         result_digest_sql = "glasshive_terminal_result_digest(" + ", ".join(
             f"runs.{field}" for field in TERMINAL_RESULT_DIGEST_FIELDS
         ) + ")"
@@ -10189,6 +10190,7 @@ class Store:
             WHERE runs.state IN ('completed', 'failed', 'cancelled', 'interrupted')
               AND runs.ended_at IS NOT NULL
               AND runs.ended_at != ''
+              AND NOT (runs.state = 'cancelled' AND workers.state IN ('terminating', 'termination_failed'))
               AND workers.bootstrap_bundle_json IS NOT NULL
               AND json_valid(workers.bootstrap_bundle_json)
               AND COALESCE(
@@ -10200,6 +10202,7 @@ class Store:
                         workers.bootstrap_bundle_json,
                         '$.callbacks.url'
                     ),
+                    {origin_callback_sql},
                     ''
                   ) != ''
               AND NOT EXISTS (
@@ -10251,6 +10254,9 @@ class Store:
               )
         """
         params: list[Any] = []
+        if worker_id:
+            query += " AND runs.worker_id = ?"
+            params.append(str(worker_id))
         if created_before:
             query += " AND runs.ended_at <= ?"
             params.append(str(created_before))
@@ -10638,7 +10644,7 @@ class Store:
                 FROM runs
                 INNER JOIN workers ON workers.worker_id = runs.worker_id
                 WHERE runs.state = 'queued'
-                  AND runs.failure_class = 'host_worker_busy'
+                  AND runs.failure_class IN ('host_worker_busy', 'host_capacity')
                   AND runs.retry_after IS NOT NULL
                   AND runs.retry_after != ''
                   AND workers.profile = ?
@@ -10674,7 +10680,7 @@ class Store:
                     SET retry_after = NULL
                     WHERE run_id IN ({placeholders})
                       AND state = 'queued'
-                      AND failure_class = 'host_worker_busy'
+                      AND failure_class IN ('host_worker_busy', 'host_capacity')
                       AND retry_after IS NOT NULL
                       AND retry_after != ''
                     """,
@@ -12270,12 +12276,17 @@ class Store:
                     attempt_id=str(attempt["attempt_id"]),
                     created_at=ended_at,
                 )
+            worker = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
             for terminal_row in terminal_rows:
-                self._record_terminal_artifact_trace_conn(
-                    conn,
-                    run_id=str(terminal_row["run_id"]),
-                    observed_at=ended_at,
-                )
+                run_id = str(terminal_row["run_id"])
+                self._record_terminal_artifact_trace_conn(conn, run_id=run_id, observed_at=ended_at)
+                terminal = conn.execute("SELECT state, ended_at FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+                if worker is not None and state == "cancelled" and terminal["state"] == state and terminal["ended_at"] == ended_at:
+                    self._record_claimed_cancellation_conn(
+                        conn, worker, run_id, message=error_text,
+                        operation_kind="terminate_worker",
+                        operation_token=f"terminate:{worker_id}:{worker['updated_at']}:{run_id}",
+                    )
             conn.execute("COMMIT")
         return cur.rowcount
 
@@ -20060,18 +20071,18 @@ class Store:
             ).fetchone()
         return self._row(row)
 
-    def get_completed_active_work_action_receipt(
+    def get_active_work_action_receipt(
         self, *, tenant_id: str, owner_id: str, work_ref: str,
         idempotency_key: str, action: str, payload_digest: str,
     ) -> dict[str, Any] | None:
-        """Read one exact finished receipt without reserving or changing an effect."""
+        """Read one exact receipt without reserving or changing an effect."""
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM active_work_action_uses
                 WHERE tenant_id = ? AND owner_id = ? AND work_ref = ?
                   AND idempotency_key = ? AND action = ? AND payload_digest = ?
-                  AND status IN ('completed', 'failed') AND response_json <> ''
+                  AND (status = 'pending' OR (status IN ('completed', 'failed') AND response_json <> ''))
                 """,
                 (tenant_id, owner_id, work_ref, idempotency_key, action, payload_digest),
             ).fetchone()
@@ -20480,6 +20491,8 @@ class Store:
         measurement_epoch: str | None = None,
         measurement_scope: str | None = None,
         measurement_created_at: str | None = None,
+        context_window_tokens: int | None = None,
+        context_window_model_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Record current native prompt occupancy without recalibrating the ratio."""
 
@@ -20493,6 +20506,8 @@ class Store:
             measurement_scope=measurement_scope,
             measurement_created_at=measurement_created_at,
             calibrate_chars_per_token=False,
+            context_window_tokens=context_window_tokens,
+            context_window_model_id=context_window_model_id,
         )
 
     def _record_provider_session_native_measurement(
@@ -20507,6 +20522,8 @@ class Store:
         measurement_scope: str | None,
         measurement_created_at: str | None,
         calibrate_chars_per_token: bool,
+        context_window_tokens: int | None = None,
+        context_window_model_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Apply one epoch/order-fenced native measurement to a session manifest."""
 
@@ -20558,7 +20575,10 @@ class Store:
                 )
             )
             current_scope = str(manifest.get(scope_field) or "")
-            if requested_scope and current_scope and requested_scope != current_scope:
+            comparable_occupancy_scopes = {"native_prompt_tokens", "native_prompt_tokens_upper_bound"}
+            if (requested_scope and current_scope and requested_scope != current_scope
+                    and not (not calibrate_chars_per_token
+                        and {requested_scope, current_scope}.issubset(comparable_occupancy_scopes))):
                 conn.execute("COMMIT")
                 return self._row(row)
             latest_created_at = str(manifest.get(created_at_field) or "")
@@ -20617,6 +20637,13 @@ class Store:
                             ),
                         }
                     )
+                if (not calibrate_chars_per_token and type(context_window_tokens) is int
+                        and context_window_tokens > 0
+                        and context_window_model_id == str(row["model_id"])):
+                    measurement_fields.update({
+                        "native_context_window_tokens": context_window_tokens,
+                        "native_context_window_model_id": str(row["model_id"]),
+                    })
                 manifest.update(measurement_fields)
                 if calibrate_chars_per_token:
                     sample = min(8.0, max(1.0, float(observed_chars_per_token)))
@@ -20885,6 +20912,35 @@ class Store:
         result = dict(row)
         result["advance_status"] = "advanced" if cursor_matches else "reconciled_stale"
         return result
+
+    def current_provider_speech_request(
+        self, request_id: str, run_id: str, attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one exact provider-owned speech operation without separate mutable lookups."""
+        if not request_id or not run_id or not attempt_id:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT request.*, session.conversation_id AS speech_conversation_id,
+                          session.agent_id AS speech_agent_id
+                   FROM provider_requests request
+                   JOIN runs run ON run.run_id = request.run_id
+                   JOIN provider_sessions session ON session.session_id = request.session_id
+                   JOIN workers worker ON worker.worker_id = run.worker_id
+                   WHERE request.request_id = ? AND request.run_id = ?
+                     AND run.active_attempt_id = ? AND run.state = 'running'
+                     AND request.state IN ('queued', 'running') AND request.restore_hold = 0
+                     AND session.worker_id = worker.worker_id AND worker.last_run_id = run.run_id
+                     AND worker.state IN ('ready', 'running')
+                     AND session.owner_id = request.owner_id AND worker.owner_id = request.owner_id
+                     AND session.tenant_id = request.tenant_id AND worker.tenant_id = request.tenant_id
+                     AND run.tenant_id = request.tenant_id
+                     AND session.project_id = run.project_id AND worker.project_id = run.project_id
+                     AND session.actor_kind = 'external_user' AND session.origin = 'interactive'
+                   LIMIT 1""",
+                (request_id, run_id, attempt_id),
+            ).fetchone()
+        return self._row(row)
 
     def get_provider_request_for_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -23921,26 +23977,28 @@ class Store:
         run_id: str,
         *,
         message: str,
+        operation_kind: str = "cancel_run",
+        operation_token: str = "",
     ) -> None:
-        """One idempotent cancellation event and callback per cancel operation."""
+        """One idempotent cancellation event and callback per exact operation."""
 
-        operation_id = str(worker["compute_release_operation_id"] or "")
+        operation_id = str(operation_token or worker["compute_release_operation_id"] or "")
         self._insert_lifecycle_event(
             conn,
             operation_token=operation_id,
             operation_epoch=0,
-            operation_kind="cancel_run",
+            operation_kind=operation_kind,
             worker=worker,
             run_id=run_id,
             event_type="run.cancelled",
             message=message or "Run cancelled",
-            payload={"operation_kind": "cancel_run"},
+            payload={"operation_kind": operation_kind},
         )
         self._enqueue_lifecycle_effects(
             conn,
             operation_token=operation_id,
             operation_epoch=0,
-            operation_kind="cancel_run",
+            operation_kind=operation_kind,
             worker_id=str(worker["worker_id"]),
             run_id=run_id,
             effect_kinds=("callback.run_cancelled",),
@@ -25551,6 +25609,11 @@ class Store:
                     conn,
                     run_id=cancelled_run_id,
                     observed_at=now,
+                )
+                self._record_claimed_cancellation_conn(
+                    conn, worker, cancelled_run_id, message=error_text,
+                    operation_kind="terminate_worker",
+                    operation_token=str(worker["compute_release_operation_id"] or token),
                 )
             conn.execute(
                 """

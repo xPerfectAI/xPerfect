@@ -46,10 +46,23 @@ LEGACY_CREDENTIAL_CLEANUP_REASON = (
 )
 LOCATOR_PREFIXES = ("native-home://", "keychain://", "broker://", "secret-store://")
 PROFILE_ACCOUNT_PROVIDERS = {
+    "direct-openai": {"codex", "openai"},
+    "direct-anthropic": {"claude", "anthropic"},
+    "direct-xai": {"grok", "xai"},
     "codex-cli": {"codex", "openai"},
     "claude-code": {"claude", "anthropic"},
     "grok-build": {"grok", "xai"},
 }
+def profile_provider_account_issue(profile: str, account) -> str:
+    """Use the registered executor's authentication contract at every binding boundary."""
+    if str(account["provider"] or "").strip().lower() not in PROFILE_ACCOUNT_PROVIDERS.get(profile, set()):
+        return "Provider account does not match this workspace profile"
+    from .profile_registry import require_worker_profile
+    if require_worker_profile(profile).native_transport == "api" and str(account["auth_method"] or "") != "api_key":
+        return "Direct API profiles require an API-key account; CLI subscription sign-in is separate"
+    return ""
+
+
 WORKSPACE_ACCOUNT_POLICIES = {"legacy", "personal_preferred", "personal_required"}
 ACCOUNT_SWITCH_BLOCKED_WORKER_STATES = {
     "starting",
@@ -2572,7 +2585,7 @@ class ControlPlaneStore:
                         raise ControlPlaneError("A personal provider account must be selected")
                     account = conn.execute(
                         """
-                        SELECT account_id, provider, label, status, updated_at
+                        SELECT account_id, provider, auth_method, label, status, updated_at
                         FROM provider_accounts
                         WHERE account_id = ? AND tenant_id = ? AND owner_id = ?
                         """,
@@ -2580,9 +2593,9 @@ class ControlPlaneStore:
                     ).fetchone()
                     if account is None:
                         raise ControlPlaneError("Provider account not found for this user")
-                    supported = PROFILE_ACCOUNT_PROVIDERS.get(str(worker["profile"] or ""), set())
-                    if str(account["provider"] or "").strip().lower() not in supported:
-                        raise ControlPlaneError("Provider account does not match this workspace profile")
+                    issue = profile_provider_account_issue(str(worker["profile"] or ""), account)
+                    if issue:
+                        raise ControlPlaneError(issue)
                     if str(account["status"] or "").strip().lower() != "ready":
                         raise ControlPlaneConflict("Provider account must be reconnected before selection")
                     pending_payload = {
@@ -3005,7 +3018,7 @@ class ControlPlaneStore:
                         raise ControlPlaneError("A personal provider account must be selected")
                     account = conn.execute(
                         """
-                        SELECT account_id, provider, label, status, updated_at
+                        SELECT account_id, provider, auth_method, label, status, updated_at
                         FROM provider_accounts
                         WHERE account_id = ? AND tenant_id = ? AND owner_id = ?
                         """,
@@ -3013,9 +3026,9 @@ class ControlPlaneStore:
                     ).fetchone()
                     if account is None:
                         raise ControlPlaneError("Provider account not found for this user")
-                    supported = PROFILE_ACCOUNT_PROVIDERS.get(str(worker["profile"] or ""), set())
-                    if str(account["provider"] or "").strip().lower() not in supported:
-                        raise ControlPlaneError("Provider account does not match this workspace profile")
+                    issue = profile_provider_account_issue(str(worker["profile"] or ""), account)
+                    if issue:
+                        raise ControlPlaneError(issue)
                     if str(account["status"] or "").strip().lower() != "ready":
                         raise ControlPlaneConflict("Provider account must be reconnected before selection")
                     account_lease = conn.execute(

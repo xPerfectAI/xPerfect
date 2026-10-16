@@ -2349,3 +2349,101 @@ def test_actual_cancel_wakes_blocked_mcp_observation_without_registry_or_prompt(
     finally:
         session.cancel()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('effort', ['high', 'low'])
+@pytest.mark.parametrize('failure', ['descriptor', 'listener', 'connect', 'prompt', 'ready'])
+def test_optional_warm_attach_falls_back_only_before_session_or_prompt(tmp_path, monkeypatch, capfd, failure, effort):
+    from contextlib import contextmanager
+    from io import StringIO
+    from workers_projects_runtime import grok_acp_runner as runner, native_warm_pool as warm, grok_websocket as transport
+    from workers_projects_runtime.store import Store
+    store = Store(str(tmp_path / 'persisted-native-quality.db'))
+    try:
+        accepted = store.reserve_delegation(
+            tenant_id='tenant', owner_id='owner', idempotency_key='quality-key', request_digest='quality-digest',
+            origin_ref='quality-origin', title='Quality fixture', goal='Return a synthetic answer.',
+            instruction='Return a synthetic answer.', origin_surface='web', worker_name='Worker', worker_role='worker',
+            profile='grok-build', backend='grok-build', runtime='grok-build', model='grok-selected', execution_mode='host',
+            bootstrap_bundle={'env': {'WPR_GROK_REASONING_EFFORT': effort}, 'viventium_launch_authority': {
+                'version': 1, 'kind': 'conversation_orchestrator', 'execution_mode': 'host'}},
+        )
+        stored = json.loads(store.get_worker(accepted['worker_id'])['bootstrap_bundle_json'])
+        persisted_effort = stored['env']['WPR_GROK_REASONING_EFFORT']
+    finally:
+        store.close()
+    monkeypatch.setenv('GROK_HOME', str(tmp_path / 'home'))
+    monkeypatch.setattr(sys, 'stdin', StringIO('Synthetic request.'))
+    class Peer(ProtocolPeer):
+        def request(self, method, params, timeout=30, **kwargs):
+            if failure == 'prompt' and method == 'session/prompt':
+                raise AcpError('Synthetic accepted prompt failure')
+            result = super().request(method, params, timeout, **kwargs)
+            if method in ('session/new', 'session/load'):
+                result['configOptions'][0]['options'].append({'value': 'low'})
+            return result
+    client = Peer()
+    @contextmanager
+    def channel(): yield client
+    launched = []
+    def popen(command, **kwargs):
+        launched.append(command)
+        return object()
+    monkeypatch.setattr(runner.subprocess, 'Popen', popen)
+    monkeypatch.setattr(runner, 'AcpClient', lambda *args, **kwargs: channel())
+    scope = {'environment_digest': 'digest', 'lane': 'conversation'}
+    identity = {'pid': 12345, 'process_start_identity': 'exact'}
+    lease = {'scope': scope, 'server': identity, 'state_record': str(tmp_path / 'state'),
+             'lease_id': 'lease', 'url': 'ws://127.0.0.1:12345/ws', 'secret': 'synthetic'}
+    record = {'phase': 'leased', 'scope': scope, 'child': identity, 'lease_id': 'lease',
+              'run_id': 'run', 'attempt_id': 'attempt', 'attempt_descriptor': str(tmp_path / 'lease')}
+    if failure == 'descriptor':
+        monkeypatch.setattr(warm, 'read_native_warm_lease', lambda *args, **kwargs: (_ for _ in ()).throw(ValueError('Synthetic mismatch')))
+    else:
+        monkeypatch.setattr(warm, 'read_native_warm_lease', lambda *args, **kwargs: lease)
+    monkeypatch.setattr(warm, 'read_native_warm_record', lambda *args: record)
+    monkeypatch.setattr(warm, 'native_environment_digest', lambda *args, **kwargs: 'digest')
+    monkeypatch.setattr(warm, 'process_start_identity', lambda *args: 'exact')
+    monkeypatch.setattr(warm, 'listener_owned_by', lambda *args: failure != 'listener')
+    def attach(*args, verify_listener, **kwargs):
+        if not verify_listener(): raise AcpError('Synthetic listener unavailable')
+        if failure == 'connect': raise OSError('Synthetic connect failed')
+        return channel()
+    monkeypatch.setattr(transport, 'WebSocketAcpClient', attach)
+    result = runner.main(['--binary', 'synthetic-grok', '--model', 'grok-selected', '--effort', persisted_effort,
+        '--run-id', 'run', '--attempt-id', 'attempt', '--native-warm-lease', str(tmp_path / 'lease')])
+    assert result == (2 if failure == 'prompt' else 0)
+    assert len(launched) == (0 if failure in ('prompt', 'ready') else 1)
+    if launched:
+        assert launched[0] == ['synthetic-grok', 'agent', '--no-leader', '--model', 'grok-selected', 'stdio']
+    assert len([1 for method, _ in client.calls if method == 'session/new']) == 1
+    events = [json.loads(line) for line in capfd.readouterr().out.splitlines()]
+    assert any(event.get('phase') == 'warm_attach_unavailable' for event in events) is (failure not in ('prompt', 'ready'))
+
+    assert any(method == 'session/set_config_option' and params.get('configId') == 'reasoning_effort'
+               and params.get('value') == persisted_effort for method, params in client.calls)
+
+
+def test_native_permission_inventory_uses_exact_enabled_ready_server_tools():
+    registry = native_ready_registry(tools=[
+        {'name': 'read_synthetic', 'enabled': True}, {'name': 'disabled_tool', 'enabled': False}])
+    client = NativeRegistryPeer(registry)
+    session = GrokSession(client)
+    session.open(cwd='/workspace', model='grok-selected',
+                 mcp_servers=MCP_SERVERS, required_mcp_servers=REQUIRED_MCP_SERVERS)
+    assert session.native_mcp_tool_names('authorized-broker') == {'authorized-broker__read_synthetic'}
+    before = len(client.calls)
+    assert session.native_mcp_tool_names('unrelated') == frozenset()
+    assert session.native_mcp_tool_names('authorized-broker') == {'authorized-broker__read_synthetic'}
+    assert len(client.calls) == before  # Reuse the readiness result, no extra request.
+    session._native_tools_disabled = True
+    assert not session.native_mcp_tool_names('authorized-broker')
+
+
+def test_native_permission_inventory_never_uses_cosmetic_names_without_registry():
+    client = NativeRegistryPeer(native_ready_registry(enabled=False))
+    session = GrokSession(client)
+    session.session_id = 'native-exact'
+    session._required_mcp_servers = ('authorized-broker',)
+    assert not session.native_mcp_tool_names('authorized-broker')
+    assert not session._native_mcp_tool_names

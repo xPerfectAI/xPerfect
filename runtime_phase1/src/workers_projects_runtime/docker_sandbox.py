@@ -435,8 +435,8 @@ AI_WORKER_BROWSER_EXTENSION_POLICY_PATHS = (
 from .grok_artifact import GROK_ARTIFACT_PROVENANCE, docker_install_instruction as grok_docker_install_instruction
 
 AI_WORKER_CODEX_NPM_SPEC = (
-    os.environ.get("WPR_SANDBOX_CODEX_NPM_SPEC", "@openai/codex@0.159.0").strip()
-    or "@openai/codex@0.159.0"
+    os.environ.get("WPR_SANDBOX_CODEX_NPM_SPEC", "@openai/codex@0.155.0-alpha.9.2").strip()
+    or "@openai/codex@0.155.0-alpha.9.2"
 )
 AI_WORKER_CLAUDE_CODE_NPM_SPEC = (
     os.environ.get("WPR_SANDBOX_CLAUDE_CODE_NPM_SPEC", "@anthropic-ai/claude-code@2.1.280").strip()
@@ -3469,7 +3469,6 @@ screen -ls | awk -v target="$target" '
             copy_file=self._copy_file,
             copy_tree=self._copy_tree,
             trusted_state_dir=trusted_state_dir,
-            copy_capability_tree=self._copy_capability_tree,
         )
 
     def _copy_file(self, src: Path, dest: Path) -> None:
@@ -3482,12 +3481,6 @@ screen -ls | awk -v target="$target" '
         if not src.exists() or dest.exists():
             return
         shutil.copytree(src, dest, dirs_exist_ok=True)
-
-    def _copy_capability_tree(self, src: Path, dest: Path) -> None:
-        """Copy an optional shared capability catalog; a link whose target is gone is skipped."""
-        if not src.exists() or dest.exists():
-            return
-        shutil.copytree(src, dest, dirs_exist_ok=True, ignore_dangling_symlinks=True)
 
     def _require_docker(self) -> None:
         if shutil.which("docker") is None:
@@ -4022,23 +4015,66 @@ screen -ls | awk -v target="$target" '
             except ValueError:
                 timeout_sec = 60.0
         timeout_sec = timeout_sec if timeout_sec and timeout_sec > 0 else None
+        # Docker may spawn CLI-plugin discovery children. Killing only the CLI on timeout
+        # leaves those children behind, so own the same private session as detached exec.
+        process = subprocess.Popen(
+            command,
+            text=True,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            stderr=subprocess.PIPE if capture_output else subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        def stop_command() -> None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except (AttributeError, OSError):
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+
         try:
-            return subprocess.run(
-                command,
-                check=check,
-                text=True,
-                stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
-                stderr=subprocess.PIPE if capture_output else subprocess.DEVNULL,
-                timeout=timeout_sec,
-                input=input_text,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            stderr = (stderr + f"\nDocker command timed out after {timeout_sec:g}s").strip()
+            try:
+                stdout, stderr = process.communicate(input_text, timeout=timeout_sec)
+            except subprocess.TimeoutExpired as exc:
+                stop_command()
+                try:
+                    stdout, stderr = process.communicate(timeout=1)
+                except (subprocess.TimeoutExpired, UnicodeDecodeError) as cleanup_error:
+                    if isinstance(cleanup_error, subprocess.TimeoutExpired):
+                        # An escaped descendant must not hold inherited pipes open indefinitely.
+                        # The owned CLI still has to be reaped; unknown process groups are untouched.
+                        for stream in (process.stdin, process.stdout, process.stderr):
+                            if stream is not None:
+                                stream.close()
+                        process.wait(timeout=1)
+                    # Timeout partials may end mid-character or contain invalid bytes. Preserve
+                    # the timeout result; ordinary successful output keeps strict decoding.
+                    stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+                    stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+                stderr = ((stderr or "") + f"\nDocker command timed out after {timeout_sec:g}s").strip()
+                if check:
+                    raise RuntimeError(stderr) from exc
+                return subprocess.CompletedProcess(command, returncode=124, stdout=stdout or "", stderr=stderr)
+            except BaseException:
+                # communicate can reap the leader before strict output decoding fails. Its
+                # numeric process-group ID no longer owns a live command after that point.
+                if process.returncode is None:
+                    stop_command()
+                    process.wait(timeout=1)
+                raise
+            result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
             if check:
-                raise RuntimeError(stderr) from exc
-            return subprocess.CompletedProcess(command, returncode=124, stdout=stdout, stderr=stderr)
+                result.check_returncode()
+            return result
+        finally:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
     def _docker_exec(
         self,

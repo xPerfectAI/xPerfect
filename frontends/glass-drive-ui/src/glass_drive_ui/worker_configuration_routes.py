@@ -34,6 +34,9 @@ class ConfigurationRequest(BaseModel):
     context: ContextRequest
     tools: ToolsRequest
     background: BackgroundRequest
+    # The independent UI package is a courier. The runtime's PerformanceConfig
+    # owns typed count/expiry validation; do not duplicate or import its runtime.
+    performance: dict[str, object] | None = None
 
 
 def install_worker_configuration_ui_routes(app, client_for_request):
@@ -79,7 +82,7 @@ def install_worker_configuration_ui_routes(app, client_for_request):
         worker_id: str, payload: ConfigurationRequest, request: Request
     ):
         return await run_in_threadpool(
-            forward, request, worker_id, "PUT", payload.model_dump()
+            forward, request, worker_id, "PUT", payload.model_dump(exclude_unset=True)
         )
 
     @app.get("/api/workers/{worker_id}/configuration/context/{source_id}")

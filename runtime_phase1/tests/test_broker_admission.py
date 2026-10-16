@@ -1604,3 +1604,88 @@ def test_existing_docker_revocation_schema_migrates_without_changing_binding(tmp
     restored = migrated.list_capability_grant_revocations()[0]
     assert restored == {**{key: value for key, value in original.items() if key != "host_startup_lease_id"}, "host_startup_lease_id": ""}
     assert migrated.enqueue_capability_grant_revocation(binding)["revocation_id"] == original["revocation_id"]
+
+@pytest.mark.parametrize("partition", [None, {"eagerServers": [], "deferredServers": ["google_workspace"]}])
+def test_admission_preserves_signed_discovery_partition_or_legacy_absence(monkeypatch, partition):
+    payload = _success_body()
+    if partition is not None:
+        payload["grant"].update(partition)
+    monkeypatch.setattr(broker_admission_module.httpx, "post", lambda *args, **kwargs:
+        httpx.Response(200, json=payload, headers={"Cache-Control": "private, no-store"}))
+    admitted = admit_capability_grant(
+        "http://127.0.0.1:3180/internal/admission", secret=SECRET, body=BODY,
+        expected_scope_fingerprint="scope_synthetic_0001")
+    projection = admitted.broker_projection()
+    if partition is None:
+        assert "eager_servers" not in projection
+        assert "deferred_servers" not in projection
+    else:
+        assert projection["eager_servers"] == []
+        assert projection["deferred_servers"] == ["google_workspace"]
+    assert projection["allowed_servers"] == ["google_workspace"]
+    assert projection["allowed_host_tools"] == ["browser"]
+    assert projection["scopes"] == {"content_read": True}
+
+
+@pytest.mark.parametrize("partition", [
+    {"eagerServers": []},
+    {"eagerServers": [], "deferredServers": []},
+    {"eagerServers": [], "deferredServers": ["not-authorized"]},
+    {"eagerServers": ["google_workspace"], "deferredServers": ["google_workspace"]},
+    {"eagerServers": None, "deferredServers": ["google_workspace"]},
+    {"eagerServers": [], "deferredServers": ["google_workspace", "google_workspace"]},
+])
+def test_admission_rejects_incomplete_or_widened_discovery_partition(monkeypatch, partition):
+    payload = _success_body()
+    payload["grant"].update(partition)
+    monkeypatch.setattr(broker_admission_module.httpx, "post", lambda *args, **kwargs:
+        httpx.Response(200, json=payload, headers={"Cache-Control": "private, no-store"}))
+    with pytest.raises(BrokerAdmissionError, match="invalid"):
+        admit_capability_grant(
+            "http://127.0.0.1:3180/internal/admission", secret=SECRET, body=BODY,
+            expected_scope_fingerprint="scope_synthetic_0001")
+
+
+@pytest.mark.parametrize('worker_access', [None, 'ask', 'full'])
+def test_canonical_host_admission_reaches_exact_native_broker_permission_binding(tmp_path, monkeypatch, worker_access):
+    from workers_projects_runtime.grok_runtime import HostGrokBuildRuntime
+    monkeypatch.setenv('VIVENTIUM_GLASSHIVE_ADMISSION_SECRET', SECRET)
+    monkeypatch.setenv('VIVENTIUM_GLASSHIVE_ADMISSION_URL', 'http://admission.example.invalid/admit')
+    def admitted_response(url, *, content, headers, timeout):
+        if url.endswith('/revoke'): return httpx.Response(204, headers={'Cache-Control': 'no-store'})
+        request = json.loads(content)
+        return httpx.Response(200, json=_success_body(**request), headers={'Cache-Control': 'no-store'})
+    monkeypatch.setattr('workers_projects_runtime.broker_admission.httpx.post', admitted_response)
+    store = Store(str(tmp_path / 'state.db'))
+    service = WorkersProjectsService(store, _CapturingHostRuntime(), reconcile_on_startup=False)
+    record = _reserve_pending_admission(store)
+    worker = store.get_worker(record['worker_id'])
+    run = store.get_run(record['run_id'])
+    bundle = json.loads(worker['bootstrap_bundle_json'])
+    bundle['viventium_launch_authority'] = {'version': 1, 'kind': 'conversation_orchestrator', 'execution_mode': 'host'}
+    if worker_access is not None:
+        bundle['viventium_launch_authority']['worker_access'] = worker_access
+    bundle['access_mode'] = 'full'  # Model-authored foreground value is not worker authority.
+    name = 'glasshive-user-capabilities'
+    bundle['claude_project_mcp'] = {name: {'type': 'http', 'url': _success_body()['brokerUrl'],
+        'headers': {'Authorization': 'Bearer ${GLASSHIVE_CAPABILITY_BROKER_TOKEN}'}}}
+    worker = {**worker, 'profile': 'grok-build', '_active_run_id': run['run_id'],
+              '_run_attempt_id': 'synthetic-attempt', '_run_startup_token_digest': 'a' * 64,
+              'bootstrap_bundle_json': json.dumps(bundle)}
+    before = store.get_worker(record['worker_id'])['bootstrap_bundle_json']
+    try:
+        admitted = service._run_local_admitted_worker(worker, run, authority_context={'host_startup_lease_id': 'a' * 64})
+        actual = json.loads(admitted['bootstrap_bundle_json'])['glasshive_capability_broker']
+        assert actual['grant_id'] == admitted['_run_local_capability_binding']['grantId']
+        assert actual['grant_expires_at'] == admitted['_native_input_deadline_at']
+        native = HostGrokBuildRuntime(str(tmp_path / 'native'))
+        monkeypatch.setattr(native, '_native_environment', lambda *args, **kwargs: bootstrap_env_for(admitted))
+        info = RuntimeInfo('grok-build', 'grok-selected', '', None, None, None,
+                           str(tmp_path / 'native-state'), str(tmp_path / 'workspace'), None)
+        command = native._grok_command(admitted, info, host=True)
+        assert command[command.index('--allow-mcp-server') + 1] == name
+        assert command[command.index('--yolo-mode') + 1] == ('true' if worker_access == 'full' else 'false')
+        assert store.get_worker(record['worker_id'])['bootstrap_bundle_json'] == before
+        assert 'synthetic-run-local-grant' not in before
+    finally:
+        service.shutdown()

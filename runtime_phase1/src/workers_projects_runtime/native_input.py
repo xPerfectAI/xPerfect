@@ -309,11 +309,18 @@ def codex_app_launch(command: list[str]) -> dict | None:
                 return None
             value = tokens[index + 1]
             if token in {"-c", "--config"}:
-                argv.extend([token, value])
                 try:
-                    overrides.update(tomllib.loads(value))
+                    parsed = tomllib.loads(value)
                 except tomllib.TOMLDecodeError:
                     return None
+                overrides.update(parsed)
+                # Speed belongs to this admitted turn. Do not make an opt-in
+                # experiment the app server's or resumed thread's default.
+                if "service_tier" in parsed:
+                    if set(parsed) != {"service_tier"}:
+                        return None
+                else:
+                    argv.extend([token, value])
             elif token in {"--enable", "--disable"}:
                 argv.extend([token, value])
             elif token in {"-m", "--model"}:
@@ -350,6 +357,11 @@ def codex_app_launch(command: list[str]) -> dict | None:
         thread["approvalPolicy"] = overrides["approval_policy"]
     if "model_reasoning_effort" in overrides:
         turn["effort"] = overrides["model_reasoning_effort"]
+    if "service_tier" in overrides:
+        tier = overrides["service_tier"]
+        if not isinstance(tier, str) or not tier or not tier.isascii() or not tier.replace("_", "").isalnum():
+            return None
+        turn["serviceTierForTurn"] = "priority" if tier == "fast" else tier
     additional_roots = list(thread.get("runtimeWorkspaceRoots") or [])
     if additional_roots:
         workspace_policy = overrides.setdefault("sandbox_workspace_write", {})
@@ -496,6 +508,59 @@ _CODEX_ITEM_FIELDS = {"aggregatedOutput": "aggregated_output", "exitCode": "exit
     "reasoningEffort": "reasoning_effort", "savedPath": "saved_path", "contentItems": "content_items"}
 
 
+def codex_public_message_event(value, session_id, turn_id, items):
+    """Keep exact native final-answer items; unknown phase waits for completion."""
+    params = value.get("params") or {}
+    if not isinstance(params, dict):
+        return None
+    if params.get("threadId") != session_id or params.get("turnId") != turn_id:
+        return None
+    method = value.get("method")
+    item = params.get("item") or {}
+    if not isinstance(item, dict):
+        return None
+    identity = params.get("itemId") if method == "item/agentMessage/delta" else item.get("id")
+    if not isinstance(identity, str) or not identity:
+        return None
+    binding = {"thread_id": session_id, "turn_id": turn_id, "item_id": identity,
+               "observed_at_ms": time.time_ns() / 1_000_000,
+               "monotonic_ms": time.monotonic_ns() / 1_000_000}
+    if method == "item/started" and item.get("type") == "agentMessage":
+        if identity in items:
+            if item.get("phase") != items[identity]["phase"]:
+                raise NativeInputError("native_public_phase_mismatch")
+            return None
+        items[identity] = {"phase": item.get("phase"), "text": "", "complete": False}
+        return {"type": "codex.message.started", **binding, "phase": item.get("phase")}
+    state = items.get(identity)
+    if state is None or state["complete"]:
+        return None
+    if method == "item/agentMessage/delta":
+        delta = params.get("delta")
+        if not isinstance(delta, str):
+            return None
+        state["text"] += delta
+        if state["phase"] != "final_answer":
+            return None
+        return {"type": "codex.message.delta", **binding, "phase": state["phase"], "delta": delta}
+    if method == "item/completed" and item.get("type") == "agentMessage":
+        state["complete"] = True
+        phase = item.get("phase")
+        if state["phase"] == "final_answer" and phase not in {None, "final_answer"}:
+            raise NativeInputError("native_public_phase_mismatch")
+        # A completion cannot turn commentary into an early public answer.
+        if state["phase"] not in {None, "final_answer"} or phase not in {None, "final_answer"}:
+            return None
+        text = item.get("text")
+        if not isinstance(text, str):
+            return None
+        if state["phase"] == "final_answer" and not text.startswith(state["text"]):
+            raise NativeInputError("native_public_text_mismatch")
+        return {"type": "codex.message.completed", **binding, "phase": phase,
+                "text": text, "buffered": state["phase"] is None}
+    return None
+
+
 def codex_event(value, session_id, turn_id):
     """Keep the existing exec reader's typed items, native calls and team evidence."""
     params = value.get("params") or {}
@@ -572,13 +637,33 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
     context = read_object(context_path)
     instruction = sys.stdin.buffer.read().decode()
     launch = context["launch"]
+    process_started_ms = time.monotonic_ns() / 1_000_000
     rpc = CodexRpc(command)
+    process_ready_ms = time.monotonic_ns() / 1_000_000
     turn = mailbox = None
     usage = None
+    context_window_tokens = None
+    public_items = {}
 
     def emit(value):
         sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
         sys.stdout.flush()
+
+    def timed_call(method, params):
+        started_ms = time.monotonic_ns() / 1_000_000
+        emit({"type": "codex.rpc", "method": method, "phase": "started",
+              "observed_at_ms": time.time_ns() / 1_000_000, "monotonic_ms": started_ms})
+        try:
+            result = rpc.call(method, params)
+        except BaseException:
+            emit({"type": "codex.rpc", "method": method, "phase": "failed",
+                  "observed_at_ms": time.time_ns() / 1_000_000,
+                  "duration_ms": time.monotonic_ns() / 1_000_000 - started_ms})
+            raise
+        emit({"type": "codex.rpc", "method": method, "phase": "completed",
+              "observed_at_ms": time.time_ns() / 1_000_000,
+              "duration_ms": time.monotonic_ns() / 1_000_000 - started_ms})
+        return result
 
     def stopped(signum, _frame):
         raise SystemExit(128 + signum)
@@ -586,11 +671,14 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, stopped)
     try:
-        rpc.call("initialize", {"clientInfo": {"name": "xperfect-native", "version": "1"},
+        emit({"type": "codex.runtime.phase", "phase": "process_ready",
+              "observed_at_ms": time.time_ns() / 1_000_000,
+              "duration_ms": process_ready_ms - process_started_ms})
+        timed_call("initialize", {"clientInfo": {"name": "xperfect-native", "version": "1"},
                                 "capabilities": {"experimentalApi": True}})
         rpc.send({"method": "initialized", "params": {}})
         options = launch["thread"]
-        result = rpc.call("thread/resume" if launch["resumed"] else "thread/start", options)
+        result = timed_call("thread/resume" if launch["resumed"] else "thread/start", options)
         session_id = (result.get("thread") or {}).get("id")
         if not isinstance(session_id, str) or not session_id or (launch["resumed"] and session_id != options["threadId"]):
             raise NativeInputError("native_session_mismatch")
@@ -617,7 +705,7 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
         if expected_effort and result.get("reasoningEffort") != expected_effort:
             raise NativeInputError("native_effort_mismatch")
         emit({"type": "thread.started", "thread_id": session_id})
-        started = rpc.call("turn/start", {**launch["turn"], "threadId": session_id,
+        started = timed_call("turn/start", {**launch["turn"], "threadId": session_id,
             "input": [{"type": "text", "text": instruction}, *launch["images"]]})
         turn_id = (started.get("turn") or {}).get("id")
         if not isinstance(turn_id, str) or not turn_id:
@@ -631,7 +719,9 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
         mailbox = ControlMailbox(context_path.parent / "native-control", run_id=context["runId"],
             attempt_id=context["attemptId"], session=turn, event=lambda _event: None)
         mailbox.start()
-        emit({"type": "turn.started"})
+        emit({"type": "turn.started", "thread_id": session_id, "turn_id": turn_id,
+              **({"requested_service_tier": launch["turn"]["serviceTierForTurn"]}
+                 if "serviceTierForTurn" in launch["turn"] else {})})
         while True:
             event = rpc.events.get()
             if event is None:
@@ -642,8 +732,16 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
                 continue
             if params.get("threadId") != session_id:
                 continue
+            if launch.get("surface") == "voice":
+                public_event = codex_public_message_event(event, session_id, turn_id, public_items)
+                if public_event:
+                    emit(public_event)
             if event.get("method") == "thread/tokenUsage/updated" and params.get("turnId") == turn_id:
-                usage = (params.get("tokenUsage") or {}).get("last")
+                token_usage = params.get("tokenUsage") or {}
+                usage = token_usage.get("last")
+                reported_window = token_usage.get("modelContextWindow")
+                context_window_tokens = (reported_window
+                    if type(reported_window) is int and reported_window > 0 else None)
                 continue
             if event.get("method") == "turn/completed" and (params.get("turn") or {}).get("id") == turn_id:
                 turn.end()
@@ -652,7 +750,10 @@ def codex_relay(context_path: Path, command: list[str]) -> int:
                 if status == "completed":
                     counts = {"input_tokens": usage.get("inputTokens"), "cached_input_tokens": usage.get("cachedInputTokens", 0),
                               "output_tokens": usage.get("outputTokens")} if isinstance(usage, dict) else None
-                    emit({"type": "turn.completed", **({"usage": counts} if counts else {})})
+                    emit({"type": "turn.completed", "observed_at_ms": time.time_ns() / 1_000_000,
+                          **({"usage": counts} if counts else {}),
+                          **({"context_window_tokens": context_window_tokens}
+                             if context_window_tokens is not None else {})})
                     return 0
                 error = params["turn"].get("error") or {}
                 emit({"type": "turn.failed", "error": error, "native_status": status})

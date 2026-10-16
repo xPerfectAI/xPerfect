@@ -74,7 +74,7 @@ def test_permission_description_is_complete_including_long_command_tail(setup):
     title = "Execute requested command " + "argument " * 70 + "end of command"
     pending["request"]["toolCall"]["title"] = title
     projected = native_input_state(provider, record)["pending"][0]
-    assert projected["prompt"] == title + "\nAllow once; Deny."
+    assert projected["prompt"] == title + "\nMay I proceed?"
     assert projected["operationTitle"] == title
 
 

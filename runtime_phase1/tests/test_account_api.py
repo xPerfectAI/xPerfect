@@ -6454,13 +6454,8 @@ def test_public_view_ref_is_absolute_read_only_and_cannot_control_workspace(acco
     assert "Mission state describes this result" in view.text
     assert "Worker state describes the reusable workspace" in view.text
     # A workspace file is not a model-selected completed mission output.
-    result_files = view.text.split('<section aria-labelledby="results-title">', 1)[1].split("</section>", 1)[0]
-    assert "artifacts/result.html" not in result_files
-    assert "No result files are available." in result_files
-    workspace_files = view.text.split('<section aria-label="Workspace files">', 1)[1].split("</section>", 1)[0]
-    assert "<details><summary>Workspace files</summary>" in workspace_files
-    assert "artifacts/result.html" in workspace_files
-    assert "Files in this reusable workspace may come from other work." in workspace_files
+    assert "artifacts/result.html" not in view.text
+    assert "No result files are available." in view.text
     assert "Terminate" not in view.text
     assert "Pause" not in view.text
     assert str(worker["workspace_dir"]) not in view.text

@@ -84,6 +84,14 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                     model = coordinator.provider._model(explicit.model, tenant_id=tenant, owner_id=owner)
                 except HTTPException as exc:
                     raise HTTPException(409, "The configured conversation model is unavailable") from exc
+                from .direct_runtime import DIRECT_PROVIDERS
+                if model.harness_profile in DIRECT_PROVIDERS:
+                    from .control_plane import PROFILE_ACCOUNT_PROVIDERS
+                    from .native_api_keys import native_key_account, enabled
+                    if (str(account.get("provider")) not in PROFILE_ACCOUNT_PROVIDERS[model.harness_profile]
+                            or not native_key_account(account) or not enabled()):
+                        raise HTTPException(409, "Direct conversation requires this provider's protected API-key connection on a supported local host")
+                    profile = model.harness_profile
                 if model.harness_profile != profile:
                     raise HTTPException(409, "The chosen account is not for the configured conversation model")
                 if explicit.effort not in tuple(model.effort_choices):
@@ -104,13 +112,14 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             selected = CoordinatorConfig.model_validate(config)
             # The chosen account answers in the conversation. Configured helper routes,
             # each with its own account, stay; without any, one route uses the same account.
+            mode = "host" if profile in {"direct-openai", "direct-anthropic", "direct-xai"} else "docker"
             routes = explicit.routes if explicit is not None and explicit.routes else [
                 Route(id="default", profile=profile, model=model.id, effort=effort,
-                      execution_mode="docker", connection_id=payload.account_id)]
+                      execution_mode=mode, connection_id=payload.account_id)]
             selected = selected.model_copy(update={
                 "model": model.id,
                 "effort": effort,
-                "scope": selected.scope.model_copy(update={"connection_id": payload.account_id, "execution_mode": "docker"}),
+                "scope": selected.scope.model_copy(update={"connection_id": payload.account_id, "execution_mode": mode}),
                 "routes": routes,
             })
         else:
@@ -120,7 +129,7 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             selected = CoordinatorConfig.model_validate(config)
         if payload is not None and payload.scope is not None:
             scope_update = payload.scope.model_dump(exclude_unset=True)
-            if payload.account_id and scope_update.get("execution_mode", "docker") != "docker":
+            if payload.account_id and scope_update.get("execution_mode", selected.scope.execution_mode) != selected.scope.execution_mode:
                 # A connected account's conversation runs in its own container; the
                 # caller cannot move it onto the host.
                 raise HTTPException(409, "A conversation with a connected account runs in its own container")

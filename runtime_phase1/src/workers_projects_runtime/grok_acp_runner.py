@@ -33,6 +33,7 @@ except ImportError:  # Private, materialized standalone runtime copy.
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True)
+    parser.add_argument('--native-warm-lease')
     parser.add_argument('--model', required=True)
     parser.add_argument('--session-id')
     parser.add_argument('--effort')
@@ -47,6 +48,7 @@ def main(argv=None):
     parser.add_argument('--output-schema-file')
     parser.add_argument('--output-schema-minimal-wire', action='store_true')
     parser.add_argument('--allow-mcp-tool', action='append', default=[])
+    parser.add_argument('--allow-mcp-server', action='append', default=[])
     parser.add_argument('--control-dir')
     parser.add_argument('--run-id', default='')
     parser.add_argument('--attempt-id', default='')
@@ -152,16 +154,57 @@ def run(args):
           'enabled': reviewed_interject, 'reason': interject_reason})
     emit({'type':'grok.runtime.phase','phase':'runner_started'})
     try:
-        process = subprocess.Popen([args.binary, 'agent', '--no-leader', '--model', args.model, 'stdio'],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
-                                   **({'cwd': child_cwd} if restricted else {}))
-        emit({'type':'grok.runtime.phase','phase':'process_started'})
-    except OSError:
+        warm_path = getattr(args, 'native_warm_lease', None)
+        timing = lambda value: emit({'type': 'grok.acp.rpc', **value})
+        client = None
+        if warm_path:
+            try:
+                try:
+                    from .native_warm_pool import read_native_warm_lease, read_native_warm_record, native_environment_digest, listener_owned_by, process_start_identity
+                    from .grok_websocket import WebSocketAcpClient
+                except ImportError:
+                    from native_warm_pool import read_native_warm_lease, read_native_warm_record, native_environment_digest, listener_owned_by, process_start_identity
+                    from grok_websocket import WebSocketAcpClient
+                from urllib.parse import urlsplit
+                lease = read_native_warm_lease(Path(warm_path), worker_id=os.environ.get('GLASSHIVE_WORKER_ID', ''),
+                    run_id=args.run_id, attempt_id=args.attempt_id, model=args.model)
+                scope = lease['scope']
+                record = read_native_warm_record(Path(lease.get('state_record') or ''))
+                identity = lease['server']
+                port = urlsplit(lease.get('url') or '').port
+                if (lease.get('stop_confirmed') or record.get('phase') != 'leased'
+                        or record.get('lease_id') != lease['lease_id'] or record.get('scope') != scope
+                        or record.get('run_id') != args.run_id or record.get('attempt_id') != args.attempt_id
+                        or record.get('attempt_descriptor') != str(warm_path) or record.get('child') != identity
+                        or scope.get('environment_digest') != native_environment_digest(dict(os.environ), lane=scope.get('lane'))):
+                    raise AcpError('Native warm process does not match the admitted attempt')
+                def verified_listener():
+                    began = time.monotonic()
+                    verified = (process_start_identity(identity['pid']) == identity['process_start_identity']
+                                and listener_owned_by(identity['pid'], port))
+                    emit({'type': 'grok.runtime.phase', 'phase': 'warm_listener_verified',
+                          'duration_ms': round((time.monotonic() - began) * 1000, 3), 'verified': verified})
+                    return verified
+                client = WebSocketAcpClient(lease['url'], lease['secret'],
+                    verify_listener=verified_listener, request_timing=timing)
+                emit({'type':'grok.runtime.phase','phase':'warm_process_attached'})
+            except (OSError, ValueError, KeyError, TypeError, ImportError, AcpError):
+                # No session, prompt or tool has been admitted on this transport.
+                # The exact lease remains owned by the parent Stop/finalizer.
+                emit({'type': 'grok.runtime.phase', 'phase': 'warm_attach_unavailable',
+                      'fallback': 'same_model_stdio'})
+        if client is None:
+            process = subprocess.Popen([args.binary, 'agent', '--no-leader', '--model', args.model, 'stdio'],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
+                                       **({'cwd': child_cwd} if restricted else {}))
+            emit({'type':'grok.runtime.phase','phase':'process_started'})
+            client = AcpClient(process, request_timing=timing)
+    except (OSError, ValueError, AcpError):
         emit({'type':'grok.error','failure_class':'runtime_dependency_missing',
-              'message':'The configured Grok Build executable could not start'})
-        print('The configured Grok Build executable could not start', file=sys.stderr)
+              'message':'The configured Grok native transport could not start'})
+        print('The configured Grok native transport could not start', file=sys.stderr)
         return 2
-    with AcpClient(process, request_timing=lambda timing: emit({'type': 'grok.acp.rpc', **timing})) as client:
+    with client as client:
         session = GrokSession(client, event=emit, reviewed_interject=reviewed_interject)
         mailbox = None
         old_handlers = {}
@@ -182,9 +225,12 @@ def run(args):
                          auth_method='xai.api_key' if os.environ.get('XAI_API_KEY') else None,
                          native_tools_disabled=restricted)
             if args.control_dir:
+                allowed_tools = set(args.allow_mcp_tool) if not restricted else set()
+                for server in args.allow_mcp_server if not restricted else []:
+                    allowed_tools.update(session.native_mcp_tool_names(server))
                 mailbox = ControlMailbox(args.control_dir, run_id=args.run_id, attempt_id=args.attempt_id,
                                          session=session, event=emit, managed_acl=args.managed_home,
-                                         auto_allow_tools=frozenset() if restricted else frozenset(args.allow_mcp_tool),
+                                         auto_allow_tools=frozenset(allowed_tools),
                                          permission_deadline_at=getattr(args, 'permission_deadline_at', None))
                 if not restricted:
                     client.permission = mailbox.permission

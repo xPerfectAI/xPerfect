@@ -121,13 +121,13 @@ def test_write_speech_uses_only_typed_safe_basename(path):
     request['request']['toolCall'] = {'title': 'Write full operation detail', 'kind': 'edit', 'rawInput': {'variant': 'write', 'file_path': path},
         '_meta': {'x.ai/tool': {'version': 1, 'name': 'write', 'kind': 'write', 'read_only': False, 'input': {'path': path}}}}
     projected = project(request)
-    assert projected['prompt'] == 'Write ' + path.rsplit('/', 1)[-1] + '\nYes, proceed; No, stop.'
+    assert projected['prompt'] == 'Write ' + path.rsplit('/', 1)[-1] + '\nMay I proceed?'
     assert 'private-parent' not in projected['prompt']
-    assert projected['operationTitle'] == 'Write full operation detail'
+    assert projected['operationTitle'] == 'Write ' + path.rsplit('/', 1)[-1]
     assert request['request']['toolCall']['rawInput']['file_path'] == path
 
 
-@pytest.mark.parametrize('mutation', ['missing', 'wrong-kind', 'wrong-name', 'wrong-acp-kind', 'read-only', 'mismatch', 'raw-path-mismatch', 'missing-raw-path', 'uri', 'control', 'slash', 'dot', 'long', 'version'])
+@pytest.mark.parametrize('mutation', ['missing', 'wrong-kind', 'wrong-name', 'wrong-acp-kind', 'read-only', 'mismatch', 'raw-path-mismatch', 'missing-raw-path', 'uri', 'control', 'slash', 'dot', 'long', 'version', 'invalid-label'])
 def test_unsupported_write_metadata_retains_original_operation_detail(mutation):
     path = '/workspace/private-parent/shape.svg'
     request = permission_wire()
@@ -143,12 +143,13 @@ def test_unsupported_write_metadata_retains_original_operation_detail(mutation):
     elif mutation == 'raw-path-mismatch': call['rawInput']['path'] = '/workspace/different.svg'
     elif mutation == 'missing-raw-path': call['rawInput'].pop('file_path')
     elif mutation == 'version': native['version'] = 2
+    elif mutation == 'invalid-label': native['label'] = {'unexpected': 'value'}
     else:
         native['input']['path'] = {'uri': 'https://synthetic.invalid/file.svg', 'control': '/workspace/bad\n.svg',
             'slash': '/workspace/folder/', 'dot': '/workspace/..', 'long': '/workspace/' + 'x' * 161}[mutation]
         call['rawInput']['file_path'] = native['input']['path']
     request['request']['toolCall'] = call
-    assert project(request)['prompt'] == 'Original operation\nYes, proceed; No, stop.'
+    assert project(request)['prompt'] == 'Original operation\nMay I proceed?'
 
 
 @pytest.mark.parametrize('mode', ['unsigned', 'signed', 'tampered'])
@@ -175,3 +176,41 @@ def test_human_attestation_reaches_native_only_through_whole_signed_body(account
         assert calls[0]['native_human_input'] == body['nativeHumanInput']
         repeated = account_client.post('/v1/work/' + accepted['workRef'] + '/actions', headers=_signed_headers(body)[1], content=raw)
         assert repeated.json()['idempotentReplay'] is True and len(calls) == 1
+
+
+@pytest.mark.parametrize('name,label', [('search_replace', 'Edit'), ('new_native_editor', 'Update')])
+def test_typed_native_edit_retains_safe_filename_for_the_exact_current_request(name, label):
+    import copy
+    import hashlib
+    path = '/workspace/private-parent/work-log.md'
+    request = permission_wire()
+    request['request']['toolCall'] = {'title': f'{label} `{path}`', 'kind': 'edit',
+        'rawInput': {'file_path': path, 'old_string': 'private original', 'new_string': 'private change'},
+        '_meta': {'x.ai/tool': {'version': 1, 'name': name, 'label': label, 'kind': 'edit',
+            'read_only': False, 'input': {'path': path}}}}
+    before = copy.deepcopy(request)
+    result = project(request)
+    assert result['prompt'] == label + ' work-log.md\nMay I proceed?'
+    assert result['operationTitle'] == label + ' work-log.md'
+    assert 'private-parent' not in str(result) and 'private change' not in str(result)
+    assert result['requestFingerprint'] == hashlib.sha256(json.dumps(request, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    assert request == before
+
+
+@pytest.mark.parametrize('change', ['path-mismatch', 'read-only', 'missing-label', 'nonfile-kind', 'label-control'])
+def test_unproved_native_edit_keeps_redacted_original_operation(change):
+    path = '/home/synthetic/private-parent/work-log.md'
+    request = permission_wire()
+    call = {'title': f'Edit `{path}`', 'kind': 'edit', 'rawInput': {'file_path': path},
+        '_meta': {'x.ai/tool': {'version': 1, 'name': 'search_replace', 'label': 'Edit',
+            'kind': 'edit', 'read_only': False, 'input': {'path': path}}}}
+    native = call['_meta']['x.ai/tool']
+    if change == 'path-mismatch': call['rawInput']['file_path'] = '/workspace/other.md'
+    elif change == 'read-only': native['read_only'] = True
+    elif change == 'missing-label': native.pop('label')
+    elif change == 'nonfile-kind': native['kind'] = 'execute'
+    else: native['label'] = 'Edit\nInjected'
+    request['request']['toolCall'] = call
+    result = project(request)
+    assert result['operationTitle'] == 'Edit `[REDACTED_LOCAL_PATH]`'
+    assert result['prompt'] == 'Edit `[REDACTED_LOCAL_PATH]`\nMay I proceed?'

@@ -64,14 +64,19 @@ def project_permission_request(item, *, run_id, attempt_id, session_id=None):
     native_input = native.get('input') if isinstance(native, dict) else None
     description = native_input.get('description') if isinstance(native_input, dict) else None
     purpose = prompt
+    file_purpose = False
     if (isinstance(native, dict) and type(native.get('version')) is int and native['version'] == 1
             and native.get('name') == 'run_terminal_command'
             and native.get('kind') == call.get('kind') == 'execute'
             and isinstance(description, str) and 0 < len(description.strip()) <= 8000):
         purpose = _redact_text(description.strip())
     elif (isinstance(native, dict) and type(native.get('version')) is int and native['version'] == 1
-            and native.get('name') == 'write' and native.get('kind') == 'write'
-            and call.get('kind') == 'edit' and native.get('read_only') is False
+            and native.get('kind') in {'write', 'edit'} and call.get('kind') == 'edit'
+            and native.get('read_only') is False
+            and ((native.get('name') == 'write' and native.get('kind') == 'write'
+                  and native.get('label') is None)
+                 or (isinstance(native.get('label'), str) and 0 < len(native['label'].strip()) <= 160
+                     and native['label'].isprintable()))
             and isinstance(native_input, dict) and isinstance(native_input.get('path'), str)):
         path = native_input['path']
         raw = call.get('rawInput')
@@ -81,11 +86,14 @@ def project_permission_request(item, *, run_id, attempt_id, session_id=None):
                 and all(ord(char) >= 32 for char in path)
                 and isinstance(raw, dict) and raw.get('file_path') == path
                 and ('path' not in raw or raw['path'] == path)):
-            purpose = 'Write ' + _redact_text(filename)
-    offered = _redact_text(purpose + '\n' + '; '.join(choice['label'] for choice in choices) + '.')
-    operation_title = prompt
-    # Preserve accepted long forms. Their complete choices remain in the form;
-    # never truncate a label, change a response value, or reject the old prompt.
+            label = native.get('label') or 'Write'
+            purpose = _redact_text(label.strip()) + ' ' + _redact_text(filename)
+            file_purpose = True
+    operation_title = purpose if file_purpose else prompt
+    # Foreground speech also uses this presentation without a Queen rewrite.
+    # Keep a decision cue, with all exact choices in the native form. A full
+    # bounded operation description must not be truncated to make room for it.
+    offered = _redact_text(purpose + '\nMay I proceed?')
     if len(offered) <= 8000:
         prompt = offered
     fingerprint = hashlib.sha256(json.dumps(item, sort_keys=True, separators=(',', ':')).encode()).hexdigest()

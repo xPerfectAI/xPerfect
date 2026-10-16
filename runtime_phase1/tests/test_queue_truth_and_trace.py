@@ -16,6 +16,7 @@ import workers_projects_runtime.service as service_module
 import workers_projects_runtime.bootstrap as bootstrap_module
 import workers_projects_runtime.mcp_server as mcp_server_module
 import workers_projects_runtime.grok_runtime as grok_runtime_module
+import workers_projects_runtime.direct_runtime as direct_runtime_module
 import workers_projects_runtime.store as store_module
 from workers_projects_runtime.openclaw_runtime import HostCapacityError, StubRuntime
 from workers_projects_runtime.native_team import NativeTeamProjection
@@ -1168,6 +1169,7 @@ def test_prompt_layer_inventory_is_derived_from_actual_registered_producers():
         "workers_projects_runtime.bootstrap.merge_glasshive_worker_instructions",
         "workers_projects_runtime.bootstrap.native_profile_tool_access_instructions",
         "workers_projects_runtime.coordinator.prompt_manifest",
+        "workers_projects_runtime.direct_runtime.direct_authority_instructions",
         "workers_projects_runtime.grok_runtime.grok_native_authority_instructions",
         "workers_projects_runtime.mcp_server.create_mcp_server",
         "workers_projects_runtime.mcp_server.glasshive_workers_server_instructions",
@@ -1196,6 +1198,7 @@ def test_prompt_layer_inventory_is_derived_from_actual_registered_producers():
 @pytest.mark.parametrize("producer", [
     bootstrap_module.native_profile_tool_access_instructions,
     grok_runtime_module.grok_native_authority_instructions,
+    direct_runtime_module.direct_authority_instructions,
 ])
 def test_registered_native_profile_prompt_is_in_live_orchestration_capability(
     tmp_path, monkeypatch, producer

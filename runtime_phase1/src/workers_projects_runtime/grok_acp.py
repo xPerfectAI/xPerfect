@@ -311,6 +311,7 @@ class GrokSession:
         self._native_tools_manifest = Event()
         self._native_mcp_observation = Event()
         self._native_mcp_initialized = False
+        self._native_mcp_tool_names = {}
         self._preopen_mcp_initialized = set()
         self._native_tools_lock = Lock()
         self._preopen_tools_manifests = {}
@@ -425,6 +426,7 @@ class GrokSession:
         servers = result.get('servers')
         if not isinstance(servers, list):
             return False
+        inventory = {}
         for name in self._required_mcp_servers:
             matching = [server for server in servers if isinstance(server, dict) and server.get('name') == name]
             if len(matching) != 1:
@@ -440,10 +442,24 @@ class GrokSession:
                         or not tool['name'].strip() or type(tool.get('enabled')) is not bool for tool in tools)
                     or not any(tool['enabled'] for tool in tools)):
                 return False
+            inventory[name] = frozenset(name + '__' + tool['name'] for tool in tools if tool['enabled'])
+        self._native_mcp_tool_names = inventory
         if self.event:
             self.event({'type': 'grok.mcp.registry_ready', 'session_id': self.session_id,
                         'required_server_count': len(self._required_mcp_servers)})
         return True
+
+    def native_mcp_tool_names(self, server):
+        # Use the exact enabled native registry, never an MCP namespace wildcard.
+        if self._native_tools_disabled or server not in self._required_mcp_servers:
+            return frozenset()
+        if server not in self._native_mcp_tool_names:
+            try:
+                self._native_registry_has_required_tools(self.client.request(
+                    '_x.ai/mcp/list', {'sessionId': self.session_id, 'cache': True}, timeout=5))
+            except AcpError:
+                return frozenset()
+        return self._native_mcp_tool_names.get(server, frozenset())
 
     def _update(self, method, params):
         if not isinstance(params, dict):
@@ -531,6 +547,7 @@ class GrokSession:
             raise AcpError('Grok native tool restriction must be a boolean')
         self._native_tools_disabled = native_tools_disabled
         self._required_mcp_servers = ()
+        self._native_mcp_tool_names = {}
         if required_mcp_servers:
             names = [server.get('name') for server in mcp_servers or [] if isinstance(server, dict)]
             if (native_tools_disabled or not isinstance(required_mcp_servers, list)

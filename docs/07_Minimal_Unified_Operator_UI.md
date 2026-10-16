@@ -17,10 +17,6 @@ Calm dark glass over a bright signal core, like a modern appliance or Tesla cont
 
 ## Interaction Thesis
 
-- packaged onboarding presents one xPerfect start command, then the app and account
-  connection; internal service and worker images are installation details, not
-  separate products, required choices, or setup lessons
-
 - the centered project composer should feel like the only thing the user needs to understand
 - after submit, the interface should hand off immediately into live watch mode
 - advanced controls stay tucked away until the user explicitly asks for them
@@ -415,6 +411,16 @@ probe remains unavailable rather than assumed capacity. Docker Desktop's disk-bu
 reads the current settings store before the legacy settings file. Both `DiskSizeMiB` and
 `diskSizeMiB`, including wrapped positive integer values, are supported. Invalid or conflicting
 values fail closed, and an existing current store cannot be replaced by stale legacy settings.
+On POSIX hosts, each bounded Docker CLI command owns its own process session. On timeout, the runtime reaps that
+command and its CLI-plugin children, with bounded pipe cleanup, while preserving the existing
+timeout and unavailable result. It does not signal the stack, engine, containers or unrelated
+processes. Repeated readiness checks must not accumulate orphaned plugin discovery processes.
+Timeout cleanup requires the runtime to remain alive until that deadline. Viventium receipt-authorized
+stack Stop also captures and rechecks its exact Docker command descendants before stopping the runtime.
+Private candidates without kernel-image proof remain untouched; original authorized stack seeds
+retain their existing UID/group/start authority. Child creation after the Stop snapshot or abrupt
+parent death before cleanup can still leave a separate CLI session. There is no parent-death
+supervisor or broad process cleanup authority.
 If a native request expires, the saved conversation says so and offers Send again.
 For a failed helper whose native response request expired, was declined, or was cancelled,
 the owner may explicitly Retry that exact child. Its replacement stays bound to the same goal;
@@ -486,3 +492,15 @@ The main composer does not depend on backdrop blur for first paint. Floating Fil
 context-menu surfaces use an opaque background so underlying text cannot bleed through. Browser
 acceptance includes first paint, narrow-screen legibility, account changes, failure/recovery,
 result/detail disclosure and reload; source tests do not substitute for those checks.
+
+An interrupted work-control HTTP request can be checked through the existing read-only
+`/v1/work/{work_ref}/actions/receipt` route with its unchanged exact request body and idempotency key.
+The owner/work/action/body digest must match. A completed or failed response is replayed unchanged.
+A pending response requires the exact current executor's bound lifecycle claim; a reservation alone
+is insufficient. `confirmationPending: true` means the native control is in progress, not applied.
+The lookup cannot reserve, take over, execute or retry an effect.
+
+Immutable failed receipt replay adds the trusted `X-xPerfect-Action-Receipt: failed-v1` response
+marker after exact owner/body/key lookup, while preserving its original status, JSON and headers.
+Ordinary authentication, rate, server and receipt-read errors do not carry this marker and cannot
+be treated as proof that the original control failed. A client deadline never authorizes a repeat.

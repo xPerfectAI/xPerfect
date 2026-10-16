@@ -3665,9 +3665,17 @@ def test_candidate_artifacts_preserve_nested_files_and_do_not_follow_directory_s
     assert candidate_artifact_paths({"workspace_dir": str(tmp_path)}) == [allowed]
 
 
-def test_concurrent_members_keep_exact_constraint_receipts(tmp_path):
+@pytest.mark.parametrize("with_stale_latest", [False, True])
+def test_concurrent_members_keep_exact_constraint_receipts(tmp_path, with_stale_latest):
+    from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase
     from workers_projects_runtime.profile_runtime import _write_constraint_ledger_for_run, _read_valid_constraint_ledger
     from concurrent.futures import ThreadPoolExecutor
+    latest = tmp_path / "glasshive-run/constraint-ledger.json"
+    if with_stale_latest:
+        stale = build_constraint_ledger(
+            instruction="Different retained task", worker={"worker_id": "old_member"}, run_id="run_old")
+        write_constraint_ledger(tmp_path, stale, "run_old")
+    stale_bytes = latest.read_bytes() if with_stale_latest else None
     def write(index):
         run_id = f"run_{index}"
         _, path = _write_constraint_ledger_for_run(
@@ -3677,5 +3685,10 @@ def test_concurrent_members_keep_exact_constraint_receipts(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         receipts = list(pool.map(write, range(2)))
     for run_id, path in receipts:
-        assert _read_valid_constraint_ledger(tmp_path, path, run_id=run_id)["run_id"] == run_id
-    assert not (tmp_path / "glasshive-run/constraint-ledger.json").exists()
+        receipt = _read_valid_constraint_ledger(tmp_path, path, run_id=run_id)
+        assert receipt["run_id"] == run_id
+        assert receipt["original_request"] == f"Exact request {run_id.removeprefix('run_')}"
+        if with_stale_latest:
+            with pytest.raises(RuntimeErrorBase, match="different run"):
+                _read_valid_constraint_ledger(tmp_path, "glasshive-run/constraint-ledger.json", run_id=run_id)
+    assert (latest.read_bytes() if latest.exists() else None) == stale_bytes

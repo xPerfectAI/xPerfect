@@ -71,7 +71,7 @@ from workers_projects_runtime.openclaw_runtime import HostCapacityError
 
 
 def test_worker_codex_uses_the_current_reviewed_release():
-    assert AI_WORKER_CODEX_NPM_SPEC == "@openai/codex@0.159.0"
+    assert AI_WORKER_CODEX_NPM_SPEC == "@openai/codex@0.155.0-alpha.9.2"
 
 
 def test_worker_claude_uses_the_current_reviewed_release():
@@ -4652,18 +4652,13 @@ def test_parallel_clean_room_run_grant_partial_projection_cleanup_is_generation_
 
 def test_docker_exec_timeout_returns_failed_result(tmp_path, monkeypatch):
     manager = DockerSandboxManager(base_dir=str(tmp_path))
+    _write_synthetic_docker(tmp_path, monkeypatch, "import time\ntime.sleep(30)\n")
+    monkeypatch.setenv("WPR_DOCKER_EXEC_TIMEOUT_SEC", "0.2")
 
-    def fake_run(*args, **kwargs):
-        _ = args, kwargs
-        raise subprocess.TimeoutExpired(["docker", "exec"], timeout=2, output="", stderr="")
-
-    monkeypatch.setenv("WPR_DOCKER_EXEC_TIMEOUT_SEC", "2")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = manager._docker_exec("wpr-test", ["bash", "-c", "sleep 99"])
+    result = manager._docker_exec("wpr-test", ["bash", "-c", "unused synthetic input"])
 
     assert result.returncode == 124
-    assert "timed out after 2s" in result.stderr
+    assert "timed out after 0.2s" in result.stderr
 
 
 def test_docker_exec_keeps_secret_environment_values_out_of_argv(tmp_path):
@@ -5518,7 +5513,7 @@ def test_ensure_image_defaults_to_no_forced_ai_worker_browser_extensions(tmp_pat
     assert f"snapshot.ubuntu.com/ubuntu/{AI_WORKER_APT_SNAPSHOT}" in dockerfile
     assert "nodejs_22.23.2-1nodesource1_${arch}.deb" in dockerfile
     assert "sha256sum -c -" in dockerfile
-    assert "@openai/codex@0.159.0" in dockerfile
+    assert "@openai/codex@0.155.0-alpha.9.2" in dockerfile
     assert "@anthropic-ai/claude-code@2.1.280" in dockerfile
     assert "--cache /tmp/glasshive-npm-cache" in dockerfile
     assert "rm -rf /tmp/glasshive-npm-cache /root/.npm /home/seluser/.npm" in dockerfile
@@ -6683,3 +6678,159 @@ def test_legacy_disk_file_only_when_current_absent(tmp_path,monkeypatch):
     assert manager._docker_disk_budget_bytes({'DockerRootDir':'/nonexistent/docker-root'})==1024**3
     (path.parent/'settings-store.json').write_text('{bad-json')
     assert manager._docker_disk_budget_bytes({'DockerRootDir':'/nonexistent/docker-root'}) is None
+
+
+def _write_synthetic_docker(tmp_path, monkeypatch, body):
+    """Run only a disposable local executable, never the installed Docker CLI."""
+    bindir = tmp_path / "synthetic-bin"
+    bindir.mkdir(exist_ok=True)
+    docker = bindir / "docker"
+    docker.write_text(f"#!{sys.executable}\n" + body)
+    docker.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    return docker
+
+
+def _synthetic_process_alive(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                            capture_output=True, text=True, timeout=2)
+    state = result.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX owned process sessions")
+@pytest.mark.parametrize("check", [False, True])
+def test_docker_command_timeout_reaps_only_its_owned_descendants(tmp_path, monkeypatch, check):
+    marker = tmp_path / "owned-child.json"
+    _write_synthetic_docker(tmp_path, monkeypatch, "\n".join([
+        "import json, os, pathlib, subprocess, sys, time",
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)', "
+        "os.environ['SYNTHETIC_DOCKER_MARKER']], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+        "pathlib.Path(os.environ['SYNTHETIC_DOCKER_MARKER']).write_text(json.dumps({'pid': child.pid, 'pgid': os.getpgid(child.pid)}))",
+        "print('partial output', flush=True)",
+        "print('probe diagnostic', file=sys.stderr, flush=True)",
+        "time.sleep(30)",
+    ]))
+    monkeypatch.setenv("SYNTHETIC_DOCKER_MARKER", str(marker))
+    manager = DockerSandboxManager(base_dir=str(tmp_path / "workers"))
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    child_pid = None
+    try:
+        started = time.monotonic()
+        if check:
+            with pytest.raises(RuntimeError, match="Docker command timed out after 0.5s"):
+                manager._docker(["info"], capture_output=True, timeout_sec=0.5)
+        else:
+            result = manager._docker(["info"], check=False, capture_output=True, timeout_sec=0.5)
+            assert result.returncode == 124
+            assert "Docker command timed out after 0.5s" in result.stderr
+        assert time.monotonic() - started < 3
+        child_pid = json.loads(marker.read_text())["pid"]
+        assert other.poll() is None
+        deadline = time.monotonic() + 1
+        while _synthetic_process_alive(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _synthetic_process_alive(child_pid), "Timed-out command left its synthetic child alive"
+    finally:
+        if marker.exists():
+            child_pid = json.loads(marker.read_text())["pid"]
+        if child_pid is not None and _synthetic_process_alive(child_pid):
+            # Old-code RED cleanup is restricted to this fixture's exact marked child.
+            command = subprocess.run(["ps", "-p", str(child_pid), "-o", "command="],
+                                     capture_output=True, text=True, timeout=2).stdout
+            if str(marker) in command:
+                os.kill(child_pid, signal.SIGKILL)
+        other.terminate()
+        other.wait(timeout=2)
+
+
+@pytest.mark.parametrize("check,exit_code", [(False, 0), (True, 0), (False, 7), (True, 7)])
+def test_docker_command_preserves_input_capture_and_exit_status(tmp_path, monkeypatch, check, exit_code):
+    _write_synthetic_docker(tmp_path, monkeypatch,
+        "import sys\nprint(sys.stdin.read().upper())\nprint('diagnostic', file=sys.stderr)\n"
+        f"sys.exit({exit_code})\n")
+    manager = DockerSandboxManager(base_dir=str(tmp_path / "workers"))
+    if check and exit_code:
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            manager._docker(["synthetic"], input_text="sample", capture_output=True, check=check)
+        result = error.value
+    else:
+        result = manager._docker(["synthetic"], input_text="sample", capture_output=True, check=check)
+    assert result.returncode == exit_code
+    assert result.stdout == "SAMPLE\n"
+    assert result.stderr == "diagnostic\n"
+
+
+def test_docker_probe_callers_keep_command_failure_unavailable(tmp_path, monkeypatch):
+    from threading import Lock
+    from types import SimpleNamespace
+    from workers_projects_runtime.profile_runtime import ProfiledWorkerRuntime
+
+    _write_synthetic_docker(tmp_path, monkeypatch, "import sys\nsys.exit(124)\n")
+    manager = DockerSandboxManager(base_dir=str(tmp_path / "workers"))
+    runtime = object.__new__(ProfiledWorkerRuntime)
+    runtime.codex = SimpleNamespace(sandbox=manager)
+    runtime._isolated_readiness_lock = Lock()
+    runtime._isolated_readiness_cache = None
+    assert runtime.refresh_isolated_parallel_readiness() == {
+        "ready": False, "reason": "docker_unavailable",
+    }
+    assert runtime.isolated_parallel_readiness(cached_only=True)["ready"] is False
+    usage = manager.resource_usage()
+    assert usage.process_probe_ok is False
+    assert usage.memory_probe_ok is False
+    assert usage.disk_probe_ok is False
+
+
+def test_docker_command_uncaptured_output_stays_uncaptured(tmp_path, monkeypatch):
+    _write_synthetic_docker(tmp_path, monkeypatch,
+        "import sys\nprint('not captured')\nprint('not captured',file=sys.stderr)\n")
+    result = DockerSandboxManager(base_dir=str(tmp_path / "workers"))._docker(["synthetic"])
+    assert result.returncode == 0
+    assert result.stdout is None
+    assert result.stderr is None
+
+
+@pytest.mark.parametrize("check", [False, True])
+@pytest.mark.parametrize("partial", [b"\xff", b"\xe2\x82"])
+def test_docker_command_timeout_keeps_invalid_partial_bytes_a_timeout(tmp_path, monkeypatch, check, partial):
+    marker = tmp_path / "producer-started"
+    _write_synthetic_docker(tmp_path, monkeypatch,
+        "import os,pathlib,time\n"
+        f"os.write(1, {partial!r})\n"
+        f"pathlib.Path({str(marker)!r}).write_text('started')\n"
+        "time.sleep(30)\n")
+    manager = DockerSandboxManager(base_dir=str(tmp_path / "workers"))
+    if check:
+        with pytest.raises(RuntimeError, match="Docker command timed out after 1s"):
+            manager._docker(["info"], capture_output=True, timeout_sec=1)
+    else:
+        result = manager._docker(["info"], capture_output=True, check=False, timeout_sec=1)
+        assert result.returncode == 124
+        assert result.stdout == partial.decode(errors="replace")
+        assert "Docker command timed out after 1s" in result.stderr
+    assert marker.read_text() == "started"
+
+
+def test_docker_command_timeout_handles_closed_stdout_and_invalid_stderr(tmp_path, monkeypatch):
+    _write_synthetic_docker(tmp_path, monkeypatch,
+        "import os,time\nos.close(1)\nos.write(2,b'\\xff')\ntime.sleep(30)\n")
+    result = DockerSandboxManager(base_dir=str(tmp_path / "workers"))._docker(
+        ["info"], capture_output=True, check=False, timeout_sec=1)
+    assert result.returncode == 124
+    assert result.stdout == ""
+    assert "\ufffd" in result.stderr
+    assert "Docker command timed out after 1s" in result.stderr
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_docker_command_normal_decode_failure_never_signals_a_reaped_leader(tmp_path, monkeypatch, check):
+    _write_synthetic_docker(tmp_path, monkeypatch, "import os\nos.write(1,b'\\xff')\n")
+    signals = []
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    with pytest.raises(UnicodeDecodeError):
+        DockerSandboxManager(base_dir=str(tmp_path / "workers"))._docker(
+            ["synthetic"], capture_output=True, check=check, timeout_sec=2)
+    assert signals == []

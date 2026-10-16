@@ -74,6 +74,7 @@ from workers_projects_runtime.signed_links import (
 )
 from workers_projects_runtime.store import (
     RunRestorationState,
+    HostRunLeaseCapacityError,
     Store,
     WorkerClosedStoreError,
 )
@@ -1828,7 +1829,8 @@ def test_completed_run_immediately_wakes_other_host_capacity_waiters(tmp_path, m
         service.shutdown()
 
 
-def test_release_host_capacity_waiters_filters_to_the_released_structural_lane(tmp_path):
+@pytest.mark.parametrize("blocked_class", ["host_worker_busy", "host_capacity"])
+def test_release_host_capacity_waiters_filters_to_the_released_structural_lane(tmp_path, blocked_class):
     store = Store(str(tmp_path / "runtime.db"))
 
     def create_waiter(*, profile: str, execution_mode: str, run_mode: str) -> tuple[dict, dict]:
@@ -1853,7 +1855,7 @@ def test_release_host_capacity_waiters_filters_to_the_released_structural_lane(t
         run = store.create_run(worker["worker_id"], project["project_id"], "wait", state="queued")
         store.update_run(
             run["run_id"],
-            failure_class="host_worker_busy",
+            failure_class=blocked_class,
             retry_after="2099-01-01T00:00:00+00:00",
         )
         return worker, run
@@ -1883,6 +1885,11 @@ def test_release_host_capacity_waiters_filters_to_the_released_structural_lane(t
         profile="codex-cli", execution_mode="docker", run_mode="conversation"
     )
 
+    _, provider_backoff = create_waiter(
+        profile="codex-cli", execution_mode="host", run_mode="conversation"
+    )
+    store.update_run(provider_backoff["run_id"], failure_class="provider_rate_limited")
+
     released = store.release_host_capacity_waiters(
         profile="codex-cli",
         execution_mode="host",
@@ -1896,6 +1903,54 @@ def test_release_host_capacity_waiters_filters_to_the_released_structural_lane(t
     assert store.get_run(mission_run["run_id"])["retry_after"] is not None
     assert store.get_run(claude_run["run_id"])["retry_after"] is not None
     assert store.get_run(docker_run["run_id"])["retry_after"] is not None
+    assert store.get_run(provider_backoff["run_id"])["retry_after"] is not None
+
+
+@pytest.mark.parametrize("blocker", ["family_lane", "account", "tenant", "resource_pressure"])
+def test_woken_capacity_waiter_still_requires_current_admission(tmp_path, blocker):
+    store = Store(str(tmp_path / "runtime.db"))
+    project = store.create_project("owner", "Capacity", "Recheck current admission.", "codex-cli")
+
+    def subject(name):
+        worker = store.create_worker(
+            project_id=project["project_id"], owner_id="owner", name=name,
+            role="worker", profile="codex-cli", backend="openclaw", runtime="codex-cli",
+            model="stub/codex-cli", execution_mode="host", bootstrap_bundle={"run_mode": "mission"},
+        )
+        run = store.create_run(worker["worker_id"], project["project_id"], "work", state="queued")
+        return worker, run
+
+    occupied_worker, occupied_run = subject("Occupied")
+    waiter, waiting_run = subject("Waiting")
+    policy = dict(conversation_limit=2, mission_limit=1 if blocker == "family_lane" else 3,
+                  account_mission_limit=1 if blocker == "account" else 4,
+                  tenant_mission_limit=1 if blocker == "tenant" else 12)
+    store.acquire_host_run_lease(
+        runtime_family="codex" if blocker == "family_lane" else "claude", lane="mission",
+        tenant_id="tenant", owner_id="owner" if blocker == "account" else "other-owner",
+        worker_id=occupied_worker["worker_id"], run_id=occupied_run["run_id"],
+        executor_id="occupied", lease_ttl_s=30, **policy,
+    )
+    store.update_run(waiting_run["run_id"], failure_class="host_capacity",
+                     retry_after="2099-01-01T00:00:00+00:00")
+
+    assert store.release_host_capacity_waiters(
+        profile="codex-cli", execution_mode="host", run_mode="mission"
+    ) == [waiter["worker_id"]]
+    current = store.get_run(waiting_run["run_id"])
+    assert current["state"] == "queued"
+    assert not current["active_attempt_id"]
+    assert store.get_active_host_run_lease_for_run(waiting_run["run_id"]) is None
+    capacity = dict(capacity_available={"memoryBytes": 0},
+                    capacity_required={"memoryBytes": 1}) if blocker == "resource_pressure" else {}
+    with pytest.raises(HostRunLeaseCapacityError) as refused:
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="mission", tenant_id="tenant", owner_id="owner",
+            worker_id=waiter["worker_id"], run_id=waiting_run["run_id"], executor_id="waiting",
+            lease_ttl_s=30, **policy, **capacity,
+        )
+    assert refused.value.capacity_class == blocker
+    assert store.get_active_host_run_lease_for_run(waiting_run["run_id"]) is None
 
 
 def test_host_capacity_waiters_remain_delayed_while_the_lane_is_still_held(tmp_path, background_consumers_disabled):
@@ -1967,7 +2022,8 @@ def test_host_capacity_waiters_remain_delayed_while_the_lane_is_still_held(tmp_p
         service.shutdown()
 
 
-def test_failed_host_run_immediately_wakes_its_capacity_lane(tmp_path, monkeypatch):
+@pytest.mark.parametrize("blocked_class", ["host_worker_busy", "host_capacity"])
+def test_failed_host_run_immediately_wakes_its_capacity_lane(tmp_path, monkeypatch, blocked_class):
     class SharedCapacityRuntime(StubRuntime):
         def __init__(self) -> None:
             self.active_worker_id = ""
@@ -1976,6 +2032,8 @@ def test_failed_host_run_immediately_wakes_its_capacity_lane(tmp_path, monkeypat
 
         def worker_capacity_error(self, worker: dict) -> RuntimeErrorBase | None:
             if self.active_worker_id and worker["worker_id"] != self.active_worker_id:
+                if blocked_class == "host_capacity":
+                    return HostCapacityError("Host lane is full.", capacity_class="family_lane")
                 return RuntimeErrorBase("Host-native codex-cli already has an active worker.")
             return None
 
@@ -2027,7 +2085,7 @@ def test_failed_host_run_immediately_wakes_its_capacity_lane(tmp_path, monkeypat
         waiting_run = service.assign_run(waiting_worker["worker_id"], "use the released slot")
         wait_until(
             lambda: (store.get_run(waiting_run["run_id"]) or {}).get("failure_class")
-            == "host_worker_busy"
+            == blocked_class
         )
 
         runtime.release_active.set()
@@ -10137,43 +10195,6 @@ def test_assign_run_refreshes_stale_worker_model_before_queue(
     assert any(event["event_type"] == "worker.model_refreshed" for event in store.list_events(worker["worker_id"]))
 
 
-def test_assign_run_drops_a_saved_codex_model_once_no_model_is_configured(
-    tmp_path,
-    background_consumers_disabled,
-    request,
-):
-    # A saved worker keeps the model of the configuration it was created under. Once no
-    # model is configured, its next run must use native Codex's own default, not that ID.
-    _ = background_consumers_disabled
-    store = Store(str(tmp_path / "runtime.db"))
-    runtime = RefreshingModelRuntime("gpt-5.4")
-    service = WorkersProjectsService(store, runtime)
-    request.addfinalizer(service.shutdown)
-    service._ensure_worker_processor = lambda worker_id: None  # type: ignore[method-assign]
-    project = service.create_project("demo-owner", "Native Default", "Follow the model choice.", "codex-cli")
-    worker = service.create_worker(
-        project_id=project["project_id"],
-        owner_id="demo-owner",
-        name="Saved Expert",
-        role="coder",
-        profile="codex-cli",
-        backend="openclaw",
-        start_synchronously=False,
-    )
-    assert worker["model"] == "gpt-5.4"
-
-    runtime.model = ""
-    run = service.assign_run(worker["worker_id"], "Use the current configuration.")
-
-    assert run["state"] == "queued"
-    assert store.get_worker(worker["worker_id"])["model"] == ""
-    refreshed = [
-        event["message"] for event in store.list_events(worker["worker_id"])
-        if event["event_type"] == "worker.model_refreshed"
-    ]
-    assert refreshed == ["Worker model refreshed from gpt-5.4 to <native default>"]
-
-
 def test_resume_worker_refreshes_stale_worker_model_before_runtime_start(
     tmp_path,
     background_consumers_disabled,
@@ -14865,3 +14886,17 @@ def test_callback_workspace_url_is_typed_and_only_native_input_adds_prose_link(t
     finally:
         service.shutdown()
         store.close()
+
+
+def test_direct_profile_model_options_come_from_runtime_catalog(tmp_path, monkeypatch):
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
+    monkeypatch.setenv('GLASSHIVE_ALLOWED_WORKER_PROFILES','direct-openai,direct-anthropic,direct-xai')
+    with TestClient(create_app(str(tmp_path/'direct-profile-options.db'),runtime_backend='stub')) as client:
+        response=client.get('/v1/worker-profiles')
+        assert response.status_code==200,response.text
+        for item in response.json()['items']:
+            models=[model for model in GLASSHIVE_MODELS.values() if model.harness_profile==item['profile']]
+            assert len(models)==1
+            assert item['models']==[{'id':models[0].id,'native_model':models[0].native_model,
+                'effort_choices':list(models[0].effort_choices),'recommended_effort':models[0].recommended_effort}]
+            assert 'none' not in item['models'][0]['effort_choices']

@@ -67,3 +67,24 @@ def test_run_evidence_reference_keeps_exact_run_after_next_completion(tmp_path):
     assert json.loads(first.read_text())=={'run_id':'run_a','value':'first'}
     assert json.loads(second.read_text())=={'run_id':'run_b','value':'second'}
     assert json.loads((tmp_path/'glasshive-run/evidence.json').read_text())['run_id']=='run_b'
+
+
+@pytest.mark.parametrize('profile', ['codex-cli', 'claude-code', 'grok-build', 'opencode'])
+@pytest.mark.parametrize('transport', [None, 'artifact_sha256'])
+@pytest.mark.parametrize('native_tools', [False, True])
+def test_native_mission_reuses_file_module_only_on_existing_supported_transport(tmp_path, profile, transport, native_tools):
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    from workers_projects_runtime.bootstrap import conversation_file_delivery_instructions
+    runtime = HostCodexCliRuntime(str(tmp_path / 'state'))
+    worker = {'worker_id': 'synthetic-worker', 'profile': profile, 'execution_mode': 'host',
+              'trusted_run_lane': 'mission', 'bootstrap_bundle_json': json.dumps({
+                  'provider_capabilities': {'native_tools': native_tools}})}
+    original = 'Use the supplied result and answer the user.'
+    composed = runtime._host_mission_instruction(worker, original, {'file_output_transport': transport})
+    eligible = profile != 'opencode' and transport == 'artifact_sha256' and native_tools
+    assert (conversation_file_delivery_instructions() in composed) is eligible
+    assert composed.startswith(original)
+    if not eligible: assert composed == original
+    worker['trusted_run_lane'] = 'conversation'
+    worker['bootstrap_bundle_json'] = json.dumps({'run_mode': 'conversation'})
+    assert runtime._host_mission_instruction(worker, original, {'file_output_transport': transport}) == original
