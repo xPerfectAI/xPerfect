@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -256,13 +257,15 @@ for line in sys.stdin:
  if method=='initialized':continue
  if method=='thread/inject_items':
   if os.environ.get('MODE')=='timeout':time.sleep(30)
-  if os.environ.get('MODE')!='no-persist':
+  if 'no-persist' not in os.environ.get('MODE',''):
    with open(os.environ['LEDGER'],'a') as out:
     for item in params['items']:out.write(json.dumps({'type':'response_item','payload':item})+'\\n')
   if os.environ.get('MODE')=='uncertain':sys.exit(1)
  if os.environ.get('MODE')=='reject' and method=='thread/inject_items':response={'error':{'code':-1}}
  else:response={'result':{'thread':{'id':params.get('threadId'),**({'path':os.environ['RESUME_PATH']} if os.environ.get('RESUME_PATH') else {})}} if method=='thread/resume' else {}}
  print(json.dumps({'id':request['id'],**response}),flush=True)
+if os.environ.get('MODE','').startswith('shutdown-hang'):time.sleep(30)
+if os.environ.get('MODE','').startswith('shutdown-error'):sys.exit(1)
 ''')
     script.chmod(0o700)
     return script
@@ -328,6 +331,53 @@ def test_unconfirmed_delivery_never_executes_or_claims_ack(tmp_path, monkeypatch
         assert receipt['injected_units'] == []
         assert len([json.loads(line) for line in (tmp_path / 'rpc.jsonl').read_text().splitlines()
                     if json.loads(line).get('method') == 'thread/inject_items']) == 1
+
+
+@pytest.mark.parametrize('mode', ['shutdown-hang', 'shutdown-error'])
+def test_reaped_control_exit_uses_exact_native_persistence_before_resume(tmp_path, monkeypatch, mode):
+    context, path, manifest = subprocess_context(tmp_path, monkeypatch, mode)
+    context_path = tmp_path / 'context.json'
+    owner.write_json(context_path, context)
+    process = subprocess.Popen([sys.executable, owner.__file__, str(context_path)], stdin=subprocess.PIPE)
+    process.communicate(b'Same admitted goal', timeout=5)
+    assert process.returncode == 0
+    assert owner.read_json(tmp_path / 'exec.json') == {
+        'pid': process.pid, 'argv': ['exec', 'resume', 'session-a', '-'], 'stdin': 'Same admitted goal',
+    }
+    expected = owner.digests(owner.units(context['authority'], context['declared_tail']))
+    assert owner.read_json(manifest)['codex_authority']['delivered'] == expected
+    receipt = owner.read_json(Path(context['receipt_path']))
+    assert receipt['authority_control_exit_code'] != 0
+    assert receipt['injected_units'] == ['stable', 'dynamic']
+
+
+@pytest.mark.parametrize('mode', ['shutdown-hang-no-persist', 'shutdown-error-no-persist'])
+def test_reaped_control_without_native_persistence_never_resumes(tmp_path, monkeypatch, mode):
+    context, path, manifest = subprocess_context(tmp_path, monkeypatch, mode)
+    context_path = tmp_path / 'context.json'
+    owner.write_json(context_path, context)
+    result = subprocess.run([sys.executable, owner.__file__, str(context_path)], capture_output=True, timeout=5)
+    assert result.returncode == 78
+    assert not (tmp_path / 'exec.json').exists()
+    assert 'codex_authority' not in owner.read_json(manifest)
+    assert owner.read_json(Path(context['failure_path']))['code'] == 'authority_update_unconfirmed'
+
+
+def test_unreaped_control_still_fails_closed():
+    calls = []
+
+    def wait(*, timeout):
+        calls.append('wait')
+        raise subprocess.TimeoutExpired('native-control', timeout)
+
+    control = object.__new__(owner.NativeControl)
+    control.deadline = time.monotonic() + 8
+    control.process = SimpleNamespace(stdin=None, wait=wait,
+        terminate=lambda: calls.append('terminate'), kill=lambda: calls.append('kill'))
+    control.reader = SimpleNamespace(join=lambda **kwargs: None)
+    with pytest.raises(owner.AuthorityUnconfirmed, match='native_control_exit_unconfirmed'):
+        control.close()
+    assert calls == ['wait', 'terminate', 'wait', 'kill', 'wait']
 
 
 def test_cancel_supervised_group_kills_preflight_and_never_executes(tmp_path, monkeypatch):

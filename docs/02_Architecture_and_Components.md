@@ -777,6 +777,8 @@ take precedence over the incremental-only guidance.
 Internal setup and tool discovery stay silent unless the user asks about them or a real blocker
 requires their decision; useful task progress and outcomes remain public.
 It may use the existing empty-content/voice-skip envelope when no extra public content is useful;
+that envelope completes the current response without executing a planned native call or
+guaranteeing another response. Native function and MCP calls need no accompanying envelope;
 silence cannot replace an unanswered user request. If a later native response is silent,
 the existing ordered-parts owner retains earlier validated audio-eligible narration and its
 eligibility for final-only channels. Every nonempty validated text-only predecessor also stays in

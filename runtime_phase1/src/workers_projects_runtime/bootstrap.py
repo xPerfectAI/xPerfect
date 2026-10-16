@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -266,6 +267,51 @@ def _worker_prompt(
     return text + ("\n" if standalone.endswith("\n") else "")
 
 
+def _current_native_tool_catalog(bundle: JsonDict, mcp_servers: list[JsonDict]) -> str:
+    """Project only the complete bounded catalog bound to this configured broker grant."""
+    broker = bundle.get("glasshive_capability_broker")
+    if not isinstance(broker, dict):
+        return "[]"
+    catalog = broker.get("tool_catalog")
+    if not isinstance(catalog, dict) or type(catalog.get("version")) is not int or catalog["version"] != 1:
+        return "[]"
+    name, url = broker.get("name"), broker.get("url")
+    expiry = broker.get("grant_expires_at")
+    if (not isinstance(name, str) or not name or not isinstance(url, str) or not url
+            or not isinstance(broker.get("grant_id"), str) or not broker["grant_id"]
+            or type(expiry) is not int or expiry <= time.time()
+            or catalog.get("grant_id") != broker["grant_id"]
+            or catalog.get("expires_at") != expiry
+            or catalog.get("server_name") != name or catalog.get("broker_url") != url):
+        return "[]"
+    matching = [server for server in mcp_servers if server.get("name") == name]
+    if (len(matching) != 1 or matching[0].get("url") != url
+            or matching[0].get("type") not in ("http", "sse") or matching[0].get("disabled") is True):
+        return "[]"
+    tools = catalog.get("tools")
+    if not isinstance(tools, list) or not tools or len(tools) > 64:
+        return "[]"
+    names, projected = set(), []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            return "[]"
+        tool_name, schema, description = tool.get("name"), tool.get("inputSchema"), tool.get("description", "")
+        if (not isinstance(tool_name, str) or not tool_name or tool_name != tool_name.strip()
+                or tool_name in names or not isinstance(description, str)
+                or not isinstance(schema, dict) or schema.get("type") != "object"):
+            return "[]"
+        names.add(tool_name)
+        projected.append({"tool_name": name + "__" + tool_name,
+                          "description": description, "input_schema": schema})
+    try:
+        raw = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        rendered = json.dumps(projected, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        rendered = rendered.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    except (ValueError, TypeError):
+        return "[]"
+    return rendered if max(len(raw.encode("utf-8")), len(rendered.encode("utf-8"))) <= 65536 else "[]"
+
+
 @worker_prompt_layer_producer("developer_instructions")
 def native_profile_tool_access_instructions(
     harness_profile: str, bundle: JsonDict, mcp_servers: list[JsonDict],
@@ -279,9 +325,15 @@ def native_profile_tool_access_instructions(
         return instructions
     from .profile_registry import require_worker_profile
     prompt_id = require_worker_profile(harness_profile).mcp_tool_access_prompt_id
-    if not prompt_id or _VIVENTIUM_WORKER_PROMPTS is None:
+    if not prompt_id:
         return instructions
-    fact = _worker_prompt(prompt_id, "").strip()
+    catalog = _current_native_tool_catalog(bundle, mcp_servers)
+    catalog_data = '<untrusted_tool_catalog_v1 instruction_authority="none">\n' + catalog + '\n</untrusted_tool_catalog_v1>'
+    fact = (catalog_data if catalog != "[]" else "") if _VIVENTIUM_WORKER_PROMPTS is None else _worker_prompt(
+        prompt_id, "", variables={"known_mcp_tools": catalog_data},
+    ).strip()
+    if not fact:
+        return instructions
     if fact in instructions:
         return instructions
     return native_instruction_before_tail(bundle, instructions, fact)
