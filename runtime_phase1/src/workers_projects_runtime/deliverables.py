@@ -324,19 +324,25 @@ def _native_tool_images(stdout: str):
                     yield call_id, tool_name, index, block.get("mimeType"), block.get("data")
 
 
+def _native_image_mime(header: bytes, trailer: bytes) -> str | None:
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"\xff\xd8\xff") and trailer.endswith(b"\xff\xd9"):
+        return "image/jpeg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _native_image_bytes(mime_type: object, encoded: object) -> tuple[bytes, str]:
     if not isinstance(mime_type, str) or mime_type not in NATIVE_IMAGE_SUFFIXES or not isinstance(encoded, str):
         raise ValueError("Unsupported native inline image")
     if len(encoded) > ((NATIVE_MEDIA_MAX_BYTES + 2) // 3) * 4:
         raise ValueError("Native inline image exceeds byte limit")
     data = base64.b64decode(encoded, validate=True)
-    matches = {
-        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg": data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9"),
-        "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
-        "image/webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
-    }
-    if not data or len(data) > NATIVE_MEDIA_MAX_BYTES or not matches[mime_type]:
+    if not data or len(data) > NATIVE_MEDIA_MAX_BYTES or _native_image_mime(data[:12], data[-2:]) != mime_type:
         raise ValueError("Invalid native inline image bytes")
     return data, NATIVE_IMAGE_SUFFIXES[mime_type]
 
@@ -433,6 +439,16 @@ class NativeFileSnapshot:
     relative: Path
     sha256: str
     size_bytes: int
+
+
+def native_file_image_mime(snapshot: NativeFileSnapshot) -> str | None:
+    """Classify captured image bytes without rereading a large file or its source path."""
+    with _native_file_reader(snapshot.root, snapshot.relative) as (handle, metadata):
+        if metadata.st_size != snapshot.size_bytes:
+            raise ValueError("Native output artifact size changed")
+        header = handle.read(12)
+        handle.seek(max(0, metadata.st_size - 2))
+        return _native_image_mime(header, handle.read(2))
 
 
 def native_output_sha256(value: bytes | NativeFileSnapshot) -> str:

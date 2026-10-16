@@ -239,6 +239,11 @@ unselected reads and references do not grant that export. Equal bytes with disti
 remain distinct attachments. Failed imports remain typed unavailable receipts without hiding the
 answer or creating a fake downloadable file.
 
+For recognized PNG, JPEG, GIF and WebP bytes, captured content owns the delivered MIME type and
+filename extension. A conflicting source extension is corrected only on the delivered name;
+source paths and exact bytes stay unchanged. Corrected names are deterministic, preserve distinct
+selections when names collide, and remain bound to the existing immutable output and replay.
+
 Host mission output uses the same immutable selected-file publisher. Codex, Claude and Grok capture
 links in the selected final assistant message before selecting its FINAL REPORT prose. Tool and
 reasoning events, literal paths, quoted text and code do not grant file publication.

@@ -69,7 +69,7 @@ from .docker_sandbox import DockerSandboxManager
 from .deliverables import (
     capture_native_media, _native_media_snapshot, _native_file_reader, NATIVE_IMAGE_SUFFIXES,
     NATIVE_MEDIA_MAX_ITEMS, NATIVE_MEDIA_MAX_BYTES, NATIVE_MEDIA_MAX_TOTAL_BYTES,
-    NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256,
+    NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256, native_file_image_mime,
     is_user_deliverable_relative_path, NATIVE_MARKDOWN_LINK_OR_ESCAPE,
 )
 from .failure_classification import (
@@ -11516,6 +11516,7 @@ raise SystemExit(exit_code)
             try:
                 run_root = self._run_root(str(worker["worker_id"]), run_id)
                 data = copy_native_file(source_root, relative, run_root)
+                image_mime = native_file_image_mime(data)
             except (OSError, ValueError):
                 reject(candidate, "unreadable")
                 continue
@@ -11523,7 +11524,7 @@ raise SystemExit(exit_code)
             if expected_digest is not None and digest != expected_digest:
                 reject(candidate, "unreadable")
                 continue
-            mime_type = mimetypes.guess_type(relative.name)[0] or "application/octet-stream"
+            mime_type = image_mime or mimetypes.guess_type(relative.name)[0] or "application/octet-stream"
             records.append(
                 {
                     "source_root": source_kind,
