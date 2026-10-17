@@ -115,6 +115,15 @@ Branch selection checks retained runs, not worker reactivation eligibility: a su
 does not turn an unchanged released failure into active work. Live, persistent or foreign source
 remains blocking; worker lifecycle and native admission checks are unchanged.
 The old failed requests and needs-input runs remain unchanged.
+An invoked deadline uses the existing exact-run lifecycle claim and native orphan cleanup,
+then proves all recorded supervisor and child generations stopped before publishing compute release.
+An expired cleanup claim or a normal same-session retry repeats that proof; failed history and
+authority are unchanged. Missing identity, a live child, a replacement generation, Pause or Stop
+keeps the fence. Successful cleanup retains the ready worker and the existing persistent native
+session, history and context epoch; it does not force a cold rebind. A failed retry logs only its
+error class and keeps the normal admission conflict. Stop cannot replace a different unresolved
+lifecycle claim; it can complete through the normal control path after exact cleanup settles.
+No provider-wide admission lock is held during native cleanup.
 Startup removes obsolete complete four-field unique indices only after confirming the six-field
 unique constraint. Legacy table rebuilds exclude those indices from replay. The schema transaction
 preserves every session ID, history and dependent request or visible admission, as well as unrelated
@@ -820,7 +829,13 @@ canonical text/history. `grok.result.deliveryDispositionRanges` carries the host
 UTF-16 `start`/`end` plus typed `disposition` shape, derived by the native parts owner from each
 model envelope. This sideband does not add fields to model output schemas. Mixed narration and
 text-only content use a conservative `skip` aggregate flag for legacy consumers; range-aware
-consumers deliver only eligible text spans as audio. The current valid header prefix exposes
+consumers deliver only eligible text spans as audio. Live text, saved final text and the range
+projection use the same decoded public-string sanitation and credential redaction. Preserve
+model-authored whitespace, including separators around empty quiet parts and multiline formatting;
+only unfinished trailing stream whitespace waits for more content or terminal reconciliation.
+Private citation/control fragments remain removed or resolved from the exact native source receipt.
+A genuine change to an accepted public prefix still fails closed without replaying a replacement.
+The current valid header prefix exposes
 both choices, so streaming text does not disappear when audio is skipped. Distinct native
 generation identities preserve all validated
 model-authored content, including requested exact repetition. Content equality is not transport

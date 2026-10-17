@@ -410,10 +410,10 @@ def test_queued_deadline_only_skips_cleanup_when_native_never_owned_run(
     elif ownership == "unconfirmed":
         monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda key: key == worker_id)
     calls = []
-    def interrupt(worker, *, run_id):
+    def cleanup(worker_id, run_id):
         calls.append(run_id)
         raise RuntimeError("Synthetic cleanup cannot be confirmed")
-    monkeypatch.setattr(service.runtime, "interrupt_worker", interrupt)
+    monkeypatch.setattr(service, "release_provider_deadline_compute", cleanup)
     result, terminal = provider._expire_response_deadline(request)
     assert result["state"] == "failed"
     assert terminal["failure_class"] == "provider_response_deadline_exceeded"

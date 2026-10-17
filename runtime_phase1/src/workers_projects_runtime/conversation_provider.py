@@ -1000,9 +1000,11 @@ def _citation_source_map(sources: Iterable[dict[str, Any]]) -> dict[str, tuple[s
 def _truncate_invalid_control_fragments(value: str) -> str:
     """Keep valid prose before a terminal-control fragment and discard the unsafe suffix."""
 
-    normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     safe_lines: list[str] = []
-    for line in normalized.split("\n"):
+    for line in re.split(r"(\r\n|\r|\n)", str(value or "")):
+        if line in {"\r\n", "\r", "\n"}:
+            safe_lines.append(line)
+            continue
         invalid_at = next(
             (
                 index
@@ -1012,8 +1014,8 @@ def _truncate_invalid_control_fragments(value: str) -> str:
             ),
             -1,
         )
-        safe_lines.append((line[:invalid_at] if invalid_at >= 0 else line).rstrip())
-    return "\n".join(safe_lines)
+        safe_lines.append(line[:invalid_at] if invalid_at >= 0 else line)
+    return "".join(safe_lines)
 
 def _sanitize_user_visible_text(
     value: str,
@@ -1039,7 +1041,7 @@ def _sanitize_user_visible_text(
 
     text = _PRIVATE_CITATION_RUN_RE.sub(render_citation_run, text)
     text = _PRIVATE_CITATION_WRAPPER_RE.sub("", text)
-    return re.sub(r"[ \t]+\n", "\n", text)
+    return text
 
 def _sanitize_provider_output(
     value: str,
@@ -1060,16 +1062,16 @@ def _sanitize_provider_output(
     return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
 
 
-def _redact_provider_output(value: str) -> str:
-    """Redact decoded public strings, so JSON escapes cannot change saved speech."""
+def _redact_provider_output(value: str, citation_sources: Iterable[dict[str, Any]] = ()) -> str:
+    """Project decoded public strings identically for live text, final text and ranges."""
     raw = str(value or "")
     try:
         payload = json.loads(raw, object_pairs_hook=_unique_json_object)
     except (ValueError, TypeError):
-        return _redact_text(raw)
+        return _redact_text(_sanitize_user_visible_text(raw, citation_sources))
     if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
-        return _redact_text(raw)
-    payload["content"] = _redact_text(payload["content"])
+        return _redact_text(_sanitize_user_visible_text(raw, citation_sources))
+    payload["content"] = _redact_text(_sanitize_user_visible_text(payload["content"], citation_sources))
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -2783,12 +2785,13 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
         if file_link_start is not None:
             text = text[:file_link_start]
         word_boundary = bool(text and text[-1].isspace()) or prefix["complete"]
-        text = _sanitize_user_visible_text(text).strip()
+        # Preserve canonical leading bytes; only the unfinished trailing tail waits.
+        text = _sanitize_user_visible_text(text).rstrip()
         if text:
             # Completion belongs to this validated public envelope, not a sentence
             # or the entire run. A mutable file/citation projection cannot seal it.
             if (prefix["complete"] and artifact is None and file_link_start is None
-                    and text == _sanitize_user_visible_text(full_text).strip()):
+                    and text == _sanitize_user_visible_text(full_text).rstrip()):
                 try:
                     envelope = json.loads("".join(parts.current))
                 except (TypeError, ValueError):
@@ -4755,6 +4758,15 @@ class ConversationProvider:
         existing_worker = (
             self.store.get_worker(str(existing["worker_id"])) if existing else None
         )
+        if existing_worker and existing_worker.get("state") == "failed":
+            try:
+                recovered = self.service.release_provider_deadline_compute(
+                    str(existing_worker["worker_id"]), str(existing_worker.get("last_run_id") or ""),
+                )
+                existing_worker = recovered or existing_worker
+            except Exception as exc:
+                # Unproven compute or another lifecycle owner keeps the normal conflict.
+                LOGGER.warning("provider_deadline_cleanup_retry_unavailable error_type=%s", type(exc).__name__)
         existing_manifest = self._session_manifest(existing)
         previous_origin_scope = existing_manifest.get("allowed_ai_origin_scope")
         requested_origin_scope = metadata.allowed_ai_origin_scope or {}
@@ -6218,6 +6230,8 @@ class ConversationProvider:
             encoded = text.encode("utf-16-le")
             if not isinstance(ranges, list):
                 return []
+            sources = (self._native_citation_sources_snapshot(request_record, run)
+                       if _PRIVATE_CITATION_RUN_RE.search(text) else ())
             projected = []
             cursor = public_cursor = 0
             for item in ranges:
@@ -6236,7 +6250,7 @@ class ConversationProvider:
                 prefix = encoded[:end * 2].decode("utf-16-le")
                 envelope = json.dumps({**source, "content": prefix}, ensure_ascii=False)
                 rendered = _redact_provider_output(self.service.render_provider_native_images(
-                    request_record, run, envelope, include_captured_files=False))
+                    request_record, run, envelope, include_captured_files=False), sources)
                 public_prefix = json.loads(rendered)["content"]
                 public_end = len(public_prefix.encode("utf-16-le")) // 2
                 if not visible_output.startswith(public_prefix) or public_end < public_cursor:
@@ -6538,9 +6552,16 @@ class ConversationProvider:
     ) -> str:
         native = self._native_output_snapshot(request_record, run)
         output = native if callable(getattr(self.service.runtime, "provider_activity_log", None)) else str(run.get("output_text") or "")
+        try:
+            decoded = json.loads(output, object_pairs_hook=_unique_json_object)
+            public_text = decoded.get("content", output) if isinstance(decoded, dict) else output
+        except (ValueError, TypeError):
+            public_text = output
+        sources = (self._native_citation_sources_snapshot(request_record, run)
+                   if isinstance(public_text, str) and _PRIVATE_CITATION_RUN_RE.search(public_text) else ())
         return _redact_provider_output(self.service.render_provider_native_images(
             request_record, run, output, output_files=output_files, output_rejections=output_rejections,
-            include_captured_files=output_files is not None))
+            include_captured_files=output_files is not None), sources)
 
     def _completion_usage(
         self,
@@ -7169,6 +7190,16 @@ class ConversationProvider:
             ) if selected_model is not None and not agent_builder_control and not delivery_control and not private_machine_state else "")
             if record["state"] == "completed" and record.get("response_json") and not private_machine_state:
                 latest_native = str(json.loads(record["response_json"])["choices"][0]["message"].get("content") or "")
+            elif latest_native:
+                # Plain native text uses the same public projection. Mutable citation
+                # and file references still wait for canonical terminal provenance.
+                citation = _PRIVATE_CITATION_WRAPPER_RE.search(latest_native)
+                file_start = _mutable_native_file_link_start(latest_native, incomplete=False)
+                withheld = min((start for start in (
+                    citation.start() if citation else None, file_start) if start is not None), default=None)
+                if withheld is not None:
+                    latest_native = latest_native[:withheld]
+                latest_native = _sanitize_user_visible_text(latest_native).rstrip()
             if (
                 not private_machine_state
                 and not agent_builder_control
@@ -7872,19 +7903,25 @@ class ConversationProvider:
                 cleanup_succeeded = True
             else:
                 try:
-                    try:
-                        self.service.runtime.interrupt_worker(worker, run_id=run_id)
-                    except TypeError as exc:
-                        if "run_id" not in str(exc):
-                            raise
-                        self.service.runtime.interrupt_worker(worker)
-                    cleanup_succeeded = True
-                except Exception:
-                    self.store.update_worker_state(
-                        str(worker["worker_id"]),
-                        "failed",
-                        last_error="GlassHive could not confirm native deadline cleanup",
+                    cleanup_succeeded = bool(
+                        self.service.release_provider_deadline_compute(str(worker["worker_id"]), run_id)
                     )
+                except Exception:
+                    # A newer run or operator control must keep its state. Failed proof
+                    # leaves the exact cleanup claim as the durable retry fence.
+                    with self.service._worker_compute_release_lock(str(worker["worker_id"])):
+                        latest = self.store.get_worker(str(worker["worker_id"])) or {}
+                        if (latest.get("last_run_id") == run_id
+                                and not latest.get("work_stop_id")
+                                and (not latest.get("compute_release_token") or (
+                                    latest.get("compute_release_kind") == "interrupt_run"
+                                    and latest.get("compute_release_target_run_id") == run_id
+                                    and latest.get("compute_release_owner") == self.service._executor_id))
+                                and latest.get("state") not in {"paused", "stopping", "terminating", "termination_failed", "terminated"}):
+                            self.store.update_worker_state(
+                                str(worker["worker_id"]), "failed",
+                                last_error="GlassHive could not confirm native deadline cleanup",
+                            )
 
         existing_types = (
             {
