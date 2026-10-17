@@ -9381,7 +9381,8 @@ class WorkersProjectsService:
                 or worker.get("state") == "stopping"
                 or self.store.has_active_operator_pause(worker_id)
                 or self.store.has_unconfirmed_host_run_start(worker_id)
-                or (worker.get("state") in {"needs_input", "failed"}
+                or ((worker.get("state") in {"needs_input", "failed"}
+                     or (worker.get("state") == "paused" and worker.get("compute_released_at")))
                     and not self.store.worker_native_compute_is_released(worker_id))
             ):
                 return worker

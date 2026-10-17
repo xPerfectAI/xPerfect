@@ -125,6 +125,11 @@ contract instead of adding a second upload route:
 - extracted text can be materialized directly
 - metadata-only attachments become an `uploads/*.metadata.json` manifest
 
+A trusted file-only authored input can have an empty text segment. Core preserves that segment
+in both the delegation context and task packet, with the same source identity and order. Native
+validation requires exact packet/context text equality; it does not invent a transcript. Upload
+references and bytes still pass through the separate owner-scoped file projection below.
+
 Any actual `source_path` copy is still gated by `WPR_BOOTSTRAP_SOURCE_ROOTS`, symlink rejection, and
 the bootstrap size limit. Request-derived metadata must never become an arbitrary host-file read.
 xPerfect must be file-type agnostic: PDF, DOCX, XLSX, PPTX, media, archives, and unknown extensions

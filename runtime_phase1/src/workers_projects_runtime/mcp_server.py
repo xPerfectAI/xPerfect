@@ -2838,7 +2838,6 @@ def _delegation_packet_block(
             isinstance(ordinal, bool)
             or ordinal != expected_ordinal
             or not isinstance(text, str)
-            or not text
             or len(text.encode("utf-8")) > 32 * 1024
             or ("truncated" in segment and segment.get("truncated") is not True)
             or (truncated and not re.fullmatch(r"[0-9a-f]{64}", original_sha256))
@@ -2853,7 +2852,9 @@ def _delegation_packet_block(
         )
     if normalized_packet_segments != source_segments:
         raise ValueError("viventium_delegation_packet is invalid")
-    if not task_text.get("instruction") and not normalized_packet_segments:
+    if not task_text.get("instruction") and not any(
+        segment[1] for segment in normalized_packet_segments
+    ):
         raise ValueError("viventium_delegation_packet is invalid")
 
     constraints = packet.get("explicit_constraints", [])

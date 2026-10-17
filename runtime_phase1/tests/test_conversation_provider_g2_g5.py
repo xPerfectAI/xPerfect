@@ -92,10 +92,12 @@ def _released_input_successor(failed_request):
     return store, service, provider, previous, request, worker_id
 
 
+@pytest.mark.parametrize("worker_state", ["needs_input", "paused"])
 def test_fresh_request_reactivates_released_input_worker_without_replaying_old_run(
-    failed_request,
+    failed_request, worker_state,
 ):
     store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    store.update_worker_state(worker_id, worker_state)
     old_run = dict(store.get_run(previous["run_id"]))
     assigned = provider._assign_pre_run_request(request, worker_id=worker_id, run_local_bundle={})
     deadline = time.monotonic() + 2
@@ -438,6 +440,9 @@ def test_released_input_successor_keeps_start_fences(failed_request, monkeypatch
         store.update_provider_request(request["request_id"], restore_hold=1)
     elif guard in {"paused", "closed"}:
         store.update_worker(worker_id, state="paused" if guard == "paused" else "terminated")
+        if guard == "paused":
+            store.add_event(store.get_worker(worker_id)["project_id"], worker_id, None,
+                            "worker.paused", "Explicit operator pause")
     elif guard == "operator_pause":
         monkeypatch.setattr(store, "has_active_operator_pause", lambda key: key == worker_id)
     elif guard == "work_stop":
@@ -1373,3 +1378,27 @@ def test_duplicate_failed_request_without_run_rejects_changed_authority_and_miss
     with pytest.raises(HTTPException, match="request authority is unavailable"):
         provider.start(payload)
     assert service.store.get_provider_request(duplicate["request_id"])["run_id"] is None
+
+
+@pytest.mark.parametrize("release", ["stale", "live_lease", "unconfirmed"])
+def test_released_paused_conversation_keeps_fresh_native_release_fence(
+    failed_request, monkeypatch, release,
+):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    store.update_worker_state(worker_id, "paused")
+    if release == "stale":
+        store.update_run(previous["run_id"], runtime_invoked_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())
+    elif release == "live_lease":
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_id, run_id=previous["run_id"], executor_id="synthetic-live-owner",
+            conversation_limit=2, mission_limit=3, account_mission_limit=4, tenant_mission_limit=12,
+            lease_ttl_s=300,
+        )
+    else:
+        monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda key: key == worker_id)
+    old = dict(store.get_run(previous["run_id"]))
+    assert service.activate_prepared_conversation_worker(worker_id)["state"] == "paused"
+    assert store.get_worker(worker_id)["state"] == "paused"
+    assert store.get_run(previous["run_id"]) == old

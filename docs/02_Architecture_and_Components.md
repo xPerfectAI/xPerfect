@@ -96,6 +96,13 @@ needs-input run. Fresh requests and duplicate requests retain the same exact-run
 owner/session, restore-hold, Pause/Stop and confirmed-compute-release checks.
 Readiness holds the existing worker lifecycle fence, not the provider-wide admission lock;
 the exact request, deadline and ready worker are checked again before dispatch.
+A conversation worker released while idle can be `paused` without an operator Pause. A new
+accepted request uses the same lifecycle-locked readiness path as released failed/input-blocked
+workers before the ordinary queue claim. A recorded idle release must remain fresh against every
+native invocation and active lease. Explicit Pause, Stop, closed/unbound scope, and unresolved
+release/start ownership remain fences. Prepared workers without an earlier release retain their
+existing initial-readiness behavior; no historical run is resumed or deleted.
+
 The queue can admit a separately accepted stateless request on that bound conversation after
 an older stateless provider request failed and has no active compute lease. The failed run stays
 unchanged. Mission, persistent-session, approval and unresolved-release work keep their ordering fences.
