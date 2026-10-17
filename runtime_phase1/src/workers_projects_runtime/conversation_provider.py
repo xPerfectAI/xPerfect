@@ -8007,10 +8007,13 @@ class ConversationProvider:
     @classmethod
     def _request_attachment_context(cls, payload: ChatCompletionRequest) -> str:
         projected = cls._projected_request_uploads(payload)
-        ledger = [
-            {**item, "inputKind": "extracted_text" if item.get("source") == "text" else "original"}
-            for item in public_upload_ledger(projected)
-        ]
+        ledger = public_upload_ledger(projected)
+        for item, supplied in zip(ledger, projected, strict=True):
+            item["inputKind"] = (
+                "metadata_only" if supplied.get("upload_blocker")
+                else "extracted_text" if supplied.get("source") == "text" or not supplied.get("source_path")
+                else "original"
+            )
         paths = [
             str(item.get("path") or "").strip().lstrip("/")
             for item in projected
@@ -8022,7 +8025,10 @@ class ConversationProvider:
             [
                 '<viventium_attached_workspace_files version="1">',
                 json.dumps({"selected_uploads": ledger}, ensure_ascii=False, separators=(",", ":")),
-                "Read each original attachment directly from its ordered workspace path:",
+                "Read the supplied attachment representations from their ordered workspace paths.",
+                "inputKind identifies original bytes, extracted text, or metadata only. "
+                "Extracted text does not establish access to original bytes. "
+                "Metadata-only entries report unavailable input.",
                 *(f"{index}. {path}" for index, path in enumerate(paths, 1)),
                 "</viventium_attached_workspace_files>",
             ]

@@ -125,6 +125,17 @@ contract instead of adding a second upload route:
 - extracted text can be materialized directly
 - metadata-only attachments become an `uploads/*.metadata.json` manifest
 
+The native attachment context labels each actual projected representation as `original`,
+`extracted_text`, or `metadata_only`. Supplied extraction is usable text; reading it does not prove
+access to the original bytes. A metadata manifest reports unavailable input and remains a blocker
+for work that needs those bytes. The host retains explicit current text, including empty text, and
+may fill absent text only from the same file ID and source in its existing owner-checked selected
+history. Current file identity and order remain unchanged.
+For declared `source=text`, the exact string body is the input, including empty and whitespace-only
+text. It takes precedence over an available original path. Nontext workspace filenames gain a
+`.txt` suffix; the original filename stays in metadata. An explicit empty body uses the existing
+`allow_empty` materialization flag. A missing or nonstring body remains a metadata-only blocker.
+
 A trusted file-only authored input can have an empty text segment. Core preserves that segment
 in both the delegation context and task packet, with the same source identity and order. Native
 validation requires exact packet/context text equality; it does not invent a transcript. Upload
