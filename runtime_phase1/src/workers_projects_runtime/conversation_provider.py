@@ -3816,13 +3816,15 @@ class ConversationProvider:
         models = list(GLASSHIVE_MODELS.values())
         if configured_grok is not None and configured_grok.id not in GLASSHIVE_MODELS:
             models.append(configured_grok)
-        # Readiness belongs to a harness; check it once per catalog request.
+        # Discovery describes model contracts, not live account authentication. Starting every
+        # native harness here delays unrelated metadata consumers and does not prove that the
+        # account selected for a later request can run. Connections and admission own that check.
         readiness = {
-            profile: _harness_readiness(profile)
-            for profile in dict.fromkeys(model.harness_profile for model in models)
+            "status": "not_checked",
+            "detail": "Catalog metadata only; account and runtime readiness are checked separately.",
         }
         return {"object": "list", "data": [
-            model.api_payload(readiness=readiness[model.harness_profile]) for model in models
+            model.api_payload(readiness=readiness) for model in models
         ]}
 
     def _model(self, model_id: str, *, tenant_id: str = "local", owner_id: str = "",

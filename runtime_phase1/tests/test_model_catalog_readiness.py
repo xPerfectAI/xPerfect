@@ -1,4 +1,4 @@
-"""Catalog discovery shares fresh harness checks within each request."""
+"""Model discovery is metadata-only; explicit readiness checks retain their own authority."""
 
 from workers_projects_runtime import conversation_provider as provider
 
@@ -9,54 +9,57 @@ def _service(monkeypatch, extra=None):
     return service
 
 
-def test_catalog_checks_each_harness_once_and_keeps_all_metadata(monkeypatch):
-    calls = []
+def test_catalog_never_launches_harness_or_authentication_probe(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("model metadata must not start a native harness")
 
-    def readiness(profile):
-        calls.append(profile)
-        return {"status": "ready", "binary_available": True, "authentication": "configured"}
-
-    monkeypatch.setattr(provider, "_harness_readiness", readiness)
-    old_payload = {"object": "list", "data": [
-        model.api_payload() for model in provider.GLASSHIVE_MODELS.values()
-    ]}
-    calls.clear()
+    monkeypatch.setattr(provider, "_harness_readiness", forbidden)
+    monkeypatch.setattr(provider, "_harness_auth_configured", forbidden)
+    monkeypatch.setattr(provider.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(provider.subprocess, "run", forbidden)
     actual = _service(monkeypatch).models_payload()
-    assert actual == old_payload
-    assert calls == list(dict.fromkeys(model.harness_profile for model in provider.GLASSHIVE_MODELS.values()))
+    assert actual["data"]
+    assert all(model["readiness"]["status"] == "not_checked" for model in actual["data"])
+    assert all("authentication" not in model["readiness"] for model in actual["data"])
+    assert all("binary_available" not in model["readiness"] for model in actual["data"])
 
 
-def test_next_catalog_request_rechecks_changed_auth_and_binary(monkeypatch):
-    state = {"status": "unavailable", "binary_available": False, "authentication": "required"}
-    monkeypatch.setattr(provider, "_harness_readiness", lambda _profile: dict(state))
+def test_catalog_preserves_every_model_capability_budget_and_field(monkeypatch):
+    expected = {"object": "list", "data": [
+        model.api_payload(readiness={}) for model in provider.GLASSHIVE_MODELS.values()
+    ]}
+    actual = _service(monkeypatch).models_payload()
+    for model in actual["data"]:
+        model["readiness"] = {}
+    assert actual == expected
+
+
+def test_catalog_readiness_is_not_a_stale_auth_observation_or_shared_mutable_state(monkeypatch):
+    monkeypatch.setattr(provider, "_harness_readiness", lambda _profile: {"status": "ready"})
     service = _service(monkeypatch)
     first = service.models_payload()
-    state.update(status="ready", binary_available=True, authentication="configured")
+    monkeypatch.setattr(provider, "_harness_readiness", lambda _profile: {"status": "authentication_required"})
     second = service.models_payload()
-    assert all(model["readiness"]["status"] == "unavailable" for model in first["data"])
-    assert all(model["readiness"]["status"] == "ready" for model in second["data"])
-    sibling = next(model for model in first["data"][1:]
-                   if model["harness_profile"] == first["data"][0]["harness_profile"])
+    assert first == second
     first["data"][0]["readiness"]["status"] = "changed_by_consumer"
-    assert sibling["readiness"]["status"] == "unavailable"
+    assert all(model["readiness"]["status"] == "not_checked" for model in second["data"])
+    assert all(model["readiness"]["status"] == "not_checked" for model in first["data"][1:])
 
 
-def test_configured_extra_grok_model_uses_same_harness_check(monkeypatch):
+def test_configured_extra_model_keeps_exact_metadata_without_probe(monkeypatch):
     extra = provider.HarnessModel(
         id="grok-build:synthetic-new-model", display_name="Synthetic model",
         harness_profile="grok-build", native_model="synthetic-new-model",
         effort_choices=("default",), recommended_effort="default", context_window=32768,
     )
-    calls = []
+    def forbidden(_profile):
+        raise AssertionError("configured metadata must not probe its harness")
 
-    def readiness(profile):
-        calls.append(profile)
-        return {"status": "ready"}
-
-    monkeypatch.setattr(provider, "_harness_readiness", readiness)
+    monkeypatch.setattr(provider, "_harness_readiness", forbidden)
     actual = _service(monkeypatch, extra).models_payload()
-    assert actual["data"][-1]["id"] == extra.id
-    assert calls.count("grok-build") == 1
+    expected = extra.api_payload(readiness=actual["data"][-1]["readiness"])
+    assert actual["data"][-1] == expected
+    assert expected["id"] == extra.id
 
 
 def test_individual_model_payload_still_checks_fresh_readiness(monkeypatch):

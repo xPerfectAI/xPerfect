@@ -720,6 +720,7 @@ def test_models_expose_exact_harness_registry(tmp_path, monkeypatch):
         "codex-cli:gpt-5.6-sol", "codex-cli:gpt-5.6-luna", "codex-cli:gpt-5.6-terra",
         "codex-cli:gpt-5.4", "codex-cli:native-default",
         "claude-code:claude-opus-5-5", "claude-code:claude-opus-5", "claude-code:opus",
+        "direct-openai:gpt-6.1-sol", "direct-anthropic:claude-opus-5-5", "direct-xai:grok-4.7",
     }
     assert models["codex-cli:gpt-5.6-sol"]["display_name"] == "Codex / GPT-5.6 Sol"
     assert models["codex-cli:gpt-5.6-sol"]["recommended_effort"] == "medium"

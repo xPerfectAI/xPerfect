@@ -170,6 +170,13 @@ When a host lane is released, the existing wake-up selects its oldest queued `ho
 ordinary admission path still rechecks lane, account, tenant, resource and lifecycle limits before
 reserving a slot. Other lanes and provider rate-limit backoff remain unchanged.
 
+The authenticated OpenAI-compatible `/v1/models` route publishes model IDs, effort choices,
+capabilities and native replay-budget declarations without starting a harness or probing sign-in.
+Its readiness status is `not_checked`; metadata is not evidence of available credentials or a
+successful model request. Connections retain their explicit Verify/Connect operations, and actual
+admission and the selected native session retain their account, authentication and capacity checks.
+This keeps a slow unrelated harness probe out of every catalog consumer's critical path.
+
 Successful native Grok model catalogs may be reused for at most 30 seconds, keyed to the installed
 binary and current environment, authentication and configuration file identities. Changed identity
 refreshes immediately; empty or failed lookups are not cached. This affects catalog discovery only,
