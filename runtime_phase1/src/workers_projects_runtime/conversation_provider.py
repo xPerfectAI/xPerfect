@@ -4823,6 +4823,13 @@ class ConversationProvider:
                 (previous_tail and not current_tail)
                 or (previous_capsules and not current_capsules)
             )
+        released_failure_reuse = bool(
+            existing and existing_worker and existing_worker.get("state") == "failed"
+            and metadata.provider_session_mode == "stateless"
+            and self.store.can_reactivate_released_stateless_provider_session(
+                str(existing["session_id"]), tenant_id=tenant_id, owner_id=metadata.owner_id,
+            )
+        )
         binding_changed = bool(
             existing
             and (
@@ -4837,8 +4844,9 @@ class ConversationProvider:
                 )).resolve() != workspace
                 or existing["access_mode"] != expected_access
                 or not existing_worker
-                or str(existing_worker.get("state") or "")
-                in {"failed", "terminating", "termination_failed", "terminated"}
+                or (str(existing_worker.get("state") or "")
+                    in {"failed", "terminating", "termination_failed", "terminated"}
+                    and not released_failure_reuse)
                 or policy_changed
                 or system_state_changed
                 or authority_removed
@@ -4881,7 +4889,11 @@ class ConversationProvider:
             predecessor_id = (self._verified_predecessor(payload, existing, existing_manifest,
                                                        previous_response, visible_keys)
                               if branch_changed else "")
-            if branch_changed and self.store.list_nonterminal_runs_for_worker(str(existing["worker_id"])):
+            if (branch_changed and self.store.list_nonterminal_runs_for_worker(str(existing["worker_id"]))
+                    and not (metadata.provider_session_mode == "stateless"
+                        and self.store.can_reselect_stateless_provider_session_branch(
+                            str(existing["session_id"]), tenant_id=tenant_id, owner_id=metadata.owner_id,
+                        ))):
                 raise HTTPException(status_code=409, detail={
                     "code": "conversation_session_authority_conflict",
                     "message": "The native conversation is active; retry the selected branch after it finishes",
@@ -5018,6 +5030,7 @@ class ConversationProvider:
                 if (
                     str(current.get("run_id") or "") != run_id
                     or str(current.get("state") or "") not in {"queued", "running"}
+                    or bool(current.get("restore_hold"))
                     or not run
                     or str(run.get("worker_id") or "") != worker_id
                     or str(run.get("state") or "") in TERMINAL_RUN_STATES
@@ -5025,15 +5038,49 @@ class ConversationProvider:
                     return current, False
                 expired = self._deadline_reached(current)
                 if not expired:
-                    self.service.start_assigned_run(worker_id)
-                    return current, True
+                    worker = self.store.get_worker(worker_id) or {}
+                    if worker.get("state") not in {"needs_input", "failed"}:
+                        self.service.start_assigned_run(worker_id)
+                        return current, True
+                    if (
+                        not worker.get("compute_released_at")
+                        or worker.get("compute_release_token")
+                        or worker.get("work_stop_id")
+                        or self.store.has_active_operator_pause(worker_id)
+                        or self.store.has_unconfirmed_host_run_start(worker_id)
+                    ):
+                        return current, False
             finally:
                 if timing_acquired is not None:
                     native_timing_event("start_lock_pre_release", requestHash=native_timing_hash("request", request_id),
                                         runHash=native_timing_hash("run", run_id),
                                         heldUntilPreReleaseMs=(time.monotonic_ns() - timing_acquired) / 1_000_000)
-        expired_request, _ = self._expire_response_deadline(current)
-        return expired_request, False
+        if expired:
+            return self._expire_response_deadline(current)[0], False
+
+        # Readiness owns its existing worker lifecycle lock, never the provider-wide
+        # admission lock. Unrelated starts, Stop and deadline arbitration remain free.
+        activated = self.service.activate_prepared_conversation_worker(worker_id)
+        with self._start_lock:
+            current = self.store.get_provider_request(request_id) or current
+            run = self.store.get_run(run_id)
+            worker = self.store.get_worker(worker_id) or {}
+            if (
+                str(current.get("run_id") or "") != run_id
+                or str(current.get("state") or "") not in {"queued", "running"}
+                or bool(current.get("restore_hold"))
+                or not run
+                or str(run.get("worker_id") or "") != worker_id
+                or str(run.get("state") or "") in TERMINAL_RUN_STATES
+            ):
+                return current, False
+            expired = self._deadline_reached(current)
+            if not expired:
+                if activated.get("state") != "ready" or worker.get("state") not in {"ready", "running"}:
+                    return current, False
+                self.service.start_assigned_run(worker_id)
+                return current, True
+        return self._expire_response_deadline(current)[0], False
 
     @staticmethod
     def _pre_run_admission_retryable(exc: Exception) -> bool:
@@ -5250,9 +5297,6 @@ class ConversationProvider:
                     ):
                         self._remember_request_local_bundle(str(duplicate["request_id"]), run_id, bundle)
                         self.service.reconcile_restart_authority_backlog_once()
-                        current_worker = self.store.get_worker(str(run["worker_id"])) or {}
-                        if current_worker.get("state") == "needs_input":
-                            self.service.activate_prepared_conversation_worker(str(run["worker_id"]))
                         self._start_assigned_run_before_deadline(
                             str(duplicate["request_id"]), run_id=run_id,
                             worker_id=str(run["worker_id"]),
@@ -7785,6 +7829,14 @@ class ConversationProvider:
             diagnostic_summary = (
                 "The provider response deadline expired before a terminal native result."
             )
+            observed_run_id = str(current.get("run_id") or "")
+            observed_run = self.store.get_run(observed_run_id) if observed_run_id else None
+            native_owned_before = bool(observed_run and (
+                observed_run.get("runtime_invoked_at") or observed_run.get("started_at")
+                or observed_run.get("active_attempt_id")
+                or self.store.get_active_host_run_lease_for_run(observed_run_id)
+                or self.store.has_unconfirmed_host_run_start(str(observed_run["worker_id"]))
+            ))
             arbitration = self.store.arbitrate_provider_request_deadline(
                 request_id,
                 default_timeout_s=effective_timeout,
@@ -7809,20 +7861,30 @@ class ConversationProvider:
         # admission lock while waiting for process cleanup.
         cleanup_succeeded = False
         if newly_expired and worker and run_id:
-            try:
-                try:
-                    self.service.runtime.interrupt_worker(worker, run_id=run_id)
-                except TypeError as exc:
-                    if "run_id" not in str(exc):
-                        raise
-                    self.service.runtime.interrupt_worker(worker)
+            never_invoked = (
+                observed_run is not None and observed_run_id == run_id and not native_owned_before
+                and not run.get("runtime_invoked_at") and not run.get("started_at")
+                and not run.get("active_attempt_id")
+                and not self.store.get_active_host_run_lease_for_run(run_id)
+                and not self.store.has_unconfirmed_host_run_start(str(worker["worker_id"]))
+            )
+            if never_invoked:
                 cleanup_succeeded = True
-            except Exception:
-                self.store.update_worker_state(
-                    str(worker["worker_id"]),
-                    "failed",
-                    last_error="GlassHive could not confirm native deadline cleanup",
-                )
+            else:
+                try:
+                    try:
+                        self.service.runtime.interrupt_worker(worker, run_id=run_id)
+                    except TypeError as exc:
+                        if "run_id" not in str(exc):
+                            raise
+                        self.service.runtime.interrupt_worker(worker)
+                    cleanup_succeeded = True
+                except Exception:
+                    self.store.update_worker_state(
+                        str(worker["worker_id"]),
+                        "failed",
+                        last_error="GlassHive could not confirm native deadline cleanup",
+                    )
 
         existing_types = (
             {

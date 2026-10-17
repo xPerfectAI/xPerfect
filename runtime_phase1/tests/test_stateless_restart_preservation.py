@@ -268,6 +268,9 @@ def test_restart_backlog_preserves_other_admission_fences(
     store = client.app.state.store
     provider = client.app.state.conversation_provider
     monkeypatch.setattr(service, "_ensure_worker_processor", lambda _worker_id: None)
+    # Build the blocker before an independent terminal observer can reconcile it.
+    reconcile = service.reconcile_restart_authority_backlog_once
+    monkeypatch.setattr(service, "reconcile_restart_authority_backlog_once", lambda: [])
     payload = _payload(workspace)
     if blocker != "persistent":
         payload["metadata"]["provider_session_mode"] = "stateless"
@@ -322,7 +325,7 @@ def test_restart_backlog_preserves_other_admission_fences(
         store.update_run(paused["run_id"], state="paused")
 
     try:
-        assert service.reconcile_restart_authority_backlog_once() == []
+        assert reconcile() == []
         assert (store.get_worker(worker_id) or {})["state"] == "needs_input"
         assert store.claim_next_queued_run(worker_id) is None
         assert (store.get_run(str(queued["run_id"])) or {})["state"] == "queued"
