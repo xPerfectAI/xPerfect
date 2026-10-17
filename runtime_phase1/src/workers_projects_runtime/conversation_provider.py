@@ -5039,7 +5039,7 @@ class ConversationProvider:
                 expired = self._deadline_reached(current)
                 if not expired:
                     worker = self.store.get_worker(worker_id) or {}
-                    if worker.get("state") not in {"needs_input", "failed"}:
+                    if worker.get("state") not in {"needs_input", "failed", "paused"}:
                         self.service.start_assigned_run(worker_id)
                         return current, True
                     if (

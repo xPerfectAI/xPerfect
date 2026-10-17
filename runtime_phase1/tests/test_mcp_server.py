@@ -4164,10 +4164,11 @@ def test_worker_delegate_once_materializes_explicit_uploaded_files(monkeypatch):
 
 
 
+@pytest.mark.parametrize("source_text", ["Read the original selected CSV; keep both plans unchanged.", ""])
 @pytest.mark.parametrize("header_selection", ["none", "partial", "all", "mixed"])
 @pytest.mark.parametrize("tool_name", ["worker_delegate_once", "workspace_launch", "workspace_schedule"])
 def test_selected_history_uploads_join_current_carrier_before_complete_validation(
-    monkeypatch, tmp_path, header_selection, tool_name
+    monkeypatch, tmp_path, header_selection, tool_name, source_text
 ):
     owner = "synthetic-owner"
     uploads_root = tmp_path / "uploads"
@@ -4194,12 +4195,12 @@ def test_selected_history_uploads_join_current_carrier_before_complete_validatio
     monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(uploads_root))
     monkeypatch.setattr(mcp_server, "get_http_headers", lambda: headers)
     monkeypatch.setattr(mcp_server, "_owner_recent_upload_entries", lambda **_: [])
-    source_text = "Read the original selected CSV; keep both plans unchanged."
+    instruction = "Read the original selected CSV; keep both plans unchanged."
     bundle = {
         "viventium_delegation_identity": {"source_event_id": "synthetic-current-source"},
         "viventium_delegation_context": {"version": 1, "source_event_id": "synthetic-current-source",
             "triggering_source_segments": [{"ordinal": 0, "source_event_id": "synthetic-current-source", "source_index": 0, "text": source_text}]},
-        "viventium_delegation_packet": {"version": 1, "task": {"instruction": source_text,
+        "viventium_delegation_packet": {"version": 1, "task": {"instruction": instruction,
             "source_segments": [{"ordinal": 0, "text": source_text}]},
             "explicit_constraints": [], "selected_files": [{"ordinal": i, "ref": r["file_id"]} for i,r in enumerate(records)]},
         "viventium_feelings_projection": {"version": 1, "enabled": False, "scope": "unknown", "expected_capsule_count": 0,
@@ -4216,10 +4217,10 @@ def test_selected_history_uploads_join_current_carrier_before_complete_validatio
     server = create_mcp_server(api_client=api)
     args = {"profile": "codex-cli", "execution_mode": "docker", "uploaded_files": explicit_records, "bootstrap_bundle_json": bundle}
     if tool_name == "worker_delegate_once":
-        args.update(title="Historical file mission", instruction=source_text)
+        args.update(title="Historical file mission", instruction=instruction)
         secret = "synthetic-service-assertion-key"
         monkeypatch.setenv("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET", secret)
-        goal_digest = hashlib.sha256(source_text.encode()).hexdigest()
+        goal_digest = hashlib.sha256(instruction.encode()).hexdigest()
         call_digest = hashlib.sha256(b"synthetic-native-tool-call").hexdigest()
         identity = {"version": 2, "source_event_id": "synthetic-current-source", "objective_ordinal": 0,
             "goal_digest": goal_digest, "call_identity_digest": call_digest, "launch_payload_digest": _launch_payload_digest(args),
@@ -4227,7 +4228,7 @@ def test_selected_history_uploads_join_current_carrier_before_complete_validatio
         bundle["viventium_delegation_identity"] = identity
         bundle["viventium_delegation_assertion"] = _scoped_delegation_identity_assertion(identity, secret, tenant_id="local", owner_id=owner)
     else:
-        args.update(description=source_text)
+        args.update(description=instruction)
         if tool_name == "workspace_schedule":
             args["run_at"] = "2030-01-01T00:00:00Z"
     async def scenario():
@@ -7819,3 +7820,39 @@ def test_scheduling_a_saved_expert_by_name_never_creates_another_workspace(monke
         scheduled_workers = conn.execute("SELECT worker_id FROM scheduled_runs").fetchall()
     assert [name for _worker_id, name in workers] == ["Supplies Expert"]
     assert scheduled_workers == [(workers[0][0],)]
+
+
+@pytest.mark.parametrize("mutation", ["text", "ordinal", "type", "digest", "context_source", "instruction"])
+def test_file_only_delegation_packet_preserves_strict_source_equality(mutation):
+    bundle = {
+        "viventium_delegation_identity": {"source_event_id": "synthetic-source"},
+        "viventium_delegation_context": {
+            "version": 1,
+            "source_event_id": "synthetic-source",
+            "triggering_source_segments": [{
+                "ordinal": 0, "source_event_id": "synthetic-source", "source_index": 0, "text": "",
+            }],
+        },
+        "viventium_delegation_packet": {
+            "version": 1,
+            "task": {"instruction": "Complete the selected file objective.",
+                     "source_segments": [{"ordinal": 0, "text": ""}]},
+            "explicit_constraints": [], "selected_files": [],
+        },
+    }
+    segment = bundle["viventium_delegation_packet"]["task"]["source_segments"][0]
+    if mutation == "text":
+        segment["text"] = "fabricated source text"
+    elif mutation == "ordinal":
+        segment["ordinal"] = 1
+    elif mutation == "type":
+        segment["text"] = None
+    elif mutation == "digest":
+        segment["truncated"] = True
+        segment["original_sha256"] = "not-a-digest"
+    elif mutation == "context_source":
+        bundle["viventium_delegation_context"]["source_event_id"] = "foreign-source"
+    else:
+        bundle["viventium_delegation_packet"]["task"].pop("instruction")
+    with pytest.raises(ValueError):
+        mcp_server._trusted_triggering_source_block(bundle)
