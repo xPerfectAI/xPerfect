@@ -99,6 +99,15 @@ the exact request, deadline and ready worker are checked again before dispatch.
 The queue can admit a separately accepted stateless request on that bound conversation after
 an older stateless provider request failed and has no active compute lease. The failed run stays
 unchanged. Mission, persistent-session, approval and unresolved-release work keep their ordering fences.
+A deadline still makes a queued request terminal, but a run that never owned an invocation,
+attempt or native lease has no native producer to interrupt. A retained failed worker can accept
+a new stateless request on the same binding only after released compute is at least as recent as every
+native invocation and no native lease remains active. Queue and branch checks share that scoped
+failed-stateless source predicate; real authority changes keep their existing conflict checks.
+Branch selection checks retained runs, not worker reactivation eligibility: a successful successor
+does not turn an unchanged released failure into active work. Live, persistent or foreign source
+remains blocking; worker lifecycle and native admission checks are unchanged.
+The old failed requests and needs-input runs remain unchanged.
 Startup removes obsolete complete four-field unique indices only after confirming the six-field
 unique constraint. Legacy table rebuilds exclude those indices from replay. The schema transaction
 preserves every session ID, history and dependent request or visible admission, as well as unrelated

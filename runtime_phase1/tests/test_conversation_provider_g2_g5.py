@@ -25,6 +25,7 @@ from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase, StubRunt
 from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
 from workers_projects_runtime.service import WorkersProjectsService
 from workers_projects_runtime.store import RunRestorationState, Store
+from test_conversation_provider import lifecycle_owned_test_clients
 
 
 @pytest.fixture
@@ -108,6 +109,314 @@ def test_fresh_request_reactivates_released_input_worker_without_replaying_old_r
     assert successor["instruction"] == request["admitted_instruction"]
     assert assigned["run_id"] != previous["run_id"]
     assert store.get_run(previous["run_id"]) == old_run
+
+
+def _failed_stateless_session_chain(tmp_path, monkeypatch):
+    from test_conversation_provider import _client, _payload
+    from test_stateless_restart_preservation import _truthfully_invoke_conversation_run
+    client = _client(tmp_path, monkeypatch)
+    store, service, provider = client.app.state.store, client.app.state.service, client.app.state.conversation_provider
+    payload = _payload(tmp_path)
+    payload["metadata"]["provider_session_mode"] = "stateless"
+    payload["metadata"]["response_timeout_s"] = 120
+    payload["messages"][-1]["content"] = "First accepted source"
+    with monkeypatch.context() as setup:
+        setup.setattr(service, "_ensure_worker_processor", lambda key: None)
+        first = provider.start(ChatCompletionRequest.model_validate(payload))
+        first_run = store.get_run(first["run_id"])
+        worker_id = first_run["worker_id"]
+        worker = store.get_worker(worker_id)
+        _truthfully_invoke_conversation_run(store, worker, first_run)
+        lease = store.get_active_host_run_lease_for_run(first_run["run_id"])
+        assert store.release_host_run_lease(
+            lease["lease_id"], executor_id="conversation-test-running-fixture",
+            reason="synthetic_provider_stopped",
+        )
+        assert store.mark_run_needs_input(
+            first_run["run_id"], expected_state="running", error_text="Synthetic provider stalled",
+            failure_class="provider_progress_stalled", failure_user_message="Synthetic provider stalled",
+        )
+        store.update_worker_state(worker_id, "needs_input")
+        service._release_needs_input_compute(store.get_worker(worker_id), store.get_run(first_run["run_id"]))
+        assert store.get_worker(worker_id)["compute_released_at"]
+        store.update_worker_state(worker_id, "needs_input")
+        assert provider._sync(store.get_provider_request(first["request_id"]))["state"] == "failed"
+        # Retain the historical pre-repair state: the successor queued without readiness.
+        setup.setattr(service, "activate_prepared_conversation_worker", store.get_worker)
+        payload["metadata"].update(message_id="queued-successor", idempotency_key="queued-successor")
+        second = provider.start(ChatCompletionRequest.model_validate(payload))
+        assert not store.get_run(second["run_id"])["started_at"]
+        second = store.update_provider_request(second["request_id"], response_deadline_at=(
+            datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        def unavailable_deadline_cleanup(*args, **kwargs):
+            raise RuntimeError("Synthetic queued-run cleanup unavailable")
+        setup.setattr(service.runtime, "interrupt_worker", unavailable_deadline_cleanup)
+        assert provider._expire_response_deadline(second)[0]["state"] == "failed"
+        assert store.get_worker(worker_id)["state"] == "needs_input"
+        # Retain the actual pre-fix deadline-cleanup false failure for recovery coverage.
+        store.update_worker_state(worker_id, "failed")
+    retained = {key: dict(store.get_run(key)) for key in [first["run_id"], second["run_id"]]}
+    assert store.can_reactivate_released_stateless_provider_session(
+        first["session_id"], tenant_id="local", owner_id="owner-a",
+    ), {key: store.get_worker(worker_id)[key] for key in (
+        "state", "pid", "last_run_id", "compute_released_at", "compute_release_token", "work_stop_id",
+    )}
+    return store, service, provider, payload, first, second, worker_id, retained
+
+
+def test_same_stateless_binding_recovers_after_queued_successor_deadline(tmp_path, monkeypatch):
+    store, service, provider, payload, first, second, worker_id, retained = _failed_stateless_session_chain(
+        tmp_path, monkeypatch,
+    )
+    requests = {item["request_id"]: dict(store.get_provider_request(item["request_id"]))
+                for item in (first, second)}
+    monkeypatch.setattr(provider, "_failed_request_has_resumable_run",
+                        lambda row: pytest.fail("new source must not resume a failed request"))
+    payload["metadata"].update(message_id="fresh-third", idempotency_key="fresh-third")
+    third = provider.start(ChatCompletionRequest.model_validate(payload))
+    assert third["session_id"] == first["session_id"]
+    assert store.get_run(third["run_id"])["worker_id"] == worker_id
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not store.get_run(third["run_id"])["started_at"]:
+        time.sleep(0.01)
+    assert store.get_run(third["run_id"])["started_at"]
+    for key, row in retained.items():
+        assert store.get_run(key) == row
+    for key, row in requests.items():
+        assert store.get_provider_request(key) == row
+
+
+@pytest.mark.parametrize("mode", ["released", "persistent", "live_lease"])
+def test_core_branch_uses_same_released_stateless_session_predicate(tmp_path, monkeypatch, mode):
+    import hashlib
+    store, service, provider, payload, first, second, worker_id, retained = _failed_stateless_session_chain(
+        tmp_path, monkeypatch,
+    )
+    session = store.get_provider_session_by_id(first["session_id"])
+    store.update_worker_state(worker_id, "needs_input")
+    manifest = json.loads(session["context_manifest_json"])
+    store.update_provider_session_history(session["session_id"], history_count=2,
+        context_manifest={**manifest, "native_context_response_key": "msg:prior-answer"})
+    parsed = ChatCompletionRequest.model_validate(payload)
+    parsed.metadata.main_context_protocol = "main_context_v1"
+    parsed.metadata.main_context_owner = "core"
+    parsed.metadata.message_id = "selected-branch-answer"
+    parsed.metadata.visible_message_chain = [{"id": "selected-question", "role": "user",
+        "sha256": hashlib.sha256(payload["messages"][-1]["content"].encode()).hexdigest()}]
+    if mode == "persistent":
+        parsed.metadata.provider_session_mode = "persistent"
+    elif mode == "live_lease":
+        reserved = store.create_run(worker_id, session["project_id"], "Synthetic native reservation", state="queued")
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_id, run_id=reserved["run_id"], executor_id="synthetic-live-owner",
+            conversation_limit=2, mission_limit=3, account_mission_limit=4, tenant_mission_limit=12,
+            lease_ttl_s=300,
+        )
+    if mode == "released":
+        same, reseeded = provider._session(parsed, provider._model(parsed.model), tmp_path, "medium", tenant_id="local")
+        assert same["session_id"] == session["session_id"] and reseeded
+        assert same["worker_id"] == worker_id
+    else:
+        with pytest.raises(HTTPException) as failure:
+            provider._session(parsed, provider._model(parsed.model), tmp_path, "medium", tenant_id="local")
+        assert failure.value.status_code == 409
+        assert failure.value.detail["code"] == "conversation_session_authority_conflict"
+    for key, row in retained.items():
+        assert store.get_run(key) == row
+
+
+@pytest.mark.parametrize("mode", ["released", "persistent", "live_lease", "foreign_owner", "foreign_session"])
+def test_core_branch_after_success_ignores_only_its_released_stateless_failure(tmp_path, monkeypatch, mode):
+    import hashlib
+    store, service, provider, payload, first, second, worker_id, retained = _failed_stateless_session_chain(
+        tmp_path, monkeypatch,
+    )
+    payload["metadata"].update(message_id="successful-third", idempotency_key="successful-third")
+    third = provider.start(ChatCompletionRequest.model_validate(payload))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        completed = provider._sync(store.get_provider_request(third["request_id"]))
+        if completed["state"] == "completed" and store.get_worker(worker_id)["state"] == "ready":
+            break
+        time.sleep(0.01)
+    assert completed["state"] == "completed"
+    assert store.get_worker(worker_id)["state"] == "ready"
+    assert store.get_worker(worker_id)["last_run_id"] == third["run_id"]
+    assert not store.can_reactivate_released_stateless_provider_session(
+        first["session_id"], tenant_id="local", owner_id="owner-a",
+    )
+    session = store.get_provider_session_by_id(first["session_id"])
+    manifest = json.loads(session["context_manifest_json"])
+    store.update_provider_session_history(session["session_id"], history_count=2,
+        context_manifest={**manifest, "native_context_response_key": "msg:prior-answer"})
+    parsed = ChatCompletionRequest.model_validate(payload)
+    parsed.metadata.main_context_protocol = "main_context_v1"
+    parsed.metadata.main_context_owner = "core"
+    parsed.metadata.message_id = "branch-after-success"
+    parsed.metadata.visible_message_chain = [{"id": "selected-question", "role": "user",
+        "sha256": hashlib.sha256(payload["messages"][-1]["content"].encode()).hexdigest()}]
+    if mode == "persistent":
+        parsed.metadata.provider_session_mode = "persistent"
+    elif mode == "live_lease":
+        reserved = store.create_run(worker_id, session["project_id"], "Synthetic native reservation", state="queued")
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_id, run_id=reserved["run_id"], executor_id="synthetic-live-owner",
+            conversation_limit=2, mission_limit=3, account_mission_limit=4, tenant_mission_limit=12,
+            lease_ttl_s=300,
+        )
+    elif mode == "foreign_owner":
+        store.update_provider_request(first["request_id"], owner_id="other-owner")
+    elif mode == "foreign_session":
+        other = store.upsert_provider_session(
+            tenant_id="local", owner_id="owner-a", conversation_id="other-conversation",
+            agent_id="other-agent", model_id=session["model_id"],
+            project_id=session["project_id"], worker_id=worker_id,
+            workspace_dir=str(tmp_path), access_mode="workspace",
+        )
+        store.update_provider_request(first["request_id"], session_id=other["session_id"])
+    if mode == "released":
+        same, reseeded = provider._session(parsed, provider._model(parsed.model), tmp_path, "medium", tenant_id="local")
+        assert same["session_id"] == first["session_id"] and reseeded
+        assert same["worker_id"] == worker_id
+    else:
+        with pytest.raises(HTTPException) as failure:
+            provider._session(parsed, provider._model(parsed.model), tmp_path, "medium", tenant_id="local")
+        assert failure.value.status_code == 409
+        assert failure.value.detail["code"] == "conversation_session_authority_conflict"
+    for key, row in retained.items():
+        assert store.get_run(key) == row
+
+
+@pytest.mark.parametrize("change", ["model", "authority", "workspace", "access", "policy", "persistent"])
+def test_failed_stateless_worker_does_not_hide_binding_changes(tmp_path, monkeypatch, change):
+    store, service, provider, payload, first, second, worker_id, retained = _failed_stateless_session_chain(
+        tmp_path, monkeypatch,
+    )
+    payload["metadata"].update(message_id="changed-third", idempotency_key="changed-third")
+    if change == "model":
+        payload["model"] = "codex-cli:gpt-6.1-sol"
+    elif change == "authority":
+        payload["messages"][0]["content"] = "Changed declaration."
+    elif change == "workspace":
+        workspace = tmp_path / "another-workspace"
+        workspace.mkdir()
+        payload["metadata"]["glasshive_options"]["workspace"]["path"] = str(workspace)
+    elif change == "access":
+        payload["metadata"]["glasshive_options"]["access"] = "full"
+    elif change == "policy":
+        monkeypatch.setattr("workers_projects_runtime.conversation_provider._native_policy_sha256",
+                            lambda model: "b" * 64)
+    else:
+        payload["metadata"]["provider_session_mode"] = "persistent"
+    with pytest.raises(HTTPException) as failure:
+        provider.start(ChatCompletionRequest.model_validate(payload))
+    assert failure.value.status_code == 409
+    assert failure.value.detail["code"] == "conversation_session_authority_conflict"
+    for key, row in retained.items():
+        assert store.get_run(key) == row
+
+
+@pytest.mark.parametrize("blocker", [
+    "stale_release", "no_release", "live_lease", "unconfirmed_start", "live_pid", "operator_pause",
+    "work_stop", "release_token", "restore_hold", "persistent", "live_request",
+    "foreign_owner", "foreign_session", "mission", "approval", "closed",
+])
+def test_released_failed_session_requires_current_scope_and_release(failed_request, monkeypatch, blocker):
+    store, service, provider, first, second, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=second["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=second["admitted_instruction"],
+    )
+    store.update_run(run["run_id"], state="failed", failure_class="provider_response_deadline_exceeded")
+    store.update_provider_request(second["request_id"], state="failed")
+    store.update_worker(worker_id, state="failed", last_run_id=run["run_id"], pid=None)
+    assert store.can_reactivate_released_stateless_provider_session(
+        first["session_id"], tenant_id="local", owner_id="owner-a",
+    )
+    if blocker == "stale_release":
+        store.update_run(first["run_id"], runtime_invoked_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())
+    elif blocker == "no_release":
+        store.update_worker(worker_id, compute_released_at=None)
+    elif blocker == "live_lease":
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_id, run_id=first["run_id"], executor_id="synthetic-live-owner",
+            conversation_limit=2, mission_limit=3, account_mission_limit=4, tenant_mission_limit=12,
+            lease_ttl_s=300,
+        )
+    elif blocker == "unconfirmed_start":
+        monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda key: key == worker_id)
+    elif blocker == "live_pid":
+        store.update_worker(worker_id, pid=1234)
+    elif blocker == "operator_pause":
+        store.add_event(run["project_id"], worker_id, first["run_id"], "worker.paused", "Synthetic Pause")
+    elif blocker in {"work_stop", "release_token"}:
+        field = "work_stop_id" if blocker == "work_stop" else "compute_release_token"
+        store.update_worker(worker_id, **{field: "synthetic-control"})
+    elif blocker == "restore_hold":
+        store.update_provider_request(first["request_id"], restore_hold=1)
+    elif blocker == "persistent":
+        store.update_provider_request(first["request_id"], replay_decision_json="{}")
+    elif blocker == "live_request":
+        store.update_provider_request(second["request_id"], state="running")
+    elif blocker == "foreign_owner":
+        store.update_provider_request(first["request_id"], owner_id="different-owner")
+    elif blocker == "foreign_session":
+        foreign = store.upsert_provider_session(
+            tenant_id="local", owner_id="owner-a", conversation_id="foreign-session",
+            agent_id="agent-a", model_id="codex-cli:gpt-5.6-sol", project_id=run["project_id"],
+            worker_id=worker_id, workspace_dir="/tmp/synthetic", access_mode="workspace",
+        )
+        store.update_provider_request(first["request_id"], session_id=foreign["session_id"])
+    elif blocker == "mission":
+        store.update_worker(worker_id, trusted_run_lane="mission")
+    elif blocker == "approval":
+        store.update_run(first["run_id"], state="paused")
+    else:
+        store.update_worker_state(worker_id, "terminated")
+    assert not store.can_reactivate_released_stateless_provider_session(
+        first["session_id"], tenant_id="local", owner_id="owner-a",
+    )
+
+
+@pytest.mark.parametrize("ownership", ["none", "invoked", "attempt", "lease", "unconfirmed"])
+def test_queued_deadline_only_skips_cleanup_when_native_never_owned_run(
+    failed_request, monkeypatch, ownership,
+):
+    store, service, provider, first, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    request = store.update_provider_request(request["request_id"], response_deadline_at=(
+        datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+    if ownership == "invoked":
+        store.update_run(run["run_id"], runtime_invoked_at=datetime.now(timezone.utc).isoformat())
+    elif ownership == "attempt":
+        store.update_run(run["run_id"], active_attempt_id="synthetic-attempt")
+    elif ownership == "lease":
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_id, run_id=run["run_id"], executor_id="synthetic-live-owner",
+            conversation_limit=2, mission_limit=3, account_mission_limit=4, tenant_mission_limit=12,
+            lease_ttl_s=300,
+        )
+        assert store.get_active_host_run_lease_for_run(run["run_id"])
+    elif ownership == "unconfirmed":
+        monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda key: key == worker_id)
+    calls = []
+    def interrupt(worker, *, run_id):
+        calls.append(run_id)
+        raise RuntimeError("Synthetic cleanup cannot be confirmed")
+    monkeypatch.setattr(service.runtime, "interrupt_worker", interrupt)
+    result, terminal = provider._expire_response_deadline(request)
+    assert result["state"] == "failed"
+    assert terminal["failure_class"] == "provider_response_deadline_exceeded"
+    assert calls == ([] if ownership == "none" else [run["run_id"]])
+    assert store.get_worker(worker_id)["state"] == ("needs_input" if ownership == "none" else "failed")
 
 
 @pytest.mark.parametrize("guard", [

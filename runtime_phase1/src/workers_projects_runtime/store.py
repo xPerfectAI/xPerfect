@@ -817,6 +817,26 @@ PROCESS_BEARING_RUN_STATES = frozenset({"running", "settling", "paused"})
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "cancelled", "interrupted"}
 )
+# Shared by exact queue admission and same-binding stateless session recovery.
+_RELEASED_FAILED_STATELESS_PROVIDER_RUN = """
+    blocking.state IN ('needs_input', 'failed')
+    AND previous.run_id = blocking.run_id
+    AND previous.state = 'failed' AND previous.restore_hold = 0
+    AND previous.session_id = session.session_id
+    AND session.worker_id = owner.worker_id
+    AND blocking.worker_id = owner.worker_id
+    AND blocking.tenant_id = owner.tenant_id
+    AND owner.trusted_run_lane = 'conversation'
+    AND previous.owner_id = owner.owner_id AND previous.tenant_id = owner.tenant_id
+    AND session.owner_id = owner.owner_id AND session.tenant_id = owner.tenant_id
+    AND COALESCE(json_extract(previous.replay_decision_json,
+        '$.provider_session_mode'), '') = 'stateless'
+    AND NOT EXISTS (
+        SELECT 1 FROM host_run_leases
+        WHERE host_run_leases.run_id = blocking.run_id AND host_run_leases.status = 'active'
+    )
+"""
+
 # Provider-side failures whose message tells the account owner why the provider stopped.
 PROVIDER_REFUSAL_FAILURE_CLASSES = frozenset({"provider_response_failed", "provider_rate_limited",
                                               "provider_quota_exhausted"})
@@ -9505,6 +9525,102 @@ class Store:
             ).fetchone()
         return self._row(row)
 
+    def can_reselect_stateless_provider_session_branch(
+        self, session_id: str, *, tenant_id: str, owner_id: str,
+    ) -> bool:
+        """Retained failed runs do not become live blockers after a successful successor."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT owner.worker_id FROM provider_sessions AS session
+                JOIN workers AS owner ON owner.worker_id = session.worker_id
+                WHERE session.session_id = ? AND session.tenant_id = ? AND session.owner_id = ?
+                  AND owner.tenant_id = session.tenant_id AND owner.owner_id = session.owner_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runs AS blocking
+                      WHERE blocking.worker_id = owner.worker_id
+                        AND blocking.state IN (
+                            'queued','claimed','admitted','running','settling','paused','needs_input'
+                        ) AND NOT EXISTS (
+                            SELECT 1 FROM provider_requests AS previous
+                            WHERE {_RELEASED_FAILED_STATELESS_PROVIDER_RUN}
+                        )
+                  )
+                """,
+                (session_id, tenant_id, owner_id),
+            ).fetchone()
+        return bool(row)
+
+    def can_reactivate_released_stateless_provider_session(
+        self, session_id: str, *, tenant_id: str, owner_id: str,
+    ) -> bool:
+        """Read-only eligibility; native activation still owns current lifecycle fences."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                WITH released AS (
+                    SELECT blocking.run_id FROM runs AS blocking
+                    JOIN provider_requests AS previous ON previous.run_id = blocking.run_id
+                    JOIN provider_sessions AS session ON session.session_id = previous.session_id
+                    JOIN workers AS owner ON owner.worker_id = session.worker_id
+                    WHERE session.session_id = ? AND {_RELEASED_FAILED_STATELESS_PROVIDER_RUN}
+                )
+                SELECT worker.worker_id FROM workers AS worker
+                JOIN provider_sessions AS target ON target.worker_id = worker.worker_id
+                WHERE target.session_id = ? AND target.tenant_id = ? AND target.owner_id = ?
+                  AND worker.tenant_id = target.tenant_id AND worker.owner_id = target.owner_id
+                  AND worker.state IN ('failed','needs_input') AND worker.trusted_run_lane = 'conversation'
+                  AND worker.compute_released_at IS NOT NULL AND worker.compute_released_at != ''
+                  AND worker.compute_release_token = '' AND worker.work_stop_id = ''
+                  AND worker.pid IS NULL
+                  AND worker.last_run_id IN (SELECT run_id FROM released)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runs WHERE runs.worker_id = worker.worker_id
+                        AND runs.state IN ('queued','claimed','admitted','running','settling','paused','needs_input')
+                        AND runs.run_id NOT IN (SELECT run_id FROM released)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM provider_requests WHERE provider_requests.session_id = target.session_id
+                        AND provider_requests.state IN ('queued','running')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM host_run_leases WHERE host_run_leases.worker_id = worker.worker_id
+                        AND host_run_leases.status = 'active'
+                  )
+                """,
+                (session_id, session_id, tenant_id, owner_id),
+            ).fetchone()
+        return bool(row and not self.has_active_operator_pause(str(row["worker_id"]))
+                    and self.worker_native_compute_is_released(str(row["worker_id"])))
+
+    def worker_native_compute_is_released(self, worker_id: str) -> bool:
+        """A release before a later native invocation cannot authorize reactivation."""
+
+        with self._connect() as conn:
+            worker = conn.execute("SELECT compute_released_at, pid FROM workers WHERE worker_id = ?",
+                                  (worker_id,)).fetchone()
+            if not worker or not worker["compute_released_at"] or worker["pid"] is not None:
+                return False
+            if conn.execute("SELECT 1 FROM host_run_leases WHERE worker_id = ? AND status = 'active' LIMIT 1",
+                            (worker_id,)).fetchone():
+                return False
+            invocations = conn.execute("SELECT runtime_invoked_at FROM runs WHERE worker_id = ? "
+                                       "AND runtime_invoked_at IS NOT NULL AND runtime_invoked_at != ''",
+                                       (worker_id,)).fetchall()
+        try:
+            released_at = datetime.fromisoformat(str(worker["compute_released_at"]))
+            if released_at.tzinfo is None:
+                return False
+            for row in invocations:
+                invoked_at = datetime.fromisoformat(str(row["runtime_invoked_at"]))
+                if invoked_at.tzinfo is None or invoked_at > released_at:
+                    return False
+        except (TypeError, ValueError):
+            return False
+        return not self.has_unconfirmed_host_run_start(worker_id)
+
     def _claim_next_queued_run_parallel(
         self,
         worker_id: str,
@@ -9545,51 +9661,22 @@ class Store:
                 conn.execute("COMMIT")
                 return None
             if conn.execute(
-                """
+                f"""
                 SELECT 1 FROM runs AS blocking
                 WHERE blocking.worker_id = ? AND blocking.state IN (
                     'claimed', 'admitted', 'running', 'settling', 'paused', 'needs_input'
-                  )
-                  AND NOT (
-                      blocking.state = 'needs_input'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM host_run_leases
-                          WHERE host_run_leases.run_id = blocking.run_id
-                            AND host_run_leases.status = 'active'
-                      )
-                      AND EXISTS (
-                          SELECT 1 FROM provider_requests AS previous
-                          WHERE previous.run_id = blocking.run_id
-                            AND previous.state = 'failed'
-                            AND COALESCE(
-                                json_extract(
-                                    previous.replay_decision_json,
-                                    '$.provider_session_mode'
-                                ),
-                                ''
-                            ) = 'stateless'
-                            AND EXISTS (
-                                SELECT 1 FROM provider_requests AS successor
-                                JOIN provider_sessions AS session
-                                  ON session.session_id = successor.session_id
-                                JOIN workers AS owner ON owner.worker_id = session.worker_id
-                                WHERE successor.run_id = ?
-                                  AND successor.session_id = previous.session_id
-                                  AND successor.state IN ('queued','running')
-                                  AND successor.restore_hold = 0 AND previous.restore_hold = 0
-                                  AND owner.worker_id = blocking.worker_id
-                                  AND owner.trusted_run_lane = 'conversation'
-                                  AND owner.owner_id = previous.owner_id
-                                  AND owner.tenant_id = previous.tenant_id
-                                  AND successor.owner_id = owner.owner_id
-                                  AND successor.tenant_id = owner.tenant_id
-                                  AND session.owner_id = owner.owner_id
-                                  AND session.tenant_id = owner.tenant_id
-                                  AND COALESCE(json_extract(successor.replay_decision_json,
-                                      '$.provider_session_mode'), '') = 'stateless'
-                            )
-                      )
-                  )
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM provider_requests AS previous
+                    JOIN provider_requests AS successor ON successor.session_id = previous.session_id
+                    JOIN provider_sessions AS session ON session.session_id = previous.session_id
+                    JOIN workers AS owner ON owner.worker_id = session.worker_id
+                    WHERE successor.run_id = ?
+                      AND successor.state IN ('queued','running') AND successor.restore_hold = 0
+                      AND successor.owner_id = owner.owner_id AND successor.tenant_id = owner.tenant_id
+                      AND COALESCE(json_extract(successor.replay_decision_json,
+                          '$.provider_session_mode'), '') = 'stateless'
+                      AND {_RELEASED_FAILED_STATELESS_PROVIDER_RUN}
+                )
                 LIMIT 1
                 """,
                 (worker_id, row["run_id"]),
