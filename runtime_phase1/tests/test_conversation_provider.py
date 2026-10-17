@@ -7946,6 +7946,69 @@ def _project_spoken_family(state, provider, payload):
                                            {"version": 1, "audio_eligible": True})
 
 
+@pytest.mark.parametrize("prior,answer", [
+    (None, "  An indented answer."),
+    ("", "Useful answer."),
+    ("", "\n  Useful answer.\n"),
+    (" \n\t", "Useful answer."),
+    (None, "Code example:  \n    return value\n"),
+    (None, "\r\n\tIndented  \r\nNext line.\r"),
+    ("Quiet context.", "Spoken answer."),
+])
+def test_native_stream_preserves_canonical_leading_bytes(monkeypatch, prior, answer):
+    """An empty quiet part must not make a valid live answer fail at completion."""
+    from types import SimpleNamespace
+    from workers_projects_runtime.agent_builder_control import NativeConversationParts
+
+    state, provider, payload = _spoken_family_fixture()
+    parts = NativeConversationParts(None, {"version": 1, "audio_eligible": True})
+    events = [{"type": "grok.session.started", "session_id": "native-a"}]
+
+    def add(update):
+        parts.update(update)
+        events.append({"type": "grok.session.update", "session_id": "native-a", "update": update})
+
+    for text, voice in ([] if prior is None else [(prior, "skip")]) + [(answer, "eligible")]:
+        if parts.current:
+            add({"sessionUpdate": "tool_call"})
+        body = json.dumps({"type": "assistant_response", "tool_name": None,
+                           "voice": voice, "content": text})
+        add({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": body}})
+    output = json.loads(parts.finish())["content"]
+    canonical = {"model": payload.model, "choices": [{"message": {"role": "assistant", "content": output},
+        "finish_reason": "stop"}], "usage": {}, "glasshive": {"usage_source": "native"}}
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(
+        provider_activity_log=lambda *_: ("grok-build", "\n".join(map(json.dumps, events)))))
+    provider._graph_transfer_control = lambda *_: None
+    state["stage"] = 0
+
+    def sync(record):
+        state["stage"] += 1
+        if state["stage"] == 2:
+            record.update(state="completed", response_json=json.dumps(canonical))
+        return record
+
+    provider._sync = sync
+    provider.response_payload = lambda *_: canonical
+
+    class Connected:
+        async def is_disconnected(self): return False
+
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def collect():
+        return [(state["stage"], row) async for row in provider._stream_chunks(state["record"], payload, Connected())]
+
+    frames = asyncio.run(collect())
+    chunks = [(stage, json.loads(row[6:])) for stage, row in frames if row.startswith("data: {")]
+    assert not [chunk for _, chunk in chunks if chunk.get("error")]
+    content = [(stage, chunk["choices"][0]["delta"]) for stage, chunk in chunks if chunk.get("choices")]
+    assert next(stage for stage, delta in content if delta.get("content")) == 1
+    assert "".join(delta.get("content", "") for _, delta in content) == output
+    assert frames[-1][1] == "data: [DONE]\n\n"
+
+
 def test_native_spoken_family_reuses_current_reservation_without_invocation_preview():
     state, provider, payload = _spoken_family_fixture()
     assert _project_spoken_family(state, provider, payload)["text"] == "Useful public words."
@@ -8314,7 +8377,7 @@ def test_native_voice_stream_matches_terminal_public_sanitation_or_fails_without
     sources = [{'ref_id':'turn1search0','title':'Public source','url':'https://example.com/reference'}]
     raw_final = json.dumps({'type':'assistant_response','tool_name':None,'voice':'eligible',
                             'content':'Changed terminal response.' if changed else text})
-    canonical = json.loads(_redact_provider_output(_sanitize_provider_output(raw_final,sources)))['content']
+    canonical = json.loads(_redact_provider_output(raw_final, sources))['content']
     provider.response_payload = lambda *_: {'model':payload.model,'choices':[{'message':{'content':canonical},'finish_reason':'stop'}],
                                           'usage':{},'glasshive':{'usage_source':'native'}}
     provider._completion_usage = lambda *_: ({},'native')
@@ -8338,6 +8401,116 @@ def test_native_voice_stream_matches_terminal_public_sanitation_or_fails_without
     else:
         assert spoken == canonical
     assert rows[-1][1] == 'data: [DONE]\n\n'
+
+
+@pytest.mark.parametrize("private_suffix", [False, True])
+def test_plain_native_stream_uses_canonical_public_projection_without_early_references(tmp_path, monkeypatch, private_suffix):
+    from types import SimpleNamespace
+
+    provider = object.__new__(ConversationProvider)
+    payload = ChatCompletionRequest.model_validate(_payload(tmp_path, stream=True))
+    payload.metadata.audio_eligible = False
+    prefix = "  Useful ordinary words for the user. " * 8
+    raw = prefix + ("\x1b[31mPRIVATE\nSafe tail. \ue202turn1search0\ue201 "
+                    "[result](artifact_sha256:" + "a" * 64 + ")" if private_suffix else "Finished.")
+    stage = {"value": 0}
+    record = {"request_id": "request-a", "run_id": "run-a", "session_id": "session-a",
+              "state": "running", "created_at": datetime.now(UTC).isoformat()}
+    sources = [{"ref_id": "turn1search0", "title": "Public source", "url": "https://example.com/source"}]
+    provider._native_output_snapshot = lambda *_: raw
+    provider._native_citation_sources_snapshot = lambda *_: sources
+    provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=lambda *_: None),
+        render_provider_native_images=lambda _request, _run, value, **_kwargs:
+            value.replace("artifact_sha256:" + "a" * 64, "https://example.com/result"))
+    output = provider._conversation_output(record, {"run_id": "run-a"})
+    canonical = {"model": payload.model, "choices": [{"message": {"content": output}, "finish_reason": "stop"}],
+                 "usage": {}, "glasshive": {"usage_source": "native"}}
+
+    def get_record(_):
+        stage["value"] += 1
+        return {**record, **({"state": "completed", "response_json": json.dumps(canonical)}
+                            if stage["value"] == 2 else {})}
+
+    provider.store = SimpleNamespace(get_provider_request=get_record, get_run=lambda _: {"run_id": "run-a"},
+                                     list_provider_activity=lambda _: [])
+    provider._sync = lambda value: value
+    provider._graph_transfer_control = lambda *_: None
+    provider._native_effective_model = lambda *_: payload.model
+    provider._native_spoken_snapshot = lambda *_: None
+    provider._native_preview_snapshot = lambda *_: None
+    provider.response_payload = lambda *_: canonical
+
+    class Connected:
+        async def is_disconnected(self): return False
+
+    async def no_sleep(_): pass
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def collect():
+        return [(stage["value"], row) async for row in provider._stream_chunks(record, payload, Connected())]
+
+    frames = asyncio.run(collect())
+    chunks = [(when, json.loads(row[6:])) for when, row in frames if row.startswith("data: {")]
+    content = [(when, chunk["choices"][0]["delta"].get("content", ""))
+               for when, chunk in chunks if chunk.get("choices")]
+    assert any(when == 1 and text for when, text in content)
+    assert "".join(text for _, text in content) == output
+    assert not any(chunk.get("error") for _, chunk in chunks)
+    assert not any("PRIVATE" in text or "\ue202" in text or "harness corrected" in text for _, text in content)
+    if private_suffix:
+        assert not any("Public source" in text or "[result]" in text for when, text in content if when == 1)
+        assert "[Public source](https://example.com/source)" in output
+        assert "[result](https://example.com/result)" in output
+    assert frames[-1][1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize("ensure_ascii", [False, True])
+@pytest.mark.parametrize("segments", [
+    [("", "skip"), ("Answer 🙂.", "eligible")],
+    [(" \n\t", "skip"), ("Code:  \n    return value\r\n", "eligible")],
+    [("Safe words.\x1b[31mPRIVATE\nSafe tail.", "eligible"), ("Text only.", "skip")],
+    [("Source \ue202turn1search0\ue201", "skip"), ("Spoken addition.", "eligible")],
+])
+def test_native_public_projection_and_exact_utf16_ranges_share_sanitation(segments, ensure_ascii):
+    from types import SimpleNamespace
+    from workers_projects_runtime.agent_builder_control import NativeConversationParts
+    from workers_projects_runtime.conversation_provider import _redact_provider_output
+
+    delivery = {"version": 1, "audio_eligible": True}
+    parts = NativeConversationParts(None, delivery)
+    for index, (text, voice) in enumerate(segments):
+        meta = {"promptId": "exact", "turnStartMs": 1, "streamStartMs": index + 2}
+        parts.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps({
+            "type": "assistant_response", "tool_name": None, "voice": voice, "content": text})}}, meta)
+        parts.update({"sessionUpdate": "response_completed"}, meta)
+    raw = json.dumps(json.loads(parts.finish()), ensure_ascii=ensure_ascii)
+    sources = [{"ref_id": "turn1search0", "title": "Public source", "url": "https://example.com/reference"}]
+    provider = object.__new__(ConversationProvider)
+    provider._native_output_snapshot = lambda *_: raw
+    source_reads = []
+    provider._native_citation_sources_snapshot = lambda *_: source_reads.append(True) or sources
+    provider.store = SimpleNamespace(get_worker=lambda _: {"worker_id": "worker-a"})
+    events = [
+        {"type": "grok.session.started", "session_id": "native-a"},
+        {"type": "grok.result", "session_id": "native-a", "stop_reason": "end_turn",
+         "output": raw, "deliveryDispositionRanges": parts.delivery_disposition_ranges()},
+    ]
+    provider.service = SimpleNamespace(
+        runtime=SimpleNamespace(provider_activity_log=lambda *_: ("grok-build", "\n".join(map(json.dumps, events)))),
+        render_provider_native_images=lambda _request, _run, output, **_kwargs: output)
+    record, run = {"request_id": "request-a"}, {"run_id": "run-a", "worker_id": "worker-a"}
+    output = json.loads(provider._conversation_output(record, run))["content"]
+    assert output == json.loads(_redact_provider_output(raw, sources))["content"]
+    assert "PRIVATE" not in output and "\ue202" not in output
+    ranges = provider._native_delivery_ranges(record, run, output)
+    assert ranges and ranges[0]["start"] == 0
+    assert ranges[-1]["end"] == len(output.encode("utf-16-le")) // 2
+    assert all(a["end"] == b["start"] for a, b in zip(ranges, ranges[1:]))
+    assert [item["disposition"]["audio"] for item in ranges] == [
+        voice for text, voice in segments if text]
+    assert len(source_reads) == (2 if "turn1search0" in raw else 0)
+    if "turn1search0" in raw:
+        assert "[Public source](https://example.com/reference)" in output
 
 
 def test_native_terminal_public_projection_does_not_erase_duplicate_controls():

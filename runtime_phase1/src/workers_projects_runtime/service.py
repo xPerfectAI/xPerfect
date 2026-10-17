@@ -18113,6 +18113,69 @@ class WorkersProjectsService:
                 "Resume startup failed and paused ownership could not be restored"
             ) from startup_error
 
+    def release_provider_deadline_compute(self, worker_id: str, run_id: str) -> dict | None:
+        """Clean one deadline's retained generation without changing its failed history."""
+        with self._worker_compute_release_lock(worker_id):
+            worker = self.require_worker(worker_id)
+            run = self.store.get_run(run_id) or {}
+            if (
+                run.get("worker_id") != worker_id or run.get("state") != "failed"
+                or run.get("failure_class") != "provider_response_deadline_exceeded"
+                or worker.get("last_run_id") != run_id or worker.get("work_stop_id")
+                or worker.get("state") in {"paused", "stopping", "terminating", "termination_failed", "terminated"}
+                or self.store.has_active_operator_pause(worker_id)
+            ):
+                return None
+            if self.store.worker_native_compute_is_released(worker_id):
+                return worker
+            token = str(worker.get("compute_release_token") or "")
+            if token and (
+                worker.get("compute_release_kind") == "interrupt_run"
+                and worker.get("compute_release_target_run_id") == run_id
+                and worker.get("compute_release_owner") == self._executor_id
+            ):
+                claim = {"worker": worker, "token": token,
+                         "epoch": int(worker.get("compute_release_epoch") or 0)}
+            else:
+                claim = self._claim_exact_run_control(worker, run, kind="interrupt_run")
+            claimed = dict(claim["worker"])
+            token, epoch = str(claim["token"]), int(claim["epoch"])
+            runtime_worker = self._runtime_worker_for_run(claimed, run)
+            if self._requires_exact_host_control(worker):
+                # The deadline already ended its lease. Orphan cleanup owns the exact
+                # retained session, and the read-only proof includes every recorded child.
+                cleanup = getattr(self.runtime, "cleanup_orphaned_run", None)
+                confirm = getattr(self.runtime, "confirm_retained_run_stopped", None)
+                if not callable(cleanup) or not callable(confirm):
+                    raise RuntimeErrorBase("The native deadline generation cannot be proven stopped")
+                info = cleanup(runtime_worker, run_id)
+                if info is None or not self._runtime_control_info_is_confirmed(info):
+                    raise RuntimeErrorBase("The native deadline cleanup was not confirmed")
+                confirm(runtime_worker, run_id, self.store.host_run_leases_for_run(worker_id, run_id))
+            else:
+                runtime_worker = self._require_claimed_container_generation(runtime_worker)
+                try:
+                    info = self.runtime.interrupt_worker(runtime_worker, run_id=run_id)
+                except TypeError as exc:
+                    if "run_id" not in str(exc):
+                        raise
+                    info = self.runtime.interrupt_worker(runtime_worker)
+                if not self._runtime_control_info_is_confirmed(info):
+                    raise RuntimeErrorBase("The provider deadline cleanup was not confirmed")
+            if not self.store.confirm_worker_control_runtime_effect(
+                worker_id, token, epoch, kind="interrupt_run", target_run_id=run_id,
+            ):
+                raise RuntimeErrorBase("Deadline cleanup lost its exact lifecycle claim")
+            result = self.store.finalize_worker_run_control_claim(
+                worker_id, token, epoch, kind="interrupt_run", target_run_id=run_id,
+                target_expected_states=("failed",), target_state="failed", worker_state="ready",
+                runtime_fields=self._runtime_info_fields(worker_id, info, last_error=""),
+                release_compute=True,
+            )
+            if result is None:
+                raise RuntimeErrorBase("Deadline cleanup could not publish its exact release proof")
+            return dict(result["worker"])
+
     def _release_worker_compute(
         self,
         worker: dict,
@@ -18451,6 +18514,13 @@ class WorkersProjectsService:
                     worker.get("compute_release_target_started_at") or ""
                 ).strip()
                 target = self.store.get_run(target_run_id) if target_run_id else None
+                if (kind == "interrupt_run" and target
+                        and target.get("failure_class") == "provider_response_deadline_exceeded"):
+                    updated = self.release_provider_deadline_compute(worker_id, target_run_id)
+                    if updated:
+                        recovered.append({"worker_id": worker_id, "kind": kind,
+                                          "target_run_id": target_run_id, "state": updated["state"]})
+                    continue
                 if (
                     kind
                     in {"pause_run", "resume_run", "interrupt_run", "cancel_run", "steer_run"}

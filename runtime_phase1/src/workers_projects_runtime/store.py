@@ -23257,6 +23257,31 @@ class Store:
         expires_at = str(row["compute_release_expires_at"] or "").strip()
         return bool(expires_at and expires_at <= now_iso)
 
+    @staticmethod
+    def _provider_deadline_cleanup_target(conn, worker, run) -> bool:
+        """Only the exact last provider deadline may publish a cleanup release."""
+        return bool(
+            worker is not None and run is not None
+            and str(worker["last_run_id"] or "") == str(run["run_id"])
+            and str(run["worker_id"]) == str(worker["worker_id"])
+            and str(run["state"]) == "failed"
+            and str(run["failure_class"] or "") == "provider_response_deadline_exceeded"
+            and not str(worker["work_stop_id"] or "")
+            and str(worker["state"]) not in {
+                "paused", "stopping", "terminating", "termination_failed", "terminated"
+            }
+            and conn.execute(
+                """SELECT 1 FROM provider_requests AS request
+                   JOIN provider_sessions AS session ON session.session_id = request.session_id
+                   WHERE request.run_id = ? AND request.state = 'failed'
+                     AND request.fallback_state = 'deadline_exceeded' AND request.restore_hold = 0
+                     AND request.owner_id = ? AND request.tenant_id = ?
+                     AND session.worker_id = ? AND session.owner_id = request.owner_id
+                     AND session.tenant_id = request.tenant_id LIMIT 1""",
+                (run["run_id"], worker["owner_id"], worker["tenant_id"], worker["worker_id"]),
+            ).fetchone() is not None
+        )
+
     def try_claim_worker_compute_release(
         self,
         worker_id: str,
@@ -23537,6 +23562,8 @@ class Store:
                     and (
                         existing_token
                         or target_state in allowed_states
+                        or (requested_kind == "interrupt_run"
+                            and self._provider_deadline_cleanup_target(conn, worker, target))
                     )
                     and not other_executing
                     and len(active_leases) <= 1
@@ -24577,6 +24604,7 @@ class Store:
         runtime_fields: dict[str, Any],
         error_text: str = "",
         release_lease: bool = False,
+        release_compute: bool = False,
     ) -> dict[str, Any] | None:
         """Commit one exact Pause/Resume/Interrupt/Steer control generation.
 
@@ -24627,6 +24655,21 @@ class Store:
                 conn.execute("COMMIT")
                 return None
             current_target_state = str(target["state"] or "")
+            if release_compute and not (
+                clean_kind == "interrupt_run"
+                and self._provider_deadline_cleanup_target(conn, worker, target)
+                and self.worker_control_runtime_proof_matches(worker)
+                and conn.execute(
+                    "SELECT 1 FROM host_run_leases WHERE worker_id = ? AND status = 'active' LIMIT 1",
+                    (worker_id,),
+                ).fetchone() is None
+                and conn.execute(
+                    "SELECT 1 FROM runs WHERE worker_id = ? AND state IN ('running', 'settling', 'paused') LIMIT 1",
+                    (worker_id,),
+                ).fetchone() is None
+            ):
+                conn.execute("COMMIT")
+                return None
             if current_target_state in TERMINAL_RUN_STATES:
                 if str(worker["state"] or "") in {
                     "terminating",
@@ -24697,6 +24740,8 @@ class Store:
                 fields: dict[str, Any] = {
                     **clean_fields,
                     "state": "ready",
+                    **({"compute_released_at": now, "pid": None, "last_error": ""}
+                       if release_compute else {}),
                     **COMPUTE_OPERATION_CLEAR_FIELDS,
                     "updated_at": now,
                     "worker_id": worker_id,

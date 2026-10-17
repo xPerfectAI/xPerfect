@@ -3683,6 +3683,15 @@ class ProfiledWorkerRuntime:
 
 
 
+    def confirm_retained_run_stopped(
+        self, worker: dict, run_id: str, host_leases: list[dict]
+    ) -> None:
+        """Read the native adapter's exact retained-generation proof."""
+        confirm = getattr(self._runtime_for_worker(worker), "confirm_retained_run_stopped", None)
+        if not callable(confirm):
+            raise RuntimeErrorBase("This runtime cannot prove a retained native run stopped")
+        confirm(worker, run_id, host_leases)
+
     def cleanup_orphaned_run(self, worker: dict, run_id: str) -> RuntimeInfo | None:
         runtime = self._runtime_for_worker(worker)
         cleanup = getattr(runtime, "cleanup_orphaned_run", None)
