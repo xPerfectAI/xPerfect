@@ -69,3 +69,29 @@ def test_individual_model_payload_still_checks_fresh_readiness(monkeypatch):
     model.api_payload()
     model.api_payload()
     assert calls == [model.harness_profile, model.harness_profile]
+
+
+def test_explicit_catalog_readiness_checks_once_per_harness(monkeypatch):
+    calls = []
+    def check(profile):
+        calls.append(profile)
+        return {"status": "ready", "detail": profile}
+    monkeypatch.setattr(provider, "_harness_readiness", check)
+    actual = _service(monkeypatch).models_payload(check_readiness=True)
+    profiles = {model.harness_profile for model in provider.GLASSHIVE_MODELS.values()}
+    assert set(calls) == profiles
+    assert len(calls) == len(profiles)
+    for model in actual["data"]:
+        assert model["readiness"] == {"status": "ready", "detail": model["harness_profile"]}
+
+
+def test_explicit_readiness_preserves_exact_default_metadata(monkeypatch):
+    monkeypatch.setattr(provider, "_harness_readiness", lambda _profile: {"status": "authentication_required"})
+    service = _service(monkeypatch)
+    default = service.models_payload()
+    checked = service.models_payload(check_readiness=True)
+    assert all(model["readiness"]["status"] == "authentication_required" for model in checked["data"])
+    for payload in (default, checked):
+        for model in payload["data"]:
+            model.pop("readiness")
+    assert default == checked

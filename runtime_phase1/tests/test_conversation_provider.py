@@ -10436,3 +10436,27 @@ def test_empty_authority_without_declared_tail_keeps_only_structural_instruction
         payload, "Signed native bootstrap.", "Current file delivery contract.",
         "Signed native bootstrap.",
     ) == "Signed native bootstrap.\n\nCurrent file delivery contract."
+
+
+def test_models_readiness_query_is_explicit_typed_and_authenticated(tmp_path, monkeypatch):
+    from workers_projects_runtime import conversation_provider as provider
+
+    client = _client(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(provider, "_harness_readiness", lambda profile: calls.append(profile) or {"status": "ready"})
+    assert client.get("/v1/models?check_readiness=true").status_code == 401
+    assert not calls
+    default = client.get("/v1/models", headers=AUTH)
+    disabled = client.get("/v1/models?check_readiness=false", headers=AUTH)
+    assert default.status_code == disabled.status_code == 200
+    assert default.json() == disabled.json()
+    assert not calls
+    checked = client.get("/v1/models?check_readiness=true", headers=AUTH)
+    assert checked.status_code == 200
+    profiles = {item["harness_profile"] for item in checked.json()["data"]}
+    assert set(calls) == profiles
+    assert len(calls) == len(profiles)
+    assert all(item["readiness"]["status"] == "ready" for item in checked.json()["data"])
+    calls.clear()
+    assert client.get("/v1/models?check_readiness=invalid", headers=AUTH).status_code == 400
+    assert not calls

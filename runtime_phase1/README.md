@@ -130,8 +130,11 @@ bootstrap instructions, worker metadata, source control, or logs.
 xPerfect exposes an authenticated OpenAI-compatible conversation surface that is independently
 callable by LibreChat or any ordinary Chat Completions client:
 
-- `GET /v1/models` publishes exact model IDs, readiness, effort/context metadata, native
-  capabilities, and whether the harness exposes incremental assistant text
+- `GET /v1/models` publishes exact model IDs, effort/context metadata, native capabilities,
+  and whether the harness exposes incremental assistant text without starting a harness or probing
+  sign-in; readiness is `not_checked`. Explicit connection checks use
+  `GET /v1/models?check_readiness=true` to check each harness once. Both modes require the same
+  authentication and owner scope; actual admission retains its own checks.
 - `POST /v1/chat/completions` accepts standard bearer authentication plus `model`, `messages`, and
   optional streaming; common tuning fields are tolerated for portability while unsupported
   client-orchestrated tools and response shapes fail visibly
