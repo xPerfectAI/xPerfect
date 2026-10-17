@@ -9530,40 +9530,6 @@ class Store:
             }:
                 conn.execute("COMMIT")
                 return None
-            if conn.execute(
-                """
-                SELECT 1 FROM runs AS blocking
-                WHERE blocking.worker_id = ? AND blocking.state IN (
-                    'claimed', 'admitted', 'running', 'settling', 'paused', 'needs_input'
-                  )
-                  AND NOT (
-                      blocking.state = 'needs_input'
-                      AND blocking.failure_class =
-                          'conversation_capability_grant_required'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM host_run_leases
-                          WHERE host_run_leases.run_id = blocking.run_id
-                            AND host_run_leases.status = 'active'
-                      )
-                      AND EXISTS (
-                          SELECT 1 FROM provider_requests
-                          WHERE provider_requests.run_id = blocking.run_id
-                            AND provider_requests.state = 'failed'
-                            AND COALESCE(
-                                json_extract(
-                                    provider_requests.replay_decision_json,
-                                    '$.provider_session_mode'
-                                ),
-                                ''
-                            ) = 'stateless'
-                      )
-                  )
-                LIMIT 1
-                """,
-                (worker_id,),
-            ).fetchone() is not None:
-                conn.execute("COMMIT")
-                return None
             row = conn.execute(
                 """
                 SELECT * FROM runs
@@ -9576,6 +9542,58 @@ class Store:
                 (worker_id, now_iso),
             ).fetchone()
             if row is None:
+                conn.execute("COMMIT")
+                return None
+            if conn.execute(
+                """
+                SELECT 1 FROM runs AS blocking
+                WHERE blocking.worker_id = ? AND blocking.state IN (
+                    'claimed', 'admitted', 'running', 'settling', 'paused', 'needs_input'
+                  )
+                  AND NOT (
+                      blocking.state = 'needs_input'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM host_run_leases
+                          WHERE host_run_leases.run_id = blocking.run_id
+                            AND host_run_leases.status = 'active'
+                      )
+                      AND EXISTS (
+                          SELECT 1 FROM provider_requests AS previous
+                          WHERE previous.run_id = blocking.run_id
+                            AND previous.state = 'failed'
+                            AND COALESCE(
+                                json_extract(
+                                    previous.replay_decision_json,
+                                    '$.provider_session_mode'
+                                ),
+                                ''
+                            ) = 'stateless'
+                            AND EXISTS (
+                                SELECT 1 FROM provider_requests AS successor
+                                JOIN provider_sessions AS session
+                                  ON session.session_id = successor.session_id
+                                JOIN workers AS owner ON owner.worker_id = session.worker_id
+                                WHERE successor.run_id = ?
+                                  AND successor.session_id = previous.session_id
+                                  AND successor.state IN ('queued','running')
+                                  AND successor.restore_hold = 0 AND previous.restore_hold = 0
+                                  AND owner.worker_id = blocking.worker_id
+                                  AND owner.trusted_run_lane = 'conversation'
+                                  AND owner.owner_id = previous.owner_id
+                                  AND owner.tenant_id = previous.tenant_id
+                                  AND successor.owner_id = owner.owner_id
+                                  AND successor.tenant_id = owner.tenant_id
+                                  AND session.owner_id = owner.owner_id
+                                  AND session.tenant_id = owner.tenant_id
+                                  AND COALESCE(json_extract(successor.replay_decision_json,
+                                      '$.provider_session_mode'), '') = 'stateless'
+                            )
+                      )
+                  )
+                LIMIT 1
+                """,
+                (worker_id, row["run_id"]),
+            ).fetchone() is not None:
                 conn.execute("COMMIT")
                 return None
             claimed_at = utc_now()

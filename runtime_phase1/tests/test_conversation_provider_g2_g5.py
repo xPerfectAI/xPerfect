@@ -69,6 +69,304 @@ def test_sync_starts_one_context_recovery(failed_request, monkeypatch):
     assert reached == [True]
 
 
+def _released_input_successor(failed_request):
+    store, service, provider, previous = failed_request
+    old_run = store.get_run(previous["run_id"])
+    worker_id = old_run["worker_id"]
+    store.update_run(old_run["run_id"], state="needs_input",
+                     failure_class="provider_progress_stalled", failure_structured=1)
+    store.update_provider_request(previous["request_id"], state="failed",
+                                  replay_decision_json=json.dumps({"provider_session_mode": "stateless"}))
+    store.update_worker(worker_id, state="needs_input", trusted_run_lane="conversation",
+                        compute_released_at=datetime.now(timezone.utc).isoformat())
+    request, _ = store.create_provider_request(
+        tenant_id="local", owner_id="owner-a", session_id=previous["session_id"],
+        idempotency_key="synthetic-successor", message_id="successor-message",
+        stream_id="successor-stream", requested_history_count=1,
+        admitted_instruction="A new, separately accepted request",
+        replay_decision={"provider_session_mode": "stateless"},
+        response_timeout_s=120,
+        response_deadline_at=(datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+    )
+    return store, service, provider, previous, request, worker_id
+
+
+def test_fresh_request_reactivates_released_input_worker_without_replaying_old_run(
+    failed_request,
+):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    old_run = dict(store.get_run(previous["run_id"]))
+    assigned = provider._assign_pre_run_request(request, worker_id=worker_id, run_local_bundle={})
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not store.get_run(assigned["run_id"])["started_at"]:
+        time.sleep(0.01)
+    successor = store.get_run(assigned["run_id"])
+    assert successor["started_at"], {
+        "worker": store.get_worker(worker_id)["state"],
+        "run": successor["state"], "failure": successor["failure_class"],
+    }
+    assert successor["instruction"] == request["admitted_instruction"]
+    assert assigned["run_id"] != previous["run_id"]
+    assert store.get_run(previous["run_id"]) == old_run
+
+
+@pytest.mark.parametrize("guard", [
+    "expired", "cancelled", "restore_hold", "paused", "closed", "operator_pause",
+    "work_stop", "release_pending", "release_unknown", "start_unconfirmed",
+])
+def test_released_input_successor_keeps_start_fences(failed_request, monkeypatch, guard):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    if guard == "expired":
+        store.update_provider_request(request["request_id"], response_deadline_at=(
+            datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+    elif guard == "cancelled":
+        store.update_provider_request(request["request_id"], state="cancelled")
+    elif guard == "restore_hold":
+        store.update_provider_request(request["request_id"], restore_hold=1)
+    elif guard in {"paused", "closed"}:
+        store.update_worker(worker_id, state="paused" if guard == "paused" else "terminated")
+    elif guard == "operator_pause":
+        monkeypatch.setattr(store, "has_active_operator_pause", lambda key: key == worker_id)
+    elif guard == "work_stop":
+        store.update_worker(worker_id, work_stop_id="synthetic-stop")
+    elif guard == "release_pending":
+        store.update_worker(worker_id, compute_release_token="synthetic-release")
+    elif guard == "release_unknown":
+        store.update_worker(worker_id, compute_released_at=None)
+    else:
+        monkeypatch.setattr(store, "has_unconfirmed_host_run_start", lambda key: key == worker_id)
+    activations = []
+    activate = service.activate_prepared_conversation_worker
+    monkeypatch.setattr(service, "activate_prepared_conversation_worker",
+                        lambda key: activations.append(key) or activate(key))
+    provider._start_assigned_run_before_deadline(
+        request["request_id"], run_id=run["run_id"], worker_id=worker_id,
+    )
+    assert activations == []
+    assert not store.get_run(run["run_id"])["started_at"]
+    assert store.get_run(previous["run_id"])["state"] == "needs_input"
+
+
+@pytest.mark.parametrize("blocker", [
+    "mission", "persistent", "prior_running", "prior_cancelled", "active_lease",
+    "foreign_session", "foreign_owner", "foreign_tenant", "unbound_successor", "approval",
+    "successor_persistent", "prior_restore_hold", "successor_restore_hold",
+])
+def test_stateless_successor_preserves_other_run_admission_fences(failed_request, blocker):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    worker = store.get_worker(worker_id)
+    old_run_id = previous["run_id"]
+    successor, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=worker["project_id"], instruction=request["admitted_instruction"],
+    )
+    store.update_worker(worker_id, state="ready")
+    if blocker == "mission":
+        store.update_worker(worker_id, trusted_run_lane="mission")
+    elif blocker == "persistent":
+        store.update_provider_request(previous["request_id"], replay_decision_json="{}")
+    elif blocker == "prior_running":
+        store.update_provider_request(previous["request_id"], state="running")
+    elif blocker == "prior_cancelled":
+        store.update_provider_request(previous["request_id"], state="cancelled")
+    elif blocker == "active_lease":
+        store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=worker_id, run_id=old_run_id, executor_id="synthetic-active-owner",
+            conversation_limit=2, mission_limit=3, account_mission_limit=4, tenant_mission_limit=12,
+            lease_ttl_s=300,
+        )
+    elif blocker == "foreign_session":
+        other = store.upsert_provider_session(
+            tenant_id="local", owner_id="owner-a", conversation_id="different-conversation",
+            agent_id="agent-a", model_id="codex-cli:gpt-5.6-sol", project_id=worker["project_id"],
+            worker_id=worker_id, workspace_dir="/tmp/synthetic", access_mode="workspace",
+        )
+        store.update_provider_request(request["request_id"], session_id=other["session_id"])
+    elif blocker == "foreign_owner":
+        store.update_provider_request(request["request_id"], owner_id="foreign-owner")
+    elif blocker == "foreign_tenant":
+        store.update_provider_request(request["request_id"], tenant_id="foreign-tenant")
+    elif blocker == "unbound_successor":
+        store.update_provider_request(request["request_id"], run_id=None)
+    elif blocker == "successor_persistent":
+        store.update_provider_request(request["request_id"], replay_decision_json="{}")
+    elif blocker in {"prior_restore_hold", "successor_restore_hold"}:
+        target = previous if blocker == "prior_restore_hold" else request
+        store.update_provider_request(target["request_id"], restore_hold=1)
+    else:
+        store.update_run(old_run_id, state="paused")
+    old_run = dict(store.get_run(old_run_id))
+    assert store.claim_next_queued_run(worker_id) is None
+    assert store.get_run(successor["run_id"])["state"] == "queued"
+    assert store.get_run(old_run_id) == old_run
+
+
+@pytest.mark.parametrize("during_readiness", ["expired", "cancelled"])
+def test_released_input_successor_rechecks_request_after_readiness(
+    failed_request, monkeypatch, during_readiness,
+):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    activate = service.activate_prepared_conversation_worker
+    def prepare_then_end(key):
+        result = activate(key)
+        if during_readiness == "expired":
+            store.update_provider_request(request["request_id"], response_deadline_at=(
+                datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        else:
+            store.update_provider_request(request["request_id"], state="cancelled")
+        return result
+    monkeypatch.setattr(service, "activate_prepared_conversation_worker", prepare_then_end)
+    result, started = provider._start_assigned_run_before_deadline(
+        request["request_id"], run_id=run["run_id"], worker_id=worker_id,
+    )
+    assert not started
+    assert result["state"] == ("failed" if during_readiness == "expired" else "cancelled")
+    assert not store.get_run(run["run_id"])["started_at"]
+
+
+def test_released_input_successor_rejects_foreign_provider_session(failed_request):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    store.update_worker(worker_id, owner_id="foreign-owner")
+    from workers_projects_runtime.service import ParallelExecutionIsolationError
+    with pytest.raises(ParallelExecutionIsolationError):
+        provider._start_assigned_run_before_deadline(
+            request["request_id"], run_id=run["run_id"], worker_id=worker_id,
+        )
+    assert not store.get_run(run["run_id"])["started_at"]
+
+
+@pytest.mark.parametrize("control", ["pause", "stop"])
+def test_conversation_readiness_serializes_actual_lifecycle_control(
+    failed_request, monkeypatch, control,
+):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    entered, release, requested, finished = Event(), Event(), Event(), Event()
+    prepare = service.runtime.ensure_worker_ready
+    def blocked_readiness(worker):
+        entered.set()
+        assert release.wait(2)
+        return prepare(worker)
+    monkeypatch.setattr(service.runtime, "ensure_worker_ready", blocked_readiness)
+    def apply_control():
+        requested.set()
+        try:
+            if control == "pause":
+                service.pause_worker(worker_id, run_id=run["run_id"])
+            else:
+                service.stop_run(worker_id, run["run_id"])
+            return dict(store.get_worker(worker_id))
+        finally:
+            finished.set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        activation = pool.submit(service.activate_prepared_conversation_worker, worker_id)
+        assert entered.wait(1)
+        change = pool.submit(apply_control)
+        assert requested.wait(1)
+        try:
+            finished_during_readiness = finished.wait(0.1)
+        finally:
+            release.set()
+        activation.result(2)
+        controlled = change.result(2)
+    assert not finished_during_readiness
+    current = store.get_worker(worker_id)
+    for field in ("state", "pid", "compute_released_at", "work_stop_id", "work_stop_settled_at"):
+        assert current[field] == controlled[field]
+    assert store.get_run(run["run_id"])["state"] == ("paused" if control == "pause" else "cancelled")
+
+
+def test_conversation_readiness_does_not_hold_unrelated_provider_cancellation(
+    failed_request, monkeypatch,
+):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    other_worker = store.create_worker(
+        project_id=run["project_id"], owner_id="owner-a", name="Independent conversation",
+        role="conversation-agent", profile="codex-cli", backend="", runtime="codex-cli",
+        model="gpt-5.6-sol",
+    )
+    store.update_worker_state(other_worker["worker_id"], "paused")
+    session = store.upsert_provider_session(
+        tenant_id="local", owner_id="owner-a", conversation_id="independent",
+        agent_id="agent-a", model_id="codex-cli:gpt-5.6-sol", project_id=run["project_id"],
+        worker_id=other_worker["worker_id"], workspace_dir="/tmp/synthetic", access_mode="workspace",
+    )
+    other_request, _ = store.create_provider_request(
+        tenant_id="local", owner_id="owner-a", session_id=session["session_id"],
+        idempotency_key="independent-request", message_id="independent-message",
+        stream_id="independent-stream", requested_history_count=1, admitted_instruction="Independent goal",
+    )
+    other_run, _ = store.create_and_attach_provider_run(
+        request_id=other_request["request_id"], worker_id=other_worker["worker_id"],
+        project_id=run["project_id"], instruction=other_request["admitted_instruction"],
+    )
+    entered, release = Event(), Event()
+    prepare = service.runtime.ensure_worker_ready
+    def blocked_readiness(worker):
+        if worker["worker_id"] == worker_id:
+            entered.set()
+            assert release.wait(2)
+        return prepare(worker)
+    monkeypatch.setattr(service.runtime, "ensure_worker_ready", blocked_readiness)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        activation = pool.submit(provider._start_assigned_run_before_deadline,
+                                 request["request_id"], run_id=run["run_id"], worker_id=worker_id)
+        assert entered.wait(1)
+        cancellation = pool.submit(provider.cancel, other_request["request_id"])
+        try:
+            cancelled = cancellation.result(1)
+            assert cancelled["state"] == "cancelled"
+            assert store.get_run(other_run["run_id"])["state"] == "cancelled"
+            assert not store.get_run(other_run["run_id"])["started_at"]
+        finally:
+            release.set()
+        activation.result(2)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "unchanged"])
+def test_unsuccessful_conversation_activation_does_not_dispatch(
+    failed_request, monkeypatch, outcome,
+):
+    store, service, provider, previous, request, worker_id = _released_input_successor(failed_request)
+    run, _ = store.create_and_attach_provider_run(
+        request_id=request["request_id"], worker_id=worker_id,
+        project_id=store.get_worker(worker_id)["project_id"], instruction=request["admitted_instruction"],
+    )
+    if outcome == "failed":
+        def fail_readiness(worker):
+            raise RuntimeError("Synthetic readiness failure")
+        monkeypatch.setattr(service.runtime, "ensure_worker_ready", fail_readiness)
+    else:
+        monkeypatch.setattr(service, "activate_prepared_conversation_worker", store.get_worker)
+    monkeypatch.setattr(service, "start_assigned_run", lambda key: pytest.fail("activation did not become ready"))
+    result, started = provider._start_assigned_run_before_deadline(
+        request["request_id"], run_id=run["run_id"], worker_id=worker_id,
+    )
+    assert not started
+    assert result["run_id"] == run["run_id"]
+    assert not store.get_run(run["run_id"])["started_at"]
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("failure", [None, "copy", "reconcile"])
 @pytest.mark.parametrize("sink_throws", [False, True])
@@ -77,7 +375,7 @@ def test_request_preparation_timing_preserves_admission_and_failure(
 ):
     store, service, provider, previous = failed_request
     monkeypatch.setenv("VIVENTIUM_VOICE_LOG_LATENCY", "true" if enabled else "false")
-    caplog.set_level(logging.INFO, logger="workers_projects_runtime.native_model_selection")
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     request, _ = store.create_provider_request(
         tenant_id="local", owner_id="owner-a", session_id=previous["session_id"],
         idempotency_key="synthetic-preparation", message_id="synthetic-message",

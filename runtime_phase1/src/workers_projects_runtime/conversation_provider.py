@@ -5018,6 +5018,7 @@ class ConversationProvider:
                 if (
                     str(current.get("run_id") or "") != run_id
                     or str(current.get("state") or "") not in {"queued", "running"}
+                    or bool(current.get("restore_hold"))
                     or not run
                     or str(run.get("worker_id") or "") != worker_id
                     or str(run.get("state") or "") in TERMINAL_RUN_STATES
@@ -5025,15 +5026,49 @@ class ConversationProvider:
                     return current, False
                 expired = self._deadline_reached(current)
                 if not expired:
-                    self.service.start_assigned_run(worker_id)
-                    return current, True
+                    worker = self.store.get_worker(worker_id) or {}
+                    if worker.get("state") != "needs_input":
+                        self.service.start_assigned_run(worker_id)
+                        return current, True
+                    if (
+                        not worker.get("compute_released_at")
+                        or worker.get("compute_release_token")
+                        or worker.get("work_stop_id")
+                        or self.store.has_active_operator_pause(worker_id)
+                        or self.store.has_unconfirmed_host_run_start(worker_id)
+                    ):
+                        return current, False
             finally:
                 if timing_acquired is not None:
                     native_timing_event("start_lock_pre_release", requestHash=native_timing_hash("request", request_id),
                                         runHash=native_timing_hash("run", run_id),
                                         heldUntilPreReleaseMs=(time.monotonic_ns() - timing_acquired) / 1_000_000)
-        expired_request, _ = self._expire_response_deadline(current)
-        return expired_request, False
+        if expired:
+            return self._expire_response_deadline(current)[0], False
+
+        # Readiness owns its existing worker lifecycle lock, never the provider-wide
+        # admission lock. Unrelated starts, Stop and deadline arbitration remain free.
+        activated = self.service.activate_prepared_conversation_worker(worker_id)
+        with self._start_lock:
+            current = self.store.get_provider_request(request_id) or current
+            run = self.store.get_run(run_id)
+            worker = self.store.get_worker(worker_id) or {}
+            if (
+                str(current.get("run_id") or "") != run_id
+                or str(current.get("state") or "") not in {"queued", "running"}
+                or bool(current.get("restore_hold"))
+                or not run
+                or str(run.get("worker_id") or "") != worker_id
+                or str(run.get("state") or "") in TERMINAL_RUN_STATES
+            ):
+                return current, False
+            expired = self._deadline_reached(current)
+            if not expired:
+                if activated.get("state") != "ready" or worker.get("state") not in {"ready", "running"}:
+                    return current, False
+                self.service.start_assigned_run(worker_id)
+                return current, True
+        return self._expire_response_deadline(current)[0], False
 
     @staticmethod
     def _pre_run_admission_retryable(exc: Exception) -> bool:
@@ -5250,9 +5285,6 @@ class ConversationProvider:
                     ):
                         self._remember_request_local_bundle(str(duplicate["request_id"]), run_id, bundle)
                         self.service.reconcile_restart_authority_backlog_once()
-                        current_worker = self.store.get_worker(str(run["worker_id"])) or {}
-                        if current_worker.get("state") == "needs_input":
-                            self.service.activate_prepared_conversation_worker(str(run["worker_id"]))
                         self._start_assigned_run_before_deadline(
                             str(duplicate["request_id"]), run_id=run_id,
                             worker_id=str(run["worker_id"]),

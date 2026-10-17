@@ -9361,25 +9361,35 @@ class WorkersProjectsService:
         return root.resolve()
 
     def activate_prepared_conversation_worker(self, worker_id: str) -> dict:
-        worker = self.require_worker(worker_id)
-        session = self.store.get_provider_session_by_worker(worker_id)
-        if (
-            not session
-            or self._trusted_run_lane(worker) != "conversation"
-            or str(session.get("tenant_id") or "")
-            != str(worker.get("tenant_id") or "")
-            or str(session.get("owner_id") or "")
-            != str(worker.get("owner_id") or "")
-        ):
-            raise ParallelExecutionIsolationError(
-                "The conversation worker does not have a durable provider-session binding."
+        with self._worker_compute_release_lock(worker_id):
+            worker = self.require_worker(worker_id)
+            session = self.store.get_provider_session_by_worker(worker_id)
+            if (
+                not session
+                or self._trusted_run_lane(worker) != "conversation"
+                or str(session.get("tenant_id") or "")
+                != str(worker.get("tenant_id") or "")
+                or str(session.get("owner_id") or "")
+                != str(worker.get("owner_id") or "")
+            ):
+                raise ParallelExecutionIsolationError(
+                    "The conversation worker does not have a durable provider-session binding."
+                )
+            if (
+                worker.get("compute_release_token")
+                or worker.get("work_stop_id")
+                or worker.get("state") == "stopping"
+                or self.store.has_active_operator_pause(worker_id)
+                or self.store.has_unconfirmed_host_run_start(worker_id)
+                or (worker.get("state") == "needs_input" and not worker.get("compute_released_at"))
+            ):
+                return worker
+            self._ensure_execution_allowed(worker)
+            return self._start_worker_again(
+                worker,
+                "worker.ready",
+                "Conversation worker ready",
             )
-        self._ensure_execution_allowed(worker)
-        return self._start_worker_again(
-            worker,
-            "worker.ready",
-            "Conversation worker ready",
-        )
 
     def find_or_create_worker(
         self,
