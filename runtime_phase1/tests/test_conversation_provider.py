@@ -2321,6 +2321,55 @@ def test_native_current_attachment_uses_owner_file_bytes(tmp_path, monkeypatch, 
         assert materialized.read_bytes() == original.read_bytes()
 
 
+def test_native_attachment_context_identifies_actual_supplied_representations(tmp_path, monkeypatch):
+    uploads = tmp_path / "uploads"
+    owner_dir = uploads / "owner-a"
+    owner_dir.mkdir(parents=True)
+    originals = [("image-current", "picture.png", "image/png"),
+                 ("audio-current", "request.m4a", "audio/mp4")]
+    records = []
+    for file_id, filename, mime in originals:
+        data = b"synthetic-original-bytes-" + file_id.encode()
+        (owner_dir / f"{file_id}__{filename}").write_bytes(data)
+        records.append({"file_id": file_id, "filename": filename, "source": "local",
+                        "type": mime, "bytes": len(data)})
+    records.extend([
+        {"file_id": "declared-text", "filename": "note.txt", "source": "text",
+         "text": "Exact supplied extraction.\n"},
+        {"file_id": "text-fallback", "filename": "fallback.txt", "source": "local",
+         "text": "Text without original bytes.\n"},
+        {"file_id": "missing-original", "filename": "report.pdf", "source": "local",
+         "text": "Extracted text cannot replace this original."},
+        {"file_id": "stored-extraction", "filename": "stored.txt", "source": "text",
+         "text": "Stored extracted text.\n"},
+    ])
+    (owner_dir / "stored-extraction__stored.txt").write_text("Different original bytes.\n")
+    monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(uploads))
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(uploads))
+    payload = ChatCompletionRequest.model_validate(_payload(tmp_path))
+    payload.metadata.bootstrap_bundle = {"viventium_upload_context": {"selected_uploads": records}}
+    projected = ConversationProvider._projected_request_uploads(payload)
+    context = ConversationProvider._request_attachment_context(payload)
+    ledger = json.loads(context.splitlines()[1])["selected_uploads"]
+    assert [item["file_id"] for item in ledger] == [item["file_id"] for item in records]
+    assert [item["inputKind"] for item in ledger] == [
+        "original", "original", "extracted_text", "extracted_text", "metadata_only", "extracted_text",
+    ]
+    assert "Read each original attachment" not in context
+    assert "Extracted text does not establish access to original bytes" in context
+    assert "Metadata-only entries report unavailable input" in context
+    for index, item in enumerate(projected, 1):
+        assert f"{index}. {item['path']}" in context
+    for item in projected[:2]:
+        assert Path(item["source_path"]).read_bytes().startswith(b"synthetic-original-bytes-")
+    assert projected[2]["content"] == records[2]["text"]
+    assert projected[3]["content"] == records[3]["text"]
+    assert projected[4]["upload_blocker"]
+    assert json.loads(projected[4]["content"])["source_status"] == "original_bytes_unavailable"
+    assert "source_path" not in projected[5]
+    assert projected[5]["content"] == "Stored extracted text.\n"
+
+
 @pytest.mark.parametrize(
     ("model", "profile_instruction_key"),
     [

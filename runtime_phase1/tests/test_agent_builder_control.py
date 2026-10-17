@@ -812,7 +812,7 @@ def test_native_continuation_changes_guidance_without_changing_authority(with_de
     assert "necessary questions, corrections, completed results and artifacts" in continued["description"]
     assert "unless the user requests repetition or a full replacement" in continued["description"]
     assert "not proof that text, preview or speech reached the user" in continued["description"]
-    assert "This completes the current response; it neither executes a planned native call nor guarantees another response." in continued["description"]
+    assert "Returning it completes the current response; it neither executes a planned native call nor guarantees another response." in continued["description"]
     assert "Native function and MCP calls need no accompanying assistant_response." in continued["description"]
     assert "Use silence only for a genuinely silent outcome" in continued["description"]
     assert "not a substitute for answering an unanswered user request" in continued["description"]
@@ -1044,3 +1044,26 @@ def test_all_host_conversation_profiles_reuse_surface_scoped_final_protocol(tmp_
     schema = runtime._conversation_output_schema(worker)
     assert ('Where messaging audio is optional' in schema['description']) is (surface == 'telegram')
     assert schema['properties']['voice']['enum'] == ['eligible', 'skip']
+
+
+@pytest.mark.parametrize("with_delivery", [False, True])
+def test_continuation_response_completion_applies_before_the_silence_rule(with_delivery):
+    from workers_projects_runtime.agent_builder_control import minimal_conversation_output_schema
+
+    graph = graph_transfer_control(_payload().tools)
+    delivery = messaging_delivery_control(audio_eligible=True) if with_delivery else None
+    declared = conversation_output_schema(graph, delivery)
+    continued = conversation_output_schema(graph, delivery, same_turn_continuation=True)
+    description = continued["description"]
+    truth = ("Returning it completes the current response; it neither executes a planned "
+             "native call nor guarantees another response.")
+    silence = "When no additional public content is useful"
+    assert description.count(truth) == 1
+    assert description.index(truth) < description.index("The native harness may admit more input")
+    assert truth not in description[description.index(silence):]
+    assert "Returning type=assistant_response ends your work for this turn." in declared["description"]
+    assert {key: value for key, value in declared.items() if key != "description"} == {
+        key: value for key, value in continued.items() if key != "description"
+    }
+    if with_delivery:
+        assert minimal_conversation_output_schema(declared) == minimal_conversation_output_schema(continued)

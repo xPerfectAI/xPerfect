@@ -61,6 +61,10 @@ _UPLOAD_LEDGER_PUBLIC_KEYS = (
     "media_group_index",
 )
 
+_TEXT_UPLOAD_EXTENSIONS = (
+    ".txt", ".md", ".csv", ".json", ".jsonl", ".tsv", ".yaml", ".yml", ".xml", ".html", ".htm", ".log",
+)
+
 
 def _safe_upload_filename(value: object, fallback: str) -> str:
     name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].strip() or fallback
@@ -438,7 +442,6 @@ def project_upload_files(
             file_obj.get("filename") or file_obj.get("name") or source_ref or file_id,
             f"upload-{len(result) + 1}",
         )
-        path = _dedupe_path(filename, used_paths)
         metadata: dict[str, Any] = {"filename": filename}
         safe_file_id = _safe_virtual_ref(file_id)
         if safe_file_id:
@@ -446,6 +449,12 @@ def project_upload_files(
         safe_source = _safe_source_type(file_obj.get("source"))
         if safe_source:
             metadata["source"] = safe_source
+        declared_text = safe_source == "text"
+        workspace_name = (
+            f"{filename}.txt" if declared_text and not filename.lower().endswith(_TEXT_UPLOAD_EXTENSIONS)
+            else filename
+        )
+        path = _dedupe_path(workspace_name, used_paths)
         safe_type = _safe_declared_type(file_obj.get("type"))
         if safe_type:
             metadata["type"] = safe_type
@@ -453,12 +462,19 @@ def project_upload_files(
             value = file_obj.get(key)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 metadata[key] = value
-        source = _trusted_virtual_source(
+        text = file_obj.get("text")
+        if declared_text and isinstance(text, str):
+            result.append({
+                "scope": "workspace", "path": path, "content": text,
+                **({"allow_empty": True} if text == "" else {}), **metadata,
+            })
+            continue
+        source = "" if declared_text else _trusted_virtual_source(
             source_ref,
             owner_id=owner_id,
             storage_owner_id=storage_owner_id,
         )
-        if not source and file_id:
+        if not source and file_id and not declared_text:
             if owner_sources is None:
                 owner_sources = _owner_sources_for_file_ids(
                     (str(record.get("file_id") or record.get("id") or "") for record in records),
@@ -478,20 +494,19 @@ def project_upload_files(
                 }
             )
             continue
-        text = file_obj.get("text")
-        if isinstance(text, str) and text.strip() and filename.lower().endswith(
-            (".txt", ".md", ".csv", ".json", ".jsonl", ".tsv", ".yaml", ".yml", ".xml", ".html", ".htm", ".log")
-        ):
+        if isinstance(text, str) and text.strip() and filename.lower().endswith(_TEXT_UPLOAD_EXTENSIONS):
             result.append({"scope": "workspace", "path": path, "content": text, **metadata})
             continue
         if metadata:
             blocker = (
+                "Declared extracted text was not supplied. Original file bytes are not a substitute for this input."
+            ) if declared_text else (
                 "Original uploaded file bytes were not safely available to GlassHive. "
                 "Do not substitute extracted text for this file unless the user explicitly asked for text extraction."
             )
             manifest = {
                 **metadata,
-                "source_status": "original_bytes_unavailable",
+                "source_status": "extracted_text_unavailable" if declared_text else "original_bytes_unavailable",
                 "blocker": blocker,
                 "extracted_text_available": bool(isinstance(text, str) and text.strip()),
             }
