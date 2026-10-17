@@ -812,6 +812,9 @@ def test_native_continuation_changes_guidance_without_changing_authority(with_de
     assert "necessary questions, corrections, completed results and artifacts" in continued["description"]
     assert "unless the user requests repetition or a full replacement" in continued["description"]
     assert "not proof that text, preview or speech reached the user" in continued["description"]
+    assert "This completes the current response; it neither executes a planned native call nor guarantees another response." in continued["description"]
+    assert "Native function and MCP calls need no accompanying assistant_response." in continued["description"]
+    assert "Use silence only for a genuinely silent outcome" in continued["description"]
     assert "not a substitute for answering an unanswered user request" in continued["description"]
     empty = {"type": "assistant_response", "content": "", "tool_name": None}
     if with_delivery:

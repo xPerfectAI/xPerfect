@@ -170,6 +170,15 @@ When a host lane is released, the existing wake-up selects its oldest queued `ho
 ordinary admission path still rechecks lane, account, tenant, resource and lifecycle limits before
 reserving a slot. Other lanes and provider rate-limit backoff remain unchanged.
 
+The authenticated OpenAI-compatible `/v1/models` route publishes model IDs, effort choices,
+capabilities and native replay-budget declarations without starting a harness or probing sign-in.
+Its default readiness status is `not_checked`; metadata is not evidence of available credentials or a
+successful model request. Explicit model readiness consumers opt in with
+`GET /v1/models?check_readiness=true`, which checks each harness once under the same authentication
+and owner scope. Connections retain their explicit Verify/Connect operations, and actual
+admission and the selected native session retain their account, authentication and capacity checks.
+This keeps a slow unrelated harness probe out of every catalog consumer's critical path.
+
 Successful native Grok model catalogs may be reused for at most 30 seconds, keyed to the installed
 binary and current environment, authentication and configuration file identities. Changed identity
 refreshes immediately; empty or failed lookups are not cached. This affects catalog discovery only,
@@ -777,6 +786,8 @@ take precedence over the incremental-only guidance.
 Internal setup and tool discovery stay silent unless the user asks about them or a real blocker
 requires their decision; useful task progress and outcomes remain public.
 It may use the existing empty-content/voice-skip envelope when no extra public content is useful;
+that envelope completes the current response without executing a planned native call or
+guaranteeing another response. Native function and MCP calls need no accompanying envelope;
 silence cannot replace an unanswered user request. If a later native response is silent,
 the existing ordered-parts owner retains earlier validated audio-eligible narration and its
 eligibility for final-only channels. Every nonempty validated text-only predecessor also stays in

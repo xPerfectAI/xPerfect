@@ -3811,18 +3811,28 @@ class ConversationProvider:
             return None
         return _configured_grok_conversation_model(selected)
 
-    def models_payload(self, *, tenant_id: str = "local", owner_id: str = "") -> dict[str, Any]:
+    def models_payload(
+        self, *, tenant_id: str = "local", owner_id: str = "", check_readiness: bool = False,
+    ) -> dict[str, Any]:
         configured_grok = self._selected_grok_model(tenant_id, owner_id)
         models = list(GLASSHIVE_MODELS.values())
         if configured_grok is not None and configured_grok.id not in GLASSHIVE_MODELS:
             models.append(configured_grok)
-        # Readiness belongs to a harness; check it once per catalog request.
-        readiness = {
-            profile: _harness_readiness(profile)
-            for profile in dict.fromkeys(model.harness_profile for model in models)
+        # Discovery describes model contracts, not live account authentication. Starting every
+        # native harness here delays unrelated metadata consumers and does not prove that the
+        # account selected for a later request can run. Connections and admission own that check.
+        readiness_by_profile = {}
+        if check_readiness:
+            for model in models:
+                if model.harness_profile not in readiness_by_profile:
+                    readiness_by_profile[model.harness_profile] = _harness_readiness(model.harness_profile)
+        unchecked = {
+            "status": "not_checked",
+            "detail": "Catalog metadata only; account and runtime readiness are checked separately.",
         }
         return {"object": "list", "data": [
-            model.api_payload(readiness=readiness[model.harness_profile]) for model in models
+            model.api_payload(readiness=readiness_by_profile.get(model.harness_profile, unchecked))
+            for model in models
         ]}
 
     def _model(self, model_id: str, *, tenant_id: str = "local", owner_id: str = "",
@@ -9321,9 +9331,12 @@ def install_conversation_provider_routes(
         return owner_id
 
     @app.get("/v1/models")
-    def glasshive_models(request: Request) -> dict[str, Any]:
+    def glasshive_models(request: Request, check_readiness: bool = False) -> dict[str, Any]:
         auth = require_provider_auth(request)
-        return provider.models_payload(tenant_id=auth.tenant_id, owner_id=owner_for_request(request, auth))
+        return provider.models_payload(
+            tenant_id=auth.tenant_id, owner_id=owner_for_request(request, auth),
+            check_readiness=check_readiness,
+        )
 
     @app.post("/v1/chat/completions")
     async def glasshive_chat_completions(payload: ChatCompletionRequest, request: Request):

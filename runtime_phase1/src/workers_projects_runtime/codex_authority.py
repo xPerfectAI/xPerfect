@@ -255,7 +255,7 @@ class NativeControl:
                     raise AuthorityUnconfirmed('native_control_rejected')
                 return value['result']
 
-    def close(self, *, successful: bool = False) -> None:
+    def close(self) -> int:
         if self.process.stdin is not None:
             self.process.stdin.close()
         try:
@@ -263,17 +263,16 @@ class NativeControl:
         except subprocess.TimeoutExpired:
             self.process.terminate()
             try:
-                self.process.wait(timeout=0.5)
+                code = self.process.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                self.process.wait(timeout=0.5)
-            if successful:
-                raise AuthorityUnconfirmed('native_control_exit_unconfirmed')
-        else:
-            if successful and code != 0:
-                raise AuthorityUnconfirmed('native_control_exit_unconfirmed')
+                try:
+                    code = self.process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired as exc:
+                    raise AuthorityUnconfirmed('native_control_exit_unconfirmed') from exc
         finally:
             self.reader.join(timeout=0.1)
+        return code
 
 
 def synchronize(context: dict) -> dict:
@@ -285,6 +284,7 @@ def synchronize(context: dict) -> dict:
     state = reconcile(Path(context['codex_home']), session, current, state, full_authority=context['authority'])
     missing = missing_units(current, state)
     phases = {}
+    control_exit_code = None
     if missing:
         deadline = min(start + 8, float(context['deadline_monotonic']))
         control = NativeControl(context['binary'], deadline)
@@ -311,12 +311,14 @@ def synchronize(context: dict) -> dict:
                 for name in missing]})
             phases['inject_ms'] = (time.monotonic() - before) * 1000
             before = time.monotonic()
-            control.close(successful=True)
+            control_exit_code = control.close()
             closed = True
             phases['close_ms'] = (time.monotonic() - before) * 1000
         finally:
             if not closed:
                 control.close()
+        # A reaped control process can exit abnormally after a successful inject.
+        # Exact persisted native authority, not its exit code, permits resume.
         state = reconcile(Path(context['codex_home']), session, current, state, full_authority=context['authority'])
         if missing_units(current, state):
             raise AuthorityUnconfirmed('native_persistence_unconfirmed')
@@ -325,6 +327,7 @@ def synchronize(context: dict) -> dict:
             'delivered_stable_sha256': state['delivered']['stable'],
             'delivered_dynamic_sha256': state['delivered']['dynamic'],
             'authority_preflight_ms': (time.monotonic() - start) * 1000,
+            'authority_control_exit_code': control_exit_code,
             'authority_preflight_phases_ms': phases, 'injected_units': missing}
 
 

@@ -58,6 +58,18 @@ Current phase-1 fields supported by the runtime:
 - `callbacks`
 - `project_definition`
 
+An optional `glasshive_capability_broker.tool_catalog` carries version, grant ID, expiry,
+server name/URL, and the complete tool names, descriptions and input schemas. Grok validates it
+against the current broker and exact configured MCP server. The catalog is all-or-omit, limited
+to 64 tools and 64 KiB of UTF-8 JSON; stale, malformed or missing data keeps ordinary native
+search/use discovery. A resumed or inherited worker cannot reuse a catalog from another grant.
+Both standalone and managed hosts render it once in an untrusted-data element, with delimiter
+characters JSON-escaped and no grant IDs, expiry or transport URL in model text. Standalone
+rendering needs no host prompt package. The model can use known metadata directly or search;
+actual calls still use native MCP and current authorization. Hosts may reuse current scoped
+metadata, but should omit this optional data when unavailable or too large for the existing
+bootstrap carrier. It must not add network discovery before a turn. No latency benefit is implied.
+
 For Prompt Workbench scheduled workers, the native server validates the callback task and run
 against the declared owner and deterministic scheduled conversation and parent IDs. The server
 retains the validated task ID in its typed `viventium_launch_authority`. The shared callback
@@ -195,7 +207,8 @@ The current model, effort, history, permissions and inference transport remain u
 
 The existing provider-session manifest records delivered digests and a bounded native-ledger
 checkpoint for the exact session and context epoch. Config materialization is not delivery proof.
-An acknowledged inject must also persist in the native ledger and close cleanly. Compaction
+An acknowledged inject must also persist in the native ledger after the control child is reaped.
+Bounded shutdown may terminate that child; its exit code does not replace exact ledger proof. Compaction
 revalidates replacement history; an uncertain prior write can reconcile without duplicate injection.
 Unconfirmed updates fail with a typed recoverable result rather than running with stale authority.
 Before model output, the existing once-only recovery fence can rebind using the authenticated
