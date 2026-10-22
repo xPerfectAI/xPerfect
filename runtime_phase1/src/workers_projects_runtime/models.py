@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .recurrence import canonical_recurrence_owner
 from .runtime_identity import derive_legacy_backend_label
@@ -472,6 +472,22 @@ class ActiveWorkActionFileInput(BaseModel):
     media_group_index: int | None = Field(default=None, alias="mediaGroupIndex", ge=0)
 
 
+class InheritedConversationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    version: Literal[1]
+    conversation_id: str = Field(min_length=1)
+    sources: list[dict[str, object]]
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, value):
+        if any(not isinstance(source.get("id"), str) or not isinstance(source.get("text"), str)
+               for source in value):
+            raise ValueError("inherited_conversation_source_invalid")
+        return value
+
+
 class ActiveWorkActionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -491,6 +507,9 @@ class ActiveWorkActionRequest(BaseModel):
     capability_reauthorization: CapabilityReauthorizationRequest | None = Field(
         default=None, alias="capabilityReauthorization"
     )
+    inherited_conversation: InheritedConversationRequest | None = Field(
+        default=None, alias="inheritedConversation"
+    )
     source_context: ActiveWorkSourceContextRequest | None = Field(
         default=None, alias="sourceContext"
     )
@@ -505,6 +524,10 @@ class ActiveWorkActionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_context_action(self) -> "ActiveWorkActionRequest":
+        if self.inherited_conversation is not None and (
+            self.action not in {"queue", "message", "steer", "retry"} or self.source_context is None
+        ):
+            raise ValueError("Inherited context requires an exact source-owned follow-up")
         if self.native_human_input is not None and self.native_input is None:
             raise ValueError("Human native input requires an exact native response")
         if self.file_inputs:

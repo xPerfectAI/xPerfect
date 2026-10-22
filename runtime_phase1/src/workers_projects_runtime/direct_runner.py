@@ -410,6 +410,9 @@ async def execute(request):
         if enabled is not None or disabled:
             toolset = toolset.filtered(lambda _ctx, tool, enabled=enabled, disabled=disabled:
                 (enabled is None or tool.name in enabled) and tool.name not in disabled)
+        if request.get("conversation_tool_mode") == "coordination":
+            from workers_projects_runtime.coordination_toolset import CoordinationToolset
+            toolset = CoordinationToolset(toolset)
         toolsets.append(toolset if server.get("preserve_tool_names") is True
                         else toolset.prefixed(server["name"]))
     effort = request.get("effort", "default")
@@ -456,7 +459,7 @@ async def execute(request):
         else:
             from pydantic_ai.models.openai import OpenAIResponsesModel, _support_tool_forcing, _reasoning_active
             from pydantic_ai.providers.openai import OpenAIProvider
-            api = AsyncOpenAI(api_key=credential, base_url="https://api.x.ai/v1" if provider == "xai" else "https://api.openai.com/v1", max_retries=0, http_client=http)
+            api = AsyncOpenAI(api_key=credential, base_url="https://api.x.ai/v1" if provider == "xai" else request.get("base_url", "https://api.openai.com/v1"), max_retries=0, http_client=http)
             from pydantic_ai.profiles.openai import OpenAIModelProfile
             profile = OpenAIModelProfile(supports_json_object_output=False)
             if provider == "xai":

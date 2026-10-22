@@ -77,3 +77,27 @@ def test_uri_authority_exclusion_still_redacts_credentials_in_its_path(redact):
     assert result.startswith('http://localhost:7190/path/')
     assert secret not in result
     assert 'REDACTED' in result
+
+
+@pytest.mark.parametrize('redact', REDACTORS)
+@pytest.mark.parametrize('prefix', ['9', '12345678', '+-.', 'under_', 'Unicodeé'])
+def test_embedded_uri_user_info_still_redacts_after_scheme_boundary_optimization(redact, prefix):
+    value = prefix + 'https://u:synthetic-password@api.example.test/path'
+    result = redact(value)
+    assert 'synthetic-password' not in result
+    assert 'u:synthetic-password@' not in result
+
+
+@pytest.mark.parametrize('redact', [redact_output, redact_evidence, redact_failure])
+def test_large_native_log_token_does_not_block_shared_response_threads(redact):
+    import time
+
+    # Native tools can emit long uninterrupted values. There is no URI in this payload;
+    # scanning every potential scheme suffix used to starve all concurrent responses.
+    value = 'a1' * 125000 + '\napi_key=synthetic_api_credential_value'
+    started = time.monotonic()
+    result = redact(value)
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.5
+    assert 'synthetic_api_credential_value' not in result
+    assert 'REDACTED' in result

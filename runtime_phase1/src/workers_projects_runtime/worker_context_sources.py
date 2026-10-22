@@ -7,6 +7,27 @@ from .peer_collaboration import PeerError
 
 def authorized_sources(store, peers, worker):
     result = []
+    from .bootstrap import bootstrap_bundle_for
+    inherited = bootstrap_bundle_for(worker).get("inherited_conversation")
+    if inherited is not None:
+        if (not isinstance(inherited, dict) or inherited.get("version") != 1
+                or not isinstance(inherited.get("conversation_id"), str)
+                or not isinstance(inherited.get("sources"), list)):
+            raise ValueError("inherited_conversation_invalid")
+        for index, source in reversed(list(enumerate(inherited["sources"]))):
+            if (not isinstance(source, dict) or not isinstance(source.get("id"), str)
+                    or not isinstance(source.get("text"), str)):
+                raise ValueError("inherited_conversation_source_invalid")
+            # JSON preserves role and tool-evidence boundaries; this is context, not task execution.
+            result.append({"id": f"conversation:{inherited['conversation_id']}:{index}:{source['id']}",
+                "label": "Inherited conversation", "kind": "conversation",
+                "context_origin": "inherited_conversation",
+                # Current inputs, then newest conversation messages, then continuity sections.
+                # Archives retain exact paged access instead of displacing recent referents.
+                "inline_priority": 0 if source.get("assigned_input") is True else 1 if source.get("current_input") is True else 3 if source.get("role") == "context" else 2,
+                # Escape malformed Unicode code units without changing valid Unicode or decoded JSON.
+                "text": json.dumps(source, ensure_ascii=False, separators=(",", ":"))
+                    .encode("utf-8", errors="backslashreplace").decode("utf-8")})
     # Library activation already owns executable tools/files in the bootstrap. This read path
     # exposes its reviewed text verbatim and checks the active grant on every request.
     with store._connect() as conn:

@@ -244,6 +244,18 @@ def restrict_codex_connections(text, removed):
         raise ConfigurationError("tool_selection_unsupported") from exc
 
 
+def _run_context_worker(worker: dict, run: dict) -> dict:
+    """Only the owner-admitted continuation supplies newer conversation evidence."""
+    raw = run.get("continuation_context_json")
+    context = json.loads(raw) if isinstance(raw, str) and raw else raw
+    inherited = context.get("inherited_conversation") if isinstance(context, dict) else None
+    if inherited is None:
+        return worker
+    bundle = dict(bootstrap_bundle_for(worker))
+    bundle["inherited_conversation"] = inherited
+    return {**worker, "bootstrap_bundle_json": _json(bundle)}
+
+
 class WorkerConfiguration:
     def __init__(self, store, peers, *, source_resolver=None, performance_runtime=None):
         self.store, self.peers = store, peers
@@ -404,6 +416,8 @@ class WorkerConfiguration:
             if config.context.mode == "inherit"
             else [s for s in sources if s["id"] in config.context.source_ids]
         )
+        # Source metadata controls packing, never authority or which sources remain readable.
+        selected = sorted(selected, key=lambda source: source.get("inline_priority", 4))
         selected_tools = (
             list(servers)
             if config.tools.mode == "inherit"
@@ -592,7 +606,7 @@ class WorkerConfiguration:
             revision = self._context_revision(conn, worker["worker_id"])
         # Transient scoped broker/peer MCP projection is trusted, but context must stay fresh.
         projected = dict(worker)
-        source_worker = dict(fresh)
+        source_worker = _run_context_worker(dict(fresh), run)
         sources, selected, _, effective = self._effective(source_worker, config)
         # The route belongs to the transport; its binder refuses a run that needs one.
         blocking = [i for i in effective["issues"] if i["code"] != CONTEXT_ROUTE_ISSUE]
@@ -660,6 +674,9 @@ class WorkerConfiguration:
             "revision": revision,
             "manifest": effective,
             "inline": inline,
+            "inherited_conversation": any(
+                source.get("context_origin") == "inherited_conversation" for source in selected
+            ),
             "run_id": run["run_id"],
             "attempt_id": attempt,
         }
@@ -685,6 +702,9 @@ class WorkerConfiguration:
             )
             _, config = self._config(conn, worker["worker_id"])
             revision = self._context_revision(conn, worker["worker_id"])
+            run = conn.execute("SELECT continuation_context_json FROM runs WHERE run_id=? AND worker_id=?",
+                               (principal["run_id"], worker["worker_id"])).fetchone()
+            worker = _run_context_worker(worker, dict(run) if run else {})
             row = conn.execute(
                 "SELECT * FROM worker_context_snapshots WHERE run_id=? AND attempt_id=? AND source_id=? AND worker_id=?",
                 (
@@ -763,13 +783,16 @@ def contextual_instruction(instruction: str, worker: dict) -> str:
     run_id = str(worker.get("_active_run_id") or "").strip()
     if run_id:
         manifest["run_id"] = run_id
-    return _json(
-        {
-            "instruction": instruction,
-            "context": projection["inline"],
-            "context_manifest": manifest,
-        }
-    )
+    envelope = {
+        "instruction": instruction,
+        "context": projection["inline"],
+        "context_manifest": manifest,
+    }
+    if projection.get("inherited_conversation"):
+        from .worker_context_mcp import context_tool_manifest
+
+        envelope["context_contract"] = context_tool_manifest()["inherited_context_contract"]
+    return _json(envelope)
 
 
 def enforce_context_tools(worker: dict) -> dict:

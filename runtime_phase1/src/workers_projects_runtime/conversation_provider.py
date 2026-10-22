@@ -688,7 +688,8 @@ def _harness_readiness(profile: str) -> dict[str, Any]:
         import importlib.util
         from .direct_runtime import DIRECT_PROVIDERS
         installed = importlib.util.find_spec("pydantic_ai") is not None
-        key = str(os.environ.get(DIRECT_PROVIDERS[profile]["key"]) or "").strip()
+        key = str((os.environ.get("WPR_OPENAI_API_KEY") if profile == "direct-openai" else "")
+                  or os.environ.get(DIRECT_PROVIDERS[profile]["key"]) or "").strip()
         ready = installed and bool(key) and key != "user_provided" and "${" not in key
         return {"status": "ready_to_try" if ready else "authentication_required" if installed else "unavailable",
                 "detail": "Direct API connection is configured; model access is checked on request." if ready else "Connect this provider's API key. CLI subscription sign-in is separate.",
@@ -4736,6 +4737,74 @@ class ConversationProvider:
             return ""
         return predecessor_id
 
+    def _session_conflict_detail(
+        self, session: dict[str, Any], blocking_runs: list[dict[str, Any]], message: str,
+        *, cancelled_attention: bool = False,
+    ) -> dict[str, Any]:
+        """Keep released foreground attention distinct from transient native occupancy."""
+        worker_id = str(session.get("worker_id") or "")
+        worker = self.store.get_worker(worker_id) or {}
+        foreground_attention = bool(
+            blocking_runs
+            and session.get("actor_kind") == "external_user"
+            and session.get("origin") == "interactive"
+            and worker.get("trusted_run_lane") == "conversation"
+            and worker.get("owner_id") == session.get("owner_id")
+            and worker.get("tenant_id") == session.get("tenant_id")
+            and not worker.get("compute_release_token")
+            and not worker.get("work_stop_id")
+            and worker.get("state") not in {
+                "paused", "stopping", "terminating", "termination_failed", "terminated",
+            }
+            and not self.store.has_active_operator_pause(worker_id)
+            and self.store.worker_native_compute_is_released(worker_id)
+        )
+        for run in blocking_runs if foreground_attention else []:
+            previous = self.store.get_provider_request_for_run(str(run.get("run_id") or "")) or {}
+            try:
+                decision = json.loads(str(previous.get("replay_decision_json") or "{}"))
+            except (TypeError, ValueError):
+                decision = {}
+            if (
+                run.get("worker_id") != worker_id or run.get("state") != "needs_input"
+                or run.get("failure_class") != "provider_progress_stalled"
+                or not run.get("failure_structured") or not run.get("provider_liveness_route_locked")
+                or previous.get("state") not in ({"failed", "cancelled"} if cancelled_attention else {"failed"})
+                or previous.get("restore_hold")
+                or previous.get("session_id") != session.get("session_id")
+                or previous.get("owner_id") != session.get("owner_id")
+                or previous.get("tenant_id") != session.get("tenant_id")
+                or not isinstance(decision, dict) or decision.get("provider_session_mode") != "persistent"
+            ):
+                foreground_attention = False
+                break
+        if foreground_attention:
+            return {"code": "provider_progress_stalled", "message": (
+                "The earlier model reply stopped making progress and needs attention "
+                "before this conversation can continue."
+            ), **({"foregroundAttention": {"version": 1,
+                "responseMessageId": str(previous["message_id"])}}
+                if len(blocking_runs) == 1 and previous.get("message_id") else {})}
+        return {"code": "conversation_session_authority_conflict", "message": message}
+
+    def foreground_attention_control(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Observe exact released foreground authority without synchronizing or resuming it."""
+        released = self._family_capacity_released([record])
+        run = self.store.get_run(str(record.get("run_id") or "")) or {}
+        session = self.store.get_provider_session_by_id(str(record.get("session_id") or "")) or {}
+        worker_id = str(run.get("worker_id") or "")
+        worker = self.store.get_worker(worker_id) or {}
+        blockers = self.store.list_nonterminal_runs_for_worker(worker_id) if worker_id else []
+        detail = self._session_conflict_detail(session, blockers, "", cancelled_attention=True)
+        can_cancel = bool(
+            record.get("native_invocation_id") and record.get("native_body_sha256")
+            and worker.get("last_run_id") == run.get("run_id")
+            and session.get("worker_id") == worker_id
+            and len(blockers) == 1 and blockers[0].get("run_id") == record.get("run_id")
+            and detail.get("foregroundAttention", {}).get("responseMessageId") == record.get("message_id")
+        )
+        return {"version": 1, "can_cancel": can_cancel, "capacity_released": released}
+
     def _session(
         self,
         payload: ChatCompletionRequest,
@@ -4901,15 +4970,17 @@ class ConversationProvider:
             predecessor_id = (self._verified_predecessor(payload, existing, existing_manifest,
                                                        previous_response, visible_keys)
                               if branch_changed else "")
-            if (branch_changed and self.store.list_nonterminal_runs_for_worker(str(existing["worker_id"]))
+            blocking_runs = (self.store.list_nonterminal_runs_for_worker(str(existing["worker_id"]))
+                             if branch_changed else [])
+            if (branch_changed and blocking_runs
                     and not (metadata.provider_session_mode == "stateless"
                         and self.store.can_reselect_stateless_provider_session_branch(
                             str(existing["session_id"]), tenant_id=tenant_id, owner_id=metadata.owner_id,
                         ))):
-                raise HTTPException(status_code=409, detail={
-                    "code": "conversation_session_authority_conflict",
-                    "message": "The native conversation is active; retry the selected branch after it finishes",
-                })
+                raise HTTPException(status_code=409, detail=self._session_conflict_detail(
+                    existing, blocking_runs,
+                    "The native conversation is active; retry the selected branch after it finishes",
+                ))
             if predecessor_id:
                 branch_changed = False
             native_epoch = str(existing_manifest.get("native_context_epoch") or "")
@@ -4992,13 +5063,9 @@ class ConversationProvider:
                 if active_runs:
                     raise HTTPException(
                         status_code=409,
-                        detail={
-                            "code": "conversation_session_authority_conflict",
-                            "message": (
-                                "The conversation session authority conflicts with an active turn; "
-                                "retry after it finishes"
-                            ),
-                        },
+                        detail=self._session_conflict_detail(existing, active_runs,
+                            "The conversation session authority conflicts with an active turn; "
+                            "retry after it finishes"),
                     )
                 self.service.terminate_worker(str(existing["worker_id"]))
         return self._create_native_session(payload, model, workspace, effort, tenant_id=tenant_id), True
@@ -7891,7 +7958,7 @@ class ConversationProvider:
         # request/run terminal claims above fence late output; do not hold the
         # admission lock while waiting for process cleanup.
         cleanup_succeeded = False
-        if newly_expired and worker and run_id:
+        if worker and run_id:
             never_invoked = (
                 observed_run is not None and observed_run_id == run_id and not native_owned_before
                 and not run.get("runtime_invoked_at") and not run.get("started_at")
@@ -9296,7 +9363,8 @@ def _is_provider_path(path: str) -> bool:
 
 
 def _openai_error(status_code: int, message: str, code: str, *, param: str | None = None,
-                  native_admission: dict[str, str | int | bool] | None = None) -> JSONResponse:
+                  native_admission: dict[str, str | int | bool] | None = None,
+                  foreground_attention: dict[str, Any] | None = None) -> JSONResponse:
     error_type = "invalid_request_error" if status_code < 500 else "server_error"
     if status_code == 401:
         error_type = "authentication_error"
@@ -9313,6 +9381,7 @@ def _openai_error(status_code: int, message: str, code: str, *, param: str | Non
                 "param": param,
                 "code": code,
                 **({"native_admission": native_admission} if native_admission is not None else {}),
+                **({"foregroundAttention": foreground_attention} if foreground_attention is not None else {}),
             }
         },
     )
@@ -9385,6 +9454,8 @@ def install_conversation_provider_routes(
                 message,
                 code,
                 param=param,
+                foreground_attention=(exc.detail.get("foregroundAttention")
+                    if code == "provider_progress_stalled" else None),
             )
         return _openai_error(
             exc.status_code,
@@ -9639,6 +9710,7 @@ def install_conversation_provider_routes(
             failure_class = str(run.get("failure_class") or "")
             if failure_class in _PUBLIC_FAILURE_CODES:
                 result["failure_class"] = failure_class
+            result["foreground_attention_control"] = provider.foreground_attention_control(record)
         if record["state"] == "completed":
             try:
                 response = json.loads(record.get("response_json") or "")
@@ -9730,8 +9802,30 @@ def install_conversation_provider_routes(
     def glasshive_cancel(request_id: str, request: Request) -> dict[str, Any]:
         auth = require_provider_auth(request)
         provider.assert_request_owner(request_id, owner_for_request(request, auth))
-        record = provider.cancel(request_id)
-        return {"id": request_id, "object": "glasshive.request", "state": record["state"]}
+        foreground_invocation = str(request.headers.get("x-viventium-foreground-attention") or "").strip()
+        with provider._start_lock:
+            if not foreground_invocation:
+                record = provider.cancel(request_id)
+                return {"id": request_id, "object": "glasshive.request", "state": record["state"]}
+            current = store.get_provider_request(request_id) or {}
+            run = store.get_run(str(current.get("run_id") or "")) or {}
+            if not run.get("worker_id"):
+                raise HTTPException(409, "Exact foreground attention is unavailable")
+            # Admission owns request identity; the existing cross-process lifecycle
+            # guard also excludes operator resume and native launch before this effect.
+            guard = service._acquire_worker_lifecycle_guard(str(run["worker_id"]), timeout_s=1.0)
+            try:
+                current = store.get_provider_request(request_id) or {}
+                control = provider.foreground_attention_control(current)
+                if (current.get("native_invocation_id") != foreground_invocation
+                        or not (control["can_cancel"] or (
+                            current.get("state") == "cancelled" and control["capacity_released"]))):
+                    raise HTTPException(409, "Exact foreground attention is no longer cancellable")
+                record = provider.cancel(request_id)
+                return {"id": request_id, "object": "glasshive.request", "state": record["state"],
+                    "capacityReleased": provider._family_capacity_released([record])}
+            finally:
+                guard.release()
 
     @app.post("/v1/requests/by-idempotency/{idempotency_key}/cancel")
     def glasshive_cancel_by_idempotency(

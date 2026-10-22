@@ -462,6 +462,7 @@ def test_late_broker_projection_cannot_reenable_unselected_tools(configured):
     envelope = json.loads(contextual_instruction(raw, projected))
     assert envelope["instruction"] == raw
     assert envelope["context"][0]["text"]
+    assert "context_contract" not in envelope
     assert contextual_instruction(raw, {}) == raw
 
 
@@ -641,3 +642,196 @@ def test_native_context_manifest_uses_current_runtime_run_without_environment(mo
         expected["run_id"] = run_id
     assert envelope["context_manifest"] == expected
     assert context["run_id"] == "run_stale"  # Shared saved projection stays unchanged.
+
+
+def test_inherited_conversation_uses_existing_exact_snapshot_reader(configured):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    core, worker = configured
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    ControlPlaneStore(core.store.db_path)
+    source_text = 'Previous accepted conversation — exact words.\n' * 1800
+    inherited = {'version':1,'conversation_id':'conversation-1','sources':[
+        {'id':'message:old','role':'user','text':source_text},
+        {'id':'message:reply','role':'assistant','text':'The prior task is done.'},
+        {'id':'message:current','role':'user','text':'Start the new task.'},
+    ]}
+    bundle=json.loads(worker['bootstrap_bundle_json']);bundle['inherited_conversation']=inherited
+    with core.store._connect() as conn:
+        conn.execute('UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?',(json.dumps(bundle),worker['worker_id']))
+    fresh=core.store.get_worker(worker['worker_id'])
+    core.source_resolver=lambda item: authorized_sources(core.store,None,item)
+    sources=core.sources(fresh)
+    selected=next(item for item in sources if item['id'].endswith(':message:old'))
+    assert json.loads(selected['text'])['text']==source_text
+    projected=core.prepare_run(fresh,{'run_id':'run','active_attempt_id':'attempt'})
+    assert projected['_context_projection']['manifest']['context']['retrievable_chars']>0
+    text='';offset=0
+    while True:
+        page=core.native_read('synthetic',selected['id'],offset,10000)
+        text+=page['text'];offset=page['next_offset']
+        if offset is None: break
+    assert text==selected['text']
+    with pytest.raises(ConfigurationError,match='worker_unavailable'):
+        core.read('local','another-owner',worker['worker_id'],selected['id'])
+
+
+def test_current_and_recent_context_precede_large_history_and_bootstrap(configured):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    from workers_projects_runtime.store import canonical_parallel_clean_room_bootstrap
+    from workers_projects_runtime.worker_configuration import contextual_instruction
+    core, worker = configured
+    ControlPlaneStore(core.store.db_path)
+    inherited = {'version':1,'conversation_id':'conversation-1','assigned_source_ordinals':[2], 'sources':[
+        {'id':'old','role':'user','text':'Old history. '*4000,'current_input':False,'source_ordinals':[]},
+        {'id':'first','role':'user','text':'The checkword is Amber.', 'current_input':False,'source_ordinals':[]},
+        {'id':'current','role':'user','text':'Write the checkword and 143.', 'current_input':True,'assigned_input':True,'source_ordinals':[2]},
+        {'id':'context:preparedContinuity','role':'context','text':'Prepared memory and Feelings.'},
+    ]}
+    bundle=json.loads(worker['bootstrap_bundle_json'])
+    bundle['inherited_conversation']=inherited
+    # Same clean-room canonical owner used by native account admission and storage.
+    bundle=canonical_parallel_clean_room_bootstrap(bundle)
+    assert bundle['inherited_conversation']==inherited
+    with core.store._connect() as conn:
+        conn.execute('UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?',(json.dumps(bundle),worker['worker_id']))
+    core.source_resolver=lambda item: authorized_sources(core.store,None,item)
+    projected=core.prepare_run(core.store.get_worker(worker['worker_id']),{'run_id':'run','active_attempt_id':'attempt'})
+    inline=projected['_context_projection']['inline']
+    assert inline[0]['id'].endswith(':current')
+    assert inline[1]['id'].endswith(':first')
+    assert any('Amber' in row['text'] for row in inline)
+    envelope=json.loads(contextual_instruction('Write the checkword and 143.',projected))
+    assert envelope['instruction']=='Write the checkword and 143.'
+    assert 'not additional tasks' in envelope['context_contract']
+    assert json.loads(inline[0]['text'])['assigned_input'] is True
+
+
+def test_recent_conversation_precedes_large_archive_without_losing_paged_sources(configured):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    from workers_projects_runtime.worker_configuration import contextual_instruction
+    from workers_projects_runtime.worker_context_mcp import context_tool_manifest
+
+    core, worker = configured
+    ControlPlaneStore(core.store.db_path)
+    archive = 'Exact continuity archive.\n' * 4600
+    inherited = {'version': 1, 'conversation_id': 'conversation-1', 'sources': [
+        {'id': 'old', 'role': 'user', 'text': 'Older local history.\n' * 2000},
+        {'id': 'recent', 'role': 'user', 'text': 'The checkword is Azure.'},
+        {'id': 'assigned', 'role': 'user', 'text': 'Write the checkword.',
+         'current_input': True, 'assigned_input': True, 'source_ordinals': [1]},
+        {'id': 'other-current', 'role': 'user', 'text': 'Keep the formatting.',
+         'current_input': True, 'assigned_input': False, 'source_ordinals': [2]},
+        {'id': 'archive', 'role': 'context', 'text': archive},
+    ]}
+    bundle = json.loads(worker['bootstrap_bundle_json'])
+    bundle['inherited_conversation'] = inherited
+    with core.store._connect() as conn:
+        conn.execute('UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?',
+                     (json.dumps(bundle), worker['worker_id']))
+    fresh = core.store.get_worker(worker['worker_id'])
+    core.source_resolver = lambda item: authorized_sources(core.store, None, item)
+    projected = core.prepare_run(fresh, {'run_id': 'run', 'active_attempt_id': 'attempt'})
+    inline = projected['_context_projection']['inline']
+    assert [row['id'].rsplit(':', 1)[-1] for row in inline[:4]] == [
+        'assigned', 'other-current', 'recent', 'old']
+    assert any('Azure' in row['text'] for row in inline)
+    assert sum(len(row['text']) for row in inline) == 24000
+    archive_source = next(row for row in core.sources(fresh) if row['id'].endswith(':archive'))
+    assert next(row['text'] for row in inline if row['id'] == archive_source['id']) == ''
+    text, offset = '', 0
+    while True:
+        page = core.native_read('synthetic', archive_source['id'], offset, 10000)
+        text += page['text']
+        offset = page['next_offset']
+        if offset is None:
+            break
+    assert text == archive_source['text']
+    assert json.loads(text)['text'] == archive
+    envelope = json.loads(contextual_instruction('Write the checkword.', projected))
+    assert envelope['context_contract'] == context_tool_manifest()['inherited_context_contract']
+
+
+def test_inherited_contract_is_absent_when_only_ordinary_sources_selected(configured):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    from workers_projects_runtime.worker_configuration import contextual_instruction
+
+    core, worker = configured
+    ControlPlaneStore(core.store.db_path)
+    bundle = json.loads(worker['bootstrap_bundle_json'])
+    bundle['inherited_conversation'] = {'version': 1, 'conversation_id': 'conversation-1',
+        'sources': [{'id': 'old', 'role': 'user', 'text': 'Earlier request.'}]}
+    with core.store._connect() as conn:
+        conn.execute('UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?',
+                     (json.dumps(bundle), worker['worker_id']))
+    core.source_resolver = lambda item: authorized_sources(core.store, None, item)
+    core.put('local', 'owner', worker['worker_id'], ConfigurationUpdate(expected_revision=1,
+        context={'mode': 'selected', 'source_ids': ['bootstrap:project_definition']}))
+    projected = core.prepare_run(core.store.get_worker(worker['worker_id']),
+                                 {'run_id': 'run', 'active_attempt_id': 'attempt'})
+    envelope = json.loads(contextual_instruction('Ordinary native work.', projected))
+    assert 'context_contract' not in envelope
+
+
+def test_followup_run_reads_its_durable_current_context(configured):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    core,worker=configured
+    ControlPlaneStore(core.store.db_path)
+    core.source_resolver=lambda item: authorized_sources(core.store,None,item)
+    run=core.store.create_run(worker['worker_id'],worker['project_id'],'Use the new checkword.',continuation_context={
+        'inherited_conversation':{'version':1,'conversation_id':'conversation-1','assigned_source_ordinals':[1],'sources':[
+            {'id':'current','role':'user','text':'The new checkword is Amber.', 'current_input':True,'assigned_input':True,'source_ordinals':[1]}
+        ]}
+    })
+    core.peers.native_principal=lambda token,**kwargs:{'worker_id':worker['worker_id'],'tenant_id':'local','owner_id':'owner','run_id':run['run_id'],'attempt_id':'attempt'}
+    projected=core.prepare_run(worker,{**run,'active_attempt_id':'attempt'})
+    source=next(row for row in projected['_context_projection']['inline'] if row['id'].endswith(':current'))
+    read=core.native_read('synthetic',source['id'],0,10000)
+    assert json.loads(read['text'])['text']=='The new checkword is Amber.'
+    assert 'inherited_conversation' not in json.loads(core.store.get_worker(worker['worker_id'])['bootstrap_bundle_json'])
+
+
+def test_real_clean_room_admission_persists_inherited_history(account_client, monkeypatch):
+    from test_account_api import account_headers, conversation_orchestrator_payload
+    service,store=account_client.app.state.service,account_client.app.state.store
+    service.executor.submit=lambda *args,**kwargs: None
+    monkeypatch.setenv('VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY','1')
+    payload=conversation_orchestrator_payload(title='Inherited context contract')
+    context={'version':1,'conversation_id':'conversation-1','assigned_source_ordinals':[2],'sources':[
+        {'id':'earlier','role':'user','text':'The checkword is Amber.','current_input':False,'source_ordinals':[]},
+        {'id':'current','role':'user','text':'Write that checkword.','current_input':True,'source_ordinals':[2],'assigned_input':True}]}
+    payload['bootstrapBundle']['inherited_conversation']=context
+    response=account_client.post('/v1/delegations',headers=account_headers(idempotency_key='context-clean-room'),json=payload)
+    assert response.status_code==202,response.text
+    accepted=store.get_delegation(response.json()['workRef'],tenant_id='tenant-a',owner_id='owner-a')
+    worker=store.get_worker(accepted['worker_id'])
+    assert json.loads(worker['bootstrap_bundle_json'])['inherited_conversation']==context
+    run=store.get_run(accepted['current_run_id'])
+    projected=service.worker_configuration.prepare_run(worker,{**run,'active_attempt_id':'synthetic-attempt'})
+    assert any('Amber' in row['text'] for row in projected['_context_projection']['inline'])
+
+from test_account_api import account_client
+
+
+def test_inherited_source_lone_surrogate_preserves_decoded_fields_through_native_reader(configured):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    core,worker=configured
+    ControlPlaneStore(core.store.db_path)
+    original={'id':'current','role':'user','text':'Exact é and malformed \ud800 unit.',
+        'current_input':True,'assigned_input':True,'source_ordinals':[1],
+        'tool_calls':[{'name':'prior_tool','args':{'value':0.00005,'lone':'\udfff','telegramUserId':'historical-data'}}]}
+    bundle=json.loads(worker['bootstrap_bundle_json'])
+    bundle['inherited_conversation']={'version':1,'conversation_id':'conversation','sources':[original]}
+    with core.store._connect() as conn:
+        conn.execute('UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?',(json.dumps(bundle),worker['worker_id']))
+    core.source_resolver=lambda item:authorized_sources(core.store,None,item)
+    projected=core.prepare_run(core.store.get_worker(worker['worker_id']),{'run_id':'run','active_attempt_id':'attempt'})
+    source=next(row for row in projected['_context_projection']['inline'] if row['id'].endswith(':current'))
+    assert 'é' in source['text']
+    assert json.loads(source['text'])==original
+    read=core.native_read('synthetic',source['id'],0,10000)
+    assert json.loads(read['text'])==original

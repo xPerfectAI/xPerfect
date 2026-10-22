@@ -96,6 +96,117 @@ def test_deadline_uses_exact_native_cleanup_and_preserves_failed_history(deadlin
     assert json.loads(events[-1]['payload_json'])['native_cleanup'] == 'accepted'
 
 
+def _queue_deadline_successor(store, request, run):
+    successor_request, _ = store.create_provider_request(
+        tenant_id='local', owner_id='owner-a', session_id=request['session_id'],
+        idempotency_key='queued-successor', message_id='queued-successor',
+        stream_id='queued-successor', requested_history_count=2,
+        admitted_instruction='Preserve this queued continuation', response_timeout_s=600,
+        response_deadline_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+        replay_decision={'provider_session_mode': 'stateless'},
+    )
+    successor, _ = store.create_and_attach_provider_run(
+        request_id=successor_request['request_id'], worker_id=run['worker_id'],
+        project_id=run['project_id'], instruction=successor_request['admitted_instruction'],
+    )
+    store.update_worker(run['worker_id'], last_run_id=successor['run_id'], state='running')
+    return successor_request, successor
+
+
+@pytest.mark.parametrize('already_failed', [False, True])
+def test_deadline_cleanup_preserves_a_never_invoked_queued_successor(deadline, monkeypatch, already_failed):
+    store, service, provider, request, historical, runtime, child = deadline
+    original_release = service.release_provider_deadline_compute
+    if already_failed:
+        monkeypatch.setattr(service, 'release_provider_deadline_compute', lambda *_args: None)
+        request, expired = provider._expire_response_deadline(request)
+        monkeypatch.setattr(service, 'release_provider_deadline_compute', original_release)
+    else:
+        expired = store.get_run(request['run_id'])
+    next_request, successor = _queue_deadline_successor(store, request, expired)
+    preserved_request = dict(store.get_provider_request(next_request['request_id']))
+    runtime._write_session_key(expired['worker_id'], 'synthetic-retained-context')
+    native_context = json.loads(runtime._session_meta_path(expired['worker_id']).read_text())
+
+    result, failed = provider._expire_response_deadline(request)
+
+    worker = store.get_worker(expired['worker_id'])
+    assert result['state'] == failed['state'] == 'failed'
+    assert failed['failure_class'] == 'provider_response_deadline_exceeded'
+    assert worker['compute_released_at'] and not worker['compute_release_token']
+    assert worker['state'] == 'ready' and worker['last_run_id'] == successor['run_id']
+    assert store.get_run(successor['run_id']) == successor
+    assert store.get_provider_request(next_request['request_id']) == preserved_request
+    retained_context = json.loads(runtime._session_meta_path(expired['worker_id']).read_text())
+    assert {key: retained_context[key] for key in native_context} == native_context
+    assert store.get_run(historical['run_id']) == historical
+    assert runtime._read_active_session(expired['worker_id']) is None
+    if already_failed:
+        assert failed == expired
+
+
+@pytest.mark.parametrize('guard', ['invoked', 'invoked_attempt', 'restore_hold'])
+def test_deadline_cleanup_rejects_a_successor_with_execution_or_restore_authority(deadline, monkeypatch, guard):
+    store, service, provider, request, historical, runtime, child = deadline
+    original_release = service.release_provider_deadline_compute
+    monkeypatch.setattr(service, 'release_provider_deadline_compute', lambda *_args: None)
+    request, expired = provider._expire_response_deadline(request)
+    monkeypatch.setattr(service, 'release_provider_deadline_compute', original_release)
+    next_request, successor = _queue_deadline_successor(store, request, expired)
+    if guard == 'invoked':
+        store.update_run(successor['run_id'], runtime_invoked_at=datetime.now(timezone.utc).isoformat())
+    elif guard == 'invoked_attempt':
+        with store._connect() as connection:
+            connection.execute(
+                'INSERT INTO run_attempts(attempt_id,run_id,attempt_number,state,claimed_at,runtime_invoked_at) '
+                'VALUES(?,?,1,?,?,?)',
+                ('synthetic-invoked-successor', successor['run_id'], 'failed', 'synthetic', 'synthetic'),
+            )
+    else:
+        store.update_provider_request(next_request['request_id'], restore_hold=1)
+    before = dict(store.get_worker(expired['worker_id']))
+    cleanup = Mock(side_effect=AssertionError('A successor authority boundary must remain untouched'))
+    monkeypatch.setattr(runtime, 'cleanup_orphaned_run', cleanup)
+
+    assert service.release_provider_deadline_compute(expired['worker_id'], expired['run_id']) is None
+
+    assert not cleanup.called
+    assert store.get_worker(expired['worker_id']) == before
+    assert store.get_run(expired['run_id']) == expired
+
+
+@pytest.mark.parametrize('race', ['claim', 'finalization'])
+def test_deadline_cleanup_rechecks_queued_successor_execution_at_ownership_boundaries(deadline, monkeypatch, race):
+    store, service, provider, request, historical, runtime, child = deadline
+    original_release = service.release_provider_deadline_compute
+    monkeypatch.setattr(service, 'release_provider_deadline_compute', lambda *_args: None)
+    request, expired = provider._expire_response_deadline(request)
+    monkeypatch.setattr(service, 'release_provider_deadline_compute', original_release)
+    _next_request, successor = _queue_deadline_successor(store, request, expired)
+    cleanup = Mock(wraps=runtime.cleanup_orphaned_run)
+    monkeypatch.setattr(runtime, 'cleanup_orphaned_run', cleanup)
+    if race == 'claim':
+        claim = service._claim_exact_run_control
+        def race_claim(*args, **kwargs):
+            store.update_run(successor['run_id'], runtime_invoked_at=datetime.now(timezone.utc).isoformat())
+            return claim(*args, **kwargs)
+        monkeypatch.setattr(service, '_claim_exact_run_control', race_claim)
+    else:
+        confirm = runtime.confirm_retained_run_stopped
+        def race_finalization(*args, **kwargs):
+            confirm(*args, **kwargs)
+            store.update_run(successor['run_id'], runtime_invoked_at=datetime.now(timezone.utc).isoformat())
+        monkeypatch.setattr(runtime, 'confirm_retained_run_stopped', race_finalization)
+
+    with pytest.raises(RuntimeErrorBase):
+        service.release_provider_deadline_compute(expired['worker_id'], expired['run_id'])
+
+    assert cleanup.call_count == (0 if race == 'claim' else 1)
+    assert not store.get_worker(expired['worker_id'])['compute_released_at']
+    assert store.get_run(expired['run_id']) == expired
+    assert store.get_run(successor['run_id'])['runtime_invoked_at']
+
+
 def test_unrecorded_child_stays_fenced_and_existing_claim_retry_recovers(deadline):
     store, service, provider, request, historical, runtime, child = deadline
     content = child.read_bytes(); child.unlink()

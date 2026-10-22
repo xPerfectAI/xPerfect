@@ -72,9 +72,16 @@ The [operator UI contract](07_Minimal_Unified_Operator_UI.md) owns the concrete 
 ## Completion evidence boundary
 
 The runtime records process, run, transcript and artifact identity. A structured provider or
-process failure, an empty result, an unmet explicitly typed output format, invalid document bytes,
+process failure, an empty result, an unmet explicitly typed output format, invalid run-owned document bytes,
 or corrupt/foreign evidence remains a failed result. These checks do not replace authority,
 workspace, capability or owner controls.
+
+A shared workspace (including a host worker's existing native directory) is not owned by
+one run. Its document inventory is diagnostic: an unrelated invalid file cannot turn a successful
+native action into failure or discard its result. Reuse the same workspace ownership rule as file
+presentation. Isolated-workspace document validation, explicit typed output requirements, and
+validation of selected published files remain enforced. Do not infer authorship from filenames,
+modification times, or the user's request wording.
 
 Prose-derived constraint, coverage and completion diagnostics are advisory. Their missing report
 marker, inferred date/format/count or unavailable internal ledger must not discard useful native

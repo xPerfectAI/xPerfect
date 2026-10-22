@@ -282,12 +282,18 @@ Capability projection is additive, not substitutive. When xPerfect writes worker
 for broker MCP grants, it must preserve the selected worker type's native host capabilities unless
 an operator explicitly configured a locked-down profile. For Codex host workers this means the
 worker-local `CODEX_HOME/config.toml` keeps allowlisted native MCP/tool definitions, including
-bundled plugin manifests such as computer-use when present, then appends the scoped
+enabled bundled plugin manifests, then appends the scoped
 `glasshive-user-capabilities` broker block. Full-access Claude Code host workers reuse that same
 selected native stdio source in their explicit private MCP config, beside the scoped broker, and
 keep the CLI's native Chrome integration when supported. Native server `HOME` remains the OS owner
 unless explicitly configured; the worker's own state stays isolated. Disabled or unselected servers,
-workspace-limited profiles, and `native_tools: false` never gain these host tools. Broker names take
+workspace-limited profiles, and `native_tools: false` never gain these host tools. An installed
+executable alone is not an MCP selection: do not synthesize extra servers from known application
+paths. Preserve the native selected configuration and manifest, so a legacy standalone server does
+not compete with the current unified browser/desktop interface. Explicitly configured servers remain
+supported, and native tool access restrictions still apply. Preserve native arrays of tables too,
+including enabled and disabled skill selections; rewriting config must not reactivate a retired
+skill. Broker names take
 precedence. Native tool allow/deny lists are preserved on the existing selected MCP child's stdio
 transport. Only filtered servers receive the transparent process adapter; unfiltered servers stay
 direct. It filters tool discovery and rejects excluded calls, retaining schemas, paging, notifications,

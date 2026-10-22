@@ -43,7 +43,6 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(instance, '_copy_host_codex_auth', lambda _: None)
     monkeypatch.setattr(instance, '_host_codex_native_mcp_allowlist', lambda: {'computer-use'})
     monkeypatch.setattr(instance, '_host_codex_bundled_mcp_config', lambda _names, _source: '')
-    monkeypatch.setattr(instance, '_host_codex_known_native_mcp_config', lambda _: '')
     monkeypatch.setattr(instance, '_host_plugin_denylist', lambda: ())
     monkeypatch.setattr(instance, '_host_codex_personality', lambda: 'inherit')
     return instance

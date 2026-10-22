@@ -103,6 +103,8 @@ def _launch_payload_digest(payload: dict) -> str:
             "expose_diagnostics": bool(payload.get("expose_diagnostics", False)),
             "goal": str(payload.get("goal") or "").strip(),
             "instruction": str(payload.get("instruction") or "").strip(),
+            **({"inherited_conversation_sha256": payload["inherited_conversation_sha256"]}
+               if payload.get("inherited_conversation_sha256") else {}),
             "owner_id": str(payload.get("owner_id") or "").strip(),
             "profile": str(payload.get("profile") or "").strip(),
             "project_id": str(payload.get("project_id") or "").strip(),
@@ -7856,3 +7858,58 @@ def test_file_only_delegation_packet_preserves_strict_source_equality(mutation):
         bundle["viventium_delegation_packet"]["task"].pop("instruction")
     with pytest.raises(ValueError):
         mcp_server._trusted_triggering_source_block(bundle)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_public_bootstrap_drops_claimed_inherited_conversation(as_json):
+    value={"project_definition":"Own task", "inherited_conversation":{
+        "version":1,"conversation_id":"other-conversation","sources":[{"id":"fake","text":"Not trusted history"}]}}
+    result=mcp_server._normalize_bootstrap_bundle(json.dumps(value) if as_json else value)
+    assert "inherited_conversation" not in result
+    assert result["project_definition"]=="Own task"
+
+
+@pytest.mark.parametrize("tamper", [False, True])
+@pytest.mark.parametrize("tool_value", [0.00005, 1e-7, "\ud800"])
+def test_trusted_launch_binds_and_preserves_exact_inherited_conversation(monkeypatch,tamper,tool_value):
+    owner="synthetic-owner";secret="synthetic-context-signature-key"
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE","docker")
+    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET",secret)
+    monkeypatch.setattr(mcp_server,"get_http_headers",lambda:{"X-Viventium-Tenant-Id":"local","X-Viventium-User-Id":owner})
+    monkeypatch.setattr(mcp_server,"_owner_recent_upload_entries",lambda **_:[])
+    inherited={"version":1,"conversation_id":"conversation-1","assigned_source_ordinals":[2],"sources":[
+        {"id":"earlier","role":"user","text":"The checkword is Amber.","current_input":False,"source_ordinals":[]},
+        {"id":"current","role":"user","text":"Write that checkword.","current_input":True,"source_ordinals":[2],"assigned_input":True}]}
+    args={"title":"Exact input task","instruction":"Write that checkword.","profile":"codex-cli","execution_mode":"docker"}
+    inherited["sources"][0]["tool_calls"]=[{"name":"prior_tool","args":{"value":tool_value,"telegramUserId":"historical-data"}}]
+    # Match JavaScript number spelling; the receiver must hash these actual bytes.
+    wire=json.dumps(inherited,separators=(",",":"),ensure_ascii=True).replace("5e-05","0.00005").replace("1e-07","1e-7")
+    context_sha=hashlib.sha256(wire.encode()).hexdigest()
+    goal_digest=hashlib.sha256(args["instruction"].encode()).hexdigest();call_digest=hashlib.sha256(b"synthetic-call").hexdigest()
+    identity={"version":2,"source_event_id":"synthetic-source","objective_ordinal":0,"goal_digest":goal_digest,"call_identity_digest":call_digest,
+        "launch_payload_digest":_launch_payload_digest({**args,"inherited_conversation_sha256":context_sha}),
+        "idempotency_key":hashlib.sha256(f"local\0{owner}\0synthetic-source\0call:{call_digest}\0{goal_digest}".encode()).hexdigest()}
+    args["bootstrap_bundle_json"]={"inherited_conversation":wire,"viventium_delegation_identity":identity,
+        "viventium_delegation_assertion":_scoped_delegation_identity_assertion(identity,secret,tenant_id="local",owner_id=owner)}
+    if tamper: args["bootstrap_bundle_json"]["inherited_conversation"]=wire.replace("Amber", "Replaced after signature")
+    class AtomicApi(TrackingApiClient):
+        def __init__(self):super().__init__();self.delegations=[]
+        def create_delegation(self,**kwargs):
+            self.delegations.append(kwargs)
+            return {"workRef":"synthetic-work","state":"queued","viewRef":"/r/synthetic","resourceClass":"standard","idempotentReplay":False}
+    api=AtomicApi();server=create_mcp_server(api_client=api)
+    async def scenario():
+        async with Client(server) as client:
+            if tamper:
+                with pytest.raises(ToolError,match="launch payload is invalid"):
+                    await client.call_tool("worker_delegate_once",args)
+            else:
+                result=_tool_json(await client.call_tool("worker_delegate_once",args))
+                assert result["status"]=="dispatched"
+    asyncio.run(scenario())
+    if tamper: assert api.delegations==[]
+    else:
+        actual=api.delegations[0]["payload"]["bootstrapBundle"]
+        assert actual["inherited_conversation"]==inherited
+        from workers_projects_runtime.store import canonical_parallel_clean_room_bootstrap
+        assert canonical_parallel_clean_room_bootstrap(actual)["inherited_conversation"]==inherited

@@ -1166,6 +1166,8 @@ def _delegation_launch_payload_digest(payload: dict[str, Any]) -> str:
             "expose_diagnostics": bool(payload.get("expose_diagnostics", False)),
             "goal": str(payload.get("goal") or "").strip(),
             "instruction": str(payload.get("instruction") or "").strip(),
+            **({"inherited_conversation_sha256": payload["inherited_conversation_sha256"]}
+               if payload.get("inherited_conversation_sha256") else {}),
             "owner_id": str(payload.get("owner_id") or "").strip(),
             "profile": str(payload.get("profile") or "").strip(),
             "project_id": str(payload.get("project_id") or "").strip(),
@@ -2661,6 +2663,7 @@ def _normalize_bootstrap_bundle(value: Any) -> dict[str, Any] | None:
     parsed.pop("viventium_constraint_source", None)
     parsed.pop("viventium_continuation_contract", None)
     parsed.pop("viventium_continuation_context", None)
+    parsed.pop("inherited_conversation", None)
 
     if isinstance(parsed.get("viventium_launch_authority"), dict):
         parsed = canonical_parallel_clean_room_bootstrap(parsed)
@@ -5267,6 +5270,19 @@ def create_mcp_server(
             "require_callback": require_callback,
             "expose_diagnostics": expose_diagnostics,
         }
+        raw_bundle = (json.loads(bootstrap_bundle_json) if isinstance(bootstrap_bundle_json, str)
+                      and bootstrap_bundle_json.strip() else bootstrap_bundle_json)
+        inherited_conversation_wire = raw_bundle.get("inherited_conversation") if isinstance(raw_bundle, dict) else None
+        inherited_conversation = None
+        if inherited_conversation_wire is not None:
+            if not isinstance(inherited_conversation_wire, str):
+                raise ValueError("inherited_conversation_wire_invalid")
+            signed_launch_payload["inherited_conversation_sha256"] = hashlib.sha256(
+                inherited_conversation_wire.encode("utf-8")
+            ).hexdigest()
+            inherited_conversation = json.loads(inherited_conversation_wire)
+            if not isinstance(inherited_conversation, dict):
+                raise ValueError("inherited_conversation_invalid")
         expose_diagnostics = _effective_diagnostics_requested(
             expose_diagnostics,
             tool_name="worker_delegate_once",
@@ -5419,6 +5435,9 @@ def create_mcp_server(
                 payload=delegation_payload,
                 signed_launch_payload=signed_launch_payload,
             )
+            if inherited_conversation is not None and isinstance(bundle.get("viventium_delegation_identity"), dict):
+                # The existing assertion above binds this exact digest; public normalization removed it.
+                bundle["inherited_conversation"] = inherited_conversation
             try:
                 accepted = atomic_delegate(
                     tenant_id=tenant_id,

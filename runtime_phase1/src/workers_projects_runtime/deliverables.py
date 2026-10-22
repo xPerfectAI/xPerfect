@@ -657,6 +657,14 @@ def is_deliverable_url(url: str) -> bool:
     return True
 
 
+def workspace_files_are_shared(worker: dict) -> bool:
+    """A directory inventory cannot attribute files to a run in these workspaces."""
+    return worker.get("_execution_workspace_mode") == "shared" or (
+        str(worker.get("execution_mode") or "docker") == "host"
+        and worker.get("workspace_kind") == "legacy"
+    )
+
+
 def deliverable_payload(
     worker: dict,
     latest_run: dict | None,
@@ -670,9 +678,7 @@ def deliverable_payload(
     # own text and the shared Files list instead of attributing a sibling file.
     # A legacy host worker can point at an existing working directory. Its
     # files are not run-owned merely because its membership is isolated.
-    shared = worker.get("_execution_workspace_mode") == "shared" or (
-        execution_mode == "host" and worker.get("workspace_kind") == "legacy"
-    )
+    shared = workspace_files_are_shared(worker)
     artifact_candidates = [] if shared else candidate_artifact_paths(worker)
     valid_artifact_candidates = [
         path
