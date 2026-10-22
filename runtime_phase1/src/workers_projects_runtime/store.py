@@ -281,6 +281,7 @@ PARALLEL_CLEAN_ROOM_BOOTSTRAP_KEYS = frozenset(
         "glasshive_capability_authorization",
         "glasshive_capability_broker",
         "glasshive_capability_requirement",
+        "inherited_conversation",
         "project_definition",
         "provider_model",
         "system_instructions",
@@ -402,6 +403,12 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
             result.pop(key, None)
     if result.get("execution_policy") != PARALLEL_CLEAN_ROOM_EXECUTION_POLICY:
         result.pop("execution_policy", None)
+
+    if "inherited_conversation" in result:
+        from .models import InheritedConversationRequest
+        result["inherited_conversation"] = InheritedConversationRequest.model_validate(
+            result["inherited_conversation"]
+        ).model_dump()
 
     if "viventium_run_liveness" in result:
         liveness = result["viventium_run_liveness"]
@@ -23259,17 +23266,50 @@ class Store:
 
     @staticmethod
     def _provider_deadline_cleanup_target(conn, worker, run) -> bool:
-        """Only the exact last provider deadline may publish a cleanup release."""
+        """Retained deadline compute may precede an uninvoked queued successor."""
+        if worker is None or run is None:
+            return False
+        latest_run_id = str(worker["last_run_id"] or "")
+        if latest_run_id != str(run["run_id"]):
+            pending_successor = conn.execute(
+                """SELECT 1 FROM runs AS successor
+                   WHERE successor.run_id = ? AND successor.worker_id = ?
+                     AND successor.state = 'queued'
+                     AND COALESCE(successor.started_at, '') = ''
+                     AND COALESCE(successor.runtime_invoked_at, '') = ''
+                     AND COALESCE(successor.active_attempt_id, '') = ''
+                     AND NOT EXISTS (
+                         SELECT 1 FROM run_attempts
+                         WHERE run_attempts.run_id = successor.run_id
+                           AND COALESCE(run_attempts.runtime_invoked_at, '') != ''
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM host_run_leases
+                         WHERE host_run_leases.run_id = successor.run_id
+                           AND (host_run_leases.startup_state = 'confirmed'
+                                OR COALESCE(host_run_leases.startup_confirmed_at, '') != '')
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM provider_requests
+                         WHERE provider_requests.run_id = successor.run_id
+                           AND provider_requests.restore_hold != 0
+                     )""",
+                (latest_run_id, worker["worker_id"]),
+            ).fetchone()
+            if pending_successor is None:
+                return False
         return bool(
-            worker is not None and run is not None
-            and str(worker["last_run_id"] or "") == str(run["run_id"])
-            and str(run["worker_id"]) == str(worker["worker_id"])
+            str(run["worker_id"]) == str(worker["worker_id"])
             and str(run["state"]) == "failed"
             and str(run["failure_class"] or "") == "provider_response_deadline_exceeded"
             and not str(worker["work_stop_id"] or "")
             and str(worker["state"]) not in {
                 "paused", "stopping", "terminating", "termination_failed", "terminated"
             }
+            and conn.execute(
+                "SELECT 1 FROM host_run_leases WHERE worker_id = ? AND status = 'active' LIMIT 1",
+                (worker["worker_id"],),
+            ).fetchone() is None
             and conn.execute(
                 """SELECT 1 FROM provider_requests AS request
                    JOIN provider_sessions AS session ON session.session_id = request.session_id
@@ -23281,6 +23321,12 @@ class Store:
                 (run["run_id"], worker["owner_id"], worker["tenant_id"], worker["worker_id"]),
             ).fetchone() is not None
         )
+
+    def provider_deadline_cleanup_target(self, worker_id: str, run_id: str) -> bool:
+        with self._connect() as conn:
+            worker = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+            run = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            return self._provider_deadline_cleanup_target(conn, worker, run)
 
     def try_claim_worker_compute_release(
         self,

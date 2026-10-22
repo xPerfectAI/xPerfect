@@ -30,7 +30,7 @@ def _strip_instruction_note(instruction: str, note: str) -> str:
 def _validated_continuation_context(value: object) -> dict[str, Any] | None:
     if value in (None, "", {}):
         return None
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or set(value) - {"inherited_conversation"} != {
         "version",
         "base_instruction",
         "guidance",
@@ -54,7 +54,13 @@ def _validated_continuation_context(value: object) -> dict[str, Any] | None:
         or sum(len(item.encode("utf-8")) for item in guidance) > 512 * 1024
     ):
         raise ValueError("Invalid workspace continuation context")
+    inherited = value.get("inherited_conversation")
+    if inherited is not None and (not isinstance(inherited, dict) or inherited.get("version") != 1
+            or not isinstance(inherited.get("conversation_id"), str)
+            or not isinstance(inherited.get("sources"), list)):
+        raise ValueError("Invalid inherited conversation context")
     return {
+        **({"inherited_conversation": inherited} if inherited is not None else {}),
         "version": 1,
         "base_instruction": base_instruction.strip(),
         "guidance": [str(item).strip() for item in guidance],
@@ -93,6 +99,7 @@ def build_workspace_continuation_context(
     *,
     previous_run: dict[str, Any],
     continuation_goal: str | None = None,
+    inherited_conversation: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Build context from host-persisted structure without parsing prompt prose."""
 
@@ -123,6 +130,8 @@ def build_workspace_continuation_context(
             **stored,
             "guidance": [*stored["guidance"], clean_goal],
         }
+    if inherited_conversation is not None:
+        stored = {**stored, "inherited_conversation": inherited_conversation}
     validated = _validated_continuation_context(stored)
     if validated is None:
         raise ValueError("Workspace continuation requires prior task context")

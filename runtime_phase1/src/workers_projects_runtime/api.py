@@ -3928,6 +3928,8 @@ def create_app(
             value["nativeHumanInput"] = payload.native_human_input.model_dump(by_alias=True)
         if payload.source_context is not None:
             value["sourceContext"] = payload.source_context.model_dump()
+        if payload.inherited_conversation is not None:
+            value["inheritedConversation"] = payload.inherited_conversation.model_dump()
         return value
 
     @app.post("/v1/work/{work_ref}/actions/receipt", status_code=202)
@@ -4015,6 +4017,9 @@ def create_app(
             if source_context is not None
             else None
         )
+        if payload.inherited_conversation is not None:
+            source_context_receipt = {**(source_context_receipt or {}),
+                "inherited_conversation": payload.inherited_conversation.model_dump()}
         if payload.file_inputs:
             # The immutable selection enters the existing reservation. Service
             # validates ready inputs before execution; durable replay is read first.

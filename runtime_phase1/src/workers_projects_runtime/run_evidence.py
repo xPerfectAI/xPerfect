@@ -24,6 +24,7 @@ from .deliverables import (
     candidate_artifact_paths,
     is_user_deliverable_relative_path,
     is_valid_professional_artifact,
+    workspace_files_are_shared,
 )
 from .failure_classification import classify_cli_failure, has_structured_failure_evidence
 from .runtime_identity import derive_legacy_backend_label
@@ -1490,6 +1491,7 @@ def _artifact_inventory(
     return {
         "count": len(items),
         "items": items,
+        "shared_workspace": workspace_files_are_shared(worker or {}),
     }
 
 
@@ -2475,7 +2477,7 @@ def summarize_run_evidence_result(evidence: dict[str, object]) -> dict[str, obje
         if final_output.get("output_chars") == 0:
             failure_reasons.append({"reason": "native result is empty"})
 
-    if isinstance(completion, dict):
+    if isinstance(completion, dict) and completion.get("status") != "not_applicable":
         contract = evidence.get("typed_output_contract")
         if isinstance(contract, dict) and contract.get("mode") == "replace":
             delivered = set(completion.get("delivered_artifact_types") or [])
@@ -2505,7 +2507,10 @@ def summarize_run_evidence_result(evidence: dict[str, object]) -> dict[str, obje
     invalid_artifacts = _invalid_professional_artifacts(
         evidence.get("artifacts") if isinstance(evidence.get("artifacts"), dict) else {}
     )
-    if invalid_artifacts:
+    # A shared directory scan does not prove run ownership. Its per-file
+    # diagnostics stay in evidence, never in native output or user-visible status.
+    shared = bool((evidence.get("artifacts") or {}).get("shared_workspace"))
+    if invalid_artifacts and not shared:
         failure_reasons.append(
             {
                 "reason": "professional artifact validation failed",
@@ -2586,9 +2591,19 @@ def build_run_evidence(
     started_at: float | None = None,
     ended_at: float | None = None,
     transcript_paths: dict[str, str] | None = None,
+    stopped_generation: bool = False,
 ) -> dict[str, object]:
     workspace = Path(workspace_dir)
-    artifacts = _artifact_inventory(workspace, worker=worker, started_at=started_at, ended_at=ended_at)
+    # A confirmed control stop is not a completion audit. Preserve its native
+    # receipt/transcript without walking or rendering unrelated workspace files.
+    # Successful and failed provider results retain their full evidence checks.
+    not_applicable = {"status": "not_applicable", "basis": "stopped_generation"}
+    artifacts = (
+        {**not_applicable, "count": 0, "items": [],
+         "shared_workspace": workspace_files_are_shared(worker)}
+        if stopped_generation else
+        _artifact_inventory(workspace, worker=worker, started_at=started_at, ended_at=ended_at)
+    )
     normalized_stop_reason = str(stop_reason or "").strip()
     if normalized_stop_reason == "timeout":
         exit_source = "timeout"
@@ -2606,6 +2621,11 @@ def build_run_evidence(
         "error_present": bool(str(error_text or "").strip()),
         "status": "ok" if exit_code == 0 and not str(error_text or "").strip() else "failed",
     }
+    omitted_preview = "[Oversized stopped-generation preview omitted; exact transcript retained]"
+    stdout_preview = (omitted_preview if stopped_generation and len(stdout_text or "") > 4000
+                      else _redact_text(stdout_text, max_chars=4000))
+    stderr_preview = (omitted_preview if stopped_generation and len(stderr_text or "") > 4000
+                      else _redact_text(stderr_text, max_chars=4000))
     effective_effort = _effective_effort(worker, command, env)
     output_contract = _trusted_continuation_output_contract(worker, run_id=run_id)
     evidence: dict[str, object] = {
@@ -2639,23 +2659,23 @@ def build_run_evidence(
         "transcript": {
             "paths": transcript_paths or {},
             "metadata": _transcript_metadata(transcript_paths, workspace_dir=workspace),
-            "stdout_tail": _redact_text(stdout_text, max_chars=4000),
-            "stderr_tail": _redact_text(stderr_text, max_chars=4000),
+            "stdout_tail": stdout_preview,
+            "stderr_tail": stderr_preview,
         },
         "artifacts": artifacts,
-        "visual_render_evidence": _visual_render_summary(artifacts),
-        "content_hygiene": check_content_hygiene(_text_artifact_payload(workspace, worker=worker)),
-        "constraint_compliance": _constraint_compliance(workspace, constraint_ledger, output_text=output_text),
+        "visual_render_evidence": dict(not_applicable) if stopped_generation else _visual_render_summary(artifacts),
+        "content_hygiene": dict(not_applicable) if stopped_generation else check_content_hygiene(_text_artifact_payload(workspace, worker=worker)),
+        "constraint_compliance": dict(not_applicable) if stopped_generation else _constraint_compliance(workspace, constraint_ledger, output_text=output_text),
         "typed_output_contract": output_contract,
-        "coverage_compliance": _coverage_compliance(
+        "coverage_compliance": dict(not_applicable) if stopped_generation else _coverage_compliance(
             workspace,
             artifacts,
             constraint_ledger,
             output_text=output_text,
         ),
-        "completion_compliance": _completion_compliance(artifacts, output_contract),
+        "completion_compliance": dict(not_applicable) if stopped_generation else _completion_compliance(artifacts, output_contract),
         "final_output": final_output,
-        "failure_classification": _failure_classification_summary(
+        "failure_classification": dict(not_applicable) if stopped_generation else _failure_classification_summary(
             stdout_text=stdout_text,
             stderr_text=stderr_text,
             runtime_name=runtime_name,

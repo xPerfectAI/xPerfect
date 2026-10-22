@@ -853,6 +853,66 @@ def test_needs_input_closes_exact_attempt_without_terminalizing_resumable_run(tm
     assert attempt["terminal_reason"] == "needs_input"
 
 
+def test_codex_transport_recovery_diagnostics_preserve_the_running_attempt(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "native-transport-recovery.sqlite3"))
+    _project, worker, run = _active_worker_and_run(
+        store, "native-transport-recovery", execution_mode="host", run_state="running"
+    )
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "native-runtime"))
+    monkeypatch.setattr(runtime, "_read_active_session", lambda _worker_id: {
+        "run_id": run["run_id"], "attempt_id": run["active_attempt_id"], "model": "test",
+    })
+    before_progress = []
+
+    def observe(event):
+        before_progress.append(store.get_run(run["run_id"]))
+        store.observe_provider_liveness(
+            run_id=event["run_id"], expected_attempt_id=event["attempt_id"],
+            kind=event["kind"], failure_class=event["failure_class"],
+            runtime=event["runtime"], model=event["model"],
+            source_sequence=event["source_sequence"], source_digest=event["source_digest"],
+            observed_at=event["observed_at"], retry_limit=3,
+        )
+
+    runtime.set_provider_liveness_observer(observe)
+    events = [
+        {"type": "error", "message": f"Reconnecting... {attempt}/5 (stream disconnected)"}
+        for attempt in range(2, 6)
+    ] + [
+        {"type": "item.completed", "item": {
+            "type": "error", "message": "Falling back from WebSockets to HTTPS transport."
+        }},
+        {"type": "item.completed", "item": {
+            "type": "agent_message", "text": "Synthetic recovered reply."
+        }},
+        {"type": "turn.completed"},
+    ]
+    stdout_path = tmp_path / "native-transport-events.jsonl"
+    stdout_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    stop = Event()
+    stop.set()
+
+    runtime._observe_native_session_events(
+        worker["worker_id"], stdout_path, stop,
+        run_id=run["run_id"], attempt_id=run["active_attempt_id"],
+    )
+
+    assert len(before_progress) == 1
+    assert before_progress[0]["state"] == "running"
+    assert before_progress[0]["meaningful_progress_at"] is None
+    assert before_progress[0]["liveness_started_at"] == run["liveness_started_at"]
+    current = store.get_run(run["run_id"])
+    assert current["state"] == "running"
+    assert current["active_attempt_id"] == run["active_attempt_id"]
+    assert current["internal_retry_count"] == 0
+    assert current["meaningful_progress_sequence"] == 1
+    assert store.get_active_host_run_lease_for_run(run["run_id"]) is not None
+    observations = store.list_provider_liveness_events(run["run_id"])
+    assert [(event["kind"], event["source_sequence"]) for event in observations] == [
+        ("meaningful_progress", 6)
+    ]
+
+
 def test_provider_liveness_retries_are_durable_deduplicated_and_reset_by_progress(
     tmp_path,
 ):

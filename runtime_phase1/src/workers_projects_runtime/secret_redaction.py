@@ -19,12 +19,15 @@ def _redact_pair_or_preserve_uri_authority(match: re.Match[str]) -> str:
     return "[REDACTED_CREDENTIAL]"
 
 
+# Anchor a scheme at its token boundary: trying every suffix of a long native log token
+# is quadratic and holds Python's GIL across unrelated live responses. The user-info
+# rule retains any numeric/punctuation prefix so embedded credentials still redact.
 # Preserve the pre-existing generic credential-pair family as well as known formats.
 # Unquoted ID:secret text is ambiguous; do not guess safety from an arbitrary label.
 RedactionRule = tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
 CREDENTIAL_REDACTIONS: tuple[RedactionRule, ...] = (
     (
-        re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s<>@\"']*:[^/\s<>@\"']+@"),
+        re.compile(r"(?i)(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*://)[^/\s<>@\"']*:[^/\s<>@\"']+@"),
         r"\1[REDACTED_CREDENTIAL]@",
     ),
     (
@@ -33,7 +36,7 @@ CREDENTIAL_REDACTIONS: tuple[RedactionRule, ...] = (
     ),
     (
         re.compile(
-            r"(?P<uri_authority>[a-zA-Z][a-zA-Z0-9+.-]*://[a-zA-Z0-9.-]+:[0-9]{1,5}(?=[/?#\s]|$))"
+            r"(?P<uri_authority>(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]*://[a-zA-Z0-9.-]+:[0-9]{1,5}(?=[/?#\s]|$))"
             r"|\b[A-Za-z0-9_]{8,}:[A-Za-z0-9_./+=-]{20,}\b"
         ),
         _redact_pair_or_preserve_uri_authority,

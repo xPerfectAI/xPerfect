@@ -6,12 +6,13 @@ from pathlib import Path
 import pytest
 
 from workers_projects_runtime.profile_runtime import RuntimeErrorBase, _require_successful_run_evidence
-from workers_projects_runtime.run_evidence import build_constraint_ledger, build_run_evidence, write_run_evidence
+from workers_projects_runtime.run_evidence import build_constraint_ledger, build_run_evidence, write_run_evidence, write_constraint_ledger
 
 
-def evidence_for(workspace: Path, *, output='The revised note is saved and verified.', contract=None):
+def evidence_for(workspace: Path, *, output='The revised note is saved and verified.', contract=None, worker_context=None):
     run_id = 'run_correction'
     worker = {'worker_id': 'wrk_correction', 'profile': 'claude-code', 'execution_mode': 'host'}
+    worker.update(worker_context or {})
     if contract is not None:
         worker['bootstrap_bundle_json'] = json.dumps({'viventium_continuation_contract': {
             'version': 1, 'run_id': run_id,
@@ -28,6 +29,8 @@ def evidence_for(workspace: Path, *, output='The revised note is saved and verif
         timeout_seconds=None, stop_reason='process_exit', constraint_ledger=ledger,
     )
     path = write_run_evidence(workspace, evidence, run_id)
+    if ledger is not None:
+        write_constraint_ledger(workspace, ledger, run_id)
     return evidence, str(path.relative_to(workspace))
 
 
@@ -120,3 +123,33 @@ def test_declared_diagnostic_deletion_is_not_treated_as_generation_unavailable(t
     with pytest.raises(RuntimeErrorBase, match="constraint ledger was not readable"):
         _require_successful_run_evidence(workspace=tmp_path, evidence_path=path,
                                          constraint_ledger_path="deleted-ledger.json", run_id="run_correction")
+
+
+@pytest.mark.parametrize("worker_context", [
+    {"_execution_workspace_mode": "shared"},
+    {"execution_mode": "host", "workspace_kind": "legacy"},
+])
+def test_shared_workspace_document_does_not_fail_native_action(tmp_path, worker_context):
+    (tmp_path / "unrelated.docx").write_text("Not produced by this run")
+    evidence, path = evidence_for(
+        tmp_path, output="The requested browser tab is open.", worker_context=worker_context,
+        contract={"mode": "replace", "required": [], "forbidden": [],
+                  "formats": [], "forbidden_formats": []},
+    )
+    assert evidence["evidence_result"]["failure_reasons"] == []
+    assert evidence["evidence_result"]["warning_reasons"] == []
+    assert evidence["artifacts"]["items"][0]["document_validation"]["valid"] is False
+    status, warning = _require_successful_run_evidence(
+        workspace=tmp_path, evidence_path=path, constraint_ledger_path="glasshive-run/runs/run_correction/constraint-ledger.json", run_id="run_correction",
+    )
+    assert status == "pass"
+    assert warning == ""
+
+
+def test_shared_workspace_keeps_explicit_missing_output_failure(tmp_path):
+    contract = {"mode": "replace", "required": ["Produce the PDF."], "forbidden": [],
+                "formats": ["pdf"], "forbidden_formats": []}
+    evidence, _ = evidence_for(tmp_path, contract=contract,
+                               worker_context={"_execution_workspace_mode": "shared"})
+    assert any(r["reason"] == "typed output formats missing"
+               for r in evidence["evidence_result"]["failure_reasons"])

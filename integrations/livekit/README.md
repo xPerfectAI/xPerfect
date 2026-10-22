@@ -124,6 +124,26 @@ input. Cancellation of an actual in-flight native model, reconnect and full back
 callback-to-speech parity still need affected-path acceptance before calling this an always-on
 voice product.
 
+## Keep native work from delaying other calls
+
+Native stdout, transcript previews and credential redaction share server resources with live
+conversation streams. A completed Stop can therefore still delay another call if result processing
+blocks the server. Putting CPU-heavy Python work in a thread alone does not prevent this.
+
+Measure native termination, stopped-result processing, public-text forwarding and first received
+audio separately. Check an independent event-loop heartbeat while replaying large retained output;
+otherwise a pause caused by another worker can look like slow inference or TTS. Keep heartbeat and
+stage evidence free of private conversation content.
+
+A confirmed typed Stop uses the existing stopped-generation evidence path before normal completion
+previews. Preserve exact native identity, death/lease proof, original private transcript/media and
+credential protection. Normal successful and failed results retain their audits and redaction.
+Optimize proven redundant work or pathological matching; do not skip privacy, drop context, wait
+for background work before speaking, or add a Voice-specific orchestration path. The
+[native generation and restart contract](../../docs/02_Architecture_and_Components.md#native-generation-and-restart-ownership)
+owns those lifecycle rules. A replay improvement still needs a loaded live-control check; it is not
+a conversational-latency or glitch-free-audio guarantee.
+
 ## Checks
 
 ```sh

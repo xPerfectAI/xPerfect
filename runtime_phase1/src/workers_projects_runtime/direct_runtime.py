@@ -14,6 +14,7 @@ import sys
 import copy
 import base64
 import tomllib
+from urllib.parse import urlsplit
 
 from .bootstrap import bootstrap_bundle_for, bootstrap_env_for, glasshive_project_agents_md, native_instruction_before_tail, worker_prompt_layer_producer
 from .grok_runtime import GrokBuildRuntime
@@ -28,6 +29,20 @@ DIRECT_PROVIDERS = {
     "direct-anthropic": {"provider": "anthropic", "key": "ANTHROPIC_API_KEY", "model": "claude-opus-5-5", "model_env": "WPR_MODEL_DIRECT_ANTHROPIC", "effort_env": "WPR_CLAUDE_CODE_EFFORT"},
     "direct-xai": {"provider": "xai", "key": "XAI_API_KEY", "model": "grok-4.7", "model_env": "WPR_MODEL_DIRECT_XAI", "effort_env": "WPR_GROK_REASONING_EFFORT"},
 }
+
+
+def direct_openai_base_url():
+    """Use an explicit deployment endpoint; conversational input cannot set it."""
+    value = os.environ.get("WPR_OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeConfigurationError("Direct OpenAI endpoint is invalid") from exc
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or port == 0):
+        raise RuntimeConfigurationError("Direct OpenAI requires an HTTPS endpoint without embedded credentials or query parameters")
+    return value
 
 
 def direct_mcp_servers(bundle, environment):
@@ -128,6 +143,34 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
     def _agent_type(self):
         return "direct"
 
+    @staticmethod
+    def _has_bound_provider_account(worker):
+        from .current_native_account import MARKER
+        return (mission_provider_account_selection(worker) is not None or MARKER in worker
+                or bool(worker.get("_glasshive_provider_account_bound"))
+                or bool(worker.get("_glasshive_provider_api_key_file"))
+                or bool(worker.get("_glasshive_inference_broker_bound")))
+
+    def _openai_endpoint(self, worker):
+        endpoint = direct_openai_base_url()
+        if endpoint != "https://api.openai.com/v1" and self._has_bound_provider_account(worker):
+            raise RuntimeConfigurationError("A deployment Direct OpenAI endpoint cannot use a selected personal provider account")
+        return endpoint
+
+    def _host_env(self, worker, run_id=None):
+        env = super()._host_env(worker, run_id=run_id)
+        if self.direct["provider"] == "openai":
+            endpoint = self._openai_endpoint(worker)
+            if not self._has_bound_provider_account(worker):
+                key = os.environ.get("WPR_OPENAI_API_KEY", "").strip()
+                if key and endpoint == "https://api.openai.com/v1":
+                    raise RuntimeConfigurationError("A dedicated Direct deployment key requires an explicit custom WPR_OPENAI_BASE_URL")
+                if endpoint != "https://api.openai.com/v1" and not key:
+                    raise RuntimeConfigurationError("A custom Direct OpenAI endpoint requires its dedicated WPR_OPENAI_API_KEY")
+                if key:
+                    env["OPENAI_API_KEY"] = key
+        return env
+
     def resolve_model(self, profile):
         if profile != self.runtime_name:
             raise RuntimeConfigurationError("Direct runtime/profile mismatch")
@@ -172,6 +215,8 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
         env = self._host_env(worker)
         apply_bound_provider_account_environment(worker, env, runtime_name=self.runtime_name)
         servers = direct_mcp_servers(bundle, env)
+        if bundle.get("run_mode") == "conversation" and bundle.get("conversation_tool_mode") == "coordination":
+            servers = [server for server in servers if server.get("preserve_tool_names") is True]
         if _native_tools_disabled(bundle) and not bundle.get("glasshive_capability_broker"):
             servers = []
         authority = direct_authority_instructions(worker, self._conversation_output_schema(worker))
@@ -199,7 +244,9 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
         cache_key = hashlib.sha256(("xperfect-prompt-cache-v1\n" + scope_json).encode()).hexdigest() if cache_eligible else None
         history_name = "direct-history-" + scope_digest + ".json"
         return {"provider": self.direct["provider"], "model": info.model, "instruction": instruction,
+                **({"base_url": self._openai_endpoint(worker)} if self.direct["provider"] == "openai" else {}),
                 "run_id": str(worker.get("_active_run_id") or "direct"),
+                "conversation_tool_mode": bundle.get("conversation_tool_mode", "full") if bundle.get("run_mode") == "conversation" else "full",
                 "instructions": authority, "mcp_servers": servers, "session_id": info.session_key or self._default_session_key(worker),
                 "input_images": [{"media_type": mime, "data_base64": base64.b64encode(data).decode()}
                                  for _path, mime, data in self._native_input_image_files(worker, info)],
@@ -217,10 +264,13 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
 
     def _history_scope(self, worker, model):
         selection = mission_provider_account_selection(worker)
+        endpoint = self._openai_endpoint(worker) if self.direct["provider"] == "openai" else None
         return {"provider": self.direct["provider"], "model": model,
                 "tenant": worker.get("tenant_id", "local"), "owner": worker.get("owner_id"),
                 "worker": worker["worker_id"], "account": selection.account_id if selection else "configured-route",
-                "epoch": bootstrap_env_for(worker).get("GLASSHIVE_PROVIDER_SESSION_EPOCH", "")}
+                "epoch": bootstrap_env_for(worker).get("GLASSHIVE_PROVIDER_SESSION_EPOCH", ""),
+                **({"endpoint_sha256": hashlib.sha256(endpoint.encode()).hexdigest()}
+                   if endpoint is not None and endpoint != "https://api.openai.com/v1" else {})}
 
     def _context_replay_request(self, worker, scope, descriptor):
         if not descriptor or self._provider_session_is_stateless(worker):

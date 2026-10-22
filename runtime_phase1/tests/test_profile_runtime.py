@@ -275,15 +275,12 @@ def test_provider_liveness_projects_only_exact_native_json_event_types(tmp_path)
         observed_at="2026-08-27T12:00:03Z",
     )
 
-    assert retry is not None
-    assert retry["kind"] == "internal_retry"
-    assert retry["failure_class"] == "provider_internal_retry"
-    assert retry["event_ref"].startswith("provider_liveness_sha256:")
-    assert retry["source_sequence"] == 3
-    assert re.fullmatch(r"[0-9a-f]{64}", str(retry["source_digest"]))
+    assert retry is None
     assert progress is not None
     assert progress["kind"] == "meaningful_progress"
-    assert progress["event_ref"] != retry["event_ref"]
+    assert progress["event_ref"].startswith("provider_liveness_sha256:")
+    assert progress["source_sequence"] == 4
+    assert re.fullmatch(r"[0-9a-f]{64}", str(progress["source_digest"]))
     assert claude_retry is not None
     assert claude_retry["kind"] == "internal_retry"
     assert claude_retry["failure_class"] == "provider_rate_limited"
@@ -375,14 +372,10 @@ def test_native_jsonl_tail_publishes_exact_liveness_sequence_and_digest(
         attempt_id=attempt_id,
     )
 
-    assert [item["source_sequence"] for item in observed] == [2, 3]
-    assert [item["kind"] for item in observed] == [
-        "meaningful_progress",
-        "internal_retry",
-    ]
+    assert [item["source_sequence"] for item in observed] == [2]
+    assert [item["kind"] for item in observed] == ["meaningful_progress"]
     assert [item["source_digest"] for item in observed] == [
         hashlib.sha256(lines[1].encode("utf-8")).hexdigest(),
-        hashlib.sha256(lines[2].encode("utf-8")).hexdigest(),
     ]
     assert all(item["worker_id"] == worker_id for item in observed)
     assert all(item["run_id"] == run_id for item in observed)
@@ -413,7 +406,9 @@ def test_native_jsonl_tail_resumed_attempt_starts_at_existing_eof(
     attempt_id = "attempt_b"
     model = "test-model"
     prior_attempt_lines = [
-        json.dumps({"type": "error", "message": f"attempt A retry {index}"})
+        json.dumps({"type": "item.completed", "item": {
+            "type": "command_execution", "status": "completed", "id": f"prior-{index}",
+        }})
         for index in range(3)
     ]
     resumed_attempt_lines = [
@@ -424,6 +419,9 @@ def test_native_jsonl_tail_resumed_attempt_starts_at_existing_eof(
             }
         ),
         json.dumps({"type": "error", "message": "attempt B retry"}),
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "Synthetic resumed reply.",
+        }}),
     ]
     stdout_path = tmp_path / "resumed-native-events.jsonl"
     stdout_path.write_text("\n".join(prior_attempt_lines) + "\n")
@@ -456,14 +454,14 @@ def test_native_jsonl_tail_resumed_attempt_starts_at_existing_eof(
 
     assert not tail.is_alive()
     assert [item["attempt_id"] for item in observed] == [attempt_id, attempt_id]
-    assert [item["source_sequence"] for item in observed] == [1, 2]
+    assert [item["source_sequence"] for item in observed] == [1, 3]
     assert [item["kind"] for item in observed] == [
         "meaningful_progress",
-        "internal_retry",
+        "meaningful_progress",
     ]
     assert [item["source_digest"] for item in observed] == [
         hashlib.sha256(line.encode("utf-8")).hexdigest()
-        for line in resumed_attempt_lines
+        for line in (resumed_attempt_lines[0], resumed_attempt_lines[2])
     ]
 
 
@@ -5729,6 +5727,27 @@ def test_host_codex_projects_enabled_modern_native_cua_without_reenabling_legacy
         assert "cua_repl" not in config["mcp_servers"]
 
 
+
+def test_host_codex_preserves_native_skill_selections(tmp_path, monkeypatch):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
+    source_home = tmp_path / "source-home"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text(
+        '[[skills.config]]\npath = "/synthetic/retired/SKILL.md"\nenabled = false\n'
+        '[[skills.config]]\npath = "/synthetic/current/SKILL.md"\nenabled = true\n'
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    expected = tomllib.loads((source_home / "config.toml").read_text())["skills"]
+    actual = tomllib.loads(runtime._host_codex_worker_config(""))
+    assert actual["skills"] == expected
+
+
+def test_native_toml_record_arrays_round_trip():
+    data = {"records": [{"name.with.dot": "first", "enabled": False,
+                         "nested": {"values": [1, 2], "empty": {}}},
+                        {"name": "second", "enabled": True}]}
+    assert tomllib.loads(profile_runtime_module._render_toml_document(data)) == data
+
 def test_host_codex_preserves_explicit_modern_cua_disable(tmp_path, monkeypatch):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     source_home = tmp_path / "source-home"
@@ -5741,7 +5760,8 @@ def test_host_codex_preserves_explicit_modern_cua_disable(tmp_path, monkeypatch)
     assert config["mcp_servers"]["cua_repl"]["enabled"] is False
 
 
-def test_host_codex_preserves_known_computer_use_client_when_manifest_is_absent(tmp_path, monkeypatch):
+@pytest.mark.parametrize("selected_plugin", [False, True])
+def test_host_codex_does_not_invent_mcp_from_installed_executable(tmp_path, monkeypatch, selected_plugin):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     source_codex_home = tmp_path / "source-codex-home"
     computer_use_client = (
@@ -5758,6 +5778,9 @@ def test_host_codex_preserves_known_computer_use_client_when_manifest_is_absent(
     computer_use_client.parent.mkdir(parents=True)
     computer_use_client.write_text("#!/usr/bin/env bash\n")
     computer_use_client.chmod(0o755)
+    (source_codex_home / "config.toml").write_text(
+        '[plugins."computer-use@openai-bundled"]\nenabled = true\n' if selected_plugin else ""
+    )
     monkeypatch.setenv("CODEX_HOME", str(source_codex_home))
 
     config = runtime._host_codex_worker_config(
@@ -5766,8 +5789,8 @@ def test_host_codex_preserves_known_computer_use_client_when_manifest_is_absent(
         "bearer_token_env_var = \"GLASSHIVE_CAPABILITY_BROKER_TOKEN\""
     )
 
-    assert "[mcp_servers.computer-use]" in config
-    assert str(computer_use_client) in config
+    assert "computer-use" not in tomllib.loads(config).get("mcp_servers", {})
+    assert str(computer_use_client) not in config
     assert "glasshive-user-capabilities" in config
 
 
@@ -13117,3 +13140,77 @@ def test_docker_codex_without_a_model_choice_runs_the_native_default(tmp_path, m
     command, _env = runtime._build_command(worker, "Create the artifact.", runtime._runtime_info(worker))
 
     assert command[command.index("-m") + 1] == "gpt-6.1-sol"
+
+
+@pytest.mark.parametrize("runtime_class,profile", [
+    (HostCodexCliRuntime, "codex-cli"),
+    (HostClaudeCodeRuntime, "claude-code"),
+])
+@pytest.mark.parametrize("stop_reason,error_class", [
+    ("paused", profile_runtime_module.WorkerPausedError),
+    ("interrupted", WorkerInterruptedError),
+    ("terminated", WorkerTerminatedError),
+])
+def test_host_typed_stop_skips_completion_preview_redaction(
+    tmp_path, monkeypatch, runtime_class, profile, stop_reason, error_class,
+):
+    runtime = runtime_class(base_dir=str(tmp_path / "private-state"))
+    worker = {
+        "worker_id": "wrk_stopped_preview", "profile": profile, "execution_mode": "host",
+        "workspace_root": str(tmp_path / "missions"), "model": "configured-model",
+        "_run_attempt_id": "attempt-stopped-preview",
+        "bootstrap_bundle_json": json.dumps({"run_mode": "mission"}),
+    }
+    run_id = "run_stopped_preview"
+    # A tool result can contain a large context or image even when the operator stops
+    # the turn. Keep its exact private transcript; it has no completed-result preview.
+    raw = json.dumps({"tool_result": "synthetic-context-" * 14000}) + "\n"
+    original_redactor = profile_runtime_module._redact_text
+
+    def preview_redactor(value, **kwargs):
+        assert value != raw, "Stopped native stdout must not enter completion-preview redaction"
+        return original_redactor(value, **kwargs)
+
+    class StoppedProcess:
+        pid = 12345
+        returncode = None
+
+        @classmethod
+        def __class_getitem__(cls, item):
+            return cls
+
+        def __init__(self, command, **kwargs):
+            _mark_fake_host_supervisor_ready(list(command), self.pid)
+            kwargs["stdout"].write(raw)
+            kwargs["stdout"].flush()
+
+        def wait(self, timeout=None):
+            runtime._note_stop_reason(worker["worker_id"], stop_reason,
+                                     run_id=run_id, attempt_id=worker["_run_attempt_id"])
+            self.returncode = 0
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(runtime, "ensure_worker_ready", lambda _: runtime._host_runtime_info(worker))
+    monkeypatch.setattr(runtime, "_build_command", lambda *_: ([profile], {}))
+    monkeypatch.setattr(runtime, "_process_identity_sha256", lambda _: "1" * 64)
+    monkeypatch.setattr(runtime, "_process_group_identity", lambda pid: pid)
+    monkeypatch.setattr(runtime, "_process_start_identity", lambda _: "synthetic-process-identity")
+    monkeypatch.setattr(profile_runtime_module.subprocess, "Popen", StoppedProcess)
+    monkeypatch.setattr(profile_runtime_module, "_redact_text", preview_redactor)
+
+    with pytest.raises(error_class):
+        runtime.run_task(worker, "Complete the assigned work.", run_id=run_id)
+
+    transcript = runtime._run_root(worker["worker_id"], run_id) / "stdout.log"
+    assert transcript.read_text() == raw
+    workspace = runtime._host_workspace_dir(worker)
+    evidence = json.loads((workspace / "glasshive-run" / "runs" / run_id / "evidence.json").read_text())
+    assert evidence["run_id"] == run_id
+    assert evidence["evidence_result"]["status"] == "fail"
+    assert evidence["artifacts"]["basis"] == "stopped_generation"
+    assert evidence["transcript"]["stdout_tail"] == (
+        "[Oversized stopped-generation preview omitted; exact transcript retained]"
+    )

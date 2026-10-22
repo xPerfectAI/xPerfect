@@ -124,6 +124,12 @@ session, history and context epoch; it does not force a cold rebind. A failed re
 error class and keeps the normal admission conflict. Stop cannot replace a different unresolved
 lifecycle claim; it can complete through the normal control path after exact cleanup settles.
 No provider-wide admission lock is held during native cleanup.
+A newer queued turn that has never invoked or confirmed native startup does not own the retained
+failed generation. Deadline cleanup may stop that exact old generation while preserving the queued
+turn, request, latest-run pointer and native history. The shared eligibility check runs before the
+service action, at lifecycle claim and at release finalization; invoked attempts, active leases,
+confirmed replacement startup and restore holds keep the fence. Reading the expired request may
+retry its unconfirmed cleanup without rewriting failed history or extending either deadline.
 Startup removes obsolete complete four-field unique indices only after confirming the six-field
 unique constraint. Legacy table rebuilds exclude those indices from replay. The schema transaction
 preserves every session ID, history and dependent request or visible admission, as well as unrelated
@@ -171,6 +177,23 @@ The existing opt-in native timing log records `host_control_signal`, `host_contr
 and KILL separately) and `host_control_child_cleanup`, with a hashed run identity and death-proof
 booleans. These stages separate time spent proving a stop from native answer generation; they do
 not claim the request has asynchronous admission.
+
+After a native generation is confirmed stopped, its existing evidence writer records the exact
+run/attempt, stop reason, redacted transcript and transcript metadata, and native media. It does not
+scan or render workspace files to audit a result that was interrupted, paused or terminated. Those
+artifact, hygiene, constraint, coverage and completion checks are marked `not_applicable` with
+`basis: stopped_generation`; this does not claim that the workspace has no files. The durable native
+control receipt and lease/death proof remain unchanged. Ordinary provider success and failure keep
+their existing completion audits. This prevents a large shared working folder from delaying a
+confirmed control receipt while unrelated files are audited.
+The stop reason already has a typed owner, so stopped evidence does not run provider-failure
+classification again. Previews above 4,000 characters are explicitly omitted rather than spending
+time redacting the complete log; original transcript files, their metadata and native media remain
+available. Smaller previews use the existing credential redaction.
+The host completion path checks that same typed stop before it builds normal completion previews
+or aggregate presentation logs. A stopped tool transcript remains in its original private file; it
+does not need a completed-result preview. Normal successful and failed results still pass through
+all existing credential redaction and completion checks.
 
 Managed shutdown stops the exact owned generation and proves it absent before releasing its lease
 for retry. Failed cleanup or unknown absence retains the lease. Processor exit cannot release that
@@ -684,6 +707,13 @@ queued run and exact claim intact for the next existing wake; it does not report
 failure. Only acquisition busy is deferred. Store or runtime errors inside the guarded operation
 remain errors, and ordinary control lock deadlines remain unchanged.
 
+A persistent foreground conversation blocked only by its own released provider-liveness attention
+returns `provider_progress_stalled` at admission. It does not report transient native occupancy or
+keep retrying a turn that needs an owner action. The linked failed request, exact owner/session,
+typed attention, current native release and restore/control guards must all match. Live, foreign,
+unknown or unconfirmed blockers retain the existing authority conflict. This classification does
+not cancel or resume work, change the session, or authorize fallback.
+
 Attention cleanup also covers a run blocked before its first invocation. If the host reports a
 retained process as absent, cleanup binds that observed native run only when Store proves the same
 worker's terminal ownership. The existing host cleanup repeats exact session, process and child
@@ -918,6 +948,21 @@ requires a persisted coordinator conversation mapped to that exact provider-sess
 owner. Role, configured routes and goal budget cannot be expanded by workers. Private token
 projection uses existing MCP materialization and never places a service token in a worker.
 
+Conversation inheritance uses `worker_context_sources.py` and the existing versioned worker
+configuration snapshots/readers. A coordinator-bound worker can access the exact authorized
+conversation sources; common ownership alone does not grant another conversation. A handoff
+should select work and optionally supply a short focus, without requiring the conversational
+agent to rewrite the source history into a new brief. Preserve roles, source identity and trust
+boundaries; raw provider journals and credentials are not shared conversation content.
+
+External host delegation does not automatically acquire a coordinator conversation binding.
+A host must supply its authorized source through the existing trusted bootstrap/context owner.
+Keep inherited conversation content in the scoped context-source mechanism, not ordinary workspace
+files or a project definition that can be materialized into the user’s working directory.
+Selected current messages plus a model-written instruction are not proof of full conversation
+inheritance. Do not fabricate coordinator goal records to attach unrelated host history, and do
+not create a second history store to work around a missing binding.
+
 In packages, workspace containers share a workers network that refuses traffic between its
 containers, so one owner's workspace cannot reach another's. The runtime serves each workspace
 container a Unix socket in that container's own directory. A small standard-library stdio bridge
@@ -942,9 +987,53 @@ The thin single-agent provider/tool executor reuses the host runtime lifecycle; 
 admission, scheduling, history, account authority, controls and callbacks. Do not use SDK teams,
 handoffs, durable conversation stores or a second manager. Viventium remains a client.
 
+For a Fast Direct Queen, the trusted conversation bootstrap may select
+`conversation_tool_mode: coordination`. The native SDK toolset wrapper exposes `hand_off_to`
+and `list_workers` over the existing start, exact-work controls and roster. This is a catalog
+projection, not another executor. Other action tools remain available to the configured workers;
+ordinary worker runs and the explicit full conversation catalog retain their existing grants.
+The output protocol is separate from these two work tools and still governs public text and audio.
+
+The host binds the selected original input and authorized conversation sources through the existing
+bootstrap resource and worker context snapshot/readers. The Queen selects current source ordinals
+and an exact existing work reference where needed; it need not generate a task recap, title or
+resource class. Inherited history provides context, not authority to repeat historical tasks.
+Start acknowledges durable admission without waiting for completion. Queue, Message, Steer and Retry
+carry the selected current input plus the current authorized conversation. The existing action
+receipt binds that snapshot; the existing run continuation context preserves it separately from
+task instructions. Later references can therefore use facts stated after launch without a rewritten
+Queen brief. The worker's original task and output authority remain intact, and each run reads its
+own snapshot. Later worker results return through the existing callback owner.
+An inline context preview is not the whole source: overflow remains available through the existing
+owner-scoped paged reader. Missing source binding fails explicitly, without invented summaries.
+The inline budget first includes assigned and other current inputs, then conversation messages
+newest first, then continuity sections. A large archive must not displace recent conversation
+referents. This changes packing only; all selected sources keep their exact snapshot and paged
+access. The inherited-context instruction is owned by `prompts/worker-context-tools.json` and is
+included only when the run selects inherited sources; ordinary native workers do not receive it.
+
 OpenAI and xAI require their Responses path for the model/tool contract; Anthropic uses
 Messages. Real supervised xAI SDK checks exercised streaming, an MCP file read and protocol-history
 continuation. These small-context checks do not prove full host modules or voice acceptance.
+Direct OpenAI can use an explicit deployment-owned `WPR_OPENAI_BASE_URL`, including an Azure
+OpenAI v1 endpoint such as `https://<resource>.openai.azure.com/openai/v1/`. The default remains
+`https://api.openai.com/v1`. The existing official OpenAI SDK, API-key account, model, reasoning,
+tools and typed delivery contract stay the same. The endpoint requires HTTPS and rejects embedded
+credentials, query parameters and fragments; messages, tool arguments and worker bootstrap fields
+cannot select it. A deployment-owned `WPR_OPENAI_API_KEY` supplies this Direct route's
+credential without replacing global `OPENAI_API_KEY` or any native/selected account. A custom
+endpoint requires that dedicated key; it cannot fall back to a global OpenAI credential. Set
+the pair together: the dedicated key is refused when the endpoint is missing or selects official
+OpenAI, so an Azure credential cannot be sent there by an incomplete deployment setting. Configure
+secrets through the host's existing secret store; the Viventium compiler's `runtime.extra_env`
+accepts its existing Keychain `secret_ref` and projects this pair only into the private runtime
+provider environment, excluding the gateway. A custom endpoint cannot be combined with a selected
+or already bound personal account; account records do not yet bind an endpoint, so this fails before
+forwarding that account's credential. The API key must belong to the endpoint. Azure's deployment name must
+match the exact requested model ID; the runtime does not rewrite model names. A custom endpoint's
+hash joins the existing history and prompt-cache scope, so another endpoint cannot reuse its
+conversation journal or cache association. This URL setting does not prove model access or voice speed;
+actual configured-provider and user-path acceptance remain required.
 Exact attempt authority, protected account resolution, typed failures and public-envelope streaming
 are covered by focused source tests. Local process termination prevents further SDK tool execution;
 closing the stream does not prove remote GPU termination. Preserve accepted actions and late-result
@@ -971,8 +1060,11 @@ receipts. Do not imply subscription authentication supplies API access or add an
 
 Direct starts a fresh supervised process by default. Its optional import-only readiness uses the
 same native warm pool described above; it does not prepare a provider client or MCP connection
-before admission. Host execution is supported; container placement is explicitly unavailable. Current Grok and GPT profiles expose Low reasoning,
-not reasoning Off. Only settings the selected SDK/provider path actually sends are accepted.
+before admission. Host execution is supported; container placement is explicitly unavailable.
+Grok 4.7 and GPT 6.1 Sol support Low reasoning, not reasoning Off. Opus 5.5 uses adaptive
+thinking; zero reported thinking tokens on one request does not mean thinking was disabled.
+Validate effort support per model. Only settings the selected SDK/provider path actually sends
+are accepted; do not silently replace the model to obtain a different effort setting.
 
 The Direct authority instruction producer belongs to the same strict prompt-integrity inventory
 as native producers. Registering a producer without including its actual owner in that inventory
@@ -1113,6 +1205,12 @@ Direct account prepare, apply and mission binding share the registered executor'
 compatibility rule. Native subscription bindings remain available. The durable host supervisor
 owns the response/run deadline; the SDK does not impose a separate short HTTP read deadline.
 The provider SDK's bounded connection, write and pool timeouts remain in force.
+
+Codex's generic top-level `error` diagnostics and completed `error` items do not count as typed
+host retries or meaningful progress. Native transport reconnection and fallback retain their own
+recovery authority; the adapter does not interpret diagnostic prose. Completed answer and successful
+tool events still count as progress. Terminal `turn.failed`, operator deadlines and the durable
+no-progress watchdog retain their existing failure and cleanup contracts.
 
 Native timing also observes typed Codex context-compaction start and completion frames through the
 existing parsed liveness observer and latency log. It records wall/monotonic observation times,

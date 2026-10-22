@@ -8029,6 +8029,14 @@ class WorkersProjectsService:
         ):
             raise RuntimeError("capability_reauthorization_invalid")
 
+        action_context = self._json_object(action_record.get("source_context_json"))
+        inherited_conversation = action_context.get("inherited_conversation")
+        if inherited_conversation is not None and (
+            str(action_record.get("tenant_id") or "") != str(worker.get("tenant_id") or "")
+            or str(action_record.get("owner_id") or "") != str(worker.get("owner_id") or "")
+        ):
+            raise RuntimeErrorBase("inherited_context_owner_unconfirmed")
+
         if action in {"queue", "message", "steer"}:
             clean_instruction = str(instruction or "").strip()
             if not clean_instruction:
@@ -8045,6 +8053,7 @@ class WorkersProjectsService:
                 queue_context = build_workspace_continuation_context(
                     previous_run=run,
                     continuation_goal=clean_instruction,
+                    inherited_conversation=inherited_conversation,
                 )
                 created = self.assign_run(
                     worker_id,
@@ -8066,6 +8075,7 @@ class WorkersProjectsService:
                 message_context = build_workspace_continuation_context(
                     previous_run=run,
                     continuation_goal=clean_instruction,
+                    inherited_conversation=inherited_conversation,
                 )
                 message_instruction = continuation_instruction(
                     previous_run=run,
@@ -8153,6 +8163,7 @@ class WorkersProjectsService:
                     run_id=run_id,
                     idempotency_key=effect_idempotency_key,
                     action_use_id=action_use_id,
+                    inherited_conversation=inherited_conversation,
                     origin_trace=origin_trace,
                     continuation_contract=continuation_contract,
                     file_manifest=action_files,
@@ -8375,6 +8386,7 @@ class WorkersProjectsService:
             retry_context = build_workspace_continuation_context(
                 previous_run=run,
                 continuation_goal=retry_guidance or None,
+                inherited_conversation=inherited_conversation,
             )
             created = self.assign_run(
                 worker_id,
@@ -12206,6 +12218,7 @@ class WorkersProjectsService:
         origin_trace: dict[str, object] | None = None,
         continuation_contract: dict[str, object] | None = None,
         file_manifest: list[dict] | None = None,
+        inherited_conversation: dict[str, object] | None = None,
     ) -> dict:
         instruction = str(_prepared_instruction or "") or self._instruction_for_steer(
             message
@@ -12270,6 +12283,7 @@ class WorkersProjectsService:
             continuation_context = build_workspace_continuation_context(
                 previous_run=target,
                 continuation_goal=message,
+                inherited_conversation=inherited_conversation,
             )
             runtime_worker = worker
             if target_state != "queued":
@@ -12450,6 +12464,7 @@ class WorkersProjectsService:
         origin_trace: dict[str, object] | None = None,
         continuation_contract: dict[str, object] | None = None,
         file_manifest: list[dict] | None = None,
+        inherited_conversation: dict[str, object] | None = None,
     ) -> dict:
         if run_id or idempotency_key or action_use_id:
             return self._steer_worker_parallel(
@@ -12463,6 +12478,7 @@ class WorkersProjectsService:
                 origin_trace=origin_trace,
                 continuation_contract=continuation_contract,
                 file_manifest=file_manifest,
+                inherited_conversation=inherited_conversation,
             )
         worker = self.require_worker(worker_id)
         self._ensure_execution_allowed(worker)
@@ -18121,7 +18137,8 @@ class WorkersProjectsService:
             if (
                 run.get("worker_id") != worker_id or run.get("state") != "failed"
                 or run.get("failure_class") != "provider_response_deadline_exceeded"
-                or worker.get("last_run_id") != run_id or worker.get("work_stop_id")
+                or not self.store.provider_deadline_cleanup_target(worker_id, run_id)
+                or worker.get("work_stop_id")
                 or worker.get("state") in {"paused", "stopping", "terminating", "termination_failed", "terminated"}
                 or self.store.has_active_operator_pause(worker_id)
             ):

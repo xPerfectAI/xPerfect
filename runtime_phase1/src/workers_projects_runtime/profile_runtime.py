@@ -1367,6 +1367,16 @@ def _toml_value(value: object, *, manifest_dir: Path | None = None, key: str = "
     if isinstance(value, str):
         rendered = str(manifest_dir) if key == "cwd" and value == "." and manifest_dir else value
         return _toml_string(rendered)
+    if isinstance(value, dict):
+        # TOML arrays of tables (for example native skill selections) arrive as
+        # lists of dicts. Preserve them as equivalent inline tables.
+        fields: list[str] = []
+        for field, item in value.items():
+            rendered = _toml_value(item)
+            if rendered is None:
+                return None
+            fields.append(f"{_toml_table_name(str(field))} = {rendered}")
+        return "{ " + ", ".join(fields) + " }"
     if isinstance(value, list):
         rendered_items: list[str] = []
         for item in value:
@@ -6687,6 +6697,7 @@ class BaseCliWorkerRuntime:
                 constraint_ledger=constraint_ledger,
                 transcript_paths=transcript_paths,
                 started_at=started_at,
+                stopped_generation=active_state in {"paused", "interrupted", "terminated"},
             )
             _write_active_run_status(
                 path=heartbeat_path,
@@ -7256,10 +7267,9 @@ class BaseCliWorkerRuntime:
                     itemHash=native_timing_hash("maintenance", event["item"].get("id")),
                     sourceSequence=line_sequence,
                 )
-            if event_type == "error":
-                kind = "internal_retry"
-                failure_class = "provider_internal_retry"
-            elif event_type == "item.completed" and isinstance(event.get("item"), dict):
+            # Generic errors can precede native transport recovery. Terminal failure,
+            # operator deadlines and the no-progress watchdog retain failure ownership.
+            if event_type == "item.completed" and isinstance(event.get("item"), dict):
                 item = event["item"]
                 item_type = str(item.get("type") or "").strip().lower()
                 item_status = str(item.get("status") or "").strip().lower()
@@ -10232,6 +10242,7 @@ def _write_evidence_for_run(
     transcript_paths: dict[str, str],
     started_at: float | None = None,
     ended_at: float | None = None,
+    stopped_generation: bool = False,
 ) -> str:
     try:
         evidence = build_run_evidence(
@@ -10253,6 +10264,7 @@ def _write_evidence_for_run(
             started_at=started_at,
             ended_at=ended_at,
             transcript_paths=transcript_paths,
+            stopped_generation=stopped_generation,
         )
         attempt_id = str(worker.get("_run_attempt_id") or "").strip()
         if attempt_id:
@@ -12214,28 +12226,6 @@ raise SystemExit(exit_code)
                 break
         return "\n\n".join(blocks).strip()
 
-    def _host_codex_known_native_mcp_config(self, names: set[str]) -> str:
-        blocks: list[str] = []
-        if "computer-use" in names:
-            computer_use_client = (
-                self._source_host_codex_home()
-                / "computer-use"
-                / "Codex Computer Use.app"
-                / "Contents"
-                / "SharedSupport"
-                / "SkyComputerUseClient.app"
-                / "Contents"
-                / "MacOS"
-                / "SkyComputerUseClient"
-            )
-            if computer_use_client.exists():
-                blocks.append(
-                    "[mcp_servers.computer-use]\n"
-                    f"command = {_toml_string(computer_use_client)}\n"
-                    "args = [\"mcp\"]"
-                )
-        return "\n\n".join(blocks).strip()
-
     def _host_codex_worker_config(
         self,
         codex_config_append: str,
@@ -12291,12 +12281,8 @@ raise SystemExit(exit_code)
         plugin_preserved = self._host_codex_bundled_mcp_config(
             preserve_names - preserved_names, source_config
         )
-        plugin_names = _codex_mcp_server_names(plugin_preserved)
-        known_native = self._host_codex_known_native_mcp_config(
-            preserve_names - preserved_names - plugin_names
-        )
         native = "\n\n".join(
-            part for part in (preserved, plugin_preserved, known_native) if part.strip()
+            part for part in (preserved, plugin_preserved) if part.strip()
         ).strip()
         # Native stdio tools connect to services of the signed-in OS owner. Their
         # default HOME must not become the worker's isolated conversation home.
@@ -13023,6 +13009,7 @@ raise SystemExit(exit_code)
             stop_reason=stop_reason,
             constraint_ledger=self._active_session_constraint_ledger(workspace=workspace, active_session=active_session),
             transcript_paths=transcript_paths,
+            stopped_generation=True,
         )
         raw_heartbeat_path = str(active_session.get("heartbeat_path") or "").strip()
         heartbeat_path = Path(raw_heartbeat_path) if raw_heartbeat_path else _active_run_status_path(workspace, run_id)
@@ -14997,33 +14984,6 @@ raise SystemExit(exit_code)
         exit_code = self._final_host_exit_code(exit_path, exit_code)
         stdout = raw_stdout.read_text() if raw_stdout.exists() else ""
         stderr = raw_stderr.read_text() if raw_stderr.exists() else ""
-        redacted_stdout = _redact_text(stdout, max_chars=16000)
-        redacted_stderr = _redact_text(stderr, max_chars=16000)
-        with stdout_path.open("a") as aggregate:
-            if redacted_stdout:
-                aggregate.write(redacted_stdout)
-                if not redacted_stdout.endswith("\n"):
-                    aggregate.write("\n")
-            stdout_path.chmod(0o600)
-        with stderr_path.open("a") as aggregate:
-            if redacted_stderr:
-                aggregate.write(redacted_stderr)
-                if not redacted_stderr.endswith("\n"):
-                    aggregate.write("\n")
-            stderr_path.chmod(0o600)
-
-        self._write_action_audit(
-            worker,
-            {
-                "kind": "run.completed" if exit_code == 0 else "run.failed",
-                "run_id": effective_run_id,
-                "cwd": str(workspace),
-                "exit_code": exit_code,
-                "stdout_tail": redacted_stdout[-2000:],
-                "stderr_tail": redacted_stderr[-2000:],
-            },
-        )
-
         self._record_run_metrics(worker["worker_id"], effective_run_id, stdout)
         try:
             self._finalize_stop_reason(worker["worker_id"], run_id=effective_run_id,
@@ -15055,6 +15015,7 @@ raise SystemExit(exit_code)
                 constraint_ledger=constraint_ledger,
                 transcript_paths=transcript_paths,
                 started_at=started_at,
+                stopped_generation=active_state in {"paused", "interrupted", "terminated"},
             )
             _write_active_run_status(
                 path=heartbeat_path,
@@ -15072,6 +15033,35 @@ raise SystemExit(exit_code)
                 evidence_path=evidence_path,
             )
             raise
+        # Only live completion results need presentation previews. Confirmed typed stops
+        # retain their exact transcripts through the stopped-generation evidence above.
+        redacted_stdout = _redact_text(stdout, max_chars=16000)
+        redacted_stderr = _redact_text(stderr, max_chars=16000)
+        with stdout_path.open("a") as aggregate:
+            if redacted_stdout:
+                aggregate.write(redacted_stdout)
+                if not redacted_stdout.endswith("\n"):
+                    aggregate.write("\n")
+            stdout_path.chmod(0o600)
+        with stderr_path.open("a") as aggregate:
+            if redacted_stderr:
+                aggregate.write(redacted_stderr)
+                if not redacted_stderr.endswith("\n"):
+                    aggregate.write("\n")
+            stderr_path.chmod(0o600)
+
+        self._write_action_audit(
+            worker,
+            {
+                "kind": "run.completed" if exit_code == 0 else "run.failed",
+                "run_id": effective_run_id,
+                "cwd": str(workspace),
+                "exit_code": exit_code,
+                "stdout_tail": redacted_stdout[-2000:],
+                "stderr_tail": redacted_stderr[-2000:],
+            },
+        )
+
         if exit_code != 0:
             if self.runtime_name == "claude-code":
                 classification = classify_cli_failure(
