@@ -60,6 +60,65 @@ def test_approval_routes_without_client_handler_keep_legacy_exec():
     assert owner.codex_app_launch(['codex', 'exec', '-c', 'approval_policy="on-request"', '-']) is None
 
 
+@pytest.mark.parametrize('resume', [False, True])
+def test_private_profile_uses_rpc_config_and_native_cli_overrides(resume):
+    profile = {'developer_instructions': 'Exact private authority',
+               'mcp_servers': {'private': {'command': '/synthetic/native-tool', 'env': {'TOKEN': 'synthetic-private'}}},
+               'plugins': {'selected@example': {'enabled': True}},
+               'features': {'plugins': True, 'hooks': False},
+               'sandbox_workspace_write': {'network_access': False, 'writable_roots': ['/synthetic/original']}}
+    command = ['codex', 'exec', '--profile', 'xperfect-synthetic', *(['resume'] if resume else []),
+               '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="high"',
+               '-c', 'approval_policy="never"', '-c', 'sandbox_mode="workspace-write"',
+               '--enable', 'code_mode_host', *(['synthetic-thread'] if resume else []), '-']
+    assert owner.codex_app_launch(command) is None
+    got = owner.codex_app_launch(command, native_profile=profile)
+    assert '--profile' not in got['command']
+    assert 'synthetic-private' not in ' '.join(got['command'])
+    assert got['thread']['config']['mcp_servers'] == profile['mcp_servers']
+    assert got['thread']['config']['plugins'] == profile['plugins']
+    assert got['thread']['config']['features'] == {'plugins': True, 'hooks': False, 'code_mode_host': True}
+    assert got['thread']['config']['sandbox_workspace_write'] == profile['sandbox_workspace_write']
+    assert got['thread']['model'] == 'gpt-6.1-sol' and got['turn']['effort'] == 'high'
+    assert got['resumed'] is resume
+    assert 'code_mode_host' not in profile['features']
+
+
+def test_private_profile_preserves_each_nested_cli_restriction():
+    profile = {'features': {'shell_tool': True, 'plugins': True},
+               'mcp_servers': {'native': {'command': '/synthetic/native-tool', 'enabled': True}}}
+    command = ['codex', 'exec', '--profile', 'xperfect-synthetic',
+               '--dangerously-bypass-approvals-and-sandbox',
+               '-c', 'features.shell_tool=false', '-c', 'features.plugins=false',
+               '-c', 'mcp_servers.native.enabled=false', '-c', 'mcp_servers.native.enabled_tools=["read"]', '-']
+    config = owner.codex_app_launch(command, native_profile=profile)['thread']['config']
+    assert config['features'] == {'shell_tool': False, 'plugins': False}
+    assert config['mcp_servers']['native'] == {'command': '/synthetic/native-tool',
+        'enabled': False, 'enabled_tools': ['read']}
+
+
+@pytest.mark.parametrize('reviewed', sorted(owner.CODEX_EXEC_REVIEWED_VERSIONS))
+@pytest.mark.parametrize('drift', [None, 'config_missing', 'new_request'])
+def test_reviewed_native_abi_still_requires_exact_control_and_config_schema(tmp_path, monkeypatch, reviewed, drift):
+    runtime = object.__new__(HostCodexCliRuntime)
+    runtime.binary = sys.executable
+    def schema(command, **kwargs):
+        if command[-1] == '--version':
+            return SimpleNamespace(returncode=0, stdout=reviewed)
+        target = Path(command[-1]); (target/'v2').mkdir()
+        (target/'v2/TurnSteerParams.json').write_text(json.dumps({'required':['threadId','input','expectedTurnId']}))
+        for name in ('ThreadStartParams','ThreadResumeParams'):
+            fields = ['runtimeWorkspaceRoots','model','sandbox','approvalPolicy']
+            if drift != 'config_missing': fields.append('config')
+            (target/f'v2/{name}.json').write_text(json.dumps({'properties':dict.fromkeys(fields, {})}))
+        (target/'ServerRequest.json').write_text(json.dumps({'oneOf':[
+            {'properties':{'method':{'enum':[method]}}} for method in
+            {*owner.CODEX_EXEC_REQUEST_METHODS, *(['new/authority/request'] if drift == 'new_request' else [])}]}))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, 'run', schema)
+    assert runtime._native_midstream_schema_supported() is (drift is None)
+
+
 @pytest.mark.parametrize('matches', [True, False])
 def test_graph_input_capability_requires_actual_native_schema_match(tmp_path, matches):
     graph = {'version': 1, 'tools': [{'name': 'lc_transfer_to_specialist', 'description': 'Consult.'}]}

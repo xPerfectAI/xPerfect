@@ -108,7 +108,11 @@ def test_first_paint_and_floating_surfaces_do_not_depend_on_transparency():
     css=(STATIC/'styles.css').read_text()
     composer=css.split('.composer-frame {',1)[1].split('}',1)[0]
     assert 'backdrop-filter' not in composer and 'animation:' not in composer
-    assert '--overlay-surface: #080b10;' in css
+    theme=(STATIC/'theme.css').read_text()
+    assert '--overlay-surface: var(--panel-strong);' in theme
+    # Both themes keep floating controls opaque rather than inheriting a glass card.
+    import re
+    assert re.search(r'--panel-strong:\s*light-dark\(#[0-9a-f]{6}, #[0-9a-f]{6}\);', theme)
     for selector in ['.watch-files-panel {','.file-move-dialog {','.file-row-menu-items, .file-row-menu > button {','.result-panel {','.more-menu {']:
         assert 'background: var(--overlay-surface)' in css.split(selector,1)[1].split('}',1)[0]
     assert '.file-row-menu > button { background: var(--overlay-surface); }' in css
@@ -142,21 +146,31 @@ def test_account_selection_and_policy_events_refresh_the_actual_summary():
     events=source[source.index("  select.addEventListener('change', () => {",source.index('async function main')):source.index("  workspaceType?.addEventListener('change'",source.index('async function main'))]
     result=node(f"""
       import {{workerAccountSummary}} from {json.dumps((STATIC/'launch-policy.js').as_uri())};
-      const control=value=>({{value,dataset:{{}},selectedOptions:[{{textContent:'Selected account'}}],handlers:{{}},addEventListener(type,handler){{this.handlers[type]=handler;}}}});
+      const control=value=>({{value,dataset:{{}},selectedOptions:[{{textContent:'Selected account'}}],handlers:{{}},addEventListener(type,handler){{this.handlers[type]=handler;}},dispatchEvent(event){{this.handlers[event.type]?.(event);}}}});
       const select=control('new:test'),providerAccount=control('a'),providerAccountPolicy=control('personal_required');
       const workerAccountSummaryNode={{textContent:''}},providerAccountHelp={{}},connectWorkerAccount=null,button={{}},help={{}};
       const workspaceMode=control('isolated'),workspaceFilePlacementField={{hidden:true}},workspaceFilePlacement=control('common'),workspaceModeHelp={{textContent:''}},workspaceType=control('sandboxed');
       const bootstrap={{new_workspace_options:[{{profile:'test',label:'Assistant'}}],provider_accounts:[{{account_id:'a',label:'First',status:'ready'}},{{account_id:'b',label:'Second',status:'ready'}}]}};
       const syncWorkspaceUI=()=>{{}}; const renderLaunchProviderAccounts=()=>{{}}; const syncWorkspaceModeUI=()=>{{}}; const syncLaunchChoiceUI=()=>{{}};
+      const onboarding={{render(){{}}}},status={{textContent:''}},windowHandlers={{}};
+      const window={{addEventListener(name,handler){{windowHandlers[name]=handler;}}}};
+      let identityTransition=false,accountRefreshFlight=null,launchRecoveryTarget=null;
       {summary}
       {events}
       providerAccount.handlers.change(); const first=workerAccountSummaryNode.textContent;
       providerAccount.value='b';providerAccount.handlers.change();const second=workerAccountSummaryNode.textContent;
       providerAccountPolicy.value='legacy';providerAccountPolicy.handlers.change();const policy=workerAccountSummaryNode.textContent;
       select.value='open:missing';select.handlers.change();const saved=workerAccountSummaryNode.textContent;
-      console.log(JSON.stringify({{first,second,policy,saved}}));
+      select.value='new:test';providerAccount.value='a';providerAccountPolicy.value='personal_required';
+      providerAccount.options=[{{value:'a'}},{{value:'b'}}];
+      let release;accountRefreshFlight=new Promise(resolve=>{{release=resolve;}});
+      windowHandlers['xperfect:account-connected']({{detail:{{profile:'test',account_id:'b'}}}});
+      await Promise.resolve();const beforeRefresh=providerAccount.value;
+      release();await accountRefreshFlight;await Promise.resolve();
+      const connected=workerAccountSummaryNode.textContent;
+      console.log(JSON.stringify({{first,second,policy,saved,beforeRefresh,connected}}));
     """)
-    assert result=={'first':'Assistant · First','second':'Assistant · Second','policy':'Assistant · Deployment-managed account selected','saved':'Worker · Account status unavailable'}
+    assert result=={'first':'Assistant · First','second':'Assistant · Second','policy':'Assistant · Deployment-managed account selected','saved':'Worker · Account status unavailable','beforeRefresh':'a','connected':'Assistant · Second'}
 
 
 def test_explicit_strict_account_survives_readiness_and_catalog_refresh():
@@ -211,10 +225,10 @@ def test_explicit_strict_account_survives_readiness_and_catalog_refresh():
 def test_workspace_summaries_read_as_formatted_text_and_stay_safe():
     """A completed run's summary on the Workspaces tile showed the answer's markdown raw."""
     source = (STATIC / 'app.js').read_text()
-    start = source.index('const inlineMarkdown = new MarkdownIt')
+    start = source.index('const inlineMarkdown = createResultMarkdown()')
     helper = source[start:source.index('\nfunction summarizeLive(', start)]
     result = node(f"""
-      import MarkdownIt from {json.dumps((STATIC / 'vendor' / 'markdown-it-15.0.2.mjs').as_uri())};
+      import {{ createResultMarkdown }} from {json.dumps((STATIC / 'result-markdown.js').as_uri())};
       {helper}
       const element = {{innerHTML: ''}};
       setInlineResult(element, 'Saved it as `rain_note.txt`, **217 words** <img src=x onerror=alert(1)> [terms](https://example.test/terms)');
@@ -226,3 +240,18 @@ def test_workspace_summaries_read_as_formatted_text_and_stay_safe():
     assert '`' not in result['shown'] and '<img' not in result['shown'] and '&lt;img' in result['shown']
     assert '<a href="https://example.test/terms" target="_blank" rel="noopener noreferrer">terms</a>' in result['shown']
     assert result['cleared'] == ''
+
+
+def test_shared_navigation_keeps_the_existing_panel_registry_and_native_link_order():
+    import re
+    expected = ['Run Project', 'Chat', 'Workspaces', 'Connections', 'Library', 'Schedules', 'Activity']
+    for page in ['index.html', 'conversation.html']:
+        html = (STATIC / page).read_text()
+        nav = html.split('class="view-tabs"', 1)[1].split('</nav>', 1)[0]
+        assert re.findall(r'class="view-tab"[^>]*>([^<]+)</a>', nav) == expected
+        assert 'role="tablist"' not in nav
+    html = (STATIC / 'index.html').read_text()
+    for tag in re.findall(r'<a[^>]+data-view-tab="[^"]+"[^>]*>', html):
+        panel = re.search(r'aria-controls="([^"]+)"', tag).group(1)
+        assert f'id="{panel}"' in html
+        assert 'href="/#' in tag

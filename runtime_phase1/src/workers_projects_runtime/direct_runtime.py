@@ -360,6 +360,9 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
             return None
         error = errors[0]
         status = error.get("status_code")
+        stream_rate_limited = status is None and error.get("provider_error_code") == "rate_limit_exceeded"
+        if stream_rate_limited:
+            status = 429
         stage = error.get("stage")
         recovery = "Check the selected API connection and model settings, then retry the same request."
         if status is None and (stage == "output_validation" or error.get("error_type") == "UnexpectedModelBehavior"):
@@ -374,11 +377,13 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
         elif status is None and stage == "sdk_dependency":
             kind, retryable, message = "runtime_dependency_missing", False, "The Direct SDK dependency could not load."
             recovery = "Install the locked xPerfect Direct dependencies, then retry."
+        elif error.get("provider_error_code") in {"invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url", "image_too_large", "image_too_small", "image_parse_error", "image_content_policy_violation", "invalid_prompt", "invalid_image_mode", "image_file_too_large", "unsupported_image_media_type", "empty_image_file", "data_residency_mismatch", "bio_policy", "misalignment_policy_violation"}:
+            kind, retryable, message = "provider_request_rejected", False, "The selected API rejected the request content."
         elif status == 401:
             kind, retryable, message = "provider_auth_missing", False, "The selected API connection was rejected. Reconnect it or check its model permissions."
-        elif status == 403:
-            kind, retryable, message = "provider_request_rejected", False, "The selected API declined this request or its model access."
-            recovery = "Check the request restrictions and model access. Review any accepted work before retrying."
+        elif status in {402, 403}:
+            kind, retryable, message = "provider_access_denied", False, "The selected API account cannot access this model."
+            recovery = "Check the account model access and billing. Review any accepted work before retrying."
         elif status == 429:
             kind, retryable, message = "provider_rate_limited", True, "The selected API connection is temporarily rate limited."
         elif isinstance(status, int) and 400 <= status < 500:
@@ -390,7 +395,7 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
         evidence = None
         if kind == "provider_rate_limited":
             evidence = {"version": 1, "failure_class": kind, "failure_structured": True,
-                "retry_at": "", "retry_after_s": None, "evidence_kind": "direct_sdk_http_status",
+                "retry_at": "", "retry_after_s": None, "evidence_kind": "direct_sdk_stream_error_code" if stream_rate_limited else "direct_sdk_http_status",
                 "evidence_id": hashlib.sha256(json.dumps({"worker": worker.get("worker_id"),
                     "run": run_id, "runtime": self.runtime_name, "status": status}, sort_keys=True).encode()).hexdigest()}
         return FailureClassification(failure_class=kind, retryable=retryable, user_message=message,

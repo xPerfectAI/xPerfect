@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -59,6 +59,11 @@ RecurringScheduleOccurrenceState = Literal[
     "skipped",
     "retryable",
     "action_required",
+    "accepted",
+    "rejected",
+    "expired",
+    "unacknowledged",
+    "superseded",
 ]
 RecurrenceType = Literal["once", "daily", "interval", "cron", "rfc5545"]
 RecurrenceDstPolicy = Literal["next_valid_earliest", "next_valid_latest"]
@@ -488,6 +493,18 @@ class InheritedConversationRequest(BaseModel):
         return value
 
 
+class ActiveWorkRuntimeBundle(BaseModel):
+    """A trusted continuation can refresh scoped tool authority, not runtime identity."""
+    model_config = ConfigDict(extra="forbid")
+    schedule_access: dict[str, object]
+
+    @field_validator("schedule_access")
+    @classmethod
+    def schedule_grant(cls, value):
+        from .application_boundary import canonical_schedule_access
+        return canonical_schedule_access(value)
+
+
 class ActiveWorkActionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -501,6 +518,7 @@ class ActiveWorkActionRequest(BaseModel):
         "retry",
         "dismiss",
     ]
+    runtime_bundle: ActiveWorkRuntimeBundle | None = Field(default=None, alias="runtimeBundle")
     native_input: NativeInputResponseRequest | None = Field(default=None, alias="nativeInput")
     native_human_input: NativeHumanInputRequest | None = Field(default=None, alias="nativeHumanInput")
     instruction: str | None = Field(default=None, max_length=100000)
@@ -524,6 +542,8 @@ class ActiveWorkActionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_context_action(self) -> "ActiveWorkActionRequest":
+        if self.runtime_bundle is not None and self.action not in {"queue", "message", "steer", "retry", "resume"}:
+            raise ValueError("Runtime authority refresh requires a continuation or resume")
         if self.inherited_conversation is not None and (
             self.action not in {"queue", "message", "steer", "retry"} or self.source_context is None
         ):
@@ -612,7 +632,52 @@ class CreateRecurringScheduleRequest(BaseModel):
     bootstrap_bundle: dict[str, object] | None = None
 
 
+class WorkerScheduleTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["worker"]
+    worker_id: str = Field(min_length=1, max_length=200)
+
+
+class WebhookScheduleTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["webhook"]
+    destination_id: str = Field(min_length=1, max_length=200)
+    request_data: dict[str, object] = Field(default_factory=dict)
+
+
+ScheduleTarget = Annotated[WorkerScheduleTarget | WebhookScheduleTarget, Field(discriminator="kind")]
+
+
+class CreateTargetScheduleRequest(CreateRecurringScheduleRequest):
+    model_config = ConfigDict(extra="forbid")
+    instruction: str = Field(default="", max_length=200_000, description="The future task for this schedule. Preserve its goal and constraints; existing authorized conversation context remains available separately.")
+    target: ScheduleTarget
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class CreateWebhookDestinationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+    name: str = Field(min_length=1, max_length=120)
+    url: str = Field(min_length=1, max_length=8192)
+    secret: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    payload_mode: Literal["envelope", "raw"] = "envelope"
+    max_body_bytes: int = Field(default=262144, ge=1024, le=262144, strict=True)
+
+
+class UpdateWebhookDestinationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_body_bytes: int | None = Field(default=None, ge=1024, le=262144, strict=True)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    secret: str | None = None
+    headers: dict[str, str] | None = None
+    enabled: bool | None = None
+
+
 class UpdateRecurringScheduleRequest(BaseModel):
+    expected_version: int | None = Field(default=None, ge=1, le=9223372036854775807, strict=True)
+    target: ScheduleTarget | None = None
     instruction: str | None = Field(default=None, min_length=1)
     recurrence_type: RecurrenceType | None = None
     interval_seconds: int | None = None
@@ -871,8 +936,10 @@ class ScheduleResponse(BaseModel):
 
 class RecurringScheduleDefinitionResponse(BaseModel):
     definition_id: str
-    project_id: str
-    worker_id: str
+    target: dict[str, object] | None = None
+    version: int = 1
+    project_id: str | None = None
+    worker_id: str | None = None
     workspace_name: str = ""
     tenant_id: str = "local"
     owner_id: str
@@ -899,7 +966,10 @@ class RecurringScheduleDefinitionResponse(BaseModel):
     next_run_at: str
     next_occurrence_at: str = ""
     last_occurrence_at: str | None = None
+    last_occurrence_id: str = ""
+    last_occurrence_expires_at: str | None = None
     last_outcome: str = ""
+    clock_finished: bool = False
     last_error: str = ""
     last_delivery_outcome: str | None = None
     last_delivery_reason: str | None = None
@@ -926,13 +996,18 @@ class RecurringScheduleDefinitionResponse(BaseModel):
 
 
 class RecurringScheduleOccurrenceResponse(BaseModel):
+    delivery_expires_at: str | None = None
+    http_status: int | None = None
+    timings_ms: dict[str, float] = Field(default_factory=dict)
     occurrence_id: str
     definition_id: str
     tenant_id: str = "local"
     owner_id: str
     scheduled_for: str
     detected_at: str
-    scheduled_run_id: str
+    scheduled_run_id: str | None = None
+    target: dict[str, object] | None = None
+    definition_version: int = 1
     idempotency_key: str = ""
     claimant: str = ""
     claimed_at: str | None = None

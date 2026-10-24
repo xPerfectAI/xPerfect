@@ -5,9 +5,25 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+def capture_runtime_probe(command: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Read complete local CLI probe output even when the CLI short-flushes pipes."""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout, tempfile.TemporaryFile(
+        mode="w+", encoding="utf-8"
+    ) as stderr:
+        completed = subprocess.run(
+            command, check=False, stdout=stdout, stderr=stderr, text=True, timeout=timeout,
+        )
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(
+            completed.args, completed.returncode, stdout=stdout.read(), stderr=stderr.read(),
+        )
 
 
 # Native CLI values; launch-time help checks retain compatibility with installed versions.
@@ -266,12 +282,8 @@ def _evaluate_requirement(
 
     args = _version_args(requirement)
     try:
-        completed = subprocess.run(
+        completed = capture_runtime_probe(
             [resolved, *args],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
             timeout=float(requirement.get("version_timeout_sec") or 5),
         )
     except Exception as exc:
@@ -405,12 +417,8 @@ def _run_requirement_probe(
     probe_label: str,
 ) -> RuntimeRequirementIssue | None:
     try:
-        completed = subprocess.run(
+        completed = capture_runtime_probe(
             command,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
             timeout=8,
         )
     except Exception as exc:

@@ -3996,6 +3996,63 @@ def test_queued_followup_does_not_hide_or_overtake_needs_input_source(account_cl
     assert store.get_run(followup_run_id)["state"] == "queued"
 
 
+@pytest.mark.parametrize("source_state", ["queued", "running"])
+def test_steer_retired_run_callback_preserves_current_work_authority(
+    account_client, source_state
+):
+    accepted = account_client.post(
+        "/v1/delegations",
+        headers=account_headers(idempotency_key="delegation-steer-run-lifecycle"),
+        json=delegation_payload_with_origin(
+            origin_ref="synthetic_steer_run_lifecycle", title="Correct the same work",
+        ),
+    ).json()
+    service = account_client.app.state.service
+    store = account_client.app.state.store
+    initial = store.get_delegation(
+        accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a"
+    )
+    source_id = initial["current_run_id"]
+    if source_state == "running":
+        _truthfully_invoke_run(store, source_id, suffix="steer-run-lifecycle")
+    body = {
+        "action": "steer", "instruction": "Correct the same note",
+        "idempotencyKey": "steer-run-lifecycle",
+    }
+    response = account_client.post(
+        f"/v1/work/{accepted['workRef']}/actions", headers=account_headers(), json=body,
+    )
+    assert response.status_code == 202, response.text
+    current = store.get_delegation(
+        accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a"
+    )
+    assert current["current_run_id"] != source_id
+    service._replay_pending_lifecycle_effects()
+    with sqlite3.connect(store.db_path) as conn:
+        retired = conn.execute(
+            "SELECT payload_json FROM callback_outbox WHERE run_id = ? "
+            "AND event_type IN ('run.cancelled', 'run.interrupted')", (source_id,),
+        ).fetchall()
+    assert len(retired) == 1
+    payload = json.loads(retired[0][0])
+    assert payload["work_ref"] == accepted["workRef"]
+    assert payload["work_terminal"] is False
+    assert payload["work_state"] == "queued"
+    assert not any(key in payload for key in ("result_state", "result_revision", "result_digest"))
+    assert store.get_run(current["current_run_id"])["state"] == "queued"
+    replay = account_client.post(
+        f"/v1/work/{accepted['workRef']}/actions", headers=account_headers(), json=body,
+    )
+    assert replay.status_code == 202
+    assert len(store.list_runs_for_worker(initial["worker_id"])) == 2
+    service._replay_pending_lifecycle_effects()
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM callback_outbox WHERE run_id = ? "
+            "AND event_type IN ('run.cancelled', 'run.interrupted')", (source_id,),
+        ).fetchone()[0] == 1
+
+
 def test_run_terminal_callback_marks_work_nonterminal_while_followup_is_queued(
     account_client,
 ):

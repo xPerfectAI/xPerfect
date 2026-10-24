@@ -82,3 +82,84 @@ def test_context_cannot_bypass_existing_owner_and_action_authority(account_clien
     if change == "wrong_owner": headers = account_headers(owner_id="owner-b")
     response = account_client.post(f"/v1/work/{accepted['workRef']}/actions", headers=headers, json=body)
     assert response.status_code == (404 if change == "wrong_owner" else 422), response.text
+
+
+@pytest.mark.parametrize('action', ['queue', 'message', 'steer', 'retry', 'resume'])
+def test_trusted_continuation_refreshes_exact_schedule_refs_on_same_native_worker(account_client, action):
+    service, store = account_client.app.state.service, account_client.app.state.store
+    service.executor.submit = lambda *args, **kwargs: None
+    accepted = account_client.post('/v1/delegations', headers=account_headers(idempotency_key='grant-continuation-launch'),
+        json=delegation_payload_with_origin()).json()
+    record = store.get_delegation(accepted['workRef'], tenant_id='tenant-a', owner_id='owner-a')
+    destination = service.create_webhook_destination(tenant_id='tenant-a', owner_id='owner-a', name='Synthetic receiver', url='https://receiver.example.test/hook')
+    original = json.loads(store.get_worker(record['worker_id'])['bootstrap_bundle_json'])
+    original['schedule_access'] = {'destinations': [{'destination_id': destination['destination_id'], 'request_data': {'request_ref': 'prior-source'}}]}
+    store.update_worker(record['worker_id'], bootstrap_bundle_json=json.dumps(original))
+    before = json.loads(store.get_worker(record['worker_id'])['bootstrap_bundle_json'])
+    body = action_body(action)
+    if action == 'retry':
+        store.finalize_run(record['current_run_id'], 'failed', error_text='Temporary outage',
+            failure_class='provider_transport_error', failure_retryable=1, failure_structured=1)
+    if action == 'resume':
+        paused = account_client.post(f"/v1/work/{accepted['workRef']}/actions", headers=account_headers(),
+            json={'action': 'pause', 'idempotencyKey': 'grant-pause-operation'})
+        assert paused.status_code == 202, paused.text
+        body = {'action': 'resume', 'idempotencyKey': 'grant-resume-operation'}
+    body['runtimeBundle'] = {'schedule_access': {'destinations': [{'destination_id': destination['destination_id'],
+        'request_data': {'request_ref': 'current-source'}}], 'manage_destination_ids': [destination['destination_id']]}}
+    path = f"/v1/work/{accepted['workRef']}/actions"
+    observed = []
+    refresh = service._refresh_active_work_runtime_grant
+    def record_refresh(worker, action_record):
+        result = refresh(worker, action_record)
+        observed.append((action_record.get('source_context_json'), result.get('bootstrap_bundle_json')))
+        return result
+    service._refresh_active_work_runtime_grant = record_refresh
+    response = account_client.post(path, headers=account_headers(), json=body)
+    assert response.status_code == 202, response.text
+    assert observed and 'current-source' in observed[-1][1], observed
+    after = store.get_delegation(accepted['workRef'], tenant_id='tenant-a', owner_id='owner-a')
+    assert after['worker_id'] == record['worker_id']
+    bundle = json.loads(store.get_worker(after['worker_id'])['bootstrap_bundle_json'])
+    assert bundle['schedule_access']['destinations'][0]['request_data']['request_ref'] == 'current-source'
+    assert 'prior-source' not in json.dumps(bundle['schedule_access'])
+    assert {k: v for k, v in bundle.items() if k != 'schedule_access'} == {k: v for k, v in before.items() if k != 'schedule_access'}
+    assert account_client.post(path + '/receipt', headers=account_headers(), json=body).status_code == 202
+    altered = copy.deepcopy(body); altered['runtimeBundle']['schedule_access']['destinations'][0]['request_data']['request_ref'] = 'forged-different-receipt'
+    assert account_client.post(path + '/receipt', headers=account_headers(), json=altered).status_code == 409
+
+
+@pytest.mark.parametrize('fault', ['foreign-destination', 'foreign-management', 'foreign-owner', 'env', 'endpoint'])
+def test_continuation_runtime_refresh_cannot_expand_identity_or_foreign_authority(account_client, fault):
+    service, store = account_client.app.state.service, account_client.app.state.store
+    service.executor.submit = lambda *args, **kwargs: None
+    accepted = account_client.post('/v1/delegations', headers=account_headers(idempotency_key='grant-authority-launch'), json=delegation_payload_with_origin()).json()
+    record = store.get_delegation(accepted['workRef'], tenant_id='tenant-a', owner_id='owner-a')
+    before = store.get_worker(record['worker_id'])['bootstrap_bundle_json']
+    foreign = service.create_webhook_destination(tenant_id='tenant-a', owner_id='owner-b', name='Foreign receiver', url='https://receiver.example.test/hook')
+    body = action_body('message'); body['runtimeBundle'] = {'schedule_access': {}}
+    headers = account_headers()
+    if fault == 'foreign-destination': body['runtimeBundle']['schedule_access']['destinations'] = [{'destination_id': foreign['destination_id'], 'request_data': {'request_ref': 'foreign'}}]
+    if fault == 'foreign-management': body['runtimeBundle']['schedule_access']['manage_destination_ids'] = [foreign['destination_id']]
+    if fault == 'foreign-owner': headers = account_headers(owner_id='owner-b')
+    if fault == 'env': body['runtimeBundle']['env'] = {'WPR_NATIVE_SELF_SCHEDULE_ENABLED': 'true'}
+    if fault == 'endpoint': body['runtimeBundle']['schedule_access']['url'] = 'https://forged.example.test/hook'
+    response = account_client.post(f"/v1/work/{accepted['workRef']}/actions", headers=headers, json=body)
+    assert response.status_code in {400, 404, 409, 422}, response.text
+    assert store.get_worker(record['worker_id'])['bootstrap_bundle_json'] == before
+
+
+def test_empty_continuation_grant_replaces_prior_refs_without_requiring_an_authored_brief(account_client):
+    service, store = account_client.app.state.service, account_client.app.state.store
+    service.executor.submit = lambda *args, **kwargs: None
+    accepted = account_client.post('/v1/delegations', headers=account_headers(idempotency_key='grant-empty-launch'), json=delegation_payload_with_origin()).json()
+    record = store.get_delegation(accepted['workRef'], tenant_id='tenant-a', owner_id='owner-a')
+    destination = service.create_webhook_destination(tenant_id='tenant-a', owner_id='owner-a', name='Receiver', url='https://receiver.example.test/hook')
+    bundle = json.loads(store.get_worker(record['worker_id'])['bootstrap_bundle_json'])
+    bundle['schedule_access'] = {'destinations': [{'destination_id': destination['destination_id'], 'request_data': {'request_ref': 'prior-source'}}]}
+    store.update_worker(record['worker_id'], bootstrap_bundle_json=json.dumps(bundle))
+    response = account_client.post(f"/v1/work/{accepted['workRef']}/actions", headers=account_headers(), json={
+        'action': 'message', 'instruction': 'Continue the same task.', 'idempotencyKey': 'grant-empty-operation', 'runtimeBundle': {'schedule_access': {}}})
+    assert response.status_code == 202, response.text
+    from workers_projects_runtime.schedule_mcp import schedule_access_grant
+    assert schedule_access_grant(store.get_worker(record['worker_id'])) == {'destinations': [], 'manage_destination_ids': [], 'allow_worker_target': False, 'defaults': {}}

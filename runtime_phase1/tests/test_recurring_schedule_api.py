@@ -882,6 +882,8 @@ def test_recurring_schedule_api_accepts_full_structured_contract(tmp_path, monke
     assert first_run_now.status_code == 200, first_run_now.text
     assert first_run_now.json()["schedule_id"] == repeated_run_now.json()["schedule_id"]
     assert first_run_now.json()["occurrence_id"] == repeated_run_now.json()["occurrence_id"]
+    assert first_run_now.json()["occurrence_created"] is True
+    assert repeated_run_now.json()["occurrence_created"] is False
 
     retired = client.delete(f"/v1/recurring-schedules/{payload['definition_id']}")
     history = client.get(

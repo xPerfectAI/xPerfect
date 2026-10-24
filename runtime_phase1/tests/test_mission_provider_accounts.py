@@ -2055,6 +2055,9 @@ def test_host_command_builders_apply_only_the_bound_native_provider_home(tmp_pat
     codex_worker["bootstrap_bundle_json"] = json.dumps(codex_bundle)
     codex_worker["_glasshive_provider_account_env"] = {"CODEX_HOME": str(codex_home)}
     codex_worker["_glasshive_provider_account_bound"] = True
+    codex_home.chmod(0o700)
+    # The command consumes prepared worker policy, as a real native admission does.
+    codex._write_host_project_mcp_files(codex_worker, tmp_path, {})
     _, codex_env = codex._build_command(codex_worker, "mission", info)
     assert codex_env["CODEX_HOME"] == str(codex_home)
     assert codex_env["CODEX_HOME"] != str(tmp_path / "global-codex")

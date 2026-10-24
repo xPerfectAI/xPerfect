@@ -32,6 +32,7 @@ Use a portable worker bootstrap contract:
 - `bootstrap_bundle`
 
 ### bootstrap_profile
+
 A high-level preset that selects a default projection style.
 
 Examples:
@@ -42,6 +43,7 @@ Examples:
 - `claude-host`
 
 ### bootstrap_bundle
+
 A structured optional payload for additive projection.
 
 Current phase-1 fields supported by the runtime:
@@ -268,6 +270,14 @@ Every host CLI version/help/auth/readiness subprocess runs only after a durable 
 reservation is live. A failed or expired preflight releases that reservation and cannot create or
 accept work. Successful admission later acquires the exact run lease under the same typed policy.
 
+Local CLI version, help and MCP-readiness probes capture complete stdout and stderr in private,
+automatically removed temporary regular files. Some native CLIs exit successfully after a partial
+pipe write; that truncated output must not be mistaken for missing native flags. The same version,
+required-capability, exit-status and timeout checks still fail closed. Claude's binary-identity help
+cache uses this shared capture owner, so effort, Chrome and restricted/read-only checks consume the
+same complete help evidence. Probe capture creates no provider request or worker, and does not
+change primary/fallback selection or admission policy.
+
 For an owner-managed Claude login, `CLAUDE_CONFIG_DIR` remains the worker's original session
 store. The CLI's native `CLAUDE_SECURESTORAGE_CONFIG_DIR` selector chooses the already-authorized
 owner credential store independently, and the exact combined environment must pass native auth
@@ -291,14 +301,63 @@ workspace-limited profiles, and `native_tools: false` never gain these host tool
 executable alone is not an MCP selection: do not synthesize extra servers from known application
 paths. Preserve the native selected configuration and manifest, so a legacy standalone server does
 not compete with the current unified browser/desktop interface. Explicitly configured servers remain
-supported, and native tool access restrictions still apply. Preserve native arrays of tables too,
+supported, and native tool access restrictions still apply.
+
+A named Codex account keeps its native `CODEX_HOME`, login refresh and saved session history. The
+worker's already-materialized policy is loaded through Codex's native config profile, published as
+an owner-only regular file under that selected account. This retains the exact model, effort,
+developer authority and selected native MCP definitions without copying credentials, moving
+history or adding a broker. A profile cannot inherit undeclared tools from the account's base
+configuration; an unexpected MCP/plugin declaration there fails closed. Account resealing retains
+the safe regular profile and its private permissions. Updated or removed worker connections are
+refreshed from the same policy on the next admitted start.
+
+The account receives private regular copies of only the already-selected native package assets,
+at the native active versions from the canonical owner cache. Mutable plugin data, connector login,
+global skills and account credentials are not copied. The account sealer preserves execute bits
+only for package files whose identity, paths and bytes match their canonical code assets. A cache
+version that would override the selected version fails closed rather than deleting local state.
+Worker-specific enablement remains in its native policy; cached packages alone grant no capability.
+`native_tools: false` projects no such assets and disables native plugin skills and hooks.
+
+Standalone worker skills remain in the same private worker catalog. The existing capability
+projector also exposes that catalog under the native `HOME/.agents/skills` root, so changing only
+the selected account's `CODEX_HOME` does not hide them. Restricted preparation retracts only this
+derived link when it still points to that same catalog; real local files and unrelated links stay
+intact. Both mission and conversation preparation apply the same native-tools guard under the
+existing private configuration lock.
+
+Native exec supports config profiles; app-server rejects its `--profile` flag. On reviewed native
+ABIs, the existing relay sends that same private policy through first-class
+`thread/start.config` or `thread/resume.config`, preserving CLI overrides, exact model and effort,
+permissions, selected MCP definitions and plugins. Private policy values stay out of command-line
+arguments. The exact reviewed version, server-request methods and native control schema must
+match before this route is used; otherwise the original native exec path stays intact.
+Native mission control does not require the optional warm pool to be enabled.
+An acknowledged native Cancel becomes the existing interrupted run outcome only after the same
+bound turn reports interruption. Failed, rejected or unconfirmed cancellation does not hide a
+provider failure; native completion that wins the race remains completion.
+Native-control status is a read-only verified snapshot, not a lifecycle action. Reads share no
+exclusive lifecycle lock; each adapter derives action capabilities from the same verified native
+context, and the service rechecks the exact running run and attempt before returning it. Mutating
+controls retain their existing lifecycle lock, permissions and exact-target checks.
+Startup-only policy or a named account can remain ineligible for the existing warm pool; a
+validated cold relay retains native control without claiming warm reuse. Tools are never removed
+or another account's process borrowed to manufacture warm eligibility. Native package/skill/hook
+discovery and actual tool execution remain separate acceptance checks.
+
+Preserve native arrays of tables too,
 including enabled and disabled skill selections; rewriting config must not reactivate a retired
 skill. Broker names take
 precedence. Native tool allow/deny lists are preserved on the existing selected MCP child's stdio
 transport. Only filtered servers receive the transparent process adapter; unfiltered servers stay
 direct. It filters tool discovery and rejects excluded calls, retaining schemas, paging, notifications,
 errors and other MCP traffic. The private child command and tool policy are hash-bound, and changed
-or unreadable policy closes the transport. Declared environment and native stderr are retained; the
+or unreadable policy closes the transport. Worker preparation and launch validation share the existing
+private per-worker state lock. Policy files are published atomically, and unchanged content is not
+rewritten: opening, inspecting or resuming a workspace cannot expose a partial policy to launch
+validation or its active MCP child. A genuinely changed policy still fails the child's old digest
+closed. Declared environment and native stderr are retained; the
 adapter owns its child process group through cancellation and exit. Claude's managed permissions,
 hooks and explicit per-run settings remain unchanged: disabling hooks cannot disable this filter.
 
@@ -320,7 +379,8 @@ existing session and tool behavior.
 
 Claude restrictions use the advertised safe mode, an empty native tool list and strict empty MCP
 configuration. The selected account, model, effort and explicit developer authority stay intact.
-Automatic workspace instructions, skills, hooks, memory and browser access are disabled. Native
+Private native context placement and saved selectors are neither materialized nor applied to this
+restricted command. Automatic workspace instructions, skills, hooks, memory and browser access are disabled. Native
 structured output may expose its `StructuredOutput` formatter; it grants no general action or file
 tool. The fresh private workspace and stateless execution remain required.
 
@@ -340,6 +400,20 @@ host or sandbox CLI transport: `default`, `low`, `medium`, `high`, `xhigh`, and 
 omits the CLI override. Explicit supported values remain unchanged, and the existing launch-time
 CLI help check rejects a value an older installed version cannot support. Invalid values remain
 rejected; they must not be silently dropped from stored worker configuration.
+
+Named Codex subscription accounts use the existing account setup owner, private `CODEX_HOME`,
+lease, process lifetime and native `login status` verification. On an explicitly local,
+single-user host with a loopback public URL, setup uses the provider's normal `codex login`
+browser flow. Codex owns the callback and token exchange; xPerfect only presents the reviewed
+provider authorization URL. It does not copy the global login or require device-code sign-in to
+be enabled. Contained, provisioned, enterprise and non-local routes keep `login --device-auth`.
+The reviewed setup response labels its flow as browser, device code, authorization code or
+unknown. Clients use that field for sign-in instructions; they do not infer the flow from a
+provider name or assume that every Codex sign-in needs a one-time code.
+Credential sealing recognizes the native executable aliases in both `codex/tmp/arg0/` and
+`codex/tmp/arg0-macos/`. Only the existing declared helper names and verified selected executable
+targets qualify; credential links, other directories and redirected targets remain rejected.
+See the [official native authentication guide](https://learn.chatgpt.com/docs/auth).
 
 Current validated local footprints on this machine:
 
@@ -439,7 +513,6 @@ The existing request/epoch calibration then owns conversation occupancy and cont
 projection. This is token observability and budget evidence, not proof that a semantic answer
 or owner-requested control succeeded.
 
-
 Optional Grok 4.7 Fast availability comes from the selected worker account's ACP session model
 options. A service-account catalog is discovery only and cannot choose a turn's effective model.
 If that account offers standard Grok 4.7 but not Fast, the existing ACP model control selects
@@ -502,7 +575,6 @@ The standalone deployment credential name is `XAI_API_KEY`. Enterprise projectio
 clean-room imports and workspace duplication. Run-scoped broker grants retain their existing
 scope and expiration when transported through native ACP.
 
-
 Native Grok MCP lifecycle receipts retain only current-session protocol event identity, configured
 required-server name, typed connection status and counts. They omit endpoint, authorization,
 reason prose and tool arguments. These events diagnose the native connection boundary. Once the exact native session reports MCP
@@ -511,3 +583,147 @@ proof when the cosmetic command catalogue has not refreshed. It must show a reso
 each exact configured required server enabled and ready with enabled named tools. Missing, foreign,
 disabled and empty results fail closed. Both evidence paths share the existing 30-second startup
 deadline; no inference or capability call runs before that proof.
+
+## Independent application inputs
+
+The [application boundary contract](09_Application_Boundary_Contract.md) owns the project boundary
+and standalone acceptance. A client supplies its own prepared instructions, context, files and
+capability references. The runtime transports those inputs through its existing worker/session
+owners; it does not interpret the client's domain state.
+
+- `WPR_RUNTIME_ENV_FILE` selects one explicit runtime environment file. `load_runtime_env()` does
+  not search application folders or load an application-specific environment file. Existing process
+  values win; only the existing runtime allowlist is loaded. The legacy loader remains available,
+  but an explicit neutral file takes precedence.
+- `WPR_UPLOADS_ROOT` supplies the file root. Its canonical path is added to the existing
+  `WPR_BOOTSTRAP_SOURCE_ROOTS`; no sibling checkout is discovered. File materialization retains
+  trusted-root, symlink, size and owner/tenant signature checks. The legacy upload-root alias remains
+  accepted. `GLASSHIVE_PROVIDER_DEFAULT_WORKSPACE` and
+  `GLASSHIVE_PROVIDER_ALLOWED_WORKSPACE_ROOTS` select workspace policy independently of a client.
+- Generic conversation headers use `x-glasshive-` identity/context names. Existing host-prefixed
+  aliases remain accepted; conflicting dual carriers fail. Neither name grants owner delegation,
+  system authorship or full access: the authenticated provider credential retains those decisions.
+  `GLASSHIVE_PROVIDER_BOOTSTRAP_SIGNATURE_SECRET` configures signed bootstrap verification without
+  a client-specific secret name. The existing compatibility secret remains accepted.
+- `launch_authority` is the neutral typed worker-launch envelope. The legacy alias remains accepted
+  through the same validation. Conflicting dual envelopes fail; a new field name does not expand
+  execution authority.
+- A client that has already prepared its instructions may set
+  `application_context_format: "opaque_v1"` in the bootstrap bundle. This path preserves instruction
+  content and the declared final tail without running a domain-specific capsule parser. It cannot
+  also request legacy semantic projection. Existing clients keep the previous projection until their
+  own preparation and affected acceptance are complete. This option adds no prompt renderer,
+  summary, context cache or cognitive module to the runtime.
+
+### Native worker scheduling grant
+
+An owner/client may supply the following grant in a worker's stored bootstrap. IDs and request
+references below are synthetic. Destination URL, auth, signing key and payload policy remain with
+owner setup; a worker cannot supply or change them through this grant.
+
+```json
+{
+  "schedule_access": {
+    "destinations": [
+      {
+        "destination_id": "destination-example",
+        "label": "Application destination label",
+        "request_data": { "request_ref": "request-example" }
+      }
+    ],
+    "allow_worker_target": false,
+    "manage_destination_ids": ["destination-example"],
+    "defaults": {
+      "once": { "misfire_grace_seconds": 3600, "catch_up_policy": "coalesce" },
+      "interval": { "misfire_grace_seconds": 900, "catch_up_policy": "skip" }
+    }
+  }
+}
+```
+
+The runtime projects `xperfect-schedules` through the existing native HTTP/socket MCP
+transport when a current grant supplies a target. No implicit self-scheduling is enabled
+in the public runtime default. An operator may set `WPR_NATIVE_SELF_SCHEDULE_ENABLED=true`
+to give native workers without an explicit grant only their own worker target. Explicit
+client grants stay authoritative; an explicit empty grant disables scheduling even when
+that operator setting is on. API profiles receive no implicit grant, and coordination-only
+conversation profiles keep their two-tool interface.
+
+The standard `./xperfect start` host launcher enables that operator setting and supplies
+`GLASSHIVE_PEER_RUNTIME_BASE_URL` from its actual API port. Private host config may turn it
+off. A custom launch must set the existing worker-reachable runtime origin. Packaged workers
+retain their existing per-workspace socket route. No new server or client-specific path
+is required. Without a native route, optional implicit access does not block unrelated work;
+an explicit grant without a route fails with `schedule_endpoint_unavailable`.
+
+The projection mints a separate `schedule`-purpose token for the exact live worker/run/attempt
+and admission lease. The token goes into the run's private environment, not the reusable
+worker or a service-wide credential.
+
+Optional `defaults` uses the existing recurrence families (`once`, `daily`, `interval`, `cron`,
+`rfc5545`) and existing bounded fields: `misfire_grace_seconds`, `catch_up_policy` and
+`max_catch_up_occurrences`. Defaults apply only when the worker omits that field. An explicit
+zero grace or `skip` remains unchanged. With no supplied defaults, existing runtime defaults
+remain unchanged. `schedule_list` returns these policies with the authorized target choices.
+The client chooses its reminder/catch-up policy; xPerfect does not infer application meaning.
+
+The seven native tools create, list, get, update (including pause/resume), retire, run now and inspect
+history through the same schedule service as owner API/MCP/UI. Each call rechecks the live attempt
+and current stored grant. Mutations share the existing lifecycle fence with Stop/Close/retry.
+`schedule_list` exposes the current authorized target choices and optional client-supplied labels
+alongside the current schedules, so the model can select opaque references without guessing.
+Labels describe choices; they grant no authority. Webhook targets must match a supplied
+destination/request-reference pair exactly; a worker cannot
+replace the body or bootstrap authority. An explicit `allow_worker_target: true` additionally permits
+scheduling that same worker, with its existing authorized runtime and context. It grants no access
+to another worker. `manage_destination_ids` lets later turns list and control prior schedules for
+those same-owner destinations without receiving permission to create arbitrary requests. Creation
+and retargeting still require an exact supplied destination/request pair. Task-instruction edits use
+the definition's signed instruction; application request references remain unchanged.
+
+Terminal attempts, retry generations, released/expired leases and closed workers revoke native
+access. Removing the stored grant also denies later calls. The small Fast Direct Queen interface
+stays unchanged: it hands action work to a configured native worker. The clock, destination store
+and owner controls remain usable without any application or AI provider account.
+
+### Destination delivery limits and configuration recovery
+
+Owner destination configuration may set `max_body_bytes` between 1 KiB and 256 KiB; its
+public default remains 256 KiB. API and MCP use the same typed field. Create and edit reject
+a schedule whose encoded due body cannot fit the configured receiver limit, before a clock
+occurrence is stored. The check uses the same due-envelope builder, actual principal/task/data,
+and the largest bounded schedule IDs, version and UTC timestamps. Raw mode checks its exact
+configured request data instead. Limits count UTF-8 bytes, not characters.
+
+Repeating a destination create key with matching current configuration recovers the same
+public identity. If current configuration differs, HTTP 409 reports only the destination ID
+and changed field names. Owner-scoped public metadata includes `url_sha256` (SHA256 of the exact configured URL) so an authorized client can detect URL drift without a URL readback. It never reads back the URL, headers or signing key. An authorized
+client can rotate a secret through the existing PATCH. URLs remain immutable; a changed URL
+uses a new destination and the existing owner-scoped schedule list/filter plus target PATCH.
+`expected_version` on a schedule PATCH provides compare-and-swap protection. The optional
+`destination_id` list filter allows a client to drain bounded batches without new registry or
+migration endpoints. Past occurrence snapshots and receipts remain with their original versions.
+
+### Existing worker continuations
+
+The existing trusted account Work Action request may carry `runtimeBundle.schedule_access`
+for queue, message, steer, retry or resume. This narrow field cannot change runtime identity,
+environment, credentials, prompts or another worker. It uses the existing authenticated
+principal, action reservation, exact request digest and receipt. Every supplied destination
+and management scope must belong to that principal.
+
+The current canonical grant replaces the previous grant as a whole; an explicit empty grant
+removes stale request references. The worker's original authorized context, files, tools and
+harness configuration stay intact. Native schedule calls recheck the stored grant and exact
+live attempt through the existing MCP authorization. No additional message, handoff brief,
+HTTP update step, queue or workflow is introduced.
+
+### Shared schedule API authentication
+
+An application courier that supplies the existing signed owner assertion to destination or
+recurring-schedule routes uses the same bearer, signature, expiry, owner and mutation-nonce
+checks as account work controls. This includes target create/list/read/edit/run-now/history,
+destination configuration and worker-specific recurring schedules. A supplied invalid assertion
+fails; it cannot fall back to a local operator identity. Browser/standalone clients without that
+assertion keep their existing authentication. Native schedule MCP keeps its separate exact-attempt
+token; an application assertion does not replace native authority.

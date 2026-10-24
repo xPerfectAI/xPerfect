@@ -1,3 +1,4 @@
+import { parseRequestData, withRequestMessage, requestDataRows, requestDataFromRows, parseScheduleJson, hasPreciseNumbers, effectiveRunOutcome, plainRunOutcome } from './schedule-data.js?v=20261023schedule9';
 import { attachExistingClaudeConnection } from './native-controls.js?v=20260922o03c';
 import {
   recurrenceSubmissionPolicy,
@@ -7,18 +8,18 @@ import {
   weekdayAtInstant,
   weeklyStartDateTimeLocal,
   zonedDateTimeLocalValue,
-} from './schedule-policy.js?v=20260922schedule10';
+} from './schedule-policy.js?v=20261023schedule9';
 import { equivalentReapprovalScopes } from './capability-review.js?v=20260811m';
 
 const SUPPORT_COPY = {
   supported: 'Ready to connect',
-  proof_required: 'Available when this deployment enables isolated Codex subscription homes',
-  provider_permission_required: 'Requires an approved hosted Claude authentication agreement',
-  setup_cli_required: 'Account setup is not installed on this xPerfect deployment',
-  unsupported_macos_host: 'Claude subscription isolation is not available for multi-user macOS host workers',
-  isolated_substrate_required: 'This multi-user deployment has not enabled a dedicated worker isolation substrate. Use the managed connected-accounts route below.',
-  secret_store_required: 'Requires this deployment\'s secure secret store',
-  managed_connection_required: 'Connect this account through the deployment\'s managed connected-accounts page.',
+  proof_required: 'Codex subscription sign-in is not enabled here. Ask the host owner to enable it, or connect an API key.',
+  provider_permission_required: 'Claude subscription sign-in is not available on this host. Connect an API key instead.',
+  setup_cli_required: 'Install this AI’s official app or command-line tool on the host, then try again.',
+  unsupported_macos_host: 'This Mac cannot create a separate Claude subscription sign-in. Use the existing Claude sign-in above or connect an API key.',
+  isolated_substrate_required: 'This host is not ready to keep each person’s AI sign-in separate. Ask the host owner to finish setup.',
+  secret_store_required: 'The host needs secure key storage before accounts can connect.',
+  managed_connection_required: 'Use this host’s account connection page.',
 };
 
 const PROVIDER_LABELS = {
@@ -58,6 +59,11 @@ let connectAiLoadError = '';
 let workspaceCatalog = { items: [] };
 let oneOffWorkspaceCatalog = { items: [] };
 let recurringSchedules = { items: [] };
+let webhookDestinations = [];
+let pendingScheduleCreate = null;
+let pendingDestinationCreate = null;
+let savedRequestDataKeys = new Set();
+const settlingScheduleRefreshes = new Map();
 let scheduleLoadError = '';
 const scheduleOccurrences = new Map();
 const scheduleHistoryGeneration = new Map();
@@ -70,8 +76,71 @@ let scheduleEditorVisible = false;
 let editingScheduleSnapshot = null;
 let activeSetupAccount = '';
 let setupPollTimer = 0;
+let controlPlaneGeneration = 0;
+let controlPlaneSectionsReady = Promise.resolve();
+let scheduleCatalogReady = false;
+let accountConnectionIntent = null;
+let libraryRequestPending = false;
 let pendingCapabilityReview = null;
 const copyResetTimers = new WeakMap();
+
+function profileForProvider(provider) {
+  return { codex: 'codex-cli', claude: 'claude-code', grok: 'grok-build', xai: 'grok-build' }[provider] || '';
+}
+
+function providerForProfile(profile) {
+  return { 'codex-cli': 'codex', 'direct-openai': 'codex', 'claude-code': 'claude',
+    'direct-anthropic': 'claude', 'grok-build': 'grok', 'direct-xai': 'grok' }[profile] || '';
+}
+
+function announceConnectedAccount(connectedAccount) {
+  if (!connectedAccount?.account_id) return;
+  const intent = accountConnectionIntent;
+  const sameProvider = !connectedAccount.profile || providerForProfile(intent?.profile) === providerForProfile(connectedAccount.profile);
+  const account = controlPlane?.provider_accounts?.find(item => item.account_id === connectedAccount.account_id);
+  if (intent?.authMethods?.length && !intent.authMethods.includes(account?.auth_method)) {
+    setProviderStatus('This account is connected. The selected worker needs an API key; connect that key to continue its job.');
+    return;
+  }
+  const profile = (sameProvider ? intent?.profile : '') || connectedAccount.profile || '';
+  window.dispatchEvent(new CustomEvent('xperfect:account-connected', {
+    detail: { ...connectedAccount, profile, returnView: intent?.returnView || '' },
+  }));
+  if (intent?.returnView) api.setView(intent.returnView);
+  accountConnectionIntent = null;
+}
+
+function applyAccountConnectionIntent() {
+  if (!controlPlane || !accountConnectionIntent?.pending || activeSetupAccount) return;
+  const select = document.getElementById('provider-account-provider');
+  const disclosure = document.getElementById('add-provider-account');
+  const requestedProvider = accountConnectionIntent?.provider || '';
+  if (select && requestedProvider && (controlPlane?.provider_options || []).some((item) => item.provider === requestedProvider)) {
+    select.value = requestedProvider;
+  }
+  if (disclosure && !activeSetupAccount) disclosure.open = true;
+  renderProviderOptionControls();
+  const methodSelect = document.getElementById('provider-account-method');
+  const permitted = accountConnectionIntent.authMethods || [];
+  if (permitted.length && methodSelect) {
+    const method = Array.from(methodSelect.options).find(item => permitted.includes(item.value));
+    methodSelect.value = method?.value || '';
+    renderProviderChoices(providerOptions(), select, methodSelect);
+    renderSupportHint();
+  }
+  const existingClaude = document.querySelector('#existing-claude-connection button');
+  const chosenProvider = document.querySelector('.provider-choice[aria-pressed="true"]');
+  if (requestedProvider === 'claude' && existingClaude && (!permitted.length || permitted.includes('subscription'))) existingClaude.focus();
+  else (chosenProvider || select)?.focus();
+  accountConnectionIntent.pending = false;
+}
+
+export async function openAccountConnection({ profile = '', provider = '', authMethods = [], returnView = '' } = {}) {
+  accountConnectionIntent = { profile, provider: provider || providerForProfile(profile), authMethods, returnView, pending: true };
+  // The existing view owner starts its refresh. Do not issue a duplicate catalog request.
+  api.setView('connections');
+  applyAccountConnectionIntent();
+}
 
 function node(tag, className = '', text = '') {
   const element = document.createElement(tag);
@@ -323,7 +392,8 @@ function renderProviderAccounts() {
   const addAccount = document.querySelector('#add-provider-account > summary');
   if (addAccount) addAccount.textContent = accounts.length ? 'Connect another account' : 'Connect an AI account';
   if (!accounts.length) {
-    list.replaceChildren(node('p', 'connections-empty', 'No AI account connected yet.'));
+    list.replaceChildren(node('p', 'connections-empty', controlPlane.sections?.provider_accounts === 'unavailable'
+      ? 'Account status is unavailable. Refresh to try again.' : 'No AI account connected yet.'));
     return;
   }
   const rows = accounts.map((account) => {
@@ -433,7 +503,8 @@ function renderGrokModelChoice() {
   const description = document.getElementById('grok-model-description');
   const status = document.getElementById('grok-model-status');
   if (!card || !select || !save || !description || !status) return;
-  const hasGrok = (controlPlane?.provider_options || []).some((option) => option.provider === 'grok');
+  const hasGrok = (controlPlane?.provider_accounts || []).some(account => ['grok', 'xai'].includes(account.provider))
+    || document.getElementById('provider-account-provider')?.value === 'grok';
   card.hidden = !hasGrok;
   if (!hasGrok) return;
   const options = [new Option('Choose a model', '')];
@@ -458,6 +529,12 @@ function renderConnections() {
   const card = document.getElementById('connected-services-card');
   if (!list || !controlPlane) return;
   const connections = controlPlane.connections || [];
+  if (controlPlane.sections?.connections === 'not_requested') return;
+  if (controlPlane.sections?.connections === 'unavailable') {
+    list.replaceChildren(node('p', 'connections-empty', 'Connected tools are unavailable. Refresh to try again.'));
+    if (card) card.hidden = false;
+    return;
+  }
   const reviewConnectionIds = new Set(
     (capabilityReviewRequest()?.items || [])
       .filter((item) => item.kind === 'connection')
@@ -679,23 +756,25 @@ function capabilityReviewRequest() {
       : [];
     pendingCapabilityReview = { workerId, count: Math.max(count, items.length), items };
   } catch (_error) {
-    sessionStorage.removeItem(CAPABILITY_REVIEW_KEY);
+    try { sessionStorage.removeItem(CAPABILITY_REVIEW_KEY); } catch { /* Optional browser hint. */ }
   }
   return pendingCapabilityReview;
 }
 
-function persistCapabilityReview(review) {
+export function persistCapabilityReview(review) {
   pendingCapabilityReview = review;
-  if (!review?.workerId || !review?.items?.length) {
-    sessionStorage.removeItem(CAPABILITY_REVIEW_KEY);
+  if (!review?.workerId || !(review?.items?.length || review?.count)) {
+    try { sessionStorage.removeItem(CAPABILITY_REVIEW_KEY); } catch { /* Optional browser hint. */ }
     pendingCapabilityReview = null;
     return;
   }
-  sessionStorage.setItem(CAPABILITY_REVIEW_KEY, JSON.stringify({
-    worker_id: review.workerId,
-    count: review.items.length,
-    items: review.items,
-  }));
+  try {
+    sessionStorage.setItem(CAPABILITY_REVIEW_KEY, JSON.stringify({
+      worker_id: review.workerId,
+      count: Math.max(Number(review.count || 0), review.items?.length || 0),
+      items: review.items || [],
+    }));
+  } catch { /* Keep the exact in-memory receipt when browser storage is unavailable. */ }
 }
 
 function restoreCapabilityReviewFromCatalog() {
@@ -714,7 +793,8 @@ function restoreCapabilityReviewFromCatalog() {
   });
 }
 
-async function reconcileCapabilityReview() {
+async function reconcileCapabilityReview(generation = controlPlaneGeneration) {
+  const scope = scheduleRunScope();
   const review = capabilityReviewRequest();
   if (!review?.items?.length) return;
   let workspace = (workspaceCatalog.items || []).find(
@@ -723,6 +803,7 @@ async function reconcileCapabilityReview() {
   if (!workspace) {
     try {
       const response = await fetch(api.withAuth(`/api/workspaces/${encodeURIComponent(review.workerId)}`));
+      if (generation !== controlPlaneGeneration || scope !== scheduleRunScope()) return;
       if (response.status === 404) {
         persistCapabilityReview(null);
         return;
@@ -734,6 +815,7 @@ async function reconcileCapabilityReview() {
       return;
     }
   }
+  if (generation !== controlPlaneGeneration || scope !== scheduleRunScope()) return;
   const remaining = workspace?.duplication_report?.outstanding_reapproval_items || [];
   persistCapabilityReview({ ...review, count: remaining.length, items: remaining });
 }
@@ -824,7 +906,20 @@ function renderLibrary() {
   const list = document.getElementById('library-list');
   const empty = document.getElementById('library-empty');
   if (!list || !controlPlane) return;
+  if (controlPlane.sections?.library === 'not_requested') {
+    list.replaceChildren();
+    if (empty) { empty.hidden = false; empty.textContent = 'Loading Library…'; }
+    return;
+  }
   const items = controlPlane.library || [];
+  if (controlPlane.sections?.library === 'unavailable') {
+    list.replaceChildren();
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = 'The Library is unavailable. Refresh to try again.';
+    }
+    return;
+  }
   const libraryById = new Map(items.map((libraryItem) => [String(libraryItem.library_id || ''), libraryItem]));
   const review = capabilityReviewRequest();
   const requiredLibraryIds = new Set(
@@ -832,7 +927,10 @@ function renderLibrary() {
       .filter((item) => item.kind === 'library')
       .map((item) => item.reference),
   );
-  if (empty) empty.hidden = items.length > 0;
+  if (empty) {
+    empty.hidden = items.length > 0;
+    empty.textContent = 'No approved capabilities are available yet.';
+  }
   const cards = items.map((item) => {
     const manifest = item.manifest || {};
     const activatable = manifest.activatable === true && item.activation_status === 'ready';
@@ -859,7 +957,8 @@ function renderLibrary() {
     const placeholder = node(
       'option',
       '',
-      workspaceCatalog.next_cursor ? 'Choose recent workspace · search Workspaces for more' : 'Choose workspace',
+      workspaceCatalog.unavailable ? 'Workspaces unavailable · refresh to retry'
+        : workspaceCatalog.next_cursor ? 'Choose recent workspace · search Workspaces for more' : 'Choose workspace',
     );
     placeholder.value = '';
     select.appendChild(placeholder);
@@ -873,10 +972,13 @@ function renderLibrary() {
     button.disabled = true;
     let activeGrant = null;
     let replacementGrant = null;
+    let grantGeneration = 0;
     const syncGrant = async () => {
+      const generation = ++grantGeneration;
+      const selectedWorkspace = select.value;
       activeGrant = null;
       replacementGrant = null;
-      if (!activatable || !select.value) {
+      if (!activatable || !selectedWorkspace) {
         button.disabled = true;
         button.textContent = activatable ? 'Add to workspace' : 'Unavailable in this deployment';
         return;
@@ -884,9 +986,10 @@ function renderLibrary() {
       button.disabled = true;
       button.textContent = 'Checking workspace…';
       try {
-        const response = await fetch(api.withAuth(`/api/workspaces/${encodeURIComponent(select.value)}/capability-grants`));
+        const response = await fetch(api.withAuth(`/api/workspaces/${encodeURIComponent(selectedWorkspace)}/capability-grants`));
         if (!response.ok) throw new Error(await api.responseMessage(response, 'Could not load workspace capabilities'));
         const payload = await response.json();
+        if (generation !== grantGeneration || select.value !== selectedWorkspace) return;
         const grants = payload.items || [];
         activeGrant = grants.find((grantItem) => grantItem.library_id === item.library_id) || null;
         replacementGrant = grants.find((grantItem) => {
@@ -906,6 +1009,7 @@ function renderLibrary() {
           button.disabled = false;
         }
       } catch (error) {
+        if (generation !== grantGeneration || select.value !== selectedWorkspace) return;
         button.textContent = error.message;
       }
     };
@@ -980,7 +1084,8 @@ function renderLibraryRequestWorkspaceOptions() {
   const review = capabilityReviewRequest();
   const selected = review?.workerId || select.value;
   const workspaces = workspaceCatalog.items || [];
-  const placeholder = node('option', '', workspaces.length
+  const placeholder = node('option', '', workspaceCatalog.unavailable
+    ? 'Workspaces are unavailable. Refresh to try again.' : workspaces.length
     ? (workspaceCatalog.next_cursor ? 'Choose recent workspace · search Workspaces for more' : 'Choose a saved workspace')
     : 'Create a saved workspace first');
   placeholder.value = '';
@@ -992,6 +1097,10 @@ function renderLibraryRequestWorkspaceOptions() {
   select.replaceChildren(placeholder, ...options);
   if (options.some((option) => option.value === selected)) select.value = selected;
   select.disabled = !options.length;
+  const submit = document.querySelector('#library-request-form button[type="submit"]');
+  if (submit) submit.disabled = !options.length || libraryRequestPending;
+  const startJob = document.getElementById('library-start-job');
+  if (startJob) startJob.hidden = Boolean(options.length) || Boolean(workspaceCatalog.unavailable);
   const status = document.getElementById('library-request-status');
   if (status && review) {
     status.textContent = `Workspace copied. Review ${review.count} capabilit${review.count === 1 ? 'y' : 'ies'} before running it.`;
@@ -1000,6 +1109,7 @@ function renderLibraryRequestWorkspaceOptions() {
 
 async function submitLibraryRequest(event) {
   event.preventDefault();
+  if (libraryRequestPending) return;
   const workspaceId = document.getElementById('library-request-workspace')?.value || '';
   const requestText = document.getElementById('library-request-text')?.value.trim() || '';
   const status = document.getElementById('library-request-status');
@@ -1014,16 +1124,23 @@ async function submitLibraryRequest(event) {
     return;
   }
   if (status) status.textContent = 'Sending a workspace-only request…';
+  libraryRequestPending = true;
+  const submit = event.currentTarget?.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
   try {
     await api.postJson(`/api/workspace/${encodeURIComponent(workspaceId)}/message`, {
       message: requestText,
     });
     if (status) status.textContent = 'Request sent. The connection review stays open until access is verified or you continue without it.';
     const workspace = (workspaceCatalog.items || []).find((item) => String(item.worker_id || '') === workspaceId);
-    const watchUrl = String(workspace?.watch_url || api.withAuth(`/watch/${encodeURIComponent(workspaceId)}?surface=desktop`));
+    const surface = document.getElementById('launch-surface')?.value === 'terminal' ? 'terminal' : 'desktop';
+    const watchUrl = String(workspace?.watch_url || api.withAuth(`/watch/${encodeURIComponent(workspaceId)}?surface=${surface}`));
     window.location.assign(watchUrl);
   } catch (error) {
     if (status) status.textContent = error.message;
+  } finally {
+    libraryRequestPending = false;
+    if (submit) submit.disabled = false;
   }
 }
 
@@ -1054,9 +1171,9 @@ function formatScheduleDateTime(value, timezoneName = 'UTC') {
       dateStyle: 'medium',
       timeStyle: 'short',
     }).format(parsed);
-    return `${formatted} · ${zone}`;
+    return `${formatted} · ${timeZoneCity(zone)}`;
   } catch (_error) {
-    return `${formatDateTime(value)} · ${zone}`;
+    return `${formatDateTime(value)} · ${timeZoneCity(zone)}`;
   }
 }
 
@@ -1074,12 +1191,13 @@ function intervalLabel(seconds) {
     const hours = value / 3600;
     return `Every ${hours} hour${hours === 1 ? '' : 's'}`;
   }
+  if (value >= 60 && value % 60 === 0) { const minutes = value / 60; return `Every ${minutes} minute${minutes === 1 ? '' : 's'}`; }
   return `Every ${value} seconds`;
 }
 
 function recurrenceLabel(schedule) {
   const kind = String(schedule.recurrence_type || 'interval');
-  const timezone = String(schedule.timezone_name || 'UTC');
+  const timezone = timeZoneCity(schedule.timezone_name || 'UTC');
   if (kind === 'once') return 'One time';
   if (kind === 'weekly') return `Every week · ${timezone}`;
   if (kind === 'rfc5545' && String(schedule.rrule || '').trim().toUpperCase() === 'FREQ=WEEKLY') {
@@ -1090,13 +1208,135 @@ function recurrenceLabel(schedule) {
   }
   if (kind === 'cron') return `Custom cron · ${timezone}`;
   if (kind === 'rfc5545') return `Custom calendar rule · ${timezone}`;
-  return `${intervalLabel(schedule.interval_seconds)} · ${timezone}`;
+  return intervalLabel(schedule.interval_seconds);
+}
+
+function effectiveScheduleInstruction() {
+  const webhook = document.getElementById('recurring-schedule-target')?.value === 'webhook';
+  if (!webhook) return document.getElementById('recurring-schedule-instruction')?.value.trim() || '';
+  const field = document.getElementById('recurring-schedule-message');
+  return field?.dataset.binding === 'instruction' ? field.value.trim() : '';
+}
+
+function hasFiredOnce(schedule) {
+  return !schedule.active && !schedule.retired_at && schedule.recurrence_type === 'once' && schedule.clock_finished === true;
+}
+
+function isFinishedOnce(schedule) {
+  return hasFiredOnce(schedule)
+    && ['accepted', 'completed', 'succeeded', 'done'].includes(schedule.last_outcome);
+}
+
+function showSchedulePageStatus(message, tone = 'info') {
+  const status = document.getElementById('schedule-page-status');
+  if (status) { status.textContent = message; status.dataset.tone = tone; }
+}
+
+function scrollToSchedule(definitionId) {
+  const card = [...document.querySelectorAll('.schedule-card')].find((item) => item.dataset.scheduleId === definitionId);
+  card?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+}
+
+function scheduleDeliveryPending(schedule) {
+  return schedule?.target?.kind === 'webhook'
+    && ['pending', 'delivering'].includes(schedule.last_outcome);
+}
+
+function refreshScheduleUntilSettled(definitionId) {
+  const prior = settlingScheduleRefreshes.get(definitionId);
+  if (prior?.timer) window.clearTimeout(prior.timer);
+  const watch = { timer: null };
+  settlingScheduleRefreshes.set(definitionId, watch);
+  const stop = () => { if (settlingScheduleRefreshes.get(definitionId) === watch) settlingScheduleRefreshes.delete(definitionId); };
+  const scope = scheduleRunScope();
+  const initial = (recurringSchedules.items || []).find((item) => item.definition_id === definitionId);
+  const occurrenceId = initial?.last_occurrence_id || '';
+  const savedExpiry = Date.parse(initial?.last_occurrence_expires_at || '');
+  const deadline = Number.isFinite(savedExpiry) ? savedExpiry : Date.now() + 30000;
+  const delays = [500, 1500, 3000, 5000, 10000, 20000, 30000];
+  const stillVisible = () => settlingScheduleRefreshes.get(definitionId) === watch
+    && scope === scheduleRunScope() && document.visibilityState !== 'hidden'
+    && document.getElementById('schedules-view')?.hidden === false;
+  const scheduleNext = (index) => {
+    const remaining = deadline - Date.now();
+    if (!stillVisible() || remaining <= 0) { stop(); return; }
+    watch.timer = window.setTimeout(async () => {
+      watch.timer = null;
+      if (!stillVisible()) { stop(); return; }
+      try {
+        // Read this saved request only; do not reload connections or the control plane.
+        const timeout = globalThis.AbortSignal?.timeout?.(Math.max(1, Math.min(10000, deadline - Date.now() + 1000)));
+        const response = await fetch(api.withAuth(`/api/recurring-schedules/${encodeURIComponent(definitionId)}`),
+          { cache: 'no-store', ...(timeout ? { signal: timeout } : {}) });
+        if (!stillVisible()) { stop(); return; }
+        if (!response.ok) { if (response.status === 404) stop(); else scheduleNext(index + 1); return; }
+        const schedule = parseScheduleJson(await response.text());
+        if (!stillVisible() || (occurrenceId && schedule.last_occurrence_id !== occurrenceId)) { stop(); return; }
+        const position = (recurringSchedules.items || []).findIndex((item) => item.definition_id === definitionId);
+        if (position < 0) { stop(); return; }
+        if (recurringSchedules.items[position].last_outcome !== schedule.last_outcome) {
+          scheduleOccurrences.delete(definitionId);
+          scheduleHistoryGeneration.set(definitionId, (scheduleHistoryGeneration.get(definitionId) || 0) + 1);
+        }
+        recurringSchedules.items[position] = schedule;
+        const outcome = schedule.last_outcome;
+        if (['pending', 'delivering', 'queued', 'scheduled', 'running'].includes(outcome)) {
+          renderSchedules(); scheduleNext(index + 1); return;
+        }
+        const message = plainRunOutcome(outcome, schedule.target?.kind === 'webhook');
+        rememberScheduleAction(schedule, message, '', ['accepted', 'completed', 'succeeded', 'done'].includes(outcome) ? 'success' : ['unacknowledged', 'rejected', 'failed', 'expired', 'delivery_expired'].includes(outcome) ? 'error' : 'info');
+        stop(); renderSchedules();
+      } catch (_) {
+        // A lost status read does not change the durable delivery or permit a duplicate.
+        if (stillVisible()) scheduleNext(index + 1); else stop();
+      }
+    }, Math.min(delays[Math.min(index, delays.length - 1)], remaining));
+  };
+  scheduleNext(0);
+}
+
+function resumePendingScheduleRefreshes() {
+  for (const schedule of recurringSchedules.items || []) {
+    if (scheduleDeliveryPending(schedule) && !settlingScheduleRefreshes.has(schedule.definition_id)) refreshScheduleUntilSettled(schedule.definition_id);
+  }
+}
+
+function showScheduleFieldError(error, status, savedOneOff = false) {
+  const fields = error.validationFields || [];
+  const known = [
+    ['local_time', 'Choose a valid time.', 'recurring-schedule-local-time'],
+    ['timezone_name', 'Choose a valid city or time zone.', 'schedule-timezone-search'],
+    ['starts_at', 'Choose a valid future date and time.', 'recurring-schedule-starts-at'],
+    ['first_run_at', 'Choose a valid future date and time.', 'recurring-schedule-starts-at'],
+    ['interval_seconds', 'Repeat at least once a minute.', 'recurring-schedule-interval-value'],
+    ['destination_id', 'Choose an app, or connect one first.', 'recurring-schedule-destination'],
+    ['instruction', 'Tell the workspace what it should do.', 'recurring-schedule-instruction'],
+    ['request_data', 'Check the extra app details.', 'recurring-schedule-request-data'],
+    ['cron_expression', 'Use five parts, such as 0 9 * * 1 (Monday at 9 AM).', 'recurring-schedule-cron'],
+  ];
+  const match = known.find(([field]) => fields.includes(field) || String(error.message || '').startsWith(`${field} `));
+  const message = match?.[1] || 'Couldn’t save this schedule. Check the details and try again.';
+  if (status) { status.textContent = savedOneOff ? `Workspace saved. ${message}` : message; status.dataset.tone = 'error'; }
+  if (match) {
+    if (match[0] === 'timezone_name') { const picker = document.getElementById('schedule-timezone-picker'); if (picker) picker.hidden = false; renderTimeZoneChoices(); }
+    if (match[0] === 'request_data') { document.getElementById('schedule-request-advanced').open = true; document.getElementById('schedule-data-json').open = true; }
+    document.getElementById(match[2])?.focus();
+  }
+}
+
+function scheduleTargetName(schedule) {
+  return schedule.target?.kind === 'webhook'
+    ? (webhookDestinations.find((item) => item.destination_id === schedule.target.destination_id)?.name || 'Connected app')
+    : workspaceName(schedule.worker_id);
 }
 
 function scheduleNextLabel(schedule) {
   const next = schedule.next_occurrence_at || schedule.next_run_at;
   if (!schedule.active) {
-    return schedule.retired_at ? 'Retired · history retained' : 'Paused · no future occurrences';
+    if (schedule.retired_at) return 'Removed · past runs saved';
+    if (isFinishedOnce(schedule)) return `${schedule.last_outcome === 'accepted' ? 'Sent' : 'Done'} ${formatScheduleDateTime(schedule.last_occurrence_at, schedule.timezone_name || 'UTC')}`;
+    if (hasFiredOnce(schedule)) return 'No future runs · check this request in history';
+    return 'Paused · no future runs';
   }
   return `Next scheduled: ${formatScheduleDateTime(next, schedule.timezone_name || 'UTC')}`;
 }
@@ -1121,33 +1361,64 @@ function renderScheduleWorkspaceOptions() {
   select.disabled = !options.length;
   const emptyState = document.getElementById('recurring-schedule-workspace-empty');
   if (emptyState) emptyState.hidden = Boolean(options.length);
-  const needsWorkspace = !options.length && !editingScheduleId;
+  const webhook = document.getElementById('recurring-schedule-target')?.value === 'webhook';
+  const needsWorkspace = !webhook && !options.length && !editingScheduleId;
   for (const id of ['recurring-schedule-instruction-field', 'recurring-schedule-fields',
-    'recurring-schedule-advanced', 'recurring-schedule-submit']) {
+    'recurring-schedule-advanced', 'recurring-schedule-submit', 'schedule-when-heading', 'schedule-preview']) {
     const field = document.getElementById(id);
-    if (field) field.hidden = needsWorkspace;
+    if (field) field.hidden = needsWorkspace || (webhook && id === 'recurring-schedule-instruction-field');
   }
+}
+
+const WEBHOOK_TIMING_LABELS = {
+  resolve_ms: 'Look up receiver address',
+  connect_ms: 'Connect to receiver',
+  tls_ms: 'Verify secure connection',
+  sign_ms: 'Sign the request',
+  write_ms: 'Send the request',
+  read_ms: 'Receive the response',
+  to_response_headers_ms: 'Request to response headers · includes connection',
+  executor_to_send_ms: 'Prepare delivery',
+  clock_lateness_ms: 'Scheduled time to clock detection',
+  outbox_wait_ms: 'Clock detection to sender start · includes save and queue',
+  executor_queue_ms: 'Sender queue wait',
+  due_to_claim_ms: 'Scheduled time to clock claim',
+  claim_to_commit_ms: 'Clock claim to saved delivery',
+  outbox_to_executor_ms: 'Saved delivery to available sender',
+  total_ms: 'HTTP attempt total · signing, connection, send and response',
+};
+
+function occurrenceDeliveryDetails(occurrence) {
+  const values = Object.entries(occurrence.timings_ms || {}).filter(([, value]) => Number.isFinite(value));
+  if (!values.length) return null;
+  const details = node('details', 'schedule-history-error');
+  details.append(node('summary', '', 'Delivery times'));
+  const lines = values.map(([key, value]) => `${WEBHOOK_TIMING_LABELS[key] || key}: ${value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(2)} ms`}`);
+  details.append(node('pre', '', lines.join('\n')));
+  return details;
 }
 
 function renderOccurrenceHistory(container, items, timezoneName = 'UTC') {
   if (!items.length) {
-    container.replaceChildren(emptyList('No occurrence has run yet'));
+    container.replaceChildren(emptyList('No runs yet'));
     return;
   }
   container.replaceChildren(...items.map((occurrence) => {
     const row = node('div', 'schedule-history-row');
-    const outcome = String(occurrence.outcome && occurrence.outcome !== 'pending'
-      ? occurrence.outcome
-      : (occurrence.state || 'pending'));
+    const outcome = effectiveRunOutcome(occurrence);
     row.append(
       node('span', '', formatScheduleDateTime(occurrence.scheduled_for, timezoneName)),
-      statusChip(outcome),
+      (() => { const chip = statusChip(outcome); chip.textContent = plainRunOutcome(outcome, !occurrence.scheduled_run_id); return chip; })(),
     );
+    if (outcome === 'accepted') row.append(node('span', 'schedule-history-detail', 'The app received this request. Its task can continue in the background.'));
+    if (Number.isInteger(occurrence.http_status)) row.append(node('span', 'schedule-history-detail', `Receiver replied HTTP ${occurrence.http_status}`));
+    const deliveryDetails = occurrenceDeliveryDetails(occurrence);
+    if (deliveryDetails) row.append(deliveryDetails);
     const error = String(occurrence.last_error || '').trim();
     if (error) {
-      const recovery = ['action_required', 'failed'].includes(outcome)
-        ? 'Check Error details, fix the cause, then use Run now or resume this schedule.'
-        : 'Open the workspace status for details before retrying.';
+      const recovery = outcome === 'unacknowledged'
+        ? 'Your app may already have started. Check there before sending a new request.'
+        : !occurrence.scheduled_run_id ? 'Check the connection and Error details before retrying.' : 'Open the workspace to see what needs help.';
       row.append(node('span', 'schedule-history-detail', recovery));
       const details = node('details', 'schedule-history-error');
       details.append(node('summary', '', 'Error details'), node('pre', '', error));
@@ -1174,10 +1445,10 @@ async function toggleOccurrenceHistory(definitionId, container, button) {
 
 async function loadOccurrenceHistory(definitionId, container) {
   const generation = scheduleHistoryGeneration.get(definitionId) || 0;
-  container.replaceChildren(node('span', 'schedule-card-meta', 'Loading occurrence history…'));
+  container.replaceChildren(node('span', 'schedule-card-meta', 'Loading past runs…'));
   try {
     const response = await fetch(api.withAuth(`/api/recurring-schedules/${encodeURIComponent(definitionId)}/occurrences?limit=20`));
-    if (!response.ok) throw new Error(await api.responseMessage(response, 'Could not load occurrence history'));
+    if (!response.ok) throw new Error(await api.responseMessage(response, 'Could not load past runs'));
     const payload = await response.json();
     if (generation !== (scheduleHistoryGeneration.get(definitionId) || 0)) return;
     const items = payload.items || [];
@@ -1205,8 +1476,8 @@ function setScheduleEditorVisible(visible) {
   layout?.classList.toggle('schedule-editor-open', scheduleEditorVisible);
 }
 
-function rememberScheduleAction(schedule, message, destination = '') {
-  scheduleActionMessages.set(String(schedule.definition_id || ''), { message, destination });
+function rememberScheduleAction(schedule, message, destination = '', tone = 'info') {
+  scheduleActionMessages.set(String(schedule.definition_id || ''), { message, destination, tone });
 }
 
 function scheduleRunScope() {
@@ -1224,6 +1495,15 @@ function restoreUncertainScheduleRunKeys() {
   if (scope === uncertainScheduleRunScope) return;
   if (uncertainScheduleRunScope) {
     recurringSchedules = { items: [] };
+    webhookDestinations = [];
+    pendingDestinationCreate = null;
+    closeDestinationDialog();
+    document.getElementById('recurring-schedule-form')?.reset();
+    setRequestData({});
+    editingScheduleId = ''; editingScheduleSnapshot = null; pendingScheduleCreate = null;
+    setScheduleEditorVisible(false);
+    const secretOnce = document.getElementById('webhook-destination-secret-once');
+    if (secretOnce) { secretOnce.textContent = ''; secretOnce.hidden = true; }
     scheduleActionMessages.clear();
     scheduleOccurrences.clear();
     scheduleHistoryGeneration.clear();
@@ -1262,6 +1542,7 @@ function persistUncertainScheduleRunKeys() {
 
 function renderScheduleActionStatus(status, remembered) {
   status.replaceChildren();
+  status.dataset.tone = remembered?.tone || 'info';
   if (!remembered?.message) return;
   status.append(document.createTextNode(remembered.message));
   if (remembered.destination) {
@@ -1272,14 +1553,14 @@ function renderScheduleActionStatus(status, remembered) {
 }
 
 async function deactivateSchedule(schedule, button, actionStatus) {
-  const name = workspaceName(schedule.worker_id);
-  if (!window.confirm(`Pause future occurrences for ${name}? You can resume it later and its history will be kept.`)) return;
+  const name = scheduleTargetName(schedule);
+  if (!window.confirm(`Pause future runs for ${name}? You can resume it later and your past runs stay saved.`)) return;
   button.disabled = true;
   button.textContent = 'Pausing…';
   const status = scheduleActionStatus(actionStatus);
   try {
     await api.patchJson(`/api/recurring-schedules/${encodeURIComponent(schedule.definition_id)}`, { enabled: false });
-    const message = 'Schedule paused. Its previous occurrences are still available.';
+    const message = 'Schedule paused. Your past runs stay saved.';
     rememberScheduleAction(schedule, message);
     if (status) status.textContent = message;
     await loadSchedules();
@@ -1296,7 +1577,7 @@ async function resumeSchedule(schedule, button, actionStatus) {
   const status = scheduleActionStatus(actionStatus);
   try {
     await api.patchJson(`/api/recurring-schedules/${encodeURIComponent(schedule.definition_id)}`, { enabled: true });
-    const message = 'Schedule resumed with the same private workspace and history.';
+    const message = 'Schedule resumed. Its task and history are unchanged.';
     rememberScheduleAction(schedule, message);
     if (status) status.textContent = message;
     await loadSchedules();
@@ -1310,11 +1591,20 @@ async function resumeSchedule(schedule, button, actionStatus) {
 function resetScheduleEditor(message = '', { hide = true } = {}) {
   editingScheduleId = '';
   editingScheduleSnapshot = null;
+  pendingScheduleCreate = null;
+  const secretOnce = document.getElementById('webhook-destination-secret-once');
+  if (secretOnce) { secretOnce.textContent = ''; secretOnce.hidden = true; }
   const form = document.getElementById('recurring-schedule-form');
   form?.reset();
+  setRequestData({});
+  for (const id of ['schedule-request-advanced', 'schedule-data-json', 'recurring-schedule-advanced']) { const details = document.getElementById(id); if (details) details.open = false; }
+  closeDestinationDialog();
+  const destinationName = document.getElementById('webhook-destination-name');
+  if (destinationName) delete destinationName.dataset.destinationId;
   if (form) {
     delete form.dataset.scheduleWeekday;
     delete form.dataset.scheduleWeeklyTime;
+    delete form.dataset.createIdempotencyKey;
   }
   const timezone = document.getElementById('recurring-schedule-timezone');
   const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -1331,7 +1621,8 @@ function resetScheduleEditor(message = '', { hide = true } = {}) {
   const title = document.getElementById('recurring-schedule-form-title');
   if (title) title.textContent = 'New schedule';
   const status = document.getElementById('recurring-schedule-status');
-  if (status) status.textContent = message;
+  if (status) { status.textContent = message; status.dataset.tone = 'info'; }
+  if (message && hide) showSchedulePageStatus(message, 'success');
   const weeklyTime = document.getElementById('recurring-schedule-weekly-time');
   if (weeklyTime) weeklyTime.value = '09:00';
   const weekday = document.getElementById('recurring-schedule-weekday');
@@ -1343,11 +1634,10 @@ function resetScheduleEditor(message = '', { hide = true } = {}) {
 }
 
 function openScheduleEditor() {
+  void loadWebhookDestinations();
   resetScheduleEditor('', { hide: false });
   renderScheduleWorkspaceOptions();
-  const firstAction = document.getElementById('recurring-schedule-workspace')?.disabled
-    ? 'recurring-schedule-create-workspace' : 'recurring-schedule-instruction';
-  document.getElementById(firstAction)?.focus();
+  document.querySelector('[name="schedule-target-choice"]:checked')?.focus();
 }
 
 function editSchedule(schedule) {
@@ -1357,6 +1647,11 @@ function editSchedule(schedule) {
     const field = document.getElementById(id);
     if (field) field.value = value == null ? '' : String(value);
   };
+  setValue('recurring-schedule-target', schedule.target?.kind || 'worker');
+  setValue('recurring-schedule-destination', schedule.target?.destination_id || '');
+  setRequestData(schedule.target?.request_data || {}, schedule.target?.kind === 'webhook' ? String(schedule.instruction || '') : '', true);
+  for (const id of ['schedule-request-advanced', 'schedule-data-json']) { const details = document.getElementById(id); if (details) details.open = false; }
+  syncWebhookDestinationActions();
   setValue('recurring-schedule-workspace', schedule.worker_id);
   setValue('recurring-schedule-instruction', schedule.instruction);
   const intervalSeconds = Number(schedule.interval_seconds || 3600);
@@ -1368,6 +1663,8 @@ function editSchedule(schedule) {
   setValue('recurring-schedule-custom-type', simpleRecurrenceType === 'custom' ? editorRecurrenceType : 'interval');
   setValue('recurring-schedule-local-time', schedule.local_time || '09:00');
   setValue('recurring-schedule-timezone', schedule.timezone_name || 'UTC');
+  const zonePicker = document.getElementById('schedule-timezone-picker'); if (zonePicker) zonePicker.hidden = true;
+  const zoneChange = document.getElementById('schedule-timezone-change'); if (zoneChange) zoneChange.setAttribute('aria-expanded', 'false');
   setValue('recurring-schedule-dst-policy', schedule.dst_policy || 'next_valid_earliest');
   setValue(
     'recurring-schedule-starts-at',
@@ -1401,11 +1698,11 @@ function editSchedule(schedule) {
     ? 'weeks'
     : (intervalSeconds > 0 && intervalSeconds % 86400 === 0
       ? 'days'
-      : (intervalSeconds > 0 && intervalSeconds % 3600 === 0 ? 'hours' : 'seconds'));
+      : (intervalSeconds > 0 && intervalSeconds % 3600 === 0 ? 'hours' : 'minutes'));
   setValue('recurring-schedule-interval-unit', intervalUnit);
   const intervalFactor = intervalUnit === 'weeks'
     ? 604800
-    : (intervalUnit === 'days' ? 86400 : (intervalUnit === 'hours' ? 3600 : 1));
+    : (intervalUnit === 'days' ? 86400 : (intervalUnit === 'hours' ? 3600 : intervalUnit === 'minutes' ? 60 : 1));
   setValue('recurring-schedule-interval-value', intervalSeconds / intervalFactor);
   setValue('recurring-schedule-overlap-policy', schedule.overlap_policy || 'skip');
   setValue('recurring-schedule-misfire-grace', Number(schedule.misfire_grace_seconds || 0) / 60);
@@ -1415,7 +1712,7 @@ function editSchedule(schedule) {
   const enabled = document.getElementById('recurring-schedule-enabled');
   if (enabled) enabled.checked = Boolean(schedule.enabled);
   const workspace = document.getElementById('recurring-schedule-workspace');
-  if (workspace) workspace.disabled = true;
+  if (workspace) workspace.disabled = !(workspaceCatalog.items || []).length && !(oneOffWorkspaceCatalog.items || []).length;
   const submit = document.getElementById('recurring-schedule-submit');
   if (submit) submit.textContent = 'Save changes';
   const cancel = document.getElementById('recurring-schedule-cancel-edit');
@@ -1426,7 +1723,7 @@ function editSchedule(schedule) {
   const title = document.getElementById('recurring-schedule-form-title');
   if (title) title.textContent = 'Edit schedule';
   const status = document.getElementById('recurring-schedule-status');
-  if (status) status.textContent = 'Editing this definition will not change its occurrence history.';
+  if (status) status.textContent = 'Your past runs stay saved.';
   syncRecurringScheduleFields();
   editingScheduleSnapshot = {
     schedule: { ...schedule },
@@ -1436,6 +1733,13 @@ function editSchedule(schedule) {
 }
 
 async function runScheduleNow(schedule, button, actionStatus, historyContainer = null) {
+  const current = (recurringSchedules.items || []).find((item) => item.definition_id === schedule.definition_id) || schedule;
+  if (scheduleDeliveryPending(current)) {
+    button.disabled = true;
+    button.textContent = 'Sending…';
+    refreshScheduleUntilSettled(schedule.definition_id);
+    return;
+  }
   restoreUncertainScheduleRunKeys();
   button.disabled = true;
   button.textContent = 'Requesting…';
@@ -1457,16 +1761,19 @@ async function runScheduleNow(schedule, button, actionStatus, historyContainer =
     persistUncertainScheduleRunKeys();
     const message = result.status === 'owner_action_required'
       ? String(result.message || 'Reconnect the affected account, then try again.')
-      : 'Run requested. It will use the same private workspace and connected capabilities.';
+      : schedule.target?.kind === 'webhook'
+        ? 'Delivery requested. History shows when your app receives it.'
+        : 'Run requested. It will use the same private workspace and connected capabilities.';
     const recoveryDestination = String(result.action_url || '')
       || (result.recovery_route === 'connections' ? '/#connections' : '');
     rememberScheduleAction(schedule, message, recoveryDestination);
     if (status) status.textContent = message;
     await loadSchedules();
+    refreshScheduleUntilSettled(definitionId);
   } catch (error) {
     const message = `${error.message} We could not confirm whether it started. Check history before trying again.`;
-    rememberScheduleAction(schedule, message);
-    if (status) status.textContent = message;
+    rememberScheduleAction(schedule, message, '', 'error');
+    if (status) { status.textContent = message; status.dataset.tone = 'error'; }
     button.disabled = false;
     button.textContent = 'Confirm prior run';
     if (historyContainer && !historyContainer.hidden) {
@@ -1476,8 +1783,8 @@ async function runScheduleNow(schedule, button, actionStatus, historyContainer =
 }
 
 async function retireSchedule(schedule, button, actionStatus) {
-  const name = workspaceName(schedule.worker_id);
-  if (!window.confirm(`Remove this schedule for ${name}? It cannot be resumed, but its occurrence history will be kept.`)) return;
+  const name = scheduleTargetName(schedule);
+  if (!window.confirm(`Remove this schedule for ${name}? It cannot be resumed, but your past runs stay saved.`)) return;
   button.disabled = true;
   button.textContent = 'Removing…';
   const status = scheduleActionStatus(actionStatus);
@@ -1485,8 +1792,7 @@ async function retireSchedule(schedule, button, actionStatus) {
     await api.deleteJson(`/api/recurring-schedules/${encodeURIComponent(schedule.definition_id)}`);
     if (editingScheduleId === schedule.definition_id) resetScheduleEditor();
     await loadSchedules();
-    const pageStatus = document.getElementById('recurring-schedule-status');
-    if (pageStatus) pageStatus.textContent = 'Schedule removed. Its occurrence history is still available.';
+    showSchedulePageStatus('Schedule removed. Your past runs stay saved.', 'success');
   } catch (error) {
     if (status) status.textContent = error.message;
     button.disabled = false;
@@ -1498,7 +1804,7 @@ function scheduleEmptyState(message = 'No schedules yet') {
   const item = node('div', 'empty-state-compact');
   item.append(
     node('strong', '', message),
-    node('span', '', 'Choose New schedule to give a workspace repeatable work.'),
+    node('span', '', 'Set a time for a task or send something to an app.'),
   );
   return item;
 }
@@ -1526,6 +1832,8 @@ function renderSchedules() {
   const loadError = scheduleLoadError
     ? scheduleLoadErrorNotice(scheduleLoadError, Boolean((recurringSchedules.items || []).length))
     : null;
+  const count = document.getElementById('schedule-count');
+  if (count) count.textContent = String((recurringSchedules.items || []).length);
   const schedules = [...(recurringSchedules.items || [])].sort((left, right) => {
     if (Boolean(left.active) !== Boolean(right.active)) return left.active ? -1 : 1;
     return String(left.next_run_at || '').localeCompare(String(right.next_run_at || ''));
@@ -1534,7 +1842,7 @@ function renderSchedules() {
   for (const definitionId of scheduleActionMessages.keys()) {
     if (!scheduleIds.has(definitionId)) scheduleActionMessages.delete(definitionId);
   }
-  if (!scheduleLoadError) {
+  if (scheduleCatalogReady && !scheduleLoadError) {
     for (const definitionId of uncertainScheduleRunKeys.keys()) {
       if (!scheduleIds.has(definitionId)) uncertainScheduleRunKeys.delete(definitionId);
     }
@@ -1546,28 +1854,35 @@ function renderSchedules() {
   }
   const cards = schedules.map((schedule) => {
     const card = node('article', 'schedule-card');
+    card.dataset.scheduleId = String(schedule.definition_id || '');
     const head = node('div', 'schedule-card-head');
     const copy = node('div', 'schedule-card-copy');
     copy.append(
-      node('strong', '', String(schedule.instruction || 'Recurring workspace task')),
-      node('span', '', workspaceName(schedule.worker_id)),
+      node('strong', '', String(schedule.instruction || (schedule.target?.kind === 'webhook' ? (typeof schedule.target.request_data?.message === 'string' && schedule.target.request_data.message || `Send to ${scheduleTargetName(schedule)}`) : 'Scheduled task'))),
+      node('span', '', `${schedule.target?.kind === 'webhook' ? 'App' : 'Workspace'} · ${scheduleTargetName(schedule)}`),
     );
     const retired = Boolean(schedule.retired_at);
-    head.append(copy, statusChip(retired ? 'retired' : (schedule.active ? 'active' : 'paused')));
+    const finished = isFinishedOnce(schedule);
+    const stateChip = statusChip(retired ? 'retired' : (finished ? 'done' : hasFiredOnce(schedule) ? schedule.last_outcome || 'pending' : schedule.active ? 'active' : 'paused'));
+    if (hasFiredOnce(schedule) && !finished) stateChip.textContent = plainRunOutcome(schedule.last_outcome || 'pending', schedule.target?.kind === 'webhook');
+    head.append(copy, stateChip);
     const meta = node('div', 'schedule-card-meta');
     meta.append(
       node('span', '', recurrenceLabel(schedule)),
       node('span', '', scheduleNextLabel(schedule)),
     );
     if (schedule.last_occurrence_at) {
-      meta.append(node('span', '', `Last occurrence: ${formatScheduleDateTime(schedule.last_occurrence_at, schedule.timezone_name || 'UTC')}`));
+      meta.append(node('span', '', `Last run: ${formatScheduleDateTime(schedule.last_occurrence_at, schedule.timezone_name || 'UTC')}`));
     }
     if (schedule.last_outcome || schedule.last_error) {
-      meta.append(node(
+      const latestResult = node(
         'span',
-        'schedule-history-detail',
-        `Latest result: ${String(schedule.last_outcome || 'needs attention').replaceAll('_', ' ')}${schedule.last_error ? ' · Details in history' : ''}`,
-      ));
+        'schedule-history-detail inline-status',
+        `Latest result: ${plainRunOutcome(schedule.last_outcome, schedule.target?.kind === 'webhook')}${schedule.last_error ? ' · Details in history' : ''}`,
+      );
+      latestResult.dataset.tone = ['accepted', 'completed', 'succeeded', 'done'].includes(schedule.last_outcome) ? 'success'
+        : ['unacknowledged', 'rejected', 'failed', 'expired', 'delivery_expired'].includes(schedule.last_outcome) ? 'error' : 'info';
+      meta.append(latestResult);
     }
     const actions = node('div', 'schedule-card-actions');
     const actionStatus = node('p', 'inline-status');
@@ -1586,7 +1901,9 @@ function renderSchedules() {
         rememberScheduleAction(schedule, 'A previous Run now request is unconfirmed. Check history, then confirm it before starting a new run.');
         renderScheduleActionStatus(actionStatus, scheduleActionMessages.get(String(schedule.definition_id || '')));
       }
-      const runNowButton = node('button', 'quiet-button', unconfirmedRun ? 'Confirm prior run' : 'Run now');
+      const pendingDelivery = scheduleDeliveryPending(schedule);
+      const runNowButton = node('button', 'quiet-button', pendingDelivery ? 'Sending…' : unconfirmedRun ? 'Confirm prior run' : schedule.last_outcome === 'unacknowledged' ? 'Send again' : 'Run now');
+      runNowButton.disabled = pendingDelivery;
       runNowButton.type = 'button';
       runNowButton.addEventListener('click', () => runScheduleNow(schedule, runNowButton, actionStatus, history));
       const editButton = node('button', 'quiet-button', 'Edit');
@@ -1599,7 +1916,7 @@ function renderSchedules() {
       stopButton.type = 'button';
       stopButton.addEventListener('click', () => deactivateSchedule(schedule, stopButton, actionStatus));
       actions.append(stopButton);
-    } else if (!retired) {
+    } else if (!retired && !hasFiredOnce(schedule)) {
       const resumeButton = node('button', 'quiet-button', 'Resume schedule');
       resumeButton.type = 'button';
       resumeButton.addEventListener('click', () => resumeSchedule(schedule, resumeButton, actionStatus));
@@ -1607,7 +1924,7 @@ function renderSchedules() {
     }
     const more = node('details', 'schedule-card-more');
     const moreSummary = node('summary', 'quiet-button', 'More');
-    moreSummary.setAttribute('aria-label', `More actions for ${workspaceName(schedule.worker_id)}`);
+    moreSummary.setAttribute('aria-label', `More actions for ${scheduleTargetName(schedule)}`);
     const moreActions = node('div', 'schedule-card-more-actions');
     const historyButton = node('button', 'quiet-button', 'View history');
     historyButton.type = 'button';
@@ -1628,11 +1945,334 @@ function renderSchedules() {
   list.replaceChildren(...(loadError ? [loadError] : []), ...cards);
 }
 
+function setDataStatus(message) {
+  const status = document.getElementById('schedule-data-status');
+  if (status) status.textContent = message;
+}
+
+function syncMessageField(value) {
+  const field = document.getElementById('recurring-schedule-message');
+  if (!field) return;
+  const instruction = field.dataset.binding === 'instruction';
+  if (!instruction) field.value = typeof value.message === 'string' ? value.message : '';
+  field.dataset.originalValue = field.value;
+  const custom = !instruction && Object.hasOwn(value, 'message') && typeof value.message !== 'string';
+  const precise = !instruction && hasPreciseNumbers(value);
+  field.disabled = custom || precise;
+  const note = document.getElementById('schedule-message-note');
+  if (note) { note.hidden = !custom && !precise; note.textContent = precise ? 'This app has very large numbers. Edit its JSON in Extra app details to keep them exact.' : 'This app’s message has a custom format. Edit it in Extra app details.'; }
+}
+
+function setRequestData(value, instruction = '', saved = false) {
+  savedRequestDataKeys = saved ? new Set(Object.keys(value)) : new Set();
+  const message = document.getElementById('recurring-schedule-message');
+  if (message) { message.dataset.binding = instruction ? 'instruction' : 'message'; message.value = instruction; }
+  const label = document.getElementById('schedule-message-label');
+  if (label) label.textContent = instruction ? 'What should happen?' : 'What should it say? (optional)';
+  const field = document.getElementById('recurring-schedule-request-data');
+  if (field) field.value = JSON.stringify(value, null, 2);
+  syncMessageField(value);
+  renderDataRows(value);
+  setDataStatus('');
+}
+
+function appendDataRow(item) {
+  const container = document.getElementById('schedule-data-fields');
+  if (!container) return;
+  const row = node('div', 'schedule-data-row');
+  const key = node('input'); key.type = 'text'; key.value = item.key; key.placeholder = 'Name'; key.setAttribute('aria-label', 'Detail name');
+  const type = node('select'); type.setAttribute('aria-label', 'Detail type');
+  for (const [value, label] of [['string', 'Text'], ['number', 'Number'], ['boolean', 'True / false'], ['null', 'Empty']]) {
+    const option = node('option', '', label); option.value = value; type.append(option);
+  }
+  type.value = item.type;
+  const value = node('input'); value.type = 'text'; value.value = item.value; value.placeholder = 'Value'; value.setAttribute('aria-label', 'Detail value');
+  if (savedRequestDataKeys.has(item.key)) { key.readOnly = true; value.readOnly = true; type.disabled = true; row.dataset.saved = 'true'; }
+  const remove = node('button', 'schedule-icon-button', '×'); remove.type = 'button'; remove.setAttribute('aria-label', 'Remove detail');
+  if (savedRequestDataKeys.has(item.key)) remove.disabled = true;
+  const sync = () => { try { commitDataRows(); setDataStatus(''); } catch (error) { setDataStatus(error.message); } };
+  key.addEventListener('input', sync); type.addEventListener('change', sync); value.addEventListener('input', sync);
+  remove.addEventListener('click', () => { row.remove(); sync(); });
+  row.append(key, type, value, remove); container.append(row);
+}
+
+function renderDataRows(value) {
+  const container = document.getElementById('schedule-data-fields');
+  if (!container) return;
+  const extras = Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== 'message' || typeof item !== 'string'));
+  const rows = requestDataRows(extras);
+  container.replaceChildren(); container.dataset.mode = rows ? 'fields' : 'json';
+  const note = document.getElementById('schedule-data-complex');
+  const add = document.getElementById('schedule-data-add');
+  if (note) note.hidden = Boolean(rows);
+  if (add) add.hidden = !rows;
+  if (rows) rows.forEach(appendDataRow);
+}
+
+function commitDataRows() {
+  const container = document.getElementById('schedule-data-fields');
+  const raw = document.getElementById('recurring-schedule-request-data');
+  if (!container || !raw || container.dataset.mode !== 'fields') return;
+  const previous = parseRequestData(raw.value);
+  const rows = [...container.querySelectorAll('.schedule-data-row')].map((row) => {
+    const [key, value] = row.querySelectorAll('input');
+    return { key: key.value, value: value.value, type: row.querySelector('select').value };
+  });
+  const result = requestDataFromRows(rows);
+  if (typeof previous.message === 'string') Object.defineProperty(result, 'message', { value: previous.message, enumerable: true, configurable: true, writable: true });
+  raw.value = JSON.stringify(result, null, 2);
+}
+
+function syncRequestMessage() {
+  const field = document.getElementById('recurring-schedule-message');
+  const raw = document.getElementById('recurring-schedule-request-data');
+  if (!field || !raw || field.dataset.binding === 'instruction' || field.disabled) return;
+  try {
+    raw.value = JSON.stringify(withRequestMessage(raw.value, field.value, field.dataset.originalValue || ''), null, 2);
+    field.dataset.originalValue = field.value; setDataStatus('');
+  } catch (_error) { setDataStatus('Check the JSON in Extra app details before changing this message.'); }
+}
+
+function collectRequestData() {
+  // JSON edits update the fields as they are entered. Invalid row values must
+  // fail visibly rather than silently sending the last valid value.
+  commitDataRows();
+  const field = document.getElementById('recurring-schedule-message');
+  const raw = document.getElementById('recurring-schedule-request-data')?.value || '{}';
+  if (field?.dataset.binding === 'instruction' || field?.disabled) return parseRequestData(raw);
+  return withRequestMessage(raw, field?.value || '', field?.dataset.originalValue || '');
+}
+
+function clearDestinationSecrets() {
+  for (const id of ['webhook-destination-secret', 'webhook-destination-headers', 'webhook-destination-url']) {
+    const field = document.getElementById(id); if (field) field.value = '';
+  }
+  const once = document.getElementById('webhook-destination-secret-once');
+  if (once) { once.textContent = ''; once.hidden = true; }
+  const panel = document.getElementById('webhook-destination-secret-panel');
+  if (panel) panel.hidden = true;
+}
+
+function closeDestinationDialog() {
+  const dialog = document.getElementById('webhook-destination-setup');
+  if (dialog?.open) dialog.close();
+  clearDestinationSecrets();
+}
+
+function openDestinationDialog(manage = false) {
+  const dialog = document.getElementById('webhook-destination-setup');
+  const form = document.getElementById('webhook-destination-form');
+  if (!dialog || !form) return;
+  clearDestinationSecrets(); form.reset();
+  const selectedId = document.getElementById('recurring-schedule-destination')?.value || '';
+  const selected = manage && webhookDestinations.find((item) => item.destination_id === selectedId);
+  form.dataset.mode = selected ? 'manage' : 'create';
+  document.getElementById('webhook-destination-title').textContent = selected ? 'Manage connection' : 'Connect an app';
+  document.getElementById('webhook-destination-name').value = selected?.name || '';
+  document.getElementById('webhook-destination-url-field').hidden = Boolean(selected);
+  document.getElementById('webhook-destination-existing-note').hidden = !selected;
+  document.getElementById('webhook-destination-save').textContent = selected ? 'Save changes' : 'Connect app';
+  document.getElementById('webhook-destination-done').textContent = 'Cancel';
+  document.getElementById('webhook-destination-mode').disabled = Boolean(selected);
+  document.getElementById('webhook-destination-mode').value = selected?.payload_mode || 'envelope';
+  document.getElementById('webhook-destination-advanced').open = false;
+  document.getElementById('webhook-destination-status').textContent = '';
+  for (const id of ['webhook-destination-rotate', 'webhook-destination-toggle']) document.getElementById(id).hidden = !selected;
+  syncWebhookDestinationActions();
+  // Name belongs to the new connection, not the currently selected connection.
+  if (!selected) document.getElementById('webhook-destination-name').value = '';
+  dialog.showModal(); document.getElementById('webhook-destination-name').focus();
+}
+
+function timeZoneCity(zone) {
+  return String(zone || 'UTC').split('/').pop().replaceAll('_', ' ');
+}
+
+function syncTimeZoneSummary() {
+  const zone = document.getElementById('recurring-schedule-timezone')?.value || 'UTC';
+  const city = timeZoneCity(zone);
+  const summary = document.getElementById('schedule-timezone-city');
+  const note = document.getElementById('recurring-schedule-timezone-note');
+  if (summary) { summary.textContent = city; summary.title = zone; }
+  if (note) note.textContent = `Times use ${city}’s local clock.`;
+}
+
+function renderTimeZoneChoices() {
+  const choice = document.getElementById('schedule-timezone-choice');
+  if (!choice) return;
+  const current = document.getElementById('recurring-schedule-timezone')?.value || 'UTC';
+  const query = document.getElementById('schedule-timezone-search')?.value.trim().toLocaleLowerCase() || '';
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone'); } catch (_error) { /* Saved and local zones remain available on older browsers. */ }
+  const available = [...new Set([current, 'UTC', ...zones])]
+    .filter((zone) => !query || `${timeZoneCity(zone)} ${zone}`.toLocaleLowerCase().includes(query))
+    .sort((left, right) => timeZoneCity(left).localeCompare(timeZoneCity(right)));
+  const placeholder = node('option', '', available.length ? 'Choose a city' : 'No cities found'); placeholder.value = '';
+  choice.replaceChildren(placeholder, ...available.map((zone) => {
+    const region = zone.includes('/') ? zone.slice(0, zone.lastIndexOf('/')).replaceAll('_', ' ') : 'Universal time';
+    const option = node('option', '', `${timeZoneCity(zone)} · ${region}`); option.value = zone; return option;
+  }));
+  choice.value = available.includes(current) ? current : '';
+}
+
+function useTomorrowScheduleTime() {
+  const timezone = document.getElementById('recurring-schedule-timezone')?.value.trim() || 'UTC';
+  const startsAt = document.getElementById('recurring-schedule-starts-at');
+  const status = document.getElementById('recurring-schedule-status');
+  const value = tomorrowDateTimeLocal(timezone);
+  if (!value) {
+    if (status) status.textContent = 'Enter a valid time zone before using the shortcut.';
+    document.getElementById('recurring-schedule-timezone')?.focus();
+    return;
+  }
+  if (startsAt) startsAt.value = value;
+  if (status) status.textContent = '';
+  updateSchedulePreview();
+}
+
+function updateSchedulePreview() {
+  const preview = document.getElementById('schedule-preview');
+  if (!preview) return;
+  const webhook = document.getElementById('recurring-schedule-target')?.value === 'webhook';
+  const where = webhook ? document.getElementById('recurring-schedule-destination') : document.getElementById('recurring-schedule-workspace');
+  const name = where?.selectedOptions?.[0]?.textContent;
+  const type = document.getElementById('recurring-schedule-type')?.value;
+  const time = document.getElementById('recurring-schedule-local-time')?.value || '09:00';
+  let when = type === 'daily' ? `Every day at ${time}` : type === 'weekly' ? 'Every week' : type === 'custom' ? 'On your custom schedule' : 'One time';
+  if (type === 'weekly') {
+    const day = document.getElementById('recurring-schedule-weekday')?.selectedOptions?.[0]?.textContent || 'week';
+    const at = document.getElementById('recurring-schedule-weekly-time')?.value || '09:00';
+    when = `Every ${day} at ${at}`;
+  } else if (type === 'once') {
+    const date = document.getElementById('recurring-schedule-starts-at')?.value;
+    if (date) { const parsed = new Date(date); when = Number.isFinite(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(parsed) : date; }
+  }
+  const zone = document.getElementById('recurring-schedule-timezone')?.value || 'UTC';
+  if (type !== 'custom') when += ` · ${timeZoneCity(zone)}`;
+  preview.textContent = where?.value ? `${when} · ${name}` : 'Choose where and when. We’ll take it from there.';
+}
+
+function syncWebhookDestinationActions() {
+  const selectedId = document.getElementById('recurring-schedule-destination')?.value || '';
+  const selected = webhookDestinations.find((item) => item.destination_id === selectedId);
+  const toggle = document.getElementById('webhook-destination-toggle');
+  const rotate = document.getElementById('webhook-destination-rotate');
+  if (toggle) { toggle.disabled = !selected; toggle.textContent = selected?.enabled === false ? 'Enable connection' : 'Disable connection'; }
+  if (rotate) rotate.disabled = !selected;
+  const manage = document.getElementById('webhook-destination-manage');
+  if (manage) manage.hidden = !selected;
+  const name = document.getElementById('webhook-destination-name');
+  if (name && name.dataset.destinationId !== selectedId) { name.value = selected?.name || ''; name.dataset.destinationId = selectedId; }
+}
+
+function renderWebhookDestinations() {
+  const select = document.getElementById('recurring-schedule-destination');
+  if (!select) return;
+  const selected = select.value;
+  const placeholder = node('option', '', 'Choose an app');
+  placeholder.value = '';
+  select.replaceChildren(placeholder, ...webhookDestinations.map((item) => {
+    const option = node('option', '', `${item.name}${item.enabled === false ? ' · disabled' : ''}`);
+    option.value = item.destination_id;
+    return option;
+  }));
+  if (webhookDestinations.some((item) => item.destination_id === selected)) select.value = selected;
+  syncWebhookDestinationActions();
+}
+
+async function loadWebhookDestinations() {
+  const scope = scheduleRunScope();
+  try {
+    const response = await fetch(api.withAuth('/api/webhook-destinations'));
+    if (!response.ok) throw new Error('Destinations are unavailable. Retry refresh.');
+    const payload = await response.json();
+    if (scope !== scheduleRunScope()) return;
+    webhookDestinations = payload.items || [];
+    renderWebhookDestinations();
+    const status = document.getElementById('schedule-app-status'); if (status) status.textContent = '';
+    const retry = document.getElementById('schedule-app-retry'); if (retry) retry.hidden = true;
+  } catch (error) {
+    if (scope !== scheduleRunScope()) return;
+    for (const id of ['webhook-destination-status', 'schedule-app-status']) { const status = document.getElementById(id); if (status) status.textContent = error.message; }
+    const retry = document.getElementById('schedule-app-retry'); if (retry) retry.hidden = false;
+  }
+}
+
+async function manageWebhookDestination(action) {
+  const scope = scheduleRunScope();
+  const status = document.getElementById('webhook-destination-status');
+  const secretOnce = document.getElementById('webhook-destination-secret-once');
+  const saveButton = document.getElementById('webhook-destination-save');
+  if (saveButton) saveButton.disabled = true;
+  for (const id of ['webhook-destination-rotate', 'webhook-destination-toggle']) { const button = document.getElementById(id); if (button) button.disabled = true; }
+  if (['create', 'rotate'].includes(action)) {
+    if (secretOnce) { secretOnce.textContent = ''; secretOnce.hidden = true; }
+    const panel = document.getElementById('webhook-destination-secret-panel'); if (panel) panel.hidden = true;
+  }
+  const selectedId = document.getElementById('recurring-schedule-destination')?.value || '';
+  const selected = webhookDestinations.find((item) => item.destination_id === selectedId);
+  try {
+    let result;
+    if (action === 'create') {
+      const name = document.getElementById('webhook-destination-name')?.value.trim() || '';
+      const url = document.getElementById('webhook-destination-url')?.value.trim() || '';
+      const secret = document.getElementById('webhook-destination-secret')?.value || null;
+      const headers = JSON.parse(document.getElementById('webhook-destination-headers')?.value || '{}');
+      if (!name) { document.getElementById('webhook-destination-name')?.focus(); throw new Error('Enter an app name.'); }
+      if (!url) { document.getElementById('webhook-destination-url')?.focus(); throw new Error('Enter the app’s receiving address.'); }
+      if (!headers || typeof headers !== 'object' || Array.isArray(headers)) throw new Error('Headers must be a JSON object.');
+      const payload = { name, url, secret, headers, payload_mode: document.getElementById('webhook-destination-mode')?.value || 'envelope' };
+      const exactRequest = JSON.stringify(payload);
+      if (pendingDestinationCreate?.request !== exactRequest) pendingDestinationCreate = { request: exactRequest, key: globalThis.crypto?.randomUUID?.() || `destination-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+      result = await api.postJson('/api/webhook-destinations', { ...payload, idempotency_key: pendingDestinationCreate.key });
+      pendingDestinationCreate = null;
+    } else if (action === 'rename') {
+      if (!selected) throw new Error('Choose an app first.');
+      const name = document.getElementById('webhook-destination-name')?.value.trim() || '';
+      if (!name) throw new Error('Enter an app name.');
+      const payload = { name };
+      const headers = document.getElementById('webhook-destination-headers')?.value.trim() || '';
+      if (headers) payload.headers = parseRequestData(headers);
+      result = await api.patchJson(`/api/webhook-destinations/${encodeURIComponent(selectedId)}`, payload);
+    } else {
+      if (!selected) throw new Error('Choose an app first.');
+      const secret = document.getElementById('webhook-destination-secret')?.value || '';
+      if (action === 'rotate' && !secret) throw new Error('Enter a new signing key in Advanced connection settings first.');
+      result = await api.patchJson(`/api/webhook-destinations/${encodeURIComponent(selectedId)}`, action === 'rotate' ? { secret } : { enabled: selected.enabled === false });
+    }
+    if (scope !== scheduleRunScope()) return;
+    for (const id of ['webhook-destination-secret', 'webhook-destination-headers', 'webhook-destination-url']) {
+      const field = document.getElementById(id); if (field) field.value = '';
+    }
+    if (result.secret_once && secretOnce) { secretOnce.textContent = result.secret_once; secretOnce.hidden = false; document.getElementById('webhook-destination-secret-panel').hidden = false; }
+    await loadWebhookDestinations();
+    const destination = document.getElementById('recurring-schedule-destination');
+    if (destination && result.destination_id) destination.value = result.destination_id;
+    syncWebhookDestinationActions();
+    if (status) status.textContent = action === 'create' ? 'Connected. You can now choose this app in a schedule.' : 'Connection updated.';
+    const done = document.getElementById('webhook-destination-done'); if (done) done.textContent = 'Done';
+    if (action === 'create') {
+      const form = document.getElementById('webhook-destination-form'); if (form) form.dataset.mode = 'manage';
+      if (saveButton) saveButton.textContent = 'Save changes';
+      document.getElementById('webhook-destination-title').textContent = 'App connected';
+      document.getElementById('webhook-destination-url-field').hidden = true;
+      document.getElementById('webhook-destination-existing-note').hidden = false;
+      document.getElementById('webhook-destination-mode').disabled = true;
+      for (const id of ['webhook-destination-rotate', 'webhook-destination-toggle']) document.getElementById(id).hidden = false;
+    }
+    updateSchedulePreview();
+  } catch (error) {
+    if (status) status.textContent = error instanceof SyntaxError ? 'Check the authentication JSON in Advanced connection settings.' : error.message;
+  } finally { if (saveButton) saveButton.disabled = false; syncWebhookDestinationActions(); }
+}
+
 async function loadSchedules() {
+  scheduleCatalogReady = false;
   try {
     const response = await fetch(api.withAuth('/api/recurring-schedules?include_inactive=true'));
     if (!response.ok) throw new Error(await api.responseMessage(response, 'Could not load recurring schedules'));
-    recurringSchedules = await response.json();
+    recurringSchedules = parseScheduleJson(await response.text());
+    scheduleCatalogReady = true;
     scheduleLoadError = '';
     scheduleOccurrences.clear();
     for (const definitionId of scheduleHistoryGeneration.keys()) {
@@ -1641,10 +2281,22 @@ async function loadSchedules() {
   } catch (error) {
     scheduleLoadError = error.message;
   }
+  await loadWebhookDestinations();
   renderSchedules();
+  resumePendingScheduleRefreshes();
 }
 
 function syncRecurringScheduleFields() {
+  const webhook = document.getElementById('recurring-schedule-target')?.value === 'webhook';
+  for (const option of document.querySelectorAll('[name="schedule-target-choice"]')) option.checked = option.value === (webhook ? 'webhook' : 'worker');
+  const webhookFields = document.getElementById('recurring-schedule-webhook-fields');
+  const workspaceField = document.getElementById('recurring-schedule-workspace-field');
+  const instructionField = document.getElementById('recurring-schedule-instruction-field');
+  if (webhookFields) webhookFields.hidden = !webhook;
+  if (workspaceField) workspaceField.hidden = webhook;
+  if (instructionField) instructionField.hidden = webhook;
+  renderScheduleWorkspaceOptions();
+  syncWebhookDestinationActions();
   const selectedKind = document.getElementById('recurring-schedule-type')?.value || 'daily';
   const customKind = document.getElementById('recurring-schedule-custom-type')?.value || 'interval';
   const kind = selectedKind === 'custom' ? customKind : selectedKind;
@@ -1660,7 +2312,7 @@ function syncRecurringScheduleFields() {
   const startsAtLabel = document.getElementById('recurring-schedule-start-label');
   const catchUpPolicy = document.getElementById('recurring-schedule-catch-up-policy')?.value || 'skip';
   const catchUpLimitField = document.getElementById('recurring-schedule-catch-up-limit-field');
-  const advanced = document.querySelector('.schedule-advanced');
+  const advanced = document.getElementById('recurring-schedule-advanced');
   if (intervalField) intervalField.hidden = kind !== 'interval';
   if (dailyField) dailyField.hidden = kind !== 'daily';
   if (onceField) onceField.hidden = kind !== 'once';
@@ -1672,13 +2324,20 @@ function syncRecurringScheduleFields() {
   if (startsAt) startsAt.required = false;
   if (startsAtLabel) startsAtLabel.textContent = 'Choose date and time';
   if (catchUpLimitField) catchUpLimitField.hidden = catchUpPolicy !== 'bounded';
-  if (advanced) advanced.hidden = false;
+  // The workspace guard owns whether this whole section is available.
+  if (advanced) advanced.hidden = !webhook && !(workspaceCatalog.items || []).length && !(oneOffWorkspaceCatalog.items || []).length && !editingScheduleId;
+  syncTimeZoneSummary();
+  updateSchedulePreview();
 }
 
 function readRecurringScheduleFormState() {
   const value = (id) => document.getElementById(id)?.value || '';
   return {
-    instruction: value('recurring-schedule-instruction'),
+    targetKind: value('recurring-schedule-target'),
+    destination: value('recurring-schedule-destination'),
+    requestData: value('recurring-schedule-request-data'),
+    workerId: value('recurring-schedule-workspace'),
+    instruction: effectiveScheduleInstruction(),
     type: value('recurring-schedule-type'),
     customType: value('recurring-schedule-custom-type'),
     intervalValue: value('recurring-schedule-interval-value'),
@@ -1708,24 +2367,33 @@ async function submitRecurringSchedule(event) {
   const status = document.getElementById('recurring-schedule-status');
   const workerId = document.getElementById('recurring-schedule-workspace')?.value || '';
   const oneOff = (oneOffWorkspaceCatalog.items || []).find((item) => String(item.worker_id || '') === workerId);
-  const instruction = document.getElementById('recurring-schedule-instruction')?.value.trim() || '';
+  const instruction = effectiveScheduleInstruction();
   const selectedType = document.getElementById('recurring-schedule-type')?.value || 'daily';
   const selectedCustomType = document.getElementById('recurring-schedule-custom-type')?.value || 'interval';
   const selectedRecurrenceType = selectedType === 'custom' ? selectedCustomType : selectedType;
-  if (!workerId) {
-    if (status) status.textContent = 'Choose a workspace first.';
+  const webhook = document.getElementById('recurring-schedule-target')?.value === 'webhook';
+  const destinationId = document.getElementById('recurring-schedule-destination')?.value || '';
+  let requestData = {};
+  if (webhook) {
+    try { requestData = collectRequestData(); }
+    catch (error) { if (status) { status.textContent = error instanceof SyntaxError ? 'Check the JSON in Extra app details.' : error.message; status.dataset.tone = 'error'; } document.getElementById('schedule-request-advanced').open = true; document.getElementById('schedule-data-json').open = true; document.getElementById('recurring-schedule-request-data')?.focus(); return; }
+    if (!requestData || typeof requestData !== 'object' || Array.isArray(requestData)) { if (status) status.textContent = 'Request data must be a JSON object.'; return; }
+    if (!destinationId) { showScheduleFieldError(new Error('destination_id missing'), status); return; }
+  }
+  if (!webhook && !workerId) {
+    if (status) { status.textContent = 'Choose a workspace first.'; status.dataset.tone = 'error'; }
     document.getElementById('recurring-schedule-workspace')?.focus();
     return;
   }
-  if (!instruction) {
-    if (status) status.textContent = 'Describe what the workspace should do.';
+  if (!webhook && !instruction) {
+    if (status) { status.textContent = 'Describe what the workspace should do.'; status.dataset.tone = 'error'; }
     document.getElementById('recurring-schedule-instruction')?.focus();
     return;
   }
   const intervalValue = Number(document.getElementById('recurring-schedule-interval-value')?.value || 1);
   const intervalUnit = document.getElementById('recurring-schedule-interval-unit')?.value || 'hours';
   const rawIntervalSeconds = Math.round(intervalValue * (
-    intervalUnit === 'weeks' ? 604800 : (intervalUnit === 'days' ? 86400 : (intervalUnit === 'hours' ? 3600 : 1))
+    intervalUnit === 'weeks' ? 604800 : (intervalUnit === 'days' ? 86400 : (intervalUnit === 'hours' ? 3600 : intervalUnit === 'minutes' ? 60 : 1))
   ));
   const localTime = document.getElementById('recurring-schedule-local-time')?.value || '09:00';
   const weeklyDay = document.getElementById('recurring-schedule-weekday')?.value || 'MO';
@@ -1751,10 +2419,11 @@ async function submitRecurringSchedule(event) {
     }
   }
   if (selectedRecurrenceType === 'once' && !startsAt) {
-    if (status) status.textContent = 'Choose when this schedule should start.';
+    if (status) { status.textContent = 'Choose when this schedule should start.'; status.dataset.tone = 'error'; }
     document.getElementById('recurring-schedule-starts-at')?.focus();
     return;
   }
+  if (selectedRecurrenceType === 'interval' && rawIntervalSeconds < 60) { showScheduleFieldError(new Error('interval_seconds too short'), status); return; }
   const {
     recurrenceType,
     intervalSeconds,
@@ -1785,8 +2454,10 @@ async function submitRecurringSchedule(event) {
     next_run_at: startsAt,
   });
   button.disabled = true;
+  if (status) status.dataset.tone = 'info';
   if (status) status.textContent = editingScheduleId ? 'Saving changes…' : oneOff ? 'Saving workspace and schedule…' : 'Creating schedule…';
   let savedOneOff = false;
+  let savedDefinition = null;
   try {
     const payload = {
       instruction,
@@ -1807,6 +2478,7 @@ async function submitRecurringSchedule(event) {
       jitter_seconds: Number(document.getElementById('recurring-schedule-jitter')?.value || 0),
       schedule_text: scheduleText,
     };
+    const target = webhook ? { kind: 'webhook', destination_id: destinationId, request_data: requestData } : { kind: 'worker', worker_id: workerId };
     if (editingScheduleId) {
       const updates = editingScheduleSnapshot
         ? scheduleEditUpdates({
@@ -1816,24 +2488,31 @@ async function submitRecurringSchedule(event) {
           payload,
         })
         : payload;
-      await api.patchJson(`/api/recurring-schedules/${encodeURIComponent(editingScheduleId)}`, updates);
+      const oldTarget = editingScheduleSnapshot?.schedule.target || { kind: 'worker', worker_id: editingScheduleSnapshot?.schedule.worker_id };
+      if (JSON.stringify(oldTarget) !== JSON.stringify(target)) updates.target = target;
+      if (oldTarget.kind !== target.kind) updates.instruction = instruction;
+      savedDefinition = await api.patchJson(`/api/recurring-schedules/${encodeURIComponent(editingScheduleId)}`, updates);
     } else {
-      if (oneOff) {
+      if (!webhook && oneOff) {
         await api.patchJson(`/api/workspace/${encodeURIComponent(workerId)}/metadata`, { workspace_kind: 'named' });
         oneOffWorkspaceCatalog.items = oneOffWorkspaceCatalog.items.filter((item) => String(item.worker_id || '') !== workerId);
         workspaceCatalog.items = [...(workspaceCatalog.items || []), { ...oneOff, workspace_kind: 'named' }];
         savedOneOff = true;
         renderScheduleWorkspaceOptions();
       }
-      await api.postJson(`/api/workspace/${encodeURIComponent(workerId)}/recurring-schedules`, payload);
+      const exactRequest = JSON.stringify({ ...payload, target });
+      if (pendingScheduleCreate?.request !== exactRequest) pendingScheduleCreate = { request: exactRequest, key: globalThis.crypto?.randomUUID?.() || `schedule-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+      savedDefinition = await api.postJson('/api/recurring-schedules', { ...payload, target, idempotency_key: pendingScheduleCreate.key });
     }
     const completedEdit = Boolean(editingScheduleId);
+    const savedId = savedDefinition?.definition_id || editingScheduleId;
     resetScheduleEditor(completedEdit ? 'Schedule changes saved.' : 'Schedule created.');
     scheduleOccurrences.clear();
     await loadSchedules();
+    const savedSchedule = (recurringSchedules.items || []).find((item) => item.definition_id === savedId);
+    if (savedSchedule) { rememberScheduleAction(savedSchedule, completedEdit ? 'Changes saved.' : 'Schedule created.', '', 'success'); renderSchedules(); scrollToSchedule(savedSchedule.definition_id); refreshScheduleUntilSettled(savedSchedule.definition_id); }
   } catch (error) {
-    if (status) status.textContent = savedOneOff
-      ? `Workspace saved. Schedule was not created: ${error.message}` : error.message;
+    showScheduleFieldError(error, status, savedOneOff);
   } finally {
     button.disabled = false;
   }
@@ -1848,30 +2527,115 @@ function renderSupportHint() {
   const provider = document.getElementById('provider-account-provider')?.value || 'codex';
   const method = document.getElementById('provider-account-method')?.value || 'subscription';
   const submit = document.querySelector('#provider-account-form button[type="submit"]');
-  const option = availableProviderOptions().find((item) => item.provider === provider);
+  const option = providerOptions().find((item) => item.provider === provider);
   const supported = Boolean(option?.methods.includes(method));
   const keyField = document.getElementById('provider-api-key-field');
   const keyInput = document.getElementById('provider-api-key');
   const needsKey = method === 'api_key' && option?.native_api_key_support === 'supported';
   if (keyField) keyField.hidden = !needsKey;
   if (keyInput) { keyInput.required = needsKey; if (!needsKey) keyInput.value = ''; }
-  setProviderStatus(supported ? '' : 'This option is no longer available. Refresh and try again.');
+  const support = document.getElementById('provider-support-note');
+  if (support) {
+    support.textContent = supported
+      ? (method === 'subscription' ? 'Sign in securely with your existing subscription.'
+        : method === 'api_key' ? 'Paste a provider API key. It stays in this account’s private storage.'
+          : 'Use your organization’s configured connection.')
+      : providerUnavailableReason(option);
+    support.dataset.state = supported ? 'available' : 'unavailable';
+  }
+  setProviderStatus(supported ? '' : providerUnavailableReason(option));
   if (submit) {
     submit.textContent = method === 'subscription' ? `Connect ${PROVIDER_LABELS[provider] || 'account'}` : 'Add account';
     submit.disabled = !supported;
   }
 }
 
-function availableProviderOptions() {
+function providerOptions() {
   return (controlPlane?.provider_options || [])
     .map((option) => ({
       ...option,
       provider: String(option.provider || '').trim().toLowerCase(),
       methods: Array.isArray(option.methods)
         ? option.methods.map((method) => String(method || '').trim()).filter(Boolean)
+          .filter(method => !accountConnectionIntent?.authMethods?.length || accountConnectionIntent.authMethods.includes(method))
         : [],
     }))
-    .filter((option) => option.provider && option.methods.length > 0);
+    .filter((option) => option.provider);
+}
+
+function availableProviderOptions() {
+  return providerOptions().filter((option) => option.methods.length > 0);
+}
+
+function providerUnavailableReason(option) {
+  if (controlPlane?.sections?.runtime_health === 'unavailable') {
+    return 'AI setup status is unavailable. Refresh to try again.';
+  }
+  if (option?.provider === 'claude' && controlPlane?.current_native_claude?.available) {
+    return 'Choose Use existing Claude sign-in to connect the account already on this computer.';
+  }
+  if (option?.subscription_support === 'setup_cli_required') {
+    return `Install ${PROVIDER_LABELS[option.provider] || 'the native AI app'} on the computer running xPerfect, then refresh.`;
+  }
+  if (option?.subscription_support === 'unsupported_macos_host') {
+    return 'Separate Claude subscription accounts are not available on this Mac. Use an existing Claude sign-in or an available API key connection.';
+  }
+  if (option?.subscription_support === 'proof_required') {
+    return 'Codex subscription sign-in is not enabled on this server.';
+  }
+  return SUPPORT_COPY[option?.subscription_support]
+    || 'This provider has no connection method available on this server.';
+}
+
+function renderProviderChoices(providers, providerSelect, methodSelect) {
+  const choices = document.getElementById('provider-choice-list');
+  if (choices) {
+    providerSelect.closest('label')?.setAttribute('hidden', '');
+    choices.replaceChildren(...providers.map((option) => {
+      const choice = node('button', 'provider-choice');
+      choice.type = 'button';
+      choice.dataset.provider = option.provider;
+      choice.setAttribute('aria-pressed', String(providerSelect.value === option.provider));
+      const mark = node('img', 'provider-mark');
+      mark.src = option.provider === 'claude' ? '/static/provider-claude.png' : `/static/provider-${option.provider}.svg`;
+      mark.alt = '';
+      mark.width = 28;
+      mark.height = 28;
+      mark.addEventListener('error', () => { mark.hidden = true; }, { once: true });
+      const copy = node('span', 'provider-choice-copy');
+      const nativeClaude = option.provider === 'claude' && controlPlane?.current_native_claude?.available;
+      copy.append(node('strong', '', option.label || PROVIDER_LABELS[option.provider] || option.provider),
+        node('small', 'provider-choice-state', controlPlane?.sections?.runtime_health === 'unavailable' ? 'Status unavailable' : option.methods.length ? 'Connect account'
+          : nativeClaude ? 'Use existing sign-in' : 'Setup needed'));
+      choice.append(mark, copy);
+      choice.addEventListener('click', () => {
+        providerSelect.value = option.provider;
+        renderProviderOptionControls();
+        if (nativeClaude && !option.methods.length) document.querySelector('#existing-claude-connection button')?.focus();
+        else Array.from(choices.children).find((item) => item.dataset.provider === option.provider)?.focus();
+      });
+      return choice;
+    }));
+  }
+  const methods = document.getElementById('provider-method-choice');
+  if (methods) {
+    methodSelect.closest('label')?.setAttribute('hidden', '');
+    const selected = providers.find((option) => option.provider === providerSelect.value);
+    methods.hidden = !selected || selected.methods.length < 2;
+    methods.replaceChildren(...(selected?.methods || []).map((method) => {
+      const label = node('label', 'provider-method-option');
+      const input = node('input');
+      input.type = 'radio'; input.name = 'provider-connection-method'; input.value = method;
+      input.checked = methodSelect.value === method;
+      input.addEventListener('change', () => {
+        if (!input.checked) return;
+        methodSelect.value = method;
+        renderSupportHint();
+      });
+      label.append(input, node('span', '', PROVIDER_METHOD_LABELS[method] || method.replaceAll('_', ' ')));
+      return label;
+    }));
+  }
 }
 
 function renderProviderOptionControls() {
@@ -1881,10 +2645,10 @@ function renderProviderOptionControls() {
   const defaultToggle = document.getElementById('provider-account-default');
   if (!addAccount || !providerSelect || !methodSelect) return;
 
-  const providers = availableProviderOptions();
+  const providers = providerOptions();
   const accounts = controlPlane?.provider_accounts || [];
   const setupHelp = document.getElementById('provider-install-help');
-  if (setupHelp && !providers.length) setupHelp.open = true;
+  if (setupHelp && !providers.some((option) => option.methods.length)) setupHelp.open = true;
   const summary = addAccount.querySelector('summary');
   if (summary) summary.textContent = accounts.length ? 'Connect another account' : 'Connect account';
   const currentProvider = providerSelect.value;
@@ -1904,7 +2668,7 @@ function renderProviderOptionControls() {
 
   providerSelect.value = providers.some((option) => option.provider === currentProvider)
     ? currentProvider
-    : providers[0].provider;
+    : providers.find((option) => option.methods.length)?.provider || providers[0].provider;
   const selectedProvider = providers.find((option) => option.provider === providerSelect.value) || providers[0];
   methodSelect.replaceChildren(...selectedProvider.methods.map((method) => {
     const element = document.createElement('option');
@@ -1912,7 +2676,8 @@ function renderProviderOptionControls() {
     element.textContent = PROVIDER_METHOD_LABELS[method] || method.replaceAll('_', ' ');
     return element;
   }));
-  methodSelect.value = selectedProvider.methods.includes(currentMethod) ? currentMethod : selectedProvider.methods[0];
+  methodSelect.value = selectedProvider.methods.includes(currentMethod) ? currentMethod : selectedProvider.methods[0] || '';
+  renderProviderChoices(providers, providerSelect, methodSelect);
   const labelInput = document.getElementById('provider-account-label');
   if (labelInput) {
     const label = providerAccountLabelTransition({
@@ -1926,7 +2691,7 @@ function renderProviderOptionControls() {
   addAccount.hidden = Boolean(activeSetupAccount);
   if (!accounts.length && !activeSetupAccount) addAccount.open = true;
   if (defaultToggle) {
-    defaultToggle.checked = accounts.length === 0;
+    defaultToggle.checked = accounts.length === 0 && controlPlane?.sections?.provider_accounts !== 'unavailable';
   }
   renderSupportHint();
 }
@@ -1945,16 +2710,17 @@ function showSetup(payload) {
   const restart = document.getElementById('restart-provider-setup');
   const provider = String(payload.provider || 'codex');
   const setupUrl = String(payload.setup_url || '');
+  const browserFlow = payload.setup_flow === 'browser';
   const code = String(payload.setup_code || '');
   const inputRequired = Boolean(payload.input_required) && !payload.complete;
   const inputSubmitted = Boolean(payload.input_submitted) && !payload.complete;
   const helpUrl = String(payload.help_url || '');
   const rawInstructions = String(payload.instructions || payload.message || '').trim();
-  const waitingForGuidance = !payload.complete && !rawInstructions && !inputSubmitted;
+  const waitingForGuidance = !payload.complete && !rawInstructions && !setupUrl && !inputSubmitted;
   const needsFallback = !payload.complete
     && !waitingForGuidance
     && !inputSubmitted
-    && (!setupUrl || (provider === 'codex' && !code));
+    && (!setupUrl || (provider === 'codex' && !code && !browserFlow));
   const accountId = String(payload.account_id || activeSetupAccount || '');
   const accountRow = [...document.querySelectorAll('.connection-row')]
     .find((candidate) => candidate.dataset.accountId === accountId);
@@ -1980,13 +2746,15 @@ function showSetup(payload) {
   if (setupHelp) {
     setupHelp.href = helpUrl || '#';
     setupHelp.textContent = 'Open ChatGPT security settings';
-    setupHelp.hidden = !helpUrl;
+    setupHelp.hidden = browserFlow || !helpUrl;
   }
   if (setupGuidance) setupGuidance.textContent = needsFallback
     ? 'Use the provider instructions below.'
     : waitingForGuidance
       ? 'Starting secure sign-in…'
-      : (provider === 'codex'
+      : browserFlow
+        ? 'Continue sign-in in your browser. Return here when you are done.'
+        : (provider === 'codex'
         ? 'Open sign-in, then enter the code.'
         : inputRequired
           ? 'Open sign-in, then paste the code here.'
@@ -2037,9 +2805,11 @@ async function submitProviderSetupInput(event) {
     );
     showSetup(payload);
     if (payload.complete) {
+      const accountId = activeSetupAccount;
       activeSetupAccount = '';
       stopSetupPolling();
-      await loadControlPlane();
+      await loadControlPlane({ connectedAccount: payload.status === 'ready'
+        ? { account_id: payload.account_id || accountId, profile: profileForProvider(payload.provider || controlPlane?.provider_accounts?.find(account => account.account_id === accountId)?.provider) } : null });
       showSetup(payload);
     } else if (!setupPollTimer) {
       setupPollTimer = window.setTimeout(pollSetup, 500);
@@ -2097,9 +2867,11 @@ async function pollSetup() {
     const payload = await response.json();
     showSetup(payload);
     if (payload.complete) {
+      const accountId = activeSetupAccount;
       activeSetupAccount = '';
       stopSetupPolling();
-      await loadControlPlane();
+      await loadControlPlane({ connectedAccount: payload.status === 'ready'
+        ? { account_id: payload.account_id || accountId, profile: profileForProvider(payload.provider || '') } : null });
       showSetup(payload);
       return;
     }
@@ -2117,53 +2889,145 @@ async function loadWorkspaceChoices(kind = 'named,legacy') {
 }
 
 async function loadControlPlane({ connectedAccount = null } = {}) {
-  const [controlResponse, connectResponse, workspacePayload, oneOffPayload, scheduleResponse, modelResponse] = await Promise.all([
-    fetch(api.withAuth('/api/control-plane')),
-    fetch(api.withAuth('/api/connect-ai')).catch(() => null),
-    loadWorkspaceChoices(),
-    loadWorkspaceChoices('ephemeral').catch(() => ({ items: [] })),
-    fetch(api.withAuth('/api/recurring-schedules?include_inactive=true')).catch((error) => ({ error })),
-    fetch(api.withAuth('/api/native-models/grok-build')).catch(() => null),
-  ]);
-  if (!controlResponse.ok) throw new Error(await api.responseMessage(controlResponse, 'Could not load connections'));
-  controlPlane = await controlResponse.json();
-  grokModels = modelResponse?.ok ? await modelResponse.json() : {
-    models: [], status: 'catalog_unavailable', message: 'Grok models are unavailable. Refresh Connections after checking the native harness.',
+  const generation = ++controlPlaneGeneration;
+  scheduleCatalogReady = false;
+  // Start independent reads together. Their failure or speed cannot block account sign-in.
+  const settled = (promise) => promise.then(value => ({ value }), error => ({ error }));
+  const requests = {
+    workspaces: settled(loadWorkspaceChoices()),
+    oneOff: settled(loadWorkspaceChoices('ephemeral')),
+    connectionHelp: settled(fetch(api.withAuth('/api/connect-ai'))),
+    schedules: settled(fetch(api.withAuth('/api/recurring-schedules?include_inactive=true'))),
+    models: settled(fetch(api.withAuth('/api/native-models/grok-build'))),
+    resources: settled(fetch(api.withAuth('/api/control-plane?sections=resources'))),
   };
+  const controlResponse = await fetch(api.withAuth('/api/control-plane?sections=accounts'));
+  if (!controlResponse.ok) throw new Error(await api.responseMessage(controlResponse, 'Could not load connections'));
+  const payload = await controlResponse.json();
+  if (generation !== controlPlaneGeneration) return;
+  const previousScope = scheduleRunScope();
+  controlPlane = payload;
+  if (previousScope && previousScope !== scheduleRunScope()) {
+    workspaceCatalog = { items: [] };
+    oneOffWorkspaceCatalog = { items: [] };
+    recurringSchedules = { items: [] };
+    webhookDestinations = [];
+    grokModels = null;
+    connectAi = null;
+    pendingCapabilityReview = null;
+    accountConnectionIntent = null;
+    activeSetupAccount = '';
+    stopSetupPolling();
+    renderLibrary();
+    renderLibraryRequestWorkspaceOptions();
+    renderSchedules();
+  }
   restoreUncertainScheduleRunKeys();
-  if (connectResponse?.ok) {
-    connectAi = await connectResponse.json();
-    connectAiLoadError = '';
-  } else {
-    connectAi = { clients: {} };
-    connectAiLoadError = 'External AI client setup is temporarily unavailable.';
-  }
-  workspaceCatalog = workspacePayload;
-  oneOffWorkspaceCatalog = oneOffPayload;
-  restoreCapabilityReviewFromCatalog();
-  if (scheduleResponse.ok) {
-    recurringSchedules = await scheduleResponse.json();
-    scheduleLoadError = '';
-    scheduleOccurrences.clear();
-    for (const definitionId of scheduleHistoryGeneration.keys()) {
-      scheduleHistoryGeneration.set(definitionId, scheduleHistoryGeneration.get(definitionId) + 1);
-    }
-  } else {
-    scheduleLoadError = scheduleResponse.error
-      ? String(scheduleResponse.error.message || 'Could not load recurring schedules')
-      : await api.responseMessage(scheduleResponse, 'Could not load recurring schedules');
-  }
-  await reconcileCapabilityReview();
   renderProviderOptionControls();
   renderProviderAccounts();
-  renderGrokModelChoice();
   renderConnections();
-  renderConnectAi();
-  renderLibrary();
-  renderLibraryRequestWorkspaceOptions();
-  renderSchedules();
-  renderCapabilityReviewBanner();
+  applyAccountConnectionIntent();
   window.dispatchEvent(new CustomEvent('glasshive:control-plane-updated', { detail: { connectedAccount } }));
+  if (connectedAccount) announceConnectedAccount(connectedAccount);
+
+  // Each section commits its own readback. Keep the account route usable even if another
+  // section is slow or unavailable. A superseded refresh may not restore another owner's UI.
+  const apply = (request, update, failure) => request.then(async (result) => {
+    if (generation !== controlPlaneGeneration) return;
+    await update(result);
+  }).catch((error) => {
+    if (generation === controlPlaneGeneration) failure?.(error);
+  });
+  controlPlaneSectionsReady = Promise.all([
+    apply(requests.resources, async ({ value: response }) => {
+      if (!response?.ok) throw new Error('Tools and Library are unavailable. Refresh to try again.');
+      const resources = await response.json();
+      if (generation !== controlPlaneGeneration) return;
+      if (resources.me?.user_id !== controlPlane.me?.user_id || resources.me?.tenant_id !== controlPlane.me?.tenant_id) return;
+      controlPlane.connections = resources.connections || [];
+      controlPlane.library = resources.library || [];
+      controlPlane.sections = { ...controlPlane.sections,
+        connections: resources.sections?.connections || 'unavailable',
+        library: resources.sections?.library || 'unavailable' };
+      renderConnections();
+      renderLibrary();
+    }, () => {
+      controlPlane.sections = { ...controlPlane.sections, connections: 'unavailable', library: 'unavailable' };
+      renderConnections();
+      renderLibrary();
+    }),
+    apply(requests.workspaces, async ({ value, error }) => {
+      workspaceCatalog = error ? { items: [], unavailable: true } : value;
+      restoreCapabilityReviewFromCatalog();
+      renderLibrary();
+      renderLibraryRequestWorkspaceOptions();
+      renderSchedules();
+      if (!error) await reconcileCapabilityReview(generation);
+      if (generation === controlPlaneGeneration) renderCapabilityReviewBanner();
+    }, () => {
+      workspaceCatalog = { items: [], unavailable: true };
+      renderLibrary();
+      renderLibraryRequestWorkspaceOptions();
+    }),
+    apply(requests.oneOff, ({ value, error }) => {
+      oneOffWorkspaceCatalog = error ? { items: [], unavailable: true } : value;
+      renderSchedules();
+    }, () => { oneOffWorkspaceCatalog = { items: [], unavailable: true }; renderSchedules(); }),
+    apply(requests.connectionHelp, async ({ value: response }) => {
+      if (response?.ok) {
+        const value = await response.json();
+        if (generation !== controlPlaneGeneration) return;
+        connectAi = value;
+        connectAiLoadError = '';
+      } else {
+        connectAi = { clients: {} };
+        connectAiLoadError = 'External AI client setup is temporarily unavailable.';
+      }
+      renderConnectAi();
+    }, () => {
+      connectAi = { clients: {} };
+      connectAiLoadError = 'External AI client setup is temporarily unavailable.';
+      renderConnectAi();
+    }),
+    apply(requests.schedules, async ({ value: response, error }) => {
+      if (response?.ok) {
+        const value = parseScheduleJson(await response.text());
+        if (generation !== controlPlaneGeneration) return;
+        recurringSchedules = value;
+        scheduleCatalogReady = true;
+        scheduleLoadError = '';
+        scheduleOccurrences.clear();
+        for (const definitionId of scheduleHistoryGeneration.keys()) {
+          scheduleHistoryGeneration.set(definitionId, scheduleHistoryGeneration.get(definitionId) + 1);
+        }
+      } else {
+        const message = error ? String(error.message || 'Could not load schedules')
+          : await api.responseMessage(response, 'Could not load schedules');
+        if (generation !== controlPlaneGeneration) return;
+        scheduleLoadError = message;
+      }
+      renderSchedules();
+      resumePendingScheduleRefreshes();
+    }, () => {
+      scheduleLoadError = 'Schedules are unavailable. Refresh to try again.';
+      renderSchedules();
+    }),
+    apply(requests.models, async ({ value: response }) => {
+      const value = response?.ok ? await response.json() : {
+        models: [], status: 'catalog_unavailable',
+        message: 'Grok models are unavailable. Refresh Connections to try again.',
+      };
+      if (generation !== controlPlaneGeneration) return;
+      grokModels = value;
+      renderGrokModelChoice();
+    }, () => {
+      grokModels = { models: [], status: 'catalog_unavailable', message: 'Grok models are unavailable. Refresh Connections to try again.' };
+      renderGrokModelChoice();
+    }),
+    loadWebhookDestinations(),
+  ]).catch(() => {
+    // Owning sections report their own request failures; account setup remains available.
+  });
 }
 
 async function submitProviderAccount(event) {
@@ -2199,16 +3063,25 @@ async function submitProviderAccount(event) {
     form.reset();
     const disclosure = document.getElementById('add-provider-account');
     if (disclosure) disclosure.open = false;
-    await loadControlPlane();
     if (created.platform_support === 'supported' && created.auth_method === 'subscription') {
       const setup = await api.postJson(`/api/provider-accounts/${encodeURIComponent(created.account_id)}/setup`);
       activeSetupAccount = String(created.account_id || '');
       showSetup(setup);
       stopSetupPolling();
-      setupPollTimer = window.setTimeout(pollSetup, 900);
+      if (setup.complete) {
+        activeSetupAccount = '';
+        await loadControlPlane({ connectedAccount: setup.status === 'ready'
+          ? { account_id: created.account_id, profile: profileForProvider(provider) } : null });
+        showSetup(setup);
+      } else {
+        setupPollTimer = window.setTimeout(pollSetup, 900);
+        await loadControlPlane();
+      }
     } else {
+      await loadControlPlane({ connectedAccount: (keyResult || created).status === 'ready'
+        ? { account_id: created.account_id, profile: profileForProvider(provider) } : null });
       setProviderStatus(keyResult?.message || (created.auth_method !== 'subscription'
-        ? 'Connected-account reference added. xPerfect will verify it when this workspace runs.'
+        ? 'Account connected. xPerfect will check model access when the job starts.'
         : (SUPPORT_COPY[created.platform_support]
           || (created.status === 'ready' ? 'Account ready.' : 'Complete sign-in before using this account.'))));
     }
@@ -2251,7 +3124,7 @@ export function renderActivity(events = [], availability = 'ready') {
       node('strong', '', String(event.workspace_name || event.name || event.title || 'Workspace')),
       node('span', '', `${eventLabel} · ${formatDateTime(event.created_at || event.updated_at || event.last_activity_at)}`),
     );
-    row.append(copy, statusChip(eventType));
+    row.append(copy);
     return row;
   }));
 }
@@ -2259,10 +3132,14 @@ export function renderActivity(events = [], availability = 'ready') {
 export async function refreshControlPlane() {
   if (!api) return;
   await loadControlPlane();
+  await controlPlaneSectionsReady;
 }
 
 export function initializeControlPlane(dependencies) {
   api = dependencies;
+  window.addEventListener('xperfect:connect-account', (event) => {
+    openAccountConnection(event.detail || {}).catch((error) => setProviderStatus(error.message));
+  });
   const connectAiTabs = [
     document.getElementById('connect-ai-auto-tab'),
     document.getElementById('connect-ai-manual-tab'),
@@ -2282,6 +3159,10 @@ export function initializeControlPlane(dependencies) {
   }));
   setConnectAiMode('auto');
   document.getElementById('library-request-form')?.addEventListener('submit', submitLibraryRequest);
+  document.getElementById('library-start-job')?.addEventListener('click', () => {
+    dependencies.setView('project');
+    document.getElementById('description')?.focus();
+  });
   document.getElementById('provider-account-form')?.addEventListener('submit', submitProviderAccount);
   document.getElementById('grok-native-model')?.addEventListener('change', () => {
     const save = document.getElementById('save-grok-native-model');
@@ -2317,6 +3198,30 @@ export function initializeControlPlane(dependencies) {
     openScheduleEditor();
   });
   document.getElementById('recurring-schedule-form')?.addEventListener('submit', submitRecurringSchedule);
+  document.getElementById('recurring-schedule-target')?.addEventListener('change', syncRecurringScheduleFields);
+  document.getElementById('recurring-schedule-destination')?.addEventListener('change', syncWebhookDestinationActions);
+  for (const option of document.querySelectorAll('[name="schedule-target-choice"]')) option.addEventListener('change', () => {
+    document.getElementById('recurring-schedule-target').value = option.value;
+    syncRecurringScheduleFields();
+  });
+  document.getElementById('schedule-app-retry')?.addEventListener('click', loadWebhookDestinations);
+  document.getElementById('webhook-destination-copy-key')?.addEventListener('click', (event) => copyText(document.getElementById('webhook-destination-secret-once')?.textContent || '', event.currentTarget));
+  document.getElementById('webhook-destination-connect')?.addEventListener('click', () => openDestinationDialog(false));
+  document.getElementById('webhook-destination-manage')?.addEventListener('click', () => openDestinationDialog(true));
+  for (const id of ['webhook-destination-close', 'webhook-destination-done']) document.getElementById(id)?.addEventListener('click', closeDestinationDialog);
+  document.getElementById('webhook-destination-setup')?.addEventListener('close', clearDestinationSecrets);
+  document.getElementById('webhook-destination-form')?.addEventListener('submit', (event) => { event.preventDefault(); void manageWebhookDestination(event.currentTarget.dataset.mode === 'manage' ? 'rename' : 'create'); });
+  document.getElementById('recurring-schedule-message')?.addEventListener('input', syncRequestMessage);
+  document.getElementById('schedule-data-add')?.addEventListener('click', () => {
+    appendDataRow({ key: '', type: 'string', value: '' });
+    document.querySelector('#schedule-data-fields .schedule-data-row:last-child input')?.focus();
+  });
+  document.getElementById('recurring-schedule-request-data')?.addEventListener('input', () => {
+    try { const value = parseRequestData(document.getElementById('recurring-schedule-request-data').value); syncMessageField(value); renderDataRows(value); setDataStatus(''); }
+    catch (_error) { setDataStatus('Check the JSON before saving.'); }
+  });
+  document.getElementById('webhook-destination-rotate')?.addEventListener('click', () => manageWebhookDestination('rotate'));
+  document.getElementById('webhook-destination-toggle')?.addEventListener('click', () => manageWebhookDestination('toggle'));
   document.getElementById('recurring-schedule-cancel-edit')?.addEventListener('click', () => resetScheduleEditor('Edit cancelled.'));
   document.getElementById('recurring-schedule-create-workspace')?.addEventListener('click', () => {
     dependencies.setView('project');
@@ -2325,19 +3230,20 @@ export function initializeControlPlane(dependencies) {
   document.getElementById('recurring-schedule-type')?.addEventListener('change', syncRecurringScheduleFields);
   document.getElementById('recurring-schedule-custom-type')?.addEventListener('change', syncRecurringScheduleFields);
   document.getElementById('recurring-schedule-catch-up-policy')?.addEventListener('change', syncRecurringScheduleFields);
-  document.getElementById('recurring-schedule-tomorrow')?.addEventListener('click', () => {
-    const timezone = document.getElementById('recurring-schedule-timezone')?.value.trim() || 'UTC';
-    const startsAt = document.getElementById('recurring-schedule-starts-at');
-    const status = document.getElementById('recurring-schedule-status');
-    const value = tomorrowDateTimeLocal(timezone);
-    if (!value) {
-      if (status) status.textContent = 'Enter a valid time zone before using the shortcut.';
-      document.getElementById('recurring-schedule-timezone')?.focus();
-      return;
-    }
-    if (startsAt) startsAt.value = value;
-    if (status) status.textContent = '';
+  document.getElementById('recurring-schedule-tomorrow')?.addEventListener('click', useTomorrowScheduleTime);
+  document.getElementById('schedule-timezone-change')?.addEventListener('click', () => {
+    const picker = document.getElementById('schedule-timezone-picker'); picker.hidden = !picker.hidden;
+    document.getElementById('schedule-timezone-change').setAttribute('aria-expanded', String(!picker.hidden));
+    if (!picker.hidden) { renderTimeZoneChoices(); document.getElementById('schedule-timezone-search').focus(); }
   });
+  document.getElementById('schedule-timezone-search')?.addEventListener('input', renderTimeZoneChoices);
+  document.getElementById('schedule-timezone-choice')?.addEventListener('change', (event) => {
+    if (!event.currentTarget.value) return;
+    document.getElementById('recurring-schedule-timezone').value = event.currentTarget.value; syncTimeZoneSummary(); updateSchedulePreview();
+  });
+  document.getElementById('recurring-schedule-timezone')?.addEventListener('input', () => { syncTimeZoneSummary(); updateSchedulePreview(); });
+  document.getElementById('recurring-schedule-form')?.addEventListener('input', updateSchedulePreview);
+  document.getElementById('recurring-schedule-form')?.addEventListener('change', updateSchedulePreview);
   document.getElementById('refresh-schedules')?.addEventListener('click', () => loadSchedules());
   document.getElementById('copy-provider-setup-code')?.addEventListener('click', (event) => {
     const codeNode = document.getElementById('provider-setup-code');

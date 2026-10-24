@@ -1,4 +1,5 @@
 """O05: a stopped or failed reply shows its real outcome and a working recovery."""
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -194,9 +195,10 @@ def test_a_conversation_this_computer_cannot_start_says_why_before_anything_is_s
     load = source[source.index("async function loadAssistants()"):source.index("$('composer').addEventListener('submit'")]
     node = shutil.which("node")
     assert node, "Node is required for the conversation start proof"
-    code = r'''
+    code = 'import { renderAccountIdentity } from ' + json.dumps(SOURCE.with_name('account-menu.js').as_uri()) + ';\n' + r'''
 class El { constructor(){this.hidden=false;this.disabled=false;this.textContent='';this.value='';this.children=[];} replaceChildren(...c){this.children=c;} }
 const elements = {}; const $ = (id) => (elements[id] ||= new El());
+globalThis.document = {getElementById:$};
 function node(tag, text){ const e = new El(); e.textContent = text; return e; }
 let conversationId = ''; let responses = {};
 async function api(path){ if (!(path in responses)) throw new Error('unexpected ' + path); const r = responses[path]; if (r instanceof Error) throw r; return r; }
@@ -224,7 +226,6 @@ console.log(JSON.stringify({
 '''
     result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
-    import json
     shown = json.loads(result.stdout)
     assert shown["here"] == {
         "send": True, "message": True, "project": True, "field": True, "run": False, "connect": True,

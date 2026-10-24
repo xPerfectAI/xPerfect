@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from workers_projects_runtime.api import create_app
 from workers_projects_runtime.openclaw_runtime import StubRuntime
 from workers_projects_runtime.signed_links import sign_link_params
 
 
-def test_worker_live_projects_exact_grok_pending_input_and_redacts_read_only_view(
+@pytest.mark.parametrize('profile', ['grok-build', 'codex-cli', 'claude-code'])
+def test_worker_live_projects_exact_native_pending_input_and_redacts_read_only_view(
     tmp_path,
     monkeypatch,
+    profile,
 ):
     monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "synthetic-signed-secret")
     monkeypatch.setenv("WPR_API_TOKEN", "synthetic-runtime-token")
@@ -27,17 +30,17 @@ def test_worker_live_projects_exact_grok_pending_input_and_redacts_read_only_vie
         "owner-a",
         "Native input",
         "Show a pending response",
-        "grok-build",
+        profile,
         tenant_id="tenant-alpha",
     )
     worker = store.create_worker(
         project_id=project["project_id"],
         owner_id="owner-a",
-        name="Grok worker",
+        name="Native worker",
         role="research",
-        profile="grok-build",
+        profile=profile,
         backend="profiled",
-        runtime="grok-build",
+        runtime=profile,
         model="grok-exact",
         tenant_id="tenant-alpha",
     )
@@ -62,6 +65,8 @@ def test_worker_live_projects_exact_grok_pending_input_and_redacts_read_only_vie
                     "request": {"questions": [{"question": "private question"}]},
                 }
             ],
+            "capabilities": {"interject": True, "cancel": False, "permission": True,
+                             "private_extra": "must-not-leak"},
             "receipts": [{"message_id": "private-receipt", "secret": "must-not-leak"}],
         },
     )
@@ -83,6 +88,8 @@ def test_worker_live_projects_exact_grok_pending_input_and_redacts_read_only_vie
         assert owner_pending["attempt_id"] == "attempt-native"
         assert owner_pending["pending_requests"][0]["request"]["questions"]
         assert "receipts" not in owner_pending
+        assert owner_pending['available'] is True
+        assert owner_pending['capabilities'] == {'interject': True, 'cancel': False, 'permission': True}
 
         signed_query = sign_link_params(
             kind="worker_view",
@@ -102,6 +109,7 @@ def test_worker_live_projects_exact_grok_pending_input_and_redacts_read_only_vie
         ]
         assert "private question" not in signed.text
         assert "private-receipt" not in signed.text
+        assert "private_extra" not in signed.text
 
         # The direct runtime read uses the same safe contract as the authorized live view.
         viewer_headers = {**owner_headers, "X-Viventium-User-Role": "viewer"}
@@ -132,3 +140,10 @@ def test_worker_live_projects_exact_grok_pending_input_and_redacts_read_only_vie
         )
         assert stale.status_code == 200
         assert stale.json()["native_control"]["available"] is False
+        def unavailable(*args, **kwargs):
+            raise RuntimeError('Private adapter diagnostic must not leak')
+        monkeypatch.setattr(app.state.service, 'native_worker_control', unavailable)
+        unavailable_live = client.get(f"/v1/workers/{worker['worker_id']}/live", headers=owner_headers)
+        assert unavailable_live.status_code == 200
+        assert unavailable_live.json()['native_control']['available'] is False
+        assert 'Private adapter diagnostic' not in unavailable_live.text

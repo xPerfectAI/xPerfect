@@ -30,6 +30,44 @@ through the account API and MCP adapter. Invalid launch authority keeps the exis
 rejection. A missing readiness reason also keeps that rejection; no fallback, replay or weaker
 admission is implied.
 
+## Scheduled work through the same control plane
+
+The [application boundary contract](09_Application_Boundary_Contract.md) owns project independence.
+The [runtime guide](../runtime_phase1/README.md#generic-worker-and-webhook-schedules) owns setup,
+HTTP examples, clock policy and delivery states. Scheduling extends the existing recurrence store,
+clock and outbox; there is no application-specific scheduler or second work manager.
+
+| Interface               | Scheduling operations                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Owner HTTP              | `POST /v1/recurring-schedules` creates a typed worker or webhook target. Existing list/get/PATCH/deactivate/run-now/history/DELETE routes control the same definition.                                                                                                                                                                                                      |
+| Owner MCP               | `schedule_create` accepts the same structured request. Existing `worker_recurring_schedules`, `worker_recurring_schedule_update`, `worker_recurring_schedule_deactivate`, `worker_recurring_schedule_run_now`, `worker_recurring_schedule_occurrences` and `worker_recurring_schedule_retire` apply to either target. Existing worker-specific creation remains compatible. |
+| Owner destination setup | `webhook_destinations`, `webhook_destination_create`, `webhook_destination_update` match GET/POST/PATCH `/v1/webhook-destinations`. Workers do not receive these credential-management operations.                                                                                                                                                                          |
+| Native worker MCP       | The runtime projects `xperfect-schedules` at `/v1/native/schedules/` only when the worker has a current `schedule_access` grant. It exposes `schedule_list`, `schedule_create`, `schedule_get`, `schedule_update`, `schedule_run_now`, `schedule_history` and `schedule_retire`.                                                                                            |
+
+Native scheduling tool descriptions identify the scheduling domain and their reminder/timer purpose.
+This keeps ordinary native tool discovery useful without relying on an application broker,
+a remembered server name, or application-specific routing. The actual MCP `tools/list` response
+is the discovery contract; a configured server alone does not prove model discovery.
+
+Native scheduling uses the existing exact worker/run/attempt authority. `schedule_list` returns
+supplied target choices; the worker passes one unchanged, plus the user's instruction and recurrence.
+A webhook grant fixes the destination and approved request data. An optional `allow_worker_target`
+grant permits that worker's own target. A separate explicit `manage_destination_ids` grant permits
+control of that owner's existing schedules at the listed destinations; it does not permit arbitrary
+new request bodies. Current grants are read again for each operation. Stop, close, retry and attempt
+replacement revoke the old native bearer. Neither a service-wide token nor destination credentials
+are supplied to the worker. The [bootstrap owner](03_Bootstrap_Auth_and_Identity_Projection.md#independent-application-inputs)
+defines the grant and neutral context fields.
+
+Specialized Fast Direct Queen profiles keep their existing small handoff interface. Scheduling is
+work for an authorized native worker; these tools do not enlarge that Queen's catalog.
+
+Use a stable creation key for a schedule. Repeating the same owner/key/body recovers the saved
+receipt; changing the body under that key conflicts. Destination creation also accepts a retry key.
+A generated signing secret is available only on that logical creation receipt, including an exact
+retry; normal lists and reads omit URLs, auth and signing secrets. A retry never re-enables a revoked
+destination. Delivery acceptance and application work completion remain separate outcomes.
+
 ## Frozen public compatibility baseline
 
 `runtime_phase1/tests/fixtures/public_compatibility_baseline_v1.json` is a frozen, synthetic
@@ -96,6 +134,7 @@ do not claim production voice parity or a latency guarantee from this reference.
 memory, Feelings and other modules still require their existing configured projections.
 
 ### LibreChat / Viventium / Standalone-Compatible Clients
+
 Use xPerfect as an external MCP server. The standalone external-MCP path is config-only and
 requires no LibreChat application-code changes. Optional Viventium/LibreChat account, inference,
 scheduling, or callback bridges may use a separately pinned compatible integration build, but are
@@ -174,7 +213,6 @@ workspace links in typed `operator_url`/`watch_url` metadata, outside `message` 
 Only native input events may add the required workspace input route to prose; delivered file
 Download/Preview links remain usable. Failure guidance asks the agent to inspect existing native
 workspace/evidence rather than requiring an end-user operator page.
-
 
 Workspace-native tool and account setup stays inside the selected persistent workstation. The
 Workspaces `Set up tools` action opens that profile's installed AI harness through the generic desktop
@@ -404,6 +442,7 @@ headers whenever the host supports them; this lookup remains a legacy bridge, no
 contract.
 
 ### Claude / Claude Code
+
 Support:
 
 - stdio attachment for local use
@@ -411,6 +450,7 @@ Support:
 - project-scoped `.mcp.json` bootstrap where appropriate
 
 ### Codex / ChatGPT-compatible MCP consumers
+
 Prefer remote HTTP MCP with auth in front of the server when not loopback-only.
 
 ### Hosted user connection
@@ -621,3 +661,37 @@ prompt hash and tool-description hash are exposed in the conversation manifest f
 
 Native worker profile support does not imply conversation-provider support. Unsupported exact
 model/profile/effort selections remain unavailable; no provider alias or fallback is invented.
+
+## Native scheduling discovery
+
+The authorized native scheduling MCP server publishes standard initialize instructions and
+seven tool descriptions from `workers_projects_runtime/prompts/schedule-tools.json`. The
+manifest helper returns its source, version and content hash for lineage checks. Initialize
+instructions and tool descriptions load from that packaged source. The same runtime scheduler
+and authorization checks serve all clients.
+
+Server instructions identify durable scheduling as an independent native capability. A
+connected-service broker catalog does not describe this server's inventory. Clients that use
+server instructions for namespace descriptions or tool search can discover scheduling without
+application-specific tool aliases, extra routers or an expanded conversational tool set.
+A real saved schedule and due result remain required acceptance evidence.
+
+A manual `schedule_run_now` starts one occurrence. Its saved worker or receiving application owns
+the instruction and configured output. The calling worker does not also perform that instruction
+or poll after acceptance unless the user explicitly requests monitoring or waiting. A separately
+requested task still runs normally. Creation/start acknowledgments use a short natural confirmation
+of timing and destination; internal receipt rules are not conversation text. Acceptance never proves
+the task completed. The versioned manifest supplies this contract to every native client.
+
+Manual run receipts expose `occurrence_created`: `true` only after a fresh atomic admission,
+`false` when an earlier receipt is recovered. The command marker is not persisted into ordinary
+due events or history. A delegated owner's absent value remains unknown. Keep the key stable
+for retries; each distinct new request needs a distinct key. A recovered occurrence cannot be
+confirmed as a new start. Authority, deduplication and occurrence identity remain unchanged.
+
+The native `schedule_run_now` response is an admission receipt: definition/occurrence identity,
+authoritative timing, owner status/state, and known creation/replay outcome. It does not contain
+the execution instruction, snapshot, target data or clock-internal dispatch hint. The saved
+executor retains those values; authorized `schedule_get`, `schedule_list` and `schedule_history`
+remain available for inspection. General API/UI receipts keep their existing contract. A
+concurrent missing admission is a typed not-found error, not an empty success.

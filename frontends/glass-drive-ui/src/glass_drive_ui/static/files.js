@@ -10,6 +10,61 @@ const stateLabel = (state) => ({ pending: 'Waiting', checking: 'Preparing', rece
 
 const key = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+// Use the same native modal surface as file moves; naming changes no file authority.
+export function requestFileName({ title, value = '', action = 'Save', folder = false,
+  returnFocus = document.activeElement, signal } = {}) {
+  if (signal?.aborted) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const id = `file-name-${key()}`;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'file-move-dialog';
+    dialog.setAttribute('aria-labelledby', `${id}-title`);
+    const heading = document.createElement('h3'); heading.id = `${id}-title`; heading.textContent = title;
+    const form = document.createElement('form'); form.className = 'project-field'; form.method = 'dialog';
+    const label = document.createElement('label'); label.className = 'project-field'; label.htmlFor = id;
+    const caption = document.createElement('span'); caption.textContent = folder ? 'Folder name' : 'Name';
+    const input = document.createElement('input'); input.id = id; input.type = 'text'; input.value = value;
+    input.required = true; input.autocomplete = 'off'; input.spellcheck = false;
+    const actions = document.createElement('div'); actions.className = 'file-move-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel';
+    const save = document.createElement('button'); save.type = 'submit'; save.className = 'primary-button compact-button'; save.textContent = action;
+    label.append(caption, input); actions.append(cancel, save); form.append(label, actions); dialog.append(heading, form);
+    let result = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      dialog.remove();
+      if (returnFocus?.isConnected && !returnFocus.disabled) returnFocus.focus();
+      resolve(result);
+    };
+    const abort = () => { result = null; if (dialog.open) dialog.close(); else finish(); };
+    cancel.addEventListener('click', abort);
+    dialog.addEventListener('cancel', () => { result = null; });
+    dialog.addEventListener('close', finish, { once: true });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!input.reportValidity()) return;
+      result = input.value;
+      dialog.close();
+    });
+    document.body.append(dialog);
+    try {
+      dialog.showModal();
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+      else { input.focus(); input.select(); }
+    } catch (_error) {
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      dialog.remove();
+      if (returnFocus?.isConnected && !returnFocus.disabled) returnFocus.focus();
+      reject(new Error('The name editor could not open. Reload this page and try again.'));
+    }
+  });
+}
+
 // One logical attach per upload and destination. The runtime replays a request key it has already
 // accepted, so a retry or a reload cannot add the same upload to the workspace twice.
 async function attachRequestKey(uploadId, directory) {
@@ -338,7 +393,11 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
         const rename = document.createElement('button'); rename.type = 'button'; rename.textContent = 'Rename'; rename.disabled = busy;
         rename.addEventListener('click', async () => {
           menu.open = false;
-          const name = window.prompt('New name', item.name);
+          const epoch = ownerEpoch;
+          const revision = item.revision;
+          const name = await requestFileName({ title: 'Rename file', value: item.name,
+            returnFocus: summary, signal: ownerController.signal }).catch(error => { showHelp(error.message); return null; });
+          if (epoch !== ownerEpoch || !items.includes(item) || revision !== item.revision) return;
           if (name === null || name === item.name) return;
           const clean = name.trim();
           if (!clean || clean === '.' || clean === '..' || /[/\\]/.test(clean)) { showHelp('Choose a name without slashes.'); return; }
@@ -712,8 +771,14 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
       moveDirectory = moveDirectory.split('/').slice(0, -1).join('/');
       renderMoveFolders();
     });
-    management.newFolder.addEventListener('click', () => {
-      const name = window.prompt('New folder name');
+    management.newFolder.addEventListener('click', async () => {
+      const epoch = ownerEpoch;
+      const destination = moveDirectory;
+      const name = await requestFileName({ title: 'New folder', folder: true, action: 'Create folder',
+        returnFocus: management.newFolder, signal: ownerController.signal }).catch(error => {
+        management.error.textContent = error.message; management.error.hidden = false; return null;
+      });
+      if (epoch !== ownerEpoch || !management.dialog.open || destination !== moveDirectory) return;
       if (name === null) return;
       const clean = name.trim();
       if (!clean || clean === '.' || clean === '..' || /[/\\]/.test(clean)) {
@@ -1127,7 +1192,11 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
         const rename = document.createElement('button'); rename.type = 'button'; rename.textContent = 'Rename';
         rename.addEventListener('click', async () => {
           menu.open = false;
-          const next = window.prompt('New name', entry.name);
+          const currentDirectory = directory;
+          const next = await requestFileName({ title: entry.is_dir ? 'Rename folder' : 'Rename file', value: entry.name,
+            returnFocus: summary }).catch(error => { setStatus(error.message); return null; });
+          if (!canWrite || !canUpload() || currentDirectory !== directory
+              || !entries.some(item => item.file_id === entry.file_id && item.revision === entry.revision && item.path === entry.path)) return;
           if (next === null || next === entry.name) return;
           const name = next.trim();
           if (!name || name === '.' || name === '..' || /[/\\]/.test(name)) { setStatus('Choose a name without slashes.'); return; }
@@ -1206,7 +1275,10 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
   }
   folderButton.addEventListener('click', async () => {
     optionsMenu.open = false;
-    const name = window.prompt('New folder name');
+    const currentDirectory = directory;
+    const name = await requestFileName({ title: 'New folder', folder: true, action: 'Create folder',
+      returnFocus: optionsMenu.querySelector?.('summary') || folderButton }).catch(error => { setStatus(error.message); return null; });
+    if (!canWrite || !canUpload() || currentDirectory !== directory) return;
     if (name === null || !name.trim()) return;
     const clean = name.trim();
     if (clean === '.' || clean === '..' || /[/\\]/.test(clean)) { setStatus('Choose a folder name without slashes.'); return; }

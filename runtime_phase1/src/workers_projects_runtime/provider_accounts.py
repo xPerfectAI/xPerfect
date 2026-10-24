@@ -74,6 +74,29 @@ _CODEX_DEVICE_CODE = re.compile(
 _CODEX_SECURITY_SETTINGS_URL = "https://chatgpt.com/#settings/Security"
 
 
+def _codex_browser_setup_url(parsed) -> bool:
+    """Accept the native browser flow, never a caller-selected callback destination."""
+
+    try:
+        if parsed.path != "/oauth/authorize" or parsed.fragment or parsed.port not in {None, 443}:
+            return False
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if (query.get("response_type") != ["code"]
+                or query.get("code_challenge_method") != ["S256"]
+                or any(len(query.get(key, [])) != 1 or not query[key][0]
+                       for key in ("client_id", "state", "code_challenge", "redirect_uri"))):
+            return False
+        callback = urlsplit(query["redirect_uri"][0])
+        return (callback.scheme == "http"
+                and callback.hostname in {"127.0.0.1", "localhost", "::1"}
+                and callback.port is not None and 0 < callback.port < 65536
+                and callback.path == "/auth/callback"
+                and not callback.username and not callback.password
+                and not callback.query and not callback.fragment)
+    except ValueError:
+        return False
+
+
 def _provider_setup_guidance(provider: str, output: str) -> dict[str, str | bool]:
     """Extract bounded, clickable guidance without trusting arbitrary CLI output as a URL."""
 
@@ -88,12 +111,20 @@ def _provider_setup_guidance(provider: str, output: str) -> dict[str, str | bool
     setup_url = ""
     for match in _SETUP_URL.finditer(str(output or "")):
         candidate = match.group(0).rstrip(".,;:)")
-        parsed = urlsplit(candidate)
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
         if parsed.scheme != "https" or parsed.username or parsed.password:
             continue
         hostname = str(parsed.hostname or "").lower()
         if normalized_provider in {"codex", "openai"}:
-            if hostname == "auth.openai.com" and parsed.path.rstrip("/") == "/codex/device":
+            try:
+                is_device = (parsed.path.rstrip("/") == "/codex/device"
+                             and not parsed.fragment and parsed.port in {None, 443})
+            except ValueError:
+                is_device = False
+            if hostname == "auth.openai.com" and (is_device or _codex_browser_setup_url(parsed)):
                 setup_url = candidate
                 break
         elif normalized_provider in {"grok", "xai"}:
@@ -110,7 +141,8 @@ def _provider_setup_guidance(provider: str, output: str) -> dict[str, str | bool
                 break
 
     setup_code = ""
-    if setup_url and normalized_provider in {"codex", "openai"}:
+    if (setup_url and normalized_provider in {"codex", "openai"}
+            and urlsplit(setup_url).path.rstrip("/") == "/codex/device"):
         code_match = _CODEX_DEVICE_CODE.search(str(output or ""))
         if code_match:
             setup_code = code_match.group(1).upper()
@@ -120,13 +152,21 @@ def _provider_setup_guidance(provider: str, output: str) -> dict[str, str | bool
         code_values = parse_qs(urlsplit(setup_url).query).get("code", [])
         input_required = any(str(value).lower() == "true" for value in code_values)
 
+    setup_flow = (
+        "unknown" if not setup_url
+        else "authorization_code" if input_required
+        else "device_code" if canonical_provider == "codex"
+        and urlsplit(setup_url).path.rstrip("/") == "/codex/device"
+        else "browser"
+    )
     return {
         "provider": canonical_provider,
+        "setup_flow": setup_flow,
         "setup_url": setup_url,
         "setup_code": setup_code,
         "help_url": (
             _CODEX_SECURITY_SETTINGS_URL
-            if normalized_provider in {"codex", "openai"}
+            if setup_flow == "device_code" and canonical_provider == "codex"
             else ""
         ),
         "input_required": input_required,
@@ -502,7 +542,8 @@ class ProviderAccountHomeManager:
                 child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
                 os.close(directory_fd)
                 directory_fd = child_fd
-            self._tighten_directory_fd(directory_fd)
+            from .native_plugin_assets import AccountAssets
+            self._tighten_directory_fd(directory_fd, native_assets=AccountAssets(lexical_home))
         except (OSError, ValueError) as exc:
             raise ControlPlaneError(
                 "Provider account home contains unsafe credential state"
@@ -514,7 +555,8 @@ class ProviderAccountHomeManager:
     def _is_codex_arg0_helper(directory_fd: int, name: str, relative: tuple[str, ...], entry) -> bool:
         # Codex creates argv[0] aliases to its executable inside this exact temp subtree.
         # These are executable aliases, never credential files; do not follow or chmod them.
-        if (len(relative) != 4 or relative[:3] != ("codex", "tmp", "arg0")
+        if (len(relative) != 4 or relative[:2] != ("codex", "tmp")
+                or relative[2] not in {"arg0", "arg0-macos"}
                 or not relative[3].startswith("codex-arg0")
                 or not relative[3][len("codex-arg0"):].isalnum()
                 or name not in {"apply_patch", "applypatch", "codex-execve-wrapper", "codex-linux-sandbox"}
@@ -593,7 +635,7 @@ class ProviderAccountHomeManager:
         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         return (current.st_dev, current.st_ino) == (entry.st_dev, entry.st_ino)
 
-    def _tighten_directory_fd(self, directory_fd: int, relative: tuple[str, ...] = ()) -> None:
+    def _tighten_directory_fd(self, directory_fd: int, relative: tuple[str, ...] = (), *, native_assets=None) -> None:
         directory_stat = os.fstat(directory_fd)
         if not stat.S_ISDIR(directory_stat.st_mode) or directory_stat.st_uid != os.geteuid():
             raise ControlPlaneError("Provider account directory ownership is unsafe")
@@ -622,7 +664,7 @@ class ProviderAccountHomeManager:
                     opened = os.fstat(child_fd)
                     if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
                         raise ControlPlaneError("Provider account directory changed during validation")
-                    self._tighten_directory_fd(child_fd, (*relative, name))
+                    self._tighten_directory_fd(child_fd, (*relative, name), native_assets=native_assets)
                 finally:
                     os.close(child_fd)
                 continue
@@ -642,7 +684,13 @@ class ProviderAccountHomeManager:
                 continue
             if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
                 raise ControlPlaneError("Provider account home contains an unsafe file")
-            os.chmod(name, 0o600, dir_fd=directory_fd, follow_symlinks=False)
+            mode = 0o600
+            if native_assets is not None:
+                try:
+                    mode = native_assets.file_mode(directory_fd, name, relative, entry) or mode
+                except (OSError, ValueError) as exc:
+                    raise ControlPlaneError("Native account package assets are unsafe or differ from their canonical source") from exc
+            os.chmod(name, mode, dir_fd=directory_fd, follow_symlinks=False)
             secured = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             if (secured.st_dev, secured.st_ino) != (entry.st_dev, entry.st_ino):
                 raise ControlPlaneError("Provider account file changed during validation")
@@ -751,7 +799,28 @@ class ProviderSetupManager:
     def _commands(self, provider: str, *, contained: bool = False) -> tuple[list[str], list[str]]:
         binary = self._binary(provider)
         if provider in {"codex", "openai"}:
-            return [binary, "login", "--device-auth"], [binary, "login", "status"]
+            # The native localhost callback works on the explicit single-user host.
+            # Other deployments retain the existing headless/device-code flow.
+            try:
+                public_url = urlsplit(str(os.environ.get("GLASSHIVE_PUBLIC_BASE_URL") or ""))
+            except ValueError:
+                public_url = urlsplit("")
+            homes = getattr(self, "homes", None)
+            local_browser = (
+                not contained and getattr(homes, "native_launcher", None) is None
+                and getattr(homes, "owner_root_resolver", None) is None
+                and os.environ.get("GLASSHIVE_SECURITY_MODE", "").lower() == "local"
+                and os.environ.get("GLASSHIVE_AUTH_MODE", "").lower() == "local"
+                and os.environ.get("WPR_DEFAULT_EXECUTION_MODE", "").lower() == "host"
+                and not os.environ.get("XPERFECT_EXECUTION_PROFILE")
+                and not os.environ.get("XPERFECT_STORAGE_ROOT")
+                and os.environ.get("GLASSHIVE_PROVIDER_ACCOUNT_ISOLATION", "").lower() != "per_worker_container"
+                and not any(_env_enabled(name) for name in ("GLASSHIVE_ENTERPRISE_MODE", "WPR_ENTERPRISE_MODE"))
+                and public_url.scheme in {"http", "https"}
+                and public_url.hostname in {"127.0.0.1", "localhost", "::1"}
+                and not public_url.username and not public_url.password
+            )
+            return [binary, "login", *([] if local_browser else ["--device-auth"])], [binary, "login", "status"]
         if provider in {"claude", "anthropic"}:
             return [binary, "auth", "login", "--claudeai"], [binary, "auth", "status", "--json"]
         if provider in {"grok", "xai"}:
@@ -819,7 +888,7 @@ class ProviderSetupManager:
             owner_id=owner_id,
             account_id=account_id,
         )
-        setup_command, _ = self._commands(provider)
+        setup_command, _ = self._commands(provider, contained=self.homes.native_launcher is not None)
         with self._lock:
             current = self._sessions.get(account_id)
             if current is not None and current.process.poll() is None:

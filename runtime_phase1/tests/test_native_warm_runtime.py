@@ -450,3 +450,111 @@ def test_idle_host_pause_only_cleans_its_exact_terminal_session(tmp_path, matchi
     finally:
         service.shutdown()
         store.close()
+
+
+def test_native_exit_between_group_snapshot_and_signal_uses_exact_death_proof(tmp_path, monkeypatch):
+    """macOS rejects killpg on an unreaped zombie-only group with EPERM."""
+    import signal
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'runtime'))
+    process = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                               stdin=subprocess.PIPE, start_new_session=True)
+    unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                 start_new_session=True)
+    child = {'pid': process.pid, 'process_group': process.pid,
+             'process_start_identity': process_start_identity(process.pid)}
+    assert child['process_start_identity'] and not runtime._native_child_proven_gone(child)
+    original_snapshot = runtime._host_escaped_descendants
+    remembered = []
+    signal_results = []
+    original_killpg = os.killpg
+
+    def exit_after_snapshot(members, group):
+        escaped = original_snapshot(members, group)
+        assert group == process.pid and process.pid in members and escaped == {}
+        process.stdin.close()
+        # Do not reap the actual child: this is the native holder's racing exit.
+        wait_for(lambda: runtime._pid_is_zombie(process.pid))
+        return escaped
+
+    def observe_signal(group, sig):
+        try:
+            result = original_killpg(group, sig)
+        except OSError as exc:
+            if sig == signal.SIGTERM:
+                signal_results.append(exc.errno)
+            raise
+        if sig == signal.SIGTERM:
+            signal_results.append(None)
+        return result
+
+    monkeypatch.setattr(runtime, '_host_escaped_descendants', exit_after_snapshot)
+    monkeypatch.setattr(os, 'killpg', observe_signal)
+    try:
+        assert runtime._signal_recorded_native_child(child, signal.SIGTERM, remember=remembered.append)
+        assert remembered == [{}] and len(signal_results) == 1
+        assert runtime._native_child_proven_gone(child)
+        assert unrelated.poll() is None, 'A different process group must remain alive'
+    finally:
+        process.wait(timeout=3)
+        unrelated.terminate()
+        unrelated.wait(timeout=3)
+
+
+@pytest.mark.parametrize('proof', ['live', 'group-survivor', 'unknown-group'])
+def test_native_signal_denial_cannot_confirm_live_or_unknown_generation(tmp_path, monkeypatch, proof):
+    import signal
+    runtime = HostGrokBuildRuntime(str(tmp_path / 'runtime'))
+    member_file = tmp_path / 'member.pid'
+    script = 'import sys; sys.stdin.read()'
+    if proof == 'group-survivor':
+        script = ('import pathlib,subprocess,sys; '
+                  'member=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                  'pathlib.Path(sys.argv[1]).write_text(str(member.pid)); sys.stdin.read()')
+    process = subprocess.Popen([sys.executable, '-c', script, str(member_file)],
+                               stdin=subprocess.PIPE, start_new_session=True)
+    member = None
+    if proof == 'group-survivor':
+        wait_for(member_file.exists)
+        member = int(member_file.read_text())
+        assert os.getpgid(member) == process.pid
+    child = {'pid': process.pid, 'process_group': process.pid,
+             'process_start_identity': process_start_identity(process.pid)}
+    original_killpg = os.killpg
+    original_members = runtime._host_process_group_members
+    original_snapshot = runtime._host_escaped_descendants
+    attempted = []
+
+    def deny_signal(group, sig):
+        if sig != 0:
+            assert group == process.pid
+            attempted.append(sig)
+            raise PermissionError('Synthetic denied exact native signal')
+        return original_killpg(group, sig)
+
+    def exit_after_snapshot(members, group):
+        escaped = original_snapshot(members, group)
+        assert process.pid in members and escaped == {}
+        if proof != 'live':
+            process.stdin.close()
+            wait_for(lambda: runtime._pid_is_zombie(process.pid))
+        return escaped
+
+    monkeypatch.setattr(os, 'killpg', deny_signal)
+    monkeypatch.setattr(runtime, '_host_escaped_descendants', exit_after_snapshot)
+    if proof == 'unknown-group':
+        monkeypatch.setattr(runtime, '_host_process_group_members',
+                            lambda group: None if attempted else original_members(group))
+    try:
+        assert runtime._signal_recorded_native_child(child, signal.SIGTERM, remember=lambda found: None) is False
+        assert attempted == [signal.SIGTERM]
+        if proof == 'live':
+            assert process.poll() is None
+        elif member:
+            assert runtime._pid_is_live(member) and not runtime._pid_is_zombie(member)
+    finally:
+        if proof == 'live':
+            process.stdin.close()
+        process.wait(timeout=3)
+        if member:
+            os.kill(member, signal.SIGTERM)
+            wait_for(lambda: runtime._recorded_pid_is_proven_gone(member))

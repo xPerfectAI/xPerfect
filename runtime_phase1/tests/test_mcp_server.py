@@ -7860,6 +7860,119 @@ def test_file_only_delegation_packet_preserves_strict_source_equality(mutation):
         mcp_server._trusted_triggering_source_block(bundle)
 
 
+@pytest.mark.parametrize("instruction_kind", ["exact-clause", "multiple-inputs", "model-brief"])
+def test_delegation_packet_explicit_assignment_keeps_original_source_role(monkeypatch, instruction_kind):
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {
+        "X-Viventium-Tenant-Id": "local", "X-Viventium-User-Id": "synthetic-owner",
+    })
+    monkeypatch.setattr(mcp_server, "_owner_recent_upload_entries", lambda **_: [])
+    instruction = "Open the public reference page and report its heading."
+    original = "Update the sample files. " + instruction
+    originals = [original]
+    if instruction_kind == "multiple-inputs":
+        originals = ["Open the public reference page.", "Report its heading and keep the tab open."]
+        instruction = "\n\n".join(originals)
+    elif instruction_kind == "model-brief":
+        instruction = "Complete the browser check and revise the sample deliverables."
+    sources = [{"ordinal": index, "source_event_id": f"synthetic-source-{index}",
+                "source_index": 0, "text": text} for index, text in enumerate(originals)]
+    bundle = {
+        "viventium_delegation_identity": {"source_event_id": "synthetic-source-0"},
+        "viventium_delegation_context": {
+            "version": 1, "source_event_id": "synthetic-source-0",
+            "triggering_source_segments": sources,
+        },
+        "viventium_delegation_packet": {
+            "version": 1,
+            "task": {"instruction": instruction, "source_segments": [
+                {"ordinal": index, "text": text} for index, text in enumerate(originals)]},
+            "explicit_constraints": [], "selected_files": [],
+        },
+        "viventium_feelings_projection": {
+            "version": 1, "enabled": False, "scope": "unknown", "expected_capsule_count": 0,
+            "canonical_instruction_field": "agents_md", "snapshot_sha256": "",
+        },
+    }
+
+    class AtomicApi(TrackingApiClient):
+        def __init__(self):
+            super().__init__()
+            self.delegations = []
+
+        def create_delegation(self, **kwargs):
+            self.delegations.append(kwargs)
+            return {"workRef": "synthetic-work", "state": "queued", "viewRef": "/r/synthetic",
+                    "resourceClass": "standard", "idempotentReplay": False}
+
+    api = AtomicApi()
+    server = create_mcp_server(api_client=api)
+    inherited = {"version": 1, "conversation_id": "synthetic-conversation",
+                 "assigned_source_ordinals": list(range(1, len(originals) + 1)),
+                 "sources": [{"id": f"original-{index}", "role": "user", "text": text,
+                              "current_input": True, "source_ordinals": [index + 1],
+                              "assigned_input": True} for index, text in enumerate(originals)]}
+    wire = json.dumps(inherited, separators=(",", ":"))
+    args = {"title": "Reference page", "instruction": instruction, "profile": "codex-cli",
+            "execution_mode": "docker", "bootstrap_bundle_json": bundle}
+    secret = "synthetic-delegation-key"
+    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET", secret)
+    goal_digest = hashlib.sha256(instruction.encode()).hexdigest()
+    call_digest = hashlib.sha256(b"synthetic-clause-call").hexdigest()
+    identity = {
+        "version": 2, "source_event_id": "synthetic-source-0", "objective_ordinal": 0,
+        "goal_digest": goal_digest, "call_identity_digest": call_digest,
+        "launch_payload_digest": _launch_payload_digest({
+            **args, "inherited_conversation_sha256": hashlib.sha256(wire.encode()).hexdigest(),
+        }),
+        "idempotency_key": hashlib.sha256(
+            f"local\0synthetic-owner\0synthetic-source-0\0call:{call_digest}\0{goal_digest}".encode(),
+        ).hexdigest(),
+    }
+    bundle["viventium_delegation_identity"] = identity
+    bundle["viventium_delegation_assertion"] = _scoped_delegation_identity_assertion(
+        identity, secret, tenant_id="local", owner_id="synthetic-owner",
+    )
+    bundle["inherited_conversation"] = wire
+
+    async def scenario():
+        async with Client(server) as client:
+            result = _tool_json(await client.call_tool("worker_delegate_once", args))
+            assert result["status"] == "dispatched"
+
+    asyncio.run(scenario())
+    actual = api.delegations[0]["payload"]
+    projected = actual["bootstrapBundle"]
+    assert projected["viventium_delegation_context"] == bundle["viventium_delegation_context"]
+    assert projected["viventium_delegation_packet"] == bundle["viventium_delegation_packet"]
+    assert projected["inherited_conversation"] == inherited
+    for rendered in [actual["instruction"], projected["project_definition"]]:
+        assert f"Task:\n{instruction}" in rendered
+        if instruction_kind == "model-brief":
+            assert "Selected user task segments:" in rendered
+            assert "SOURCE EVIDENCE" not in rendered
+            marker = "USER TASK SEGMENT"
+        else:
+            assert "Selected source evidence (context only):" in rendered
+            assert "The Task above is the assigned work." in rendered
+            assert "USER TASK SEGMENT" not in rendered
+            marker = "SOURCE EVIDENCE"
+        for index, text in enumerate(originals):
+            assert f"--- BEGIN {marker} {index} ---\n{text}" in rendered
+
+
+def test_delegation_packet_without_explicit_instruction_retains_source_task_fallback():
+    block = mcp_server._delegation_packet_block({
+        "viventium_delegation_packet": {
+            "version": 1, "task": {"source_segments": [{"ordinal": 0, "text": "Original whole task."}]},
+            "explicit_constraints": [], "selected_files": [],
+        },
+    }, [(0, "Original whole task.", False, "")])
+    assert "Selected user task segments:" in block
+    assert "--- BEGIN USER TASK SEGMENT 0 ---\nOriginal whole task." in block
+    assert "context only" not in block
+
+
 @pytest.mark.parametrize("as_json", [False, True])
 def test_public_bootstrap_drops_claimed_inherited_conversation(as_json):
     value={"project_definition":"Own task", "inherited_conversation":{

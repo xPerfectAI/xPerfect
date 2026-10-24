@@ -18,9 +18,10 @@ def test_launch_binds_exact_uploads_before_admitting_run(destination):
         operations.append(("bind", path, payload))
         return original_files(method, path, payload)
 
-    def assign(worker_id, instruction):
+    def assign(worker_id, instruction, *, idempotency_key=None):
         operations.append(("assign", worker_id))
-        return original_assign(worker_id, instruction)
+        assert idempotency_key == "repeatable-launch"
+        return original_assign(worker_id, instruction, idempotency_key=idempotency_key)
 
     runtime.file_request = files
     runtime.assign_run = assign
@@ -44,8 +45,10 @@ def test_launch_binds_exact_uploads_before_admitting_run(destination):
     if response.json()["status"] != "action_required":
         assert operations[1][0] == "assign"
         instruction = runtime.assign_requests[0]["instruction"]
-        assert "Success Criteria:\nMatch both accepted file versions" in instruction
-        assert "Context:\nBackground supplied by the owner" in instruction
+        assert instruction == (
+            "Use the files\n\nSuccess criteria:\nMatch both accepted file versions"
+            "\n\nBackground:\nBackground supplied by the owner"
+        )
 
 
 def test_schedule_carries_upload_ids_without_mutating_current_workspace():
@@ -65,8 +68,10 @@ def test_schedule_carries_upload_ids_without_mutating_current_workspace():
     assert response.status_code == 200, response.text
     assert runtime.schedule_requests[0]["file_upload_ids"] == ["fil_one", "fil_two"]
     assert runtime.schedule_requests[0]["file_upload_revisions"] == ["rev_one", "rev_two"]
-    assert "Success Criteria:\nCheck each accepted revision" in runtime.schedule_requests[0]["instruction"]
-    assert "Context:\nBackground for the scheduled work" in runtime.schedule_requests[0]["instruction"]
+    assert runtime.schedule_requests[0]["instruction"] == (
+        "Use these accepted versions\n\nSuccess criteria:\nCheck each accepted revision"
+        "\n\nBackground:\nBackground for the scheduled work"
+    )
     assert runtime.file_upload_requests == []
     assert runtime.assign_requests == []
 
@@ -143,9 +148,7 @@ def test_goal_only_launch_uses_configured_route_without_invented_criteria(monkey
     result = client.post("/api/launch", json={"description": "Summarize the supplied report"})
     assert result.status_code == 200, result.text
     instruction = runtime.assign_requests[-1]["instruction"]
-    assert "Summarize the supplied report" in instruction
-    assert "Success Criteria:" not in instruction
-    assert "Context:" not in instruction
+    assert instruction == "Summarize the supplied report"
     assert runtime.create_worker_requests[-1]["profile"] == "claude-code"
 
 

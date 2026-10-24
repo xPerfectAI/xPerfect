@@ -68,6 +68,11 @@ Record visible choices, required inputs, clicks, confusing wording, and before/a
 Check supported small screens, themes, keyboard/focus, and accessibility. Source, tests, and reviewer
 opinions support this evidence; none replaces using and visually evaluating the delivered product.
 The [operator UI contract](07_Minimal_Unified_Operator_UI.md) owns the concrete interaction cases.
+Its job-first form distinguishes the requested work and optional outcome from the onboarding
+material, named worker, worker type, account and workspace. Existing workers can be reused, or a
+safe copy can seed a new worker. Reuse keeps the exact identity; a copy does not imply a native
+conversation/session fork. Required Knowledge uses the existing background, file, native setup
+and approved Library mechanisms; it is not another catalog or orchestration layer.
 
 ## Completion evidence boundary
 
@@ -77,9 +82,11 @@ or corrupt/foreign evidence remains a failed result. These checks do not replace
 workspace, capability or owner controls.
 
 A shared workspace (including a host worker's existing native directory) is not owned by
-one run. Its document inventory is diagnostic: an unrelated invalid file cannot turn a successful
-native action into failure or discard its result. Reuse the same workspace ownership rule as file
-presentation. Isolated-workspace document validation, explicit typed output requirements, and
+one run. Completion evidence does not scan or attribute its directory contents to that run.
+This reuses the same ownership rule as file presentation and avoids repeated validation of unrelated
+history. Selected native file/media receipts and immutable publication retain their own checks;
+the shared Files view remains available. An unrelated invalid file cannot turn a successful native
+action into failure or discard its result. Isolated-workspace document validation, explicit typed output requirements, and
 validation of selected published files remain enforced. Do not infer authorship from filenames,
 modification times, or the user's request wording.
 
@@ -145,19 +152,25 @@ xPerfect is not:
 ## Terminology
 
 ### Sandbox
+
 A persistent workstation-like execution environment that holds the worker's home directory, workspace, processes, and live control surfaces.
 
 ### Host Computer
+
 A no-sandbox execution mode where the worker uses local CLIs and OS/browser/filesystem access on
 the user's main machine. This mode is intentionally powerful and must be selected explicitly.
 
 ### Worker
-The active AI runtime inside a sandbox or host workspace.
-Examples:
 
-- `codex-cli`
-- `claude-code`
-- `openclaw-general`
+A named, reusable AI runtime identity inside a sandbox or host workspace. Reusing a worker keeps
+its exact project, account, workspace and supported native continuity. Starting a new worker or
+making a safe copy creates a distinct identity.
+
+### Worker type
+
+The registered native harness or direct-model adapter, represented by the existing worker profile.
+Examples include `codex-cli`, `claude-code` and `openclaw-general`. A type is not a saved worker,
+a provider account or a workspace.
 
 The worker profile plus execution mode is the runtime selector. The legacy API field
 `backend=openclaw` may still appear for compatibility, but it must not be presented as the product
@@ -169,10 +182,19 @@ There are three separate OpenClaw concepts that must not be collapsed:
 - `@openclaw` is a mention/activation alias.
 - `openclaw-general` is a worker profile, selected the same way as `codex-cli` or `claude-code`.
 
+### Workspace
+
+The persistent place where work runs and files live. An isolated workspace has one worker; a
+supported shared workspace can have several distinct members. Keep existing owner, project,
+platform and capability admission rules. Do not imply that any saved worker can be moved into any
+workspace, or silently convert isolation to make a form choice succeed.
+
 ### Project
+
 The durable task definition around one or more workers, including goal, success criteria, continuity, and audit trail.
 
 ### Bootstrap Bundle
+
 A portable preset describing what should be projected into a worker when it starts or resumes.
 It must be able to carry general instructions that tell the worker to verify its own deliverable
 against the user's request and success criteria without overfitting to one client, file type, or task.
@@ -223,8 +245,12 @@ When the shared workspace probe, host capacity, or a selected account is briefly
 first use, the saved foreground turn retries automatically with its original identity and a
 bounded delay. A missing or invalid configuration stays blocked with a clear recovery action.
 
-New users start from a single conversation composer using their configured assistant. Route,
-context, tool and admission settings remain advanced controls. UI status must distinguish saved
+New users start from **Run Project**, the first navigation item, to give a goal and use their
+configured defaults. **Chat** is the second item and offers a single message composer with the
+configured assistant. This visible name and order do not change the conversation API or its
+execution contract. Route, context, tool and admission settings remain advanced controls. The
+[operator UI contract](07_Minimal_Unified_Operator_UI.md#shared-appearance-and-navigation) owns the
+shared website-inspired appearance and Light / Auto / Dark controls. UI status must distinguish saved
 intent, waiting work, execution, failure and completion without exposing internal protocol details.
 Grok Build needs one exact native model: a deployment choice wins, otherwise the owner chooses an
 offered installed model in Connections. Missing or unavailable choices fail with a typed setup
@@ -243,7 +269,6 @@ every child project, worker and run. A child project's
 default cannot widen its origin. If a selected origin disappears, new starts stop; the owner can
 still read saved status and results and stop work. Connection readiness and execution placement
 remain separate from permission, and the native binder confirms the actual account at start.
-
 
 When a native Grok session ends with an unanswered current question, the runtime reports that no
 owner response was recorded. Provider completion text does not prove that the owner declined.

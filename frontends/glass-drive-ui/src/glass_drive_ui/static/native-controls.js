@@ -1,13 +1,19 @@
 // Existing authenticated runtime proxy and CSRF-aware fetch helpers own access.
+export function canGuideNativeTurn(state, signed = false) {
+  return !signed && state?.available === true && state.read_only === false
+    && ['interject', 'cancel', 'permission'].some((action) => state.capabilities?.[action] === true);
+}
+
 export function attachNativeControls(container, workerId, { getJson, postJson, onResponseNeeded }) {
   const panel = document.createElement('details');
+  panel.className = 'native-turn-controls';
   const heading = document.createElement('summary');
   heading.textContent = 'Guide or respond';
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
   const requests = document.createElement('div');
   const text = document.createElement('textarea');
-  text.setAttribute('aria-label', 'Message to the active Grok turn');
+  text.setAttribute('aria-label', 'Message to the active turn');
   text.placeholder = 'Add direction to the active turn';
   text.maxLength = 65536;
   const send = button('Send to active turn');
@@ -22,27 +28,61 @@ export function attachNativeControls(container, workerId, { getJson, postJson, o
   let pending = false;
   let requestKey = '';
   let announcedKey = '';
+  let currentTarget = null;
+  let unconfirmedInterject = null;
+  let confirmedRequests = [];
+  let statusReason = '';
+  function showStatus(message, reason) {
+    status.textContent = message;
+    statusReason = reason;
+  }
+  function sameTarget(left, right) {
+    return Boolean(left && right && left.run_id === right.run_id && left.attempt_id === right.attempt_id);
+  }
+  function updateActionAvailability() {
+    const canControl = Boolean(state) && sameTarget(currentTarget, state)
+      && state.available !== false && state.read_only !== true && !pending;
+    send.disabled = !canControl || state.capabilities?.interject !== true
+      || sameTarget(currentTarget, unconfirmedInterject);
+    cancel.disabled = !canControl || state.capabilities?.cancel !== true;
+    for (const section of requests.children) {
+      section.disabled = !canControl || state.capabilities?.permission !== true;
+    }
+  }
   function button(label) {
     const node = document.createElement('button');
-    node.type = 'button'; node.textContent = label; return node;
+    node.type = 'button'; node.className = 'secondary-button compact-button native-control-action';
+    node.textContent = label; return node;
   }
   // Native context can be one long line; wrap it so every offered option stays in view.
   function wrapText(node) {
     node.style.whiteSpace = 'pre-wrap'; node.style.overflowWrap = 'anywhere'; return node;
   }
   async function submit(payload) {
-    if (!state || pending) return;
+    if (!state || pending || !sameTarget(currentTarget, state)
+        || state.available === false || state.read_only === true
+        || state.capabilities?.[payload.action] !== true
+        || (payload.action === 'interject' && sameTarget(currentTarget, unconfirmedInterject))) return;
+    const submittedTarget = { ...currentTarget };
     pending = true;
+    updateActionAvailability();
     try {
-      const result = await postJson(url, { run_id: state.run_id, attempt_id: state.attempt_id, ...payload });
-      status.textContent = result.status === 'queued' ? 'Message queued by Grok.'
+      const result = await postJson(url, { ...submittedTarget, ...payload });
+      if (!sameTarget(currentTarget, submittedTarget)) return;
+      if (result.status === 'pending' && payload.action === 'interject') {
+        unconfirmedInterject = submittedTarget;
+      }
+      if (result.status === 'queued' && payload.action === 'interject' && text.value === payload.text) {
+        text.value = '';
+      }
+      showStatus(result.status === 'queued' ? 'Message queued for the active turn.'
         : result.status === 'cancel_requested' ? 'Cancellation requested.'
         : result.status === 'permission_submitted' ? 'Response submitted.'
         : result.status === 'pending' ? 'Awaiting native receipt. Do not send again.'
-        : result.error || result.status || 'Native control returned no status.';
-      requestKey = '';
-    } catch (error) { status.textContent = error.message; }
-    finally { pending = false; }
+        : result.error || result.status || 'Native control returned no status.', 'action');
+    } catch (error) {
+      if (sameTarget(currentTarget, submittedTarget)) showStatus(error.message, 'action');
+    } finally { pending = false; updateActionAvailability(); }
   }
   send.addEventListener('click', () => { if (text.value.trim()) submit({ action: 'interject', text: text.value }); });
   cancel.addEventListener('click', () => submit({ action: 'cancel' }));
@@ -53,7 +93,7 @@ export function attachNativeControls(container, workerId, { getJson, postJson, o
     title.style.overflowWrap = 'anywhere';
     const params = item.request || {};
     const method = String(item.method || '').replace(/^_/, '');
-    title.textContent = params.toolCall?.title || params.message || 'Grok needs your response';
+    title.textContent = params.toolCall?.title || params.message || 'The worker needs your response';
     section.append(title);
     if (Number.isFinite(item.expires_at)) {
       const deadline = document.createElement('p');
@@ -159,42 +199,75 @@ export function attachNativeControls(container, workerId, { getJson, postJson, o
 
   function renderState(next, { reveal = false } = {}) {
     state = next && typeof next === 'object' ? next : null;
-    const pendingRequests = Array.isArray(state?.pending_requests)
-      ? state.pending_requests.filter((item) => item && typeof item === 'object')
-      : [];
-    const canControl = Boolean(state) && state.available !== false && state.read_only !== true;
-    send.disabled = !canControl;
-    cancel.disabled = !canControl;
-    const nextKey = JSON.stringify(pendingRequests.map((item) => String(item.request_id || '')));
-    if (nextKey !== requestKey) {
-      requests.replaceChildren(...pendingRequests.map(showRequest));
+    // The live API uses null only when there is no active native turn.
+    if (next === null) {
+      currentTarget = null;
+      unconfirmedInterject = null;
+      confirmedRequests = [];
+      requestKey = '';
+      announcedKey = '';
+      requests.replaceChildren();
+      showStatus('', '');
+      heading.textContent = 'Guide or respond';
+      if (parentHeading) parentHeading.textContent = parentHeadingText;
+      updateActionAvailability();
+      onResponseNeeded?.({ waiting: false, isNew: false });
+      return;
+    }
+    let targetChanged = false;
+    // Missing-ID/unavailable objects do not prove that a request or its answer ended.
+    if (typeof state?.run_id === 'string' && state.run_id
+        && typeof state?.attempt_id === 'string' && state.attempt_id) {
+      if (!sameTarget(currentTarget, state)) {
+        currentTarget = { run_id: state.run_id, attempt_id: state.attempt_id };
+        unconfirmedInterject = null;
+        targetChanged = true;
+        showStatus('', '');
+      }
+    }
+    const hasSnapshot = Boolean(state) && sameTarget(currentTarget, state) && state.available !== false;
+    if (hasSnapshot) {
+      confirmedRequests = Array.isArray(state.pending_requests)
+        ? state.pending_requests.filter((item) => item && typeof item === 'object')
+        : [];
+    } else if (targetChanged) {
+      confirmedRequests = [];
+    }
+    const nextKey = JSON.stringify(confirmedRequests.map((item) => String(item.request_id || '')));
+    const requestsChanged = targetChanged || nextKey !== requestKey;
+    if (requestsChanged) {
+      requests.replaceChildren(...confirmedRequests.map(showRequest));
       requestKey = nextKey;
     }
-    const waiting = pendingRequests.length > 0;
+    updateActionAvailability();
+    const waiting = confirmedRequests.length > 0;
     heading.textContent = waiting ? 'Response needed' : 'Guide or respond';
-    if (waiting) {
-      status.textContent = state.read_only === true
-        ? 'Grok is waiting for a workspace member to respond.'
-        : 'Grok is waiting for your response.';
+    if (!hasSnapshot) {
+      if (currentTarget && !['action', 'unconfirmed'].includes(statusReason)) {
+        showStatus('Native controls are not ready for this turn.', 'availability');
+      }
+    } else if (waiting) {
+      if (requestsChanged || statusReason !== 'action') {
+        showStatus(state.read_only === true
+          ? 'The worker is waiting for a workspace member to respond.'
+          : 'The worker is waiting for your response.', 'request');
+      }
       if (reveal) {
         panel.open = true;
         if (parentPanel) parentPanel.open = true;
       }
-    } else if (state?.available === false) {
-      status.textContent = 'Native controls are not ready for this turn.';
-    } else if (state?.read_only === true) {
-      status.textContent = 'Native controls are available to a workspace member.';
+    } else if (sameTarget(currentTarget, unconfirmedInterject)) {
+      showStatus('Awaiting native receipt. Do not send again.', 'unconfirmed');
+    } else if (state.read_only === true && statusReason !== 'action') {
+      showStatus('Native controls are available to a workspace member.', 'availability');
+    } else if (['availability', 'read', 'request', 'unconfirmed'].includes(statusReason)) {
+      showStatus('', '');
     }
     if (parentHeading) {
       parentHeading.textContent = waiting ? 'More · response needed' : parentHeadingText;
     }
-    if (!state) {
-      requests.replaceChildren();
-      requestKey = '';
-      status.textContent = '';
-    }
     // A host surface may surface each new request set once; it keeps its own layout.
-    const isNew = waiting && nextKey !== announcedKey;
+    const isNew = waiting && (targetChanged || nextKey !== announcedKey);
     announcedKey = waiting ? nextKey : '';
     onResponseNeeded?.({ waiting, isNew });
   }
@@ -205,12 +278,15 @@ export function attachNativeControls(container, workerId, { getJson, postJson, o
 
   async function refresh() {
     // Without a running turn there is no native state to read.
-    if (!state || !panel.open || !panel.isConnected || pending) return;
+    if (!state || state.available === false || !panel.open || !panel.isConnected || pending) return;
+    const requestedTarget = currentTarget;
     try {
-      renderState(await getJson(url));
+      const next = await getJson(url);
+      if (currentTarget === requestedTarget) renderState(next);
     } catch (error) {
+      if (currentTarget !== requestedTarget) return;
       renderState({ available: false });
-      status.textContent = error.message;
+      if (!['action', 'unconfirmed'].includes(statusReason)) showStatus(error.message, 'read');
     }
   }
   panel.addEventListener('toggle', refresh);

@@ -141,6 +141,7 @@ def environment(state: Path, config: dict, instance: str) -> dict:
     # Codex sign-in without hidden setup flags. Private config can opt out.
     env.setdefault("GLASSHIVE_ENABLE_NATIVE_API_KEYS", "1")
     env.setdefault("GLASSHIVE_ENABLE_CODEX_PERSONAL_ACCOUNTS", "1")
+    env.setdefault("WPR_NATIVE_SELF_SCHEDULE_ENABLED", "true")
     ports = config["ports"]
     secret = json.loads((state / "secrets.json").read_text())
     managed = state / "data" / "managed-files"

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from .application_boundary import launch_authority_for
+from . import schedule_targets
+
 import base64
 import binascii
 import json
@@ -1500,6 +1503,9 @@ def _background_consumers_enabled() -> bool:
 
 def _recurring_schedule_owner() -> str:
     load_viventium_runtime_env()
+    neutral_owner = str(os.environ.get("WPR_RECURRING_SCHEDULE_OWNER") or "").strip()
+    if neutral_owner:
+        return canonical_recurrence_owner(neutral_owner)
     configured = str(os.environ.get("GLASSHIVE_RECURRING_SCHEDULE_OWNER") or "").strip().lower()
     viventium_deployment = bool(
         str(os.environ.get("VIVENTIUM_ENV_FILE") or "").strip()
@@ -1872,6 +1878,20 @@ class WorkersProjectsService:
         )
         self._shutdown_event = Event()
         self._scheduler_wake_event = Event()
+        # Same clock and outbox; HTTP capacity cannot be consumed by model runs.
+        from .schedule_webhooks import WebhookTransport, WebhookNetworkPolicy
+        ports = tuple(int(value.strip()) for value in os.environ.get("WPR_WEBHOOK_ALLOWED_PORTS", "443").split(",") if value.strip())
+        networks = tuple(value.strip() for value in os.environ.get("WPR_WEBHOOK_ALLOWED_NETWORKS", "").split(",") if value.strip())
+        self.webhook_destinations = schedule_targets.Destinations(store.db_path.parent)
+        self.schedule_webhook_transport = WebhookTransport(policy=WebhookNetworkPolicy(
+            allow_local_http=_env_truthy("WPR_WEBHOOK_ALLOW_LOCAL_HTTP"),
+            allowed_ports=ports, allowed_networks=networks,
+        ))
+        self._schedule_transport_capacity = _bounded_int_env("WPR_WEBHOOK_TRANSPORT_SLOTS", 4, min_value=1, max_value=32)
+        self.schedule_transport_executor = ThreadPoolExecutor(max_workers=self._schedule_transport_capacity, thread_name_prefix="wpr-webhook")
+        self._schedule_transport_lock = Lock()
+        self._schedule_transport_active = set()
+
         self.run_notifications = RunNotifications()
         self._processors_lock = Lock()
         self._active_processors: set[str] = set()
@@ -2303,6 +2323,8 @@ class WorkersProjectsService:
                 "GlassHive background loops did not stop: "
                 + ", ".join(active_background_threads)
             )
+        self.schedule_transport_executor.shutdown(wait=True, cancel_futures=False)
+        self.schedule_webhook_transport.close()
         self.executor.shutdown(wait=True, cancel_futures=False)
         self.conversation_executor.shutdown(wait=True, cancel_futures=False)
         if native_warm_cleanup_error is not None:
@@ -2333,7 +2355,7 @@ class WorkersProjectsService:
         if not isinstance(callbacks, dict) or not callbacks:
             return {}
         resolved = dict(callbacks)
-        authority = bundle.get("viventium_launch_authority")
+        authority = launch_authority_for(bundle)
         if (
             isinstance(authority, dict)
             and authority.get("version") == 1
@@ -6511,7 +6533,7 @@ class WorkersProjectsService:
         self, worker: dict, *, preflight: bool = True
     ) -> str:
         bundle = self._bootstrap_bundle_for(worker) or {}
-        authority = bundle.get("viventium_launch_authority")
+        authority = launch_authority_for(bundle)
         execution_mode = str(worker.get("execution_mode") or "docker")
         policy_ready = (
             str(bundle.get("execution_policy") or "").strip()
@@ -7439,7 +7461,7 @@ class WorkersProjectsService:
         }
 
         launch_authority = (
-            bootstrap_bundle.get("viventium_launch_authority")
+            launch_authority_for(bootstrap_bundle)
             if isinstance(bootstrap_bundle, dict)
             else None
         )
@@ -7855,6 +7877,7 @@ class WorkersProjectsService:
             raise RuntimeError("active_work_source_context_invalid") from exc
         if not isinstance(source_context, dict):
             raise RuntimeError("active_work_source_context_invalid")
+        source_context.pop("runtime_bundle", None)
         if not source_context:
             return None, None
         output_contract = source_context.get("output_contract")
@@ -7897,6 +7920,32 @@ class WorkersProjectsService:
             (item["upload_id"], item["revision"], item["sha256"], item["size_bytes"], item["filename"]) for entry, item in zip(manifest, inputs)):
             raise RuntimeErrorBase("active_work_file_input_changed")
         return [{**entry, "source_file_id": item["source_file_id"], "input_kind": item["input_kind"], "media_group_index": item["media_group_index"]} for entry, item in zip(manifest, inputs)]
+
+    def _refresh_active_work_runtime_grant(self, worker: dict, action_record: dict) -> dict:
+        context = self._json_object(action_record.get("source_context_json"))
+        incoming = context.get("runtime_bundle")
+        if incoming is None:
+            return worker
+        from .models import ActiveWorkRuntimeBundle
+        bundle = ActiveWorkRuntimeBundle.model_validate(incoming).model_dump()
+        tenant, owner = str(worker.get("tenant_id") or "local"), str(worker.get("owner_id") or "")
+        if (str(action_record.get("tenant_id") or "local"), str(action_record.get("owner_id") or "")) != (tenant, owner):
+            raise ValueError("active_work_runtime_owner_unconfirmed")
+        grant = bundle["schedule_access"]
+        for item in grant["destinations"]:
+            destination = self.webhook_destinations.get(tenant, owner, item["destination_id"])
+            if not destination or not destination["enabled"]:
+                raise ValueError("active_work_schedule_destination_unavailable")
+        for destination_id in grant["manage_destination_ids"]:
+            if not self.webhook_destinations.get(tenant, owner, destination_id):
+                raise ValueError("active_work_schedule_destination_unavailable")
+        with self._worker_compute_release_lock(worker["worker_id"]):
+            current = self.require_worker(worker["worker_id"])
+            # Replace the complete canonical grant. Never union stale request refs.
+            self._ensure_execution_allowed(current)
+            merged = dict(self._bootstrap_bundle_for(current) or {})
+            merged["schedule_access"] = grant
+            return self.store.update_worker(current["worker_id"], bootstrap_bundle_json=json.dumps(merged)) or current
 
     def execute_active_work_action(
         self,
@@ -7957,6 +8006,7 @@ class WorkersProjectsService:
             method = getattr(self.runtime, "respond_native_input", None)
             if not callable(method):
                 raise RuntimeError("native_input_unavailable")
+            worker = self._refresh_active_work_runtime_grant(worker, action_record)
             prior_response = self._json_object(action_record.get("response_json"))
             prior_pending = (prior_response.get("status") == "pending"
                              and prior_response.get("confirmationPending") is True)
@@ -8036,6 +8086,9 @@ class WorkersProjectsService:
             or str(action_record.get("owner_id") or "") != str(worker.get("owner_id") or "")
         ):
             raise RuntimeErrorBase("inherited_context_owner_unconfirmed")
+
+        if action in {"queue", "message", "steer", "retry", "resume"}:
+            worker = self._refresh_active_work_runtime_grant(worker, action_record)
 
         if action in {"queue", "message", "steer"}:
             clean_instruction = str(instruction or "").strip()
@@ -9493,9 +9546,7 @@ class WorkersProjectsService:
                 expected_runtime = self._initial_runtime_label(
                     profile, execution_mode
                 )
-                expected_authority = expected_bundle.get(
-                    "viventium_launch_authority"
-                )
+                expected_authority = launch_authority_for(expected_bundle)
                 fallback_profile = (
                     str(expected_authority.get("fallback_worker_profile") or "")
                     .strip()
@@ -9553,7 +9604,7 @@ class WorkersProjectsService:
                         and candidate_bundle.get("execution_policy")
                         == expected_bundle.get("execution_policy")
                         == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
-                        and candidate_bundle.get("viventium_launch_authority")
+                        and launch_authority_for(candidate_bundle)
                         == expected_authority
                         and env_matches
                         and "glasshive_capability_authorization"
@@ -9990,16 +10041,39 @@ class WorkersProjectsService:
                 return deactivated
         raise RuntimeError("Delegated workspace schedule cleanup did not converge")
 
+    def create_webhook_destination(self, *, tenant_id, owner_id, **values):
+        return self.webhook_destinations.create(tenant_id or "local", owner_id, **values)
+
+    def list_webhook_destinations(self, *, tenant_id, owner_id):
+        return self.webhook_destinations.list(tenant_id or "local", owner_id)
+
+    def update_webhook_destination(self, destination_id, *, tenant_id, owner_id, **updates):
+        result = self.webhook_destinations.update(tenant_id or "local", owner_id, destination_id, **updates)
+        self._scheduler_wake_event.set()
+        return result
+
+    def create_target_schedule(self, **values):
+        return schedule_targets.create_definition(self, **values)
+
+    def process_pending_schedule_webhooks_once(self):
+        return schedule_targets.dispatch_pending(self)
+
     def list_recurring_schedules(
         self,
         *,
         tenant_id: str,
         owner_id: str,
         worker_id: str | None = None,
+        destination_id: str | None = None,
         include_inactive: bool = False,
         limit: int = 100,
     ) -> list[dict]:
-        if self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
+        if destination_id:
+            schedules = self.store.list_recurring_schedule_definitions_for_owner(
+                tenant_id=tenant_id, owner_id=owner_id, include_inactive=include_inactive,
+                destination_id=destination_id, limit=limit,
+            )
+        elif self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
             result = self._delegated_schedule_call(
                 "list",
                 {
@@ -10029,10 +10103,16 @@ class WorkersProjectsService:
                 limit=limit,
             )
 
+        if not destination_id and self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
+            local = self.store.list_recurring_schedule_definitions_for_owner(tenant_id=tenant_id, owner_id=owner_id, include_inactive=include_inactive, limit=limit)
+            schedules += [item for item in local if item.get("target_explicit") and (not worker_id or item.get("worker_id") == worker_id)]
         enriched: list[dict] = []
         for schedule in schedules:
             item = dict(schedule)
-            if self.recurring_schedule_owner() != DELEGATED_RECURRENCE_OWNER:
+            # Manual runs enrich history but do not consume the saved future clock.
+            item["clock_finished"] = bool(item.get("recurrence_type") == "once" and not item.get("active") and item.get("last_occurrence_at"))
+            webhook = (item.get("target") or {}).get("kind") == "webhook"
+            if webhook or self.recurring_schedule_owner() != DELEGATED_RECURRENCE_OWNER:
                 latest = self.store.list_recurring_schedule_occurrences(
                     str(item.get("definition_id") or ""),
                     tenant_id=tenant_id,
@@ -10042,9 +10122,11 @@ class WorkersProjectsService:
                 if latest:
                     occurrence = latest[0]
                     outcome = str(occurrence.get("outcome") or "").strip()
-                    if outcome in {"", "pending", "manual_pending"}:
+                    if webhook or occurrence.get("state") == "unacknowledged" or outcome in {"", "pending", "manual_pending"}:
                         outcome = str(occurrence.get("state") or "pending").strip()
                     item["last_occurrence_at"] = occurrence.get("scheduled_for")
+                    item["last_occurrence_id"] = str(occurrence.get("occurrence_id") or "")
+                    item["last_occurrence_expires_at"] = occurrence.get("delivery_expires_at")
                     item["last_outcome"] = outcome
                     item["last_error"] = str(occurrence.get("last_error") or "")
             scheduled_worker_id = str(item.get("worker_id") or "")
@@ -10065,7 +10147,10 @@ class WorkersProjectsService:
         tenant_id: str,
         owner_id: str,
     ) -> dict | None:
-        if self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
+        local = schedule_targets.local_definition(self.store, definition_id, tenant_id, owner_id)
+        if local:
+            definition = local
+        elif self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
             result = self._delegated_schedule_call(
                 "get",
                 {"definition_id": definition_id},
@@ -10082,7 +10167,9 @@ class WorkersProjectsService:
         if not definition:
             return None
         enriched = dict(definition)
-        if self.recurring_schedule_owner() != DELEGATED_RECURRENCE_OWNER:
+        enriched["clock_finished"] = bool(definition.get("recurrence_type") == "once" and not definition.get("active") and definition.get("last_occurrence_at"))
+        webhook = (enriched.get("target") or {}).get("kind") == "webhook"
+        if webhook or self.recurring_schedule_owner() != DELEGATED_RECURRENCE_OWNER:
             latest = self.store.list_recurring_schedule_occurrences(
                 definition_id,
                 tenant_id=tenant_id,
@@ -10092,9 +10179,11 @@ class WorkersProjectsService:
             if latest:
                 occurrence = latest[0]
                 outcome = str(occurrence.get("outcome") or "").strip()
-                if outcome in {"", "pending", "manual_pending"}:
+                if webhook or occurrence.get("state") == "unacknowledged" or outcome in {"", "pending", "manual_pending"}:
                     outcome = str(occurrence.get("state") or "pending").strip()
                 enriched["last_occurrence_at"] = occurrence.get("scheduled_for")
+                enriched["last_occurrence_id"] = str(occurrence.get("occurrence_id") or "")
+                enriched["last_occurrence_expires_at"] = occurrence.get("delivery_expires_at")
                 enriched["last_outcome"] = outcome
                 enriched["last_error"] = str(occurrence.get("last_error") or "")
         worker = self.store.get_worker(
@@ -10114,6 +10203,8 @@ class WorkersProjectsService:
         owner_id: str,
         limit: int = 50,
     ) -> list[dict]:
+        if schedule_targets.local_definition(self.store, definition_id, tenant_id, owner_id):
+            return self.store.list_recurring_schedule_occurrences(definition_id, tenant_id=tenant_id, owner_id=owner_id, limit=limit)
         if self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
             result = self._delegated_schedule_call(
                 "occurrences",
@@ -10329,6 +10420,8 @@ class WorkersProjectsService:
         tenant_id: str,
         owner_id: str,
     ) -> dict | None:
+        if schedule_targets.local_definition(self.store, definition_id, tenant_id, owner_id):
+            return schedule_targets.change_definition(self, definition_id, tenant_id, owner_id, {"enabled": False}, retire=False)
         if self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
             result = self._delegated_schedule_call(
                 "deactivate",
@@ -10351,6 +10444,8 @@ class WorkersProjectsService:
         owner_id: str,
         updates: dict[str, object],
     ) -> dict | None:
+        if schedule_targets.local_definition(self.store, definition_id, tenant_id, owner_id):
+            return schedule_targets.change_definition(self, definition_id, tenant_id, owner_id, updates, retire=False)
         if updates.get("enabled") is True:
             self._require_schedule_principal_authority(
                 tenant_id=tenant_id,
@@ -10505,6 +10600,8 @@ class WorkersProjectsService:
         tenant_id: str,
         owner_id: str,
     ) -> dict | None:
+        if schedule_targets.local_definition(self.store, definition_id, tenant_id, owner_id):
+            return schedule_targets.change_definition(self, definition_id, tenant_id, owner_id, {}, retire=True)
         if self.recurring_schedule_owner() == DELEGATED_RECURRENCE_OWNER:
             result = self._delegated_schedule_call(
                 "retire",
@@ -10527,6 +10624,21 @@ class WorkersProjectsService:
         owner_id: str,
         idempotency_token: str,
     ) -> dict | None:
+        local = schedule_targets.local_definition(self.store, definition_id, tenant_id, owner_id)
+        if local:
+            receipt = schedule_targets.manual_receipt(self.store, local, idempotency_token)
+            if receipt is not None:
+                return {**receipt, "status": "scheduled", "schedule_owner": NATIVE_RECURRENCE_OWNER, "owner_action": "dispatch_here"}
+            self._revalidate_recurring_schedule_fire(local)
+            now = datetime.now(timezone.utc).isoformat()
+            if local["target"]["kind"] == "webhook":
+                result = schedule_targets.materialize_webhook(self.store, local, scheduled_for=now, detected_at=now, next_run_at=local["next_run_at"], manual_key=idempotency_token)
+            else:
+                result = self.store.create_recurring_schedule_run_now(definition_id, tenant_id=tenant_id, owner_id=owner_id, idempotency_token=idempotency_token, scheduled_for=now, require_principal_authority=True)
+            if result is None:
+                return None
+            self._scheduler_wake_event.set()
+            return {**result, "status": "scheduled", "schedule_owner": NATIVE_RECURRENCE_OWNER, "owner_action": "dispatch_here"}
         self._require_schedule_principal_authority(
             tenant_id=tenant_id,
             owner_id=owner_id,
@@ -10731,9 +10843,17 @@ class WorkersProjectsService:
             result["deactivated_delegated_definitions"] = int(
                 delegated.get("deactivated") or 0
             )
+        self._scheduler_wake_event.set()
         return result
 
     def _revalidate_recurring_schedule_fire(self, definition: dict[str, object]) -> dict:
+        if definition.get("target_explicit"):
+            with self.store._connect() as conn:
+                schedule_targets._authority(conn, str(definition.get("tenant_id") or "local"), str(definition.get("owner_id") or ""))
+        if definition.get("target_kind") == "webhook":
+            schedule_targets._target(self, str(definition.get("tenant_id") or "local"), str(definition.get("owner_id") or ""), definition["target"])
+            self._require_schedule_principal_authority(tenant_id=str(definition.get("tenant_id") or "local"), owner_id=str(definition.get("owner_id") or ""), establish=False)
+            return {}
         worker = self.require_worker(str(definition.get("worker_id") or ""))
         return self._revalidate_worker_schedule_fire(
             worker,
@@ -10778,16 +10898,17 @@ class WorkersProjectsService:
         except ValueError as exc:
             logger.error("GlassHive native recurrence is disabled by scheduler ownership configuration: %s", exc)
             return []
-        if owner != NATIVE_RECURRENCE_OWNER:
-            return []
         now_iso = now.astimezone(timezone.utc).isoformat()
         materialized: list[dict[str, object]] = []
         definitions = self.store.list_due_recurring_schedule_definitions(
             now_iso,
             scheduler_owner=recurrence_owner_storage_value(NATIVE_RECURRENCE_OWNER),
             limit=50,
+            include_legacy=owner == NATIVE_RECURRENCE_OWNER,
         )
         for definition in definitions:
+            if owner != NATIVE_RECURRENCE_OWNER and not definition.get("target_explicit"):
+                continue
             try:
                 occurrences, next_occurrence = due_occurrences_and_next(definition, now=now)
             except (TypeError, ValueError, OverflowError) as exc:
@@ -10806,7 +10927,7 @@ class WorkersProjectsService:
                 assert isinstance(occurrence, datetime)
                 state = str(occurrence_decision.get("state") or "pending")
                 outcome = str(occurrence_decision.get("outcome") or "pending")
-                if state == "pending" and overlap == "skip":
+                if state == "pending" and overlap == "skip" and definition.get("target_kind") != "webhook":
                     worker_id = str(definition.get("worker_id") or "")
                     if self.store.get_active_run(worker_id) or self.store.has_queued_runs(worker_id):
                         state, outcome = "skipped", "overlap_skipped"
@@ -10829,17 +10950,21 @@ class WorkersProjectsService:
                     detected_at=now,
                 )
                 try:
-                    schedule = self.store.materialize_recurring_schedule_occurrence(
-                        str(definition.get("definition_id") or ""),
-                        expected_next_run_at=expected_next,
-                        scheduled_for=occurrence.isoformat(),
-                        next_run_at=stored_next.isoformat(),
-                        detected_at=now_iso,
-                        dispatch_at=dispatch_at.isoformat(),
-                        occurrence_state=state,
-                        outcome=outcome,
-                        deactivate_after=deactivate_after,
-                    )
+                    if definition.get("target_kind") == "webhook":
+                        schedule = schedule_targets.materialize_webhook(self.store, definition, scheduled_for=occurrence.isoformat(), detected_at=now_iso, next_run_at=stored_next.isoformat(), dispatch_at=dispatch_at.isoformat(), state=state, outcome=outcome, deactivate=deactivate_after)
+                        definition = {**definition, "next_run_at": stored_next.isoformat()}
+                    else:
+                        schedule = self.store.materialize_recurring_schedule_occurrence(
+                            str(definition.get("definition_id") or ""),
+                            expected_next_run_at=expected_next,
+                            scheduled_for=occurrence.isoformat(),
+                            next_run_at=stored_next.isoformat(),
+                            detected_at=now_iso,
+                            dispatch_at=dispatch_at.isoformat(),
+                            occurrence_state=state,
+                            outcome=outcome,
+                            deactivate_after=deactivate_after,
+                        )
                 except WorkerClosedStoreError:
                     break
                 if schedule:
@@ -10847,6 +10972,9 @@ class WorkersProjectsService:
                 expected_next = stored_next.isoformat()
                 if state == "action_required":
                     break
+        if len(definitions) >= 50 and materialized:
+            # Drain a progressing bounded backlog without polling invalid rules.
+            self._scheduler_wake_event.set()
         return materialized
 
     def schedule_run(
@@ -10999,6 +11127,10 @@ class WorkersProjectsService:
         worker_id = str(schedule.get("worker_id") or "").strip()
         if not schedule_id or not worker_id:
             raise ValueError("Scheduled dispatch requires schedule and worker ids")
+        if runtime_bundle is None and str(schedule.get("bootstrap_json") or "{}") != "{}":
+            runtime_bundle = json.loads(str(schedule["bootstrap_json"]))
+            if not isinstance(runtime_bundle, dict):
+                raise ValueError("Scheduled context must be a structured object")
         worker = self.require_worker(worker_id)
         self._revalidate_worker_schedule_fire(
             worker,
@@ -12435,7 +12567,9 @@ class WorkersProjectsService:
     def native_worker_control(self, worker_id: str, *, run_id: str = "", attempt_id: str = "", action: str | None = None, payload: dict | None = None) -> dict:
         # The public caller performs owner authorization; this fence binds every
         # native control to the current durable run and attempt.
-        with self._worker_compute_release_lock(worker_id):
+        lock = (nullcontext() if action is None
+                else self._worker_compute_release_lock(worker_id))
+        with lock:
             worker = self.require_worker(worker_id)
             if action is not None:
                 self._ensure_execution_allowed(worker)
@@ -12444,11 +12578,32 @@ class WorkersProjectsService:
                 raise ValueError("There is no running native turn")
             current_run = str(run.get("run_id") or "")
             current_attempt = str(run.get("active_attempt_id") or "")
-            if not current_attempt or (action is not None and (run_id != current_run or attempt_id != current_attempt)):
+            if (not current_attempt or (action is not None and (run_id != current_run or attempt_id != current_attempt))
+                    or (run_id and run_id != current_run) or (attempt_id and attempt_id != current_attempt)):
                 raise ValueError("Native control targets a stale run attempt")
             runtime_worker = self._runtime_worker_for_run(worker, run)
             if action is None:
-                return self.runtime.native_control_state(runtime_worker, run_id=current_run, attempt_id=current_attempt)
+                state = self.runtime.native_control_state(runtime_worker, run_id=current_run, attempt_id=current_attempt)
+                if not isinstance(state, dict):
+                    raise ValueError("Native control state is unavailable")
+                if state.get("run_id") != current_run or state.get("attempt_id") != current_attempt:
+                    raise ValueError("Native control state is stale")
+                capabilities = state.get("capabilities")
+                if "capabilities" not in state:
+                    # Retain the existing contract for external adapters that
+                    # have not yet added a verified capability snapshot.
+                    supports = getattr(self.runtime, "supports_native_control", None)
+                    capabilities = {name: callable(supports) and supports(runtime_worker, name,
+                        run_id=current_run, attempt_id=current_attempt) is True
+                        for name in ("interject", "cancel", "permission")}
+                if not isinstance(capabilities, dict):
+                    raise ValueError("Native control capabilities are unavailable")
+                latest = self.store.get_active_run(worker_id)
+                if (not latest or latest.get("state") != "running" or latest.get("run_id") != current_run
+                        or latest.get("active_attempt_id") != current_attempt):
+                    raise ValueError("Native control targets a stale run attempt")
+                return {**state, "capabilities": {name: capabilities.get(name) is True
+                    for name in ("interject", "cancel", "permission")}}
             return self.runtime.native_control(runtime_worker, run_id=current_run, attempt_id=current_attempt, action=action, payload=payload)
 
     def steer_worker(
@@ -14301,9 +14456,42 @@ class WorkersProjectsService:
         active_run = self.store.get_active_run(worker_id)
         if not active_run:
             if worker.get("state") in {"starting", "running"}:
-                info = self.runtime.reconcile_worker(worker)
-                state = "ready" if info.pid else "paused"
-                return self._apply_runtime_info(worker_id, info, state=state, last_error=worker.get("last_error") or "") or worker
+                # A visible read can arrive after acceptance but before the queue
+                # claims the run. No PID yet is not a reason to pause accepted work.
+                try:
+                    guard = self._acquire_worker_lifecycle_guard(worker_id, timeout_s=0.0)
+                except RuntimeErrorBase:
+                    return self.store.get_worker(worker_id) or worker
+                try:
+                    current = self.require_worker(worker_id)
+                    if (current.get("state") not in {"starting", "running"}
+                            or current.get("compute_release_token")
+                            or current.get("work_stop_id")
+                            or self.store.has_active_operator_pause(worker_id)
+                            or self._local_processor_owns(worker_id)
+                            or self.store.get_active_run(worker_id)):
+                        return current
+                    updated = None
+                    if not self.store.has_queued_runs(worker_id):
+                        info = self.runtime.reconcile_worker(current)
+                        fields = self._runtime_info_fields(
+                            worker_id, info, last_error=current.get("last_error") or "")
+                        fields["state"] = "ready" if info.pid else "paused"
+                        if not info.pid:
+                            fields["compute_released_at"] = utc_now()
+                        updated = self.store.reconcile_idle_worker_runtime(
+                            worker_id,
+                            expected_updated_at=str(current.get("updated_at") or ""),
+                            expected_last_run_id=str(current.get("last_run_id") or ""),
+                            **fields,
+                        )
+                finally:
+                    guard.release()
+                # Wake only the existing accepted receipt. The processor retains
+                # its normal Pause/Close/authorization/start-generation fences.
+                if self.store.has_queued_runs(worker_id):
+                    self._ensure_worker_processor(worker_id)
+                return updated or self.store.get_worker(worker_id) or current
             return worker
         # A normal authenticated read can call heal_worker while the local queue
         # processor is still writing its exact attempt evidence. Let that
@@ -15130,6 +15318,8 @@ class WorkersProjectsService:
                         if configuration is not None:
                             from .worker_context_mcp import bind_context_projection
                             run_worker = bind_context_projection(configuration, run_worker, run)
+                        from .schedule_mcp import bind_schedule_projection
+                        run_worker = bind_schedule_projection(self, run_worker, run)
                         placement_reader = getattr(self.runtime, "native_workspace_placement", None)
                         if callable(placement_reader):
                             run_worker["_native_context_placement"] = placement_reader(run_worker)
@@ -16195,6 +16385,8 @@ class WorkersProjectsService:
                         if configuration is not None:
                             from .worker_context_mcp import bind_context_projection
                             run_worker = bind_context_projection(configuration, run_worker, run)
+                        from .schedule_mcp import bind_schedule_projection
+                        run_worker = bind_schedule_projection(self, run_worker, run)
                         placement_reader = getattr(self.runtime, "native_workspace_placement", None)
                         if callable(placement_reader):
                             run_worker["_native_context_placement"] = placement_reader(run_worker)
@@ -18845,6 +19037,7 @@ class WorkersProjectsService:
     def _process_scheduler_cycle(self) -> None:
         for phase_name, phase in (
             ("scheduled runs", self.process_due_schedules_once),
+            ("schedule webhook delivery", self.process_pending_schedule_webhooks_once),
             ("queued work status", self.process_queued_work_status_once),
             (
                 "expired lifecycle claims",
@@ -18883,6 +19076,7 @@ class WorkersProjectsService:
             for value in (
                 self.store.next_queued_retry_after(now_iso=now.isoformat()),
                 self.store.next_queue_maintenance_at(now=now.isoformat()),
+                schedule_targets.next_wake(self.store, now.isoformat(), include_legacy=self.recurring_schedule_owner() == NATIVE_RECURRENCE_OWNER),
             )
             if value
         ]
@@ -18940,7 +19134,7 @@ class WorkersProjectsService:
         self, worker: dict
     ) -> dict[str, str] | None:
         bundle = self._bootstrap_bundle_for(worker) or {}
-        authority = bundle.get("viventium_launch_authority")
+        authority = launch_authority_for(bundle)
         if not (
             str(bundle.get("execution_policy") or "").strip()
             == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
@@ -19048,7 +19242,7 @@ class WorkersProjectsService:
                 needs_input=True,
             )
         bundle = self._bootstrap_bundle_for(worker) or {}
-        launch_authority = bundle.get("viventium_launch_authority")
+        launch_authority = launch_authority_for(bundle)
         automatic_clean_room = bool(
             str(bundle.get("execution_policy") or "").strip()
             == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
@@ -19648,17 +19842,34 @@ class WorkersProjectsService:
             min_value=0,
             max_value=1048576,
         ) * 1024**2
-        available_after_reservation = {
-            "childProcesses": max(0, process_limit - child_processes),
-            "threads": max(0, thread_limit - threads),
-            "memoryBytes": max(0, available_memory),
-            "diskBytes": max(0, available_disk),
-        }
         required_headroom = {
             "childProcesses": 1,
             "threads": 1,
             "memoryBytes": memory_headroom,
             "diskBytes": disk_headroom,
+        }
+        probes_healthy = process_probe_ok and memory_probe_ok and disk_probe_ok
+        proven_host_shortage = False
+        host_available: dict[str, int] = {}
+        if not probes_healthy and host_probe_healthy:
+            # An unknown Docker snapshot cannot invalidate a measured host deficit.
+            # Report only the host evidence; placeholder Docker zeros prove no shortage.
+            host_available = {
+                "childProcesses": max(0, process_limit - usage.child_processes),
+                "threads": max(0, thread_limit - usage.threads),
+                "memoryBytes": max(0, usage.available_memory_bytes),
+                "diskBytes": max(0, usage.available_disk_bytes),
+            }
+            proven_host_shortage = any(
+                host_available[key] < required_headroom[key] for key in required_headroom
+            )
+            if proven_host_shortage:
+                prospective_reservation = {key: 0 for key in required_headroom}
+        available_after_reservation = host_available if proven_host_shortage else {
+            "childProcesses": max(0, process_limit - child_processes),
+            "threads": max(0, thread_limit - threads),
+            "memoryBytes": max(0, available_memory),
+            "diskBytes": max(0, available_disk),
         }
         shortage = {
             key: max(0, required_headroom[key] - available_after_reservation[key])
@@ -19683,17 +19894,14 @@ class WorkersProjectsService:
         if docker_probe_error_code:
             snapshot["dockerProbeErrorCode"] = docker_probe_error_code
         error: HostCapacityError | None = None
-        if not (
-            process_probe_ok
-            and memory_probe_ok
-            and disk_probe_ok
-        ):
+        if not probes_healthy and not proven_host_shortage:
             error = HostCapacityError(
                 "Host resource admission is waiting for a healthy resource probe.",
                 capacity_class="resource_probe_unavailable",
             )
         elif (
-            workspace_pressure
+            proven_host_shortage
+            or workspace_pressure
             or child_processes >= process_limit
             or threads >= thread_limit
             or available_memory < memory_headroom
@@ -19729,7 +19937,7 @@ class WorkersProjectsService:
         return error
 
     def _is_native_conversation_delegation(self, worker: dict) -> bool:
-        authority = (self._bootstrap_bundle_for(worker) or {}).get("viventium_launch_authority")
+        authority = launch_authority_for(self._bootstrap_bundle_for(worker) or {})
         if (
             not isinstance(authority, dict)
             or authority.get("version") != 1
@@ -21371,7 +21579,7 @@ class WorkersProjectsService:
         from .conversation_provider import GLASSHIVE_MODELS, _configured_grok_conversation_model
 
         result = dict(bundle or {})
-        authority = result.get("viventium_launch_authority") or {}
+        authority = launch_authority_for(result) or {}
         prefix = "fallback_worker" if fallback else "worker"
         model_id = authority.get(f"{prefix}_model")
         effort = authority.get(f"{prefix}_reasoning_effort")

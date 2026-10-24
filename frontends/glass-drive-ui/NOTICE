@@ -16,3 +16,16 @@ The conversation renderer bundle also contains mdurl 2.1.0 (MIT), entities 8.0.0
 helpers (MIT). Their licenses are included in the same vendor directory as
 mdurl-LICENSE, entities-LICENSE, oxc-project-runtime-LICENSE, and
 rolldown-LICENSE. The bundled xterm.js 5.5.0 license is in vendor/xterm-5.5.0/LICENSE.
+
+Provider marks identify the corresponding supported services only; no endorsement is implied.
+Official assets retrieved 2026-10-23, unmodified:
+- OpenAI Blossom (provider-codex.svg): https://openai.com/brand/
+  Asset: https://images.ctfassets.net/kftzwdyauwt9/3hUGLn3ypllZ0oa01qOYVq/28e8188e6f11b84c3e876569d492734f/Blossom_Light.svg
+- Claude icon (provider-claude.png): https://claude.ai/
+  Asset: https://assets-proxy.anthropic.com/claude-ai/v2/assets/v1/c129d018a-0ZbJsTbu.png
+  Guidelines: https://www.anthropic.com/legal/trademark-guidelines
+- Grok logomark (provider-grok.svg):
+  https://data.x.ai/logos/SpaceXAI_Grok_Assets.zip
+  Guidelines: https://x.ai/legal/brand-guidelines
+These marks remain the property of their respective owners; the project's Apache license
+neither grants trademark rights nor replaces their usage terms.

@@ -71,7 +71,6 @@ all configured primary and fallback routes. This catalog limit does not override
 valid native session observation, an explicit operator cap, or the hard ceiling. Final native
 admission remains authoritative; inputs beyond capacity fail with 413 instead of truncation.
 
-
 ### Private structured response courier
 
 A trusted host may declare `response_contract` in the existing signed zero-tool bootstrap
@@ -173,6 +172,9 @@ wait. A second target must not start a fresh grace period for a signal already s
 process-exit grace periods, not an API response-time guarantee: identity checks and recorded
 native-child cleanup still run, and unknown death retains the existing fence. Steer still waits
 for confirmed interruption before it reports the replacement as queued.
+A native process can exit between the ownership snapshot and the signal. A signal error alone
+is never success: the existing exact-incarnation death and empty-live-group proof must still pass.
+This includes an exited, unreaped native holder whose zombie-only group rejects a signal.
 The existing opt-in native timing log records `host_control_signal`, `host_control_wait` (TERM
 and KILL separately) and `host_control_child_cleanup`, with a hashed run identity and death-proof
 booleans. These stages separate time spent proving a stop from native answer generation; they do
@@ -218,6 +220,13 @@ transaction and ownership fences before correction. Signed links reuse a fresh s
 before expiry cleanup, avoiding a write on valid reuse. Expired references and tokens keep the
 normal cleanup and creation path; authorization and revocation checks remain unchanged.
 
+A queued receipt remains accepted work before a native process exists. Authenticated workspace
+reads must not change a starting worker to paused merely because it has no PID yet. Idle-process
+healing takes the existing lifecycle guard without waiting, rechecks current work and Pause intent,
+and wakes the existing accepted queue. Its idle runtime update uses an exact worker-generation
+compare-and-set and refuses any nonterminal run. Explicit Pause, Stop, Close and authorization
+boundaries remain authoritative; healing creates no replacement instruction or receipt.
+
 Conversation capacity refusals default to a one-second `Retry-After`, the smallest valid HTTP delay.
 The same trusted lane reaches durable reservation and retry backoff; bounded jitter is unchanged.
 Mission and delegation retry keep their five-second default. Existing explicit host-busy or general
@@ -259,12 +268,12 @@ reporting must not silently remove that evidence from resumed work.
 
 These are different forms of reuse:
 
-| Reused state | What it saves | What it does not prove |
-| --- | --- | --- |
-| Worker workspace or running container | Recreating files and the execution environment | An initialized native agent process |
-| Saved native conversation session | Losing or reconstructing the conversation history | A running process or cached provider context |
-| Initialized idle native process | Starting and initializing that process on the next turn | Authenticated session, current tools, model inference or speech readiness |
-| Provider prompt cache | Some repeated model input processing, when the provider confirms a cache hit | Process readiness or free history transfer |
+| Reused state                          | What it saves                                                                | What it does not prove                                                    |
+| ------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Worker workspace or running container | Recreating files and the execution environment                               | An initialized native agent process                                       |
+| Saved native conversation session     | Losing or reconstructing the conversation history                            | A running process or cached provider context                              |
+| Initialized idle native process       | Starting and initializing that process on the next turn                      | Authenticated session, current tools, model inference or speech readiness |
+| Provider prompt cache                 | Some repeated model input processing, when the provider confirms a cache hit | Process readiness or free history transfer                                |
 
 Current host Codex, Grok and Claude conversation adapters start a native process for each turn,
 then prove that turn's native process stopped. They retain the exact session ID and history for
@@ -289,20 +298,21 @@ is paused, or its current account is unavailable. Saved positive values then res
 starting and leased counts. No agent or model work runs just to fill the idle count.
 
 The count accepts 0–8 idle servers per worker; expiry accepts 10–3600 seconds, default 120.
+An MCP configuration update that omits `performance` preserves its saved values. An explicit
+`native_warm_servers: 0` still disables preparation; omission does not enable it or reset it.
 The host runtime bounds all preparing, idle, leased and unconfirmed processes to 16 total and
 8 per owner. Normal worker concurrency limits still apply. An expired idle target stays stopped
 until a subsequent save or admitted turn refreshes it. Normally one idle server per persistent
 worker is sufficient. More idle servers consume memory; they do not create more workers.
 
-| Runtime/account path | Idle native server support |
-| --- | --- |
-| Host Grok, static current native account or worker key | Supported |
-| Grok named account with per-attempt projection | Unavailable; normal native startup remains available |
-| Direct OpenAI, Anthropic or xAI, host | Import-only SDK process; account is unbound until the admitted run |
-| Host Codex, current native file account and supported app-server schema | Initialized native stdio; fresh thread authority binds after lease |
-| Codex named account, startup-only override or unsupported environment binding | Unavailable; exact normal startup remains available |
-| Claude or container | No adapter; normal native startup remains available |
-
+| Runtime/account path                                                          | Idle native server support                                         |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Host Grok, static current native account or worker key                        | Supported                                                          |
+| Grok named account with per-attempt projection                                | Unavailable; normal native startup remains available               |
+| Direct OpenAI, Anthropic or xAI, host                                         | Import-only SDK process; account is unbound until the admitted run |
+| Host Codex, current native file account and supported app-server schema       | Initialized native stdio; fresh thread authority binds after lease |
+| Codex named account, startup-only override or unsupported environment binding | Unavailable; exact normal startup remains available                |
+| Claude or container                                                           | No adapter; normal native startup remains available                |
 
 Codex prepares the selected executable with its existing authenticated native account and
 `initialize` only. It performs no model request or MCP connection while idle; native account
@@ -350,13 +360,13 @@ change the footprint. Size the configured count to available memory; no model we
 
 A separate local isolated, empty-home, no-inference experiment measured:
 
-| Work measured | Samples | Duration |
-| --- | --- | --- |
-| Codex process creation through initialize acknowledgement | 3 | 56.5–85.6 ms |
-| Already initialized Codex local `thread/list` request | 12 | 0.39–0.89 ms |
-| Grok stdio process creation through initialize acknowledgement | 3 | 352.0–446.5 ms |
-| Connect to an already prepared native Grok server | 3 | 0.65–0.73 ms |
-| Grok native initialize acknowledgement after that connection | 3 | 104.5–110.5 ms |
+| Work measured                                                  | Samples | Duration       |
+| -------------------------------------------------------------- | ------- | -------------- |
+| Codex process creation through initialize acknowledgement      | 3       | 56.5–85.6 ms   |
+| Already initialized Codex local `thread/list` request          | 12      | 0.39–0.89 ms   |
+| Grok stdio process creation through initialize acknowledgement | 3       | 352.0–446.5 ms |
+| Connect to an already prepared native Grok server              | 3       | 0.65–0.73 ms   |
+| Grok native initialize acknowledgement after that connection   | 3       | 104.5–110.5 ms |
 
 Two real idle Grok processes became ready in 819.5 ms total with durable launch records and
 listener ownership checks. Each used about 62 MiB of resident memory in an empty private home.
@@ -411,7 +421,6 @@ Primary sources: [Codex app-server lifecycle](https://learn.chatgpt.com/docs/app
 [Grok reconnect behavior](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/agent/server.rs),
 and [Claude continuous SDK connection](https://code.claude.com/docs/en/agent-sdk/python).
 
-
 ## 3. Execution Substrate
 
 Current phase-1 substrate:
@@ -465,6 +474,10 @@ This shape preserves the important separation:
 - xPerfect owns worker runtime truth
 - Viventium or LibreChat are clients
 - provider auth and connected-account systems can be bridged in without changing the xPerfect core model
+
+The [application boundary and generic scheduled-delivery contract](09_Application_Boundary_Contract.md)
+owns the proposed client-neutral extension, compatibility transition, execution sequence and standalone
+success criteria. Existing client-specific compatibility is not the architecture for new core features.
 
 ## Native Grok adapter contract
 
@@ -969,7 +982,6 @@ container a Unix socket in that container's own directory. A small standard-libr
 carries each harness's context, peer and coordinator MCP calls over it. The runtime still
 authorizes every call by the run's own token.
 
-
 ## Optional Direct model execution
 
 Status: implemented in source as explicit Direct OpenAI, Anthropic and xAI profiles for the
@@ -993,6 +1005,13 @@ and `list_workers` over the existing start, exact-work controls and roster. This
 projection, not another executor. Other action tools remain available to the configured workers;
 ordinary worker runs and the explicit full conversation catalog retain their existing grants.
 The output protocol is separate from these two work tools and still governs public text and audio.
+The projected handoff description must retain the native delegation contract: workers receive
+their own authorized capability projection, independently of the Queen's direct catalog. Missing
+direct access does not prove worker inability. The worker discovers the live prerequisite or
+reports the actual blocker, within the user's execution limits. A two-tool catalog must not erase
+this capability distinction or claim that configured access proves successful execution.
+A launch receipt proves background work acceptance. Claims about the requested effect require
+result evidence; accepted work must not be presented as an action already performed.
 
 The host binds the selected original input and authorized conversation sources through the existing
 bootstrap resource and worker context snapshot/readers. The Queen selects current source ordinals
@@ -1003,7 +1022,21 @@ carry the selected current input plus the current authorized conversation. The e
 receipt binds that snapshot; the existing run continuation context preserves it separately from
 task instructions. Later references can therefore use facts stated after launch without a rewritten
 Queen brief. The worker's original task and output authority remain intact, and each run reads its
-own snapshot. Later worker results return through the existing callback owner.
+own snapshot. When one input contains independent objectives, the optional existing `instruction`
+field can identify one exact original clause. The supplying application validates that selection
+against its authorized original input; xPerfect transports it without a summary. Omitting the field
+retains the complete selected input. Full inherited sources remain context, not additional work.
+When a delegation packet's instruction is an exact quote within one original segment, or the
+complete selected segments joined by blank lines, its renderer labels the unchanged originals as
+source evidence. The exact task defines the assignment; the source quotes preserve context and
+applicable conditions. Other instructions retain the selected originals' existing task role, so a
+model-written brief cannot demote user requirements. Source equality and signed identity checks
+are unchanged.
+Conditions, limits and output requirements elsewhere in a selected source remain applicable
+context for the assigned objective. A worker does not receive other objectives merely to repeat
+those conditions in its exact clause; the same rule applies to current guidance on existing work.
+The two-tool facade description and selection wording are owned by the versioned
+`prompts/coordination-tools.json`; `coordination_tool_manifest()` exposes its source and hash. Later worker results return through the existing callback owner.
 An inline context preview is not the whole source: overflow remains available through the existing
 owner-scoped paged reader. Missing source binding fails explicitly, without invented summaries.
 The inline budget first includes assigned and other current inputs, then conversation messages
@@ -1114,6 +1147,18 @@ requests and discards application metadata; reindex the known origin after that 
 tool return, unique goal and attachment. Never infer authority for unmarked legacy parts from their
 text. A marker that is absent or fails its content hash cannot authorize archive removal.
 
+The same request projection reuses an identical inline context-source prefix across consecutive
+trusted Core inputs in one context epoch. Its source ID, immutable hash and exact prefix bytes must
+match; a changed version or unknown input breaks reuse. The first copy stays intact for caching.
+Later carriers empty only the already-visible prefix text. Their outgoing source descriptor uses
+`inline_chars: 0` and the existing `retrieval` delivery value; manifest totals reflect the current
+carrier. A `retained_inline` reference identifies the earlier visible prefix by its original run,
+source ID, full source hash, offset and character count. The full immutable source remains available
+through its existing authorized reader. Raw journals retain the original text and manifest. Current
+accepted input, unique history, model replies, tool protocol and images are unchanged.
+Content-free stage metrics count removed source prefixes and UTF-8 data bytes. This does not prove
+that the current delta contains all earlier source, authorize history deletion or replace changing
+runtime context with a guessed summary.
 
 The host capsule compiler can also supply one typed UTF-8 range for its exact current active-work
 DATA envelope. Native admission binds that range to the accepted Core owner, protocol, source

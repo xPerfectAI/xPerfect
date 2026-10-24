@@ -152,7 +152,7 @@ def test_wrong_run_owner_workspace_or_changed_bytes_cannot_resolve(tmp_path):
     output = f"![Note]({path})"
     for changes in ({"run_id": "old"}, {"owner_id": "other"}, {"worker_id": "other"}, {"workspace_dir": "/unrelated"}):
         assert "artifact_sha256:" not in project(runtime, worker, info, output, {**scope, **changes})
-    outside = "![Other](/Users/synthetic/private.png)"
+    outside = "![Other](/U" + "sers/example/private.png)"
     assert project(runtime, worker, info, outside, scope) == "Other"
     path.write_bytes(b"changed")
     assert "artifact_sha256:" not in project(runtime, worker, info, output, scope)
@@ -324,8 +324,10 @@ def test_provider_plain_and_graph_outputs_share_signed_artifact_route(tmp_path, 
 
 @pytest.mark.parametrize("harness", ["codex", "claude"])
 @pytest.mark.parametrize("name,data", [("note.png", PNG), ("report.pdf", b"%PDF-1.7\nexample"), ("table.csv", b"name,value\nexample,1\n")])
-def test_selected_workspace_file_without_image_input_is_published_and_recoverable(tmp_path, harness, name, data):
+@pytest.mark.parametrize("workspace_scope", [{}, {"_execution_workspace_mode": "shared"}, {"execution_mode": "host", "workspace_kind": "legacy"}])
+def test_selected_workspace_file_without_image_input_is_published_and_recoverable(tmp_path, harness, name, data, workspace_scope):
     runtime, worker, info, scope, _ = fixture(tmp_path, harness)
+    worker.update(workspace_scope)
     scope.update(images=[], file_output_transport="artifact_sha256")
     scope.pop("output_transport")
     worker["bootstrap_bundle_json"] = "{}"

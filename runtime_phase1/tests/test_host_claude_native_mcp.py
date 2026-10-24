@@ -250,3 +250,69 @@ finally:
     finally:
         if process.poll() is None:
             process.terminate(); process.wait(timeout=8)
+
+
+def test_unchanged_native_mcp_refresh_preserves_active_policy_files(source, tmp_path, monkeypatch):
+    """Reading/resuming a worker must not rewrite files its MCP child is reading."""
+    from workers_projects_runtime import profile_runtime
+    runtime, home, _ = source
+    (home / 'config.toml').write_text('[mcp_servers.cua_repl]\ncommand="/synthetic/cua"\nenabled_tools=["js"]\n')
+    materialize(runtime, tmp_path, {}, 'mission')
+    state = runtime._state_dir('wrk_native_tools')
+    files = [tmp_path / 'workspace/.mcp.json', *state.glob('native-mcp-tool*.json')]
+    before = {str(path): (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns) for path in files}
+    monkeypatch.setattr(profile_runtime, '_atomic_write_private_text',
+                        lambda *_: pytest.fail('Unchanged MCP policy was rewritten'))
+    materialize(runtime, tmp_path, {}, 'mission')
+    assert before == {str(path): (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns) for path in files}
+    runtime._assert_host_claude_mcp_config({'worker_id': 'wrk_native_tools'}, tmp_path / 'workspace/.mcp.json')
+
+
+def test_native_mcp_launch_waits_for_complete_concurrent_preparation(source, tmp_path, monkeypatch):
+    """Launch validation cannot observe a legitimate half-published policy set."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from workers_projects_runtime import profile_runtime
+    from workers_projects_runtime.native_mcp_tool_filter import read_policy
+
+    runtime, home, _ = source
+    native_config = home / 'config.toml'
+    native_config.write_text('[mcp_servers.cua_repl]\ncommand="/synthetic/cua"\nenabled_tools=["js"]\n')
+    first = materialize(runtime, tmp_path, {}, 'mission')['cua_repl']
+    old_policy, old_digest = Path(first['args'][1]), first['args'][2]
+    target = tmp_path / 'workspace/.mcp.json'
+    native_config.write_text('[mcp_servers.cua_repl]\ncommand="/synthetic/cua"\nenabled_tools=["js","read"]\n')
+    publishing, release, validating, validated = (threading.Event() for _ in range(4))
+    real_write = profile_runtime._atomic_write_private_text
+
+    def paused_write(path, text):
+        if path == target:
+            publishing.set()
+            assert release.wait(5), 'Test did not release preparation'
+        real_write(path, text)
+
+    def validate():
+        validating.set()
+        try:
+            runtime._assert_host_claude_mcp_config({'worker_id': 'wrk_native_tools'}, target)
+        finally:
+            validated.set()
+
+    monkeypatch.setattr(profile_runtime, '_atomic_write_private_text', paused_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(materialize, runtime, tmp_path, {}, 'mission')
+        try:
+            assert publishing.wait(5), 'Preparation did not reach its partial publication checkpoint'
+            # An already-running child retains its old exact digest: a real changed policy
+            # fails closed, rather than becoming an unreadable/truncated JSON document.
+            with pytest.raises(ValueError, match='changed after materialization'):
+                read_policy(old_policy, old_digest)
+            reader = pool.submit(validate)
+            assert validating.wait(5)
+            assert not validated.wait(0.05), 'Launch inspected an incomplete policy publication'
+        finally:
+            release.set()
+        writer.result(timeout=5)
+        reader.result(timeout=5)
+    assert validated.is_set()
+    runtime._assert_host_claude_mcp_config({'worker_id': 'wrk_native_tools'}, target)

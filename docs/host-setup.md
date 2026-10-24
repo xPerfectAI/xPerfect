@@ -19,7 +19,7 @@ Runtime readiness does not mean a provider is connected or a model has completed
 Install your provider's native CLI, then open **Connections → Connect an AI account** (it reads
 **Connect another account** once you have one) and choose the **AI**:
 
-- [Codex](https://developers.openai.com/codex/cli/): choose **My subscription** for native device sign-in, or **Connected API key**.
+- [Codex](https://developers.openai.com/codex/cli/): choose **My subscription**. On this single-user localhost host, Codex opens its normal browser sign-in and returns through its own local callback. There is no device-code setting to enable. Contained and non-local deployments retain native device sign-in. **Connected API key** is also available.
 - [Claude Code](https://code.claude.com/docs/en/setup): choose **Connected API key**. For an existing Claude subscription, choose **Use existing Claude sign-in** in Connections. xPerfect verifies the current OS sign-in and connects it as a distinct selected account. If setup is needed, open **Sign-in help**, complete the native install/sign-in, then choose **Check again**. Named Claude subscription accounts are unavailable on macOS because their isolation cannot be guaranteed; there, `./xperfect doctor` shows Claude setup as `use_existing_sign_in`.
 - [Grok](https://github.com/xai-org/grok-build): choose **My subscription** for native device sign-in, or **Connected API key**. Grok also needs one exact model: choose it under **Grok model** in Connections and select **Use model**, or run `grok models` and `./xperfect restart --model grok-build=<model>`. xPerfect never picks a Grok model for you; `./xperfect doctor` shows what each installed harness will use.
 

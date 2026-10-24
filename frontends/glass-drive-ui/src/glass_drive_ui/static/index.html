@@ -5,90 +5,70 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>xPerfect</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="stylesheet" href="/static/styles.css?v=20260927polish1" />
+    <script src="/static/theme.js?v=20261024journeys18"></script>
+    <link rel="stylesheet" href="/static/theme.css?v=20261024journeys18" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261024journeys18" />
   </head>
   <body class="launch-body">
     <main class="launch-shell">
-      <div class="ambient ambient-a"></div>
-      <div class="ambient ambient-b"></div>
-      <section class="composer-frame" data-active-view="project">
-        <div class="brand-row">
+      <section class="composer-frame app-frame" data-active-view="project">
+        <div class="brand-row app-header">
           <a class="brand-mark" href="/" aria-label="xPerfect home">xPerfect</a>
-          <div class="view-tabs" role="tablist" aria-label="xPerfect views">
-            <a class="view-tab" href="/conversation">Conversation</a>
-            <button id="project-tab" class="view-tab" type="button" role="tab" aria-selected="true" aria-controls="project-view" data-view-tab="project">Run project</button>
-            <button id="workspaces-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="workspace-view" data-view-tab="workspaces">Workspaces</button>
-            <button id="connections-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="connections-view" data-view-tab="connections">Connections</button>
-            <button id="library-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="library-view" data-view-tab="library">Library</button>
-            <button id="schedules-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="schedules-view" data-view-tab="schedules">Schedules</button>
-            <button id="activity-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-view" data-view-tab="activity">Activity</button>
-          </div>
-          <div id="current-user-control" class="current-user-control" hidden>
-            <span id="current-user-label" class="current-user-label"></span>
-            <button id="switch-account" class="account-action" type="button">Switch account</button>
-            <button id="local-sign-out" class="account-action" type="button">Sign out here</button>
-          </div>
+          <nav class="view-tabs" aria-label="Main">
+            <a id="project-tab" class="view-tab" data-view-tab="project" aria-controls="project-view" aria-current="page" href="/#project">Run Project</a>
+            <a class="view-tab" href="/conversation">Chat</a>
+            <a id="workspaces-tab" class="view-tab" data-view-tab="workspaces" aria-controls="workspace-view" href="/#workspaces">Workspaces</a>
+            <a id="connections-tab" class="view-tab" data-view-tab="connections" aria-controls="connections-view" href="/#connections">Connections</a>
+            <a id="library-tab" class="view-tab" data-view-tab="library" aria-controls="library-view" href="/#library">Library</a>
+            <a id="schedules-tab" class="view-tab" data-view-tab="schedules" aria-controls="schedules-view" href="/#schedules">Schedules</a>
+            <a id="activity-tab" class="view-tab" data-view-tab="activity" aria-controls="activity-view" href="/#activity">Activity</a>
+          </nav>
+          <details class="profile-menu" id="profile-menu">
+            <summary class="profile-avatar" aria-label="Your account" title="Your account">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 21v-2a7.5 7.5 0 0 1 15 0v2"/></svg>
+            </summary>
+            <div class="profile-menu-panel">
+              <div id="current-user-control" class="current-user-control" hidden>
+                <span id="current-user-label" class="current-user-label"></span>
+              </div>
+              <span class="profile-menu-caption">Appearance</span>
+              <fieldset class="appearance-toggle"><legend class="appearance-legend">Appearance</legend>
+<label class="appearance-option" title="Use light appearance"><input type="radio" name="appearance" value="light" data-theme-picker aria-label="Light"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg><span>Light</span></label>
+<label class="appearance-option" title="Follow your device appearance"><input type="radio" name="appearance" value="system" data-theme-picker aria-label="Auto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span>Auto</span></label>
+<label class="appearance-option" title="Use dark appearance"><input type="radio" name="appearance" value="dark" data-theme-picker aria-label="Dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z"/></svg><span>Dark</span></label>
+</fieldset>
+              <a class="profile-menu-action" href="/#connections">Manage connections</a>
+              <button id="switch-account" class="account-action" type="button" hidden>Switch account</button>
+              <button id="local-sign-out" class="account-action" type="button" hidden>Sign out here</button>
+              <p id="profile-menu-status" role="status" hidden></p>
+            </div>
+          </details>
         </div>
         <aside id="capability-review-banner" class="capability-review-banner" aria-live="polite" hidden></aside>
-        <section id="project-view" class="project-view" role="tabpanel" aria-labelledby="project-tab">
+        <section id="project-view" class="project-view" aria-labelledby="project-tab">
           <div class="composer-copy">
-            <h1>What would you like to do?</h1>
+            <h1>What's the Job?</h1>
+            <p>Explain the work/project for this specialized AI Worker.</p>
           </div>
           <form id="launch-form" class="composer-form">
             <label class="project-field project-field-main">
-              <span class="sr-only">Your goal</span>
-              <textarea id="description" name="description" rows="4" placeholder="Describe what you want done…" required></textarea>
+              <span class="sr-only">What's the Job?</span>
+              <textarea id="description" name="description" rows="4" placeholder="Tell me what you want to get done…" required></textarea>
             </label>
-            <div class="project-details" aria-label="Optional project details">
-              <div class="project-details-grid">
-                <label class="project-field">
-                  <span>Success criteria <small>(optional)</small></span>
-                  <textarea id="success_criteria" name="success_criteria" rows="3" placeholder="Anything the result must include?"></textarea>
-                </label>
-                <label class="project-field">
-                  <span>Background <small>(optional)</small></span>
-                  <textarea id="context" name="context" rows="3" placeholder="Helpful context, links, or constraints."></textarea>
-                </label>
-              </div>
-            </div>
-            <section class="project-details" aria-label="Who and where">
-              <div class="project-details-grid launch-choice-grid">
-                <label class="project-field">
-                  <span>Worker</span>
-                  <select id="workspace-option" name="workspace_option"></select>
-                  <small id="workspace-help" class="field-help"></small>
-                  <small id="worker-account-summary" class="worker-account-summary" aria-live="polite"></small>
-                </label>
-                <div id="worker-account-field" class="project-field">
-                  <label for="provider-account-selection">Account</label>
-                  <select id="provider-account-selection" name="provider_account_id">
-                    <option value="">Checking account options…</option>
-                  </select>
-                  <small id="provider-account-help" class="field-help">Checking account options…</small>
-                  <button id="connect-worker-account" class="text-action" type="button" hidden>Connect an account</button>
-                </div>
-                <label class="project-field">
-                  <span>Workspace</span>
-                  <select id="workspace-mode" name="workspace_mode">
-                    <option value="isolated" selected>Separate workspace (default)</option>
-                    <option value="shared">Shared workspace</option>
-                  </select>
-                  <small id="workspace-mode-help" class="field-help">One worker with its own files and history.</small>
-                </label>
-                <label id="workspace-file-placement-field" class="project-field" hidden>
-                  <span>Project files</span>
-                  <select id="workspace-file-placement" name="workspace_file_placement">
-                    <option value="common" selected>Common project files</option>
-                    <option value="member_private">Private files per member</option>
-                  </select>
-                  <small class="field-help">Members share the workspace. Native account homes stay private.</small>
-                </label>
-              </div>
-            </section>
-            <section class="composer-files" aria-labelledby="composer-files-title">
+            <label class="project-field outcome-field">
+              <span>What's the required outcome? <small>(optional)</small></span>
+              <small class="field-help">Success criteria: how will you know the job is done well?</small>
+              <textarea id="success_criteria" name="success_criteria" rows="2" placeholder="For example: a one-page summary with sources and next steps."></textarea>
+            </label>
+            <section class="composer-files knowledge-card" aria-labelledby="composer-files-title">
+              <h2 id="composer-files-title">Required Knowledge</h2>
+              <label class="project-field background-context"><span>Background Context <small>(optional)</small></span>
+                <small class="field-help">What background context, files, material does this AI Worker need to get itself fully onboarded?</small>
+                <textarea id="context" name="context" rows="3" placeholder="Add notes, links, constraints, or useful background…"></textarea>
+              </label>
               <div class="composer-files-heading">
                 <div>
-                  <h2 id="composer-files-title">Files</h2>
+                  <span>Files <small>(optional)</small></span>
                 </div>
                 <div class="file-choose-actions">
                   <button class="file-choose" id="project-add-files" type="button">Add files</button>
@@ -127,12 +107,68 @@
                 </div>
               </dialog>
             </section>
+            <section class="project-details worker-onboarding" aria-labelledby="worker-choice-title">
+              <div class="section-heading"><h2 id="worker-choice-title">Who's Doing The Job?</h2>
+                <fieldset class="choice-toggle"><legend class="sr-only">Select the AI Worker</legend>
+                  <label><input type="radio" name="worker-choice-radio" value="new" checked><span>New</span></label>
+                  <label><input type="radio" name="worker-choice-radio" value="existing"><span>Existing</span></label>
+                </fieldset>
+              </div>
+              <input id="worker-choice" type="hidden" value="new">
+              <select id="workspace-option" name="workspace_option" aria-label="Worker launch selection" hidden></select>
+              <div id="new-worker-fields" class="project-details-grid">
+                <label class="project-field"><span>Name <small>(optional)</small></span><input id="worker-name" type="text" maxlength="120" placeholder="For example: Research partner"><small class="field-help">Name it to keep this worker for reuse.</small></label>
+                <label class="project-field"><span>Worker type</span><select id="worker-type"></select></label>
+                <div id="worker-account-field" class="project-field">
+                  <label for="provider-account-selection">Account</label>
+                  <select id="provider-account-selection" name="provider_account_id"><option value="">Checking account options…</option></select>
+                  <small id="provider-account-help" class="field-help">Checking account options…</small>
+                  <button id="connect-worker-account" class="text-action" type="button" hidden>Connect an account</button>
+                </div>
+                <details id="copy-worker-details" class="worker-copy-options">
+                  <summary>Copy an existing worker <small>(optional)</small></summary>
+                  <div id="copy-worker-search">
+                    <div id="worker-catalog-controls" class="project-field" hidden>
+                      <label for="worker-search">Find a previous worker</label>
+                      <div class="launch-actions"><input id="worker-search" type="search" placeholder="Search workers or jobs"><button id="worker-search-button" class="secondary-button compact-button" type="button">Search</button><button id="worker-load-more" class="secondary-button compact-button" type="button" hidden>Load more</button></div>
+                      <small id="worker-catalog-status" class="field-help" role="status"></small>
+                    </div>
+                  </div>
+                  <label class="project-field"><span>Select the worker to copy</span><select id="copy-worker"><option value="">Start fresh</option></select><small class="field-help">Copies files, project notes, worker type and the AI account. Chat history, browser sign-ins and tool approvals do not carry over.</small></label>
+                </details>
+              </div>
+              <div id="existing-worker-field" class="project-field" hidden><div id="existing-worker-search"></div><label for="existing-worker">Select the AI Worker</label><select id="existing-worker"></select></div>
+              <small id="workspace-help" class="field-help"></small>
+              <small id="worker-account-summary" class="worker-account-summary" aria-live="polite"></small>
+            </section>
+            <section class="project-details location-onboarding" aria-labelledby="work-location-title">
+              <div class="section-heading"><h2 id="work-location-title">Where should I work?</h2>
+                <fieldset id="workspace-location-choices" class="choice-toggle"><legend class="sr-only">Workspace</legend>
+                  <label><input type="radio" name="workspace-choice-radio" value="new" checked><span>New</span></label>
+                  <label><input type="radio" name="workspace-choice-radio" value="existing"><span>Existing</span></label>
+                </fieldset>
+              </div>
+              <input id="workspace-choice" type="hidden" value="new">
+              <label id="existing-workspace-field" class="project-field" hidden><span>Workspace</span><select id="execution-workspace"></select><small id="execution-workspace-help" class="field-help"></small></label>
+              <p id="saved-worker-location" class="field-help" hidden></p>
+              <div id="new-workspace-fields" class="project-details-grid">
+                <label class="project-field"><span>Workspace</span>
+                  <select id="workspace-mode" name="workspace_mode"><option value="isolated" selected>My own workspace</option><option value="shared">Shared with other workers</option></select>
+                  <small id="workspace-mode-help" class="field-help">One worker with its own files and history.</small>
+                </label>
+                <label id="workspace-file-placement-field" class="project-field" hidden><span>Project files</span><select id="workspace-file-placement" name="workspace_file_placement"><option value="common" selected>Common project files</option><option value="member_private">Private files per member</option></select><small class="field-help">Members share the workspace. Native account homes stay private.</small></label>
+              </div>
+            </section>
             <div class="launch-footer">
               <div class="launch-actions">
                 <button id="launch-button" type="submit" class="primary-button" value="launch">Run Project</button>
               </div>
             </div>
             <p id="launch-status" class="launch-status" aria-live="polite"></p>
+            <div id="launch-recovery" class="launch-actions" hidden>
+              <p id="launch-recovery-help" class="field-help"></p>
+              <button id="launch-start-again" type="submit" class="secondary-button" aria-describedby="launch-recovery-help">Start again</button>
+            </div>
             <details class="advanced-panel">
               <summary>More settings</summary>
               <div class="advanced-grid">
@@ -210,7 +246,7 @@
             </details>
           </form>
         </section>
-        <section id="workspace-view" class="workspace-hive" role="tabpanel" aria-labelledby="workspaces-tab" hidden>
+        <section id="workspace-view" class="workspace-hive" aria-labelledby="workspaces-tab" hidden>
           <div class="workspace-hive-head">
             <div>
               <h1>Workspaces</h1>
@@ -276,7 +312,7 @@
             <span id="workspace-catalog-status" class="inline-status" aria-live="polite"></span>
           </div>
         </section>
-        <section id="connections-view" class="control-plane-view" role="tabpanel" aria-labelledby="connections-tab" hidden>
+        <section id="connections-view" class="control-plane-view" aria-labelledby="connections-tab" hidden>
           <header class="control-plane-head">
             <div>
               <h1>Connections</h1>
@@ -354,14 +390,12 @@
               <details id="add-provider-account" class="connection-disclosure">
                 <summary>Connect another account</summary>
                 <form id="provider-account-form" class="account-form">
-                  <label>
-                    <span>AI</span>
-                    <select id="provider-account-provider" name="provider"></select>
-                  </label>
-                  <label>
-                    <span>Sign in with</span>
-                    <select id="provider-account-method" name="auth_method"></select>
-                  </label>
+                  <div><span class="account-choice-label">AI</span><div id="provider-choice-list" class="provider-choice-list" aria-label="AI"></div>
+                    <label class="provider-native-select"><span>AI</span><select id="provider-account-provider" name="provider"></select></label>
+                  </div>
+                  <div><span class="account-choice-label">Sign in with</span><div id="provider-method-choice" class="provider-method-choice"></div><small id="provider-support-note" class="field-help"></small>
+                    <label class="provider-native-select"><span>Sign in with</span><select id="provider-account-method" name="auth_method"></select></label>
+                  </div>
                   <label class="account-label-field">
                     <span>Name</span>
                     <input id="provider-account-label" name="label" type="text" maxlength="160" placeholder="Personal account" required />
@@ -409,7 +443,7 @@
                   <button id="connect-ai-auto-tab" class="connect-ai-mode" type="button" role="tab" aria-selected="true" aria-controls="connect-ai-auto-panel">Automatic</button>
                   <button id="connect-ai-manual-tab" class="connect-ai-mode" type="button" role="tab" aria-selected="false" aria-controls="connect-ai-manual-panel">Manual</button>
                 </div>
-                <section id="connect-ai-auto-panel" class="connect-ai-panel" role="tabpanel" aria-labelledby="connect-ai-auto-tab">
+                <section id="connect-ai-auto-panel" class="connect-ai-panel" aria-labelledby="connect-ai-auto-tab">
                   <span class="section-kicker">Recommended</span>
                   <h3>Connect this AI</h3>
                   <p id="connect-ai-auto-copy">Paste once. Your AI follows only its own setup.</p>
@@ -418,7 +452,7 @@
                     <button id="copy-connect-ai-prompt" class="quiet-button" type="button">Copy connect instruction</button>
                   </div>
                 </section>
-                <section id="connect-ai-manual-panel" class="connect-ai-panel" role="tabpanel" aria-labelledby="connect-ai-manual-tab" hidden>
+                <section id="connect-ai-manual-panel" class="connect-ai-panel" aria-labelledby="connect-ai-manual-tab" hidden>
                   <h3>Add the server yourself</h3>
                   <p>Paste this address into your AI app’s Streamable HTTP or MCP server setting.</p>
                   <div class="command-row">
@@ -441,7 +475,7 @@
             </details>
           </div>
         </section>
-        <section id="library-view" class="control-plane-view" role="tabpanel" aria-labelledby="library-tab" hidden>
+        <section id="library-view" class="control-plane-view" aria-labelledby="library-tab" hidden>
           <header class="control-plane-head">
             <div>
               <span class="section-kicker">Reusable capabilities</span>
@@ -465,6 +499,7 @@
               <p class="card-note">This sends a workspace-only request to the worker you chose. It does not install anything globally or approve new access.</p>
               <div class="library-request-actions">
                 <button class="primary-button compact-button" type="submit">Ask this workspace</button>
+                <button id="library-start-job" type="button" class="secondary-button" hidden>Start a job</button>
                 <span id="library-request-status" class="inline-status" aria-live="polite"></span>
               </div>
             </form>
@@ -472,12 +507,12 @@
           <div id="library-list" class="library-grid" aria-live="polite"></div>
           <p id="library-empty" class="workspace-hive-empty" hidden>No approved capabilities are available yet.</p>
         </section>
-        <section id="schedules-view" class="control-plane-view" role="tabpanel" aria-labelledby="schedules-tab" hidden>
+        <section id="schedules-view" class="control-plane-view" aria-labelledby="schedules-tab" hidden>
           <header class="control-plane-head">
             <div>
-              <span class="section-kicker">Schedule</span>
+              <span class="section-kicker">Plan ahead</span>
               <h1>Schedules</h1>
-              <p>Give a workspace repeatable work, then review each result.</p>
+              <p>The right task, at the right time. Set it once and carry on.</p>
             </div>
             <button id="new-schedule-action" class="primary-button compact-button" type="button">New schedule</button>
           </header>
@@ -485,14 +520,43 @@
             <section id="schedule-create-card" class="control-card schedule-create-card" aria-labelledby="recurring-schedule-form-title" hidden>
               <div class="control-card-head">
                 <div>
-                  <span class="section-kicker">Set it once</span>
+                  <span class="section-kicker">Plan ahead</span>
                   <h2 id="recurring-schedule-form-title">New schedule</h2>
                 </div>
               </div>
               <form id="recurring-schedule-form" class="schedule-form">
-                <label>
-                  <span>Workspace</span>
-                  <select id="recurring-schedule-workspace">
+                <fieldset class="schedule-target-options">
+                  <legend>What would you like to do?</legend>
+                  <label class="schedule-target-option"><input type="radio" name="schedule-target-choice" value="worker" checked /><span><strong>Run a task</strong><small>A workspace takes care of it.</small></span></label>
+                  <label class="schedule-target-option"><input type="radio" name="schedule-target-choice" value="webhook" /><span><strong>Send to an app</strong><small>Your connected app receives it.</small></span></label>
+                </fieldset>
+                <select id="recurring-schedule-target" class="sr-only" tabindex="-1" aria-hidden="true"><option value="worker">Run an AI workspace</option><option value="webhook">Send a webhook</option></select>
+                <div id="recurring-schedule-webhook-fields" class="schedule-app-fields" hidden>
+                  <div class="schedule-destination-row">
+                    <label for="recurring-schedule-destination">Where?</label>
+                    <button id="webhook-destination-connect" type="button" class="schedule-text-button">Connect an app</button>
+                    <select id="recurring-schedule-destination" aria-label="Connected app"><option value="">Choose an app</option></select>
+                    <button id="webhook-destination-manage" type="button" class="schedule-text-button" hidden>Manage connection</button>
+                  </div>
+                  <p id="schedule-app-status" class="inline-status" aria-live="polite"></p><button id="schedule-app-retry" class="schedule-text-button" type="button" hidden>Retry loading apps</button>
+                  <label for="recurring-schedule-message"><span id="schedule-message-label">What should it say? <span class="schedule-optional">Optional</span></span></label>
+                  <textarea id="recurring-schedule-message" rows="3" placeholder="For example, remind me to review the weekly update." aria-describedby="schedule-message-note"></textarea><small id="schedule-message-note" class="field-help" hidden></small>
+                  <details id="schedule-request-advanced" class="schedule-advanced">
+                    <summary>Extra app details</summary>
+                    <p class="schedule-help">Only add these if your app needs them.</p>
+                    <div id="schedule-data-fields" class="schedule-data-fields"></div>
+                    <p id="schedule-data-complex" class="schedule-help" hidden>This app has custom data. It stays unchanged unless you edit it below.</p>
+                    <button id="schedule-data-add" type="button" class="quiet-button">Add a detail</button>
+                    <details id="schedule-data-json" class="schedule-json-details"><summary>Edit as JSON</summary>
+                      <label for="recurring-schedule-request-data">App request data</label>
+                      <textarea id="recurring-schedule-request-data" rows="5" spellcheck="false">{}</textarea>
+                    </details>
+                    <p id="schedule-data-status" class="inline-status" aria-live="polite"></p>
+                  </details>
+                </div>
+                <label id="recurring-schedule-workspace-field">
+                  <span>Where?</span>
+                  <select id="recurring-schedule-workspace" aria-label="Workspace">
                     <option value="">Choose a workspace</option>
                   </select>
                   <div id="recurring-schedule-workspace-empty" class="schedule-workspace-empty" hidden>
@@ -502,9 +566,10 @@
                   <small class="field-help">Scheduling a one-off run keeps it as a saved workspace.</small>
                 </label>
                 <label id="recurring-schedule-instruction-field">
-                  <span>What should this workspace do?</span>
+                  <span>What should happen?</span>
                   <textarea id="recurring-schedule-instruction" rows="4" maxlength="10000" placeholder="Create the weekly project update and save it in the workspace."></textarea>
                 </label>
+                <div id="schedule-when-heading" class="schedule-section-heading"><h3>When?</h3><span>Choose a time that works.</span></div>
                 <div id="recurring-schedule-fields" class="schedule-field-grid">
                   <label>
                     <span>Repeats</span>
@@ -544,20 +609,24 @@
                   <label id="recurring-schedule-interval-field" hidden>
                     <span>Repeat every</span>
                     <span class="schedule-interval-inputs">
-                      <input id="recurring-schedule-interval-value" type="number" min="1" max="8784" value="1" inputmode="numeric" />
+                      <input id="recurring-schedule-interval-value" type="number" step="any" min="1" max="8784" value="1" inputmode="numeric" />
                       <select id="recurring-schedule-interval-unit" aria-label="Repeat interval unit">
-                        <option value="seconds">seconds</option>
+                        <option value="minutes">minutes</option>
                         <option value="hours">hours</option>
                         <option value="days">days</option>
                         <option value="weeks">weeks</option>
                       </select>
                     </span>
                   </label>
-                  <label id="recurring-schedule-timezone-field">
-                    <span>Time zone <small>(change as needed)</small></span>
-                    <input id="recurring-schedule-timezone" type="text" value="UTC" autocomplete="off" placeholder="America/Toronto" />
-                    <small id="recurring-schedule-timezone-note" class="field-help">Times use this saved time zone.</small>
-                  </label>
+                  <div id="recurring-schedule-timezone-field" class="schedule-timezone-field">
+                    <div class="schedule-timezone-summary"><span>Time zone</span><strong id="schedule-timezone-city">Your local time</strong><button id="schedule-timezone-change" class="schedule-text-button" type="button" aria-expanded="false" aria-controls="schedule-timezone-picker">Change</button></div>
+                    <div id="schedule-timezone-picker" class="schedule-timezone-picker" hidden>
+                      <label for="schedule-timezone-search">Find a city</label><input id="schedule-timezone-search" type="search" placeholder="Search cities" autocomplete="off" />
+                      <label class="sr-only" for="schedule-timezone-choice">Time zone city</label><select id="schedule-timezone-choice" aria-label="Time zone city"></select>
+                      <details class="schedule-json-details"><summary>Enter a time zone directly</summary><label class="sr-only" for="recurring-schedule-timezone">Time zone identifier</label><input id="recurring-schedule-timezone" type="text" value="UTC" autocomplete="off" placeholder="Area/City" /></details>
+                    </div>
+                    <small id="recurring-schedule-timezone-note" class="field-help">The saved city sets the time for this schedule.</small>
+                  </div>
                   <label id="recurring-schedule-custom-type-field" hidden>
                     <span>Custom type</span>
                     <select id="recurring-schedule-custom-type">
@@ -576,7 +645,7 @@
                   </label>
                 </div>
                 <details id="recurring-schedule-advanced" class="schedule-advanced">
-                  <summary>Reliability and time window</summary>
+                  <summary>Advanced options</summary>
                   <label>
                     <span>When the clock repeats an hour</span>
                     <select id="recurring-schedule-dst-policy">
@@ -619,6 +688,7 @@
                     <input id="recurring-schedule-jitter" type="number" min="0" max="900" value="0" inputmode="numeric" />
                   </label>
                 </details>
+                <p id="schedule-preview" class="schedule-preview" aria-live="polite"></p>
                 <div class="schedule-form-footer">
                   <p id="recurring-schedule-status" class="inline-status" aria-live="polite"></p>
                   <button id="recurring-schedule-cancel-edit" class="quiet-button" type="button" hidden>Cancel</button>
@@ -629,21 +699,21 @@
             <section class="schedule-list-panel" aria-labelledby="recurring-schedule-list-title">
               <div class="schedule-list-head">
                 <div>
-                  <span class="section-kicker">Your account</span>
-                  <h2 id="recurring-schedule-list-title">Saved schedules</h2>
+                  <h2 id="recurring-schedule-list-title">Your schedules <span id="schedule-count" class="schedule-count"></span></h2>
                 </div>
                 <button id="refresh-schedules" class="quiet-button" type="button">Refresh</button>
               </div>
+              <p id="schedule-page-status" class="inline-status schedule-page-status" aria-live="polite"></p>
               <div id="schedule-list" class="schedule-list" aria-live="polite">
                 <div class="empty-state-compact">
                   <strong>No schedules yet</strong>
-                  <span>Choose New schedule to give a workspace repeatable work.</span>
+                  <span>Set a time for a task or send something to an app.</span>
                 </div>
               </div>
             </section>
           </div>
         </section>
-        <section id="activity-view" class="control-plane-view" role="tabpanel" aria-labelledby="activity-tab" hidden>
+        <section id="activity-view" class="control-plane-view" aria-labelledby="activity-tab" hidden>
           <header class="control-plane-head">
             <div>
               <span class="section-kicker">Across your workspaces</span>
@@ -655,6 +725,25 @@
         </section>
       </section>
     </main>
+    <dialog id="webhook-destination-setup" class="schedule-connection-dialog" aria-labelledby="webhook-destination-title">
+      <div class="schedule-connection-content">
+        <header class="schedule-dialog-head"><div><h2 id="webhook-destination-title">Connect an app</h2><p>Set it up once. Choose it in any schedule.</p></div><button id="webhook-destination-close" class="schedule-icon-button" type="button" aria-label="Close connection setup">×</button></header>
+        <form id="webhook-destination-form" class="schedule-connection-form">
+          <label for="webhook-destination-name">App name</label><input id="webhook-destination-name" maxlength="120" autocomplete="off" placeholder="For example, My assistant" />
+          <div id="webhook-destination-url-field"><label for="webhook-destination-url">App address</label><input id="webhook-destination-url" type="text" inputmode="url" autocomplete="off" placeholder="https://your-app.com/hooks/schedules" /><p class="schedule-help">Use the receiving address from your app.</p></div>
+          <p id="webhook-destination-existing-note" class="schedule-help" hidden>The saved address and credentials stay private. Connect a new app to use a different address.</p>
+          <details id="webhook-destination-advanced" class="schedule-advanced"><summary>Advanced connection settings</summary>
+            <label for="webhook-destination-secret">Signing key <span class="schedule-optional">Generated if empty</span></label><input id="webhook-destination-secret" type="password" autocomplete="new-password" />
+            <label for="webhook-destination-headers">Authentication headers <span class="schedule-optional">Optional JSON</span></label><textarea id="webhook-destination-headers" rows="3" spellcheck="false" placeholder='{"Authorization":"Bearer …"}'></textarea>
+            <label for="webhook-destination-mode">Send format</label><select id="webhook-destination-mode"><option value="envelope">Schedule event with app details</option><option value="raw">App details only</option></select>
+            <div class="schedule-dialog-tools"><button id="webhook-destination-rotate" type="button" class="quiet-button">Update signing key</button><button id="webhook-destination-toggle" type="button" class="quiet-button">Disable connection</button></div>
+          </details>
+          <div id="webhook-destination-secret-panel" class="schedule-secret-panel" hidden><strong>One last step</strong><p>Copy this signing key into your app. It disappears when you close this window.</p><pre id="webhook-destination-secret-once" hidden></pre><button id="webhook-destination-copy-key" type="button" class="quiet-button">Copy key</button></div>
+          <p id="webhook-destination-status" class="inline-status" aria-live="polite"></p>
+          <footer class="schedule-dialog-footer"><button id="webhook-destination-done" type="button" class="quiet-button">Cancel</button><button id="webhook-destination-save" type="submit" class="primary-button compact-button">Connect app</button></footer>
+        </form>
+      </div>
+    </dialog>
     <dialog id="rename-workspace-dialog" class="workspace-dialog" aria-labelledby="rename-workspace-title">
       <form id="rename-workspace-form" class="workspace-dialog-form">
         <div>
@@ -682,7 +771,7 @@
         <div>
           <span class="section-kicker">Reusable workspace</span>
           <h2 id="save-template-title">Save as template</h2>
-          <p>xPerfect saves reusable intent, exact Library versions, and an opaque worker-account reference—not files, sign-ins, credential homes, schedules, or history. The account is revalidated before use.</p>
+          <p>Saves how this worker is set up. New workers check account access and tool permissions. Files, sign-ins, schedules and chat history stay with the original worker.</p>
         </div>
         <label>
           <span>Template name</span>
@@ -699,6 +788,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/static/app.js?v=20260927attach2" type="module"></script>
+    <script src="/static/app.js?v=20261024journeys18" type="module"></script>
   </body>
 </html>

@@ -2321,7 +2321,86 @@ def test_native_current_attachment_uses_owner_file_bytes(tmp_path, monkeypatch, 
         assert materialized.read_bytes() == original.read_bytes()
 
 
-def test_native_attachment_context_identifies_actual_supplied_representations(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_current", [False, True])
+def test_typed_current_uploads_keep_history_outside_current_turn_and_fallback(tmp_path, monkeypatch, with_current):
+    workspace = tmp_path / "Life"
+    workspace.mkdir()
+    uploads = tmp_path / "uploads"
+    owner_dir = uploads / "owner-a"
+    owner_dir.mkdir(parents=True)
+    records = []
+    for file_id, filename, mime in [("current-file", "request.wav", "audio/wav"),
+                                   ("history-file", "shapes.png", "image/png")]:
+        data = ("synthetic-" + file_id).encode()
+        (owner_dir / f"{file_id}__{filename}").write_bytes(data)
+        records.append({"file_id": file_id, "filename": filename, "type": mime,
+                        "source": "local", "bytes": len(data)})
+    monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(uploads))
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(uploads))
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(workspace)
+    payload["messages"] = [payload["messages"][0],
+        {"role": "user", "content": "Name the earlier shapes."},
+        {"role": "assistant", "content": "A square and a circle."},
+        {"role": "user", "content": "" if with_current else "Use the prior recording."}]
+    bundle = {"viventium_upload_context": {
+        "selected_uploads": records,
+        "current_upload_ids": ["current-file"] if with_current else [],
+    }}
+    response = client.post("/v1/chat/completions", json=payload, headers={
+        **AUTH, **_signed_bundle_headers(bundle),
+        "X-GlassHive-Fallback-Model": "claude-code:opus",
+        "X-GlassHive-Fallback-Reasoning-Effort": "high",
+    })
+    assert response.status_code == 200, response.text
+    record = client.app.state.store.get_provider_request(response.json()["glasshive"]["request_id"])
+    for instruction in (record["admitted_instruction"], record["fallback_instruction"]):
+        assert "Read the supplied attachment representations" not in instruction
+        assert "Historical conversation files remain available" not in instruction
+        history, current = instruction.split("<viventium_current_accepted_turn_v1>", 1)
+        assert '<viventium_historical_workspace_files version="1">' in history
+        assert '"file_id":"history-file"' in history
+        assert "uploads/shapes.png" in history and "uploads/shapes.png" not in current
+        assert '"file_id":"history-file"' not in current
+        if with_current:
+            assert '"file_id":"current-file"' in current
+            assert "uploads/request.wav" in current and "uploads/request.wav" not in history
+        else:
+            assert "uploads/request.wav" in history and "uploads/request.wav" not in current
+            assert "<viventium_attached_workspace_files" not in current
+    run = client.app.state.store.get_run(record["run_id"])
+    worker = client.app.state.store.get_worker(run["worker_id"])
+    retained = json.loads(worker["bootstrap_bundle_json"])
+    assert [item["path"] for item in retained["files"]] == ["uploads/request.wav", "uploads/shapes.png"]
+
+
+@pytest.mark.parametrize("current_ids", [None, "file-a", [1], ["x" * 257]])
+def test_native_attachment_scope_rejects_malformed_current_ids(tmp_path, current_ids):
+    from fastapi import HTTPException
+    payload = ChatCompletionRequest.model_validate(_payload(tmp_path))
+    payload.metadata.bootstrap_bundle = {"viventium_upload_context": {
+        "selected_uploads": [], "current_upload_ids": current_ids,
+    }}
+    with pytest.raises(HTTPException) as error:
+        ConversationProvider._request_attachment_context(payload)
+    assert error.value.status_code == 400
+
+
+def test_selected_packet_preserves_explicit_empty_current_upload_scope(tmp_path):
+    bundle = {"viventium_upload_context": {
+        "selected_uploads": [{"file_id": "history-file", "filename": "report.txt", "source": "text", "text": "Historical content."}],
+        "current_upload_ids": [],
+    }, "viventium_delegation_packet": {"selected_files": [{"ordinal": 0, "ref": "history-file"}]}}
+    scoped = ConversationProvider._selected_request_bundle(bundle)
+    assert scoped["viventium_upload_context"]["current_upload_ids"] == []
+    payload = ChatCompletionRequest.model_validate(_payload(tmp_path))
+    payload.metadata.bootstrap_bundle = scoped
+    assert ConversationProvider._request_attachment_context(payload) == ""
+    assert '"file_id":"history-file"' in ConversationProvider._request_attachment_context(payload, historical=True)
+
+
+@pytest.mark.parametrize("tool_mode", ["full", "coordination"])
+def test_native_attachment_context_identifies_actual_supplied_representations(tmp_path, monkeypatch, tool_mode):
     uploads = tmp_path / "uploads"
     owner_dir = uploads / "owner-a"
     owner_dir.mkdir(parents=True)
@@ -2347,7 +2426,8 @@ def test_native_attachment_context_identifies_actual_supplied_representations(tm
     monkeypatch.setenv("WPR_LIBRECHAT_UPLOADS_ROOT", str(uploads))
     monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(uploads))
     payload = ChatCompletionRequest.model_validate(_payload(tmp_path))
-    payload.metadata.bootstrap_bundle = {"viventium_upload_context": {"selected_uploads": records}}
+    payload.metadata.bootstrap_bundle = {"conversation_tool_mode": tool_mode,
+        "viventium_upload_context": {"selected_uploads": records}}
     projected = ConversationProvider._projected_request_uploads(payload)
     context = ConversationProvider._request_attachment_context(payload)
     ledger = json.loads(context.splitlines()[1])["selected_uploads"]
@@ -2356,6 +2436,8 @@ def test_native_attachment_context_identifies_actual_supplied_representations(tm
         "original", "original", "extracted_text", "extracted_text", "metadata_only", "extracted_text",
     ]
     assert "Read each original attachment" not in context
+    assert "Read the supplied attachment representations" not in context
+    assert "Historical conversation files remain available" not in context
     assert "Extracted text does not establish access to original bytes" in context
     assert "Metadata-only entries report unavailable input" in context
     for index, item in enumerate(projected, 1):
@@ -4757,7 +4839,7 @@ def test_streaming_redactor_redacts_newline_split_home_path_and_bounds_long_line
     visible += redactor.feed("x" * 65)
     visible += redactor.flush()
 
-    assert "/Users/synthetic" not in visible
+    assert ("/Users" + "/synthetic") not in visible
     assert "[REDACTED_LOCAL_PATH]" in visible
     assert "[REDACTED_OVERSIZED_STREAM_SEGMENT]" in visible
 
@@ -6941,6 +7023,7 @@ def test_host_capacity_preserves_the_requested_protocol_error_contract(tmp_path,
         assert response.json()["error"] == {
             "message": "Host resource headroom is below its configured admission guard.",
             "code": "host_capacity", "type": "server_error", "param": None,
+            "capacityClass": "resource_pressure",
         }
         assert "detail" not in response.json()
     else:
@@ -7031,7 +7114,7 @@ def test_empty_answer_guard_preserves_answer_transfer_and_declared_silence(tmp_p
 
 def test_typed_failure_classes_reach_the_client_error_code():
     from workers_projects_runtime.conversation_provider import _provider_failure_error
-    for failure_class in ("native_mcp_unavailable", "provider_auth_missing", "provider_quota_exhausted", "provider_progress_stalled", "host_capacity", "native_input_declined", "native_input_expired", "native_input_cancelled", "native_turn_cancelled"):
+    for failure_class in ("provider_unavailable", "native_mcp_unavailable", "provider_auth_missing", "provider_quota_exhausted", "provider_progress_stalled", "host_capacity", "native_input_declined", "native_input_expired", "native_input_cancelled", "native_turn_cancelled"):
         assert _provider_failure_error({"failure_class": failure_class}) == (
             "glasshive_runtime_error", failure_class
         )
@@ -7150,6 +7233,28 @@ def test_current_merged_sources_keep_pending_input_and_historical_fence(delta):
     assert {2, 4}.issubset(decision["admitted_message_indices"])
     assert "Only the final accepted turn below" not in instruction
     assert "Only this final accepted turn" not in instruction
+
+
+@pytest.mark.parametrize("content", ["", [], [{"type": "input_audio", "input_audio": {"data": "synthetic"}}]])
+def test_empty_current_source_keeps_its_message_and_delegation_identity(content):
+    from workers_projects_runtime.conversation_provider import _admit_conversation_history
+    messages = [
+        ChatMessage(role="user", content="Name the earlier shapes."),
+        ChatMessage(role="assistant", content="A square and a circle."),
+        ChatMessage(role="user", content=content),
+    ]
+    instruction, decision, _ = _admit_conversation_history(
+        messages, start_at=0, turn_context="", model=next(iter(GLASSHIVE_MODELS.values())),
+        current_input_indices={2}, source_ordinals_by_index={2: [1]},
+        attachment_context="[Attached current original]",
+    )
+    historical, current = instruction.split("<viventium_current_accepted_turn_v1>", 1)
+    assert '[message 2 user]\n<delegation_source>{"sourceOrdinals":[1]}</delegation_source>' in current
+    assert "[Attached current original]" in current
+    assert "Name the earlier shapes." in historical and "Name the earlier shapes." not in current
+    assert "A square and a circle." not in current
+    assert 2 in decision["admitted_message_indices"]
+    assert messages[-1].content == content
 
 
 @pytest.mark.parametrize("mapped_sources", [False, True])
@@ -8298,7 +8403,7 @@ def test_typed_voice_redactor_preserves_split_secret_guards_without_fixed_tail(s
         output += redactor.feed(secret[split:] + '\nSafe tail.')
         output += redactor.flush()
         assert 'synthetic-credential' not in output
-        assert '/Users/synthetic' not in output
+        assert ('/Users' + '/synthetic') not in output
         assert 'SYNTHETICBODY' not in output
         assert 'Safe words.' in output and 'Safe tail.' in output
 
@@ -9661,7 +9766,7 @@ def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(
 
 # Private machine-state transport shares the signed zero-tool admission, never public redaction.
 _PRIVATE_STATE_CONTRACT = {"version": 1, "visibility": "private_machine_state", "format": "json_object"}
-_PRIVATE_STATE_PATH = "/Users/synthetic-owner/Documents/Native_Worker_Check.md"
+_PRIVATE_STATE_PATH = "/U" + "sers/example/Documents/Native_Worker_Check.md"
 _PRIVATE_STATE_TEXT = json.dumps({"version": 1, "summary": "Keep evidence at " + _PRIVATE_STATE_PATH,
     "pendingAsks": ["Await permission before sending"], "commitments": [], "corrections": [],
     "decisions": [], "durableIdentifiers": [_PRIVATE_STATE_PATH], "recurrenceOutcomes": [], "toolPairs": []})

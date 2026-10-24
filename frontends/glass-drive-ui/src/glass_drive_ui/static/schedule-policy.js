@@ -56,11 +56,13 @@ export function scheduleEditUpdates({ original = {}, initial = {}, current = {},
       'type', 'customType', 'weeklyDay', 'weeklyTime', 'timezone',
     ].some(changed);
     put('recurrence_type', raw('recurrence_type', 'type', 'customType'));
-    put('interval_seconds', raw('interval_seconds', 'intervalValue', 'intervalUnit'));
-    put('local_time', raw('local_time', 'localTime'));
-    put('timezone_name', raw('timezone_name', 'timezone'));
+    // A type switch activates fields that were hidden (and can still match the
+    // initial form defaults). Their assembled values belong to the new type.
+    put('interval_seconds', recurrenceTypeChanged ? payload.interval_seconds : raw('interval_seconds', 'intervalValue', 'intervalUnit'));
+    put('local_time', recurrenceTypeChanged ? payload.local_time : raw('local_time', 'localTime'));
+    put('timezone_name', recurrenceTypeChanged ? payload.timezone_name : raw('timezone_name', 'timezone'));
     if (recurrenceTypeChanged || changed('dstPolicy')) put('dst_policy', payload.dst_policy);
-    put('cron_expression', raw('cron_expression', 'cron'));
+    put('cron_expression', recurrenceTypeChanged ? payload.cron_expression : raw('cron_expression', 'cron'));
     put('rrule', recurrenceTypeChanged ? payload.rrule : raw('rrule', 'rrule'));
     put('starts_at', weeklyAnchorChanged ? payload.starts_at : raw('starts_at', 'startsAt'));
     put('ends_at', changed('endsAt') ? payload.ends_at : original.ends_at);

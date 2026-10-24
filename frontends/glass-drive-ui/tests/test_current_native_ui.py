@@ -131,11 +131,11 @@ globalThis.document={createElement:tag=>new Element(tag)};
 const parent=new Element('details'); const heading=new Element('summary'); heading.textContent='More'; parent.summary=heading;
 const mount=new Element('div'); mount.parentDetails=parent;
 const controller=attachNativeControls(mount,'worker-native',{getJson:async()=>({}),postJson:async()=>({status:'permission_submitted'})});
-controller.updateLive({run_id:'run-native',attempt_id:'attempt-native',available:true,pending_requests:[{request_id:'request-native',method:'session/request_permission',request:{toolCall:{title:'Run command',rawInput:'echo exact command'},options:[{optionId:'allow',name:'Allow'}]}}]});
+controller.updateLive({run_id:'run-native',attempt_id:'attempt-native',available:true,capabilities:{interject:true,cancel:true,permission:true},pending_requests:[{request_id:'request-native',method:'session/request_permission',request:{toolCall:{title:'Run command',rawInput:'echo exact command'},options:[{optionId:'allow',name:'Allow'}]}}]});
 assert.equal(parent.open,true); assert.equal(heading.textContent,'More · response needed');
 const panel=mount.children[0]; assert.equal(panel.open,true); assert.equal(panel.children[2].children.length,1);
 const requestSection=panel.children[2].children[0]; assert.equal(requestSection.children.some((child)=>child.tag==='pre' && child.textContent==='echo exact command'),true);
-assert.equal(panel.children[1].textContent,'Grok is waiting for your response.');
+assert.equal(panel.children[1].textContent,'The worker is waiting for your response.');
 assert.equal(panel.children[4].disabled,false); assert.equal(panel.children[5].disabled,false);
 console.log('pending native input live renderer proof pass');
 '''.replace('MODULE', json.dumps(path))
@@ -166,7 +166,7 @@ const mount=new Element('div'); const calls=[];
 let getCount=0;
 const controller=attachNativeControls(mount,'worker-native',{getJson:async()=>{getCount+=1;return {};},postJson:async()=>({status:'permission_submitted'}),onResponseNeeded:(value)=>calls.push(value)});
 const request={request_id:'request-1',method:'session/request_permission',expires_at:1700000060,request:{toolCall:{title:'Run command'},options:[{optionId:'allow',name:'Allow'}]}};
-const live=(pending)=>controller.updateLive({run_id:'run',attempt_id:'attempt',available:true,pending_requests:pending});
+const live=(pending)=>controller.updateLive({run_id:'run',attempt_id:'attempt',available:true,capabilities:{interject:true,cancel:true,permission:true},pending_requests:pending});
 live([request]); live([request]);
 assert.deepEqual(calls,[{waiting:true,isNew:true},{waiting:true,isNew:false}]);
 const section=mount.children[0].children[2].children[0];
@@ -210,7 +210,7 @@ globalThis.setInterval=()=>0; globalThis.clearInterval=()=>{};
 globalThis.document={createElement:tag=>new Element(tag)};
 const mount=new Element('div'); const calls=[];
 const controller=attachNativeControls(mount,'worker',{getJson:async()=>({}),postJson:async(_path,payload)=>{calls.push(payload);return {status:'permission_submitted'};}});
-controller.updateLive({run_id:'run',attempt_id:'attempt',available:true,pending_requests:[{
+controller.updateLive({run_id:'run',attempt_id:'attempt',available:true,capabilities:{interject:true,cancel:true,permission:true},pending_requests:[{
   request_id:'request',method:'session/request_permission',request:{options:[
     {optionId:'always',kind:'allow_always',name:'Yes, and do not ask again'},
     {optionId:'once',kind:'allow_once',name:'Yes, proceed'},
@@ -289,13 +289,17 @@ def test_watch_steer_hint_recovers_after_a_transient_outage():
 const node = () => ({textContent: '', hidden: false, disabled: false, placeholder: '', dataset: {}});
 const guidancePrimary = node(), guidanceQueue = node(), steerInput = node(), sendButton = node(), title = node(), subtitle = node(),
   statePill = node(), overlay = node(), overlayTitle = node(), overlayDetail = node(), overlayLabel = node(), stageResultText = node(), runToggleButton = node();
-const stage = {dataset: {}}, signInLink = node();
+const stage = {dataset: {}}, signInLink = node(), runTime = node(), menuToggle = node(), filesPanel = node();
+const filesToggle = {...node(), setAttribute: () => {}};
+const interrupt = node(), menu = {querySelector: () => interrupt};
+const availabilityUpdates = [], syncWatchMenuAvailability = value => availabilityUpdates.push(value);
 const window = {location: {pathname: '/watch/wrk_one', search: '?project_id=prj_one', hash: ''}};
     let currentDisplayState, currentRunState, currentDesktopAvailable, currentDeliverable, currentSummary, currentFullOutput, currentResultText, actionFailure;
 const clearAttachedView = () => {}, renderOutputContent = () => {}, syncResultActions = () => {}, syncArtifactList = () => {}, syncSendAffordance = () => {};
 const showResult = (text) => { stageResultText.hidden = !text; };
 showWorkspaceUnavailable(502);
 if (guidancePrimary.textContent !== 'Workspace status is unavailable right now.') throw new Error('5xx: ' + guidancePrimary.textContent);
+if (!runTime.hidden || !interrupt.disabled || !filesToggle.disabled || !menuToggle.disabled || !filesPanel.hidden || availabilityUpdates.at(-1) !== null) throw new Error('Unavailable state must remove stale timing and mutation actions');
 syncSteerAvailability('running');
 if (guidancePrimary.textContent !== 'Send redirects now' || steerInput.disabled) throw new Error('recovered: ' + guidancePrimary.textContent);
 showWorkspaceUnavailable(403);
@@ -317,6 +321,8 @@ if (!guidancePrimary.textContent.startsWith('This workspace is closed.')) throw 
 
 def test_watch_places_required_native_input_above_the_growing_file_list():
     html = (Path(server_module.STATIC_DIR) / 'watch.html').read_text()
-    panel = html[html.index('id="result-panel"'):html.index('id="latest-output-human"')]
+    panel = html[html.index('id="result-panel"'):html.index('id="result-technical"')]
     # Files accumulate per turn; a pending request must not fall below them.
     assert panel.index('id="result-actions"') < panel.index('id="native-controls"') < panel.index('id="artifact-list"')
+    assert panel.index('id="latest-output-full"') < panel.index('id="artifact-list"')
+    assert '<details id="workspace-artifacts"' in panel and '<details id="workspace-artifacts" class="workspace-artifacts" hidden>' in panel

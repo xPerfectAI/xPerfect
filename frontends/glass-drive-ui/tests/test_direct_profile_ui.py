@@ -17,7 +17,7 @@ const field={hidden:true}; const selector={value:'new:direct-anthropic'};
 const document={getElementById:()=>effort,querySelector:()=>field,createElement:()=>({})};
 const catalog={items:[{profile:'direct-anthropic',models:[{effort_choices:['default','low','medium','high','max'],recommended_effort:'high'}]},
  {profile:'direct-openai',models:[{effort_choices:['default','low','medium','high','xhigh'],recommended_effort:'high'}]}]};
-let requests=0; const fetch=async()=>{requests++;return {ok:true,json:async()=>catalog}};
+let requests=0; const fetch=async(url)=>{assert.equal(url,'/api/member-profiles');requests++;return {ok:true,json:async()=>catalog}};
 ''' +body+'''
 (async()=>{
  await syncDirectEffort('direct-anthropic',selector);

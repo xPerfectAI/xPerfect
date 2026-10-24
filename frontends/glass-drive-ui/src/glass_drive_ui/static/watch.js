@@ -1,17 +1,12 @@
-import { watchOutputModel } from './delivery-presenter.js?v=20260923closed1';
-import { workspaceLifecycleControl } from './launch-policy.js?v=20260811m';
-import { createFileDraft, createWorkspaceFiles } from './files.js?v=20260927attach2';
-import { attachNativeControls } from './native-controls.js?v=20260922o03c';
-import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
+import { watchOutputModel, watchTimingModel } from './delivery-presenter.js?v=20261024journeys18';
+import { workspaceLifecycleControl } from './launch-policy.js?v=20261024journeys18';
+import { createFileDraft, createWorkspaceFiles } from './files.js?v=20261024journeys18';
+import { attachNativeControls, canGuideNativeTurn } from './native-controls.js?v=20261024journeys18';
+import { createResultMarkdown } from './result-markdown.js?v=20261024journeys18';
 
 // The same safe rendering as conversation replies: raw HTML is escaped and unsafe link
 // schemes are refused. Links open beside the workspace instead of replacing it.
-const resultMarkdown = new MarkdownIt({ html: false, linkify: false, typographer: false });
-resultMarkdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
-  tokens[index].attrSet('target', '_blank');
-  tokens[index].attrSet('rel', 'noopener noreferrer');
-  return self.renderToken(tokens, index, options);
-};
+const resultMarkdown = createResultMarkdown();
 
 const params = new URLSearchParams(window.location.search);
 const workerId = window.location.pathname.split('/').filter(Boolean).at(-1);
@@ -35,6 +30,9 @@ const workspaceApiBase = `/api/workspace/${workerId}`;
 const frame = document.getElementById('desktop-frame');
 const overlay = document.getElementById('stage-overlay');
 const stage = document.querySelector('.watch-stage');
+const watchApp = document.querySelector('.watch-app');
+const terminalLog = document.getElementById('terminal-log');
+const terminalLogSummary = document.getElementById('terminal-log-summary');
 const overlayLabel = document.querySelector('#stage-overlay .overlay-label');
 const overlayTitle = document.getElementById('overlay-title');
 const overlayDetail = document.getElementById('overlay-detail');
@@ -64,6 +62,11 @@ const resultTechnical = document.getElementById('result-technical');
 let actionFailure = null;
 const resultActions = document.getElementById('result-actions');
 const artifactList = document.getElementById('artifact-list');
+const workspaceArtifacts = document.getElementById('workspace-artifacts');
+const artifactCount = document.getElementById('artifact-count');
+const runTime = document.getElementById('watch-run-time');
+const runTimeLabel = document.getElementById('watch-time-label');
+const runTimeValue = document.getElementById('watch-time-value');
 const statusLabel = document.getElementById('status-label');
 const statePill = document.getElementById('watch-state');
 const menu = document.getElementById('more-menu');
@@ -79,8 +82,9 @@ const surfaceDesktopButton = document.getElementById('surface-desktop');
 const openExternal = document.getElementById('open-external');
 const openTerminalLink = document.getElementById('open-terminal-link');
 const openProjectWorkspace = document.getElementById('open-project-workspace');
-const openProjectWorkspaceMenu = document.getElementById('open-project-workspace-menu');
-const openclawActionButton = document.querySelector('[data-action="openclaw"]');
+const closeWorkspaceDialog = document.getElementById('watch-close-dialog');
+const closeWorkspaceCancel = document.getElementById('watch-close-cancel');
+const closeWorkspaceConfirm = document.getElementById('watch-close-confirm');
 const steerForm = document.getElementById('steer-form');
 const steerInput = document.getElementById('steer-input');
 const sendButton = document.getElementById('send-button');
@@ -151,6 +155,8 @@ let refreshInFlight = false;
 let nativeControls = null;
 let latestFileActivityKey = '';
 let listedFileActivityKey = '';
+let settledTerminalRun = '';
+let terminalResultPreferred = false;
 
 // Keyed on the latest run, its attempt and its phase: the terminal shows exactly that run,
 // attaching its current attempt's session once it starts (again after a retry) and its saved
@@ -221,6 +227,37 @@ function ownerResponseNeeded(data) {
     && Array.isArray(control.pending_requests) && control.pending_requests.length);
 }
 
+// A terminal-only deployment leads with its existing human result when work ends.
+// Native input stays visible during work or while the owner must answer a request.
+function syncTerminalResultPresentation(data) {
+  if (!terminalLog || !terminalLogSummary || !watchApp) return;
+  const run = data?.latest_run || {};
+  const runKey = `${String(run.run_id || '')}:${String(run.active_attempt_id || '')}`;
+  const settled = Boolean(run.run_id) && terminalRunPhase(run.state) === 'ended'
+    && activeSurface === 'terminal' && !currentDesktopAvailable && !ownerResponseNeeded(data)
+    && Boolean(currentFullOutput.trim());
+  if (!settled) {
+    const wasPreferred = terminalResultPreferred;
+    terminalResultPreferred = false;
+    settledTerminalRun = '';
+    watchApp.dataset.resultFirst = 'false';
+    terminalLogSummary.hidden = true;
+    terminalLog.open = true;
+    resultClose.hidden = false;
+    if (wasPreferred && !actionFailure && !ownerResponseNeeded(data)) closeResultPanel();
+    return;
+  }
+  if (settledTerminalRun !== runKey) {
+    settledTerminalRun = runKey;
+    terminalResultPreferred = true;
+    terminalLog.open = false;
+    openResultPanel();
+  }
+  watchApp.dataset.resultFirst = String(terminalResultPreferred);
+  terminalLogSummary.hidden = !terminalResultPreferred;
+  resultClose.hidden = terminalResultPreferred;
+}
+
 function displayStateForLive(data) {
   const workerState = String(data?.worker?.close_state || data?.worker?.state || '').trim().toLowerCase();
   const runState = String(data?.latest_run?.state || '').trim().toLowerCase();
@@ -236,7 +273,12 @@ function displayStateForLive(data) {
 
 function displayStateLabel(state) {
   const normalized = String(state || '').trim().toLowerCase();
+  const activeLabels = { created: 'Starting', starting: 'Starting', resuming: 'Resuming', queued: 'Queued', running: 'Working', settling: 'Finishing', needs_input: 'Response needed', ready: 'Ready', paused: 'Paused', idle: 'Idle', stopped: 'Stopped' };
+  if (activeLabels[normalized]) return activeLabels[normalized];
   if (normalized === 'completed') return 'Completed';
+  if (normalized === 'failed') return 'Failed';
+  if (normalized === 'interrupted') return 'Interrupted';
+  if (normalized === 'cancelled') return 'Cancelled';
   if (normalized === 'idle_terminated') return 'Idle stopped';
   if (normalized === 'terminated') return 'Closed';
   if (normalized === 'terminating') return 'Closing';
@@ -249,13 +291,42 @@ function clearRetryTimers() {
   retryTimers = [];
 }
 
-function closeMenu() {
+function closeMenu({ restoreFocus = false } = {}) {
   menu.hidden = true;
   menuToggle.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) menuToggle.focus();
 }
+
+function syncWatchLayout() {
+  const ribbon = document.querySelector('.watch-ribbon');
+  if (ribbon) watchApp.style.setProperty('--watch-header-height', `${ribbon.getBoundingClientRect().height}px`);
+  const footer = document.querySelector('.watch-footer');
+  if (footer) watchApp.style.setProperty('--watch-footer-height', `${footer.getBoundingClientRect().height}px`);
+}
+
+function watchMenuItems() {
+  return Array.from(menu.querySelectorAll('button[role="menuitem"]'))
+    .filter((button) => !button.hidden && !button.disabled && button.getClientRects().length);
+}
+
+function openMenu(last = false) {
+  syncWatchLayout();
+  menu.hidden = false;
+  menuToggle.setAttribute('aria-expanded', 'true');
+  const items = watchMenuItems();
+  (last ? items.at(-1) : items[0])?.focus();
+}
+
 
 function closeResultPanel() {
   actionFailure = null;
+  if (terminalResultPreferred) {
+    terminalResultPreferred = false;
+    watchApp.dataset.resultFirst = 'false';
+    terminalLogSummary.hidden = true;
+    terminalLog.open = true;
+    resultClose.hidden = false;
+  }
   resultPanel.hidden = true;
   resultToggle.setAttribute('aria-expanded', 'false');
   const kind = latestOutputFull.hidden ? 'status' : 'result';
@@ -347,7 +418,6 @@ function projectWorkspaceUrl() {
 function syncProjectWorkspaceLinks() {
   const available = Boolean(projectWorkspaceUrl());
   openProjectWorkspace.hidden = !available;
-  openProjectWorkspaceMenu.hidden = !available;
 }
 
 function syncSendAffordance() {
@@ -378,10 +448,10 @@ function syncSendAffordance() {
   sendButton.title = `Send redirects now. Hold Send or use ${queueShortcutLabel} to queue a follow-up without interrupting current work.`;
 }
 
-function syncRunToggle(state) {
+function syncRunToggle(state, runState = state) {
   if (!runToggleButton) return;
   const normalized = String(state || '').trim().toLowerCase();
-  const control = workspaceLifecycleControl(normalized);
+  const control = workspaceLifecycleControl(normalized, runState);
   runToggleButton.hidden = control.hidden;
   runToggleButton.dataset.action = control.action;
   runToggleButton.textContent = control.label;
@@ -399,7 +469,7 @@ function syncSteerAvailability(state) {
   const closed = ['terminating', 'termination_failed', 'terminated'].includes(String(state || '').trim().toLowerCase());
   steerInput.disabled = closed;
   sendButton.disabled = closed;
-  steerInput.placeholder = closed ? 'This workspace is closed' : 'Steer this workspace';
+  steerInput.placeholder = closed ? 'This workspace is closed' : 'Message this worker…';
   if (closed) {
     guidancePrimary.textContent = 'This workspace is closed. Return to Workspaces to create new work.';
     guidanceQueue.textContent = '';
@@ -414,6 +484,7 @@ function autoResizeSteerInput() {
   if (!steerInput) return;
   steerInput.style.height = 'auto';
   steerInput.style.height = `${Math.min(Math.max(steerInput.scrollHeight, 52), 156)}px`;
+  syncWatchLayout();
 }
 
 function clearLongPress() {
@@ -447,12 +518,39 @@ function scheduleRefresh(delayMs = refreshDelayForState()) {
   }, delayMs);
 }
 
+function syncWatchMenuAvailability(data) {
+  const runtime = data?.runtime_details || {};
+  const desktop = Boolean(runtime.view_available || runtime.view_url);
+  const closed = ['terminating', 'termination_failed', 'terminated'].includes(String(data?.worker?.close_state || data?.worker?.state || ''));
+  const manage = data?.can_manage_workspace === true && !closed;
+  const appActions = document.getElementById('watch-app-actions');
+  if (appActions) appActions.hidden = !desktop || !manage;
+  const nativeAction = { 'codex-cli': 'codex', 'claude-code': 'claude', 'openclaw-general': 'openclaw' }[data?.worker?.profile];
+  for (const action of ['codex', 'claude', 'openclaw']) {
+    const button = menu.querySelector(`[data-action="${action}"]`);
+    if (button) button.hidden = !desktop || !manage || action !== nativeAction;
+  }
+  surfaceDesktopButton.hidden = !desktop;
+  surfaceTerminalButton.hidden = !desktop && activeSurface === 'terminal';
+  openTerminalLink.hidden = activeSurface === 'terminal';
+  const interrupt = menu.querySelector('[data-action="interrupt"]');
+  if (interrupt) {
+    const allowed = manage && STEERABLE_RUN_STATES.has(String(data?.latest_run?.state || ''));
+    interrupt.hidden = !allowed;
+    interrupt.disabled = !allowed;
+  }
+  const close = menu.querySelector('[data-action="terminate"]');
+  if (close) close.hidden = data?.can_manage_workspace !== true || ['terminating', 'terminated'].includes(String(data?.worker?.close_state || data?.worker?.state || ''));
+  const workspaceGroup = close?.closest('[role="group"]');
+  if (workspaceGroup) workspaceGroup.hidden = openTerminalLink.hidden && (!interrupt || interrupt.hidden) && (!close || close.hidden);
+}
+
 function syncMenuLabels() {
   surfaceTerminalButton.dataset.active = String(activeSurface === 'terminal');
   surfaceDesktopButton.dataset.active = String(activeSurface === 'desktop');
-  openExternal.textContent = activeSurface === 'desktop'
+  (openExternal.querySelector?.('span') || openExternal).textContent = activeSurface === 'desktop' && currentDesktopAvailable
       ? 'Open current desktop in new tab'
-      : 'Open current session in new tab';
+      : 'Open live activity in new tab';
 }
 
 function setSurface(surface, { force = false } = {}) {
@@ -533,10 +631,10 @@ function summarizeOutput(data) {
   return {
     ...output,
     label: 'Response needed',
-    panelTitle: 'Grok needs your response',
+    panelTitle: 'The worker needs your response',
     summary: data.native_control.read_only === true
-      ? 'Grok is waiting for a workspace member to respond.'
-      : 'Grok is waiting for your response.',
+      ? 'The worker is waiting for a workspace member to respond.'
+      : 'The worker is waiting for your response.',
   };
 }
 
@@ -581,12 +679,9 @@ function syncArtifactList(items) {
     ? items.filter((item) => item && !item.is_dir && (item.open_url || item.download_url || item.path))
     : [];
   artifactList.hidden = files.length === 0;
+  if (workspaceArtifacts) workspaceArtifacts.hidden = files.length === 0;
+  if (artifactCount) artifactCount.textContent = String(files.length);
   if (!files.length) return;
-
-  const heading = document.createElement('div');
-  heading.className = 'artifact-list-heading';
-  heading.textContent = files.length === 1 ? 'Workspace file' : `Workspace files (${files.length})`;
-  artifactList.appendChild(heading);
 
   const visibleFiles = files.slice(0, 20);
   for (const file of visibleFiles) {
@@ -882,6 +977,7 @@ function renderOutputContent(output) {
   resultPanelTitle.textContent = output.panelTitle;
   latestOutputInline.textContent = output.summary;
   latestOutputHuman.textContent = output.summary;
+  latestOutputHuman.hidden = Boolean(output.result);
   // Only a completed run's answer is a result; other output stays in Technical details.
   latestOutputFull.innerHTML = output.result ? resultMarkdown.render(output.result) : '';
   latestOutputFull.hidden = !output.result;
@@ -1043,18 +1139,18 @@ function setOverlay(state, detail) {
 
   if (connecting) {
     if (overlayLabel) {
-      overlayLabel.textContent = filePreviewActive ? 'Delivered file' : 'Workspace attaching';
+      overlayLabel.textContent = filePreviewActive ? 'Delivered file' : 'Connecting';
     }
     overlayTitle.textContent = filePreviewActive
       ? 'Opening delivered file…'
       : activeSurface === 'desktop'
         ? 'Attaching live workspace…'
-        : 'Attaching exact live session…';
+        : 'Opening live activity…';
     overlayDetail.textContent = filePreviewActive
       ? 'The completed file preview is loading. Use Open delivered file in new tab if this takes more than a few seconds.'
       : activeSurface === 'desktop'
         ? 'The desktop is waking up. If it takes more than a few seconds, open the current desktop in a new tab.'
-      : 'We are connecting to the exact running session. If it takes more than a few seconds, open the current session in a new tab.';
+      : 'We are opening this worker’s live activity. If it takes more than a few seconds, open the current session in a new tab.';
     return;
   }
 
@@ -1065,12 +1161,12 @@ function setOverlay(state, detail) {
     ? 'Opening delivered file…'
     : activeSurface === 'desktop'
       ? 'Preparing live workspace…'
-      : 'Preparing exact live session…';
+      : 'Opening live activity…';
   overlayDetail.textContent = detail || (filePreviewActive
     ? 'The completed file preview will appear here automatically.'
     : activeSurface === 'desktop'
       ? 'The desktop will attach automatically when the workspace is ready.'
-    : 'The exact workspace session will appear here as soon as the workspace is ready.');
+    : 'Your worker’s activity will appear here when it is ready.');
 }
 
 function showWorkspaceUnavailable(status) {
@@ -1099,13 +1195,20 @@ function showWorkspaceUnavailable(status) {
   title.textContent = heading;
   subtitle.textContent = message;
   statePill.textContent = code === 401 ? 'Sign-in needed' : 'Unavailable';
+  statePill.dataset.state = 'unavailable';
   actionFailure = null;
   renderOutputContent({
     label: heading, panelTitle: heading,
-    summary: message, result: message, technical: '',
+    summary: message, result: '', technical: '',
   });
   syncResultActions(null);
   syncArtifactList([]);
+  if (runTime) runTime.hidden = true;
+  filesToggle.disabled = true; menuToggle.disabled = true;
+  filesPanel.hidden = true; filesToggle.setAttribute('aria-expanded', 'false');
+  syncWatchMenuAvailability(null);
+  const interrupt = menu.querySelector('[data-action="interrupt"]');
+  if (interrupt) interrupt.disabled = true;
   if (runToggleButton) {
     runToggleButton.hidden = true;
     runToggleButton.disabled = true;
@@ -1121,6 +1224,17 @@ function showWorkspaceUnavailable(status) {
   overlayTitle.textContent = heading;
   overlayDetail.textContent = message;
 }
+function syncNativeControls(data) {
+  if (nativeControlsMount) nativeControlsMount.hidden = data?.native_control === null;
+  if (canGuideNativeTurn(data?.native_control, signedToken) && !nativeControls && nativeControlsMount) {
+    nativeControls = attachNativeControls(nativeControlsMount, workerId, {
+      getJson: nativeGetJson,
+      postJson: nativePostJson,
+    });
+  }
+  nativeControls?.updateLive(data?.native_control || null);
+}
+
 async function refresh() {
   if (refreshInFlight) {
     scheduleRefresh(ACTIVE_REFRESH_MS);
@@ -1136,6 +1250,7 @@ async function refresh() {
     const data = await response.json();
     if (signInLink) signInLink.hidden = true;
     const worker = data.worker;
+    filesToggle.disabled = false; menuToggle.disabled = false;
     currentWorkerState = String(worker.state || '').trim().toLowerCase();
     const runtime = data.runtime_details || {};
     const displayState = displayStateForLive(data);
@@ -1147,21 +1262,16 @@ async function refresh() {
       'grok-build': 'Grok Build', 'openclaw-general': 'OpenClaw' }[worker.profile] || worker.profile || 'AI worker';
     const shared = data.execution_workspace_mode === 'shared';
     title.textContent = String(worker.name || currentProjectTitle || 'Worker');
-    subtitle.textContent = `${profileLabel} · ${shared ? 'Shared workspace' : 'Separate workspace'} · ${displayStateLabel(displayState)}`;
+    subtitle.textContent = `${profileLabel} · ${shared ? 'Shared workspace' : 'Separate workspace'}`;
     if (addWorkerButton) addWorkerButton.hidden = !shared || data.can_manage_workspace !== true;
-    if (openclawActionButton) {
-      openclawActionButton.hidden = !String(worker.profile || '').startsWith('openclaw');
-    }
-    if (String(worker.profile || '') === 'grok-build' && !signedToken && !nativeControls && nativeControlsMount) {
-      nativeControls = attachNativeControls(nativeControlsMount, workerId, {
-        getJson: nativeGetJson,
-        postJson: nativePostJson,
-      });
-    }
-    nativeControls?.updateLive(data?.native_control || null);
+    syncNativeControls(data);
     syncDocumentTitle(currentProjectTitle, worker.name, ownerResponseNeeded(data));
     statePill.textContent = displayStateLabel(displayState);
-    syncRunToggle(displayState === 'completed' ? displayState : currentWorkerState);
+    statePill.dataset.state = displayState;
+    const timing = watchTimingModel(data.latest_run);
+    if (runTime) runTime.hidden = !timing;
+    if (timing) { runTimeLabel.textContent = timing.label; runTimeValue.textContent = timing.value; }
+    syncRunToggle(displayState === 'completed' ? displayState : currentWorkerState, data.latest_run?.state);
 
     currentDesktopAvailable = Boolean(runtime.view_available || runtime.view_url);
   currentDesktopUrl = currentDesktopAvailable ? withUiRev(withAuth(`${uiBase}/desktop/${workerId}`)) : '';
@@ -1180,6 +1290,7 @@ async function refresh() {
     }
     await maybePromoteDeliverable(data);
     syncMenuLabels();
+    syncWatchMenuAvailability(data);
     setSurface(activeSurface, { force: false });
     if (!(activeSurface === 'desktop' && !currentDesktopAvailable)) {
       setOverlay(
@@ -1188,9 +1299,11 @@ async function refresh() {
           ? 'Use Resume to continue the same workspace.'
           : activeSurface === 'desktop'
             ? 'The desktop will attach automatically when the workspace is ready.'
-            : 'The exact workspace session will attach automatically when the workspace is ready.'
+            : 'Live activity will appear here when the worker is ready.'
       );
     }
+    syncTerminalResultPresentation(data);
+    syncWatchLayout();
   } finally {
     refreshInFlight = false;
     scheduleRefresh();
@@ -1200,6 +1313,9 @@ async function refresh() {
 for (const button of document.querySelectorAll('[data-action]')) {
   button.addEventListener('click', async () => {
     const action = button.getAttribute('data-action');
+    if (action === 'terminate') {
+      closeMenu(); closeWorkspaceDialog.showModal(); closeWorkspaceCancel.focus(); return;
+    }
     if (action === 'files') {
       closeMenu(); filesPanel.hidden = false;
       filesToggle.setAttribute('aria-expanded', 'true');
@@ -1221,6 +1337,25 @@ for (const button of document.querySelectorAll('[data-action]')) {
     }
   });
 }
+
+closeWorkspaceDialog?.addEventListener('cancel', (event) => {
+  if (closeWorkspaceConfirm.disabled) event.preventDefault();
+});
+closeWorkspaceCancel?.addEventListener('click', () => closeWorkspaceDialog.close());
+closeWorkspaceDialog?.addEventListener('close', () => menuToggle.focus());
+closeWorkspaceConfirm?.addEventListener('click', async () => {
+  if (closeWorkspaceConfirm.disabled) return;
+  closeWorkspaceConfirm.disabled = true;
+  closeWorkspaceCancel.disabled = true;
+  try {
+    await postAction('action/terminate');
+    closeWorkspaceDialog.close(); actionFailure = null; await refresh();
+  } catch (error) {
+    closeWorkspaceDialog.close(); showActionFailure(error);
+  } finally {
+    closeWorkspaceConfirm.disabled = false; closeWorkspaceCancel.disabled = false;
+  }
+});
 
 filesToggle?.addEventListener('click', () => {
   filesPanel.hidden = !filesPanel.hidden;
@@ -1274,11 +1409,13 @@ document.addEventListener('drop', (event) => {
 
 surfaceTerminalButton.addEventListener('click', () => {
   closeMenu();
+  if (terminalResultPreferred) closeResultPanel();
   setSurface('terminal', { force: true });
 });
 
 surfaceDesktopButton.addEventListener('click', () => {
   closeMenu();
+  if (terminalResultPreferred) closeResultPanel();
   setSurface('desktop', { force: true });
 });
 
@@ -1295,16 +1432,28 @@ frame.addEventListener('load', () => {
 });
 
 menuToggle.addEventListener('click', () => {
-  const open = menu.hidden;
-  menu.hidden = !open;
-  menuToggle.setAttribute('aria-expanded', String(open));
-  if (open) {
-    const firstMenuItem = menu.querySelector('button:not([hidden])');
-    if (firstMenuItem instanceof HTMLElement) {
-      firstMenuItem.focus();
-    }
-  }
+  if (menu.hidden) openMenu(); else closeMenu();
 });
+menuToggle.addEventListener('keydown', (event) => {
+  if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+  event.preventDefault();
+  openMenu(event.key === 'ArrowUp');
+});
+menu.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault(); event.stopPropagation(); closeMenu({ restoreFocus: true }); return;
+  }
+  if (event.key === 'Tab') { closeMenu(); return; }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  const items = watchMenuItems();
+  if (!items.length) return;
+  event.preventDefault();
+  const index = items.indexOf(document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+  items[next].focus();
+});
+window.addEventListener('resize', syncWatchLayout);
 
 resultToggle.addEventListener('click', () => {
   if (resultPanel.hidden) {
@@ -1324,15 +1473,15 @@ document.addEventListener('click', (event) => {
   if (!menu.hidden && !menu.contains(target) && !menuToggle.contains(target)) {
     closeMenu();
   }
-  if (!resultPanel.hidden && !resultPanel.contains(target) && !resultToggle.contains(target)) {
+  if (!terminalResultPreferred && !resultPanel.hidden && !resultPanel.contains(target) && !resultToggle.contains(target)) {
     closeResultPanel();
   }
 });
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
-    closeMenu();
-    closeResultPanel();
+    if (!menu.hidden) closeMenu({ restoreFocus: true });
+    if (!terminalResultPreferred) closeResultPanel();
     // A dialog open inside Files handles its own Escape first.
     if (!filesPanel.hidden && !document.querySelector('dialog[open]')) filesClose?.click();
   }
@@ -1353,7 +1502,7 @@ openExternal.addEventListener('click', () => {
   window.open(currentSurfaceUrl(), '_blank', 'noopener,noreferrer');
 });
 
-for (const button of [openProjectWorkspace, openProjectWorkspaceMenu]) {
+for (const button of [openProjectWorkspace]) {
   button.addEventListener('click', () => {
     closeMenu();
     window.location.assign('/#workspaces');
@@ -1427,6 +1576,7 @@ steerForm.addEventListener('submit', async (event) => {
   await submitFooterInstruction('steer');
 });
 
+syncWatchMenuAvailability(null);
 syncMenuLabels();
 syncProjectWorkspaceLinks();
 syncSendAffordance();

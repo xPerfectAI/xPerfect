@@ -10,20 +10,63 @@ def test_schedule_run_recovery_survives_render_history_and_normal_navigation():
     script = Path(__file__).with_name("schedule-recovery.cjs")
     result = subprocess.run(["node", str(script)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert "5 schedule recovery causal cases passed" in result.stdout
+    assert "8 schedule recovery causal cases passed" in result.stdout
+
+
+def test_recurrence_type_switch_uses_visible_defaults_and_clears_old_type_fields():
+    module = (STATIC_DIR / "schedule-policy.js").as_uri()
+    script = f"""
+      import {{ scheduleEditUpdates }} from {json.dumps(module)};
+      const original = {{
+        recurrence_type: 'once', interval_seconds: null, local_time: '',
+        timezone_name: 'America/New_York', cron_expression: '', rrule: '',
+        starts_at: '2035-01-01T12:34:56.123456+00:00', ends_at: null,
+      }};
+      const initial = {{
+        type: 'once', customType: 'interval', intervalValue: '1', intervalUnit: 'hours',
+        localTime: '09:00', timezone: 'America/New_York', cron: '', rrule: '',
+      }};
+      const daily = scheduleEditUpdates({{
+        original, initial, current: {{ ...initial, type: 'daily' }},
+        payload: {{ ...original, recurrence_type: 'daily', local_time: '09:00' }},
+      }});
+      if (daily.local_time !== '09:00') throw new Error('Once → daily lost the visible default time');
+      if (daily.starts_at !== original.starts_at) throw new Error('Unchanged exact start time drifted');
+      const elapsed = scheduleEditUpdates({{
+        original: {{ ...original, recurrence_type: 'daily', local_time: '09:00' }},
+        initial: {{ ...initial, type: 'daily' }}, current: {{ ...initial, type: 'custom' }},
+        payload: {{ ...original, recurrence_type: 'interval', interval_seconds: 3600, timezone_name: 'UTC' }},
+      }});
+      if (elapsed.interval_seconds !== 3600 || elapsed.timezone_name !== 'UTC' || elapsed.local_time !== '')
+        throw new Error('Daily → elapsed retained old calendar fields');
+      const fromCron = scheduleEditUpdates({{
+        original: {{ ...original, recurrence_type: 'cron', cron_expression: '0 9 * * *' }},
+        initial: {{ ...initial, type: 'custom', customType: 'cron', cron: '0 9 * * *' }},
+        current: {{ ...initial, type: 'daily', customType: 'cron', cron: '0 9 * * *' }},
+        payload: {{ ...original, recurrence_type: 'daily', local_time: '09:00', cron_expression: '' }},
+      }});
+      if (fromCron.cron_expression !== '' || fromCron.local_time !== '09:00')
+        throw new Error('Cron → daily retained old cron fields');
+    """
+    result = subprocess.run(["node", "--input-type=module", "--eval", script],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_kickoff_details_are_visible_and_goal_is_the_only_required_field():
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    import re
 
     assert "Add details" not in index
     assert 'id="success_criteria" name="success_criteria"' in index
     assert 'id="context" name="context"' in index
     assert 'id="description" name="description"' in index
-    assert 'id="description" name="description" rows="4" placeholder="Describe what you want done…" required' in index
-    assert 'id="success_criteria" name="success_criteria" rows="3" placeholder="Anything the result must include?" required' not in index
-    assert 'id="context" name="context" rows="3" placeholder="Helpful context, links, or constraints." required' not in index
-    assert '<div class="project-details" aria-label="Optional project details">' in index
+    # Wording and grouping can improve without changing the goal-only required contract.
+    for field in ['description', 'success_criteria', 'context']:
+        tag = re.search(r'<textarea\b[^>]*\bid="' + field + r'"[^>]*>', index).group()
+        assert bool(re.search(r'\brequired(?:\s|=|>)', tag)) is (field == 'description')
+    assert index.index('id="context"') < index.index('<summary>More settings</summary>')
+    assert index.index('id="project-add-files"') < index.index('<summary>More settings</summary>')
 
 
 def test_schedule_surface_starts_with_saved_list_and_compact_editor_controls():
@@ -43,7 +86,7 @@ def test_schedule_surface_starts_with_saved_list_and_compact_editor_controls():
     assert '>Start project<' in index
     assert 'Scheduling a one-off run keeps it as a saved workspace.' in index
     assert '>Cancel<' in index
-    assert 'Times use this saved time zone.' in index
+    assert 'The saved city sets the time for this schedule.' in index
     assert 'IANA' not in index
     assert 'id="recurring-schedule-tomorrow"' in index
     assert 'schedule-card-more' in control_plane
@@ -52,7 +95,7 @@ def test_schedule_surface_starts_with_saved_list_and_compact_editor_controls():
     assert 'scheduleLoadErrorNotice(scheduleLoadError,' in control_plane
     assert 'if (schedule.last_error) actions.append(historyButton)' in control_plane
     assert "node('details', 'schedule-history-error')" in control_plane
-    assert 'Check Error details, fix the cause, then use Run now or resume this schedule.' in control_plane
+    assert 'Your app may already have started. Check there before sending a new request.' in control_plane
     assert 'We could not confirm whether it started. Check history before trying again.' in control_plane
     assert 'No duplicate occurrence was created' not in control_plane
     assert 'recurringSchedules = { items: [] };\n    scheduleLoadError = error.message;' not in control_plane

@@ -29,7 +29,7 @@ class Element {
 }
 
 function fixture({ storage = new Map(), owner = 'owner-test' } = {}) {
-  const nodes = { 'schedule-list': new Element('div'), 'recurring-schedule-status': new Element('p') };
+  const nodes = { 'schedule-list': new Element('div'), 'recurring-schedule-status': new Element('p'), 'schedules-view': new Element('section') };
   const context = vm.createContext({
     console, Map, Set, Date, Intl, URLSearchParams, CustomEvent: class {},
     crypto: { randomUUID: () => `test-token-${++tokenSerial}` },
@@ -38,14 +38,16 @@ function fixture({ storage = new Map(), owner = 'owner-test' } = {}) {
       setItem: (key, value) => storage.set(key, value),
       removeItem: (key) => storage.delete(key),
     },
-    window: { dispatchEvent() {} },
+    window: { dispatchEvent() {}, setTimeout: () => 1, clearTimeout() {} },
     document: {
+      visibilityState: 'visible',
       getElementById: (id) => nodes[id] || null,
       querySelector: () => null,
       createElement: (tag) => new Element(tag),
       createTextNode: (value) => { const element = new Element('#text'); element.textContent = value; return element; },
     },
   });
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../src/glass_drive_ui/static/schedule-data.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source.replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\n/gm, '').replace(/^export /gm, ''), context);
   context.schedule = { ...schedule };
   context.me = { tenant_id: 'tenant-test', user_id: owner };
@@ -55,7 +57,7 @@ function fixture({ storage = new Map(), owner = 'owner-test' } = {}) {
     postJson: async () => ({}),
   };
   vm.runInContext('api = mockApi; controlPlane = { me }; restoreUncertainScheduleRunKeys(); recurringSchedules = { items: [schedule] };', context);
-  const success = (payload) => ({ ok: true, json: async () => payload });
+  const success = (payload) => ({ ok: true, json: async () => payload, text: async () => JSON.stringify(payload) });
   context.fetch = async () => success({ items: [context.schedule] });
   return { context, nodes, storage, success, run: (expression) => vm.runInContext(expression, context) };
 }
@@ -114,13 +116,19 @@ async function main() {
 
     const reloaded = fixture({ storage });
     reloaded.run('recurringSchedules = { items: [] }; restoreCapabilityReviewFromCatalog=()=>{}; reconcileCapabilityReview=async()=>{}; renderProviderOptionControls=()=>{}; renderProviderAccounts=()=>{}; renderConnections=()=>{}; renderConnectAi=()=>{}; renderLibrary=()=>{}; renderLibraryRequestWorkspaceOptions=()=>{}; renderCapabilityReviewBanner=()=>{};');
+    const controlReads = [];
     reloaded.context.fetch = async (url) => url.startsWith('/api/recurring-schedules')
       ? { ok: false }
-      : reloaded.success(url === '/api/control-plane' ? { me: reloaded.context.me } : { items: [] });
+      : reloaded.success(url.startsWith('/api/control-plane')
+        ? (controlReads.push(url), { me: reloaded.context.me, connections: [], library: [], sections: { connections: 'ready', library: 'ready' } })
+        : { items: [] });
     await reloaded.run('refreshControlPlane()');
+    assert(controlReads.includes('/api/control-plane?sections=accounts'), 'reload must use the actual account section request');
+    assert(controlReads.includes('/api/control-plane?sections=resources'), 'reload must use the independent resource section request');
     assert(storage.size, 'an initial list 503 must not forget the unresolved token');
-    reloaded.context.fetch = async (url) => reloaded.success(url === '/api/control-plane'
-      ? { me: reloaded.context.me } : { items: [reloaded.context.schedule] });
+    reloaded.context.fetch = async (url) => reloaded.success(url.startsWith('/api/control-plane')
+      ? { me: reloaded.context.me, connections: [], library: [], sections: { connections: 'ready', library: 'ready' } }
+      : { items: [reloaded.context.schedule] });
     await reloaded.run('refreshControlPlane()');
     reloaded.run('renderSchedules()');
     assert(findButton(reloaded.nodes['schedule-list'], 'Confirm prior run'));
@@ -157,12 +165,12 @@ async function main() {
     context.historyButton = new Element('button');
     await run('toggleOccurrenceHistory(schedule.definition_id, history, historyButton)');
     assert.equal(reads, 1, 'uncertain request must invalidate cached empty history');
-    assert.match(context.history.textContent, /pending/);
+    assert.match(context.history.textContent, /Sending/);
     assert.match(context.status.textContent, /could not confirm/);
     run('scheduleOccurrences.set(schedule.definition_id, [])');
     await run('runScheduleNow(schedule, button, status, history)');
     assert.equal(reads, 2, 'already open history must revalidate after an uncertain request');
-    assert.match(context.history.textContent, /pending/);
+    assert.match(context.history.textContent, /Sending/);
   }
   {
     const { context, nodes, run, success } = fixture();
@@ -184,23 +192,105 @@ async function main() {
     const { context, nodes, run, success } = fixture();
     context.fetch = async (url) => url.startsWith('/api/recurring-schedules')
       ? { ok: false }
-      : success(url === '/api/control-plane' ? { me: context.me } : { items: [] });
+      : success(url.startsWith('/api/control-plane')
+        ? { me: context.me, connections: [], library: [], sections: { connections: 'ready', library: 'ready' } }
+        : { items: [] });
     run('restoreCapabilityReviewFromCatalog=()=>{}; reconcileCapabilityReview=async()=>{}; renderProviderOptionControls=()=>{}; renderProviderAccounts=()=>{}; renderConnections=()=>{}; renderConnectAi=()=>{}; renderLibrary=()=>{}; renderLibraryRequestWorkspaceOptions=()=>{}; renderCapabilityReviewBanner=()=>{};');
     await run('refreshControlPlane()');
     assert.match(nodes['schedule-list'].textContent, /Test task/);
     assert.match(nodes['schedule-list'].textContent, /Showing the last loaded list/);
     context.fetch = async (url) => url.startsWith('/api/recurring-schedules')
       ? Promise.reject(Error('Network interrupted'))
-      : success(url === '/api/control-plane' ? { me: context.me } : { items: [] });
+      : success(url.startsWith('/api/control-plane')
+        ? { me: context.me, connections: [], library: [], sections: { connections: 'ready', library: 'ready' } }
+        : { items: [] });
     await run('refreshControlPlane()');
     assert.match(nodes['schedule-list'].textContent, /Test task/);
     assert.match(nodes['schedule-list'].textContent, /Network interrupted/);
-    context.fetch = async (url) => success(url === '/api/control-plane'
-      ? { me: context.me } : { items: [context.schedule] });
+    context.fetch = async (url) => success(url.startsWith('/api/control-plane')
+      ? { me: context.me, connections: [], library: [], sections: { connections: 'ready', library: 'ready' } }
+      : { items: [context.schedule] });
     await run('refreshControlPlane()');
     assert.doesNotMatch(nodes['schedule-list'].textContent, /Could not refresh/);
   }
-  console.log('5 schedule recovery causal cases passed');
+  {
+    const { context, nodes, run, success } = fixture();
+    const timers = [], delays = [], requests = [];
+    let elapsed = 0;
+    const originalNow = Date.now;
+    const started = originalNow();
+    try {
+      Date.now = () => started + elapsed;
+      context.schedule.target = {kind:'webhook',destination_id:'app'};
+      context.schedule.last_outcome = 'pending';
+      context.schedule.last_occurrence_id = 'delivery-test';
+      context.schedule.last_occurrence_expires_at = new Date(started + 60000).toISOString();
+      context.window.setTimeout = (callback, delay) => { timers.push(async () => { elapsed += delay; await callback(); }); delays.push(delay); return delays.length; };
+      context.fetch = async (url) => {
+        requests.push(url);
+        return success({...context.schedule, last_outcome: elapsed > 5000 ? 'accepted' : 'pending'});
+      };
+      let sends = 0;
+      context.mockApi.postJson = async () => { sends++; return {}; };
+      run('scheduleOccurrences.set(schedule.definition_id, [{state:"pending"}]); renderSchedules()');
+      context.button = findButton(nodes['schedule-list'], 'Sending…');
+      assert.equal(context.button.disabled, true, 'a pending delivery cannot create another event');
+      context.status = new Element('p');
+      await run('runScheduleNow(schedule, button, status)');
+      assert.equal(sends, 0, 'a stale click handler also refuses to duplicate pending work');
+      while (timers.length) await timers.shift()();
+      assert.deepEqual(delays, [500, 1500, 3000, 5000], 'status checks continue past the first five seconds');
+      assert.equal(elapsed, 10000);
+      assert(requests.every(url => url === '/api/recurring-schedules/definition-test'), 'poll only this definition');
+      assert.match(nodes['schedule-list'].textContent, /Received by the app/);
+      assert(findButton(nodes['schedule-list'], 'Run now'), 'a confirmed ACK permits a new deliberate run');
+      assert.equal(run('settlingScheduleRefreshes.size'), 0);
+      assert.equal(run('scheduleOccurrences.has(schedule.definition_id)'), false, 'late ACK invalidates pending history');
+    } finally { Date.now = originalNow; }
+  }
+  {
+    for (const guard of ['hidden', 'owner', 'expiry']) {
+      const { context, nodes, run, success } = fixture();
+      let callback, reads = 0;
+      context.schedule.target = {kind:'webhook',destination_id:'app'};
+      context.schedule.last_outcome = 'pending';
+      context.schedule.last_occurrence_expires_at = new Date(Date.now() + (guard === 'expiry' ? -1 : 60000)).toISOString();
+      context.window.setTimeout = action => { callback = action; return 1; };
+      context.fetch = async () => { reads++; return success(context.schedule); };
+      run('refreshScheduleUntilSettled(schedule.definition_id)');
+      if (guard === 'hidden') nodes['schedules-view'].hidden = true;
+      if (guard === 'owner') context.me.user_id = 'different-owner';
+      if (callback) await callback();
+      assert.equal(reads, 0, `${guard} must stop the status watch`);
+      assert.equal(run('settlingScheduleRefreshes.size'), 0);
+    }
+  }
+  {
+    const { context, nodes, run } = fixture();
+    context.schedule.active = false; context.schedule.last_occurrence_at = '2026-09-23T09:00:00Z';
+    context.schedule.last_outcome = 'accepted';
+    context.schedule.clock_finished = false;
+    run('renderSchedules()');
+    assert.ok(findButton(nodes['schedule-list'], 'Resume schedule'), 'a manual result must not consume a paused future clock');
+    context.schedule.clock_finished = true;
+    run('renderSchedules()');
+    assert.equal(findButton(nodes['schedule-list'], 'Resume schedule'), null, 'a completed one-time run is not paused');
+    assert.match(nodes['schedule-list'].textContent, /done/);
+    context.history = new Element('div');
+    context.ambiguous = { state: 'unacknowledged', outcome: 'cancelled', scheduled_for: '2026-09-23T09:00:00Z' };
+    run('renderOccurrenceHistory(history, [ambiguous])');
+    assert.match(context.history.textContent, /Receipt not confirmed/);
+    assert.doesNotMatch(context.history.textContent, /Stopped/);
+    const latest = root => root.textContent.startsWith('Latest result:') && root.tagName === 'span' ? root : root.children.map(latest).find(Boolean);
+    for (const [outcome, tone] of [['pending','info'], ['rejected','error'], ['unacknowledged','error'], ['accepted','success']]) {
+      context.schedule.last_outcome = outcome;
+      run('renderSchedules()');
+      const result = latest(nodes['schedule-list']);
+      assert.equal(result.dataset.tone, tone, `${outcome} must have its visible semantic colour`);
+      assert(result.className.includes('inline-status'), 'reuse the existing semantic status palette');
+    }
+  }
+  console.log('8 schedule recovery causal cases passed');
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

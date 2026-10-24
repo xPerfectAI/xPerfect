@@ -4,14 +4,14 @@ import pytest
 from workers_projects_runtime.control_plane import ControlPlaneError
 from workers_projects_runtime.provider_accounts import ProviderAccountHomeManager
 
-@pytest.fixture
-def account(tmp_path, monkeypatch):
+@pytest.fixture(params=['arg0', 'arg0-macos'])
+def account(tmp_path, monkeypatch, request):
     root=tmp_path.resolve()
     binary=root/'trusted-codex';binary.write_text('synthetic executable');binary.chmod(0o755)
     monkeypatch.setattr('workers_projects_runtime.provider_accounts.provider_setup_binary',lambda _:str(binary))
     homes=ProviderAccountHomeManager(root/'accounts')
     home=homes.ensure_home(tenant_id='tenant',owner_id='owner',account_id='acct_test',provider='codex')
-    helpers=home/'codex/tmp/arg0/codex-arg0Ab12cd';helpers.mkdir(parents=True,mode=0o700)
+    helpers=home/'codex/tmp'/request.param/'codex-arg0Ab12cd';helpers.mkdir(parents=True,mode=0o700)
     auth=home/'codex/auth.json';auth.write_text('synthetic auth');auth.chmod(0o644)
     return homes,home,helpers,binary,auth
 
@@ -75,7 +75,7 @@ def test_product_selected_symlinked_codex_launcher_is_the_only_accepted_alias(
         homes.tighten_permissions(account_home=home)
 
 
-@pytest.mark.parametrize('kind',['credential','other-directory','other-name','wrong-target','relative-target','session-name','provider-directory'])
+@pytest.mark.parametrize('kind',['credential','other-directory','other-name','wrong-target','relative-target','session-name','provider-directory','other-temp-directory'])
 def test_adjacent_links_remain_rejected_without_touching_target(account,kind):
     homes,home,helpers,binary,auth=account
     path=helpers/'apply_patch';target=binary
@@ -86,6 +86,7 @@ def test_adjacent_links_remain_rejected_without_touching_target(account,kind):
     elif kind=='relative-target':target=Path(os.path.relpath(binary,helpers))
     elif kind=='session-name':path=helpers.parent/'unrecognized/apply_patch';path.parent.mkdir()
     elif kind=='provider-directory':path=home/'claude/tmp/arg0/codex-arg0Ab12cd/apply_patch';path.parent.mkdir(parents=True)
+    elif kind=='other-temp-directory':path=home/'codex/tmp/arg0-unreviewed/codex-arg0Ab12cd/apply_patch';path.parent.mkdir(parents=True)
     path.symlink_to(target)
     before=(binary.stat().st_mode,binary.read_bytes())
     with pytest.raises(ControlPlaneError,match='unsafe link'):homes.tighten_permissions(account_home=home)

@@ -12,6 +12,9 @@ That document is the canonical owner of model judgment, parity, single sources o
 separation of concerns, reuse and research, simple UX, batch delivery, QA and learning discipline.
 Feature contracts and narrower user instructions still govern the specific task.
 
+For client integration work, follow the [application boundary contract](docs/09_Application_Boundary_Contract.md).
+Keep core changes client-neutral; client-specific semantics and adapters belong to the client.
+
 ## Component Safety
 
 - Attribute project work to `AdrienBeyk` using the project’s public GitHub noreply identity.

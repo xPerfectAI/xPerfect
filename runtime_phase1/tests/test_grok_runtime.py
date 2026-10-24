@@ -1597,26 +1597,27 @@ def test_runner_uses_admitted_server_inventory_for_one_time_transport_permission
     assert not list((tmp_path / 'control').glob('*.pending'))
 
 
+@pytest.mark.parametrize('authority_key', ['launch_authority', 'viventium_launch_authority'])
 @pytest.mark.parametrize('case', ['full', 'ask', 'absent', 'raw_full', 'untrusted', 'restricted', 'wrong_kind', 'wrong_substrate', 'expired', 'boolean_version', 'caller_no_authority'])
-def test_native_mission_full_access_requires_owner_authority_and_admitted_generation(tmp_path, case):
-    bundle = {'viventium_launch_authority': {'version': 1, 'kind': 'conversation_orchestrator',
+def test_native_mission_full_access_requires_owner_authority_and_admitted_generation(tmp_path, case, authority_key):
+    bundle = {authority_key: {'version': 1, 'kind': 'conversation_orchestrator',
               'execution_mode': 'host', 'worker_access': 'full'}}
     record = {**worker(tmp_path), 'trusted_run_lane': 'mission',
               '_active_run_id': 'run-1', '_run_attempt_id': 'attempt-1',
               '_run_startup_token_digest': 'a' * 64, '_native_input_deadline_at': 9999999999,
               '_run_local_capability_binding': {'workerId': 'worker-grok', 'runId': 'run-1',
                   'hostStartupLeaseId': 'a' * 64}}
-    if case == 'ask': bundle['viventium_launch_authority']['worker_access'] = 'ask'
-    if case in {'absent', 'raw_full'}: bundle['viventium_launch_authority'].pop('worker_access')
+    if case == 'ask': bundle[authority_key]['worker_access'] = 'ask'
+    if case in {'absent', 'raw_full'}: bundle[authority_key].pop('worker_access')
     if case == 'raw_full': bundle['access_mode'] = 'full'
     if case == 'untrusted': record.pop('_native_input_deadline_at')
     if case == 'restricted': bundle['provider_capabilities'] = {'native_tools': False}
-    if case == 'wrong_kind': bundle['viventium_launch_authority']['kind'] = 'caller-authored'
-    if case == 'wrong_substrate': bundle['viventium_launch_authority']['execution_mode'] = 'docker'
+    if case == 'wrong_kind': bundle[authority_key]['kind'] = 'caller-authored'
+    if case == 'wrong_substrate': bundle[authority_key]['execution_mode'] = 'docker'
     if case == 'expired': record['_native_input_deadline_at'] = 1
-    if case == 'boolean_version': bundle['viventium_launch_authority']['version'] = True
+    if case == 'boolean_version': bundle[authority_key]['version'] = True
     if case == 'caller_no_authority':
-        bundle.pop('viventium_launch_authority')
+        bundle.pop(authority_key)
         bundle['access_mode'] = 'full'
     record['bootstrap_bundle_json'] = json.dumps(bundle)
     runtime = HostGrokBuildRuntime(str(tmp_path / 'state'))

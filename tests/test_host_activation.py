@@ -56,6 +56,12 @@ class HostActivationTests(unittest.TestCase):
         self.assertEqual(env["GLASSHIVE_PEER_RUNTIME_BASE_URL"], "http://127.0.0.1:22001")
         self.assertEqual(env["GLASSHIVE_RUNTIME_BASE_URL"], "http://127.0.0.1:22001")
 
+    def test_standalone_scheduling_is_operator_enabled_and_can_be_disabled(self):
+        config = host.configuration(self.state)
+        self.assertEqual(host.environment(self.state, config, "instance")["WPR_NATIVE_SELF_SCHEDULE_ENABLED"], "true")
+        config["env"]["WPR_NATIVE_SELF_SCHEDULE_ENABLED"] = "false"
+        self.assertEqual(host.environment(self.state, config, "instance")["WPR_NATIVE_SELF_SCHEDULE_ENABLED"], "false")
+
     def test_conversation_work_stays_in_private_state_not_the_checkout(self):
         config = host.configuration(self.state)
         with patch.dict(os.environ, {"GLASSHIVE_PROVIDER_DEFAULT_WORKSPACE": str(host.ROOT)}):

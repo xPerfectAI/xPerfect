@@ -10,7 +10,7 @@ from workers_projects_runtime.models import NativeControlRequest
 def test_native_control_fences_durable_run_and_attempt_before_calling_runtime():
     calls=[]
     service=object.__new__(WorkersProjectsService)
-    service._worker_compute_release_lock=lambda _:nullcontext()
+    service._worker_compute_release_lock=lambda _,**kwargs:nullcontext()
     service.require_worker=lambda _: {'worker_id':'worker','profile':'grok-build'}
     service._ensure_execution_allowed=lambda _:None
     service.store=SimpleNamespace(get_active_run=lambda _: {'run_id':'run','active_attempt_id':'attempt','state':'running'})
@@ -20,7 +20,25 @@ def test_native_control_fences_durable_run_and_attempt_before_calling_runtime():
     assert calls==[]
     assert service.native_worker_control('worker',run_id='run',attempt_id='attempt',action='interject',payload={'text':'direction'})=={'status':'queued'}
     assert calls[0]['payload']=={'text':'direction'}
-    assert service.native_worker_control('worker')=={'run_id':'run','attempt_id':'attempt'}
+    assert service.native_worker_control('worker')=={'run_id':'run','attempt_id':'attempt',
+        'capabilities': {'interject':False,'cancel':False,'permission':False}}
+
+
+@pytest.mark.parametrize('actions', [{'interject':True}, {'interject':True,'cancel':True},
+                                    {'permission':True}, {'interject':'true'}])
+def test_native_state_actions_come_from_exact_runtime_capability_probe(actions):
+    service=object.__new__(WorkersProjectsService)
+    service._worker_compute_release_lock=lambda _,**kwargs:nullcontext()
+    service.require_worker=lambda _: {'worker_id':'worker','profile':'synthetic-native'}
+    service.store=SimpleNamespace(get_active_run=lambda _: {'run_id':'run','active_attempt_id':'attempt','state':'running'})
+    calls=[]
+    service.runtime=SimpleNamespace(
+        native_control_state=lambda worker,**kw:kw,
+        supports_native_control=lambda worker,action,**kw:calls.append((worker,action,kw)) or actions.get(action,False))
+    state=service.native_worker_control('worker')
+    assert state['capabilities']=={action:actions.get(action) is True for action in ('interject','cancel','permission')}
+    assert [item[1] for item in calls]==['interject','cancel','permission']
+    assert all(item[2]=={'run_id':'run','attempt_id':'attempt'} for item in calls)
 
 
 def test_public_controls_require_existing_worker_authorization(tmp_path):

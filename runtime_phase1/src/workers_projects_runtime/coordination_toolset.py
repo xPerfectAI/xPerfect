@@ -1,5 +1,8 @@
 """Two names over existing owner-authorized work tools; no scheduler or execution loop."""
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+import hashlib
+import json
 
 from pydantic import TypeAdapter
 from pydantic_ai.toolsets.wrapper import WrapperToolset
@@ -8,6 +11,15 @@ START = 'worker_delegate_once_mcp_glasshive-workers-projects'
 CONTROL = 'active_work_action'
 ROSTER = 'active_work_list'
 ACTIONS = {'start', 'queue', 'message', 'steer', 'pause', 'resume', 'stop', 'retry', 'dismiss'}
+
+
+def coordination_tool_manifest():
+    path = Path(__file__).with_name("prompts") / "coordination-tools.json"
+    raw = path.read_bytes()
+    return json.loads(raw) | {
+        "source": "workers_projects_runtime/prompts/coordination-tools.json",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
 
 
 @dataclass
@@ -35,7 +47,7 @@ class CoordinationToolset(WrapperToolset):
         control_schema = control.tool_def.parameters_json_schema if control else {}
         start_properties = start_schema.get('properties', {})
         control_properties = control_schema.get('properties', {})
-        permitted = {'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput'}
+        permitted = {'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput', 'instruction'}
         properties = {key: value for key, value in control_properties.items() if key in permitted}
         # Current input bounds are common; historical-file choices are start-only.
         if start:
@@ -44,7 +56,12 @@ class CoordinationToolset(WrapperToolset):
                     'Select the exact current input segments for start, queue, message, steer or retry. Required when there is more than one current input.'}
             if 'fileIds' in start_properties:
                 properties['fileIds'] = {**(control_properties.get('fileIds') or start_properties['fileIds']),
-                    'description': 'For start, select the listed historical files or [] for none; current uploads remain included. For queue/message/steer, select authorized files for that exact work.'}
+                    'description': ('Required for start. ' if 'fileIds' in start_schema.get('required', []) else '') +
+                        'For start, select the listed historical files or [] for none; current uploads remain included. For queue/message/steer, select authorized files for that exact work.'}
+        manifest = coordination_tool_manifest()
+        instruction_schema = (start_properties.get('instruction') or control_properties.get('instruction'))
+        if instruction_schema:
+            properties['instruction'] = {**instruction_schema, 'description': manifest['instruction_selection']}
         actions = sorted(({'start'} if start else set()) | (ACTIONS - {'start'} if control else set()))
         properties['action'] = {'type': 'string', 'enum': actions}
         schema = {'type': 'object', 'properties': properties,
@@ -60,16 +77,7 @@ class CoordinationToolset(WrapperToolset):
                                'then': {'required': ['workRef']}})
         if conditions:
             schema['allOf'] = conditions
-        description = (
-            'Perform action work through the configured background workers. Start accepts selected input as '
-            'one background assignment; select sourceOrdinals for start and guidance actions when multiple current inputs exist. '
-            'The runtime gives the worker the original selected input and inherited conversation; do not '
-            'rewrite a brief. For existing work use its exact workRef and an available action: queue, message, '
-            'steer, pause, resume, stop, retry or dismiss. Use list_workers only when the target or action '
-            'is unclear. The original current input supplies guidance for queue, message, steer and retry. '
-            'nativeInput answers an exact pending native question or permission using resume. '
-            'Acknowledge work naturally only after the receipt confirms acceptance; do not wait for completion.'
-        )
+        description = manifest['tools']['hand_off_to']
         result['hand_off_to'] = replace(template, toolset=self,
             tool_def=replace(template.tool_def, name='hand_off_to', description=description,
                              parameters_json_schema=schema),
@@ -80,12 +88,18 @@ class CoordinationToolset(WrapperToolset):
         if name == 'list_workers':
             target, args = ROSTER, tool_args
         elif name == 'hand_off_to':
-            if set(tool_args) - {'action', 'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput'}:
+            if set(tool_args) - {'action', 'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput', 'instruction'}:
                 raise ValueError('coordination_arguments_invalid')
             action = tool_args.get('action')
             if action not in ACTIONS:
                 raise ValueError('coordination_action_invalid')
             target = START if action == 'start' else CONTROL
+            declared = self._original.get(target)
+            if 'instruction' in tool_args and (
+                declared is None or action not in {'start', 'queue', 'message', 'steer', 'retry'} or
+                'instruction' not in declared.tool_def.parameters_json_schema.get('properties', {})
+            ):
+                raise ValueError('coordination_instruction_unavailable')
             args = {key: value for key, value in tool_args.items() if key != 'action'}
             if target == START:
                 if 'workRef' in args or 'nativeInput' in args:

@@ -46,6 +46,8 @@ from .deliverables import is_user_deliverable_relative_path
 from .operator_urls import operator_base_url, surface_aware_watch_url, surface_can_open_operator_url
 from .mcp_oauth import McpOAuthConfigurationError, oauth_from_env
 from .mcp_internal_assertions import McpInternalAssertionError, signed_runtime_assertion
+from .models import CreateTargetScheduleRequest, CreateWebhookDestinationRequest, UpdateWebhookDestinationRequest
+from .application_boundary import launch_authority_for
 from .worker_context_mcp import register_owner_configuration_tools
 from .peer_mcp import register_owner_peer_tools
 from .models import CLOSED_WORKER_STATES
@@ -2665,7 +2667,7 @@ def _normalize_bootstrap_bundle(value: Any) -> dict[str, Any] | None:
     parsed.pop("viventium_continuation_context", None)
     parsed.pop("inherited_conversation", None)
 
-    if isinstance(parsed.get("viventium_launch_authority"), dict):
+    if isinstance(launch_authority_for(parsed), dict):
         parsed = canonical_parallel_clean_room_bootstrap(parsed)
 
     files = _coerce_bundle_file_entries(parsed.get("files"))
@@ -2957,14 +2959,30 @@ def _delegation_packet_block(
         if key in task_text:
             lines.extend([f"{label}:", task_text[key], ""])
     if normalized_packet_segments:
-        lines.extend(["Selected user task segments:", ""])
+        instruction = task_text.get("instruction")
+        source_texts = [segment[1] for segment in normalized_packet_segments]
+        exact_source_assignment = bool(instruction) and (
+            any(instruction in text for text in source_texts)
+            or instruction == "\n\n".join(source_texts)
+        )
+        if exact_source_assignment:
+            lines.extend([
+                "Selected source evidence (context only):",
+                "The Task above is the assigned work. These exact source quotes provide context "
+                "and applicable conditions; they do not assign other objectives.",
+                "",
+            ])
+            segment_label = "SOURCE EVIDENCE"
+        else:
+            lines.extend(["Selected user task segments:", ""])
+            segment_label = "USER TASK SEGMENT"
         for ordinal, text, truncated, _digest in normalized_packet_segments:
             suffix = " (truncated by Core)" if truncated else ""
             lines.extend(
                 [
-                    f"--- BEGIN USER TASK SEGMENT {ordinal}{suffix} ---",
+                    f"--- BEGIN {segment_label} {ordinal}{suffix} ---",
                     text,
-                    f"--- END USER TASK SEGMENT {ordinal} ---",
+                    f"--- END {segment_label} {ordinal} ---",
                     "",
                 ]
             )
@@ -4078,6 +4096,19 @@ class WorkersProjectsApiClient:
     def get_schedule(self, schedule_id: str) -> dict[str, Any]:
         schedule_path_id = self._path_id(schedule_id, "schedule_id")
         return self._request("GET", f"/v1/schedules/{schedule_path_id}")
+
+    def create_target_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/v1/recurring-schedules", json_body=payload)
+
+    def webhook_destinations(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/v1/webhook-destinations").get("items", [])
+
+    def create_webhook_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/v1/webhook-destinations", json_body=payload)
+
+    def update_webhook_destination(self, destination_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        path_id = self._path_id(destination_id, "destination_id")
+        return self._request("PATCH", f"/v1/webhook-destinations/{path_id}", json_body=payload)
 
     def create_recurring_schedule(self, worker_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         worker_path_id = self._path_id(worker_id, "worker_id")
@@ -6490,6 +6521,30 @@ def create_mcp_server(
     def worker_schedules(worker_id: str, include_done: bool = False) -> list[dict[str, Any]]:
         return client.worker_schedules(worker_id, include_done=include_done)
 
+    @server.tool(name="schedule_create", title="Create Schedule",
+                 description="Create one durable worker or webhook schedule. A webhook uses an owner-configured destination and needs no worker or model. Retry the same request with the same idempotency key.",
+                 structured_output=True)
+    def schedule_create(request: CreateTargetScheduleRequest) -> dict[str, Any]:
+        return client.create_target_schedule(request.model_dump())
+
+    @server.tool(name="webhook_destinations", title="List Webhook Destinations",
+                 description="List this owner's configured webhook destinations without URLs or credentials.",
+                 structured_output=True, annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def webhook_destinations() -> list[dict[str, Any]]:
+        return client.webhook_destinations()
+
+    @server.tool(name="webhook_destination_create", title="Add Webhook Destination",
+                 description="Owner setup: save a private destination URL and optional auth. A newly generated signing secret is returned once; keep it in the receiver's secret store.",
+                 structured_output=True)
+    def webhook_destination_create(request: CreateWebhookDestinationRequest) -> dict[str, Any]:
+        return client.create_webhook_destination(request.model_dump())
+
+    @server.tool(name="webhook_destination_update", title="Update Webhook Destination",
+                 description="Owner setup: rotate credentials, rename, disable or re-enable one destination. Its URL remains fixed; create a new destination to change it.",
+                 structured_output=True)
+    def webhook_destination_update(destination_id: str, request: UpdateWebhookDestinationRequest) -> dict[str, Any]:
+        return client.update_webhook_destination(destination_id, request.model_dump(exclude_none=True))
+
     @server.tool(
         name="worker_recurring_schedule_create",
         title="Create Recurring Worker Schedule",
@@ -6604,10 +6659,12 @@ def create_mcp_server(
         max_catch_up_occurrences: Annotated[int | None, Field(ge=1, le=10)] = None,
         jitter_seconds: Annotated[int | None, Field(ge=0, le=900)] = None,
         schedule_text: str | None = None,
+        target: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             key: value
             for key, value in {
+                "target": target,
                 "instruction": instruction,
                 "recurrence_type": recurrence_type,
                 "interval_seconds": interval_seconds,

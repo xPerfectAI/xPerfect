@@ -916,6 +916,7 @@ Follow these steps to sign in with ChatGPT using device code authorization:
     )
     assert codex == {
         "provider": "codex",
+        "setup_flow": "device_code",
         "setup_url": "https://auth.openai.com/codex/device",
         "setup_code": "TEST-CODE1",
         "help_url": "https://chatgpt.com/#settings/Security",
@@ -935,6 +936,7 @@ Follow these steps to sign in with ChatGPT using device code authorization:
     )
     assert claude == {
         "provider": "claude",
+        "setup_flow": "authorization_code",
         "setup_url": "https://claude.ai/oauth/authorize?code=true",
         "setup_code": "",
         "help_url": "",
@@ -951,6 +953,7 @@ Follow these steps to sign in with ChatGPT using device code authorization:
     )
     assert native_claude == {
         "provider": "claude",
+        "setup_flow": "authorization_code",
         "setup_url": (
             "https://claude.com/cai/oauth/authorize?code=true&client_id=synthetic"
         ),

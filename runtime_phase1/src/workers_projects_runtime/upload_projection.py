@@ -96,7 +96,8 @@ def _safe_declared_type(value: object) -> str:
 
 def _upload_root_candidates() -> list[Path]:
     roots: list[Path] = []
-    configured = os.environ.get("WPR_LIBRECHAT_UPLOADS_ROOT", "").strip()
+    configured = (os.environ.get("WPR_UPLOADS_ROOT")
+                  or os.environ.get("WPR_LIBRECHAT_UPLOADS_ROOT") or "").strip()
     if configured:
         roots.append(Path(configured).expanduser())
     roots.extend(

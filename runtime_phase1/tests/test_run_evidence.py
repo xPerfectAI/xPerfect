@@ -2605,6 +2605,29 @@ def test_candidate_artifact_paths_sorts_before_max_entry_cap(tmp_path):
     assert paths == [priority_artifact]
 
 
+@pytest.mark.parametrize("scope", [
+    {"_execution_workspace_mode": "shared"},
+    {"execution_mode": "host", "workspace_kind": "legacy"},
+])
+def test_shared_workspace_evidence_does_not_scan_or_attribute_directory_files(tmp_path, monkeypatch, scope):
+    from workers_projects_runtime import deliverables
+    (tmp_path / "unrelated.txt").write_text("An earlier worker's output.")
+    worker = {"workspace_dir": str(tmp_path), **scope}
+    def forbid_walk(*_args, **_kwargs):
+        pytest.fail("A shared directory cannot prove this run authored its files")
+    monkeypatch.setattr(deliverables.os, "walk", forbid_walk)
+    assert candidate_artifact_paths(worker) == []
+    assert run_evidence._artifact_inventory(tmp_path, worker=worker) == {
+        "count": 0, "items": [], "shared_workspace": True,
+    }
+    assert _text_artifact_payload(tmp_path, worker=worker) == {}
+    # Typed output requirements remain strict; unrelated files cannot satisfy them.
+    assert run_evidence._completion_compliance(
+        {"items": [], "shared_workspace": True},
+        {"mode": "replace", "format_expectations": ["pdf"]},
+    )["status"] == "fail"
+
+
 def test_run_evidence_records_html_browser_smoke_prerequisite(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
     output_dir.mkdir()

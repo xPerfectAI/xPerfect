@@ -54,8 +54,8 @@ def transcript(data=PNG, *, call_id="call_one", source_type="base64"):
     ])
 
 
-def write_evidence(tmp_path, stdout=None, run_id="run_image"):
-    worker = {"worker_id": "worker_a", "workspace_dir": str(tmp_path), "execution_mode": "host"}
+def write_evidence(tmp_path, stdout=None, run_id="run_image", workspace_scope=None):
+    worker = {"worker_id": "worker_a", "workspace_dir": str(tmp_path), "execution_mode": "host", **(workspace_scope or {})}
     path = profile_runtime._write_evidence_for_run(
         worker=worker, run_id=run_id, runtime_name="claude-code", model="opus",
         command=[], env={}, workspace=tmp_path, stdout_text=stdout or transcript(),
@@ -66,8 +66,9 @@ def write_evidence(tmp_path, stdout=None, run_id="run_image"):
     return worker, json.loads((tmp_path / path).read_text())
 
 
-def test_terminal_evidence_preserves_real_image_without_selecting_deliverable(tmp_path):
-    worker, evidence = write_evidence(tmp_path)
+@pytest.mark.parametrize("workspace_scope", [{}, {"_execution_workspace_mode": "shared"}, {"workspace_kind": "legacy"}])
+def test_terminal_evidence_preserves_real_image_without_selecting_deliverable(tmp_path, workspace_scope):
+    worker, evidence = write_evidence(tmp_path, workspace_scope=workspace_scope)
     observation = evidence["native_media"]["observations"][0]
     assert (tmp_path / observation["workspace_path"]).read_bytes() == PNG
     assert observation["sha256"] == hashlib.sha256(PNG).hexdigest()

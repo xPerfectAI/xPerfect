@@ -82,6 +82,9 @@ from .models import (
     ActiveWorkActionRequest,
     AssignRunRequest,
     CreateRecurringScheduleRequest,
+    CreateTargetScheduleRequest,
+    CreateWebhookDestinationRequest,
+    UpdateWebhookDestinationRequest,
     CreateProjectRequest,
     CreateWorkerRequest,
     DesktopActionRequest,
@@ -120,7 +123,9 @@ from .coordinator_config import configured_coordinator
 from .worker_configuration import WorkerConfiguration
 from .worker_configuration_api import install_worker_configuration_routes
 from .worker_context_sources import authorized_sources
+from .application_boundary import launch_authority_for
 from .worker_context_mcp import native_context_server
+from .schedule_mcp import native_schedule_server
 from .coordinator_mcp import native_coordinator_server
 from .peer_collaboration import PeerError
 from .profile_registry import PROFILES, require_worker_profile, UnsupportedWorkerProfileError
@@ -446,7 +451,7 @@ def create_app(
             except Exception as exc:
                 logger.warning("Native workspace sockets are unavailable: %s", type(exc).__name__)
         try:
-            async with peer_mcp.session_manager.run(), coordinator_mcp.session_manager.run(), context_mcp.session_manager.run():
+            async with peer_mcp.session_manager.run(), coordinator_mcp.session_manager.run(), context_mcp.session_manager.run(), schedule_mcp.session_manager.run():
                 yield
         finally:
             if native_sockets:
@@ -561,6 +566,7 @@ def create_app(
             response = _openai_error(
                 503, str(detail["message"]), str(detail["code"]),
                 native_admission=exc.native_admission,
+                capacity_detail=detail,
             )
             response.headers["Retry-After"] = str(retry_after)
             return response
@@ -938,13 +944,21 @@ def create_app(
     @app.middleware("http")
     async def optional_bearer_auth(request: Request, call_next):
         request.state.auth_context = AuthContext()
-        # Core file couriers carry the same signed owner assertion as work actions.
-        # Human file clients keep their existing authentication path when it is absent.
-        asserted_file_upload = bool(request.headers.get(SERVICE_ASSERTION_HEADER)) and (
+        # Application couriers use the same verified owner assertion on shared
+        # file/schedule APIs. Human/native clients retain their existing auth path
+        # when no assertion is supplied; a supplied invalid assertion never falls back.
+        parts = request.url.path.strip("/").split("/")
+        asserted_owner_api = bool(request.headers.get(SERVICE_ASSERTION_HEADER)) and (
             request.url.path == "/v1/file-uploads"
             or request.url.path.startswith("/v1/file-uploads/")
+            or request.url.path == "/v1/webhook-destinations"
+            or request.url.path.startswith("/v1/webhook-destinations/")
+            or request.url.path == "/v1/recurring-schedules"
+            or request.url.path.startswith("/v1/recurring-schedules/")
+            or (len(parts) >= 4 and parts[:2] == ["v1", "workers"]
+                and parts[3] == "recurring-schedules")
         )
-        if _is_account_api_path(request.url.path) or asserted_file_upload:
+        if _is_account_api_path(request.url.path) or asserted_owner_api:
             assertion_secret = str(
                 os.environ.get("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET") or ""
             ).strip()
@@ -1016,6 +1030,15 @@ def create_app(
                 service.coordinator.native_identity(service.peers.native_principal(token))
             except (PeerError, CoordinatorScopeError):
                 return JSONResponse(status_code=403, content={"detail": {"code": "coordinator_native_unauthorized"}})
+            return await call_next(request)
+        if request.url.path == "/v1/native/schedules" or request.url.path.startswith("/v1/native/schedules/"):
+            scheme, _, token = str(request.headers.get("authorization") or "").partition(" ")
+            try:
+                if scheme.lower() != "bearer":
+                    raise PeerError("schedule_unauthorized", 401)
+                service.peers.native_principal(token, purpose="schedule")
+            except PeerError:
+                return JSONResponse(status_code=403, content={"detail": {"code": "schedule_unauthorized"}})
             return await call_next(request)
         if request.url.path == "/v1/native/context" or request.url.path.startswith("/v1/native/context/"):
             scheme, _, token = str(request.headers.get("authorization") or "").partition(" ")
@@ -2235,6 +2258,7 @@ def create_app(
 
         allowed = {
             "worker_id",
+            "workspace_id",
             "project_id",
             "name",
             "role",
@@ -2262,6 +2286,9 @@ def create_app(
             "schedule_readiness",
         }
         item = {key: worker.get(key) for key in allowed if key in worker}
+        item["workspace_name"] = str(
+            worker.get("project_title") or worker.get("name") or "Workspace"
+        )
         duplication_report = item.get("duplication_report")
         if isinstance(duplication_report, dict):
             current_report = dict(duplication_report)
@@ -2617,8 +2644,7 @@ def create_app(
         identity and method; native arguments never cross that boundary.
         """
 
-        profile = str(worker.get("profile") or worker.get("worker_profile") or "").strip().lower()
-        if profile != "grok-build" or not active_run or str(active_run.get("state") or "") != "running":
+        if not active_run or str(active_run.get("state") or "") != "running":
             return None
         run_id = str(active_run.get("run_id") or "").strip()
         attempt_id = str(active_run.get("active_attempt_id") or "").strip()
@@ -2672,6 +2698,7 @@ def create_app(
                 "reason": "native_control_state_stale",
             }
         raw_pending = state.get("pending_requests")
+        capabilities = state.get("capabilities") if isinstance(state.get("capabilities"), dict) else {}
         pending = raw_pending if isinstance(raw_pending, list) else []
         if show_internal:
             visible_pending = [dict(item) for item in pending[:32] if isinstance(item, dict)]
@@ -2690,6 +2717,8 @@ def create_app(
             "pending_requests": visible_pending,
             "available": True,
             "read_only": not show_internal,
+            "capabilities": {name: capabilities.get(name) is True
+                for name in ("interject", "cancel", "permission")},
         }
 
     def _safe_native_control_state(
@@ -2713,6 +2742,7 @@ def create_app(
                 "reason": "native_control_state_stale",
             }
         pending = state.get("pending_requests")
+        capabilities = state.get("capabilities") if isinstance(state.get("capabilities"), dict) else {}
         safe_pending = []
         for item in pending[:32] if isinstance(pending, list) else []:
             if not isinstance(item, dict):
@@ -2727,6 +2757,8 @@ def create_app(
             "pending_requests": safe_pending,
             "available": True,
             "read_only": True,
+            "capabilities": {name: capabilities.get(name) is True
+                for name in ("interject", "cancel", "permission")},
         }
 
     def _live_payload(worker_id: str, request: Request | None = None) -> dict[str, object]:
@@ -3928,6 +3960,8 @@ def create_app(
             value["nativeHumanInput"] = payload.native_human_input.model_dump(by_alias=True)
         if payload.source_context is not None:
             value["sourceContext"] = payload.source_context.model_dump()
+        if payload.runtime_bundle is not None:
+            value["runtimeBundle"] = payload.runtime_bundle.model_dump()
         if payload.inherited_conversation is not None:
             value["inheritedConversation"] = payload.inherited_conversation.model_dump()
         return value
@@ -4020,6 +4054,9 @@ def create_app(
         if payload.inherited_conversation is not None:
             source_context_receipt = {**(source_context_receipt or {}),
                 "inherited_conversation": payload.inherited_conversation.model_dump()}
+        if payload.runtime_bundle is not None:
+            source_context_receipt = {**(source_context_receipt or {}),
+                "runtime_bundle": payload.runtime_bundle.model_dump()}
         if payload.file_inputs:
             # The immutable selection enters the existing reservation. Service
             # validates ready inputs before execution; durable replay is read first.
@@ -4400,6 +4437,7 @@ def create_app(
         shared_profile_support = getattr(
             service.runtime, "shared_workspace_profile_support", None
         )
+        host_cli_installed = getattr(service.runtime, "host_cli_installed", None)
         for descriptor in PROFILES:
             if allowed and descriptor.profile not in allowed:
                 continue
@@ -4419,6 +4457,10 @@ def create_app(
                 "native_transport": descriptor.native_transport,
                 "execution_modes": modes,
                 "adapter_registered": bool(modes),
+                "host_cli_installed": (
+                    host_cli_installed(descriptor.profile)
+                    if callable(host_cli_installed) and "host" in modes else None
+                ),
                 "shared_workspace": shared_workspace,
                 "models": [{"id": model.id, "native_model": model.native_model,
                             "effort_choices": list(model.effort_choices),
@@ -4426,7 +4468,7 @@ def create_app(
                            for model in GLASSHIVE_MODELS.values()
                            if model.harness_profile == descriptor.profile],
             })
-        # Registration describes code availability, not binary, account or provider readiness.
+        # Adapter registration and host binary presence are separate; neither proves account/provider readiness.
         return {"items": items}
 
     @app.get("/v1/provider-readiness/{profile}")
@@ -4675,6 +4717,8 @@ def create_app(
         lambda request: coordinator_owner_scope(*_current_principal(request)))
     context_mcp = native_context_server(service.worker_configuration)
     app.mount("/v1/native/context", context_mcp.streamable_http_app())
+    schedule_mcp = native_schedule_server(service)
+    app.mount("/v1/native/schedules", schedule_mcp.streamable_http_app())
 
     service.coordinator = CoordinatorService(store, service, app.state.conversation_provider)
     app.state.coordinator = service.coordinator
@@ -5199,6 +5243,8 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def private_credential_validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path.startswith("/v1/webhook-destinations"):
+            return JSONResponse(status_code=422, content={"detail": "Invalid webhook destination fields"})
         if request.url.path.endswith("/credentials"):
             return JSONResponse(status_code=422, content={"detail": "Enter a valid API key"})
         if _is_provider_path(request.url.path) and provider_validation_exception_handler:
@@ -5655,7 +5701,10 @@ def create_app(
             if isinstance(payload.bootstrap_bundle, dict)
             else {}
         )
-        authority = bundle.get("viventium_launch_authority")
+        try:
+            authority = launch_authority_for(bundle)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Conflicting launch authority carriers") from None
         return bool(
             str(payload.bootstrap_profile or "").strip()
             == PROMPT_WORKBENCH_SCHEDULED_BOOTSTRAP_PROFILE
@@ -5857,10 +5906,56 @@ def create_app(
         )
         return {"items": [ScheduleResponse(**item) for item in schedules]}
 
+    @app.get("/v1/webhook-destinations")
+    def list_webhook_destinations(request: Request) -> dict[str, object]:
+        _, tenant_id, owner_id = _current_principal(request)
+        return {"items": service.list_webhook_destinations(tenant_id=tenant_id, owner_id=owner_id)}
+
+    @app.post("/v1/webhook-destinations", status_code=201)
+    def create_webhook_destination(payload: CreateWebhookDestinationRequest, request: Request) -> dict[str, object]:
+        _, tenant_id, owner_id = _current_principal(request)
+        try:
+            result = service.create_webhook_destination(tenant_id=tenant_id, owner_id=owner_id, **payload.model_dump())
+        except ControlPlaneConflict as exc:
+            from .schedule_targets import DestinationCreateConflict
+            if isinstance(exc, DestinationCreateConflict):
+                raise HTTPException(status_code=409, detail={"code": "webhook_destination_create_conflict",
+                    "destination_id": exc.destination_id, "changed_fields": exc.changed_fields}) from None
+            raise
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid webhook destination configuration") from None
+        return JSONResponse(status_code=201, content=result, headers={"Cache-Control": "no-store"})
+
+    @app.patch("/v1/webhook-destinations/{destination_id}")
+    def update_webhook_destination(destination_id: str, payload: UpdateWebhookDestinationRequest,
+                                   request: Request) -> dict[str, object]:
+        _, tenant_id, owner_id = _current_principal(request)
+        try:
+            result = service.update_webhook_destination(destination_id, tenant_id=tenant_id, owner_id=owner_id,
+                                                        **payload.model_dump(exclude_none=True))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid webhook destination configuration") from None
+        if not result:
+            raise HTTPException(status_code=404, detail="Webhook destination not found")
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/recurring-schedules", response_model=RecurringScheduleDefinitionResponse, status_code=201)
+    def create_target_recurring_schedule(payload: CreateTargetScheduleRequest, request: Request) -> RecurringScheduleDefinitionResponse:
+        _, tenant_id, owner_id = _current_principal(request)
+        fields = payload.model_dump()
+        if fields["target"]["kind"] == "worker":
+            require_worker(str(fields["target"]["worker_id"]), request)
+        try:
+            definition = service.create_target_schedule(tenant_id=tenant_id, owner_id=owner_id, **fields)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RecurringScheduleDefinitionResponse(**definition)
+
     @app.get("/v1/recurring-schedules")
     def list_recurring_schedules(
         request: Request,
         include_inactive: bool = False,
+        destination_id: str | None = None,
         limit: int = 100,
     ) -> dict[str, list[RecurringScheduleDefinitionResponse]]:
         _, tenant_id, owner_id = _current_principal(request)
@@ -5868,6 +5963,7 @@ def create_app(
             tenant_id=tenant_id,
             owner_id=owner_id,
             include_inactive=include_inactive,
+            destination_id=destination_id,
             limit=limit,
         )
         return {"items": [RecurringScheduleDefinitionResponse(**item) for item in definitions]}

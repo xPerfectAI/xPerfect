@@ -13,8 +13,8 @@ def test_kickoff_exposes_shared_workspace_choice_and_preserves_isolated_default(
     app = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert 'id="workspace-mode" name="workspace_mode"' in index
-    assert '<option value="isolated" selected>Separate workspace (default)</option>' in index
-    assert '<option value="shared">Shared workspace</option>' in index
+    assert '<option value="isolated" selected>My own workspace</option>' in index
+    assert '<option value="shared">Shared with other workers</option>' in index
     assert 'id="workspace-file-placement" name="workspace_file_placement"' in index
     assert 'value="member_private">Private files per member</option>' in index
     assert 'workspace_mode: workspaceMode?.value || \'isolated\'' in app
