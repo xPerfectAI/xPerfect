@@ -71,8 +71,12 @@ The [operator UI contract](07_Minimal_Unified_Operator_UI.md) owns the concrete 
 Its job-first form distinguishes the requested work and optional outcome from the onboarding
 material, named worker, worker type, account and workspace. Existing workers can be reused, or a
 safe copy can seed a new worker. Reuse keeps the exact identity; a copy does not imply a native
-conversation/session fork. Required Knowledge uses the existing background, file, native setup
-and approved Library mechanisms; it is not another catalog or orchestration layer.
+conversation/session fork. Required Knowledge combines background text, existing Files and the same private Library picker
+used by Watch and Chat. Library keeps exact reusable item/version references and uses existing file,
+bootstrap, native setup and approved capability owners; it is not another orchestration layer.
+Knowledge can be saved without an AI account or workspace. Native skill/tool availability remains
+target-specific and subject to its existing review; a saved reference grants no new authority.
+See [One Library, across the app](07_Minimal_Unified_Operator_UI.md#one-library-across-the-app).
 
 ## Completion evidence boundary
 
@@ -152,22 +156,18 @@ xPerfect is not:
 ## Terminology
 
 ### Sandbox
-
 A persistent workstation-like execution environment that holds the worker's home directory, workspace, processes, and live control surfaces.
 
 ### Host Computer
-
 A no-sandbox execution mode where the worker uses local CLIs and OS/browser/filesystem access on
 the user's main machine. This mode is intentionally powerful and must be selected explicitly.
 
 ### Worker
-
 A named, reusable AI runtime identity inside a sandbox or host workspace. Reusing a worker keeps
 its exact project, account, workspace and supported native continuity. Starting a new worker or
 making a safe copy creates a distinct identity.
 
 ### Worker type
-
 The registered native harness or direct-model adapter, represented by the existing worker profile.
 Examples include `codex-cli`, `claude-code` and `openclaw-general`. A type is not a saved worker,
 a provider account or a workspace.
@@ -183,18 +183,15 @@ There are three separate OpenClaw concepts that must not be collapsed:
 - `openclaw-general` is a worker profile, selected the same way as `codex-cli` or `claude-code`.
 
 ### Workspace
-
 The persistent place where work runs and files live. An isolated workspace has one worker; a
 supported shared workspace can have several distinct members. Keep existing owner, project,
 platform and capability admission rules. Do not imply that any saved worker can be moved into any
 workspace, or silently convert isolation to make a form choice succeed.
 
 ### Project
-
 The durable task definition around one or more workers, including goal, success criteria, continuity, and audit trail.
 
 ### Bootstrap Bundle
-
 A portable preset describing what should be projected into a worker when it starts or resumes.
 It must be able to carry general instructions that tell the worker to verify its own deliverable
 against the user's request and success criteria without overfitting to one client, file type, or task.
@@ -217,7 +214,11 @@ The runtime must remain usable even when none of those clients are present.
 ## Standalone conversation coordination
 
 A coordinator uses the existing native conversation role. It can answer directly or choose bounded
-worker delegation. Native model selection, account leases, runtime capacity and exact controls keep
+worker delegation. Chat can also assign an accepted goal to an existing worker in its selected
+project. The worker keeps its account, model, effort, abilities, files and native history. A queued
+new goal does not resume unrelated paused work. The model selects the exact worker from the scoped
+status roster; no role-name router or second Expert object is introduced.
+Native model selection, account leases, runtime capacity and exact controls keep
 the same owners as ordinary work. LibreChat, Viventium and external callback services are optional.
 
 The native coordinator exposes the same Queue, Message, Steer, Pause/Resume, Stop, Retry and
@@ -269,6 +270,7 @@ every child project, worker and run. A child project's
 default cannot widen its origin. If a selected origin disappears, new starts stop; the owner can
 still read saved status and results and stop work. Connection readiness and execution placement
 remain separate from permission, and the native binder confirms the actual account at start.
+
 
 When a native Grok session ends with an unanswered current question, the runtime reports that no
 owner response was recorded. Provider completion text does not prove that the owner declined.

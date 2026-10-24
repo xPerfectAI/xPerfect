@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "id": "finance-director",
+  "name": "Morgan · Finance Director",
+  "role": "Finance Director",
+  "description": "Explain financial performance and cash choices with working, traceable files.",
+  "outcome": "Explain financial performance and cash choices with working, traceable files.",
+  "tags": [
+    "Business",
+    "Finance Director"
+  ],
+  "profile": "claude-code",
+  "execution_mode": "host",
+  "project_definition": "You are Morgan, a reusable AI Worker specializing as a Finance Director.\n\nUse authorized company policies, account mappings, period/currency data and assumptions to reconcile management reports, explain variances, model cash scenarios and prepare clear decision memos with usable workbooks. Keep unknowns explicit; do not post ledgers, transfer funds, make investments or invent professional sign-off.\n\nUse the company material supplied for this job as the current source of its terminology, methods, units, approvals and desired output. Read the actual files before judging. Keep the original task and success criteria faithful. Use native tools when they help; professional judgment belongs to the model and qualified reviewer, not a host keyword rule. Show actual finished files and explain material limitations plainly. Reuse the same Worker and exact knowledge versions for follow-up work. The complete optional native Skill contains a bounded calculation/checking aid; check actual compatibility and setup rather than claiming an unavailable tool is loaded.",
+  "library_items": [
+    {
+      "key": "professional-method",
+      "selected": true,
+      "item": {
+        "name": "Financial Reporting and Planning",
+        "kind": "note",
+        "text": "Use authorized company policies, account mappings, period/currency data and assumptions to reconcile management reports, explain variances, model cash scenarios and prepare clear decision memos with usable workbooks. Keep unknowns explicit; do not post ledgers, transfer funds, make investments or invent professional sign-off.\n\nUse the company material supplied for this job as the current source of its terminology, methods, units, approvals and desired output. Read the actual files before judging. Keep the original task and success criteria faithful. Use native tools when they help; professional judgment belongs to the model and qualified reviewer, not a host keyword rule. Show actual finished files and explain material limitations plainly. Reuse the same Worker and exact knowledge versions for follow-up work. The complete optional native Skill contains a bounded calculation/checking aid; check actual compatibility and setup rather than claiming an unavailable tool is loaded."
+      }
+    },
+    {
+      "key": "analysis-skill",
+      "selected": true,
+      "item": {
+        "name": "Cash and Variance Analysis",
+        "kind": "skill",
+        "profiles": [
+          "claude-code"
+        ]
+      },
+      "file_sources": [
+        {
+          "source": "skill/SKILL.md",
+          "path": ".claude/skills/finance-director/SKILL.md"
+        },
+        {
+          "source": "skill/scripts/analyze.py",
+          "path": ".claude/skills/finance-director/scripts/analyze.py"
+        },
+        {
+          "source": "skill/references/method.md",
+          "path": ".claude/skills/finance-director/references/method.md"
+        }
+      ]
+    },
+    {
+      "key": "optional-community-source",
+      "selected": false,
+      "item": {
+        "name": "Finance Tools and Methods · optional",
+        "kind": "native",
+        "source_uri": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/finance"
+      }
+    },
+    {
+      "key": "curated-variance-analysis",
+      "selected": true,
+      "item": {
+        "name": "Financial Variance Review",
+        "kind": "skill",
+        "profiles": [
+          "claude-code"
+        ]
+      },
+      "file_sources": [
+        {
+          "source": "curated/variance-analysis/LICENSE",
+          "path": ".claude/skills/variance-analysis/LICENSE"
+        },
+        {
+          "source": "curated/variance-analysis/NOTICE.txt",
+          "path": ".claude/skills/variance-analysis/NOTICE.txt"
+        },
+        {
+          "source": "curated/variance-analysis/SKILL.md",
+          "path": ".claude/skills/variance-analysis/SKILL.md"
+        },
+        {
+          "source": "curated/variance-analysis/references/variance_bridge.py",
+          "path": ".claude/skills/variance-analysis/references/variance_bridge.py"
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "publisher": "xPerfectAI",
+    "source": "curated://xperfect/starter-team",
+    "revision": "2026-10-24",
+    "license": "Apache-2.0",
+    "content_origin": "Original project starter methods and synthetic examples, with selected licensed curated native Skills identified below. Optional external references do not imply installation or connected tools.",
+    "references": [
+      {
+        "url": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/finance",
+        "status": "Reference only; native setup, permissions, dependencies and per-component terms still apply.",
+        "license": "Apache-2.0; external services/data terms separate"
+      }
+    ],
+    "curated_skills": [
+      {
+        "name": "variance-analysis",
+        "publisher": "Anthropic",
+        "source": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/finance/skills/variance-analysis",
+        "revision": "33d3dea41a341b341d4f5da2e8801ae0c89be2b8",
+        "license": "Apache-2.0",
+        "files_unchanged": false,
+        "setup": "Knowledge/Skill files only. Dependency installation and external tool authorization are separate.",
+        "curation_changes": [
+          "Exact sequential decomposition",
+          "Zero denominator and reconciliation handling",
+          "No unsupported company-cause/policy claims"
+        ],
+        "original_skill_sha256": "467db7de3fb118550d013409254e2d4a9f87385a661e154655bf3431919b0ba1",
+        "curated_skill_sha256": "b49019eed68b766a334e59ddb8d5033807e1fb4a849c5c706ac572f920f60a34"
+      }
+    ]
+  },
+  "demo": {
+    "job": "demo/job.md",
+    "inputs": [
+      "demo/data.csv",
+      "demo/plan.json",
+      "demo/company-onboarding.md"
+    ],
+    "acceptance": "demo/acceptance.json"
+  }
+}

@@ -32,7 +32,6 @@ Use a portable worker bootstrap contract:
 - `bootstrap_bundle`
 
 ### bootstrap_profile
-
 A high-level preset that selects a default projection style.
 
 Examples:
@@ -43,7 +42,6 @@ Examples:
 - `claude-host`
 
 ### bootstrap_bundle
-
 A structured optional payload for additive projection.
 
 Current phase-1 fields supported by the runtime:
@@ -502,6 +500,110 @@ B. Treat auth projection as a provider-specific plugin behind a universal xPerfe
 
 C. Keep the xPerfect runtime independently usable by any client that can supply bootstrap data or call its API/MCP surface.
 
+## Selected personal Library context
+
+Chat accepts exact personal Library references as `library_refs: [{item_id, version_id}]`.
+The authorized owner selects versions, including a Bundle's pinned versions. Acceptance retains
+those versions and their canonical upload revisions in the same transaction as the user turn.
+A retry uses its accepted selection even if the personal catalog entry was later removed.
+Omitting the field inherits the conversation's selection; an explicit empty list clears it for
+future turns. Neither choice rewrites accepted work or changes model, account, tools or grants.
+Conversation and turn selection records contain compact identities, file revisions and safe
+labels/pending state. Saved skill/package bodies remain in their canonical retained versions;
+they are not copied into each turn or status response. Reusing the same exact selection still
+validates/pins its canonical retained versions, without resolving its bodies again. Status polls
+read public turn fields and the latest small delivery metadata, not whole stored request packets.
+
+Direct Queens receive selected text after the full unchanged conversation history. The deployment
+can set `CoordinatorConfig.library_text_chars` (default 24,000; range 0–262,144). This is a total
+selected-text limit, not a history limit. Each text source either fits intact or is marked
+`Not loaded for this Queen; available to Helpers`. Binary material and text over that limit keep
+their exact canonical file references. The reply cannot claim that an omitted source was read.
+No Library management tools are added to the Fast Queen's tool set.
+The appended material uses the existing protected reference-result carrier, not a new user
+message. It stays beside the latest user request in that request's existing turn group. Its
+digest prevents silent clipping; it grants no tool or instruction authority and creates no
+provider tool-call/result pair.
+Its explicit identity and digest also identify it as a transient reference for history counting.
+The saved caller-history cursor excludes that one appended reference, so the next user's message
+or Helper result cannot be skipped. The original history stays unchanged; no extra reference copy
+is inserted into old user turns. The public provider transport rejects a forged internal reference
+marker. This reuses the existing cursor and source validation, without a second context channel.
+
+Native Queens receive the same selected canonical files through existing bootstrap projection.
+The actual foreground worker binds exact upload revisions through Files before its first native
+start and before reusing that session for a later selected turn. Unbound file entries are not
+passed directly to native startup.
+An accepted file is copied once. Later native starts reuse its private completion receipt and
+preserve any worker edits. A changed filesystem device number alone cannot block this completed
+no-op when the accepted owner, version, scope, canonical workspace path and root inode still match.
+Only the current service-private receipt grants that exception; a legacy receipt or a pending copy
+does not. The receipt is checked again under the projection lock, so its loss cannot enable a write.
+Continuity capture uses the same rule and validates the accepted manifest before retaining this
+completed projection. No stored binding is rewritten and no file is copied to repair a device-number
+mismatch. Changed roots, inodes, scope or versions still fail closed.
+The selection metadata says that files are provided, not that the model has read them. Helpers
+receive the accepted upload identities and revisions through normal Files binding before native
+execution starts. Large selected knowledge uses the existing lookup delivery mode and does not
+displace the originating user objective or exact conversation sources. If a worker is launched
+from a result turn, the most recent user turn at or before that result remains the originating
+objective. Later user input remains available; a rewritten delegation brief is not a replacement
+for the original conversation.
+
+Lookup-only packing changes model input, not the existing host snapshot contract. Context
+inspection and run preparation still read and hash complete selected text sources; native
+retrieval rechecks current authority against the exact accepted snapshot. This is not a claim of
+lazy disk access, zero preparation cost or a measured improvement in response latency.
+
+Knowledge selection does not install a native package, apply a text skill to an unknown future
+worker, or authorize new tools. Such requirements remain explicit pending items until the actual
+supported target and required approval are known. Saved personal versions and templates retain
+references, not cloned credentials, provider sessions or conversation histories. Text skill
+projection is supported only by the declared native profile; a copied file is not proof that a
+different harness loaded it.
+
+Full-access host Claude workers select complete declared text-skill folders through the native
+session-only `--plugin-dir` root-`SKILL.md` layout. This keeps `--setting-sources ''`, the selected
+account, strict MCP, managed policy and explicit per-run settings intact. Launch checks the exact
+owned regular files and supporting directories against the declared bytes; links, extra entries,
+changed files and native plugin components are rejected. Source references and Library labels
+cannot select a folder. Restricted, read-only, workspace-only and web-disabled paths retain their
+existing controls. Native discovery supplies the namespaced skill name (for example,
+`report:report`); only a successful native `Skill` call proves load. See the native
+[plugin layout](https://code.claude.com/docs/en/plugins-reference#standard-layout) and
+[session selector](https://code.claude.com/docs/en/cli-reference).
+Library readiness uses that same launch policy. A policy change reports an already-reviewed skill
+as Not available with its current reason, including on an idempotent retry. It preserves the
+approved contribution and files; restoring supported policy restores the next-start readiness.
+A skill first denied by policy changes to Needs review when policy permits it. It receives no
+native projection until the owner gives a fresh explicit approval.
+
+Owner-visible Chat snapshots expose `library.refs`, item names/versions and safe delivery metadata.
+`loaded: true` for Direct means included in the request, not proof of model attention. Native
+`delivery: native_file` means projected/readable. Snapshot metadata never contains native source
+tokens, private projection paths or source text. Ordinary turns without a selection do not
+initialize or query the personal Library.
+
+Removing an applied native contribution uses its exact path and content hash. The shared cleanup
+primitive removes only an unchanged file which no remaining contribution uses; edited files,
+replacement links and shared files remain. The caller uses the existing native-start/lifecycle
+guard and actual workspace root. Existing native refresh owns configuration on the next start;
+this is not a second installer or a promise to unload already running native tools.
+
+Standalone local conversations delegate through the same ordinary owner host admission used by
+Run Project. Their server-configured exact model, effort and ready owner account remain explicit;
+the private model selector must match the owner's durable accepted goal and configured route.
+New Chat uses that same declared placement for connected accounts and reports the actual supported
+account IDs, profile and authentication method before submission. A local host does not require a
+Docker workspace merely to select its existing Codex or Claude account. Other deployment modes keep
+their existing shared-container requirements. A Direct API account is labelled as Direct only when
+the configured conversation model actually uses the Direct route; API-key authentication alone does
+not select a harness or change the model. These checks start no worker and change no saved default.
+
+Existing workspace mutation, capacity, account and policy fences remain. This local path does not
+require a client-specific parallel-work environment grant or install selected skills on future
+children. Explicit legacy client isolation/parallel policy keeps its existing authorization path.
+
 ## Grok private native state
 
 Current-session Grok completion metadata projects native token usage into the normal terminal
@@ -512,6 +614,7 @@ foreign sessions and notifications outside the current prompt do not create meas
 The existing request/epoch calibration then owns conversation occupancy and context-budget
 projection. This is token observability and budget evidence, not proof that a semantic answer
 or owner-requested control succeeded.
+
 
 Optional Grok 4.7 Fast availability comes from the selected worker account's ACP session model
 options. A service-account catalog is discovery only and cannot choose a turn's effective model.
@@ -575,6 +678,7 @@ The standalone deployment credential name is `XAI_API_KEY`. Enterprise projectio
 clean-room imports and workspace duplication. Run-scoped broker grants retain their existing
 scope and expiration when transported through native ACP.
 
+
 Native Grok MCP lifecycle receipts retain only current-session protocol event identity, configured
 required-server name, typed connection status and counts. They omit endpoint, authorization,
 reason prose and tool arguments. These events diagnose the native connection boundary. Once the exact native session reports MCP
@@ -628,14 +732,14 @@ owner setup; a worker cannot supply or change them through this grant.
       {
         "destination_id": "destination-example",
         "label": "Application destination label",
-        "request_data": { "request_ref": "request-example" }
+        "request_data": {"request_ref": "request-example"}
       }
     ],
     "allow_worker_target": false,
     "manage_destination_ids": ["destination-example"],
     "defaults": {
-      "once": { "misfire_grace_seconds": 3600, "catch_up_policy": "coalesce" },
-      "interval": { "misfire_grace_seconds": 900, "catch_up_policy": "skip" }
+      "once": {"misfire_grace_seconds": 3600, "catch_up_policy": "coalesce"},
+      "interval": {"misfire_grace_seconds": 900, "catch_up_policy": "skip"}
     }
   }
 }

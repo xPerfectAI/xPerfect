@@ -1,0 +1,11 @@
+month,account,type,currency,actual,budget
+2026-07,Service revenue,revenue,USD,100000,100000
+2026-07,Payroll,expense,USD,60000,60000
+2026-07,Operating costs,expense,USD,20000,25000
+2026-08,Service revenue,revenue,USD,110000,100000
+2026-08,Payroll,expense,USD,65000,60000
+2026-08,Operating costs,expense,USD,25000,25000
+2026-09,Service revenue,revenue,USD,90000,100000
+2026-09,Payroll,expense,USD,65000,60000
+2026-09,Operating costs,expense,USD,30000,25000
+2026-07,Service revenue,revenue,USD,100000,100000

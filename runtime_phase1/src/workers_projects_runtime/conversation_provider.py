@@ -71,7 +71,7 @@ from .profile_runtime import (
     _redact_text,
     _select_user_facing_agent_output,
 )
-from .service import WorkersProjectsService
+from .service import NativeFilePublicationUnavailable, WorkersProjectsService
 from .native_model_selection import (ModelConfigurationRequired, selected_grok_model, valid_model_id,
                                      native_grok_models, native_timing_enabled,
                                      native_timing_hash, native_timing_event)
@@ -815,6 +815,19 @@ class MainContextStateBlock(BaseModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+def _conversation_worker_name(agent_id: str, started_at: str = "") -> str:
+    """Readable private session label; routing stays on the existing conversation identity."""
+    try:
+        started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        started = datetime.now(UTC)
+    label = f"Chat · {started.astimezone(UTC).strftime('%d %b %Y, %H:%M:%S UTC')}"
+    identity = " ".join(str(agent_id or "").split())
+    return (f"{label} · {identity}" if identity else label)[:120]
+
+
 class CompletionMetadata(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -1148,7 +1161,7 @@ class StreamingRedactor:
                 self._buffer = _redact_text(complete_lines) + self._buffer[last_newline + 1 :]
         stable_limit = max(0, len(self._buffer) - self.overlap)
         sensitive_tail = re.search(
-            r"(?i)(?:" + "/Users" + r"/|/(?:home|root|Volumes|private/var)/|~/|bearer(?:\s+)?|(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]?\s*|sk-|ghp_|xoxb-|eyJ|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|data:image/)[^\n]*$",
+            r"(?i)(?:/Users/|/(?:home|root|Volumes|private/var)/|~/|bearer(?:\s+)?|(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]?\s*|sk-|ghp_|xoxb-|eyJ|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|data:image/)[^\n]*$",
             self._buffer,
         )
         multiline_opener = re.search(
@@ -1369,6 +1382,23 @@ def _stable_authority_sha256(payload: ChatCompletionRequest) -> str:
     if dynamic_tail and snapshot.endswith(dynamic_tail):
         snapshot = snapshot[: -len(dynamic_tail)].rstrip()
     return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+
+def _caller_history_count(payload: ChatCompletionRequest) -> int:
+    """Do not charge an owner-composed transient reference to caller chat history."""
+    selection = payload.metadata.bootstrap_bundle.get("library_selection") if payload.metadata else None
+    if not isinstance(selection, dict) or not selection.get("reference_message"):
+        return len(payload.messages)
+    from .library_context_metadata import canonical_library_selection
+    reference = canonical_library_selection(selection)["reference_message"]
+    message = payload.messages[-1]
+    if (message.role != "tool" or not isinstance(message.content, str)
+            or hashlib.sha256(message.content.encode("utf-8")).hexdigest() != reference["sha256"]
+            or not any(item.get("id") == reference["id"] and item.get("sha256") == reference["sha256"]
+                       and item.get("role") == "tool" and item.get("accepted_source") is True
+                       for item in payload.metadata.visible_message_chain)):
+        raise HTTPException(status_code=409, detail="Selected Library reference identity changed")
+    return len(payload.messages) - 1
+
 
 def _history_instruction(messages: Iterable[ChatMessage], *, start_at: int = 0) -> str:
     all_messages = list(messages)
@@ -2306,6 +2336,9 @@ def _hydrate_metadata(
         "developer_instruction_tail": _decode_developer_instruction_tail(request)
         or str(incoming.get("developer_instruction_tail") or "").strip(),
     }
+    selection = metadata["bootstrap_bundle"].get("library_selection")
+    if isinstance(selection, dict) and selection.get("reference_message") is not None:
+        raise HTTPException(status_code=403, detail="Transient Library references are authored by the conversation owner")
     capabilities = metadata["bootstrap_bundle"].get("provider_capabilities")
     if isinstance(capabilities, dict) and capabilities.get("native_tools") is False:
         metadata["provider_session_mode"] = "stateless"
@@ -4658,6 +4691,28 @@ class ConversationProvider:
             "bootstrap_profile": host_bootstrap_profile,
         }
 
+    def _bind_selected_library_files(self, payload, model, worker_id):
+        """Use normal owner Files binding before Native conversation admission."""
+        if model.harness_profile in DIRECT_PROFILES:
+            return
+        selection = payload.metadata.bootstrap_bundle.get("library_selection")
+        if not isinstance(selection, dict) or not selection.get("upload_ids"):
+            return
+        from .library_context_metadata import canonical_library_selection
+        selected = canonical_library_selection(selection)
+        ids, revisions = selected["upload_ids"], selected["upload_revisions"]
+        if len(ids) != len(revisions):
+            raise HTTPException(status_code=409, detail="Selected Library file versions are unavailable; select the sources again")
+        identity = hashlib.sha256(json.dumps([ids,revisions], separators=(",", ":")).encode()).hexdigest()
+        started, status = time.monotonic_ns(), "failed"
+        try:
+            self.service.files.bind(worker_id, str(payload.metadata.tenant_id or "local"),
+                payload.metadata.owner_id, ids, "conversation-library-"+identity, revisions=revisions)
+            status = "completed"
+        finally:
+            native_timing_event("conversation_library_bind", workerHash=native_timing_hash("worker", worker_id),
+                elapsedMs=(time.monotonic_ns()-started)/1_000_000, status=status, files=len(ids))
+
     def _create_native_session(
         self,
         payload: ChatCompletionRequest,
@@ -4713,7 +4768,7 @@ class ConversationProvider:
         worker = self.service.create_worker(
             project_id=project["project_id"],
             owner_id=metadata.owner_id,
-            name=f"xPerfect {metadata.agent_id}",
+            name=_conversation_worker_name(metadata.agent_id, str(project.get("created_at") or "")),
             role="conversation-agent",
             profile=model.harness_profile,
             backend="",
@@ -4761,6 +4816,7 @@ class ConversationProvider:
                 ),
             },
         )
+        self._bind_selected_library_files(payload, model, str(worker["worker_id"]))
         # The provider-session row is the durable authority that changes this host worker from
         # the isolated mission lane to the conversation lane. Start compute only after that link
         # exists so the isolation gate remains fail-closed for every untrusted caller.
@@ -5110,6 +5166,7 @@ class ConversationProvider:
                    if str((existing_worker or {}).get("execution_mode") or "host") == "host"
                    else {}),
             )
+            self._bind_selected_library_files(payload, model, str(existing["worker_id"]))
             current_manifest = {
                 **existing_manifest,
                 "effort": effort,
@@ -5761,7 +5818,7 @@ class ConversationProvider:
                             tenant_id=tenant_id, owner_id=payload.metadata.owner_id,
                             session_id=session["session_id"], idempotency_key=idempotency_key,
                             message_id=payload.metadata.message_id, stream_id=payload.metadata.stream_id,
-                            requested_history_count=len(payload.messages),
+                            requested_history_count=_caller_history_count(payload),
                             fallback_model_id=fallback_model.id if fallback_model is not None else "",
                             fallback_reasoning_effort=fallback_effort if fallback_model is not None else "",
                             fallback_instruction=fallback_instruction, replay_decision=replay_decision,
@@ -6891,8 +6948,14 @@ class ConversationProvider:
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=502, detail="Native private machine state is not a complete JSON object") from exc
         else:
-            output = self._conversation_output(request_record, run, output_files=output_files,
-                                               output_rejections=output_rejections)
+            try:
+                output = self._conversation_output(request_record, run, output_files=output_files,
+                                                   output_rejections=output_rejections)
+            except NativeFilePublicationUnavailable as exc:
+                raise HTTPException(status_code=409, detail={
+                    "code": "native_output_files_identity_unavailable",
+                    "message": "The selected files are unavailable for this response.",
+                }) from exc
         try:
             decision = parse_conversation_output(
                 output,
@@ -8692,7 +8755,7 @@ class ConversationProvider:
             new_worker = self.service.create_worker(
                 project_id=project["project_id"],
                 owner_id=str(session["owner_id"]),
-                name=f"xPerfect {session['agent_id']}",
+                name=_conversation_worker_name(str(session["agent_id"]), str(session.get("created_at") or project.get("created_at") or "")),
                 role="conversation-agent",
                 profile=model.harness_profile,
                 backend="",
@@ -8943,7 +9006,7 @@ class ConversationProvider:
             new_worker = self.service.create_worker(
                 project_id=project["project_id"],
                 owner_id=str(session["owner_id"]),
-                name=f"xPerfect {session['agent_id']}",
+                name=_conversation_worker_name(str(session["agent_id"]), str(session.get("created_at") or project.get("created_at") or "")),
                 role="conversation-agent",
                 profile=fallback_model.harness_profile,
                 backend="",

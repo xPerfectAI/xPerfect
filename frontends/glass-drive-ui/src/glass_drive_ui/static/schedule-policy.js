@@ -5,6 +5,15 @@ export function scheduleEditorType(schedule = {}) {
   return recurrenceType;
 }
 
+// Only daily and cron recurrence use an explicit repeated-hour policy. Other
+// types store "elapsed"; keep a valid default ready if the user changes type.
+export function scheduleDstPolicyState(type, value) {
+  return {
+    applicable: type === 'daily' || type === 'cron',
+    value: value === 'next_valid_latest' ? value : 'next_valid_earliest',
+  };
+}
+
 export function recurrenceSubmissionPolicy(selectedType, { intervalSeconds, timezoneName, rrule } = {}) {
   const kind = String(selectedType || 'daily');
   if (kind === 'weekly') {

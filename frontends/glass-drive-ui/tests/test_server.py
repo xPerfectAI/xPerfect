@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1508,7 +1507,8 @@ def test_launch_applies_grok_effort_to_native_runtime_env():
     assert bundle["env"]["WPR_GROK_REASONING_EFFORT"] == "high"
 
 
-def test_launch_applies_claude_max_effort_to_runtime_env():
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'max', 'xhigh'])
+def test_launch_applies_claude_selected_effort_to_runtime_env(effort):
     fake = FakeRuntimeClient()
     client = TestClient(create_app(runtime_client=fake))
 
@@ -1516,12 +1516,12 @@ def test_launch_applies_claude_max_effort_to_runtime_env():
         'description': 'Create a report',
         'success_criteria': 'Report exists',
         'workspace_option': 'new:claude-code',
-        'effort': 'max',
+        'effort': effort,
     })
 
     assert launch.status_code == 200
     bundle = fake.create_worker_requests[-1]['bootstrap_bundle']
-    assert bundle["env"]["WPR_CLAUDE_CODE_EFFORT"] == "max"
+    assert bundle["env"]["WPR_CLAUDE_CODE_EFFORT"] == effort
     assert "Worker effort preference" not in bundle.get("system_instructions", "")
 
 
@@ -1776,6 +1776,14 @@ def test_bootstrap_filters_worker_profiles_from_guardrail_env(monkeypatch):
     ]
 
 
+def test_bootstrap_grok_api_label_keeps_the_exact_existing_profile():
+    client = TestClient(create_app(runtime_client=FakeRuntimeClient()))
+    choices = client.get('/api/bootstrap').json()['new_workspace_options']
+    direct = next(item for item in choices if item['profile'] == 'direct-xai')
+    assert direct == {'value': 'new:direct-xai', 'label': 'Direct / Grok API',
+                      'profile': 'direct-xai', 'account_auth_methods': ['api_key']}
+
+
 def test_bootstrap_uses_configured_default_worker_profile(monkeypatch):
     monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli,claude-code")
     monkeypatch.setenv("GLASSHIVE_DEFAULT_WORKER_PROFILE", "claude-code")
@@ -1958,7 +1966,7 @@ def test_watch_assets_render():
     assert watch.headers['cache-control'] == 'no-store'
     assert 'xPerfect' in watch.text
     assert 'Workspace live view' in watch.text
-    assert 'Back to workspaces' in watch.text
+    assert re.search(r'<button[^>]+id="open-project-workspace"[^>]*>.*?<span>Workspaces</span>', watch.text, re.S)
     assert 'Open worker details' not in watch.text
     assert 'Send redirects now' in watch.text
     assert 'Hold Send or Cmd/Ctrl+Enter to queue instead' in watch.text
@@ -2316,7 +2324,8 @@ def test_launcher_workspace_hive_static_controls():
     assert "/api/workspace-templates/${encodeURIComponent(templateId)}/instantiate" in app_js
     assert "fresh paused workspace" in index_html
     assert "New workers check account access and tool permissions." in index_html
-    assert "Files, sign-ins, schedules and chat history stay with the original worker." in index_html
+    assert "Saves this setup and its selected Library versions." in index_html
+    assert "Other workspace files, sign-ins, schedules and chat history stay here." in index_html
     assert "Choose a saved template first." in app_js
     assert "rename-workspace-dialog" in index_html
     assert "window.prompt" not in app_js
@@ -2385,7 +2394,8 @@ def test_launcher_workspace_hive_static_controls():
     assert 'id="library-request-form"' in index_html
     assert "submitLibraryRequest" in control_plane_js
     assert "Ask this workspace" in index_html
-    assert "This sends a workspace-only request" in index_html
+    assert "Only this worker is changed." in index_html
+    assert "You stay in control of new access." in index_html
     assert "The connection review stays open until access is verified" in control_plane_js
     assert "Continue without" in control_plane_js
     assert "waiveCapabilityReapproval" in control_plane_js
@@ -2422,8 +2432,8 @@ def test_launcher_workspace_hive_static_controls():
     assert "Workspace complete" in desktop_js
     assert "The latest output and workspace files are available from the status panel" in desktop_js
     assert "Clipboard sync: inactive until workspace resumes" in desktop_js
-    assert "desktop.js?v=20260922brand1" in desktop_html
-    assert "desktop.css?v=20260811m" in desktop_html
+    assert "desktop.js?v=20261024polish1" in desktop_html
+    assert "desktop.css?v=20261024polish1" in desktop_html
     assert "<style" not in desktop_html
     assert "#desktop-overlay" in desktop_css
     assert 'id="workspace-status-link"' in desktop_html
@@ -2454,7 +2464,7 @@ def test_launcher_workspace_hive_static_controls():
     assert "const workspaceApiBase = `/api/workspace/${workerId}`" in watch_js
     assert "/api/worker/${workerId}/live" not in watch_js
     assert '@app.get("/api/workspace/{worker_id}/live")' in (Path(server_module.__file__).read_text(encoding="utf-8"))
-    assert "const connecting = !completed && attachStartedAt" in watch_js
+    assert "const connecting = Boolean(attachStartedAt && !frameReady);" in watch_js
     assert "function filePreviewUrl()" in watch_js
     assert "function fileDeliverableKey(deliverable, runId)" in watch_js
     assert "function isFilePreviewUrl(url)" in watch_js
@@ -2472,7 +2482,8 @@ def test_launcher_workspace_hive_static_controls():
     assert "Live progress:" not in watch_js
     assert "gh_token|gh_sig|token|signature|sig" in watch_js
     assert "data.artifacts?.items || []" in watch_js
-    assert "Workspace files" in watch_js
+    assert 'id="watch-files-title">Library</h2>' in watch_html
+    assert 'id="watch-files-list" class="project-file-list" aria-label="Workspace files"' in watch_html
     assert 'src="/static/watch.js?v=' in watch_html
     assert ".artifact-row" in styles_css
     assert "artifact-list-more" in watch_js
@@ -2486,9 +2497,12 @@ def test_launcher_workspace_hive_static_controls():
     assert "if (previewUrl) return previewUrl" not in watch_js
     assert "setInterval(refresh" not in watch_js
     assert "Workspace resuming" not in watch_js
-    assert 'grid-template-areas:' in styles_css
-    assert '"brand controls"' in styles_css
-    assert '.watch-meta-line p' in styles_css
+    assert '.watch-nav-row { display: flex; align-items: center; gap: 18px; min-width: 0; }' in styles_css
+    assert '.watch-nav-row { flex-wrap: wrap; gap: 10px; }' in styles_css
+    assert '.watch-nav-row > .brand-mark { margin-right: auto; }' in styles_css
+    assert '.watch-main { flex-basis: calc(100% - 140px); order: 2; }' in styles_css
+    assert '.watch-summary-row { flex-wrap: wrap; gap: 8px; }' in styles_css
+    assert '.watch-main p {' in styles_css and 'text-overflow: ellipsis' in styles_css
     assert 'white-space: normal' in styles_css
 
 
@@ -2611,7 +2625,8 @@ def test_workspace_status_scripts_never_label_failed_terminal_runs_completed():
     assert "Close needs attention" in app_script
     assert "let currentDisplayState = 'starting';" in watch_script
     assert "const state = currentDisplayState;" in watch_script
-    assert "'terminating', 'termination_failed', 'terminated'].includes(currentDisplayState)" in watch_script
+    assert "const closed = ['terminating', 'termination_failed', 'terminated'].includes(String(state || '').trim().toLowerCase());" in watch_script
+    assert "syncSteerAvailability(displayState);" in watch_script
     assert "GlassHive will resume when you send more work" not in desktop_script
     assert "This workspace was closed" in desktop_script
     assert ">Close workspace</button>" in watch_markup
@@ -3478,7 +3493,7 @@ def test_enterprise_work_view_preserves_security_and_authorizes_artifact_click(m
     [
         "not-a-view-ref",
         "ghr_short",
-        "ghr_" + "1234567890abcdef12345678%2Factions",
+        "ghr_1234567890abcdef12345678%2Factions",
     ],
 )
 def test_operator_work_view_rejects_invalid_opaque_ref_before_upstream(monkeypatch, ref_id):
@@ -3527,7 +3542,7 @@ def test_operator_work_view_preserves_runtime_invalid_ref_response(monkeypatch):
 
 
 def test_operator_work_view_never_proxies_mutations(monkeypatch):
-    ref_id = "ghr_" + "1234567890abcdef12345678"
+    ref_id = "ghr_1234567890abcdef12345678"
 
     class UnexpectedAsyncClient:
         def __init__(self, *args, **kwargs):
@@ -3935,7 +3950,7 @@ def test_short_worker_view_ref_ttl_config_can_expire_refs(monkeypatch):
 
 
 def test_ui_sensitive_url_log_filter_redacts_signed_tokens():
-    view_ref = "ghr_" + "1234567890abcdef12345678"
+    view_ref = "ghr_1234567890abcdef12345678"
     raw = (
         'GET /novnc/wrk_1/websockify?gh_token=secret-token&gh_sig=signature&gh_exp=123 '
         f'GET /v1/signed-links/opaque-token?download=1 GET /w/{view_ref}'
@@ -5970,7 +5985,8 @@ def test_control_plane_ui_exposes_safe_disconnect_and_capability_remove_paths():
     assert "observed_runs" in script
     assert "observed_failures" in script
     assert "observed_duration_seconds" in script
-    assert "Observed by xPerfect" in script
+    assert "Observed here:" in script
+    assert "Usage details" in script
     assert "Tokens reported by worker" in script
     assert "/verify" in script
     assert "Activity is temporarily unavailable" in script
@@ -6420,7 +6436,7 @@ def test_local_password_login_is_explicit_same_origin_and_has_no_signup_surface(
     assert config.json()["oidc_login_visible"] is False
     assert config.json()["login_methods"] == ["local_password"]
     assert 'id="local-login"' in page.text
-    assert '/static/auth.js?v=20260922a' in page.text
+    assert '/static/auth.js?v=20261024polish1' in page.text
     assert page.headers["cache-control"] == "no-store, no-cache, private, max-age=0"
     assert login_csrf
     assert client.get("/auth/email/register").status_code == 404
@@ -8283,5 +8299,9 @@ def test_unknown_native_catalog_does_not_falsely_mark_a_type_uninstalled(monkeyp
 
 def test_connections_heading_uses_same_width_as_account_column():
     styles = (Path(server_module.STATIC_DIR) / "styles.css").read_text()
-    assert "#connections-view .control-plane-head { max-width: 760px; }" in styles
-    assert re.search(r"\.connections-stack\s*\{[^}]*max-width:\s*760px", styles)
+    # The complete view owns the shared content width; heading and accounts inherit it.
+    assert re.search(r"#connections-view,\s*#activity-view\s*\{[^}]*width:\s*min\(100%,\s*var\(--content-width\)\)", styles)
+    stack = re.search(r"\.connections-stack\s*\{([^}]*)\}", styles).group(1)
+    assert re.search(r"(?:^|;)\s*width:\s*100%\s*;", stack)
+    assert "max-width" not in stack
+    assert not re.search(r"#connections-view\s+\.control-plane-head\s*\{[^}]*max-width:", styles)

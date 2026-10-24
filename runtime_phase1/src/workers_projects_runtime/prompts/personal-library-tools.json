@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "tools": {
+    "personal_library_list": "List the authenticated owner's private saved Library items and versions. Archived items are optional. This is an owner management tool, not a worker's context reader or the public approved catalog.",
+    "personal_library_read": "Read one exact owner-private Library item version. Preserve its original material and provenance; a saved native reference is not proof of installation or current-session availability.",
+    "personal_library_save": "Save private knowledge from existing upload IDs/revisions, a note, a supported complete text skill, native/approved source reference, or a Bundle of exact item/version references. Supply a stable idempotency key. This grants no tools and never publishes to the approved catalog.",
+    "personal_library_revise": "Create a new Library item version using its expected current version. Accepted runs and bundles keep their exact old revisions. Do not rewrite underlying pinned upload metadata.",
+    "personal_library_archive": "Hide or restore a personal saved item for future selection, with an expected version. This does not uninstall native capabilities or erase accepted history.",
+    "personal_library_delete": "Delete an owner-private saved item only with explicit confirmation. Release only its Library retention pin; accepted/template/bundle references remain protected. Workspace copies and native installations are separate.",
+    "personal_library_resolve": "Expand selected exact item/version references into the existing upload ID/revision fields and explicit native requirements. No second attachment transport or extra model-generated brief. Conflicts, missing material and unsupported requirements remain visible.",
+    "personal_library_capture": "Keep an authorized workspace file for reuse at its exact expected revision. Uses the existing version-checked reader and upload storage; no user download/reupload. Changed files fail rather than saving different bytes.",
+    "personal_library_workspace": "Show the exact named worker's accepted Library contributions and actual statuses. Sharing a workspace does not grant every worker the same tools or context selection.",
+    "personal_library_apply": "Add exact Library references to the named worker. Files attach now; the context list changes at the next run. Native setup and actual-target approval are separate; inspect unmet requirements and do not report them ready. Never silently restart or switch the provider.",
+    "personal_library_remove": "Remove one recorded contribution only while the worker is idle. Preserve unrelated material, edited/shared copies and loaded conversation; unchanged solely-used copies use existing Trash/Undo. This is not a blanket native uninstall.",
+    "personal_library_undo": "Undo one recent Library removal for the same worker and exact version within its retention window. Uses existing Trash recovery and typed contribution owners; never restore unrelated old configuration, silently restart or expand native authority."
+  }
+}

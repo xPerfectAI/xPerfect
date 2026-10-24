@@ -587,6 +587,8 @@ def _candidate_callback_payload() -> tuple[dict[str, Any], WorkersProjectsServic
     service = WorkersProjectsService.__new__(WorkersProjectsService)
     service.store = _CaptureStore()
     service.executor = _NoopExecutor()
+    # This contract inspects the persisted payload and signature, not outbound transport.
+    service._submit_callback_delivery = lambda *_args, **_kwargs: False
     service.runtime = SimpleNamespace(
         effort_projection_for_worker=lambda _worker: {
             "requested": "high",
@@ -655,6 +657,9 @@ def _candidate_chat_completion() -> dict[str, Any]:
         "completion_tokens": 4,
         "total_tokens": 7,
     }
+    provider._native_usage_snapshots = lambda record, run: (
+        provider._native_usage_snapshot(record, run), None, "",
+    )
     request = ChatCompletionRequest(
         model="codex-cli:gpt-5.6-sol",
         messages=[{"role": "user", "content": "Synthetic question"}],
@@ -710,6 +715,7 @@ async def _candidate_chat_stream() -> list[dict[str, Any] | str]:
                 "session_id": "session-synthetic",
                 "state": "completed",
                 "response_json": "",
+                "created_at": "2023-11-14T22:13:20+00:00",
             }
 
         def get_run(self, _run_id):
@@ -738,6 +744,9 @@ async def _candidate_chat_stream() -> list[dict[str, Any] | str]:
         "completion_tokens": 4,
         "total_tokens": 7,
     }
+    provider._native_usage_snapshots = lambda record, run: (
+        provider._native_usage_snapshot(record, run), None, "",
+    )
     request = ChatCompletionRequest(
         model="codex-cli:gpt-5.6-sol",
         messages=[{"role": "user", "content": "Synthetic question"}],
@@ -746,7 +755,7 @@ async def _candidate_chat_stream() -> list[dict[str, Any] | str]:
     )
     chunks: list[dict[str, Any] | str] = []
     async for chunk in provider._stream_chunks(
-        {"request_id": "chatcmpl-gh-synthetic"},
+        {"request_id": "chatcmpl-gh-synthetic", "created_at": "2023-11-14T22:13:20+00:00"},
         request,
         _ConnectedRequest(),
     ):

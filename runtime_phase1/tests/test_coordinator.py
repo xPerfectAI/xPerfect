@@ -431,9 +431,17 @@ def test_plain_foreground_turn_exposes_only_owned_running_native_control(coordin
 @pytest.mark.parametrize('structured,failure_class,expected', [
     (1, 'native_input_expired', 'native_input_expired'),
     (0, 'native_input_expired', 'failed'),
+    (1, 'model_configuration_required', 'model_configuration_required'),
+    (0, 'model_configuration_required', 'failed'),
+    (1, 'provider_auth_missing', 'provider_auth_missing'),
+    (0, 'provider_auth_missing', 'failed'),
+    (1, 'provider_connected_account_reconnect_required', 'provider_connected_account_reconnect_required'),
+    (0, 'provider_connected_account_reconnect_required', 'failed'),
+    (1, 'provider_unauthorized', 'provider_unauthorized'),
+    (0, 'provider_unauthorized', 'failed'),
     (1, 'unclassified', 'failed'),
 ])
-def test_foreground_timeout_keeps_only_a_safe_typed_recovery_reason(
+def test_foreground_failure_keeps_only_a_safe_typed_recovery_reason(
     coordinator, structured, failure_class, expected,
 ):
     cid = create(coordinator)
@@ -1628,6 +1636,9 @@ def test_native_tools_all_have_canonical_descriptions(coordinator):
     assert {tool.name:tool.description for tool in tools} == expected
     assert 'goal_ids' in next(t for t in tools if t.name=='coordinator_handle').inputSchema['properties']
     assert 'run_id' in next(t for t in tools if t.name=='coordinator_result').inputSchema['properties']
+    accept_schema = next(t for t in tools if t.name=='coordinator_accept_goals').inputSchema
+    assert set(accept_schema['properties']) == {'goals'}
+    assert accept_schema['required'] == ['goals']
     control = next(t for t in tools if t.name=='coordinator_control').inputSchema
     assert set(control['$defs']['Control']['properties']['action']['enum']) == {'queue','message','steer','pause','resume','stop','retry','dismiss'}
 
@@ -2510,7 +2521,7 @@ def test_direct_coordinator_api_account_uses_protected_key_and_preserves_host_sc
     from workers_projects_runtime.coordinator_config import configured_coordinator
     from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
     account={'account_id':'api-fixture','provider':'xai','status':'ready','auth_method':'api_key','secret_locator':'native-home://api-key'}
-    coordinator.service.control_plane_store=SimpleNamespace(get_provider_account=lambda **_: dict(account),list_connections=lambda **_:[])
+    coordinator.service.control_plane_store=SimpleNamespace(get_provider_account=lambda **_: {k:v for k,v in account.items() if k!='secret_locator'},get_provider_account_record=lambda **_: dict(account),list_connections=lambda **_:[])
     coordinator.service.store=coordinator.store
     coordinator.provider._model=lambda model_id,**_: GLASSHIVE_MODELS[model_id]
     config=CoordinatorConfig(model='direct-xai:grok-4.7',effort='high',scope=CoordinatorScope(execution_mode='host'))
@@ -2528,3 +2539,18 @@ def test_direct_coordinator_api_account_uses_protected_key_and_preserves_host_sc
     assert client.post('/v1/coordinator/conversations',json={'account_id':'api-fixture','scope':{'execution_mode':'docker'}}).status_code==409
     account['auth_method']='subscription'
     assert client.post('/v1/coordinator/conversations',json={'account_id':'api-fixture'}).status_code==409
+
+
+def test_chat_turn_admission_keeps_one_durable_output_stream_identity(coordinator):
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'turn-files', 'Return a report')
+    received = []
+    def unavailable(payload, **_kwargs):
+        received.append(payload.metadata)
+        raise ConnectionError('Synthetic unavailable provider')
+    coordinator.provider.start = unavailable
+    coordinator.start_turn('local', 'owner', cid, 'turn-files')
+    coordinator.start_turn('local', 'owner', cid, 'turn-files')
+    assert len(received) == 2
+    assert all(item.stream_id == item.message_id == 'turn-files' for item in received)
+    assert received[0].idempotency_key == received[1].idempotency_key

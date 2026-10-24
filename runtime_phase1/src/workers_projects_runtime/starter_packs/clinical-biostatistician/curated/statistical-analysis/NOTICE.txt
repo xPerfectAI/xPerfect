@@ -1,0 +1,7 @@
+Third-party Skill: statistical-analysis
+Source: https://github.com/K-Dense-AI/scientific-agent-skills/tree/593377bb048752abb0152deab9fbb1083a6087df/skills/statistical-analysis
+Revision: 593377bb048752abb0152deab9fbb1083a6087df
+License: MIT; see LICENSE.
+The selected upstream Skill files are redistributed unchanged.
+Dependencies and external tools retain their own terms and actual setup status.
+Curation does not install packages, connect services or grant access.

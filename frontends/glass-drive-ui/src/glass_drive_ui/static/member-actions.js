@@ -1,4 +1,4 @@
-import { workspaceLifecycleControl } from './launch-policy.js?v=20261024journeys18';
+import { workspaceLifecycleControl } from './launch-policy.js?v=20261024polish1';
 
 export function renderMemberActions(container, member, { request, refresh, status }) {
   const controls = document.createElement('div');

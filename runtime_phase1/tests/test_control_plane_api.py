@@ -781,6 +781,14 @@ def test_capability_grants_and_provider_disconnect_have_complete_api_lifecycle(t
     grant_id = confirmed.json()["applied"]["grant_id"]
 
     grants = client.get(f"/v1/workspaces/{workspace['worker_id']}/capability-grants")
+    from workers_projects_runtime import bootstrap
+    worker_root=tmp_path/'capability-root'
+    worker_root.mkdir()
+    (worker_root/'SKILL.md').write_text('synthetic')
+    client.app.state.store.update_worker(workspace['worker_id'],workspace_dir=str(worker_root))
+    real_cleanup=bootstrap.remove_projected_library_files
+    def failed_cleanup(*args):raise OSError('Synthetic cleanup failure')
+    monkeypatch.setattr(bootstrap,'remove_projected_library_files',failed_cleanup)
     revoked = client.delete(
         f"/v1/workspaces/{workspace['worker_id']}/capability-grants/{grant_id}"
     )
@@ -788,6 +796,13 @@ def test_capability_grants_and_provider_disconnect_have_complete_api_lifecycle(t
     assert [item["grant_id"] for item in grants.json()["items"]] == [grant_id]
     assert revoked.status_code == 200
     assert revoked.json()["revoked_at"] is not None
+    assert revoked.json()['native_cleanup']['state']=='unconfirmed'
+    assert (worker_root/'SKILL.md').exists()
+    monkeypatch.setattr(bootstrap,'remove_projected_library_files',real_cleanup)
+    retry=client.delete(f"/v1/workspaces/{workspace['worker_id']}/capability-grants/{grant_id}")
+    assert retry.status_code==200 and retry.json()['replayed']
+    assert not (worker_root/'SKILL.md').exists()
+    assert 'restore_bootstrap_bundle_json' not in retry.json()
 
     second_pending = client.post(
         "/v1/pending-changes",
@@ -1360,3 +1375,48 @@ def test_library_confirmation_is_bound_to_reviewed_immutable_snapshot(tmp_path):
     assert client.get(
         f"/v1/workspaces/{workspace['worker_id']}/capability-grants"
     ).json()["items"] == []
+
+
+def test_library_upgrade_cleans_only_unchanged_obsolete_files_and_has_existing_retry(tmp_path, monkeypatch):
+    from workers_projects_runtime import bootstrap
+    database=tmp_path/'upgrade.db'
+    client=TestClient(create_app(db_path=str(database),runtime_backend='stub'))
+    project=client.post('/v1/projects',json={'owner_id':'demo-owner','title':'Synthetic upgrade','goal':'Preserve independent material'}).json()
+    worker=client.post(f"/v1/projects/{project['project_id']}/workers",json={
+        'owner_id':'demo-owner','name':'Upgrade worker','role':'main','profile':'codex-cli',
+        'workspace_kind':'named','start_synchronously':False}).json()
+    root=tmp_path/'workspace';root.mkdir()
+    client.app.state.store.update_worker(worker['worker_id'],workspace_dir=str(root))
+    cp=ControlPlaneStore(str(database))
+    first=register_manifest(cp,library_manifest(stable_id='skill.synthetic.safe-upgrade',files=[
+        {'path':'OLD.md','content':'old managed text'}, {'path':'EDITED.md','content':'before edit'}]))
+    def prepare(kind,item,**extra):
+        value=client.post('/v1/pending-changes',json={'change_type':kind,'target_id':worker['worker_id'],
+            'payload':{'library_id':item['library_id'],**extra}})
+        assert value.status_code==201,value.text
+        return value.json()
+    pending=prepare('library_enable',first)
+    enabled=client.post(f"/v1/pending-changes/{pending['change_id']}/confirm",json={'confirmation_token':pending['confirmation_token']})
+    assert enabled.status_code==200,enabled.text
+    old_grant=enabled.json()['applied']['grant_id']
+    (root/'OLD.md').write_text('old managed text');(root/'EDITED.md').write_text('user changed this')
+    (root/'ordinary.txt').write_text('keep ordinary work')
+    second=register_manifest(cp,library_manifest(stable_id='skill.synthetic.safe-upgrade',version='2.0.0',
+        files=[{'path':'NEW.md','content':'new managed text'}]))
+    pending=prepare('library_upgrade',second,replaces_grant_id=old_grant)
+    original=bootstrap.remove_projected_library_files
+    def unavailable(*args):raise OSError('synthetic unavailable root')
+    monkeypatch.setattr(bootstrap,'remove_projected_library_files',unavailable)
+    changed=client.post(f"/v1/pending-changes/{pending['change_id']}/confirm",json={'confirmation_token':pending['confirmation_token']})
+    assert changed.status_code==200,changed.text
+    applied=changed.json()['applied']
+    assert applied['native_cleanup']['state']=='unconfirmed'
+    assert applied['cleanup_retry']['path'].endswith('/'+old_grant)
+    monkeypatch.setattr(bootstrap,'remove_projected_library_files',original)
+    retry=client.delete(applied['cleanup_retry']['path'])
+    assert retry.status_code==200,retry.text
+    assert not(root/'OLD.md').exists()
+    assert (root/'EDITED.md').read_text()=='user changed this'
+    assert (root/'ordinary.txt').read_text()=='keep ordinary work'
+    assert retry.json()['native_cleanup']['retained']==[{'path':'EDITED.md','reason':'edited'}]
+    assert client.get(f"/v1/workspaces/{worker['worker_id']}/capability-grants").json()['items'][0]['grant_id']==applied['grant_id']

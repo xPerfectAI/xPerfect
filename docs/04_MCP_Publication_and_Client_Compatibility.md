@@ -30,6 +30,15 @@ through the account API and MCP adapter. Invalid launch authority keeps the exis
 rejection. A missing readiness reason also keeps that rejection; no fallback, replay or weaker
 admission is implied.
 
+## Artifact links use the configured browser origin
+
+MCP artifact listings and downloads use `GLASSHIVE_ARTIFACT_BASE_URL` when explicitly set,
+then the operator URL (`GLASSHIVE_OPERATOR_BASE_URL` or `WPR_OPERATOR_BASE_URL`), before
+legacy MCP/default fallbacks. The standalone host supplies its configured UI port through
+`WPR_OPERATOR_BASE_URL`; its separate MCP `--base-url` selects the runtime API, not the
+browser destination. Non-default ports must produce usable signed links without changing
+accounts, source files, or the worker. Signing, path restrictions and link authority are unchanged.
+
 ## Scheduled work through the same control plane
 
 The [application boundary contract](09_Application_Boundary_Contract.md) owns project independence.
@@ -37,12 +46,12 @@ The [runtime guide](../runtime_phase1/README.md#generic-worker-and-webhook-sched
 HTTP examples, clock policy and delivery states. Scheduling extends the existing recurrence store,
 clock and outbox; there is no application-specific scheduler or second work manager.
 
-| Interface               | Scheduling operations                                                                                                                                                                                                                                                                                                                                                       |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owner HTTP              | `POST /v1/recurring-schedules` creates a typed worker or webhook target. Existing list/get/PATCH/deactivate/run-now/history/DELETE routes control the same definition.                                                                                                                                                                                                      |
-| Owner MCP               | `schedule_create` accepts the same structured request. Existing `worker_recurring_schedules`, `worker_recurring_schedule_update`, `worker_recurring_schedule_deactivate`, `worker_recurring_schedule_run_now`, `worker_recurring_schedule_occurrences` and `worker_recurring_schedule_retire` apply to either target. Existing worker-specific creation remains compatible. |
-| Owner destination setup | `webhook_destinations`, `webhook_destination_create`, `webhook_destination_update` match GET/POST/PATCH `/v1/webhook-destinations`. Workers do not receive these credential-management operations.                                                                                                                                                                          |
-| Native worker MCP       | The runtime projects `xperfect-schedules` at `/v1/native/schedules/` only when the worker has a current `schedule_access` grant. It exposes `schedule_list`, `schedule_create`, `schedule_get`, `schedule_update`, `schedule_run_now`, `schedule_history` and `schedule_retire`.                                                                                            |
+| Interface | Scheduling operations |
+| --- | --- |
+| Owner HTTP | `POST /v1/recurring-schedules` creates a typed worker or webhook target. Existing list/get/PATCH/deactivate/run-now/history/DELETE routes control the same definition. |
+| Owner MCP | `schedule_create` accepts the same structured request. Existing `worker_recurring_schedules`, `worker_recurring_schedule_update`, `worker_recurring_schedule_deactivate`, `worker_recurring_schedule_run_now`, `worker_recurring_schedule_occurrences` and `worker_recurring_schedule_retire` apply to either target. Existing worker-specific creation remains compatible. |
+| Owner destination setup | `webhook_destinations`, `webhook_destination_create`, `webhook_destination_update` match GET/POST/PATCH `/v1/webhook-destinations`. Workers do not receive these credential-management operations. |
+| Native worker MCP | The runtime projects `xperfect-schedules` at `/v1/native/schedules/` only when the worker has a current `schedule_access` grant. It exposes `schedule_list`, `schedule_create`, `schedule_get`, `schedule_update`, `schedule_run_now`, `schedule_history` and `schedule_retire`. |
 
 Native scheduling tool descriptions identify the scheduling domain and their reminder/timer purpose.
 This keeps ordinary native tool discovery useful without relying on an application broker,
@@ -67,6 +76,51 @@ receipt; changing the body under that key conflicts. Destination creation also a
 A generated signing secret is available only on that logical creation receipt, including an exact
 retry; normal lists and reads omit URLs, auth and signing secrets. A retry never re-enables a revoked
 destination. Delivery acceptance and application work completion remain separate outcomes.
+
+## Private Library through HTTP and MCP
+
+My Library is an owner-private index over the existing Files store. It is separate from the
+deployment's approved capability catalog. Saved items have immutable `item_id`/`version_id`
+references. Notes and knowledge use existing uploads, revisions, quotas, pins and workspace
+bindings; flat Bundles retain their selected versions. Saving a native source or an approved
+capability reference does not install it or grant access.
+
+| Owner operation | HTTP | MCP |
+| --- | --- | --- |
+| Browse/read saved items | `GET /v1/personal-library`, `GET /v1/personal-library/{item_id}` | `personal_library_list`, `personal_library_read` |
+| Save a note, knowledge, text skill, source reference or Bundle | `POST /v1/personal-library` | `personal_library_save` |
+| Add an immutable revision | `PATCH /v1/personal-library/{item_id}` | `personal_library_revise` |
+| Archive/restore to future pickers | `POST /v1/personal-library/{item_id}/archive` | `personal_library_archive` |
+| Delete with explicit confirmation | `DELETE /v1/personal-library/{item_id}?confirm=true` | `personal_library_delete` |
+| Expand exact selected versions | `POST /v1/personal-library/resolve` | `personal_library_resolve` |
+| Keep a current workspace file for reuse | `POST /v1/workspaces/{worker_id}/personal-library/capture` | `personal_library_capture` |
+| Inspect/apply selected material | `GET` / `POST /v1/workspaces/{worker_id}/personal-library` | `personal_library_workspace`, `personal_library_apply` |
+| Remove a managed contribution / Undo | `DELETE /v1/workspaces/{worker_id}/personal-library/{application_id}`, `POST` to its `/undo` route | `personal_library_remove`, `personal_library_undo` |
+
+Creation and application keys recover the same logical operation; conflicting content is an
+error. Revision updates require `expected_version_id`. Capture requires the existing Files
+`file_id` and `revision`; a changed source fails rather than saving different bytes. Removal is
+idle-only and preserves edited or shared copies and independent configuration. Its Undo window
+is bounded; the returned `undo_expires_at` is authoritative. Archive changes future selection,
+not an installed worker. Deletion releases only the personal retention pin; accepted turns,
+Bundles, templates and workspace copies retain their own exact references.
+
+These are owner-management tools. Shared links, viewers and attempt-scoped workers cannot browse
+My Library. Native workers read only selected material through their existing Files and context
+interfaces. The Fast Direct Queen keeps its small handoff interface. Its selected text is bounded
+and appended after unchanged conversation history; binary and overflow items remain available to
+authorized Helpers and are explicitly reported as not loaded for that Queen. No Library CRUD or
+new read tool is added to the Queen. The source description manifest is
+`runtime_phase1/src/workers_projects_runtime/prompts/personal-library-tools.json`.
+
+`workspace_launch` and `worker_delegate_once` also accept optional exact `library_refs` and
+`confirm_library` fields. Selected material uses the existing prepare/apply/run path: the worker
+identity exists before application, and the original job starts only after the existing Library
+owner has applied supported material. Unapplied requirements remain visible in the result and
+worker's Library context; they do not grant tools or replace the job. Launches without selections
+retain their existing atomic delegation path. `confirm_library: false` leaves executable skills
+unreviewed; it does not cancel the original ordinary job. An approved capability still needs its
+existing exact-target confirmation. Explicit template/copy reapproval gates remain intact.
 
 ## Frozen public compatibility baseline
 
@@ -134,7 +188,6 @@ do not claim production voice parity or a latency guarantee from this reference.
 memory, Feelings and other modules still require their existing configured projections.
 
 ### LibreChat / Viventium / Standalone-Compatible Clients
-
 Use xPerfect as an external MCP server. The standalone external-MCP path is config-only and
 requires no LibreChat application-code changes. Optional Viventium/LibreChat account, inference,
 scheduling, or callback bridges may use a separately pinned compatible integration build, but are
@@ -213,6 +266,7 @@ workspace links in typed `operator_url`/`watch_url` metadata, outside `message` 
 Only native input events may add the required workspace input route to prose; delivered file
 Download/Preview links remain usable. Failure guidance asks the agent to inspect existing native
 workspace/evidence rather than requiring an end-user operator page.
+
 
 Workspace-native tool and account setup stays inside the selected persistent workstation. The
 Workspaces `Set up tools` action opens that profile's installed AI harness through the generic desktop
@@ -294,10 +348,13 @@ bound run and attempt; the host resolves its own trusted destination before impo
 into its normal message store. Replay retains the accepted callback bytes and the immutable selection.
 Progress, failed and cancelled callbacks do not publish this completed-result carrier.
 
-Native file previews and downloads use the selected filename only when the exact completed
-run, owner, callback, revision, digest and stored bytes identify one unique name for that artifact.
-Missing, invalid, stale or ambiguous metadata keeps the storage basename. This presentation rule
-does not change signed-link scope, file access, immutable bytes or range downloads.
+Native file previews and downloads retain the selected filename when verified metadata identifies
+one unique name for the exact stored artifact. Delegated completed results use their owner-bound
+callback, revision and digest. Ordinary native Chat results use their existing exact worker/run/
+attempt capture; they do not need a mission callback. The shared name mapping also preserves the
+publisher's verified image extension. Missing, invalid, stale or ambiguous metadata keeps the storage
+basename. This presentation rule does not change signed-link scope, file access, immutable bytes or
+range downloads.
 A mission view lists only model-selected completed outputs under Result files. Other
 authorized files remain in the separate collapsed Workspace files section, labeled as
 reusable workspace content that may come from other work. Neither section grants new
@@ -442,7 +499,6 @@ headers whenever the host supports them; this lookup remains a legacy bridge, no
 contract.
 
 ### Claude / Claude Code
-
 Support:
 
 - stdio attachment for local use
@@ -450,8 +506,24 @@ Support:
 - project-scoped `.mcp.json` bootstrap where appropriate
 
 ### Codex / ChatGPT-compatible MCP consumers
-
 Prefer remote HTTP MCP with auth in front of the server when not loopback-only.
+
+### Local user connection
+
+The local launcher supplies **Connections → Use xPerfect from another AI app** with its existing
+`xperfect mcp --state-dir ...` stdio command, the current instance address and the checkout used for
+the companion skill. The signed-in panel's **Automatic** instruction configures only the receiving
+Codex or Claude Code client and finishes with one `workspace_list` verification. **Manual** exposes
+the equivalent native add command. Both use the same stdio service; there is no second connector,
+OAuth registration, copied provider login or token pasted into the instruction.
+
+Local client cards say that no sign-in is needed and do not offer remote HTTP address or OAuth
+registration fields. The native command uses the selected private local state under its OS user;
+AI worker accounts remain separately selected and authorized. Keep the generated instance-specific
+server name and state path, reuse an existing exact registration, and preserve unrelated client
+configuration. This route is not advertised for multi-user deployments or as a hosted chatbot's
+access to a user's local machine. Hosted HTTP setup retains its registered-client and native OAuth
+requirements below.
 
 ### Hosted user connection
 
@@ -659,8 +731,38 @@ coordinator authority. Tool descriptions are authored in the packaged
 `workers_projects_runtime/prompts/coordinator-tools.json`, beside `coordinator.md`. Source version,
 prompt hash and tool-description hash are exposed in the conversation manifest for Workbench.
 
+Native coordinator tool schema version 3 lets `coordinator_dispatch` accept exactly one of
+`worker_id` (an existing worker) or `route_id` (a new helper), alongside `goal_id` and `instruction`.
+`coordinator_status` lists at most 100 available workers in the selected owned project and reports
+truncation. A narrower workspace scope stays narrow. Foreground conversation workers, closed workers, ephemeral workers and delegated helpers are
+excluded; dispatch rechecks the same typed eligibility, ownership and scope. The existing worker's saved account
+must remain ready. Unsupported or unavailable targets never select another account or helper.
+Old route dispatch JSON and request digests retain their exact shape. Ordinary existing-worker
+runs have no delegation work reference; Queue/Message/Dismiss and failed-helper Retry remain
+delegation-only actions. A new request becomes a new goal on the same ordinary worker. Stop uses
+the existing run-scoped cancellation claim and native termination proof, preserving unrelated
+queued goals. Public whole-work Stop keeps its existing queue-wide meaning. Account reconnect,
+ability review and unavailable-worker blockers have distinct typed codes.
+The six native tools and owner HTTP dispatch share this typed branch. No management MCP authority
+or Direct Queen tool is added.
+
+Native coordinator tool schema version 2 made `coordinator_accept_goals` take only `goals`.
+Its authenticated run identifies the current provider request; that request's accepted message ID
+owns `source_turn_id`. The runtime checks the conversation, owner, session and worker before
+acceptance, including before the outer conversation has attached the request receipt. The model
+does not guess a chat turn ID from a native run ID. Native clients must refresh this tool schema;
+the authenticated owner HTTP API still requires its explicit `turn_id`. No new Queen tool or
+automatic choice of objective, route or worker is introduced.
+
+Codex's generated configuration approves the exact run-bound `xperfect-coordinator` server's
+tools only after its worker/run identity and nonempty native token projection match. Its tools
+still validate their live run and owner authority. This uses Codex's existing per-server approval
+setting; it does not approve other MCP servers, change global approval policy or grant a new
+provider/account/tool capability. A missing or stale projection cannot add this configuration.
+
 Native worker profile support does not imply conversation-provider support. Unsupported exact
 model/profile/effort selections remain unavailable; no provider alias or fallback is invented.
+
 
 ## Native scheduling discovery
 
@@ -695,3 +797,25 @@ the execution instruction, snapshot, target data or clock-internal dispatch hint
 executor retains those values; authorized `schedule_get`, `schedule_list` and `schedule_history`
 remain available for inspection. General API/UI receipts keep their existing contract. A
 concurrent missing admission is a typed not-found error, not an empty success.
+
+
+## Public starting templates, private worker ownership
+
+`workspace_starter_list` (HTTP `GET /v1/workspace-starters`) lists the packaged public worker
+template metadata and exact content hash. `workspace_starter_import` (HTTP
+`POST /v1/workspace-starters/{id}/import`) accepts that hash, an owner-scoped idempotency key,
+and optional explicit account/effort choices. It composes ordinary personal Library records and
+an immutable workspace template. It starts no worker, installs no plugin and grants no access.
+
+Continue with the existing `workspace_template_instantiate`, exact-target Library review and
+normal worker launch/status/steer/result tools. The same records can be used by a native Chat
+worker through the management MCP. This adds no Fast Queen routing rule or domain-specific tool.
+Template summaries include exact `personal_library_refs` alongside approved `library_refs`,
+without copying private material bodies into the catalog. Shared-link and viewer identities
+cannot use private template import.
+
+The import receipt binds its key to the exact package hash and supplied choices before creating
+material. Retry a partial import with that same request; do not generate a new key because the
+response was lost. A completed replay returns the original template even if the packaged
+catalog changed. Reusing a key for different choices is a conflict. Account references are
+revalidated before use, and a native skill still requires approval on the actual new worker.

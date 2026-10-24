@@ -82,7 +82,7 @@ def test_terminal_native_diagnostic_is_redacted_and_bounded():
                     api_error_status=500,
                     result=(
                         "API Error: upstream failed for api_key=" + secret
-                        + " while reading /U" + "sers/example/Documents/brief.txt "
+                        + " while reading /Users/private-person/Documents/brief.txt "
                         + "bearer " + "Zz9" * 20 + " " + ("x" * 3000)
                     ),
                 ),

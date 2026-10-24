@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 
 from .openclaw_runtime import RuntimeErrorBase
+from .personal_library import LibraryRef
+from .workspace_files import FileAdmissionError
 
 from .coordinator import (
     Control, CoordinatorConfig, CoordinatorConflict, CoordinatorScope,
@@ -18,6 +20,7 @@ class TurnInput(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
     message: str = Field(min_length=1, max_length=524288)
     goals: list[Goal] = Field(default_factory=list, max_length=1000)
+    library_refs: list[LibraryRef] | None = Field(default=None, max_length=128)
 
 
 class ConversationCreateInput(StrictModel):
@@ -53,6 +56,8 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             raise HTTPException(403, str(exc)) from exc
         except CoordinatorConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        except FileAdmissionError as exc:
+            raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)}) from exc
         except RuntimeErrorBase as exc:
             if str(exc) != "active_work_generation_changed":
                 raise
@@ -61,67 +66,78 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                 "message": "Current work changed. Check its status and try again.",
             }) from exc
 
+    def connected_config(tenant: str, owner: str, account_id: str):
+        account = coordinator.service.control_plane_store.get_provider_account(
+            account_id=account_id, tenant_id=tenant, owner_id=owner,
+        )
+        profile = {
+            "codex": "codex-cli", "openai": "codex-cli",
+            "claude": "claude-code", "anthropic": "claude-code",
+            "grok": "grok-build", "xai": "grok-build",
+        }.get(str((account or {}).get("provider") or "").lower())
+        if not account or account.get("status") != "ready" or not profile:
+            raise HTTPException(409, "Choose a connected assistant before starting a conversation")
+        from .coordinator_config import explicit_coordinator_config, connected_account_execution_mode
+        explicit = invoke(explicit_coordinator_config)
+        if explicit is not None:
+            # A configured conversation model and effort are exact choices: the
+            # chosen account must be for that AI; they are never swapped silently.
+            try:
+                model = coordinator.provider._model(explicit.model, tenant_id=tenant, owner_id=owner)
+            except HTTPException as exc:
+                raise HTTPException(409, "The configured conversation model is unavailable") from exc
+            from .direct_runtime import DIRECT_PROVIDERS
+            if model.harness_profile in DIRECT_PROVIDERS:
+                from .control_plane import PROFILE_ACCOUNT_PROVIDERS
+                from .native_api_keys import native_key_account, enabled
+                protected = coordinator.service.control_plane_store.get_provider_account_record(
+                    account_id=account_id, tenant_id=tenant, owner_id=owner,
+                )
+                if (str(account.get("provider")) not in PROFILE_ACCOUNT_PROVIDERS[model.harness_profile]
+                        or protected is None or not native_key_account(protected) or not enabled()):
+                    raise HTTPException(409, "Direct conversation requires this provider's protected API-key connection on a supported local host")
+                profile = model.harness_profile
+            if model.harness_profile != profile:
+                raise HTTPException(409, "The chosen account is not for the configured conversation model")
+            if explicit.effort not in tuple(model.effort_choices):
+                raise HTTPException(409, "The configured conversation effort is unavailable for its model")
+            effort = explicit.effort
+        else:
+            native_model = coordinator.service._resolve_worker_model(profile, connected_account_execution_mode(profile), tenant_id=tenant, owner_id=owner)
+            try:
+                model = coordinator.provider._model(f"{profile}:{native_model}", tenant_id=tenant, owner_id=owner)
+            except HTTPException as exc:
+                raise HTTPException(409, "The selected assistant model is unavailable for conversations") from exc
+            if model.harness_profile != profile or model.native_model != native_model:
+                raise HTTPException(409, "The selected assistant model is unavailable for conversations")
+            effort = model.recommended_effort
+        config = invoke(default_config, tenant, owner, profile)
+        if config is None:
+            raise HTTPException(409, {"code": "coordinator_not_configured", "message": "Connect an assistant in Connections to start a conversation."})
+        selected = CoordinatorConfig.model_validate(config)
+        # The chosen account answers in the conversation. Configured helper routes,
+        # each with its own account, stay; without any, one route uses the same account.
+        mode = connected_account_execution_mode(profile)
+        routes = explicit.routes if explicit is not None and explicit.routes else [
+            Route(id="default", profile=profile, model=model.id, effort=effort,
+                  execution_mode=mode, connection_id=account_id)]
+        selected = selected.model_copy(update={
+            "model": model.id,
+            "effort": effort,
+            "scope": selected.scope.model_copy(update={"connection_id": account_id, "execution_mode": mode}),
+            "routes": routes,
+        })
+
+        from .control_plane import profile_provider_account_issue
+        if account.get("auth_method") and profile_provider_account_issue(profile, account):
+            raise HTTPException(409, "The connected account does not support this assistant")
+        return selected, account, profile
+
     @router.post("/conversations")
     def create(request: Request, payload: ConversationCreateInput | None = None):
         tenant, owner = principal(request)
         if payload is not None and payload.account_id:
-            account = coordinator.service.control_plane_store.get_provider_account(
-                account_id=payload.account_id, tenant_id=tenant, owner_id=owner,
-            )
-            profile = {
-                "codex": "codex-cli", "openai": "codex-cli",
-                "claude": "claude-code", "anthropic": "claude-code",
-                "grok": "grok-build", "xai": "grok-build",
-            }.get(str((account or {}).get("provider") or "").lower())
-            if not account or account.get("status") != "ready" or not profile:
-                raise HTTPException(409, "Choose a connected assistant before starting a conversation")
-            from .coordinator_config import explicit_coordinator_config
-            explicit = invoke(explicit_coordinator_config)
-            if explicit is not None:
-                # A configured conversation model and effort are exact choices: the
-                # chosen account must be for that AI; they are never swapped silently.
-                try:
-                    model = coordinator.provider._model(explicit.model, tenant_id=tenant, owner_id=owner)
-                except HTTPException as exc:
-                    raise HTTPException(409, "The configured conversation model is unavailable") from exc
-                from .direct_runtime import DIRECT_PROVIDERS
-                if model.harness_profile in DIRECT_PROVIDERS:
-                    from .control_plane import PROFILE_ACCOUNT_PROVIDERS
-                    from .native_api_keys import native_key_account, enabled
-                    if (str(account.get("provider")) not in PROFILE_ACCOUNT_PROVIDERS[model.harness_profile]
-                            or not native_key_account(account) or not enabled()):
-                        raise HTTPException(409, "Direct conversation requires this provider's protected API-key connection on a supported local host")
-                    profile = model.harness_profile
-                if model.harness_profile != profile:
-                    raise HTTPException(409, "The chosen account is not for the configured conversation model")
-                if explicit.effort not in tuple(model.effort_choices):
-                    raise HTTPException(409, "The configured conversation effort is unavailable for its model")
-                effort = explicit.effort
-            else:
-                native_model = coordinator.service._resolve_worker_model(profile, "docker", tenant_id=tenant, owner_id=owner)
-                try:
-                    model = coordinator.provider._model(f"{profile}:{native_model}", tenant_id=tenant, owner_id=owner)
-                except HTTPException as exc:
-                    raise HTTPException(409, "The selected assistant model is unavailable for conversations") from exc
-                if model.harness_profile != profile or model.native_model != native_model:
-                    raise HTTPException(409, "The selected assistant model is unavailable for conversations")
-                effort = model.recommended_effort
-            config = invoke(default_config, tenant, owner, profile)
-            if config is None:
-                raise HTTPException(409, {"code": "coordinator_not_configured", "message": "Connect an assistant in Connections to start a conversation."})
-            selected = CoordinatorConfig.model_validate(config)
-            # The chosen account answers in the conversation. Configured helper routes,
-            # each with its own account, stay; without any, one route uses the same account.
-            mode = "host" if profile in {"direct-openai", "direct-anthropic", "direct-xai"} else "docker"
-            routes = explicit.routes if explicit is not None and explicit.routes else [
-                Route(id="default", profile=profile, model=model.id, effort=effort,
-                      execution_mode=mode, connection_id=payload.account_id)]
-            selected = selected.model_copy(update={
-                "model": model.id,
-                "effort": effort,
-                "scope": selected.scope.model_copy(update={"connection_id": payload.account_id, "execution_mode": mode}),
-                "routes": routes,
-            })
+            selected, _, _ = connected_config(tenant, owner, payload.account_id)
         else:
             config = invoke(default_config, tenant, owner)
             if config is None:
@@ -130,9 +146,8 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
         if payload is not None and payload.scope is not None:
             scope_update = payload.scope.model_dump(exclude_unset=True)
             if payload.account_id and scope_update.get("execution_mode", selected.scope.execution_mode) != selected.scope.execution_mode:
-                # A connected account's conversation runs in its own container; the
-                # caller cannot move it onto the host.
-                raise HTTPException(409, "A conversation with a connected account runs in its own container")
+                # Placement is selected by the deployment, not an owner request.
+                raise HTTPException(409, "This account uses the deployment's configured conversation placement")
             if "connection_id" in scope_update and selected.scope.connection_id and (
                 scope_update["connection_id"] != selected.scope.connection_id
             ):
@@ -146,15 +161,15 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
     def readiness(request: Request):
         """What a new conversation would meet on this deployment, read before anything is sent.
 
-        A connected account's conversation runs in its own container, so it needs the
-        shared-workspace placement; one without an account runs the default conversation
-        model where it is configured, which on this computer needs that model's CLI. These
-        checks start nothing. Capacity and sign-in are still decided when the turn runs.
+        Connected accounts use ordinary local host admission where the deployment enables
+        it, otherwise the existing shared-container placement. These checks start nothing.
+        Capacity and sign-in are still decided when the turn runs.
         """
         tenant, owner = principal(request)
-        placement = coordinator.service.shared_workspace_deployment_readiness(
-            {"mode": "shared", "execution_mode": "docker"}
-        )
+        from .service import standalone_coordinator_host_enabled
+        placement = ({"available": True, "code": "ready"} if standalone_coordinator_host_enabled()
+                     else coordinator.service.shared_workspace_deployment_readiness(
+                         {"mode": "shared", "execution_mode": "docker"}))
         default = {"available": True, "code": "ready"}
         config = invoke(default_config, tenant, owner)
         if config is None:
@@ -169,15 +184,29 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                     ).harness_profile
                 except Exception:
                     profile = ""  # an unavailable model is reported when the turn runs
-                if profile and installed(profile) is False:
+                if profile and profile not in {"direct-openai", "direct-anthropic", "direct-xai"} and installed(profile) is False:
                     default = {"available": False, "code": "native_cli_missing"}
-        return {
-            "connected_account": {
-                "available": placement.get("available") is True,
-                "code": str(placement.get("code") or ""),
-            },
-            "default": default,
-        }
+        connected = {"available": placement.get("available") is True,
+                     "code": str(placement.get("code") or "")}
+        list_accounts = getattr(getattr(coordinator.service, "control_plane_store", None), "list_provider_accounts", None)
+        if connected["available"] and callable(list_accounts):
+            supported = []
+            installed = getattr(coordinator.service.runtime, "host_cli_installed", None)
+            for account in list_accounts(tenant_id=tenant, owner_id=owner):
+                if account.get("status") != "ready":
+                    continue
+                try:
+                    selected, account, profile = connected_config(tenant, owner, account["account_id"])
+                except (HTTPException, CoordinatorConflict, ValueError):
+                    continue
+                if (selected.scope.execution_mode == "host" and profile not in {"direct-openai", "direct-anthropic", "direct-xai"}
+                        and callable(installed) and installed(profile) is False):
+                    continue
+                supported.append({"account_id": account["account_id"], "profile": profile,
+                                  "auth_method": str(account.get("auth_method") or "")})
+            connected["supported_account_ids"] = [item["account_id"] for item in supported]
+            connected["supported_accounts"] = supported
+        return {"connected_account": connected, "default": default}
 
     @router.get("/conversations/{conversation_id}")
     def status(conversation_id: str, request: Request):
@@ -186,7 +215,8 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
     @router.post("/conversations/{conversation_id}/turns")
     def submit(conversation_id: str, payload: TurnInput, request: Request):
         identity = (*principal(request), conversation_id)
-        invoke(coordinator.accept_turn, *identity, payload.idempotency_key, payload.message, payload.goals)
+        invoke(coordinator.accept_turn, *identity, payload.idempotency_key, payload.message, payload.goals,
+               None if payload.library_refs is None else [ref.model_dump() for ref in payload.library_refs])
         return invoke(coordinator.start_turn, *identity, payload.idempotency_key)
 
     @router.post("/conversations/{conversation_id}/turns/{turn_id}/stop")

@@ -384,6 +384,9 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
         elif status in {402, 403}:
             kind, retryable, message = "provider_access_denied", False, "The selected API account cannot access this model."
             recovery = "Check the account model access and billing. Review any accepted work before retrying."
+        elif status == 413:
+            kind, retryable, message = "provider_request_rejected", False, "The selected API rejected this request as too large."
+            recovery = "Reduce duplicated transport data without losing authorized context. Review any accepted work before retrying; this is not proof of a model token limit."
         elif status == 429:
             kind, retryable, message = "provider_rate_limited", True, "The selected API connection is temporarily rate limited."
         elif isinstance(status, int) and 400 <= status < 500:

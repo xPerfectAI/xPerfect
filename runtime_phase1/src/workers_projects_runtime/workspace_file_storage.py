@@ -322,6 +322,18 @@ class FileStorageAdapter:
         )
 
 
+def projection_target_matches(record: dict, current: dict, *, completed: bool = False) -> bool:
+    """Only a verified private completed receipt permits a device-number change.
+
+    The caller owns receipt validation. Pending writes retain the exact physical
+    binding; completed reuse retains every other field, including root inode.
+    """
+    return record.keys() == current.keys() and all(
+        value == current[key] for key, value in record.items()
+        if not (completed and key == "workspace_device")
+    )
+
+
 def resolve_projection_control(entry: dict, worker: dict, workspace_root: Path):
     """Resolve trusted DB lineage; never read a caller-supplied key or control path."""
     if any(key in entry for key in ("managed_receipt_path", "managed_control_root", "managed_receipt_key")):
@@ -365,11 +377,17 @@ def resolve_projection_control(entry: dict, worker: dict, workspace_root: Path):
         raise FileAdmissionError("A unique initialized Files control owner is required for this projection", 503)
     adapter, item, identity = accepted[0]
     authorize_projection_source(entry, worker)
+    receipt = adapter.receipt(tenant, owner, item["projection_id"])
+    completed_only = False
     with adapter.files.store._connect() as conn:
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("INSERT OR IGNORE INTO workspace_file_projection_targets VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", identity)
         current = conn.execute("SELECT * FROM workspace_file_projection_targets WHERE projection_id=?", (item["projection_id"],)).fetchone()
-        if tuple(current) != identity:
-            raise FileAdmissionError("Projection is already bound to another workspace root or version", 409)
-    return adapter, item, adapter.receipt(tenant, owner, item["projection_id"])
+        expected = dict(zip(current.keys(), identity))
+        if not projection_target_matches(dict(current), expected):
+            private_completed = (receipt.exists() or receipt.is_symlink()) and adapter.completed(tenant, owner, item)
+            if not private_completed or not projection_target_matches(dict(current), expected, completed=True):
+                raise FileAdmissionError("Projection is already bound to another workspace root or version", 409)
+            completed_only = True
+    return adapter, item, receipt, completed_only

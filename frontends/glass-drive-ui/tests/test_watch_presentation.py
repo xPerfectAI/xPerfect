@@ -122,7 +122,7 @@ const document={activeElement:menuToggle,handlers:{},
 const watchApp={style:{setProperty:()=>{}}};
 let terminalResultPreferred=true;
 const resultPanel=new Node(),resultToggle=new Node(),filesPanel=new Node();filesPanel.hidden=true;
-let resultCloses=0;const closeResultPanel=()=>{resultCloses+=1};
+let resultCloses=0,lastResultClose=null;const closeResultPanel=options=>{resultCloses+=1;lastResultClose=options;};
 const setQueueModifierActive=()=>{};
 function key(value){return {key:value,prevented:false,stopped:false,preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;}};}
 """ + functions + "\n" + listeners + "\n" + document_listeners + "\n" + body)
@@ -179,6 +179,44 @@ menu.handlers.keydown(key('Escape'));assert.equal(menu.hidden,true);assert.equal
 """)
 
 
+def test_escape_closes_only_the_top_owned_surface_and_keeps_native_dialog_authority():
+    menu_checks("""
+resultPanel.hidden=false;terminalResultPreferred=true;
+document.handlers.keydown(key('Escape'));
+assert.equal(resultCloses,1,'A completed result can also be dismissed with Escape');
+assert.deepEqual(lastResultClose,{restoreFocus:true});
+openMenu();document.handlers.keydown(key('Escape'));assert.equal(resultCloses,1);
+document.querySelector=()=>({open:true});document.handlers.keydown(key('Escape'));
+assert.equal(resultCloses,1,'A native dialog owns its own Escape');
+document.querySelector=()=>null;const handled=key('Escape');handled.defaultPrevented=true;
+document.handlers.keydown(handled);assert.equal(resultCloses,1);
+""")
+
+
+def test_result_actions_show_only_the_declared_file_identity_as_safe_text():
+    source = (STATIC / "watch.js").read_text()
+    node("""
+import assert from 'node:assert/strict';
+const element=()=>({children:[],attributes:{},textContent:'',
+ replaceChildren(){this.children=[];},appendChild(node){this.children.push(node);},
+ setAttribute(name,value){this.attributes[name]=value;}});
+const document={createElement:element},resultActions=element();
+const libraryManager=false;
+""" + actual_function("syncResultActions", source) + """
+syncResultActions({kind:'file',label:'<report>.xlsx',open_url:'/open',download_url:'/download'});
+assert.equal(resultActions.hidden,false);assert.equal(resultActions.children[0].textContent,'<report>.xlsx');
+assert.equal(resultActions.children[0].className,'result-file-name');
+assert.equal(resultActions.children[1].attributes['aria-label'],'Open file: <report>.xlsx');
+assert.equal(resultActions.children[2].attributes['aria-label'],'Download file: <report>.xlsx');
+assert.equal(resultActions.children[1].href,'/open');assert.equal(resultActions.children[2].href,'/download');
+syncResultActions({kind:'file',workspace_path:'reports/answer.txt',open_url:'/open'});
+assert.equal(resultActions.children[0].textContent,'reports/answer.txt');
+syncResultActions({kind:'file',open_url:'/unlabelled'});
+assert.equal(resultActions.children.length,1,'Never infer a file identity from its URL');
+syncResultActions(null);assert.equal(resultActions.hidden,true);assert.equal(resultActions.children.length,0);
+""")
+
+
 def menu_availability_checks(body):
     source = (STATIC / "watch.js").read_text()
     node("""
@@ -186,7 +224,8 @@ import assert from 'node:assert/strict';
 const names=['codex','claude','openclaw','interrupt','terminate'];
 const buttons=Object.fromEntries(names.map(name=>[name,{hidden:false}]));
 const workspaceGroup={hidden:false};buttons.terminate.closest=()=>workspaceGroup;
-const appActions={hidden:false},surfaceDesktopButton={},surfaceTerminalButton={},openTerminalLink={};
+const appActions={hidden:false},surfaceDesktopButton={},surfaceTerminalButton={},openTerminalLink={},openExternal={};
+let currentNoRunActivity=false;
 let activeSurface='terminal';
 const menu={querySelector:selector=>buttons[selector.match(/data-action="([^"]+)"/)[1]]};
 const document={getElementById:id=>{assert.equal(id,'watch-app-actions');return appActions;}};
@@ -201,7 +240,7 @@ for(const data of [null,{},owner,{...owner,can_manage_workspace:'true'}]){
  syncWatchMenuAvailability(data);
  assert.equal(appActions.hidden,true);assert.equal(surfaceDesktopButton.hidden,true);
  for(const name of ['codex','claude','openclaw'])assert.equal(buttons[name].hidden,true);
- assert.equal(surfaceTerminalButton.hidden,true,'Do not offer a duplicate current activity view');
+ assert.equal(surfaceTerminalButton.hidden,false,'Keep the selected Live activity view discoverable');
  assert.equal(openTerminalLink.hidden,true);
 }
 syncWatchMenuAvailability(owner);assert.equal(buttons.interrupt.hidden,false);assert.equal(buttons.terminate.hidden,false);
@@ -339,4 +378,16 @@ await closeButton.handlers.click();await closeWorkspaceConfirm.handlers.click();
 assert.deepEqual(calls,['action/terminate']);assert.equal(failures.length,1);assert.equal(failures[0],rejected);
 assert.equal(closeWorkspaceDialog.open,false);assert.equal(focused,menuToggle);assert.equal(refreshes,0);
 assert.equal(closeWorkspaceConfirm.disabled,false);assert.equal(closeWorkspaceCancel.disabled,false);
+""")
+
+
+def test_never_run_workspace_keeps_view_choice_without_offering_an_empty_new_tab():
+    menu_availability_checks("""
+currentNoRunActivity=true;syncWatchMenuAvailability({...owner,latest_run:null});
+assert.equal(surfaceTerminalButton.hidden,false);assert.equal(surfaceTerminalButton.disabled,true);
+assert.equal(openExternal.disabled,true,'Never open a fake live activity page before first work');
+currentNoRunActivity=false;syncWatchMenuAvailability(owner);
+assert.equal(surfaceTerminalButton.disabled,false);assert.equal(openExternal.disabled,false);
+activeSurface='desktop';syncWatchMenuAvailability({...owner,runtime_details:{view_available:true}});
+assert.equal(openExternal.disabled,false);
 """)

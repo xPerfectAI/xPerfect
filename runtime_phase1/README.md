@@ -75,6 +75,38 @@ reapers, and the scheduler while a cloned database is inspected. Newly emitted c
 durably pending for the live phase. The live single-runtime service sets the flag back to `true`; a
 passive rehearsal must never deliver callbacks or execute copied queued/scheduled work.
 
+## Background reliability and result delivery
+
+The service owns its periodic callback recovery, lifecycle cleanup, scheduler, host lease
+heartbeat and any configured isolated-runtime probe. `/health` reports these owners under
+`background_consumers` and returns HTTP 503 if a required periodic owner has stopped. Explicitly
+disabled consumers remain marked `disabled`; finite startup recovery may run or finish while
+HTTP is ready. Provider account availability is reported separately from loop liveness.
+
+Each lifecycle cleanup phase catches a transient dependency failure independently and retries
+on the next existing pass. Shutdown stops the other owners and executors even if lease cleanup
+fails; unknown native termination keeps its durable fence and remains an explicit cleanup error.
+
+Worker-result callbacks and scheduled webhooks use the same bounded HTTP transport pool,
+separate from native work and provider result settlement. `WPR_WEBHOOK_TRANSPORT_SLOTS` bounds
+running plus queued transport tasks; owner limits prevent one owner from filling the pool.
+Up to two worker callbacks per recipient can progress within the same owner limit;
+terminal results and input requests precede routine pending status within each fair owner batch. Claim,
+submission, payload preparation and settlement failures release their exact in-memory reservation.
+The existing durable outbox and generation/lease CAS own retry after a sender crash.
+
+Production worker callback delivery performs one HTTP attempt per admission. A retryable failure
+persists `next_attempt_at` with exponential backoff from
+`GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S` (default 0.5 seconds), capped at 300 seconds. The existing
+scheduler wakes for that due time; no maintenance thread or HTTP slot sleeps through backoff.
+`GLASSHIVE_CALLBACK_MAX_TOTAL_ATTEMPTS` still bounds the total attempts before dead-lettering;
+the old burst-attempt setting does not multiply production attempts. A receiver-requested
+recovery that cannot acquire bounded transport returns retryable HTTP 503 with `Retry-After: 1`;
+capacity alone must not report an unchanged durable decision. Pending `run.needs_input`
+events use the same recovery while their original attempt remains current. A retry preserves the
+original callback/result identity and never re-runs native work. Exhausted or terminally rejected
+delivery stays visible as a dead letter; it is not success and is not silently revived.
+
 ## Generic worker and webhook schedules
 
 Use the same owner-authenticated HTTP session as the other control-plane operations. The generated
@@ -107,7 +139,7 @@ are documented in their own owners.
      "target": {
        "kind": "webhook",
        "destination_id": "whd_0123456789abcdef0123456789abcdef",
-       "request_data": { "request_ref": "daily-summary" }
+       "request_data": {"request_ref": "daily-summary"}
      },
      "instruction": "Prepare today's summary",
      "idempotency_key": "example-schedule-01",
@@ -148,13 +180,13 @@ another occurrence. Editing versions future work and preserves original occurren
 
 ### Delivery states and recovery
 
-| State                  | Meaning                                                                                                                                      |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pending                | Saved delivery awaits capacity or its persisted retry time. No AI slot is required.                                                          |
-| Accepted               | Valid HTTP 2xx ACK received; application completion is separate. A later optional body error cannot undo this ACK.                           |
-| Rejected               | Delivery was refused by the receiver or current destination/security policy; inspect the safe reason and numeric HTTP status.                |
-| Expired                | No initial accepted delivery was obtained before the effective deadline. An already attempted request can instead remain unacknowledged.     |
-| Unacknowledged         | The sender lacks a final ACK and the receiver may already have acted. Do not invent success, no-effect or exactly-once guarantees.           |
+| State | Meaning |
+| --- | --- |
+| Pending | Saved delivery awaits capacity or its persisted retry time. No AI slot is required. |
+| Accepted | Valid HTTP 2xx ACK received; application completion is separate. A later optional body error cannot undo this ACK. |
+| Rejected | Delivery was refused by the receiver or current destination/security policy; inspect the safe reason and numeric HTTP status. |
+| Expired | No initial accepted delivery was obtained before the effective deadline. An already attempted request can instead remain unacknowledged. |
+| Unacknowledged | The sender lacks a final ACK and the receiver may already have acted. Do not invent success, no-effect or exactly-once guarantees. |
 | Cancelled / superseded | Future eligible delivery stopped. Existing ACKs and uncertainty about earlier sends are retained; cancelling does not retract external work. |
 
 Retries use the same event ID and immutable body with a fresh attempt timestamp/signature. Backoff
@@ -223,6 +255,17 @@ Current behavior:
   Cached but disabled plugins and explicit server disables stay
   disabled; the host plugin denylist remains enforced. Native startup, environment and nested tool
   settings are preserved without adding a second browser or computer-control runtime.
+
+Native Codex stdio keeps raw tool-call and acceptance events, including the current
+`rawResponseItem/completed` wire method. Cold and prepared workers enable Codex's
+`omit_app_server_notification_media` feature. On validated native version `0.164.0-alpha.11.1`,
+notification copies omit inline image/audio bytes while the model input and journal retain them.
+The feature key also exists in reviewed version `0.162.0-alpha.17.2`; raw-media omission on that
+older version has not been validated. Generated files
+continue through the existing scoped artifact carrier. This prevents large historical image
+messages from breaking the control connection without deleting conversation context. The reader
+keeps its 8 MiB frame bound; an oversized or invalid frame reports `native_event_oversized` or
+`native_event_invalid` with safe transport metadata instead of hiding the cause as a closed pipe.
 
 ## Claude Code on Amazon Bedrock
 
@@ -428,6 +471,7 @@ transaction as its replacement. Clients can settle that run's activity without c
 accepted work or replacement. Callback replay retains the same identity; a retired run does not
 gain the replacement's terminal result authority.
 
+
 All operations use the runtime owner/tenant and worker authorization boundary. File writes reject view-only identities. Managed source projection requires an explicitly trusted managed-storage root. API admission monitoring alone does not enforce a native disk quota. Standalone startup loads only an explicit `VIVENTIUM_ENV_FILE`, if provided.
 
 ## Standalone coordinator
@@ -444,3 +488,27 @@ Package these source files with the runtime. Focused deterministic checks are
 `tests/test_coordinator.py`; fixed exact-model evaluation cases are
 `tests/fixtures/coordinator/evals.json`. Native tool execution and real browser acceptance are
 separate release gates.
+
+### Direct image transport and history
+
+Direct API profiles preserve the selected provider, model, scope, original text, native tools,
+receipts and all authorized image bytes. The existing SDK request hook sends each exact user
+image once per request and retains each repeated occurrence as a data-only content reference.
+Identity includes full SHA256, MIME type and vendor settings; distinct image settings stay
+distinct. The SDK receives an identity label beside the full image. No image is resized or
+summarized, and text that merely claims an image hash grants no file or image access.
+
+The same verified SDK history prevents another binary copy from being appended on each text
+turn. Existing raw journals remain intact. Projection uses only actual typed bytes retained in
+the same provider/account scope or in the current authorized input; it keeps a full available
+copy even if an earlier occurrence was removed by a history projection. A missing current user
+carrier fails closed. Tool calls/results and non-image media stay unchanged. Structured image
+projection metrics report unique images, duplicate bytes and restored images without logging
+private image data.
+
+HTTP413 means that the provider rejected a request as too large. It does not prove a model token
+limit or justify a fresh worker, context loss or action replay. The existing non-retryable
+rejection family retains that transport distinction. Owning checks:
+`tests/test_direct_media_projection.py`, the Direct runtime/current-state/archive tests and
+native-media authority tests. Actual provider acceptance and client delivery remain separate
+release evidence.

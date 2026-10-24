@@ -16,9 +16,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .control_plane import CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore
+from .coordinator import COORDINATOR_SCHEMA_VERSION
 from .deliverables import NON_DELIVERABLE_DIR_NAMES
 from .execution_profile import packaged_linux
 from .models import utc_now
+from .peer_collaboration import PEER_COLLABORATION_SCHEMA_VERSION
 from .profile_runtime import ProfiledWorkerRuntime
 from .service import (_bounded_int_env, _copy_regular_workspace_file,
                       _workspace_copy_plan, _workspace_duplicate_path_is_excluded)
@@ -31,8 +33,7 @@ from .store import (CALLBACK_TRACE_AUTHORITY_FIELDS, CLOSED_WORKER_STATES, COMPU
     verified_callback_trace_snapshots)
 
 
-_PEER_COLLABORATION_SCHEMA_VERSION = 3
-_OPTIONAL_SCHEMA_VERSIONS = {"coordinator": 3, "worker_configuration": 2}
+_OPTIONAL_SCHEMA_VERSIONS = {"coordinator": COORDINATOR_SCHEMA_VERSION, "worker_configuration": 2}
 _KNOWN_COMPONENTS = {
     "runtime_store",
     "control_plane",
@@ -46,11 +47,15 @@ _OPTIONAL_TABLES = {
     },
     "worker_configuration": {"worker_configurations", "worker_context_snapshots"},
 }
-# Owned tables recognized by presence alone: the default-off local-QA fault authority
-# creates its complete set when enabled and records no schema-version row.
+# These existing owners create their complete table sets without a schema ledger row.
+# Presence selects the owner; exact DDL, indexes and constraints are still reviewed below.
 _LEDGERLESS_OPTIONAL_TABLES = {
     "local_qa_control": frozenset({
         "local_qa_fault_controls", "local_qa_fault_audit", "local_qa_fault_arm_ledger",
+    }),
+    "personal_library": frozenset({
+        "personal_library_items", "personal_library_versions", "personal_library_requests",
+        "personal_library_holders", "personal_library_applications", "personal_library_apply_requests",
     }),
 }
 
@@ -72,6 +77,7 @@ _POSITIONAL_TABLES = frozenset({
     "peer_grant_batches", "peer_grants", "peer_messages", "peer_policies",
     "worker_context_snapshots", "workspace_file_pins", "workspace_file_policies",
     "workspace_file_projection_targets", "workspace_file_storage_config",
+    "personal_library_items", "personal_library_requests", "personal_library_holders",
 })
 
 
@@ -208,7 +214,7 @@ def _schema_composition(connection: sqlite3.Connection) -> dict[str, int]:
     required = {
         "runtime_store": RUNTIME_STORE_SCHEMA_VERSION,
         "control_plane": CONTROL_PLANE_SCHEMA_VERSION,
-        "peer_collaboration": _PEER_COLLABORATION_SCHEMA_VERSION,
+        "peer_collaboration": PEER_COLLABORATION_SCHEMA_VERSION,
     }
     if any(observed.get(component) != version for component, version in required.items()):
         raise ValueError("GlassHive continuity requires the current reviewed component schema")
@@ -254,6 +260,11 @@ def _apply_schema_owners(path: Path, components) -> Store:
 
             with store._connect() as connection:
                 initialize_local_qa_schema(connection)
+        if "personal_library" in components:
+            from .personal_library import ensure_personal_library_schema
+
+            with store._connect() as connection:
+                ensure_personal_library_schema(connection)
     except BaseException:
         store.close()
         raise
@@ -508,6 +519,48 @@ def _quota_owner_root(connection: sqlite3.Connection, backend, tenant: str, owne
         raise ValueError("GlassHive quota continuity owner storage identity is unavailable") from exc
 
 
+@contextmanager
+def _managed_source_lock(location: Path, *, source: bool):
+    """Fence the existing Files mutation lock without exporting it as payload."""
+    import fcntl
+    from .workspace_files import _directory
+
+    if not os.path.lexists(location):
+        yield set()
+        return
+    if location.is_symlink() or not location.is_dir():
+        raise ValueError("GlassHive Files owner root is unsafe")
+    with _directory(location) as parent:
+        name = ".xperfect-files.lock"
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+        except FileNotFoundError:
+            yield set()
+            return
+        except OSError as exc:
+            raise ValueError("GlassHive Files mutation lock is invalid") from exc
+        try:
+            if not source:
+                raise ValueError("GlassHive Files archive contains a source mutation lock")
+            lock = os.fstat(descriptor)
+            if (not stat.S_ISREG(lock.st_mode) or lock.st_nlink != 1 or lock.st_size
+                    or lock.st_uid != os.geteuid() or lock.st_mode & 0o077):
+                raise ValueError("GlassHive Files mutation lock is invalid")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("GlassHive Files mutations must settle before continuity") from None
+            yield {name}
+            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            root = os.fstat(parent)
+            observed_root = location.lstat()
+            if ((current.st_dev, current.st_ino, current.st_size) != (lock.st_dev, lock.st_ino, 0)
+                    or (observed_root.st_dev, observed_root.st_ino) != (root.st_dev, root.st_ino)):
+                raise ValueError("GlassHive Files mutation lock changed during continuity")
+        finally:
+            os.close(descriptor)
+
+
 def _managed_file_versions(store: Store, archive_root: Path, source_root: Path | None = None) -> tuple[int, int]:
     """Copy or verify complete local Files versions without opening a live owner."""
 
@@ -567,54 +620,55 @@ def _managed_file_versions(store: Store, archive_root: Path, source_root: Path |
                     if (row["tenant_id"], row["owner_id"], row["state"]) == (tenant, owner, "ready")}
         if source_root is not None and location != location.resolve(strict=False):
             raise ValueError("GlassHive Files source storage root is unsafe")
-        if location.exists() or location.is_symlink():
-            if location.is_symlink() or not location.is_dir():
-                raise ValueError("GlassHive Files owner root is unsafe")
-            actual = {entry.name for entry in location.iterdir()}
-            legacy = {name for name in actual - set(expected)
-                      if re.fullmatch(r"prj_[0-9a-f]{32}\.receipt", name)}
-            if source_root is None and legacy:
-                raise ValueError("GlassHive Files archive contains source projection authority")
-            if source_root is not None and legacy:
-                with store._connect() as connection:
-                    accepted = {str(row[0]) + ".receipt" for row in connection.execute(
-                        "SELECT projection_id FROM workspace_file_projection_targets "
-                        "WHERE tenant_id=? AND owner_id=?", (tenant, owner)
-                    )}
-                if not legacy <= accepted:
-                    raise ValueError("GlassHive Files legacy projection receipt has no owner")
-                for name in legacy:
-                    info = (location / name).lstat()
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size or info.st_uid != os.geteuid():
-                        raise ValueError("GlassHive Files legacy projection receipt is invalid")
-            if actual != (set(expected) | legacy):
-                raise ValueError("GlassHive Files versions contain missing or unsettled payloads")
-        elif expected:
-            raise ValueError("GlassHive Files ready payload is missing")
-        for name, row in expected.items():
-            if not re.fullmatch(r"fil_[0-9a-f]{32}\.blob", name):
-                raise ValueError("GlassHive Files version identity is invalid")
-            if (not isinstance(row["size_bytes"], int) or row["size_bytes"] < 0
-                    or not re.fullmatch(r"[0-9a-f]{64}", str(row["sha256"]))):
-                raise ValueError("GlassHive Files version metadata is invalid")
-            source_file = location / name
-            if source_root is not None:
-                copied = _copy_regular_workspace_file(
-                    source_file, target_dir / name, location,
-                    max_bytes=20 * 1024**3 - copied_bytes, deadline=deadline,
-                )
-                copied_bytes += copied
-            file_to_verify = target_dir / name
-            metadata = file_to_verify.lstat()
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != row["size_bytes"]:
-                raise ValueError("GlassHive Files ready payload has changed")
-            digest = hashlib.sha256()
-            with file_to_verify.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    digest.update(chunk)
-            if digest.hexdigest() != row["sha256"]:
-                raise ValueError("GlassHive Files ready payload digest disagrees")
-            copied_count += 1
+        with _managed_source_lock(location, source=source_root is not None) as control_files:
+            if location.exists() or location.is_symlink():
+                if location.is_symlink() or not location.is_dir():
+                    raise ValueError("GlassHive Files owner root is unsafe")
+                actual = {entry.name for entry in location.iterdir()}
+                legacy = {name for name in actual - set(expected)
+                          if re.fullmatch(r"prj_[0-9a-f]{32}\.receipt", name)}
+                if source_root is None and legacy:
+                    raise ValueError("GlassHive Files archive contains source projection authority")
+                if source_root is not None and legacy:
+                    with store._connect() as connection:
+                        accepted = {str(row[0]) + ".receipt" for row in connection.execute(
+                            "SELECT projection_id FROM workspace_file_projection_targets "
+                            "WHERE tenant_id=? AND owner_id=?", (tenant, owner)
+                        )}
+                    if not legacy <= accepted:
+                        raise ValueError("GlassHive Files legacy projection receipt has no owner")
+                    for name in legacy:
+                        info = (location / name).lstat()
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size or info.st_uid != os.geteuid():
+                            raise ValueError("GlassHive Files legacy projection receipt is invalid")
+                if actual != (set(expected) | legacy | control_files):
+                    raise ValueError("GlassHive Files versions contain missing or unsettled payloads")
+            elif expected:
+                raise ValueError("GlassHive Files ready payload is missing")
+            for name, row in expected.items():
+                if not re.fullmatch(r"fil_[0-9a-f]{32}\.blob", name):
+                    raise ValueError("GlassHive Files version identity is invalid")
+                if (not isinstance(row["size_bytes"], int) or row["size_bytes"] < 0
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(row["sha256"]))):
+                    raise ValueError("GlassHive Files version metadata is invalid")
+                source_file = location / name
+                if source_root is not None:
+                    copied = _copy_regular_workspace_file(
+                        source_file, target_dir / name, location,
+                        max_bytes=20 * 1024**3 - copied_bytes, deadline=deadline,
+                    )
+                    copied_bytes += copied
+                file_to_verify = target_dir / name
+                metadata = file_to_verify.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != row["size_bytes"]:
+                    raise ValueError("GlassHive Files ready payload has changed")
+                digest = hashlib.sha256()
+                with file_to_verify.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+                if digest.hexdigest() != row["sha256"]:
+                    raise ValueError("GlassHive Files ready payload digest disagrees")
+                copied_count += 1
     return copied_count, copied_bytes
 
 
@@ -624,6 +678,8 @@ def _projection_targets(connection: sqlite3.Connection, database: Path) -> list[
     A target whose lineage, owner root, workspace or control paths disagree is refused.
     ``receipt`` is the committed receipt a completed target has, or None.
     """
+    from .workspace_file_storage import manifests, projection_target_matches
+
     rows = [dict(row) for row in connection.execute("SELECT * FROM workspace_file_projection_targets")]
     if not rows:
         return []
@@ -665,10 +721,9 @@ def _projection_targets(connection: sqlite3.Connection, database: Path) -> list[
         if not allowed or workspace.is_symlink() or not workspace.is_dir():
             raise ValueError("GlassHive Files projection workspace owner disagrees")
         metadata = workspace.stat()
-        if (metadata.st_dev, metadata.st_ino) != (row["workspace_device"], row["workspace_inode"]):
-            raise ValueError("GlassHive Files projection workspace identity changed")
         control = receipt_control / digest
-        receipt = control / f"{row['projection_id']}.receipt"
+        private_receipt = control / f"{row['projection_id']}.receipt"
+        receipt = private_receipt
         if receipt.parent != receipt.parent.resolve(strict=False):
             raise ValueError("GlassHive Files projection control root is unsafe")
         legacy = owner_root / f"{row['projection_id']}.receipt"
@@ -690,6 +745,22 @@ def _projection_targets(connection: sqlite3.Connection, database: Path) -> list[
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size or info.st_uid != os.geteuid():
                 raise ValueError("GlassHive Files projection receipt is invalid")
             committed = receipt
+        current = {**row, "workspace_device": metadata.st_dev, "workspace_inode": metadata.st_ino}
+        if not projection_target_matches(row, current):
+            # A completed projection never writes again. Device numbers may be
+            # renumbered across boots; only its private receipt and exact accepted
+            # binding may keep that no-op valid. Pending and legacy targets stay strict.
+            if (committed != private_receipt
+                    or not projection_target_matches(row, current, completed=True)):
+                raise ValueError("GlassHive Files projection workspace identity changed")
+            accepted = [(worker_id, item) for worker_id, item in manifests(connection, tenant, owner)
+                        if item.get("projection_id") == row["projection_id"]]
+            expected = (row["upload_id"], row["relative_path"], row["sha256"], row["size_bytes"], row["scope_id"])
+            if not accepted or any(
+                (item.get("upload_id"), item.get("path"), item.get("sha256"), item.get("size_bytes"),
+                 item.get("file_scope_id") or worker_id) != expected for worker_id, item in accepted
+            ):
+                raise ValueError("GlassHive Files projection accepted owner manifest disagrees")
         targets.append({"row": row, "owner": (tenant, owner), "owner_root": owner_root, "workspace": workspace,
                         "control": control, "legacy_receipt": legacy, "receipt": committed})
     return targets

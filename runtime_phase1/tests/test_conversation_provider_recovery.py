@@ -6,6 +6,8 @@ import base64
 
 import pytest
 
+from workers_projects_runtime.conversation_provider import TURN_CONTEXT_MAX_ENCODED_BYTES
+
 from test_conversation_provider import (
     AUTH,
     ChatCompletionRequest,
@@ -270,16 +272,44 @@ def test_current_memory_body_survives_initial_resume_and_configured_fallback(tmp
     assert sessions[0] == sessions[1]
 
 
-def test_current_memory_capacity_keeps_legacy_header_and_native_input_guards(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
-    payload = _payload(tmp_path)
-    context = "x" * (200 * 1024)
-    payload["metadata"]["turn_context"] = context
-    body, _ = _post_bound(client, payload)
+def test_current_memory_capacity_keeps_calibrated_body_and_legacy_header_guards(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
+    client = _client(tmp_path, monkeypatch, runtime=NativeUsageRuntime())
+    store = client.app.state.store
+    payload = _payload(tmp_path, model="codex-cli:gpt-6.1-sol")
+    payload["metadata"]["turn_context"] = "x"
+    seed, _ = _post_bound(client, payload, invocation="capacity-seed")
+    assert seed.status_code == 200, seed.text
+    seed_record = store.get_provider_request(seed.json()["id"])
+    decision = json.loads(seed_record["replay_decision_json"])
+    budget = decision["budget_bytes"]
+    # Measure the real admitted envelope, rather than treating the old 192 KiB
+    # default as a universal limit for every current model.
+    envelope_bytes = len(seed_record["admitted_instruction"].encode()) - 1
+    context = "x" * (budget - envelope_bytes)
+    payload["metadata"].update(turn_context=context, conversation_id="capacity-at-boundary",
+                               message_id="capacity-at-boundary", stream_id="capacity-at-boundary",
+                               idempotency_key="capacity-at-boundary")
+    boundary, _ = _post_bound(client, payload, invocation="capacity-at-boundary")
+    assert boundary.status_code == 200, boundary.text
+    admitted = store.get_provider_request(boundary.json()["id"])
+    assert len(admitted["admitted_instruction"].encode()) == budget
+    assert context in admitted["admitted_instruction"]
+    assert json.loads(admitted["replay_decision_json"])["omitted_message_count"] == 0
+
+    payload["metadata"].update(turn_context=context + "x", conversation_id="capacity-over-boundary",
+                               message_id="capacity-over-boundary", stream_id="capacity-over-boundary",
+                               idempotency_key="capacity-over-boundary")
+    body, _ = _post_bound(client, payload, invocation="capacity-over-boundary")
     assert body.status_code == 413, body.text
     assert "No partial source was admitted" in body.text
+    assert store.get_provider_request(tenant_id="local", owner_id="owner-a",
+                                      native_invocation_id="capacity-over-boundary") is None
     payload["metadata"].pop("turn_context")
-    header, _ = _post_bound(client, payload, invocation="header-capacity", headers={"X-GlassHive-Turn-Context-B64": base64.b64encode(context.encode()).decode()})
+    header_context = "x" * ((TURN_CONTEXT_MAX_ENCODED_BYTES // 4) * 3 + 1)
+    header, _ = _post_bound(client, payload, invocation="header-capacity", headers={
+        "X-GlassHive-Turn-Context-B64": base64.b64encode(header_context.encode()).decode(),
+    })
     assert header.status_code == 400
     assert "turn context is too large" in header.text
 
@@ -295,7 +325,9 @@ def test_native_body_identity_rejects_changed_current_memory(tmp_path, monkeypat
     assert changed.status_code == 409
 
 
-def test_response_deadline_after_session_rebind_stops_only_original_run(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native_owned", [False, True], ids=["never-invoked", "native-attempt"])
+@pytest.mark.parametrize("rebound", [False, True], ids=["matched-session", "rebound-session"])
+def test_response_deadline_cleanup_requires_exact_native_ownership(tmp_path, monkeypatch, native_owned, rebound):
     client = _client(tmp_path, monkeypatch, runtime=NativeUsageRuntime())
     service = client.app.state.service
     store = client.app.state.store
@@ -303,23 +335,42 @@ def test_response_deadline_after_session_rebind_stops_only_original_run(tmp_path
     monkeypatch.setattr(service, "_ensure_worker_processor", lambda _worker_id: None)
     record = provider.start(ChatCompletionRequest.model_validate(_payload(tmp_path)))
     original = store.get_provider_session_by_id(record["session_id"])
+    if native_owned:
+        claimed = store.claim_next_queued_run(original["worker_id"], executor_id=service._executor_id)
+        assert claimed["run_id"] == record["run_id"]
+        lease = store.acquire_host_run_lease(
+            runtime_family="codex", lane="conversation", tenant_id="local", owner_id="owner-a",
+            worker_id=original["worker_id"], run_id=record["run_id"], executor_id=service._executor_id,
+            conversation_limit=2, mission_limit=4, account_mission_limit=4, tenant_mission_limit=8,
+            lease_ttl_s=300,
+        )
+        assert store.admit_claimed_run(record["run_id"], lease_id=lease["lease_id"],
+                                       executor_id=service._executor_id)
+        invoked = store.mark_run_runtime_invoked(record["run_id"], lease_id=lease["lease_id"],
+                                                executor_id=service._executor_id)
+        assert invoked["runtime_invoked_at"] and invoked["active_attempt_id"]
+        store.update_worker(original["worker_id"], state="running", compute_released_at=None)
     replacement = store.create_worker(
         project_id=original["project_id"], owner_id="owner-a", name="Replacement worker",
         role="conversation-agent", profile="codex-cli", backend="",
         runtime="codex-cli", model="gpt-5.6-sol",
     )
-    rebound = store.upsert_provider_session(
-        tenant_id="local", owner_id="owner-a", conversation_id=original["conversation_id"],
-        agent_id=original["agent_id"], model_id=original["model_id"],
-        project_id=original["project_id"], worker_id=replacement["worker_id"],
-        workspace_dir=str(tmp_path), access_mode="workspace",
-    )
-    assert rebound["session_id"] == record["session_id"]
+    if rebound:
+        replacement_session = store.upsert_provider_session(
+            tenant_id="local", owner_id="owner-a", conversation_id=original["conversation_id"],
+            agent_id=original["agent_id"], model_id=original["model_id"],
+            project_id=original["project_id"], worker_id=replacement["worker_id"],
+            workspace_dir=str(tmp_path), access_mode="workspace",
+        )
+        assert replacement_session["session_id"] == record["session_id"]
     later = store.create_run(replacement["worker_id"], original["project_id"],
                              "Preserve this later work.", state="queued")
     interrupts = []
-    monkeypatch.setattr(service.runtime, "interrupt_worker",
-                        lambda worker, run_id=None: interrupts.append((worker["worker_id"], run_id)))
+    interrupt = service.runtime.interrupt_worker
+    def interrupt_exact(worker, run_id=None):
+        interrupts.append((worker["worker_id"], run_id))
+        return interrupt(worker, run_id=run_id)
+    monkeypatch.setattr(service.runtime, "interrupt_worker", interrupt_exact)
     record = store.update_provider_request(
         record["request_id"], response_timeout_s=1,
         response_deadline_at="2000-01-01T00:00:00+00:00",
@@ -328,11 +379,19 @@ def test_response_deadline_after_session_rebind_stops_only_original_run(tmp_path
     assert expired["state"] == "failed"
     assert run["run_id"] == record["run_id"]
     assert run["state"] == "failed"
-    assert interrupts == [(original["worker_id"], record["run_id"])]
+    # An uninvoked queue has no native process to stop. An invoked attempt can
+    # be interrupted only while its exact durable session still binds it.
+    expected_interrupts = [(original["worker_id"], record["run_id"])] if native_owned and not rebound else []
+    assert interrupts == expected_interrupts
     assert store.get_run(later["run_id"])["state"] == "queued"
-    assert store.get_provider_session_by_id(record["session_id"])["worker_id"] == replacement["worker_id"]
+    expected_worker = replacement["worker_id"] if rebound else original["worker_id"]
+    assert store.get_provider_session_by_id(record["session_id"])["worker_id"] == expected_worker
+    activity = store.list_provider_activity(record["request_id"])
+    failure = next(item for item in activity if item["event_type"] == "failed")
+    assert json.loads(failure["payload_json"])["native_cleanup"] == (
+        "unconfirmed" if native_owned and rebound else "accepted")
     provider._expire_response_deadline(expired)
-    assert interrupts == [(original["worker_id"], record["run_id"])]
+    assert interrupts == expected_interrupts
     assert sum(event["event_type"] == "failed" for event in
                store.list_provider_activity(record["request_id"])) == 1
 

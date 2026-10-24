@@ -17,7 +17,7 @@ from typing import Any
 
 from .peer_collaboration import ensure_peer_schema, guard_peer_run
 from .worker_configuration import guard_worker_configuration
-from .coordinator import guard_coordinator_run
+from .coordinator import guard_coordinator_run, coordinator_run_ready
 from .workspace_continuation import accepted_run_input
 
 from .runtime_requirements import WORKER_EFFORT_ENV_VALUES
@@ -290,6 +290,7 @@ PARALLEL_CLEAN_ROOM_BOOTSTRAP_KEYS = frozenset(
         "inherited_conversation",
         "application_context_format",
         "launch_authority",
+        "library_selection",
         "schedule_access",
         "project_definition",
         "provider_model",
@@ -418,6 +419,9 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
     opaque_application_context(result)
     if "schedule_access" in result:
         result["schedule_access"] = canonical_schedule_access(result["schedule_access"])
+    if "library_selection" in result:
+        from .library_context_metadata import canonical_library_selection
+        result["library_selection"] = canonical_library_selection(result["library_selection"])
 
     if "inherited_conversation" in result:
         from .models import InheritedConversationRequest
@@ -730,10 +734,10 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
                 "upload_blocker",
             }
         )
+        from .library_context_metadata import canonical_file_context_metadata
         result["files"] = [
-            _allowlisted_dict(item, file_keys)
-            for item in result["files"]
-            if isinstance(item, dict)
+            _allowlisted_dict(item, file_keys) | canonical_file_context_metadata(item)
+            for item in result["files"] if isinstance(item, dict)
         ]
     return result
 
@@ -6990,7 +6994,22 @@ class Store:
                 AND execution_workspaces.tenant_id = workers.tenant_id
                 AND execution_workspaces.owner_id = workers.owner_id
         """
-        clauses = ["workers.tenant_id = ?", "workers.owner_id = ?"]
+        clauses = [
+            "workers.tenant_id = ?",
+            "workers.owner_id = ?",
+            # Chat's bound conversation worker is not a reusable Workspaces entry.
+            # Keep its mission helpers, even when they share the same project.
+            """NOT (
+                COALESCE(workers.trusted_run_lane, 'mission') = 'conversation'
+                AND EXISTS (
+                    SELECT 1 FROM provider_sessions AS session
+                    WHERE session.worker_id = workers.worker_id
+                      AND session.tenant_id = workers.tenant_id
+                      AND session.owner_id = workers.owner_id
+                      AND session.project_id = workers.project_id
+                )
+            )""",
+        ]
         params: list[Any] = [tenant_id or "local", owner_id]
         normalized_kinds = {normalize_workspace_kind(value) for value in workspace_kinds or set()}
         if normalized_kinds:
@@ -9691,6 +9710,17 @@ class Store:
             return False
         return not self.has_unconfirmed_host_run_start(worker_id)
 
+    @staticmethod
+    def _next_ready_queued_run(conn, worker_id: str, now_iso: str):
+        # Unattached or restored Chat work must not block independent accepted jobs.
+        # Bound the read, preserving queue order among currently eligible candidates.
+        rows = conn.execute(
+            "SELECT * FROM runs WHERE worker_id=? AND state='queued' "
+            "AND (retry_after IS NULL OR retry_after='' OR retry_after<=?) "
+            "ORDER BY queued_at ASC LIMIT 256", (worker_id, now_iso),
+        ).fetchall()
+        return next((row for row in rows if coordinator_run_ready(conn, str(row["run_id"]))), None)
+
     def _claim_next_queued_run_parallel(
         self,
         worker_id: str,
@@ -9716,17 +9746,7 @@ class Store:
             }:
                 conn.execute("COMMIT")
                 return None
-            row = conn.execute(
-                """
-                SELECT * FROM runs
-                WHERE worker_id = ?
-                  AND state = 'queued'
-                  AND (retry_after IS NULL OR retry_after = '' OR retry_after <= ?)
-                ORDER BY queued_at ASC
-                LIMIT 1
-                """,
-                (worker_id, now_iso),
-            ).fetchone()
+            row = self._next_ready_queued_run(conn, worker_id, now_iso)
             if row is None:
                 conn.execute("COMMIT")
                 return None
@@ -9933,17 +9953,7 @@ class Store:
                 conn.execute("COMMIT")
                 return None
             while True:
-                row = conn.execute(
-                    """
-                    SELECT * FROM runs
-                    WHERE worker_id = ?
-                      AND state = 'queued'
-                      AND (retry_after IS NULL OR retry_after = '' OR retry_after <= ?)
-                    ORDER BY queued_at ASC
-                    LIMIT 1
-                    """,
-                    (worker_id, now_iso),
-                ).fetchone()
+                row = self._next_ready_queued_run(conn, worker_id, now_iso)
                 if row is None:
                     conn.execute("COMMIT")
                     return None
@@ -13881,6 +13891,63 @@ class Store:
     def cancel_schedule(self, schedule_id: str) -> dict[str, Any] | None:
         return self.finalize_schedule(schedule_id, state="cancelled", queued_run_id=None)
 
+    def observe_native_event_if_current(
+        self, *, worker_id: str, run_id: str, attempt_id: str, provider: str, event: dict,
+    ) -> dict[str, Any] | None:
+        """Reduce and record one native lifecycle frame under its exact attempt."""
+        from .native_team import NativeTeamProjection
+
+        event_type, payload = event.get("event_type"), event.get("payload")
+        if (provider not in {"codex", "claude", "grok"} or not isinstance(event_type, str)
+                or not event_type.startswith("provider.") or not isinstance(payload, dict)):
+            return None
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute("SELECT * FROM runs WHERE run_id=? AND worker_id=?", (run_id, worker_id)).fetchone()
+            if (run is None or str(run["active_attempt_id"] or "") != attempt_id
+                    or str(run["state"] or "") not in {"running", "settling", "paused", "needs_input"}):
+                conn.execute("COMMIT")
+                return None
+            worker = conn.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+            if worker is None:
+                conn.execute("COMMIT")
+                return None
+            def object_value(raw):
+                try:
+                    value = json.loads(raw or "{}")
+                except (ValueError, TypeError):
+                    return {}
+                return value if isinstance(value, dict) else {}
+            capabilities = object_value(run["native_capabilities_json"])
+            capabilities.update({"provider": provider, "providerStream": True})
+            if event_type.startswith("provider.child.") or event_type == "provider.team.message":
+                capabilities["childProjection"] = True
+            else:
+                capabilities.setdefault("childProjection", False)
+            projection = NativeTeamProjection.from_summary(object_value(run["native_child_summary_json"]))
+            if not projection.observable:
+                projection = NativeTeamProjection(provider=provider, observable=True)
+            projection.apply(event)
+            session_id = (str(payload.get("sessionId") or "")[:256]
+                          if event_type == "provider.session.started" else run["native_session_id"])
+            conn.execute(
+                "UPDATE runs SET native_capabilities_json=?,native_child_summary_json=?,native_session_id=? "
+                "WHERE run_id=? AND worker_id=? AND active_attempt_id=?",
+                (json.dumps(capabilities, sort_keys=True), json.dumps(projection.summary() or {}, sort_keys=True),
+                 session_id, run_id, worker_id, attempt_id),
+            )
+            audit_payload = {**payload, **({"attemptId": attempt_id} if attempt_id else {})}
+            conn.execute(
+                "INSERT INTO events(event_id,project_id,worker_id,tenant_id,run_id,event_type,message,payload_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (f"evt_{uuid.uuid4().hex[:10]}", str(worker["project_id"]), worker_id,
+                 str(worker["tenant_id"] or "local"), run_id, event_type,
+                 "Native provider lifecycle updated", json.dumps(audit_payload, ensure_ascii=False, sort_keys=True), utc_now()),
+            )
+            updated = conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            conn.execute("COMMIT")
+        return self._row(updated)
+
     def add_event(
         self,
         project_id: str,
@@ -14267,8 +14334,26 @@ class Store:
         """List recent workspace events without crossing the authenticated owner boundary."""
         bounded_limit = max(1, min(int(limit), 200))
         with self._connect() as conn:
+            # Only a native conversation has an in-app Chat destination. External
+            # provider sessions can use the same lane but have no coordinator page.
+            has_conversations = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_conversations'"
+            ).fetchone() is not None
+            conversation_id = """(
+                SELECT session.conversation_id FROM provider_sessions AS session
+                JOIN coordinator_conversations AS conversation
+                  ON conversation.conversation_id = session.conversation_id
+                 AND conversation.tenant_id = session.tenant_id
+                 AND conversation.owner_id = session.owner_id
+                WHERE workers.trusted_run_lane = 'conversation'
+                  AND session.worker_id = workers.worker_id
+                  AND session.tenant_id = workers.tenant_id
+                  AND session.owner_id = workers.owner_id
+                  AND session.project_id = workers.project_id
+                ORDER BY session.updated_at DESC, session.session_id DESC LIMIT 1
+            )""" if has_conversations else "NULL"
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     events.event_id,
                     events.project_id,
@@ -14278,7 +14363,8 @@ class Store:
                     events.event_type,
                     events.created_at,
                     workers.name AS workspace_name,
-                    workers.workspace_kind
+                    workers.workspace_kind,
+                    {conversation_id} AS conversation_id
                 FROM events
                 JOIN workers ON workers.worker_id = events.worker_id
                 WHERE events.tenant_id = ?
@@ -14911,7 +14997,7 @@ class Store:
                     return None
                 callback_id = str(candidate["callback_id"])
             pending = conn.execute(
-                "SELECT * FROM callback_outbox WHERE callback_id = ? AND status = ? AND (event_type <> 'schedule.due' OR next_attempt_at IS NULL OR next_attempt_at <= ?)",
+                "SELECT * FROM callback_outbox WHERE callback_id = ? AND status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
                 (str(callback_id), expected_status, now),
             ).fetchone()
             if pending is None:
@@ -14999,6 +15085,7 @@ class Store:
         attempts: int,
         payload_json: str,
         last_error: str,
+        retry_delay_seconds: float = 0.0,
     ) -> dict[str, Any] | None:
         with self._connect() as conn:
             cur = conn.execute(
@@ -15009,7 +15096,7 @@ class Store:
                     payload_json = ?,
                     last_error = ?,
                     updated_at = ?, delivery_lease_token = '',
-                    delivery_lease_expires_at = NULL
+                    delivery_lease_expires_at = NULL, next_attempt_at = ?
                 WHERE callback_id = ? AND status = 'delivering'
                   AND delivery_lease_token = ? AND delivery_generation = ?
                 """,
@@ -15018,6 +15105,7 @@ class Store:
                     payload_json,
                     last_error[-2000:],
                     utc_now(),
+                    (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(retry_delay_seconds)))).isoformat() if retry_delay_seconds > 0 else None,
                     callback_id,
                     str(lease_token),
                     int(delivery_generation),
@@ -15038,6 +15126,7 @@ class Store:
         attempts: int,
         payload_json: str,
         last_error: str,
+        retry_delay_seconds: float = 0.0,
     ) -> dict[str, Any] | None:
         if lease_token is not None and delivery_generation is not None:
             return self._mark_callback_pending_parallel(
@@ -15047,6 +15136,7 @@ class Store:
                 attempts=attempts,
                 payload_json=payload_json,
                 last_error=last_error,
+                retry_delay_seconds=retry_delay_seconds,
             )
         with self._connect() as conn:
             cur = conn.execute(
@@ -15057,7 +15147,7 @@ class Store:
                     payload_json = ?,
                     last_error = ?,
                     updated_at = ?, delivery_lease_token = '',
-                    delivery_lease_expires_at = NULL
+                    delivery_lease_expires_at = NULL, next_attempt_at = ?
                 WHERE callback_id = ? AND status = 'delivering'
                   AND delivery_lease_token = ? AND delivery_generation = ?
                 """,
@@ -15066,6 +15156,7 @@ class Store:
                     payload_json,
                     last_error[-2000:],
                     utc_now(),
+                    (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(retry_delay_seconds)))).isoformat() if retry_delay_seconds > 0 else None,
                     callback_id,
                     str(lease_token),
                     int(delivery_generation),
@@ -15155,19 +15246,29 @@ class Store:
         self, limit: int = 50, *, created_before: str | None = None
     ) -> list[dict[str, Any]]:
         clean_created_before = str(created_before or "").strip()
-        created_clause = " AND created_at <= ?" if clean_created_before else ""
-        params: list[Any] = []
+        created_clause = " AND cb.created_at <= ?" if clean_created_before else ""
+        params: list[Any] = [utc_now()]
         if clean_created_before:
             params.append(clean_created_before)
         params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT * FROM callback_outbox
-                WHERE status = 'pending' AND event_type <> 'schedule.due'
-                {created_clause}
-                ORDER BY updated_at ASC
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT cb.*, ROW_NUMBER() OVER (
+                        PARTITION BY cb.tenant_id, COALESCE(worker.owner_id, cb.owner_id)
+                        ORDER BY CASE WHEN cb.result_revision > 0 OR cb.event_type IN (
+                            'run.completed', 'run.failed', 'run.cancelled', 'run.interrupted',
+                            'run.paused', 'run.needs_input', 'run.blocked') THEN 0 ELSE 1 END,
+                            cb.updated_at, cb.callback_id
+                    ) AS owner_order
+                    FROM callback_outbox cb
+                    LEFT JOIN workers worker ON worker.worker_id = cb.worker_id
+                      AND worker.tenant_id = cb.tenant_id
+                    WHERE cb.status = 'pending' AND cb.event_type <> 'schedule.due'
+                      AND (cb.next_attempt_at IS NULL OR cb.next_attempt_at <= ?)
+                    {created_clause}
+                ) ORDER BY owner_order, updated_at, callback_id LIMIT ?
                 """,
                 params,
             ).fetchall()
@@ -23714,7 +23815,7 @@ class Store:
                     "pause_run": {"queued", "running", "settling"},
                     "resume_run": {"paused"},
                     "interrupt_run": {"running", "settling"},
-                    "cancel_run": {"running", "settling"},
+                    "cancel_run": {"claimed", "admitted", "running", "settling", "paused", "needs_input"},
                     "steer_run": {"queued", "running", "settling"},
                 }[requested_kind]
                 policy_valid = bool(
@@ -28555,6 +28656,8 @@ class Store:
                     meaningful_progress_sequence = 0, internal_retry_count = 0,
                     last_internal_retry_class = '',
                     capacity_retry_count = 0,
+                    native_session_id = '', native_capabilities_json = '{}',
+                    native_child_summary_json = '{}',
                     queue_wait_open = 0, queue_wait_closed_at = ?,
                     queue_wait_duration_seconds = ?, queue_next_status_at = NULL,
                     failure_class = '', failure_retryable = 0,

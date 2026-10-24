@@ -22,7 +22,7 @@
 .workspace-members button:disabled { opacity: .45; cursor: not-allowed; }
 .workspace-members :is(button,a,input,select,textarea,summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .member-select { display: grid; gap: .375rem; width: 100%; text-align: left; }
-.member-select[aria-current="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.member-select[aria-current="true"] { border-color: var(--accent); background-color: var(--accent-soft); }
 .member-select strong { font-size: .875rem; font-weight: 600; overflow-wrap: anywhere; }
 .member-select span { color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
 .member-sidebar [data-refresh] { margin-top: .75rem; }
@@ -37,7 +37,7 @@
 .member-close button { color: var(--danger); }
 .member-message { margin: 1.25rem 0; display: grid; gap: .625rem; }
 .workspace-members label { display: grid; gap: .5rem; font-size: .8125rem; font-weight: 550; }
-.workspace-members input, .workspace-members select, .workspace-members textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: .625rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--panel-strong); color: var(--text); font: inherit; }
+.workspace-members input, .workspace-members select, .workspace-members textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: .625rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background-color: var(--panel-strong); color: var(--text); font: inherit; }
 .workspace-members textarea { resize: vertical; min-height: 4.5rem; line-height: 1.5; }
 .workspace-members input[type="checkbox"] { width: 1rem; height: 1rem; margin: 0; accent-color: var(--accent); }
 .workspace-members label:has(input[type="checkbox"]) { display: flex; align-items: center; line-height: 1.5; }

@@ -1447,7 +1447,8 @@ def test_startup_recovery_does_not_deliver_callbacks_after_shutdown(
 
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_INTERVAL_S", "3600")
     monkeypatch.setattr("workers_projects_runtime.service.httpx.post", fake_post)
-    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
     service._shutdown_event.set()
     try:
         original_startup_recovery(service)

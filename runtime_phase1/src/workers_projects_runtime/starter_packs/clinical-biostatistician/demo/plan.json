@@ -1,0 +1,9 @@
+{
+  "question": "What is the difference in observed binary response between the two groups, and what could change that interpretation?",
+  "arms": [
+    "Control",
+    "Investigational"
+  ],
+  "endpoint_type": "binary",
+  "missing_policy": "exclude_with_warning"
+}

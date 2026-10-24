@@ -1,3 +1,4 @@
+import { attachActionMenu } from './action-menu.js?v=20261024polish1';
 // Shared file transport for kickoff and Watch. File bytes are never kept in browser storage.
 export const formatBytes = (bytes) => {
   const value = Math.max(0, Number(bytes) || 0);
@@ -211,6 +212,7 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
   const saveFingerprints = () => { if (ownerScope) fileHints.setItem(fingerprintKey, JSON.stringify(fingerprints)); };
   const draftRequest = (url, options = {}) => request(url, { ...options, signal: ownerController.signal });
   const items = [];
+  const fileMenuTriggers = new Map();
   let restoring = true;
   const pendingPicks = [];
   const transferQueue = [];
@@ -317,6 +319,7 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
     management.cancel.focus();
   }
   function render() {
+    fileMenuTriggers.clear();
     list.replaceChildren();
     for (const item of visibleItems()) {
       const row = document.createElement('li');
@@ -403,10 +406,12 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
           if (!clean || clean === '.' || clean === '..' || /[/\\]/.test(clean)) { showHelp('Choose a name without slashes.'); return; }
           const parent = (item.relative_path || item.name).split('/').slice(0, -1).join('/');
           await changePath(item, [parent, clean].filter(Boolean).join('/'));
+          if (epoch === ownerEpoch && items.includes(item)) fileMenuTriggers.get(item.upload_id)?.focus();
         });
         const move = document.createElement('button'); move.type = 'button'; move.textContent = 'Move'; move.disabled = busy;
         move.addEventListener('click', () => { menu.open = false; pickMove([item.upload_id], summary); });
-        menuItems.append(rename, move); menu.append(summary, menuItems); actions.append(menu);
+        menuItems.append(rename, move); menu.append(summary, menuItems); attachActionMenu(menu, summary, menuItems); actions.append(menu);
+        fileMenuTriggers.set(item.upload_id, summary);
       } else {
         const remove = document.createElement('button'); remove.type = 'button';
         remove.textContent = item.cleanupInFlight ? 'Removing…'
@@ -979,16 +984,18 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
   trashList, trashStatus, trashPanel, trashOpen, trashClose, optionsMenu,
   notice, noticeText, noticeUndo, noticeClose,
   moveDialog, moveLocation, moveParent, moveFolders, moveMore, moveError, moveConfirm, moveCancel, moveCancelBottom,
-  canUpload = () => true, onAccess = () => {}, audienceLabel = null }) {
+  canUpload = () => true, onAccess = () => {}, audienceLabel = null, onKeepForReuse = null }) {
   const base = `/api/workspace/${encodeURIComponent(workerId)}`;
   let directory = '';
   let directoryDisplayName = '';
   let cursor = '';
   let listLoadSequence = 0;
   let canWrite = false;
+  let keepForReuseAccess = false;
   let listingError = '';
   let dragOut = false;
   const entries = [];
+  const fileMenuTriggers = new Map();
   const selected = new Map();
   let pendingUndo = null;
   let moveEntries = [];
@@ -996,6 +1003,9 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
   let moveCursor = '';
   let moveLoadSequence = 0;
   let moveReturnFocus = null;
+  const optionsTrigger = optionsMenu.querySelector?.('summary');
+  const optionsItems = optionsMenu.querySelector?.('.file-row-menu-items');
+  if (optionsTrigger && optionsItems) attachActionMenu(optionsMenu, optionsTrigger, optionsItems);
   const url = (path) => `${base}${path}`;
   const setStatus = (message) => { status.textContent = message; status.hidden = !message; };
   function showNotice(message, undo = null) {
@@ -1030,6 +1040,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
           try {
             await mutate(`/files/${encodeURIComponent(entry.file_id)}/restore`, 'POST', { undo_id: entry.undo_id });
             await open(directory); await refreshTrash(); showNotice(`${entry.name} restored.`);
+            (fileMenuTriggers.get(entry.file_id) || optionsTrigger)?.focus();
           } catch (error) { trashStatus.textContent = `${entry.path}: ${error.message}`; restore.disabled = false; }
         });
         row.append(label, restore); trashList.append(row);
@@ -1120,6 +1131,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
     } catch (error) { setStatus(`Could not move file: ${error.message}`); }
   }
   function render() {
+    fileMenuTriggers.clear();
     list.replaceChildren();
     directoryLabel.textContent = !directory ? 'Workspace root'
       : directory === 'inputs' ? 'Attached files'
@@ -1184,7 +1196,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
         download.setAttribute('aria-label', `Download ${entry.name}`);
         row.append(download);
       }
-      if (canWrite) {
+      if (canWrite || (keepForReuseAccess && !entry.is_dir && onKeepForReuse)) {
         const menu = document.createElement('details'); menu.className = 'file-row-menu';
         const summary = document.createElement('summary'); summary.textContent = '⋯';
         summary.setAttribute('aria-label', `More options for ${entry.name}`);
@@ -1203,6 +1215,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
           const path = [entry.path.split('/').slice(0, -1).join('/'), name].filter(Boolean).join('/');
           try { await mutate(`/files/${encodeURIComponent(entry.file_id)}`, 'PATCH', { path, revision: entry.revision }); await open(directory); showNotice(`${entry.name} renamed.`); }
           catch (error) { setStatus(error.message); }
+          finally { if (currentDirectory === directory) (fileMenuTriggers.get(entry.file_id) || optionsTrigger)?.focus(); }
         });
         const move = document.createElement('button'); move.type = 'button'; move.textContent = 'Move';
         move.addEventListener('click', () => { menu.open = false; pickMove([entry], summary); });
@@ -1215,10 +1228,18 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
             selected.delete(entry.file_id);
             await open(directory);
             showNotice(`${entry.name} deleted.`, result.undo_id ? { fileId: entry.file_id, undoId: result.undo_id, name: entry.name } : null);
+            (result.undo_id ? noticeUndo : optionsTrigger)?.focus();
           }
-          catch (error) { setStatus(error.message); }
+          catch (error) { setStatus(error.message); fileMenuTriggers.get(entry.file_id)?.focus(); }
         });
-        menuItems.append(rename, move, remove); menu.append(summary, menuItems); row.append(menu);
+        if (!entry.is_dir && keepForReuseAccess && onKeepForReuse) {
+          const keep = document.createElement('button'); keep.type = 'button'; keep.textContent = 'Keep for reuse';
+          keep.addEventListener('click', async () => { menu.open = false; try { const saved = await onKeepForReuse(entry, summary); if (saved?.item_id) showNotice(`${saved.name || entry.name} saved privately in My Library.`); } catch (error) { setStatus(error.message); } });
+          menuItems.append(keep);
+        }
+        if (canWrite) menuItems.append(rename, move, remove);
+        menu.append(summary, menuItems); attachActionMenu(menu, summary, menuItems); row.append(menu);
+        fileMenuTriggers.set(entry.file_id, summary);
       }
       row.draggable = canWrite;
       row.addEventListener('dragstart', (event) => internalDrag(event, entry));
@@ -1293,7 +1314,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
     void refreshTrash();
     trashClose.focus();
   });
-  trashClose.addEventListener('click', () => { trashPanel.hidden = true; trashOpen.focus(); });
+  trashClose.addEventListener('click', () => { trashPanel.hidden = true; optionsTrigger?.focus(); });
   noticeClose.addEventListener('click', () => { notice.hidden = true; pendingUndo = null; });
   noticeUndo.addEventListener('click', async () => {
     if (!pendingUndo) return;
@@ -1304,6 +1325,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
       await open(directory);
       if (!trashPanel.hidden) await refreshTrash();
       showNotice(`${target.name} restored.`);
+      (fileMenuTriggers.get(target.fileId) || optionsTrigger)?.focus();
     } catch (error) { setStatus(`Could not restore ${target.name}: ${error.message}`); }
     finally { noticeUndo.disabled = false; }
   });
@@ -1355,7 +1377,10 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
     fileHints.setItem(hint, JSON.stringify({ directory: chosen }));
     return chosen;
   };
-  return { open, refresh: () => open(directory), attach: async (uploadIds) => {
+  return { open, refresh: () => open(directory), setKeepForReuseAccess(value) {
+    const allowed = value === true && typeof onKeepForReuse === 'function';
+    if (allowed !== keepForReuseAccess) { keepForReuseAccess = allowed; render(); }
+  }, attach: async (uploadIds) => {
     // The folder shown when adding is where every new upload goes, even if Files moves on while
     // earlier requests are still being sent; each is filed before any request starts.
     const chosen = directory;

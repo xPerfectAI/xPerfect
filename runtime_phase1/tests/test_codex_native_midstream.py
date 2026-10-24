@@ -77,7 +77,7 @@ def test_private_profile_uses_rpc_config_and_native_cli_overrides(resume):
     assert 'synthetic-private' not in ' '.join(got['command'])
     assert got['thread']['config']['mcp_servers'] == profile['mcp_servers']
     assert got['thread']['config']['plugins'] == profile['plugins']
-    assert got['thread']['config']['features'] == {'plugins': True, 'hooks': False, 'code_mode_host': True}
+    assert got['thread']['config']['features'] == {'plugins': True, 'hooks': False, 'code_mode_host': True, 'omit_app_server_notification_media': True}
     assert got['thread']['config']['sandbox_workspace_write'] == profile['sandbox_workspace_write']
     assert got['thread']['model'] == 'gpt-6.1-sol' and got['turn']['effort'] == 'high'
     assert got['resumed'] is resume
@@ -92,7 +92,7 @@ def test_private_profile_preserves_each_nested_cli_restriction():
                '-c', 'features.shell_tool=false', '-c', 'features.plugins=false',
                '-c', 'mcp_servers.native.enabled=false', '-c', 'mcp_servers.native.enabled_tools=["read"]', '-']
     config = owner.codex_app_launch(command, native_profile=profile)['thread']['config']
-    assert config['features'] == {'shell_tool': False, 'plugins': False}
+    assert config['features'] == {'shell_tool': False, 'plugins': False, 'omit_app_server_notification_media': True}
     assert config['mcp_servers']['native'] == {'command': '/synthetic/native-tool',
         'enabled': False, 'enabled_tools': ['read']}
 

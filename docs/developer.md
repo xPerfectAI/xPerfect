@@ -13,20 +13,36 @@ Local keys live in `<state>/secrets.json`. The state directory defaults to
 
 ## 1. Connect a client
 
-On a deployment whose operator has registered supported AI clients, the web UI can do it: signed
-in, open **Connections → Use xPerfect from another AI app** for the exact add and sign-in steps.
-The local host launcher has its own client setup. The container and hosted launchers do not
-configure a complete native-client registration: local clients can use stdio or the local
-container's private bearer key, but hosted OAuth setup needs the operator's supported client
-registration. The manual protocol example below assumes an already-authorized access token;
-it does not solve native-client registration. [MCP publication](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection)
-explains the client contract.
+For a local `./xperfect start` instance:
 
-For a local client over stdio, for example:
+1. Sign in to the web app and open **Connections → Use xPerfect from another AI app**.
+2. Keep **Automatic**, copy its instruction, and paste it into the Codex or Claude Code client
+   you want to use. It follows only its own section and reuses an existing matching setup.
+3. Restart that client if prompted. The instruction ends with one `workspace_list` call to
+   check this exact xPerfect instance.
+
+The local launcher supplies its own **stdio** command and state directory. The AI client starts
+that existing `xperfect mcp` command as the same OS user; there is no local OAuth or browser sign-in
+step and no token to paste into the prompt. Worker provider accounts are separate: connect one
+before asking a worker to run AI work. **Manual** shows the exact native add command for each
+supported client. Copy that command rather than guessing a server name, checkout path or state
+location. It preserves unrelated client settings.
+
+The underlying local command is:
 
 ```sh
-claude mcp add xperfect -- /path/to/xPerfect/xperfect mcp
+/path/to/xPerfect/xperfect mcp --state-dir /path/to/private/state
 ```
+
+Use the actual paths supplied by your local app. Starting with another state directory connects
+a different instance. A stdio client runs locally; it is not a remote URL for a hosted chatbot.
+
+For a hosted deployment, the same panel offers only AI clients the operator has completely
+registered. Use its generated native HTTP/OAuth commands and complete the client's own browser
+sign-in. If registration is unavailable, the panel explains that limit; do not substitute local
+credentials or invent a callback. [MCP publication](04_MCP_Publication_and_Client_Compatibility.md#local-user-connection)
+owns local setup; [hosted user connection](04_MCP_Publication_and_Client_Compatibility.md#hosted-user-connection)
+owns the remote registration and scope rules.
 
 To check the protocol by hand, use plain MCP over streamable HTTP with `curl`:
 
@@ -97,28 +113,33 @@ account in **Connections**, or over MCP:
 
 See [Connect AI accounts](deployment-hosted.md#connect-ai-accounts).
 
-**A reusable expert in one call.** `workspace_launch` creates a saved, named workspace and starts it
-when you set `favorite=true` (or resume one with `reuse_existing_workspace=true`); any MCP client
-can do this. Give it files and skills with `bootstrap_bundle_json` (`{"files": {"path": "content"}}`;
-a Claude Code skill lives at `.claude/skills/<skill>/SKILL.md`, a Codex skill at
-`.agents/skills/<skill>/SKILL.md`) and your own AI account with
-`provider_account_policy="personal_required"`. Only a fresh one-off launch without `favorite`
-requires a trusted source identity from an integrated host; a plain client gets "A trusted source
-event identity is required" for that one case. A retried `workspace_launch` can create a second
-workspace, so check `workspace_list` before retrying an unclear failure.
+**A reusable expert in one call.** `workspace_launch` can create and start a named workspace. When
+the user asks to save and favorite it, set `favorite=true`; use `reuse_existing_workspace=true` to
+find and resume an existing alias. Give it text files and native skills with
+`bootstrap_bundle_json` (`{"files": {"path": "content"}}`). Claude Code uses
+`.claude/skills/<skill>/SKILL.md`; Codex uses `.agents/skills/<skill>/SKILL.md`. Use
+`provider_account_policy="personal_required"` for the user's own connected account.
+
+A fresh one-off launch without a selected project, reuse, favorite or Library selection uses
+the atomic delegate path, which requires a trusted source identity from an integrated host. Do
+not fabricate that identity or change the user's choices to bypass the requirement. A plain
+management client can use the explicit create/run steps above. Check `workspace_list` before
+retrying an unclear mutation; a one-call interface alone does not guarantee replay safety.
+Selected Library references and their actual-target review use the same
+[Library contract](04_MCP_Publication_and_Client_Compatibility.md#private-library-through-http-and-mcp).
 
 ### Serve a reusable expert
 
 Connect your product or AI client to the existing authenticated MCP endpoint. Use `workspace_list`
 to select an expert, `worker_run` to give it work, and `worker_message` for guidance or a follow-up.
 Use the returned run/worker context to check that exact result and retrieve its artifacts. Keep
-the same workspace for continuity; duplicate it when you want separate files and history.
+the same workspace for continuity; copy it when you want separate files and history.
 
-The optional [connection skill](../skills/connect-glasshive/SKILL.md) helps an AI use this existing
-control plane. A worker's own skills, files and tool setup belong inside its native workspace,
-not in a new per-expert server or routing layer. Text files can use `bootstrap_bundle_json`;
-binary files use the existing authenticated Files upload path. Never place provider credentials
-in either bundle. Hosted applications use MCP; the internal runtime HTTP port is not a public API.
+The optional [connection skill](../skills/connect-glasshive/SKILL.md) helps an AI use the existing
+control plane. A worker's skills, files and tools belong inside its native workspace, not in a
+new per-expert server or routing layer. Text files can use `bootstrap_bundle_json`; binary files
+use the existing authenticated Files upload path. Never place provider credentials in either
+bundle. Hosted applications use MCP; the internal runtime HTTP port is not a public API.
 
 ## 4. Runtime HTTP API (local)
 

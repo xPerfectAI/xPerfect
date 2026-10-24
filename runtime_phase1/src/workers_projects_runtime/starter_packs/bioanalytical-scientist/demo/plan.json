@@ -1,0 +1,6 @@
+{
+  "calibration": "linear_unweighted_demo",
+  "concentration_unit": "ng/mL",
+  "qc_max_relative_error_percent": 20,
+  "source": "Synthetic company method; tolerance is provided here, not claimed as a universal regulatory limit."
+}

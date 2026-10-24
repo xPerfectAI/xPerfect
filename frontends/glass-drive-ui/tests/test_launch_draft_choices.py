@@ -25,6 +25,7 @@ def run(case):
     refresh = source[source.index('  const currentBootstrapResult ='):source.index('\n  function stopHivePolling()')]
     submit_start = source.index("  form.addEventListener('submit', async (event) => {")
     guard = source[submit_start + len("  form.addEventListener('submit', async (event) => {"):source.index('    launchInFlight = true;', submit_start)]
+    validation = source[source.index('  function clearLaunchValidation()'):source.index("  form.addEventListener('input', clearLaunchValidation)")]
     direct_start = source.index("    if (String(select.value).startsWith('new:direct-'))", submit_start)
     direct_guard = source[direct_start:source.index('    const payload = {', direct_start)]
     script = r'''
@@ -68,9 +69,14 @@ let bootstrap=null,bootstrapGeneration=0,bootstrapFlight=null,identityTransition
 const select=elements['workspace-option'],providerAccount=elements['provider-account-selection'],providerAccountPolicy=elements['provider-account-policy'];
 const defaultWorker=elements['default-worker-profile'],codexEffort=elements['codex-effort'],claudeEffort=elements['claude-effort'],openclawEffort=elements['openclaw-effort'];
 const workspaceType=elements['workspace-type'],workspaceMode=elements['workspace-mode'],workspaceFilePlacement=elements['workspace-file-placement'];
-const workspaceModeHelp=elements['workspace-mode-help'],workspaceFilePlacementField={},providerAccountHelp={},templateStartStatus={},workspaceCatalogStatus={},status={},button={},help={};
+const workspaceModeHelp=elements['workspace-mode-help'],workspaceFilePlacementField={},providerAccountHelp={},templateStartStatus={},workspaceCatalogStatus={},status={dataset:{}},button={},help={};
 const catalogState={generation:0},workspaceKindFilter={value:'named,ephemeral,legacy'},workspaceSearch={value:''},workspaceTagFilter={value:''};
 const fileDraft={setOwnerScope(){},blocked:()=>false},onboarding={render(){}};
+const launchLibrary={setOwnerScope(){},refs:()=>[]},mainLibrary={setAccess(){}},signedToken='';
+// This fixture starts without a selected expert; bootstrap still updates its owner-bound picker.
+const expertBootstrapUpdates=[];
+const expertPicker={update:async value=>{expertBootstrapUpdates.push(value);},selection:()=>null,prepare(){throw new Error('No expert selected');}};
+const selectedLibraryRefs=[];
 const renderCurrentUser=()=>{},syncAccountSummary=()=>{},renderWorkspaceHive=()=>{},workspaceViewData=()=>({}),hivePrefs=()=>({}),renderActivity=()=>{},syncWorkspaceUI=()=>{};
 const workspaceOptionLabel=item=>item.name,decorateCatalogWorkspace=value=>value,refreshWorkspaceCatalog=async()=>{},getJson=async()=>{throw new Error('Unexpected exact lookup');};
 let incoming={draft_owner_scope:scopeA,csrf_token:'synthetic',identity:{},
@@ -89,6 +95,7 @@ const fetch=async()=>({ok:true,json:async()=>({items:[{profile:'direct-openai',m
 HELPERS
 REFRESH
 let launchInFlight=false;
+VALIDATION
 const scheduleText=elements['schedule-text'],scheduleButton={};
 async function submitGuard(){const event={preventDefault(){},submitter:{id:'launch-button'}}; GUARD; return true;}
 async function directGuard(){DIRECT_GUARD; return true;}
@@ -96,7 +103,7 @@ const saved=values=>cache.set(`xperfect.launch-draft.v1.${scopeA}`,JSON.stringif
 const persisted=()=>JSON.parse(cache.get(`xperfect.launch-draft.v1.${scopeA}`)).values;
 ''' + case
     script = (script.replace('DRAFT_SETUP', draft).replace('HELPERS', helpers).replace('REFRESH', refresh)
-              .replace('DIRECT_GUARD', direct_guard).replace('GUARD', guard)
+              .replace('DIRECT_GUARD', direct_guard).replace('GUARD', guard).replace('VALIDATION', validation)
               .replace('DRAFT', json.dumps((STATIC / 'launch-draft.js').as_uri()))
               .replace('POLICY', json.dumps((STATIC / 'launch-policy.js').as_uri()))
               .replace('ONBOARDING', json.dumps((STATIC / 'worker-onboarding.js').as_uri())))

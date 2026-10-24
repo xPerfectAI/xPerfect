@@ -30,7 +30,8 @@ class ControlPlaneApi:
 
     def workspace_templates(self):
         self.calls.append(("template_list", {}))
-        return [{"template_id": "wst_public_safe", "name": "Research template", "version": 1}]
+        return [{"template_id": "wst_public_safe", "name": "Research template", "version": 1,
+                 "personal_library_refs": [{"item_id": "pli_research", "version_id": "plv_exact"}]}]
 
     def save_workspace_template(self, worker_id, *, name, description="", lineage_id=""):
         self.calls.append(
@@ -252,6 +253,9 @@ def test_control_plane_mcp_tools_are_additive_and_require_browser_confirmation(m
             assert _json(renamed)["name"] == "Quarterly research"
             assert _json(duplicated)["workspace"]["worker_id"] == "wrk_copy"
             assert _json(templates)[0]["template_id"] == "wst_public_safe"
+            assert _json(templates)[0]["personal_library_refs"] == [
+                {"item_id": "pli_research", "version_id": "plv_exact"}
+            ]
             assert _json(saved_template)["version"] == 1
             assert _json(instantiated_template)["workspace"]["state"] == "paused"
             assert _json(instantiated_template)["approvals_required"][0]["approval_required"] is True

@@ -152,7 +152,7 @@ def test_wrong_run_owner_workspace_or_changed_bytes_cannot_resolve(tmp_path):
     output = f"![Note]({path})"
     for changes in ({"run_id": "old"}, {"owner_id": "other"}, {"worker_id": "other"}, {"workspace_dir": "/unrelated"}):
         assert "artifact_sha256:" not in project(runtime, worker, info, output, {**scope, **changes})
-    outside = "![Other](/U" + "sers/example/private.png)"
+    outside = "![Other](/Users/synthetic/private.png)"
     assert project(runtime, worker, info, outside, scope) == "Other"
     path.write_bytes(b"changed")
     assert "artifact_sha256:" not in project(runtime, worker, info, output, scope)

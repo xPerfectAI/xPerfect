@@ -1,8 +1,9 @@
-import { watchOutputModel, watchTimingModel } from './delivery-presenter.js?v=20261024journeys18';
-import { workspaceLifecycleControl } from './launch-policy.js?v=20261024journeys18';
-import { createFileDraft, createWorkspaceFiles } from './files.js?v=20261024journeys18';
-import { attachNativeControls, canGuideNativeTurn } from './native-controls.js?v=20261024journeys18';
-import { createResultMarkdown } from './result-markdown.js?v=20261024journeys18';
+import { createLibraryBrowser, libraryRequest, libraryStatus, libraryRemovalOutcome, reviewLibraryUse, askNativeLibrarySetup } from './personal-library.js?v=20261024polish1';
+import { watchOutputModel, watchTimingModel } from './delivery-presenter.js?v=20261024polish1';
+import { workspaceLifecycleControl } from './launch-policy.js?v=20261024polish1';
+import { createFileDraft, createWorkspaceFiles } from './files.js?v=20261024polish1';
+import { attachNativeControls, canGuideNativeTurn } from './native-controls.js?v=20261024polish1';
+import { createResultMarkdown } from './result-markdown.js?v=20261024polish1';
 
 // The same safe rendering as conversation replies: raw HTML is escaped and unsafe link
 // schemes are refused. Links open beside the workspace instead of replacing it.
@@ -48,6 +49,19 @@ function showResult(text) {
 const title = document.getElementById('watch-title');
 const subtitle = document.getElementById('watch-subtitle');
 const addWorkerButton = document.getElementById('watch-add-worker');
+const askChatButton = document.getElementById('watch-ask-chat');
+function syncAskChat(data) {
+  if (!askChatButton) return;
+  const worker = data.worker || {};
+  askChatButton.hidden = data.can_manage_workspace !== true || Boolean(signedToken)
+    || worker.workspace_kind === 'ephemeral' || Boolean(data.work_ref)
+    || ['terminating', 'termination_failed', 'terminated'].includes(worker.state) || !worker.project_id;
+  askChatButton.dataset.projectId = askChatButton.hidden ? '' : worker.project_id;
+}
+askChatButton?.addEventListener('click', () => {
+  const targetProject = askChatButton.dataset.projectId;
+  if (targetProject) window.location.assign(`/conversation?project_id=${encodeURIComponent(targetProject)}`);
+});
 addWorkerButton?.addEventListener('click', () => {
   const target = new URL('/', window.location.href);
   target.searchParams.set('add_worker', workerId);
@@ -115,6 +129,17 @@ const filesTrashStatus = document.getElementById('watch-file-trash-status');
 const filesAttach = document.getElementById('watch-attach-files');
 const filesUploadArea = document.getElementById('watch-file-upload');
 let filesCanWrite = null;
+let libraryManager = false;
+let libraryOwnerScope = '';
+function currentLibraryOwnerScope() { return libraryManager ? libraryOwnerScope || watchDraft?.ownerScope() || '' : ''; }
+let librarySnapshot = null;
+function libraryTargetClosed() {
+  return ['terminating', 'termination_failed', 'terminated'].includes(String(librarySnapshot?.worker?.close_state || librarySnapshot?.worker?.state || ''));
+}
+let libraryAddedEpoch = 0;
+let requestedLibraryEntry = new URLSearchParams(window.location.search).get('library') === 'added';
+let requestedLibraryPrepared = false;
+let pendingLibraryTab = '';
 let watchDraftScopeLoad = 0;
 let watchDraftScopeController = null;
 const fileError = (message) => { filesStatus.textContent = message; filesStatus.hidden = false; };
@@ -140,6 +165,7 @@ let currentResultText = '';
 let currentProjectTitle = projectId || 'Project';
 let currentDeliverable = null;
 let currentDesktopAvailable = false;
+let currentNoRunActivity = false;
 let lastPromotedDeliverableKey = '';
 let lastAttachedFilePreviewKey = '';
 let currentFilePreviewKey = '';
@@ -164,7 +190,8 @@ let terminalResultPreferred = false;
 function terminalRunPhase(runState) {
   const state = String(runState || '').trim().toLowerCase();
   if (['completed', 'failed', 'cancelled', 'interrupted'].includes(state)) return 'ended';
-  if (['running', 'settling', 'paused', 'needs_input'].includes(state)) return 'live';
+  if (state === 'settling') return 'settling';
+  if (['running', 'paused', 'needs_input'].includes(state)) return 'live';
   return 'waiting';
 }
 
@@ -242,7 +269,7 @@ function syncTerminalResultPresentation(data) {
     settledTerminalRun = '';
     watchApp.dataset.resultFirst = 'false';
     terminalLogSummary.hidden = true;
-    terminalLog.open = true;
+    if (!terminalLog.open) terminalLog.open = true;
     resultClose.hidden = false;
     if (wasPreferred && !actionFailure && !ownerResponseNeeded(data)) closeResultPanel();
     return;
@@ -250,7 +277,7 @@ function syncTerminalResultPresentation(data) {
   if (settledTerminalRun !== runKey) {
     settledTerminalRun = runKey;
     terminalResultPreferred = true;
-    terminalLog.open = false;
+    if (terminalLog.open) terminalLog.open = false;
     openResultPanel();
   }
   watchApp.dataset.resultFirst = String(terminalResultPreferred);
@@ -286,6 +313,15 @@ function displayStateLabel(state) {
   return normalized || 'starting';
 }
 
+function noRunActivityFor(data) {
+  const runtime = data?.runtime_details || {};
+  const state = String(data?.worker?.close_state || data?.worker?.state || '').trim().toLowerCase();
+  return ['ready', 'paused', 'idle', 'idle_terminated', 'stopped'].includes(state)
+    && data?.latest_run === null && data?.active_run === null
+    && runtime.mode === 'host-computer' && !runtime.pid
+    && !runtime.view_available && !runtime.view_url;
+}
+
 function clearRetryTimers() {
   for (const timer of retryTimers) window.clearTimeout(timer);
   retryTimers = [];
@@ -318,13 +354,13 @@ function openMenu(last = false) {
 }
 
 
-function closeResultPanel() {
+function closeResultPanel({ restoreFocus = false } = {}) {
   actionFailure = null;
   if (terminalResultPreferred) {
     terminalResultPreferred = false;
     watchApp.dataset.resultFirst = 'false';
     terminalLogSummary.hidden = true;
-    terminalLog.open = true;
+    if (!terminalLog.open) terminalLog.open = true;
     resultClose.hidden = false;
   }
   resultPanel.hidden = true;
@@ -332,6 +368,7 @@ function closeResultPanel() {
   const kind = latestOutputFull.hidden ? 'status' : 'result';
   resultToggle.setAttribute('aria-label', `Open latest workspace ${kind}`);
   if (resultToggleAction) resultToggleAction.textContent = `Open ${kind}`;
+  if (restoreFocus) resultToggle.focus();
 }
 
 function openResultPanel() {
@@ -345,10 +382,9 @@ function openResultPanel() {
 
 function forceReloadFrame(url) {
   frameReady = false;
-  frame.src = 'about:blank';
-  window.setTimeout(() => {
-    frame.src = url;
-  }, 180);
+  // Assigning src navigates even when the address is unchanged. Avoid a delayed blank
+  // navigation that can race a newer surface or report a false successful load.
+  frame.src = url;
 }
 
 function scheduleReconnects(url) {
@@ -362,9 +398,12 @@ function scheduleReconnects(url) {
   }
 }
 
-function attachView(url) {
+function attachView(url, { force = false } = {}) {
   if (!url) return;
-  if (lastAttachedUrl === url && frame.src === url) return;
+  // Chrome can defer an iframe's initial navigation inside a closed details element.
+  // Start its load and recovery clock only after the native disclosure is visible.
+  if (terminalLog && !terminalLog.open) return;
+  if (!force && lastAttachedUrl === url && frame.src === url) return;
   lastAttachedUrl = url;
   lastAttachedFilePreviewKey = isFilePreviewUrl(url) ? currentFilePreviewKey : '';
   attachStartedAt = Date.now();
@@ -483,7 +522,8 @@ function syncSteerAvailability(state) {
 function autoResizeSteerInput() {
   if (!steerInput) return;
   steerInput.style.height = 'auto';
-  steerInput.style.height = `${Math.min(Math.max(steerInput.scrollHeight, 52), 156)}px`;
+  const maximum = Math.min(360, Math.max(156, (window.innerHeight || 850) * .42));
+  steerInput.style.height = `${Math.min(Math.max(steerInput.scrollHeight, 52), maximum)}px`;
   syncWatchLayout();
 }
 
@@ -531,7 +571,10 @@ function syncWatchMenuAvailability(data) {
     if (button) button.hidden = !desktop || !manage || action !== nativeAction;
   }
   surfaceDesktopButton.hidden = !desktop;
-  surfaceTerminalButton.hidden = !desktop && activeSurface === 'terminal';
+  // Keep the selected view discoverable alongside alternate supported views.
+  surfaceTerminalButton.hidden = false;
+  surfaceTerminalButton.disabled = currentNoRunActivity;
+  openExternal.disabled = !data || (activeSurface === 'terminal' && currentNoRunActivity);
   openTerminalLink.hidden = activeSurface === 'terminal';
   const interrupt = menu.querySelector('[data-action="interrupt"]');
   if (interrupt) {
@@ -548,6 +591,8 @@ function syncWatchMenuAvailability(data) {
 function syncMenuLabels() {
   surfaceTerminalButton.dataset.active = String(activeSurface === 'terminal');
   surfaceDesktopButton.dataset.active = String(activeSurface === 'desktop');
+  surfaceTerminalButton.setAttribute('aria-current', String(activeSurface === 'terminal'));
+  surfaceDesktopButton.setAttribute('aria-current', String(activeSurface === 'desktop'));
   (openExternal.querySelector?.('span') || openExternal).textContent = activeSurface === 'desktop' && currentDesktopAvailable
       ? 'Open current desktop in new tab'
       : 'Open live activity in new tab';
@@ -561,6 +606,11 @@ function setSurface(surface, { force = false } = {}) {
   if (currentWorkerState === 'terminated') {
     clearAttachedView();
     setOverlay('terminated');
+    return;
+  }
+  if (currentNoRunActivity && state === 'ready') {
+    clearAttachedView();
+    setOverlay(state);
     return;
   }
   if (['created', 'starting', 'paused', 'idle', 'idle_terminated', 'stopped', 'terminating', 'termination_failed', 'terminated'].includes(state)
@@ -602,7 +652,7 @@ function setSurface(surface, { force = false } = {}) {
   if (sameFilePreviewAttached && !stalledFilePreviewAttach && !force) {
     // Keep the completed file preview stable while signed URLs rotate in live payloads.
   } else if (force || lastAttachedUrl !== url || frame.src !== url) {
-    attachView(url);
+    attachView(url, { force });
   }
   setOverlay(state || 'starting');
 }
@@ -649,11 +699,20 @@ function syncResultActions(deliverable) {
     if (downloadUrl) actions.push({ label: 'Download file', url: downloadUrl, primary: false, download: true });
   }
   resultActions.hidden = actions.length === 0;
+  const fileName = deliverable?.kind === 'file'
+    ? String(deliverable.label || deliverable.workspace_path || '').trim() : '';
+  if (actions.length && fileName) {
+    const identity = document.createElement('span');
+    identity.className = 'result-file-name';
+    identity.textContent = fileName;
+    resultActions.appendChild(identity);
+  }
   for (const action of actions) {
     const link = document.createElement('a');
     link.className = `result-action${action.primary ? ' primary' : ''}`;
     link.href = action.url;
     link.textContent = action.label;
+    if (fileName) link.setAttribute('aria-label', `${action.label}: ${fileName}`);
     if (action.download) {
       link.download = '';
     } else {
@@ -662,6 +721,24 @@ function syncResultActions(deliverable) {
     }
     resultActions.appendChild(link);
   }
+  if (libraryManager && deliverable?.kind === 'file' && (deliverable.file_id && deliverable.revision || deliverable.source === 'workspace_file' && deliverable.workspace_path)) {
+    const exactVersion = Boolean(deliverable.file_id && deliverable.revision);
+    const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'result-action'; keep.textContent = exactVersion ? 'Keep for reuse' : 'Save current file…';
+    keep.title = exactVersion ? 'Save this exact delivered file version' : 'Open Files to choose its current version, which may differ from this result';
+    keep.onclick = async () => { keep.disabled = true; try { if (exactVersion) await keepDeliveredFile(deliverable, keep); else await showCurrentDeliveredFile(deliverable); } catch (error) { fileError(error.message); filesPanel.hidden = false; filesToggle.setAttribute('aria-expanded', 'true'); selectLibraryTab('files'); } finally { keep.disabled = false; } }; resultActions.append(keep); resultActions.hidden = false;
+  }
+}
+async function keepDeliveredFile(file, button) {
+  if (!file.file_id || !file.revision) throw new Error('This result has no saved file version. Open Files to choose the current file.');
+  return watchLibrary.capture(file, button);
+}
+async function showCurrentDeliveredFile(file) {
+  const owner = currentLibraryOwnerScope();
+  if (!owner) return;
+  const path = String(file.workspace_path || ''); const directory = path.split('/').slice(0, -1).join('/');
+  filesPanel.hidden = false; filesToggle.setAttribute('aria-expanded', 'true'); selectLibraryTab('files');
+  await workspaceFiles.open(directory);
+  if (owner === currentLibraryOwnerScope() && !filesStatus.textContent) fileError('Choose the current file’s menu, then Keep for reuse. Its current version may differ from this result.');
 }
 
 function formatArtifactSize(bytes) {
@@ -752,6 +829,7 @@ const workspaceFiles = createWorkspaceFiles({
   moveCancel: document.getElementById('watch-file-move-cancel'),
   moveCancelBottom: document.getElementById('watch-file-move-cancel-bottom'),
   audienceLabel: document.getElementById('watch-files-audience'),
+  onKeepForReuse: signedToken ? null : (entry, returnFocus) => libraryManager ? watchLibrary.capture(entry, returnFocus) : Promise.reject(new Error('Sign in with a workspace manager account to save this file.')),
   onAccess: (canWrite) => {
     filesCanWrite = canWrite;
     watchDraftActivation = activateWatchDraft(canWrite);
@@ -816,6 +894,136 @@ const watchDraft = createFileDraft({
   onChange: ({ readyIds }) => { filesAttach.hidden = !unattachedIds(readyIds).length; },
   onReady: attachReadyUpload,
 });
+const watchLibrary = createLibraryBrowser({ mount: document.getElementById('watch-library-browser'), workerId,
+  getOwnerScope: currentLibraryOwnerScope, onPick: async (refs, resolved, { signal }) => {
+    if (!libraryManager) throw new Error('This workspace is not editable from this view.');
+    if (libraryTargetClosed()) throw new Error('This workspace is closed. You can still save and reuse its files.');
+    const owner = currentLibraryOwnerScope();
+    const nativeItems = (resolved.items || []).filter(item => ['skill', 'native', 'approved'].includes(item.kind));
+    let confirmNative = false;
+    if (nativeItems.length) confirmNative = await reviewLibraryUse(nativeItems, librarySnapshot?.worker?.name || 'this worker', { signal, profile: librarySnapshot?.worker?.profile });
+    if (nativeItems.length && !confirmNative) return;
+    if (!libraryManager || signal.aborted || owner !== currentLibraryOwnerScope()) throw new Error('Your account changed. Open Library again before continuing.');
+    if (libraryTargetClosed()) throw new Error('This workspace is closed. You can still save and reuse its files.');
+    await libraryRequest(`/api/workspace/${encodeURIComponent(workerId)}/library`, { method: 'POST', body: { refs, request_key: crypto.randomUUID(), confirm_native: confirmNative } });
+    await workspaceFiles.refresh(); await refreshAddedLibrary(); selectLibraryTab('added');
+  }, pickLabel: 'Add here' });
+function syncWatchLibrarySnapshot(data) {
+  libraryManager = data?.can_manage_workspace === true && !signedToken;
+  if (!libraryManager) libraryOwnerScope = '';
+  librarySnapshot = data; syncLibraryAccess();
+}
+function syncLibraryAccess() {
+  const owner = currentLibraryOwnerScope();
+  const allowed = Boolean(owner);
+  for (const name of ['added', 'saved']) document.getElementById(`watch-library-tab-${name}`).hidden = !allowed;
+  watchLibrary?.setAccess(allowed, owner);
+  watchLibrary.setPickAvailable(!libraryTargetClosed(), 'This workspace is closed. You can still save and reuse its files.');
+  workspaceFiles.setKeepForReuseAccess(allowed);
+  if (requestedLibraryEntry && libraryManager) {
+    filesPanel.hidden = false; filesToggle.setAttribute('aria-expanded', 'true');
+    if (!allowed && !requestedLibraryPrepared) { requestedLibraryPrepared = true; void workspaceFiles.open(); }
+  }
+  if (allowed && requestedLibraryEntry) { pendingLibraryTab = ''; requestedLibraryEntry = false; filesPanel.hidden = false; filesToggle.setAttribute('aria-expanded', 'true'); selectLibraryTab('added'); }
+  if (allowed && pendingLibraryTab && !filesPanel.hidden) {
+    const preferredTab = pendingLibraryTab; pendingLibraryTab = ''; selectLibraryTab(preferredTab);
+  }
+  const busy = ['queued', 'running', 'settling'].includes(String(librarySnapshot?.latest_run?.state || ''));
+  for (const button of document.querySelectorAll('[data-library-remove], [data-library-mutation]')) { button.disabled = libraryTargetClosed() || busy || button.dataset.libraryBusy === 'true'; button.title = libraryTargetClosed() ? 'This workspace is closed' : busy ? 'Available when the worker is idle' : ''; }
+  if (!allowed) { libraryAddedEpoch += 1; document.getElementById('watch-library-added-list').replaceChildren(); if (document.querySelector('.watch-library-tabs [aria-selected="true"]')?.id !== 'watch-library-tab-files') selectLibraryTab('files'); }
+}
+function selectLibraryTab(name, focus = false, remember = false) {
+  if (remember) pendingLibraryTab = '';
+  if (name !== 'files' && !currentLibraryOwnerScope()) name = 'files';
+  if (remember) { try { localStorage.setItem('xperfect.display.library-tab', name); } catch { /* Display preference only. */ } }
+  for (const button of document.querySelectorAll('.watch-library-tabs [role="tab"]')) {
+    const active = button.id === `watch-library-tab-${name}`; button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1;
+    document.getElementById(button.getAttribute('aria-controls')).hidden = !active; if (active && focus) button.focus();
+  }
+  if (name === 'added') void refreshAddedLibrary();
+  if (name === 'saved') void watchLibrary.refresh();
+}
+function libraryUndoButton(item, status) {
+  const undo = document.createElement('button'); undo.type = 'button'; undo.className = 'quiet-button'; undo.textContent = item.kind === 'approved' ? 'Restore for review' : 'Undo';
+  undo.dataset.libraryRemove = item.application_id;
+  const busy = ['queued', 'running', 'settling'].includes(String(librarySnapshot?.latest_run?.state || ''));
+  undo.disabled = busy || libraryTargetClosed(); if (undo.disabled) undo.title = libraryTargetClosed() ? 'This workspace is closed' : 'Available when the worker is idle';
+  undo.onclick = async () => {
+    const owner = currentLibraryOwnerScope(); const signal = watchLibrary.signal();
+    if (!libraryManager || signal.aborted || libraryTargetClosed()) return;
+    undo.disabled = true; undo.dataset.libraryBusy = 'true';
+    try {
+      await libraryRequest(`/api/workspace/${encodeURIComponent(workerId)}/library/${encodeURIComponent(item.application_id)}/undo`, { method: 'POST', body: {} });
+      if (signal.aborted || owner !== currentLibraryOwnerScope()) return;
+      await refreshAddedLibrary(); await workspaceFiles.refresh();
+    } catch (error) { if (!signal.aborted) { status.textContent = error.message; undo.disabled = false; } }
+    finally { undo.dataset.libraryBusy = 'false'; }
+  };
+  return undo;
+}
+async function refreshAddedLibrary() {
+  if (!libraryManager) return; const epoch = ++libraryAddedEpoch; const mount = document.getElementById('watch-library-added-list'); const status = document.getElementById('watch-library-added-status'); status.textContent = 'Loading added items…';
+  try {
+    const data = await libraryRequest(`/api/workspace/${encodeURIComponent(workerId)}/library`);
+    if (epoch !== libraryAddedEpoch || !libraryManager) return; mount.replaceChildren();
+    for (const item of data.items || []) {
+      const row = document.createElement('article'); row.className = 'personal-library-item'; const copy = document.createElement('div'); copy.className = 'personal-library-item-copy';
+      const name = document.createElement('strong'); name.textContent = item.name; const state = document.createElement('small'); state.textContent = libraryStatus(item); copy.append(name, state); row.append(copy);
+      if (item.state === 'removed') {
+        if (item.undo_available) row.append(libraryUndoButton(item, status));
+        mount.append(row); continue;
+      }
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'quiet-button'; remove.textContent = item.state === 'cleanup_unconfirmed' ? 'Retry file cleanup' : 'Remove here';
+      const active = ['queued', 'running', 'settling'].includes(String(librarySnapshot?.latest_run?.state || '')); remove.dataset.libraryRemove = item.application_id; remove.disabled = active || libraryTargetClosed(); if (remove.disabled) remove.title = libraryTargetClosed() ? 'This workspace is closed' : 'Available when the worker is idle';
+      remove.onclick = async () => {
+        if (libraryTargetClosed()) return;
+        remove.disabled = true; remove.dataset.libraryBusy = 'true';
+        try {
+          const result = await libraryRequest(`/api/workspace/${encodeURIComponent(workerId)}/library/${encodeURIComponent(item.application_id)}`, { method: 'DELETE' });
+          await refreshAddedLibrary(); await workspaceFiles.refresh();
+          const outcome = libraryRemovalOutcome(result);
+          status.replaceChildren(document.createTextNode(outcome.message));
+          if (outcome.needsRetry) {
+            const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'quiet-button'; retry.textContent = 'Retry file cleanup'; retry.dataset.libraryRemove = item.application_id;
+            retry.onclick = async () => { retry.disabled = true; await remove.onclick(); }; status.append(retry);
+          }
+          if (result.can_undo || result.undo_available) status.append(libraryUndoButton(item, status));
+        } catch (error) { status.textContent = error.message; remove.disabled = false; }
+        finally { remove.dataset.libraryBusy = 'false'; }
+      };
+      const actions = document.createElement('div'); actions.className = 'personal-library-item-actions'; actions.append(remove);
+      if (item.state === 'cleanup_unconfirmed' && item.undo_available) actions.append(libraryUndoButton(item, status));
+      if (['needs_review', 'needs_setup'].includes(item.state)) {
+        const setup = document.createElement('button'); setup.type = 'button'; setup.className = 'secondary-button'; setup.textContent = item.kind === 'approved' || item.state === 'needs_review' ? 'Review' : 'Set up';
+        setup.dataset.libraryMutation = 'true'; setup.disabled = libraryTargetClosed(); if (setup.disabled) setup.title = 'This workspace is closed';
+        setup.onclick = async () => { const owner = currentLibraryOwnerScope(); const signal = watchLibrary.signal(); setup.disabled = true; try {
+          if (libraryTargetClosed()) return;
+          const exact = await libraryRequest(`/api/personal-library/${encodeURIComponent(item.item_id)}?version_id=${encodeURIComponent(item.version_id)}`);
+          if (!libraryManager || signal.aborted || owner !== currentLibraryOwnerScope()) return;
+          if (item.kind === 'approved') {
+            const resources = await libraryRequest('/api/control-plane?sections=resources'); const approved = (resources.library || []).find(value => value.library_id === exact.payload?.library_id);
+            if (!approved) throw new Error('This approved capability is unavailable. Refresh Library to choose another.');
+            if (!libraryManager || signal.aborted || owner !== currentLibraryOwnerScope()) throw new Error('Your account changed. Open Library again before continuing.');
+            if (libraryTargetClosed()) throw new Error('This workspace is closed. You can still save and reuse its files.');
+            const pending = await libraryRequest('/api/pending-changes', { method: 'POST', body: { change_type: 'library_enable', target_id: workerId, payload: { library_id: approved.library_id, scopes: approved.scopes || [] } } });
+            if (!pending.change_id || !pending.confirmation_token) throw new Error('Could not prepare the existing capability review.');
+            window.location.assign(`/confirm-change#change_id=${encodeURIComponent(pending.change_id)}&token=${encodeURIComponent(pending.confirmation_token)}`);
+          } else if (item.state === 'needs_review') {
+            if (await reviewLibraryUse([exact], librarySnapshot?.worker?.name || 'this worker', { signal, profile: librarySnapshot?.worker?.profile })) { if (libraryTargetClosed()) throw new Error('This workspace is closed. You can still save and reuse its files.'); await libraryRequest(`/api/workspace/${encodeURIComponent(workerId)}/library`, { method: 'POST', body: { refs: [{ item_id: item.item_id, version_id: item.version_id }], request_key: crypto.randomUUID(), confirm_native: true } }); await refreshAddedLibrary(); }
+          } else askNativeLibrarySetup({ workerId, item: exact, signal, canStart: () => !libraryTargetClosed() });
+        } catch (error) { status.textContent = error.message; } finally { setup.disabled = libraryTargetClosed(); } };
+        actions.prepend(setup);
+      }
+      row.append(actions); mount.append(row);
+    }
+    if (!(data.items || []).length) { const empty = document.createElement('p'); empty.className = 'personal-library-empty'; empty.textContent = 'No knowledge or abilities added yet. You can still use Files.'; mount.append(empty); }
+    status.textContent = '';
+  } catch (error) { if (epoch === libraryAddedEpoch && libraryManager) status.textContent = `Could not load added items: ${error.message}`; }
+}
+for (const button of document.querySelectorAll('.watch-library-tabs [role="tab"]')) {
+  button.addEventListener('click', () => selectLibraryTab(button.id.slice('watch-library-tab-'.length), false, true));
+  button.addEventListener('keydown', event => { const tabs = [...document.querySelectorAll('.watch-library-tabs [role="tab"]')].filter(tab => !tab.hidden); const index = tabs.indexOf(button); let next; if (event.key === 'ArrowRight') next = tabs[(index + 1) % tabs.length]; if (event.key === 'ArrowLeft') next = tabs[(index + tabs.length - 1) % tabs.length]; if (event.key === 'Home') next = tabs[0]; if (event.key === 'End') next = tabs.at(-1); if (next) { event.preventDefault(); selectLibraryTab(next.id.slice('watch-library-tab-'.length), true, true); } });
+}
 const setWatchDraftBusy = (busy) => {
   watchDraft.setBusy(busy);
   filesAttach.disabled = busy;
@@ -900,10 +1108,12 @@ async function activateWatchDraft(canWrite) {
   watchDraftScopeController?.abort();
   watchDraftScopeController = null;
   if (!canWrite) {
-    setWatchDraftBusy(false);
-    watchDraft.setOwnerScope(null);
-    filesUploadArea.hidden = true;
-    return;
+    watchDraft.setOwnerScope(null); filesUploadArea.hidden = true;
+    if (!libraryManager) {
+      libraryOwnerScope = ''; setWatchDraftBusy(false); syncLibraryAccess(); return;
+    }
+    // Read-only Files do not remove this exact workspace manager's private Library.
+    // Reuse this owner check; keep its upload draft disabled.
   }
   const controller = new AbortController();
   watchDraftScopeController = controller;
@@ -913,13 +1123,16 @@ async function activateWatchDraft(canWrite) {
     const response = await fetch('/api/bootstrap', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error(`Account check failed (${response.status}).`);
     const data = await response.json();
-    if (load !== watchDraftScopeLoad || !filesCanWrite) return;
-    watchDraft.setOwnerScope(data.draft_owner_scope);
-    filesUploadArea.hidden = !watchDraft.ownerScope();
-    if (!watchDraft.ownerScope()) fileError('Your account could not be verified. Refresh to add files.');
+    if (load !== watchDraftScopeLoad || (!filesCanWrite && !libraryManager)) return;
+    watchDraft.setOwnerScope(filesCanWrite ? data.draft_owner_scope : null);
+    libraryOwnerScope = libraryManager && /^[a-f0-9]{64}$/.test(String(data.draft_owner_scope || '')) ? data.draft_owner_scope : '';
+    syncLibraryAccess();
+    filesUploadArea.hidden = !filesCanWrite || !watchDraft.ownerScope();
+    if (filesCanWrite && !watchDraft.ownerScope()) fileError('Your account could not be verified. Refresh to add files.');
   } catch (error) {
     if (load !== watchDraftScopeLoad) return;
-    watchDraft.setOwnerScope(null);
+    watchDraft.setOwnerScope(null); libraryOwnerScope = '';
+    syncLibraryAccess();
     filesUploadArea.hidden = true;
     fileError(`Could not check your account: ${error.message} Refresh to add files.`);
   } finally {
@@ -1075,11 +1288,11 @@ async function submitFooterInstruction(mode) {
 }
 
 function setOverlay(state, detail) {
-  const completed = state === 'completed';
   const needsAttention = TERMINAL_ATTENTION_STATES.has(state);
-  const connecting = !completed && attachStartedAt && !frameReady && Date.now() - attachStartedAt < 12000;
+  const connecting = Boolean(attachStartedAt && !frameReady);
   const filePreviewActive = activeSurface === 'desktop' && Boolean(filePreviewUrl());
-  const waiting = state === 'starting' || state === 'paused' || state === 'idle' || state === 'idle_terminated' || state === 'stopped' || state === 'terminating' || state === 'termination_failed' || state === 'terminated' || needsAttention || connecting;
+  const readyForFirstRun = currentNoRunActivity && state === 'ready';
+  const waiting = readyForFirstRun || state === 'starting' || state === 'paused' || state === 'idle' || state === 'idle_terminated' || state === 'stopped' || state === 'terminating' || state === 'termination_failed' || state === 'terminated' || needsAttention || connecting;
   // The attention notice sits above that run's saved output instead of covering it.
   const banner = needsAttention && showsSavedRunOutput(state);
   overlay.hidden = !waiting;
@@ -1088,6 +1301,13 @@ function setOverlay(state, detail) {
     stage.dataset.overlayMode = banner ? 'banner' : '';
   }
   if (!waiting) return;
+
+  if (readyForFirstRun) {
+    if (overlayLabel) overlayLabel.textContent = 'Workspace ready';
+    overlayTitle.textContent = 'What should I work on?';
+    overlayDetail.textContent = 'Send a message below to start work. Your files are available in Library.';
+    return;
+  }
 
   if (needsAttention) {
     if (overlayLabel) {
@@ -1133,7 +1353,16 @@ function setOverlay(state, detail) {
       overlayLabel.textContent = 'Workspace idle';
     }
     overlayTitle.textContent = 'Worker idle';
-    overlayDetail.textContent = 'The last run is complete and compute is stopped to save resources. Send follow-up work and xPerfect will resume this workspace automatically.';
+    overlayDetail.textContent = currentNoRunActivity
+      ? 'No work is running. Send a message below to start work. Your files are available in Library.'
+      : 'The last run is complete and compute is stopped to save resources. Send follow-up work and xPerfect will resume this workspace automatically.';
+    return;
+  }
+
+  if (connecting && Date.now() - attachStartedAt >= 12000) {
+    if (overlayLabel) overlayLabel.textContent = 'View unavailable';
+    overlayTitle.textContent = activeSurface === 'desktop' ? 'The desktop has not connected' : 'Live activity has not connected';
+    overlayDetail.textContent = 'Open More and select this view to reconnect, or open it in a new tab. Your work can continue while the view reconnects.';
     return;
   }
 
@@ -1207,6 +1436,7 @@ function showWorkspaceUnavailable(status) {
   filesToggle.disabled = true; menuToggle.disabled = true;
   filesPanel.hidden = true; filesToggle.setAttribute('aria-expanded', 'false');
   syncWatchMenuAvailability(null);
+  syncWatchLibrarySnapshot(null);
   const interrupt = menu.querySelector('[data-action="interrupt"]');
   if (interrupt) interrupt.disabled = true;
   if (runToggleButton) {
@@ -1250,6 +1480,7 @@ async function refresh() {
     const data = await response.json();
     if (signInLink) signInLink.hidden = true;
     const worker = data.worker;
+    syncAskChat(data);
     filesToggle.disabled = false; menuToggle.disabled = false;
     currentWorkerState = String(worker.state || '').trim().toLowerCase();
     const runtime = data.runtime_details || {};
@@ -1274,6 +1505,7 @@ async function refresh() {
     syncRunToggle(displayState === 'completed' ? displayState : currentWorkerState, data.latest_run?.state);
 
     currentDesktopAvailable = Boolean(runtime.view_available || runtime.view_url);
+    currentNoRunActivity = noRunActivityFor(data);
   currentDesktopUrl = currentDesktopAvailable ? withUiRev(withAuth(`${uiBase}/desktop/${workerId}`)) : '';
     currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || ''),
       String(data.latest_run?.state || ''), String(data.latest_run?.active_attempt_id || '')));
@@ -1291,6 +1523,10 @@ async function refresh() {
     await maybePromoteDeliverable(data);
     syncMenuLabels();
     syncWatchMenuAvailability(data);
+    syncWatchLibrarySnapshot(data);
+    // Set the enclosing details state before attaching its iframe, and keep that
+    // state stable across refreshes so its browsing context is not reinitialized.
+    syncTerminalResultPresentation(data);
     setSurface(activeSurface, { force: false });
     if (!(activeSurface === 'desktop' && !currentDesktopAvailable)) {
       setOverlay(
@@ -1302,7 +1538,6 @@ async function refresh() {
             : 'Live activity will appear here when the worker is ready.'
       );
     }
-    syncTerminalResultPresentation(data);
     syncWatchLayout();
   } finally {
     refreshInFlight = false;
@@ -1359,13 +1594,19 @@ closeWorkspaceConfirm?.addEventListener('click', async () => {
 
 filesToggle?.addEventListener('click', () => {
   filesPanel.hidden = !filesPanel.hidden;
+  pendingLibraryTab = '';
   filesToggle.setAttribute('aria-expanded', String(!filesPanel.hidden));
   if (!filesPanel.hidden) {
     listedFileActivityKey = latestFileActivityKey;
+    let preferredTab = 'files';
+    try { const saved = localStorage.getItem('xperfect.display.library-tab'); if (['files', 'added', 'saved'].includes(saved)) preferredTab = saved; } catch { /* Files is the first-use default. */ }
+    pendingLibraryTab = preferredTab !== 'files' && !currentLibraryOwnerScope() ? preferredTab : '';
+    selectLibraryTab(preferredTab);
     void workspaceFiles.open(); filesClose?.focus();
   }
 });
 filesClose?.addEventListener('click', () => {
+  pendingLibraryTab = '';
   filesPanel.hidden = true;
   filesToggle?.setAttribute('aria-expanded', 'false');
   filesToggle?.focus();
@@ -1419,16 +1660,27 @@ surfaceDesktopButton.addEventListener('click', () => {
   setSurface('desktop', { force: true });
 });
 
+terminalLog?.addEventListener('toggle', () => {
+  if (!terminalLog.open) {
+    clearRetryTimers();
+    if (!frameReady) attachStartedAt = 0;
+    return;
+  }
+  setSurface(activeSurface, { force: !frameReady && !attachStartedAt });
+});
+
 frame.addEventListener('load', () => {
-  if (!frame.src || frame.src === 'about:blank') return;
+  // src is the requested address, not the document that emitted this event. A late
+  // about:blank or prior-surface load must not cancel recovery for the current view.
+  if (!lastAttachedUrl || frame.src !== lastAttachedUrl) return;
+  try {
+    const loaded = frame.contentDocument;
+    if (!loaded || loaded.readyState !== 'complete' || loaded.location.href !== lastAttachedUrl) return;
+  } catch { return; }
   frameReady = true;
   attachStartedAt = 0;
-  if (!['paused', 'idle', 'idle_terminated', 'stopped', 'terminating', 'termination_failed', 'terminated'].includes(currentDisplayState)) {
-    overlay.hidden = true;
-    if (stage) {
-      stage.dataset.overlayActive = 'false';
-    }
-  }
+  clearRetryTimers();
+  setOverlay(currentDisplayState);
 });
 
 menuToggle.addEventListener('click', () => {
@@ -1464,7 +1716,7 @@ resultToggle.addEventListener('click', () => {
 });
 
 resultClose.addEventListener('click', () => {
-  closeResultPanel();
+  closeResultPanel({ restoreFocus: true });
 });
 
 document.addEventListener('click', (event) => {
@@ -1479,11 +1731,10 @@ document.addEventListener('click', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') {
+  if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]')) {
     if (!menu.hidden) closeMenu({ restoreFocus: true });
-    if (!terminalResultPreferred) closeResultPanel();
-    // A dialog open inside Files handles its own Escape first.
-    if (!filesPanel.hidden && !document.querySelector('dialog[open]')) filesClose?.click();
+    else if (!filesPanel.hidden) filesClose?.click();
+    else if (!resultPanel.hidden) closeResultPanel({ restoreFocus: true });
   }
   setQueueModifierActive(Boolean(event.metaKey || event.ctrlKey));
 });
@@ -1577,6 +1828,7 @@ steerForm.addEventListener('submit', async (event) => {
 });
 
 syncWatchMenuAvailability(null);
+  syncWatchLibrarySnapshot(null);
 syncMenuLabels();
 syncProjectWorkspaceLinks();
 syncSendAffordance();

@@ -1,15 +1,17 @@
-import { parseRequestData, withRequestMessage, requestDataRows, requestDataFromRows, parseScheduleJson, hasPreciseNumbers, effectiveRunOutcome, plainRunOutcome } from './schedule-data.js?v=20261023schedule9';
-import { attachExistingClaudeConnection } from './native-controls.js?v=20260922o03c';
+import { attachActionMenu } from './action-menu.js?v=20261024polish1';
+import { parseRequestData, withRequestMessage, requestDataRows, requestDataFromRows, parseScheduleJson, hasPreciseNumbers, effectiveRunOutcome, plainRunOutcome } from './schedule-data.js?v=20261024polish1';
+import { attachExistingClaudeConnection } from './native-controls.js?v=20261024polish1';
 import {
   recurrenceSubmissionPolicy,
+  scheduleDstPolicyState,
   scheduleEditUpdates,
   scheduleEditorType,
   tomorrowDateTimeLocal,
   weekdayAtInstant,
   weeklyStartDateTimeLocal,
   zonedDateTimeLocalValue,
-} from './schedule-policy.js?v=20261023schedule9';
-import { equivalentReapprovalScopes } from './capability-review.js?v=20260811m';
+} from './schedule-policy.js?v=20261024polish1';
+import { equivalentReapprovalScopes } from './capability-review.js?v=20261024polish1';
 
 const SUPPORT_COPY = {
   supported: 'Ready to connect',
@@ -83,6 +85,7 @@ let accountConnectionIntent = null;
 let libraryRequestPending = false;
 let pendingCapabilityReview = null;
 const copyResetTimers = new WeakMap();
+let connectionMenuAbort = null;
 
 function profileForProvider(provider) {
   return { codex: 'codex-cli', claude: 'claude-code', grok: 'grok-build', xai: 'grok-build' }[provider] || '';
@@ -165,7 +168,7 @@ function statusChip(status) {
 function providerTimestamp(label, value) {
   const timestamp = Number(value || 0);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
-  return `${label} ${new Date(timestamp * 1000).toLocaleString()}`;
+  return `${label} ${new Date(timestamp * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
 }
 
 function observedDuration(value) {
@@ -177,29 +180,56 @@ function observedDuration(value) {
 }
 
 function providerAccountDetails(account) {
-  const provider = String(account.provider || 'AI').replaceAll('_', ' ');
-  const method = String(account.auth_method || 'account').replaceAll('_', ' ');
+  const providerId = String(account.provider || '');
+  const provider = ['grok', 'xai'].includes(providerId)
+    ? 'Grok · SpaceXSI'
+    : (PROVIDER_LABELS[providerId] || String(providerId || 'AI').replaceAll('_', ' '));
+  const method = { subscription: 'Subscription', api_key: 'API key', enterprise_route: 'Managed connection' }[account.auth_method]
+    || String(account.auth_method || 'account').replaceAll('_', ' ');
   return `${provider} · ${method}`;
 }
 
-function providerAccountUsage(account) {
-  const details = [
+function retainProviderAccountFocus(account, button) {
+  let restore = document.activeElement === button;
+  const row = button.closest('.connection-row');
+  const trigger = button.closest('.connection-more')?.querySelector('summary') || button;
+  const action = trigger.dataset.accountAction;
+  if (restore && trigger !== button) trigger.focus();
+  const followFocus = (event) => {
+    if (event.target !== button && event.target !== trigger) restore = false;
+  };
+  document.addEventListener('focusin', followFocus);
+  return () => {
+    document.removeEventListener('focusin', followFocus);
+    if (!restore) return;
+    const list = document.getElementById('provider-account-list');
+    const current = Array.from(list?.querySelectorAll('.connection-row') || [])
+      .find((item) => item.dataset.accountId === String(account.account_id || ''));
+    const target = Array.from(current?.querySelectorAll('[data-account-action]') || [])
+      .find((item) => item.dataset.accountAction === action && !item.disabled)
+      || current?.querySelector('summary');
+    if (target?.isConnected) target.focus();
+    else if (row?.isConnected && !button.disabled) button.focus();
+  };
+}
+
+function providerAccountUsage(account, technical = false) {
+  const details = technical ? [] : [
     providerTimestamp('Verified', account.last_verified_at),
     providerTimestamp('Last used', account.last_used_at),
   ];
   const observedRuns = Number(account.observed_runs || 0);
   if (observedRuns > 0) {
     const observedFailures = Math.max(0, Number(account.observed_failures || 0));
-    details.push(
-      `Observed by xPerfect: ${observedRuns} run${observedRuns === 1 ? '' : 's'} · `
-      + `${observedFailures} failed · ${observedDuration(account.observed_duration_seconds)}`,
-    );
+    details.push(technical
+      ? observedDuration(account.observed_duration_seconds)
+      : `Observed here: ${observedRuns} run${observedRuns === 1 ? '' : 's'} · ${observedFailures} failed`);
   }
   const hasReportedTokens = account.observed_input_tokens != null || account.observed_output_tokens != null;
-  if (hasReportedTokens) {
+  if (hasReportedTokens && technical) {
     const inputTokens = Math.max(0, Number(account.observed_input_tokens || 0));
     const outputTokens = Math.max(0, Number(account.observed_output_tokens || 0));
-    details.push(`Tokens reported by worker: ${inputTokens.toLocaleString()} input · ${outputTokens.toLocaleString()} output`);
+    details.push(`Tokens reported by worker: ${inputTokens.toLocaleString()} input · ${outputTokens.toLocaleString()} output. Cached input may be counted separately.`);
   }
   return details.filter(Boolean).join(' · ');
 }
@@ -284,6 +314,7 @@ async function reconnectProviderAccount(account, button) {
   }
   if (account.auth_source === 'current_os_claude_subscription') return verifyProviderAccount(account, button);
   const accountId = encodeURIComponent(String(account.account_id || ''));
+  const idleLabel = button.textContent;
   button.disabled = true;
   button.textContent = 'Checking…';
   try {
@@ -302,11 +333,12 @@ async function reconnectProviderAccount(account, button) {
   } catch (error) {
     setProviderStatus(error.message);
     button.disabled = false;
-    button.textContent = String(account.auth_method || '') === 'subscription' ? 'Reconnect' : 'Reconnect & test';
+    button.textContent = idleLabel;
   }
 }
 
 async function verifyProviderAccount(account, button) {
+  const restoreFocus = retainProviderAccountFocus(account, button);
   const idleLabel = button.textContent || 'Test connection';
   button.disabled = true;
   button.textContent = 'Testing…';
@@ -322,6 +354,8 @@ async function verifyProviderAccount(account, button) {
     setProviderStatus(error.message);
     button.disabled = false;
     button.textContent = idleLabel;
+  } finally {
+    restoreFocus();
   }
 }
 
@@ -362,6 +396,8 @@ async function removeProviderAccount(account, button) {
 }
 
 function renderProviderAccounts() {
+  connectionMenuAbort?.abort();
+  connectionMenuAbort = null;
   const note = document.getElementById("native-provider-note");
   if (note) note.textContent = controlPlane?.native_provider_note || "";
   const list = document.getElementById('provider-account-list');
@@ -396,10 +432,20 @@ function renderProviderAccounts() {
       ? 'Account status is unavailable. Refresh to try again.' : 'No AI account connected yet.'));
     return;
   }
+  connectionMenuAbort = new AbortController();
   const rows = accounts.map((account) => {
     const row = node('article', 'connection-row');
     row.dataset.accountId = String(account.account_id || '');
     row.classList.toggle('needs-review', reviewAccountIds.has(row.dataset.accountId));
+    const identity = node('div', 'connection-identity');
+    const markProvider = { codex: 'codex', claude: 'claude', grok: 'grok', xai: 'grok' }[account.provider];
+    if (markProvider) {
+      const mark = node('img', 'provider-mark connection-provider-mark');
+      mark.src = `/static/provider-${markProvider}.svg?v=20261024vector1`;
+      mark.dataset.provider = markProvider;
+      mark.alt = ''; mark.width = 32; mark.height = 32;
+      identity.append(mark);
+    }
     const copy = node('div', 'connection-copy');
     copy.append(
       node('strong', '', String(account.label || account.provider || 'Worker account')),
@@ -421,6 +467,7 @@ function renderProviderAccounts() {
     ));
     if (account.auth_source === 'current_os_claude_subscription') {
       const verify = node('button', 'quiet-button', 'Verify'); verify.type = 'button';
+      verify.dataset.accountAction = 'verify';
       verify.addEventListener('click', () => verifyProviderAccount(account, verify));
       actions.append(verify);
     } else if (account.status === 'connecting' && String(account.auth_method || '') === 'subscription') {
@@ -440,7 +487,7 @@ function renderProviderAccounts() {
       && String(account.recovery_code || '') === 'credential_cleanup_failed'
     ) {
       const check = node('button', 'quiet-button', 'Check connection');
-      check.type = 'button';
+      check.type = 'button'; check.dataset.accountAction = 'verify';
       check.addEventListener('click', () => verifyProviderAccount(account, check));
       actions.append(check);
     } else if (
@@ -459,14 +506,31 @@ function renderProviderAccounts() {
       actions.append(manage);
     }
     const more = node('details', 'connection-more');
-    const moreSummary = node('summary', '', 'More');
+    const moreSummary = node('summary', 'connection-more-trigger', 'More');
+    moreSummary.dataset.accountAction = 'more';
     moreSummary.setAttribute('aria-label', `More actions for ${String(account.label || account.provider || 'account')}`);
     const moreActions = node('div', 'connection-more-actions');
     const usage = providerAccountUsage(account);
     if (usage) moreActions.append(node('span', 'connection-more-note', usage));
+    if (account.observed_input_tokens != null || account.observed_output_tokens != null || account.observed_duration_seconds != null) {
+      const detailToggle = node('button', 'text-button', 'Usage details');
+      detailToggle.type = 'button'; detailToggle.tabIndex = -1;
+      detailToggle.setAttribute('role', 'menuitem'); detailToggle.setAttribute('aria-expanded', 'false');
+      detailToggle.dataset.menuKeepOpen = 'true';
+      const technical = node('span', 'connection-more-note', providerAccountUsage(account, true));
+      technical.id = `account-usage-${String(account.account_id)}`; technical.hidden = true;
+      detailToggle.setAttribute('aria-controls', technical.id);
+      detailToggle.addEventListener('click', () => {
+        technical.hidden = !technical.hidden;
+        detailToggle.setAttribute('aria-expanded', String(!technical.hidden));
+      });
+      moreActions.append(detailToggle, technical);
+    }
     if (account.status === 'ready' && account.auth_source !== 'current_os_claude_subscription') {
       const test = node('button', 'text-button', 'Test connection');
       test.type = 'button';
+      test.dataset.icon = 'check';
+      test.setAttribute('role', 'menuitem'); test.setAttribute('aria-label', 'Test connection'); test.tabIndex = -1;
       test.addEventListener('click', () => verifyProviderAccount(account, test));
       moreActions.append(test);
     }
@@ -474,23 +538,30 @@ function renderProviderAccounts() {
       String(account.auth_method || '') === 'subscription'
       && account.auth_source !== 'current_os_claude_subscription'
       && subscriptionRouteAvailable(account)
-      && String(account.status || '') === 'action_required'
-      && String(account.recovery_code || '') === 'credential_cleanup_failed'
+      && (String(account.status || '') === 'ready'
+        || (String(account.status || '') === 'action_required'
+          && String(account.recovery_code || '') === 'credential_cleanup_failed'))
     ) {
       const signInAgain = node('button', 'text-button', 'Sign in again');
       signInAgain.type = 'button';
+      signInAgain.dataset.icon = 'reconnect';
+      signInAgain.setAttribute('role', 'menuitem'); signInAgain.setAttribute('aria-label', 'Sign in again'); signInAgain.tabIndex = -1;
       signInAgain.addEventListener('click', () => reconnectProviderAccount(account, signInAgain));
       moreActions.append(signInAgain);
     }
     const remove = node('button', 'text-button danger-text-button', 'Remove');
     remove.type = 'button';
+    remove.dataset.icon = 'remove';
+    remove.setAttribute('role', 'menuitem'); remove.setAttribute('aria-label', 'Remove'); remove.tabIndex = -1;
     remove.addEventListener('click', () => removeProviderAccount(account, remove));
     moreActions.append(remove);
     if (moreActions.childElementCount) {
       more.append(moreSummary, moreActions);
+      attachActionMenu(more, moreSummary, moreActions, { signal: connectionMenuAbort.signal });
       actions.append(more);
     }
-    row.append(copy, actions);
+    identity.append(copy);
+    row.append(identity, actions);
     return row;
   });
   list.replaceChildren(...rows);
@@ -641,6 +712,15 @@ function renderConnectAi() {
     : supportedNames[0] || 'a supported AI app';
   if (supportedSummary) supportedSummary.textContent = `Control your workspaces from ${supportedText}.`;
   if (automaticCopy) automaticCopy.textContent = `Paste this once into ${supportedText}. It will follow only its own setup.`;
+  const localStdio = supportedNames.length > 0 && Object.values(clients).every(client => client.transport === 'stdio');
+  const manualIntro = document.getElementById('connect-ai-manual-intro');
+  const serverAddress = document.getElementById('connect-ai-server-address');
+  const registration = document.getElementById('connect-ai-registration-details');
+  if (manualIntro) manualIntro.textContent = localStdio
+    ? 'Use the command for your AI app in Terminal setup. No sign-in is needed on this computer.'
+    : 'Paste this address into your AI app’s Streamable HTTP or MCP server setting.';
+  if (serverAddress) serverAddress.hidden = localStdio;
+  if (registration) registration.hidden = localStdio;
   const mcpUrl = String(connectAi.mcp_url || '');
   const guidedPrompt = String(connectAi.guided_prompt || '');
   if (serverUrl) serverUrl.textContent = mcpUrl;
@@ -674,10 +754,9 @@ function renderConnectAi() {
   );
 
   const rows = canSetup ? [
-    ...(clients.codex && clients.codex.transport === 'stdio' ? [
+    ...(clients.codex?.transport === 'stdio' ? [
       commandRow('Codex · Add server', String(clients.codex.add_command || '')),
-    ] : []),
-    ...(clients.codex && clients.codex.transport !== 'stdio' ? [
+    ] : clients.codex ? [
       commandRow('Codex · 1. Configure server', String(clients.codex.config_toml || '')),
       commandRow('Codex · 2. Sign in', String(clients.codex.login_command || '')),
     ] : []),
@@ -839,7 +918,11 @@ async function prepareProviderAccountReapproval(review, item, button) {
   }
 }
 
-function openCapabilitySetup(item) {
+function openCapabilitySetup(item, review) {
+  if (item.resolution === 'personal_library' && review?.workerId) {
+    window.location.assign(`/watch/${encodeURIComponent(review.workerId)}?surface=terminal&library=added`);
+    return;
+  }
   const route = item.route === 'connections' ? 'connections' : 'library';
   window.location.hash = route;
   document.getElementById(`${route}-view`)?.scrollIntoView({ block: 'start' });
@@ -874,7 +957,7 @@ function renderCapabilityReviewBanner() {
     return;
   }
   const title = node('strong', '', `Review ${review.items.length} copied workspace capabilit${review.items.length === 1 ? 'y' : 'ies'}`);
-  const summary = node('span', '', 'Nothing private was copied automatically. Choose each item below before running this workspace.');
+  const summary = node('span', '', 'This worker is paused. Review the items below before you start it.');
   const actions = node('div', 'capability-review-actions');
   for (const item of review.items) {
     const row = node('div', 'capability-review-action');
@@ -887,7 +970,7 @@ function renderCapabilityReviewBanner() {
       button.disabled = true;
     } else {
       button.textContent = `Review ${item.label}`;
-      button.addEventListener('click', () => openCapabilitySetup(item));
+      button.addEventListener('click', () => openCapabilitySetup(item, review));
     }
     row.append(button);
     if (item.resolution !== 'provider_selection') {
@@ -922,6 +1005,7 @@ function renderLibrary() {
   }
   const libraryById = new Map(items.map((libraryItem) => [String(libraryItem.library_id || ''), libraryItem]));
   const review = capabilityReviewRequest();
+  if (review && document.getElementById('approved-library-details')) document.getElementById('approved-library-details').open = true;
   const requiredLibraryIds = new Set(
     (review?.items || [])
       .filter((item) => item.kind === 'library')
@@ -936,6 +1020,7 @@ function renderLibrary() {
     const activatable = manifest.activatable === true && item.activation_status === 'ready';
     const capabilityName = String(manifest.label || manifest.name || item.stable_id || 'Approved capability');
     const card = node('article', 'library-card');
+    card.dataset.libraryId = String(item.library_id || '');
     card.classList.toggle('needs-review', requiredLibraryIds.has(String(item.library_id || '')));
     const head = node('div', 'library-card-head');
     head.append(node('span', 'library-kind', String(manifest.kind || 'Capability')), statusChip(item.status || 'available'));
@@ -950,7 +1035,7 @@ function renderLibrary() {
       node('span', '', (item.supported_profiles || []).join(', ') || 'Compatible workers'),
       node('span', '', `Permissions: ${(item.scopes || []).join(', ') || 'none requested'}`),
     );
-    card.append(meta);
+    const more = node('details', 'library-card-details'); more.append(node('summary', '', 'Details & access'), meta); card.append(more);
     const grant = node('div', 'library-grant');
     const select = node('select');
     select.setAttribute('aria-label', `Workspace for ${capabilityName}`);
@@ -1063,7 +1148,8 @@ function renderLibrary() {
         }, 2200);
       }
     });
-    grant.append(select, button);
+    if (activatable) grant.append(select, button);
+    else grant.append(node('p', 'card-note', 'Not available in this installation. Your saved material is unchanged.'));
     if (
       review
       && requiredLibraryIds.has(String(item.library_id || ''))
@@ -1665,7 +1751,7 @@ function editSchedule(schedule) {
   setValue('recurring-schedule-timezone', schedule.timezone_name || 'UTC');
   const zonePicker = document.getElementById('schedule-timezone-picker'); if (zonePicker) zonePicker.hidden = true;
   const zoneChange = document.getElementById('schedule-timezone-change'); if (zoneChange) zoneChange.setAttribute('aria-expanded', 'false');
-  setValue('recurring-schedule-dst-policy', schedule.dst_policy || 'next_valid_earliest');
+  setValue('recurring-schedule-dst-policy', scheduleDstPolicyState(editorRecurrenceType, schedule.dst_policy).value);
   setValue(
     'recurring-schedule-starts-at',
     zonedDateTimeLocalValue(schedule.starts_at, schedule.timezone_name || 'UTC'),
@@ -1938,6 +2024,7 @@ function renderSchedules() {
       moreActions.append(retireButton);
     }
     more.append(moreSummary, moreActions);
+    attachActionMenu(more, moreSummary, moreActions);
     actions.append(more);
     card.append(head, meta, actions, actionStatus, history);
     return card;
@@ -2300,6 +2387,11 @@ function syncRecurringScheduleFields() {
   const selectedKind = document.getElementById('recurring-schedule-type')?.value || 'daily';
   const customKind = document.getElementById('recurring-schedule-custom-type')?.value || 'interval';
   const kind = selectedKind === 'custom' ? customKind : selectedKind;
+  const dstPolicy = document.getElementById('recurring-schedule-dst-policy');
+  const dstPolicyField = document.getElementById('recurring-schedule-dst-policy-field');
+  const dstState = scheduleDstPolicyState(kind, dstPolicy?.value);
+  if (dstPolicyField) dstPolicyField.hidden = !dstState.applicable;
+  if (dstPolicy) { dstPolicy.disabled = !dstState.applicable; dstPolicy.value = dstState.value; }
   const intervalField = document.getElementById('recurring-schedule-interval-field');
   const dailyField = document.getElementById('recurring-schedule-daily-field');
   const onceField = document.getElementById('recurring-schedule-once-field');
@@ -2597,7 +2689,10 @@ function renderProviderChoices(providers, providerSelect, methodSelect) {
       choice.dataset.provider = option.provider;
       choice.setAttribute('aria-pressed', String(providerSelect.value === option.provider));
       const mark = node('img', 'provider-mark');
-      mark.src = option.provider === 'claude' ? '/static/provider-claude.png' : `/static/provider-${option.provider}.svg`;
+      const markProvider = { codex: 'codex', claude: 'claude', grok: 'grok', xai: 'grok' }[option.provider];
+      if (markProvider) mark.src = `/static/provider-${markProvider}.svg?v=20261024vector1`;
+      mark.dataset.provider = markProvider || '';
+      mark.hidden = !markProvider;
       mark.alt = '';
       mark.width = 28;
       mark.height = 28;
@@ -3117,14 +3212,22 @@ export function renderActivity(events = [], availability = 'ready') {
       'run.completed': 'Work completed',
       'run.failed': 'Work needs attention',
     };
-    const eventLabel = activityLabels[eventType] || eventType.replaceAll('.', ' ').replaceAll('_', ' ');
+    const fallbackLabel = eventType.replaceAll('.', ' ').replaceAll('_', ' ');
+    const eventLabel = activityLabels[eventType] || fallbackLabel.charAt(0).toUpperCase() + fallbackLabel.slice(1);
+    const conversationId = typeof event.conversation_id === 'string' ? event.conversation_id : '';
     const row = node('article', 'activity-row');
     const copy = node('div', 'connection-copy');
     copy.append(
-      node('strong', '', String(event.workspace_name || event.name || event.title || 'Workspace')),
+      node('strong', '', conversationId ? 'Chat' : String(event.workspace_name || event.name || event.title || 'Workspace')),
       node('span', '', `${eventLabel} · ${formatDateTime(event.created_at || event.updated_at || event.last_activity_at)}`),
     );
     row.append(copy);
+    if (conversationId || event.worker_id) {
+      const open = node('a', 'quiet-button', conversationId ? 'Open chat' : 'Open workspace');
+      open.href = conversationId ? `/conversation?id=${encodeURIComponent(conversationId)}`
+        : `/watch/${encodeURIComponent(event.worker_id)}`;
+      row.append(open);
+    }
     return row;
   }));
 }
@@ -3136,6 +3239,13 @@ export async function refreshControlPlane() {
 }
 
 export function initializeControlPlane(dependencies) {
+window.addEventListener('xperfect:approved-library', event => {
+  const details = document.getElementById('approved-library-details'); if (details) details.open = true;
+  const id = String(event.detail?.libraryId || '');
+  const card = [...document.querySelectorAll('[data-library-id]')].find(value => value.dataset.libraryId === id);
+  card?.scrollIntoView({ block: 'center', behavior: 'smooth' }); card?.querySelector('select')?.focus();
+});
+
   api = dependencies;
   window.addEventListener('xperfect:connect-account', (event) => {
     openAccountConnection(event.detail || {}).catch((error) => setProviderStatus(error.message));

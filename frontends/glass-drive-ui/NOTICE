@@ -7,25 +7,32 @@ xPerfect is distributed under the Apache License, Version 2.0.
 Third-party components retain their respective licenses and attribution notices.
 This notice does not change those licenses or imply endorsement by their authors.
 
-The conversation renderer includes markdown-it 15.0.2, Copyright (c) 2014
+The conversation renderer includes markdown-it 15.0.3, Copyright (c) 2014
 Vitaly Puzrin and Alex Kocharin, under the MIT License. Its license is at
 src/glass_drive_ui/static/vendor/markdown-it-LICENSE.
 
-The conversation renderer bundle also contains mdurl 2.1.0 (MIT), entities 8.0.0
-(BSD-2-Clause), and generated @oxc-project/runtime 0.142.0 and Rolldown runtime
+The conversation renderer bundle also contains mdurl 2.1.0 (MIT), entities 8.1.0
+(BSD-2-Clause), and generated @oxc-project/runtime 0.154.0 and Rolldown 1.2.14 runtime
 helpers (MIT). Their licenses are included in the same vendor directory as
 mdurl-LICENSE, entities-LICENSE, oxc-project-runtime-LICENSE, and
 rolldown-LICENSE. The bundled xterm.js 5.5.0 license is in vendor/xterm-5.5.0/LICENSE.
 
 Provider marks identify the corresponding supported services only; no endorsement is implied.
-Official assets retrieved 2026-10-23, unmodified:
-- OpenAI Blossom (provider-codex.svg): https://openai.com/brand/
-  Asset: https://images.ctfassets.net/kftzwdyauwt9/3hUGLn3ypllZ0oa01qOYVq/28e8188e6f11b84c3e876569d492734f/Blossom_Light.svg
-- Claude icon (provider-claude.png): https://claude.ai/
-  Asset: https://assets-proxy.anthropic.com/claude-ai/v2/assets/v1/c129d018a-0ZbJsTbu.png
+Official vector assets retrieved 2026-10-24, with source geometry and colours intact:
+- OpenAI Blossom (provider-codex.svg), the inline header vector published at:
+  Source: https://developers.openai.com/
+  Selector: header svg[viewBox="100 100 411 411"]
+  The monochrome artwork uses currentColor; the UI shows black or white for contrast.
+  Guidelines: https://openai.com/brand/
+- Claude Spark (provider-claude.svg), from the official Anthropic newsroom press kit:
+  Source: https://www.anthropic.com/news
+  Asset: https://www.anthropic.com/press-kit
+  Archive entry: Anthropic media resources/Anthropic logos/Claude logos/3 Claude Spark/SVG/Claude Spark - Clay.svg
   Guidelines: https://www.anthropic.com/legal/trademark-guidelines
-- Grok logomark (provider-grok.svg):
-  https://data.x.ai/logos/SpaceXAI_Grok_Assets.zip
+- Grok logomark (provider-grok.svg and provider-grok-light.svg), the supplied dark
+  and light artwork from the official SpaceXSI brand pack, used without recolouring:
+  Asset: https://data.x.ai/logos/SpaceXAI_Grok_Assets.zip
+  Archive entries: SpaceXAI_Grok_Assets/Grok_Logomark_Dark.svg and Grok_Logomark_Light.svg
   Guidelines: https://x.ai/legal/brand-guidelines
 These marks remain the property of their respective owners; the project's Apache license
 neither grants trademark rights nor replaces their usage terms.

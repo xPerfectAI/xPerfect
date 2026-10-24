@@ -35,6 +35,7 @@ export function configureLibraryFixture(data, workspaces, dependencies) {
   controlPlane = data; workspaceCatalog = {items: workspaces}; api = dependencies;
 }
 export function renderLibraryFixture() { renderLibrary(); }
+export function renderCapabilityReviewFixture() { renderCapabilityReviewBanner(); }
 export function renderProvidersFixture() { renderProviderOptionControls(); }
 export const submitLibraryFixture = submitLibraryRequest;
 export const announceFixture = announceConnectedAccount;
@@ -238,4 +239,17 @@ await ui.openAccountConnection({profile:'direct-anthropic',authMethods:['api_key
 assert.equal(provider.value,'claude');assert.equal(method.value,'api_key');assert.equal(key.required,true);assert.notEqual(nativeClaude.focused,true);
 ui.announceFixture({account_id:'subscription',profile:'claude-code'});assert.equal(events.length,0);assert.equal(views.at(-1),'connections');
 ui.announceFixture({account_id:'key',profile:'claude-code'});assert.equal(events.at(-1).detail.profile,'direct-anthropic');assert.equal(views.at(-1),'project');
+''')
+
+
+def test_personal_library_template_review_opens_exact_worker_added_here():
+    run(r'''
+put('capability-review-banner');
+ui.configureFixture({dependencies});
+ui.persistCapabilityReview({workerId:'worker-new',count:1,items:[{action_id:'review-1',kind:'personal_library',reference:'version-1',resolution:'personal_library',label:'Status report skill',route:'library'}]});
+ui.renderCapabilityReviewFixture();
+const visit=node=>[node,...(node.children||[]).flatMap(visit)];
+const button=visit(elements.get('capability-review-banner')).find(node=>node.textContent==='Review Status report skill');
+assert.ok(button);button.handlers.click();
+assert.equal(window.destination,'/watch/worker-new?surface=terminal&library=added');
 ''')

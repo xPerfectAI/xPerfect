@@ -10515,8 +10515,8 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
             "/root/private.txt",
             "/Volumes/Private/private.txt",
             "/private/var/synthetic/private.txt",
-            "ghp_" + "syntheticgithubcredential",
-            "xoxb-" + "synthetic-slack-credential",
+            "ghp_syntheticgithubcredential",
+            "xoxb-synthetic-slack-credential",
             "eyJhbGciOiJIUzI1NiJ9.c3ludGhldGlj.c2lnbmF0dXJl",
             private_key,
         ]
@@ -10538,9 +10538,9 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
 
 
 @pytest.mark.parametrize("destination", [
-    "</U" + "sers/example/Project Folder/private-report.md>",
+    "</Users/synthetic/Project Folder/private-report.md>",
     "/home/synthetic/private-report.md",
-    "<file:///U" + "sers/example/Project Folder/private-report.md>",
+    "<file:///Users/synthetic/Project Folder/private-report.md>",
     "/Volumes/Private/private-report.md",
     "~/private-report.md",
     "/root/reports/private-report(2).md",
@@ -10561,8 +10561,7 @@ def test_redact_text_keeps_private_image_label_and_redacts_secret_labels():
 def test_redact_text_fails_closed_for_an_unterminated_private_key():
     private_key_body = "A" * 120
     redacted = _redact_text(
-        "Safe prefix.\n-----BEGIN "
-        "PRIVATE KEY-----\n"
+        "Safe prefix.\n-----BEGIN PRIVATE KEY-----\n"
         f"{private_key_body}\n"
         "untrusted trailing text"
     )
@@ -13215,3 +13214,28 @@ def test_host_typed_stop_skips_completion_preview_redaction(
     assert evidence["transcript"]["stdout_tail"] == (
         "[Oversized stopped-generation preview omitted; exact transcript retained]"
     )
+
+
+@pytest.mark.parametrize("runtime_type", [HostClaudeCodeRuntime, CodexCliRuntime])
+@pytest.mark.parametrize("has_output", [False, True])
+def test_settling_native_run_shows_saved_root_output_without_starting_compute(tmp_path, runtime_type, has_output):
+    runtime = runtime_type(base_dir=str(tmp_path))
+    worker = {"worker_id":"wrk_finishing", "name":"Worker", "profile":runtime.runtime_name}
+    runtime._ensure_dirs(worker["worker_id"])
+    run = {"run_id":"run_finishing", "active_attempt_id":"attempt-current", "state":"settling"}
+    log_root = (runtime._run_root(worker["worker_id"], run["run_id"]) if isinstance(runtime, HostClaudeCodeRuntime)
+                else runtime._attempt_run_root(worker["worker_id"], run["run_id"], run["active_attempt_id"]))
+    log_root.mkdir(parents=True, exist_ok=True)
+    if has_output: (log_root / "stdout.log").write_text("Root answer; another native child is still finishing.\n")
+    def no_start(*_args, **_kwargs): raise AssertionError("A saved view must not start native compute")
+    runtime.ensure_worker_ready = no_start
+    runtime.sandbox.ensure_ready = no_start
+    target = runtime.run_terminal_target(worker, run)
+    assert target is not None
+    assert target.subtitle == "Run run_finishing settling"
+    assert target.close_code == 4410
+    assert target.close_reason == ("Run output shown" if has_output else "No saved output")
+    output = _run_output(target)
+    if has_output: assert "another native child is still finishing" in output
+    else: assert "settling" in output and "No terminal output was kept" in output
+    assert run["state"] == "settling"

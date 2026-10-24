@@ -12,9 +12,19 @@ from test_account_api import (
 )
 
 
+@pytest.fixture(autouse=True)
+def manual_transport_owner(monkeypatch):
+    # These recovery-CAS tests dispatch explicitly. Periodic startup/replay must
+    # not race the synthetic retained rows or use a real callback receiver.
+    from workers_projects_runtime.service import WorkersProjectsService
+    monkeypatch.setattr(WorkersProjectsService, "start_background_consumers", lambda self: None)
+
+
 def retained_result(client):
     service = client.app.state.service
     service.executor.submit = lambda *args, **kwargs: None
+    submit_transport = service._submit_callback_delivery
+    service._submit_callback_delivery = lambda *args, **kwargs: False
     payload = delegation_payload_with_origin()
     payload["bootstrapBundle"]["callbacks"]["hmac_secret"] = "synthetic-secret"
     accepted = client.post("/v1/delegations", headers=account_headers(
@@ -37,6 +47,7 @@ def retained_result(client):
             "workerId": work["worker_id"], "runId": run["run_id"],
             "callbackId": callback["callback_id"], "resultRevision": callback["result_revision"],
             "resultDigest": callback["result_digest"]}
+    service._submit_callback_delivery = submit_transport
     return store, service, body, callback
 
 
@@ -49,7 +60,7 @@ def row(store, body):
 def test_recovery_preserves_history_and_one_owned_delivery_lease(account_client):
     store, service, body, original = retained_result(account_client)
     tasks = []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     first = account_client.post("/v1/callback-associations/recover", headers=account_headers(), json=body)
     assert first.status_code == 202, first.text
     assert first.json() == {"state": "delivering"}
@@ -93,7 +104,7 @@ def test_recovery_failure_keeps_attempts_and_cooldown_then_uses_original_signer(
     store, service, body, original = retained_result(account_client)
     tasks = []
     requests = []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     def post(url, *, content, headers, timeout):
         requests.append((content, headers))
         return httpx.Response(500, request=httpx.Request("POST", url))
@@ -121,7 +132,7 @@ def test_recovered_result_acceptance_is_exact_and_does_not_send_twice(account_cl
     store, service, body, original = retained_result(account_client)
     tasks = []
     received = []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     def post(url, *, content, headers, timeout):
         payload = json.loads(content)
         received.append(payload)
@@ -150,7 +161,7 @@ def test_publisher_retry_signs_immutable_creation_clock_and_refreshes_send_clock
 ):
     store, service, body, original = retained_result(account_client)
     tasks, received = [], []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     assert account_client.post("/v1/callback-associations/recover",
         headers=account_headers(), json=body).status_code == 202
     args, kwargs = tasks.pop()
@@ -174,7 +185,9 @@ def test_publisher_retry_signs_immutable_creation_clock_and_refreshes_send_clock
         })
 
     monkeypatch.setattr("workers_projects_runtime.service.httpx.post", post)
-    args[0](*args[1:], **{**kwargs, "delivery_attempts": 2})
+    service._deliver_claimed_callback_record(args[1], args[2], args[3], delivery_attempts=2)
+    from workers_projects_runtime import schedule_targets
+    schedule_targets.release_transport(service, args[4])
     assert len(received) == 2
     assert [item[0]["callback_ts"] for item in received] == [1_900_000_001, 1_900_000_008]
     assert {item[0]["callback_created_at"] for item in received} == {original["created_at"]}
@@ -198,7 +211,7 @@ def test_publisher_legacy_record_does_not_invent_creation_clock(
 ):
     store, service, body, original = retained_result(account_client)
     tasks, received = [], []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     assert account_client.post("/v1/callback-associations/recover",
         headers=account_headers(), json=body).status_code == 202
     args, kwargs = tasks.pop()
@@ -220,7 +233,7 @@ def test_publisher_legacy_record_does_not_invent_creation_clock(
         })
 
     monkeypatch.setattr("workers_projects_runtime.service.httpx.post", post)
-    args[0](args[1], claimed, args[3], **kwargs)
+    args[0](args[1], claimed, args[3], args[4], **kwargs)
     assert len(received) == 1
     assert "callback_created_at" not in received[0]
     assert received[0]["callback_ts"] > 0
@@ -231,7 +244,7 @@ def test_publisher_legacy_record_does_not_invent_creation_clock(
 def test_recovery_failure_cannot_overwrite_a_new_delivery_lease(account_client, monkeypatch):
     store, service, body, _ = retained_result(account_client)
     tasks = []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     assert account_client.post("/v1/callback-associations/recover", headers=account_headers(), json=body).status_code == 202
     def post(url, *, content, headers, timeout):
         with store._connect() as conn:
@@ -248,6 +261,8 @@ def test_recovery_failure_cannot_overwrite_a_new_delivery_lease(account_client, 
 def retained_stop(client):
     service = client.app.state.service
     service.executor.submit = lambda *args, **kwargs: None
+    submit_transport = service._submit_callback_delivery
+    service._submit_callback_delivery = lambda *args, **kwargs: False
     accepted = client.post("/v1/delegations", headers=account_headers(
         idempotency_key="retained-work-stop"), json=delegation_payload_with_origin())
     assert accepted.status_code == 202, accepted.text
@@ -272,13 +287,14 @@ def retained_stop(client):
     body = {"originRef": work["origin_ref"], "workRef": work["work_ref"],
             "workerId": work["worker_id"], "runId": work["current_run_id"],
             **{key: trace[key] for key in ("callbackRef", "payloadSha256", "authoritySha256")}}
+    service._submit_callback_delivery = submit_transport
     return store, service, body, original
 
 
 def test_retained_stop_recovers_original_callback_once_through_original_signer(account_client, monkeypatch):
     store, service, body, original = retained_stop(account_client)
     tasks, received = [], []
-    service.executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
+    service.schedule_transport_executor.submit = lambda *args, **kwargs: tasks.append((args, kwargs))
     def post(url, *, content, headers, timeout):
         received.append((json.loads(content), headers))
         return httpx.Response(202, request=httpx.Request("POST", url), json={"status": "http_accepted"})
@@ -522,3 +538,23 @@ def test_exact_host_worker_termination_preserves_target_after_legacy_split(accou
         for child in [process, unrelated]:
             if child.poll() is None: child.terminate()
             child.wait(timeout=3)
+
+
+def test_capacity_pressure_is_retryable_and_does_not_claim_or_rewrite_retained_result(account_client):
+    store, service, body, original = retained_result(account_client)
+    with service._schedule_transport_lock:
+        service._schedule_transport_active.update({
+            ("tenant-a", "owner-a", "synthetic-recipient", "active-1"),
+            ("tenant-a", "owner-a", "synthetic-recipient", "active-2"),
+        })
+    try:
+        response = account_client.post("/v1/callback-associations/recover", headers=account_headers(), json=body)
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "1"
+        assert response.json()["detail"]["code"] == "callback_transport_busy"
+        assert row(store, body)["status"] == "dead_lettered"
+        assert row(store, body)["payload_json"] == original["payload_json"]
+        assert row(store, body)["attempts"] == 27
+    finally:
+        with service._schedule_transport_lock:
+            service._schedule_transport_active.clear()

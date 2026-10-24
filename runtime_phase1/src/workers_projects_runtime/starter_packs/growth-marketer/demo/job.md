@@ -1,0 +1,5 @@
+Plan a90-day launch using the supplied synthetic brand brief and channel evidence. Produce a coherent campaign brief, an editable landing-page draft, a short email sequence and measurement/budget workbook or CSV. Explain the tradeoffs, mark assumptions, and check every product claim against the approved list. Nothing may be published or sent.
+
+Use company-onboarding.md and the supplied plan/data. The example is synthetic. Use the native practical-method Skill when appropriate; inspect its actual output and independently verify representative values. Produce a polished evidence-first report plus editable analysis files, not just a chat answer. Include what remains uncertain and what an expert reviewer needs to decide. Do not publish, send, spend, submit or change source data.
+
+After the first delivery, use the same Worker for a follow-up: explain the impact of a corrected input or changed approved assumption. For the unhappy path, repeat on bad-input.csv, preserve inputs and explain why analysis cannot safely complete; never relabel that as success.

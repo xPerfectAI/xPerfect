@@ -4,11 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>xPerfect</title>
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <script src="/static/theme.js?v=20261024journeys18"></script>
-    <link rel="stylesheet" href="/static/theme.css?v=20261024journeys18" />
-    <link rel="stylesheet" href="/static/styles.css?v=20261024journeys18" />
-  </head>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261024polish1" />
+    <script src="/static/theme.js?v=20261024polish1"></script>
+    <link rel="stylesheet" href="/static/theme.css?v=20261024polish1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261024polish1" />
+      <link rel="stylesheet" href="/static/personal-library.css?v=20261024polish1">
+      <link rel="stylesheet" href="/static/expert-picker.css?v=20261024polish1">
+</head>
   <body class="launch-body">
     <main class="launch-shell">
       <section class="composer-frame app-frame" data-active-view="project">
@@ -46,11 +48,11 @@
         </div>
         <aside id="capability-review-banner" class="capability-review-banner" aria-live="polite" hidden></aside>
         <section id="project-view" class="project-view" aria-labelledby="project-tab">
-          <div class="composer-copy">
-            <h1>What's the Job?</h1>
-            <p>Explain the work/project for this specialized AI Worker.</p>
-          </div>
           <form id="launch-form" class="composer-form">
+            <div class="composer-copy">
+              <h1>What's the Job?</h1>
+              <p>Explain the work/project for this specialized AI Worker.</p>
+            </div>
             <label class="project-field project-field-main">
               <span class="sr-only">What's the Job?</span>
               <textarea id="description" name="description" rows="4" placeholder="Tell me what you want to get done…" required></textarea>
@@ -73,9 +75,11 @@
                 <div class="file-choose-actions">
                   <button class="file-choose" id="project-add-files" type="button">Add files</button>
                   <button class="file-choose file-clear-all" id="project-clear-all-files" type="button" hidden>Clear all files</button>
-                  <details class="file-row-menu">
+                  <details class="file-row-menu" id="project-file-options">
                     <summary aria-label="More file options">⋯</summary>
-                    <button id="project-add-folder" type="button">Add folder</button>
+                    <div class="file-row-menu-items">
+                      <button id="project-add-folder" type="button">Add folder</button>
+                    </div>
                   </details>
                 </div>
               </div>
@@ -91,6 +95,7 @@
                 <button id="project-file-export" class="file-choose" type="button">Download ZIP</button>
                 <button id="project-file-clear" class="file-choose" type="button">Clear selection</button>
               </div>
+              <div class="personal-library-selection"><button id="project-choose-library" type="button" class="secondary-button" hidden>Add knowledge &amp; abilities</button><ul id="project-library-selection" aria-label="Selected Library items"></ul></div>
               <ul id="project-file-list" class="project-file-list" aria-label="Selected files"></ul>
               <p id="project-file-status" class="file-status" role="status" aria-live="polite" hidden></p>
               <p id="project-file-budget" class="file-budget" role="status"></p>
@@ -108,7 +113,7 @@
               </dialog>
             </section>
             <section class="project-details worker-onboarding" aria-labelledby="worker-choice-title">
-              <div class="section-heading"><h2 id="worker-choice-title">Who's Doing The Job?</h2>
+              <div class="section-heading"><h2 id="worker-choice-title" tabindex="-1">Who's Doing The Job?</h2>
                 <fieldset class="choice-toggle"><legend class="sr-only">Select the AI Worker</legend>
                   <label><input type="radio" name="worker-choice-radio" value="new" checked><span>New</span></label>
                   <label><input type="radio" name="worker-choice-radio" value="existing"><span>Existing</span></label>
@@ -118,7 +123,7 @@
               <select id="workspace-option" name="workspace_option" aria-label="Worker launch selection" hidden></select>
               <div id="new-worker-fields" class="project-details-grid">
                 <label class="project-field"><span>Name <small>(optional)</small></span><input id="worker-name" type="text" maxlength="120" placeholder="For example: Research partner"><small class="field-help">Name it to keep this worker for reuse.</small></label>
-                <label class="project-field"><span>Worker type</span><select id="worker-type"></select></label>
+                <label class="project-field"><span>Worker type</span><select id="worker-type" disabled><option value="">Loading worker types…</option></select></label>
                 <div id="worker-account-field" class="project-field">
                   <label for="provider-account-selection">Account</label>
                   <select id="provider-account-selection" name="provider_account_id"><option value="">Checking account options…</option></select>
@@ -214,6 +219,9 @@
                   <span>Claude Effort</span>
                   <select id="claude-effort" name="claude_effort">
                     <option value="">Deployment default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
                     <option value="max">Max</option>
                     <option value="xhigh">X-High</option>
                   </select>
@@ -286,12 +294,12 @@
             </div>
           </div>
           <details id="workspace-template-panel" class="workspace-template-panel">
-            <summary>Start from template</summary>
+            <summary>Start from an expert</summary>
             <form id="workspace-template-start-form" class="workspace-template-form">
               <label>
-                <span>Template</span>
+                <span>Expert</span>
                 <select id="workspace-template-select">
-                  <option value="">No saved templates yet</option>
+                  <option value="">No saved experts yet</option>
                 </select>
               </label>
               <label>
@@ -299,7 +307,7 @@
                 <input id="workspace-template-instance-name" type="text" maxlength="160" placeholder="Fresh research desk" />
               </label>
               <div>
-                <p id="workspace-template-meta" class="card-note">Templates create a fresh paused workspace. Connected capabilities require fresh approval.</p>
+                <p id="workspace-template-meta" class="card-note">Starts a new worker with this expert’s saved setup. Any new access still needs your review.</p>
                 <p id="workspace-template-start-status" class="inline-status" aria-live="polite"></p>
               </div>
               <button id="workspace-template-start" class="primary-button compact-button" type="submit">Start workspace</button>
@@ -454,8 +462,8 @@
                 </section>
                 <section id="connect-ai-manual-panel" class="connect-ai-panel" aria-labelledby="connect-ai-manual-tab" hidden>
                   <h3>Add the server yourself</h3>
-                  <p>Paste this address into your AI app’s Streamable HTTP or MCP server setting.</p>
-                  <div class="command-row">
+                  <p id="connect-ai-manual-intro">Paste this address into your AI app’s Streamable HTTP or MCP server setting.</p>
+                  <div class="command-row" id="connect-ai-server-address">
                     <div class="command-copy"><strong>xPerfect server</strong><code id="connect-ai-server-url"></code></div>
                     <button id="copy-connect-ai-url" class="quiet-button" type="button">Copy server address</button>
                   </div>
@@ -478,15 +486,17 @@
         <section id="library-view" class="control-plane-view" aria-labelledby="library-tab" hidden>
           <header class="control-plane-head">
             <div>
-              <span class="section-kicker">Reusable capabilities</span>
+              <span class="section-kicker">Knowledge &amp; abilities</span>
               <h1>Library</h1>
-              <p>Discover approved skills, tools, and connectors, then grant them to the workspace that needs them.</p>
+              <p>Give your workers the knowledge, tools and skills they need.</p>
             </div>
           </header>
-          <section class="control-card library-request-card" aria-labelledby="library-request-title">
-            <span class="section-kicker">Use the worker’s native setup</span>
-            <h2 id="library-request-title">Add a skill, tool, plugin, or connector</h2>
-            <p>Tell a saved workspace what you want to add. Its Claude, Codex, or other worker will inspect the source and use the supported native setup flow. Interactive sign-in or new permissions stay visible to you.</p>
+          <div id="personal-library-main"></div>
+          <details class="control-card library-native-details"><summary>Connect another tool or skill</summary>
+          <section class="library-request-card" aria-labelledby="library-request-title">
+            <span class="section-kicker">Connect your tools</span>
+            <h2 id="library-request-title">What else should your worker be able to do?</h2>
+            <p>Choose a worker and tell it which tool or skill to add. It will guide you through any setup.</p>
             <form id="library-request-form" class="library-request-form">
               <label>
                 Workspace
@@ -496,7 +506,7 @@
                 What should xPerfect add?
                 <textarea id="library-request-text" rows="3" maxlength="10000" placeholder="Add the skill from https://… and verify it works in this workspace." required></textarea>
               </label>
-              <p class="card-note">This sends a workspace-only request to the worker you chose. It does not install anything globally or approve new access.</p>
+              <p class="card-note">Only this worker is changed. You stay in control of new access.</p>
               <div class="library-request-actions">
                 <button class="primary-button compact-button" type="submit">Ask this workspace</button>
                 <button id="library-start-job" type="button" class="secondary-button" hidden>Start a job</button>
@@ -504,8 +514,11 @@
               </div>
             </form>
           </section>
+          </details>
+          <details id="approved-library-details" class="control-card"><summary>Reviewed tools and access</summary>
           <div id="library-list" class="library-grid" aria-live="polite"></div>
           <p id="library-empty" class="workspace-hive-empty" hidden>No approved capabilities are available yet.</p>
+          </details>
         </section>
         <section id="schedules-view" class="control-plane-view" aria-labelledby="schedules-tab" hidden>
           <header class="control-plane-head">
@@ -543,15 +556,17 @@
                   <textarea id="recurring-schedule-message" rows="3" placeholder="For example, remind me to review the weekly update." aria-describedby="schedule-message-note"></textarea><small id="schedule-message-note" class="field-help" hidden></small>
                   <details id="schedule-request-advanced" class="schedule-advanced">
                     <summary>Extra app details</summary>
-                    <p class="schedule-help">Only add these if your app needs them.</p>
-                    <div id="schedule-data-fields" class="schedule-data-fields"></div>
-                    <p id="schedule-data-complex" class="schedule-help" hidden>This app has custom data. It stays unchanged unless you edit it below.</p>
-                    <button id="schedule-data-add" type="button" class="quiet-button">Add a detail</button>
-                    <details id="schedule-data-json" class="schedule-json-details"><summary>Edit as JSON</summary>
-                      <label for="recurring-schedule-request-data">App request data</label>
-                      <textarea id="recurring-schedule-request-data" rows="5" spellcheck="false">{}</textarea>
-                    </details>
-                    <p id="schedule-data-status" class="inline-status" aria-live="polite"></p>
+                    <div class="schedule-advanced-body">
+                      <p class="schedule-help">Only add these if your app needs them.</p>
+                      <div id="schedule-data-fields" class="schedule-data-fields"></div>
+                      <p id="schedule-data-complex" class="schedule-help" hidden>This app has custom data. It stays unchanged unless you edit it below.</p>
+                      <button id="schedule-data-add" type="button" class="quiet-button">Add a detail</button>
+                      <details id="schedule-data-json" class="schedule-json-details"><summary>Edit as JSON</summary>
+                        <label for="recurring-schedule-request-data">App request data</label>
+                        <textarea id="recurring-schedule-request-data" rows="5" spellcheck="false">{}</textarea>
+                      </details>
+                      <p id="schedule-data-status" class="inline-status" aria-live="polite"></p>
+                    </div>
                   </details>
                 </div>
                 <label id="recurring-schedule-workspace-field">
@@ -646,47 +661,49 @@
                 </div>
                 <details id="recurring-schedule-advanced" class="schedule-advanced">
                   <summary>Advanced options</summary>
-                  <label>
-                    <span>When the clock repeats an hour</span>
-                    <select id="recurring-schedule-dst-policy">
-                      <option value="next_valid_earliest">Use the first matching time</option>
-                      <option value="next_valid_latest">Use the second matching time</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>End after (optional)</span>
-                    <input id="recurring-schedule-ends-at" type="datetime-local" />
-                  </label>
-                  <label class="schedule-checkbox-label">
-                    <input id="recurring-schedule-enabled" type="checkbox" checked />
-                    <span>Enabled immediately</span>
-                  </label>
-                  <label>
-                    <span>If the prior occurrence is still running</span>
-                    <select id="recurring-schedule-overlap-policy">
-                      <option value="skip">Skip the overlapping occurrence</option>
-                      <option value="queue">Queue one behind it</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Late-run grace (minutes)</span>
-                    <input id="recurring-schedule-misfire-grace" type="number" min="0" max="10080" value="5" inputmode="numeric" />
-                  </label>
-                  <label>
-                    <span>After downtime</span>
-                    <select id="recurring-schedule-catch-up-policy">
-                      <option value="skip">Skip missed occurrences</option>
-                      <option value="bounded">Catch up a limited number</option>
-                    </select>
-                  </label>
-                  <label id="recurring-schedule-catch-up-limit-field" hidden>
-                    <span>Maximum catch-up occurrences</span>
-                    <input id="recurring-schedule-catch-up-limit" type="number" min="1" max="10" value="1" inputmode="numeric" />
-                  </label>
-                  <label>
-                    <span>Dispatch jitter (seconds)</span>
-                    <input id="recurring-schedule-jitter" type="number" min="0" max="900" value="0" inputmode="numeric" />
-                  </label>
+                  <div class="schedule-advanced-body">
+                    <label id="recurring-schedule-dst-policy-field" hidden>
+                      <span>When the clock repeats an hour</span>
+                      <select id="recurring-schedule-dst-policy">
+                        <option value="next_valid_earliest">Use the first matching time</option>
+                        <option value="next_valid_latest">Use the second matching time</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>End after (optional)</span>
+                      <input id="recurring-schedule-ends-at" type="datetime-local" />
+                    </label>
+                    <label class="schedule-checkbox-label">
+                      <input id="recurring-schedule-enabled" type="checkbox" checked />
+                      <span>Enabled immediately</span>
+                    </label>
+                    <label>
+                      <span>If the prior occurrence is still running</span>
+                      <select id="recurring-schedule-overlap-policy">
+                        <option value="skip">Skip the overlapping occurrence</option>
+                        <option value="queue">Queue one behind it</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Late-run grace (minutes)</span>
+                      <input id="recurring-schedule-misfire-grace" type="number" min="0" max="10080" value="5" inputmode="numeric" />
+                    </label>
+                    <label>
+                      <span>After downtime</span>
+                      <select id="recurring-schedule-catch-up-policy">
+                        <option value="skip">Skip missed occurrences</option>
+                        <option value="bounded">Catch up a limited number</option>
+                      </select>
+                    </label>
+                    <label id="recurring-schedule-catch-up-limit-field" hidden>
+                      <span>Maximum catch-up occurrences</span>
+                      <input id="recurring-schedule-catch-up-limit" type="number" min="1" max="10" value="1" inputmode="numeric" />
+                    </label>
+                    <label>
+                      <span>Dispatch jitter (seconds)</span>
+                      <input id="recurring-schedule-jitter" type="number" min="0" max="900" value="0" inputmode="numeric" />
+                    </label>
+                  </div>
                 </details>
                 <p id="schedule-preview" class="schedule-preview" aria-live="polite"></p>
                 <div class="schedule-form-footer">
@@ -718,7 +735,7 @@
             <div>
               <span class="section-kicker">Across your workspaces</span>
               <h1>Activity</h1>
-              <p>Recently active workspaces and their latest state, in one place.</p>
+              <p>Recent events across your workspaces, newest first.</p>
             </div>
           </header>
           <div id="activity-list" class="activity-list" aria-live="polite"></div>
@@ -729,17 +746,21 @@
       <div class="schedule-connection-content">
         <header class="schedule-dialog-head"><div><h2 id="webhook-destination-title">Connect an app</h2><p>Set it up once. Choose it in any schedule.</p></div><button id="webhook-destination-close" class="schedule-icon-button" type="button" aria-label="Close connection setup">×</button></header>
         <form id="webhook-destination-form" class="schedule-connection-form">
-          <label for="webhook-destination-name">App name</label><input id="webhook-destination-name" maxlength="120" autocomplete="off" placeholder="For example, My assistant" />
-          <div id="webhook-destination-url-field"><label for="webhook-destination-url">App address</label><input id="webhook-destination-url" type="text" inputmode="url" autocomplete="off" placeholder="https://your-app.com/hooks/schedules" /><p class="schedule-help">Use the receiving address from your app.</p></div>
-          <p id="webhook-destination-existing-note" class="schedule-help" hidden>The saved address and credentials stay private. Connect a new app to use a different address.</p>
-          <details id="webhook-destination-advanced" class="schedule-advanced"><summary>Advanced connection settings</summary>
-            <label for="webhook-destination-secret">Signing key <span class="schedule-optional">Generated if empty</span></label><input id="webhook-destination-secret" type="password" autocomplete="new-password" />
-            <label for="webhook-destination-headers">Authentication headers <span class="schedule-optional">Optional JSON</span></label><textarea id="webhook-destination-headers" rows="3" spellcheck="false" placeholder='{"Authorization":"Bearer …"}'></textarea>
-            <label for="webhook-destination-mode">Send format</label><select id="webhook-destination-mode"><option value="envelope">Schedule event with app details</option><option value="raw">App details only</option></select>
-            <div class="schedule-dialog-tools"><button id="webhook-destination-rotate" type="button" class="quiet-button">Update signing key</button><button id="webhook-destination-toggle" type="button" class="quiet-button">Disable connection</button></div>
-          </details>
-          <div id="webhook-destination-secret-panel" class="schedule-secret-panel" hidden><strong>One last step</strong><p>Copy this signing key into your app. It disappears when you close this window.</p><pre id="webhook-destination-secret-once" hidden></pre><button id="webhook-destination-copy-key" type="button" class="quiet-button">Copy key</button></div>
-          <p id="webhook-destination-status" class="inline-status" aria-live="polite"></p>
+          <div class="schedule-connection-fields">
+            <label for="webhook-destination-name">App name</label><input id="webhook-destination-name" maxlength="120" autocomplete="off" placeholder="For example, My assistant" />
+            <div id="webhook-destination-url-field"><label for="webhook-destination-url">App address</label><input id="webhook-destination-url" type="text" inputmode="url" autocomplete="off" placeholder="https://your-app.com/hooks/schedules" /><p class="schedule-help">Use the receiving address from your app.</p></div>
+            <p id="webhook-destination-existing-note" class="schedule-help" hidden>The saved address and credentials stay private. Connect a new app to use a different address.</p>
+            <details id="webhook-destination-advanced" class="schedule-advanced"><summary>Advanced connection settings</summary>
+              <div class="schedule-advanced-body">
+                <div class="schedule-advanced-field"><label for="webhook-destination-secret">Signing key <span class="schedule-optional">Generated if empty</span></label><input id="webhook-destination-secret" type="password" autocomplete="new-password" /></div>
+                <div class="schedule-advanced-field"><label for="webhook-destination-headers">Authentication headers <span class="schedule-optional">Optional JSON</span></label><textarea id="webhook-destination-headers" rows="3" spellcheck="false" placeholder='{"Authorization":"Bearer …"}'></textarea></div>
+                <div class="schedule-advanced-field"><label for="webhook-destination-mode">Send format</label><select id="webhook-destination-mode"><option value="envelope">Schedule event with app details</option><option value="raw">App details only</option></select></div>
+                <div class="schedule-dialog-tools"><button id="webhook-destination-rotate" type="button" class="quiet-button">Update signing key</button><button id="webhook-destination-toggle" type="button" class="quiet-button">Disable connection</button></div>
+              </div>
+            </details>
+            <div id="webhook-destination-secret-panel" class="schedule-secret-panel" hidden><strong>One last step</strong><p>Copy this signing key into your app. It disappears when you close this window.</p><pre id="webhook-destination-secret-once" hidden></pre><button id="webhook-destination-copy-key" type="button" class="quiet-button">Copy key</button></div>
+            <p id="webhook-destination-status" class="inline-status" aria-live="polite"></p>
+          </div>
           <footer class="schedule-dialog-footer"><button id="webhook-destination-done" type="button" class="quiet-button">Cancel</button><button id="webhook-destination-save" type="submit" class="primary-button compact-button">Connect app</button></footer>
         </form>
       </div>
@@ -770,11 +791,11 @@
       <form id="save-template-form" class="workspace-dialog-form">
         <div>
           <span class="section-kicker">Reusable workspace</span>
-          <h2 id="save-template-title">Save as template</h2>
-          <p>Saves how this worker is set up. New workers check account access and tool permissions. Files, sign-ins, schedules and chat history stay with the original worker.</p>
+          <h2 id="save-template-title">Save as expert</h2>
+          <p>Saves this setup and its selected Library versions. Other workspace files, sign-ins, schedules and chat history stay here. New workers check account access and tool permissions.</p>
         </div>
         <label>
-          <span>Template name</span>
+          <span>Expert name</span>
           <input id="save-template-name" type="text" maxlength="160" autocomplete="off" required />
         </label>
         <label>
@@ -784,10 +805,10 @@
         <p id="save-template-status" class="inline-status" aria-live="polite"></p>
         <div class="workspace-dialog-actions">
           <button id="cancel-save-template" class="quiet-button" type="button">Cancel</button>
-          <button class="primary-button compact-button" type="submit">Save template</button>
+          <button class="primary-button compact-button" type="submit">Save expert</button>
         </div>
       </form>
     </dialog>
-    <script src="/static/app.js?v=20261024journeys18" type="module"></script>
+    <script src="/static/app.js?v=20261024polish1" type="module"></script>
   </body>
 </html>

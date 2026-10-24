@@ -1,0 +1,20 @@
+{
+  "documents": [
+    {
+      "path": "protocol.md",
+      "version": "2",
+      "review_status": "approved",
+      "sections": [
+        "Design"
+      ]
+    },
+    {
+      "path": "assay-report.md",
+      "version": "1",
+      "review_status": "draft",
+      "sections": [
+        "Results"
+      ]
+    }
+  ]
+}

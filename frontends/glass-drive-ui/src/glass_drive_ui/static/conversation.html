@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Chat · xPerfect</title>
-<script src="/static/theme.js?v=20261024journeys18"></script>
-<link rel="icon" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/theme.css?v=20261024journeys18">
-<link rel="stylesheet" href="/static/conversation.css?v=20261024journeys18">
+<script src="/static/theme.js?v=20261024polish1"></script>
+<link rel="icon" href="/static/favicon.svg?v=20261024polish1">
+<link rel="stylesheet" href="/static/theme.css?v=20261024polish1">
+<link rel="stylesheet" href="/static/conversation.css?v=20261024polish1">
+<link rel="stylesheet" href="/static/personal-library.css?v=20261024polish1">
 </head>
 <body class="conversation-body">
 <div class="app-shell">
@@ -43,22 +44,23 @@
             </div>
           </details>
 </header>
-<div class="chat-toolbar"><button id="new-conversation" type="button">New chat</button></div>
 <main class="conversation-layout">
 <section class="conversation" aria-label="Chat">
-<div id="empty"><h1>What would you like to do?</h1></div>
+<div class="chat-heading"><div id="empty"><h1>What would you like to do?</h1></div><button id="new-conversation" type="button">New chat</button></div>
+<div class="chat-options">
 <label id="conversation-project-field" class="project-choice" for="conversation-project"><span>Use a project <small>(optional)</small></span><select id="conversation-project"><option value="">New project</option></select></label>
 <label id="conversation-assistant-field" class="project-choice" for="conversation-assistant"><span>Assistant</span><select id="conversation-assistant"><option value="">Loading your connections…</option></select></label>
+</div>
 <a id="conversation-connect" class="connect-assistant" href="/#connections" hidden>Connect an assistant</a>
 <a id="conversation-run-project" class="connect-assistant" href="/" hidden>Run project</a>
 <div id="messages" role="log" aria-label="Messages" aria-live="polite"></div>
 <p id="status" role="status"></p>
-<form id="composer"><label class="sr-only" for="message">Message</label><textarea id="message" rows="3" placeholder="Ask anything, or give me work to do…" required></textarea><div class="composer-actions"><button id="stop-response" type="button" hidden>Stop reply</button><button id="send" type="submit">Send</button></div></form>
+<form id="composer"><div class="personal-library-selection"><button id="chat-choose-library" type="button" class="secondary-button" hidden>Add knowledge &amp; abilities</button><ul id="chat-library-selection" aria-label="Selected Library items"></ul><p id="chat-library-status" class="personal-library-help" hidden></p></div><label class="sr-only" for="message">Message</label><textarea id="message" rows="3" placeholder="Ask anything, or give me work to do…" required></textarea><div class="composer-actions"><button id="stop-response" type="button" hidden>Stop reply</button><button id="send" type="submit">Send</button></div></form>
 </section>
 <aside id="work" aria-label="Your work" hidden><h2>Your work</h2><div id="native-controls"></div><div id="goals"></div></aside>
 </main>
 </div>
 </div>
-<script type="module" src="/static/conversation.js"></script>
+<script type="module" src="/static/conversation.js?v=20261024polish1"></script>
 </body>
 </html>

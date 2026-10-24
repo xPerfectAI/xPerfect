@@ -478,7 +478,7 @@ def next_wake(store,now,*,include_legacy=True):
     with store._connect() as conn:
         row=conn.execute("""SELECT MIN(value) FROM (
           SELECT MIN(next_run_at) AS value FROM recurring_schedule_definitions WHERE scheduler_owner='native' AND active=1 AND next_run_at>? AND (? OR create_key<>'')
-          UNION ALL SELECT MIN(next_attempt_at) FROM callback_outbox WHERE event_type='schedule.due' AND status='pending' AND next_attempt_at>?)""",(now,include_legacy,now)).fetchone()
+          UNION ALL SELECT MIN(next_attempt_at) FROM callback_outbox WHERE status='pending' AND next_attempt_at>?)""",(now,include_legacy,now)).fetchone()
     return row[0] if row else None
 
 
@@ -529,13 +529,36 @@ def finish_callback(store,record,*,state,error="",timings=None,http_status=None,
     return changed==1
 
 
+def reserve_transport(service, key, *, destination_limit=2):
+    """Bound running and queued HTTP work across the existing outbox transports."""
+    with service._schedule_transport_lock:
+        active = service._schedule_transport_active
+        if service._shutdown_event.is_set() or len(active) >= service._schedule_transport_capacity:
+            return False
+        if (any(item[3] == key[3] for item in active)
+                or sum(item[:2] == key[:2] for item in active) >= 2
+                or sum(item[:3] == key[:3] for item in active) >= destination_limit):
+            return False
+        active.add(key)
+        return True
+
+
+def release_transport(service, key):
+    with service._schedule_transport_lock:
+        service._schedule_transport_active.discard(key)
+    service._scheduler_wake_event.set()
+
+
 def deliver(service,record):
     started=time.perf_counter();timings={}
     attempt_started = False
-    timings["executor_queue_ms"] = max(0, (started-record.get("_submitted_monotonic",started))*1000)
-    timings["clock_lateness_ms"] = max(0, (parsed(record["created_at"])-parsed(json.loads(record["payload_json"])["scheduled_at"])).total_seconds()*1000)
-    timings["outbox_wait_ms"] = max(0, (datetime.now(timezone.utc)-parsed(record["created_at"])).total_seconds()*1000)
+    key = (record["tenant_id"], record["owner_id"], record["destination_id"], record["callback_id"])
     try:
+        # Persisted metadata can be corrupt too. Its decoding belongs inside the
+        # same reservation cleanup as the network attempt.
+        timings["executor_queue_ms"] = max(0, (started-record.get("_submitted_monotonic",started))*1000)
+        timings["clock_lateness_ms"] = max(0, (parsed(record["created_at"])-parsed(json.loads(record["payload_json"])["scheduled_at"])).total_seconds()*1000)
+        timings["outbox_wait_ms"] = max(0, (datetime.now(timezone.utc)-parsed(record["created_at"])).total_seconds()*1000)
         reason=fence_callback(service,record)
         if reason:
             finish_callback(service.store,record,state="unacknowledged" if record["attempts"] else "cancelled" if reason=="cancelled" else "rejected",error=reason,attempt_started=False);return
@@ -560,9 +583,7 @@ def deliver(service,record):
         # No exception text: HTTP/private configuration errors can contain URLs or credentials.
         finish_callback(service.store,record,state="unacknowledged",error="delivery_internal_error",retryable=True,timings=timings,attempt_started=attempt_started)
     finally:
-        with service._schedule_transport_lock:
-            service._schedule_transport_active.discard((record["tenant_id"],record["owner_id"],record["destination_id"],record["callback_id"]))
-        service._scheduler_wake_event.set()
+        release_transport(service, key)
 
 
 def dispatch_pending(service):
@@ -572,20 +593,24 @@ def dispatch_pending(service):
     dispatched=[]
     for candidate in due_callback_records(service.store,now):
         key=(candidate["tenant_id"],candidate["owner_id"],candidate["destination_id"],candidate["callback_id"])
-        with service._schedule_transport_lock:
-            active=service._schedule_transport_active
-            if len(active)>=service._schedule_transport_capacity:break
-            if any(k[3]==key[3] for k in active) or sum(k[:2]==key[:2] for k in active)>=2 or sum(k[:3]==key[:3] for k in active)>=2:continue
-            active.add(key)
-        record=service.store.claim_pending_callback(candidate["callback_id"], lease_seconds=20)
-        if not record:
-            with service._schedule_transport_lock:service._schedule_transport_active.discard(key)
+        if not reserve_transport(service, key):
             continue
-        record["_submitted_monotonic"] = time.perf_counter()
-        try:service.schedule_transport_executor.submit(deliver,service,record)
+        submitted = False
+        record = None
+        try:
+            record=service.store.claim_pending_callback(candidate["callback_id"], lease_seconds=20)
+            if not record:
+                continue
+            record["_submitted_monotonic"] = time.perf_counter()
+            service.schedule_transport_executor.submit(deliver,service,record)
+            submitted = True
+            dispatched.append(record["callback_id"])
         except Exception:
-            with service._schedule_transport_lock:service._schedule_transport_active.discard(key)
-            service.store.mark_callback_pending(record["callback_id"],lease_token=record["delivery_lease_token"],delivery_generation=record["delivery_generation"],attempts=0,payload_json=record["payload_json"],last_error="transport_executor_unavailable")
+            if record is not None:
+                service.store.mark_callback_pending(record["callback_id"],lease_token=record["delivery_lease_token"],delivery_generation=record["delivery_generation"],attempts=0,payload_json=record["payload_json"],last_error="transport_executor_unavailable")
             raise
-        dispatched.append(record["callback_id"])
+        finally:
+            # Claim, submission and pre-send failure all release the exact slot.
+            if not submitted:
+                release_transport(service, key)
     return dispatched

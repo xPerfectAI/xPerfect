@@ -1,0 +1,15 @@
+{
+  "period": "2026-Q3",
+  "currency": "USD",
+  "attribution": "mutually_exclusive",
+  "scenario_budget": 12000,
+  "goal": "Prepare a90-day launch for a fictional specialist-service product using approved claims, evidence and a testable measurement plan.",
+  "approved_claims": [
+    "Produces reviewable work files",
+    "Works with company-provided methods and material"
+  ],
+  "prohibited_claims": [
+    "Guaranteed revenue or scientific approval",
+    "Invented customer endorsements"
+  ]
+}

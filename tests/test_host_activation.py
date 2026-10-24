@@ -284,6 +284,19 @@ class LocalUnlockTests(unittest.TestCase):
         self.assertFalse({k for k in mcp if k in host.ASSERTION_KEYS})
         self.assertEqual(mcp["GLASSHIVE_HUMAN_AUTH_MODE"], "")
 
+    def test_local_mcp_setup_uses_this_instance_without_new_credentials(self):
+        config = {**self.config, "env": {"XPERFECT_LOCAL_MCP_COMMAND": '["untrusted"]'}}
+        base = host.environment(self.state, config, "instance")
+        ui = host.role_environment(self.state, config, base, "ui")
+        command = json.loads(ui["XPERFECT_LOCAL_MCP_COMMAND"])
+        self.assertEqual(command, [sys.executable, str(host.ROOT / "xperfect"), "mcp", "--state-dir", str(self.state)])
+        self.assertEqual(ui["XPERFECT_LOCAL_MCP_URL"], f"http://127.0.0.1:{config['ports']['mcp']}/mcp")
+        self.assertEqual(ui["XPERFECT_LOCAL_CHECKOUT"], str(host.ROOT))
+        secret_values = json.loads((self.state / "secrets.json").read_text()).values()
+        self.assertFalse(any(secret in ui["XPERFECT_LOCAL_MCP_COMMAND"] for secret in secret_values))
+        for role in ("api", "mcp"):
+            self.assertNotIn("XPERFECT_LOCAL_MCP_COMMAND", host.role_environment(self.state, config, base, role))
+
     def test_the_local_mcp_role_starts_without_hosted_oauth_and_the_ui_names_its_address(self):
         # The MCP server reads GLASSHIVE_MCP_PUBLIC_URL as hosted OAuth configuration; a local
         # install must never set it, or the MCP role refuses to start.
@@ -299,8 +312,8 @@ class LocalUnlockTests(unittest.TestCase):
         ports = self.config["ports"]
         self.assertEqual(ui["GLASSHIVE_OPERATOR_BASE_URL"], f"http://127.0.0.1:{ports['ui']}")
         self.assertEqual(ui["XPERFECT_LOCAL_MCP_URL"], f"http://127.0.0.1:{ports['mcp']}/mcp")
-        self.assertEqual(json.loads(ui["XPERFECT_LOCAL_MCP_COMMAND"])[1:],
-                         ["mcp", "--state-dir", str(self.state)])
+        self.assertEqual(json.loads(ui["XPERFECT_LOCAL_MCP_COMMAND"]),
+                         [sys.executable, str(host.ROOT / "xperfect"), "mcp", "--state-dir", str(self.state)])
 
     def test_an_ai_app_connection_reports_the_clis_of_the_running_service(self):
         # An AI app starts `xperfect mcp` with its own PATH, which may lack a CLI the running

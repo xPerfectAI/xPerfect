@@ -34,6 +34,7 @@ export function mountWorkerOnboarding({ root = document, getData, onChoice, onBr
   const more = $('worker-load-more');
   let ownerScope = '';
   let rendering = false;
+  let availability = 'loading';
   function options(select, items, placeholder = null) {
     const previous = select.value;
     const nodes = [];
@@ -52,9 +53,17 @@ export function mountWorkerOnboarding({ root = document, getData, onChoice, onBr
     render();
     launch.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  function render() {
+  function render(state = null) {
     const data = getData();
-    if (!data) return;
+    if (state) availability = state;
+    else if (data) availability = 'ready';
+    if (!data) {
+      options(type, [], availability === 'unavailable'
+        ? 'Worker types unavailable — refresh to retry' : 'Loading worker types…');
+      type.disabled = true;
+      type.dataset.availability = availability;
+      return;
+    }
     rendering = true;
     const knownWorkers = data.existing_workspaces || [];
     const catalog = data.worker_catalog;
@@ -83,13 +92,16 @@ export function mountWorkerOnboarding({ root = document, getData, onChoice, onBr
     options(existing, workerOptions, workers.length ? 'Choose an AI Worker' : 'No workers yet — choose New');
     options(copy, workerOptions, 'Start fresh');
     const host = ($('workspace-type')?.value || data.default_workspace_type) === 'host';
-    options(type, (data.new_workspace_options || []).map(item => workerTypeOption(item, host)));
+    const typeOptions = (data.new_workspace_options || []).map(item => workerTypeOption(item, host));
+    const selectedType = saved ? `new:${saved.profile}` : value;
+    options(type, typeOptions, !typeOptions.length ? 'No worker types available'
+      : typeOptions.some(item => item.value === selectedType) ? null : 'Choose a worker type');
     if (reuse) existing.value = value.split(':', 2)[1];
     if (copying) copy.value = value.split(':', 2)[1];
     else copy.value = '';
-    if (saved) type.value = `new:${saved.profile}`;
-    else type.value = value;
-    type.disabled = copying;
+    type.value = typeOptions.some(item => item.value === selectedType) ? selectedType : '';
+    type.disabled = copying || !typeOptions.length;
+    type.dataset.availability = typeOptions.length ? 'ready' : 'empty';
     if (copying && !saved) type.value = '';
     if (search && ownerScope !== String(data.draft_owner_scope || '')) {
       ownerScope = String(data.draft_owner_scope || '');

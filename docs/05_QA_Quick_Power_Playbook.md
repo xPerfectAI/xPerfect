@@ -192,3 +192,77 @@ Pass if:
 - the runtime remains standalone
 - client-specific integration is optional
 - the bootstrap contract is sufficient to carry auth/context/memory/callbacks later
+
+## 9. Shared UI and Library acceptance
+
+For appearance or Library changes, select the affected rows under the agreed QA scope. Use the
+normal running UI and an isolated browser origin for temporary appearance preferences. Keep
+screenshots, raw browser receipts and machine paths private.
+
+| Path | User check | Expected result |
+|---|---|---|
+| Delivered assets | Reload an existing browser tab normally; inspect entry and shared-module URLs. | Current source loads without a hard refresh. Conditional requests retain validators and revalidation; shared modules have one URL per generation. |
+| Common shell | Visit each affected navigation destination in both themes and at wide and narrow widths. | Header anchors, title roles, controls and account menu agree. No horizontal page overflow; visible semantic states retain contrast. |
+| Chat | Keep an unsent draft, choose one saved Library version, then Use selected. | Draft and selected account stay intact, the exact version appears, and focus returns to the picker trigger. Cancel and Escape apply nothing. |
+| Chat draft sizing | Type a long draft, reduce the available viewport, then clear or edit a saved message. | Only the message field grows to a bounded height, then scrolls. Focused typing keeps actions in view; reading elsewhere does not move the page. Draft text, retry keys and input composition stay intact. A desktop viewport simulation is not a real phone keyboard test. |
+| Run actions | Inspect actual settled lifecycle controls in Workspaces and Watch in both themes. | Continue, Resume and Pause use neutral secondary styles; status colours remain on status. Disabled and keyboard-focus states stay visible. Do not start work merely to inspect the button. |
+| Custom worker entry | Choose an expert, then Create my own; repeat with Existing selected. | The automatic expert name clears, the visible worker-setup heading receives focus, and the current New/Existing choice stays intact. No worker is created by selection alone. |
+| Library picker | Compare a loaded list, an absent search and a cleared search, including a short phone viewport. | Search, filters and footer keep their natural heights. Item text remains readable; the list scrolls. Cancel and Use selected share one footer. |
+| Library editors | Open Add → Write a note and an existing item's Edit action, then cancel each. | Shared field/action styles remain readable; keyboard focus returns to the visible Add or item-options trigger. No save occurs on Cancel. |
+| Watch Library | Open Files and My Library on an existing workspace; resize wide and narrow. | Existing files and authority remain intact. Selectable cards retain room for their text; the phone drawer uses the available viewport. Close returns focus to Library. |
+| Appearance | Change Light/Dark, reload and inspect another open app tab; restore Auto. | The preference persists and synchronizes across tabs. Auto follows the device; native worker content retains its own appearance. |
+| Native selects and disclosures | Open each field family; use keyboard selection, disabled state, long values and narrow widths. | One inset arrow, selected text fits, complete visible focus, and a clear open/closed content cue. Browser semantics remain native. |
+| Action menus | Open last-row Library/Files and workspace menus; use arrows, Home/End, Escape, outside click and a dialog nested menu. | Every action stays in the viewport without moving the card. Escape restores its trigger and leaves the parent dialog open. |
+| Short Library picker | Reduce available height, search one/zero/many items, scroll, and select/cancel. | Content remains reachable through one body scroll region; the action footer remains visible. No stretched card or clipped ring. |
+| Schedule fields | Open weekly and advanced fields; save a paused synthetic schedule and reload; inspect connection modal at short height. | Checkbox remains inline, weekday/time values fit, unsupported DST choices stay hidden, and header/actions remain visible around scrolling fields. |
+| Watch result and activity | Reload a completed workspace; open Technical log and close/reopen the result by keyboard. | Exact saved native output loads when its visible container opens; filename is shown, and result dismissal restores its trigger. |
+| Initial and degraded state | Observe pre-owner loading, a healthy empty catalog and a rejected catalog request. | Loading and empty results do not claim failure; a real failed request retains its error and retry path. |
+
+Focused deterministic owners are in `frontends/glass-drive-ui/tests/`: `test_asset_delivery.py`,
+`test_theme_appearance.py`, `test_final_ui_polish.py`, `test_personal_library_ui.py` and
+`test_expert_picker.py`. Reuse their valid proof and relevant consumer checks. They do not replace
+the actual browser checks above or certify unrelated provider execution.
+Record the actual rendered viewport and settled state from the same tab as each responsive
+capture. A requested size or a filename is not proof of the captured layout. Keep rejected or
+loading captures separate from acceptance evidence.
+
+
+## 10. Professional Worker starters and real deliveries
+
+Use the bundled examples under `runtime_phase1/src/workers_projects_runtime/starter_packs/`.
+Each package contains a sample job, company onboarding material, valid and deliberately invalid
+inputs, and expected checks. Keep actual account details, native traces, screenshots and raw
+research private. A working synthetic example is not professional certification.
+
+| Starting expert | Useful work to inspect | Required check |
+|---|---|---|
+| Maya, Clinical Biostatistician | Study review, analysis tables and a reproducible workbook | Recompute the planned estimates and uncertainty; identify missing responses. No unsupported efficacy claim. |
+| Theo, Bioanalytical Scientist | Assay review, QC exceptions and an editable calculation workbook | Reconcile the fitted results and approved QC limits; keep unsupported causes unknown. |
+| Priya, Regulatory Affairs Specialist | Evidence map, gaps and draft change-impact review | Follow each claim to the supplied source and revision; distinguish missing, draft and approved evidence. |
+| Alex, Growth Marketer | Campaign plan, copy, claims review and measurement workbook | Reconcile the budget and assumptions. Separate observed results from scale, audience and capacity hypotheses. |
+| Morgan, Finance Director | Variance bridges, cash scenarios and a board brief | Reconcile source totals and formulas; keep unexplained cash differences visible instead of plugging them. |
+
+1. Choose a starter through Run Project. Supply the job, desired result and company files. Review
+   the actual target's selected native Skills before execution; cancelling must keep the job and
+   saved worker. Optional source links do not mean a plugin is installed or an account connected.
+2. Run the sample through the supported configured harness. Inspect the real report and download
+   its files through the delivered UI. Independently compare key numbers and formulas against the
+   original inputs. Verify source and Skill bytes are unchanged. Reject unsupported claims even
+   when the arithmetic passes.
+3. Supply the deliberate bad input. The worker must identify the source problem without guessing
+   a repair or presenting that case as completed analysis. Keep unrelated accepted work intact.
+4. Ask the same worker to refine the result or change an explicit assumption. Retain its account,
+   workspace, selected versions and native history. Preserve the original deliverable where the
+   request calls for it. Verify the actual revised files and any required numeric invariants.
+5. Use Ask in Chat for that worker's project. Confirm the exact existing worker is selected, queued
+   work is described truthfully, and a useful completed result with working file links returns to
+   the conversation. Reload and replay must not create another worker or repeat completed work.
+6. Repeat the affected entry path through the public API and management MCP using the same starter,
+   template and worker mechanisms. Check the real MCP tools and file downloads; tool discovery or
+   import alone does not prove execution. Foreign identities, unapproved native material and
+   invalid file paths must retain their existing access boundaries.
+
+Deterministic owners include `test_starter_templates.py`, `test_starter_pack_examples.py`,
+`test_coordinator_existing_worker.py`, `test_coordinator_result_files.py`, and the existing native
+file, provider, template and Library banks. Use only the checks selected by the agreed QA scope.
+Native jobs, real browser journeys and provider limitations remain explicit evidence gates.

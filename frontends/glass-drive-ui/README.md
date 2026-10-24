@@ -146,6 +146,36 @@ cd frontends/glass-drive-ui
 uv run pytest -q
 ```
 
+## Browser dependency provenance
+
+The UI uses native ES modules and upstream browser distributions. No local JavaScript build or
+package installation is needed. Vendor files remain unmodified and ship through the existing
+static service. `tests/test_vendor_provenance.py` verifies their exact SHA-256 hashes offline.
+
+| Package | npm tarball member | Local vendor file | SHA-256 |
+|---|---|---|---|
+| [markdown-it 15.0.3](https://registry.npmjs.org/markdown-it/15.0.3) | `package/dist/browser/markdown-it.esm.min.mjs` | `markdown-it-15.0.3.mjs` | `d5432491790141da046b1197353705db03264f40b5727f3b4b591f5aba193e30` |
+| [@xterm/xterm 5.5.0](https://registry.npmjs.org/@xterm/xterm/5.5.0) | `package/lib/xterm.js` | `xterm-5.5.0/xterm.js` | `1f991ac3b4b283ebf96e60ae23a00a52765dd3a2e46fa6fdda9f1aab032f7495` |
+| @xterm/xterm 5.5.0 | `package/css/xterm.css` | `xterm-5.5.0/xterm.css` | `ba8e6985669488981ccf40c0cefe3aba80722cb6c92de7ad628b0bd717faf2b6` |
+
+To reproduce a vendor update, read the exact version's npm metadata at the linked registry URL,
+fetch `dist.tarball`, and verify the downloaded bytes against `dist.integrity` before extraction.
+Copy only the named member to `src/glass_drive_ui/static/vendor/`; do not run an npm install or
+rebuild an upstream distribution. Copy the package's `package/LICENSE` and the embedded
+dependencies' license files, then update `NOTICE`, this table, the hash test and all import owners.
+The upstream [15.0.3 package lock](https://github.com/markdown-it/markdown-it/blob/15.0.3/package-lock.json)
+and the browser bundle's region headers identify mdurl 2.1.0, entities 8.1.0, OXC runtime 0.154.0
+and Rolldown 1.2.14. Their license files are in the same vendor directory.
+
+Markdown-it 15.0.3 fixes
+[quadratic reference parsing](https://github.com/markdown-it/markdown-it/security/advisories/GHSA-gfr2-rv44-r23c),
+which is reachable with the UI's HTML and typography options disabled. Both result and Chat
+renderers retain those disabled options. Keep native file identities, safe links, tables and
+literal HTML covered by `tests/test_result_markdown.py`; its bounded pathological-reference
+check guards the affected parser path. The Python lock also pins certifi 2026.10.19, which removes
+the [affected emSign trust root](https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2).
+These source locks do not by themselves update an installed or running service.
+
 ## Files
 
 Kickoff and Watch share the Files control. Browser uploads use durable draft receipts and streamed raw bodies; launches send `file_upload_ids`. Upload progress, same-ID retry, removal errors and restored drafts stay visible. Files supports folders, moves, trash/Undo and streamed selection ZIP export through authenticated UI proxies. Download links contain no service token or raw host path. Native drag-out remains disabled until verified for the deployment's browser and OS.

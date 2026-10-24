@@ -83,6 +83,113 @@ def read_context_replay(descriptor):
     return complete_tool_history(ModelMessagesTypeAdapter.validate_json(record["messages"]))
 
 
+def _image_identity(image):
+    import hashlib
+    from pydantic_core import to_jsonable_python
+    identity = {"sha256": hashlib.sha256(image.data).hexdigest(),
+                "media_type": image.media_type,
+                "vendor_metadata": to_jsonable_python(image.vendor_metadata)}
+    return json.dumps(identity, sort_keys=True, separators=(",", ":")), identity
+
+
+def _user_images(messages):
+    from pydantic_ai.messages import ModelRequest, UserPromptPart, BinaryContent
+    return [item for message in messages if isinstance(message, ModelRequest)
+            for part in message.parts if isinstance(part, UserPromptPart) and isinstance(part.content, list)
+            for item in part.content if isinstance(item, BinaryContent) and item.is_image]
+
+
+def _image_label(image, *, reference):
+    _, identity = _image_identity(image)
+    return json.dumps({"xperfect_image_reference" if reference else "xperfect_image":
+                      {**identity, "identifier": image.identifier}}, sort_keys=True, separators=(",", ":"))
+
+
+def direct_image_prompt(instruction, images, history):
+    """Append each exact asset once in this already verified SDK history scope."""
+    if not images:
+        return instruction
+    seen = {_image_identity(item)[0] for item in _user_images(history)}
+    content = [instruction]
+    for image in images:
+        key, _ = _image_identity(image)
+        if key in seen:
+            content.append(_image_label(image, reference=True))
+        else:
+            content.append(image)
+            seen.add(key)
+    return content
+
+
+def direct_image_request_projection(messages, available_images, *, current_run_id=None, metrics=None):
+    """Keep exact image occurrences, one full payload per authorized identity, and all native parts."""
+    from dataclasses import replace
+    from pydantic_ai.messages import ModelRequest, UserPromptPart, BinaryContent
+    available = {_image_identity(image)[0]: image for image in available_images}
+    latest = {}
+    for mi, message in enumerate(messages):
+        if not isinstance(message, ModelRequest):
+            continue
+        for pi, part in enumerate(message.parts):
+            if isinstance(part, UserPromptPart) and isinstance(part.content, list):
+                for ci, item in enumerate(part.content):
+                    if isinstance(item, BinaryContent) and item.is_image:
+                        key, _ = _image_identity(item)
+                        latest[key] = (mi, pi, ci)
+                        available.setdefault(key, item)
+    result = list(messages)
+    duplicate_bytes = 0
+    for mi, message in enumerate(messages):
+        if not isinstance(message, ModelRequest):
+            continue
+        parts = list(message.parts)
+        for pi, part in enumerate(message.parts):
+            if not isinstance(part, UserPromptPart) or not isinstance(part.content, list):
+                continue
+            content = []
+            changed = False
+            for ci, item in enumerate(part.content):
+                if not isinstance(item, BinaryContent) or not item.is_image:
+                    content.append(item)
+                    continue
+                key, _ = _image_identity(item)
+                reference = latest[key] != (mi, pi, ci)
+                content.append(_image_label(item, reference=reference))
+                if reference:
+                    duplicate_bytes += len(item.data)
+                else:
+                    content.append(item)
+                changed = True
+            if changed:
+                parts[pi] = replace(part, content=content)
+        if parts != message.parts:
+            result[mi] = replace(message, parts=parts)
+    missing = [image for key, image in available.items() if key not in latest]
+    if missing:
+        # A projection/checkpoint may omit a prior full copy. Restore only actual
+        # bytes already authorized in this exact SDK scope/current input. Textual
+        # hash labels are never parsed as authority or file access.
+        target = next(((mi, pi) for mi in range(len(result) - 1, -1, -1)
+                       if isinstance(result[mi], ModelRequest)
+                       and (current_run_id is None or result[mi].run_id == current_run_id)
+                       for pi in range(len(result[mi].parts) - 1, -1, -1)
+                       if isinstance(result[mi].parts[pi], UserPromptPart)), None)
+        if target is None:
+            raise ValueError("Authorized Direct images have no current user input carrier")
+        mi, pi = target
+        message = result[mi]
+        part = message.parts[pi]
+        content = [part.content] if isinstance(part.content, str) else list(part.content)
+        for image in missing:
+            content.extend((_image_label(image, reference=False), image))
+        parts = list(message.parts)
+        parts[pi] = replace(part, content=content)
+        result[mi] = replace(message, parts=parts)
+    if metrics is not None:
+        metrics.update(unique_images=len(available), duplicate_bytes=duplicate_bytes, restored_images=len(missing))
+    return result
+
+
 def mcp_config(servers):
     result = {}
     for server in servers:
@@ -469,7 +576,7 @@ async def execute(request):
     # Imported once per supervised executor, never in the service's ordinary CLI path.
     from pydantic_ai import Agent, PartStartEvent, PartDeltaEvent, PartEndEvent, TextPart, TextPartDelta
     from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent, AgentRunResultEvent, ToolCallPart, ToolCallPartDelta
-    from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ToolReturnPart
+    from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ToolReturnPart, BinaryContent
 
     CURRENT_STAGE = "configuration"
     provider, model = request["provider"], request["model"]
@@ -491,6 +598,10 @@ async def execute(request):
         emit({"type": "direct.stage", "stage": "context_tool_replay",
               "messages": len(history), "tool_calls": len(tool_call_ids),
               "bytes": len(ModelMessagesTypeAdapter.dump_json(history))})
+    current_images = [BinaryContent(base64.b64decode(image["data_base64"], validate=True),
+                                    media_type=image["media_type"]) for image in request.get("input_images", [])]
+    available_images = [*_user_images(history), *current_images]
+    prompt = direct_image_prompt(request["instruction"], current_images, history)
     session_id = request["session_id"]
     emit({"type": "grok.session.started", "session_id": session_id, "model": model,
           "requested_model": model, "executor": "direct", "provider": provider,
@@ -619,7 +730,7 @@ async def execute(request):
             }
             return response
         capabilities = [Hooks(after_model_request=observe_response_shape)]
-        if archive_input is not None or state_input is not None or request.get("history_enabled", True):
+        if archive_input is not None or state_input is not None or request.get("history_enabled", True) or available_images:
             from pydantic_ai.capabilities import Hooks
             from pydantic_ai.messages import ToolReturnPart
             def prepare_history(ctx, model_request):
@@ -654,6 +765,11 @@ async def execute(request):
                             "removed_utf8_bytes": projection_metrics.get("removed_utf8_bytes", 0),
                             "removed_context_sources": projection_metrics.get("removed_context_sources", 0),
                             "removed_context_data_utf8_bytes": projection_metrics.get("removed_context_data_utf8_bytes", 0)})
+                if available_images or _user_images(model_request.messages):
+                    media_metrics = {}
+                    model_request.messages = direct_image_request_projection(
+                        model_request.messages, available_images, current_run_id=ctx.run_id, metrics=media_metrics)
+                    emit({"type": "direct.stage", "stage": "image_projection", **media_metrics})
                 return model_request
             capabilities.append(Hooks(before_model_request=prepare_history))
         agent = Agent(selected, instructions=request["instructions"], toolsets=toolsets,
@@ -716,11 +832,6 @@ async def execute(request):
         CURRENT_STAGE = "tool_connection"
         async with agent:
             emit({"type":"direct.stage", "stage":"mcp_connections_ready", "connections":len(toolsets)})
-            prompt = request["instruction"]
-            if request.get("input_images"):
-                from pydantic_ai import BinaryContent
-                prompt = [prompt, *[BinaryContent(base64.b64decode(image["data_base64"], validate=True), media_type=image["media_type"])
-                                    for image in request["input_images"]]]
             CURRENT_STAGE = "tool_catalog"
             async with agent.run_stream_events(prompt, message_history=history,
                                                model_settings=settings, retries=0) as events:

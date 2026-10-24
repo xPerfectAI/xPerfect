@@ -2032,6 +2032,45 @@ def test_workspace_launch_projects_native_claude_effort(monkeypatch, effort):
     asyncio.run(scenario())
 
 
+def test_host_mcp_artifact_links_use_the_configured_ui_origin(monkeypatch, tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("artifact_host", Path(__file__).resolve().parents[2] / "scripts/host.py")
+    host = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(host)
+    state = tmp_path / "host"
+    config = host.configuration(state, {"api": 22001, "ui": 22002, "mcp": 22003})
+    env = host.role_environment(state, config, host.environment(state, config, "artifact-test"), "mcp")
+    for name in ("GLASSHIVE_ARTIFACT_BASE_URL", "GLASSHIVE_OPERATOR_BASE_URL", "WPR_MCP_PUBLIC_URL"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert env["WPR_OPERATOR_BASE_URL"] == "http://127.0.0.1:22002"
+    assert "http://127.0.0.1:22001" in host.commands(state, config)["mcp"]
+    server = create_mcp_server(api_client=FakeApiClient())
+
+    async def scenario():
+        async with Client(server) as client:
+            listing = _tool_json(await client.call_tool("workspace_artifacts", {"worker_id": "wrk_123"}))
+            download = _tool_json(await client.call_tool("workspace_artifact_download", {"worker_id": "wrk_123", "path": "index.html"}))
+            for item in [*listing["items"], download]:
+                for field, kind in (("signed_open_url", "artifact_open"), ("signed_download_url", "artifact_download")):
+                    _assert_link_ref_url(item[field], prefix="http://127.0.0.1:22002/v1/link-refs/", kind=kind)
+    asyncio.run(scenario())
+
+
+def test_artifact_url_keeps_explicit_configuration_precedence(monkeypatch):
+    monkeypatch.setenv("WPR_OPERATOR_BASE_URL", " https://operator-alias.example.test/ ")
+    monkeypatch.setenv("WPR_MCP_PUBLIC_URL", "https://mcp.example.test")
+    monkeypatch.setenv("GLASSHIVE_OPERATOR_BASE_URL", " ")
+    monkeypatch.delenv("GLASSHIVE_ARTIFACT_BASE_URL", raising=False)
+    assert mcp_server._public_artifact_base_url() == "https://operator-alias.example.test"
+    monkeypatch.setenv("GLASSHIVE_OPERATOR_BASE_URL", "https://operator.example.test/")
+    assert mcp_server._public_artifact_base_url() == "https://operator.example.test"
+    monkeypatch.setenv("GLASSHIVE_ARTIFACT_BASE_URL", "https://files.example.test/")
+    assert mcp_server._public_artifact_base_url() == "https://files.example.test"
+
+
 def test_workspace_artifact_download_rejects_traversal_before_signing(monkeypatch):
     monkeypatch.setenv("GLASSHIVE_ARTIFACT_BASE_URL", "https://glasshive.example.test")
     monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "public-safe-signed-link-secret")
@@ -4837,6 +4876,35 @@ def test_workspace_launch_uses_documented_ui_fields_without_low_level_chain(monk
         assert "open it in the workspace browser" not in instruction
         assert "Before finishing, inspect the actual output" in instruction
         assert "Finish with a concise FINAL REPORT" in instruction
+
+
+def test_workspace_launch_applies_exact_library_refs_before_first_run(monkeypatch):
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    class LibraryApi(TrackingApiClient):
+        def create_delegation(self, **kwargs):
+            pytest.fail("Library selection must prepare through its existing owner before admission")
+        def _request(self, method, path, *, json_body=None, require_write_scope=False):
+            assert method == "POST" and path == "/v1/workspaces/wrk_resumed/personal-library"
+            assert require_write_scope
+            self.calls.append("apply_library")
+            self.library_payload = json_body
+            return {"items": [], "pending": [{"kind":"native", "state":"needs_setup"}]}
+    api=LibraryApi(); server=create_mcp_server(api_client=api)
+    async def scenario():
+        async with Client(server) as client:
+            response=await client.call_tool("workspace_launch", {
+                "description":"Use the selected reference, keeping pending setup visible.",
+                "profile":"claude-code", "library_refs":[{"item_id":"item-a","version_id":"version-a"}],
+                "confirm_library":False,
+            })
+            value=_tool_json(response)
+            assert value["status"] == "dispatched"
+            assert value["library_requirements"][0]["state"] == "needs_setup"
+    asyncio.run(scenario())
+    assert api.calls.index("apply_library") < api.calls.index("assign_run")
+    assert api.library_payload["refs"] == [{"item_id":"item-a","version_id":"version-a"}]
+    assert api.library_payload["confirm_native"] is False
+    assert api.library_payload["request_key"].startswith("mcp-library-")
 
 
 def test_workspace_launch_can_favorite_the_created_workspace_in_the_same_call(monkeypatch):
@@ -7868,13 +7936,13 @@ def test_delegation_packet_explicit_assignment_keeps_original_source_role(monkey
     })
     monkeypatch.setattr(mcp_server, "_owner_recent_upload_entries", lambda **_: [])
     instruction = "Open the public reference page and report its heading."
-    original = "Update the sample files. " + instruction
+    original = "Update the packing files. " + instruction
     originals = [original]
     if instruction_kind == "multiple-inputs":
         originals = ["Open the public reference page.", "Report its heading and keep the tab open."]
         instruction = "\n\n".join(originals)
     elif instruction_kind == "model-brief":
-        instruction = "Complete the browser check and revise the sample deliverables."
+        instruction = "Complete the browser check and revise the travel deliverables."
     sources = [{"ordinal": index, "source_event_id": f"synthetic-source-{index}",
                 "source_index": 0, "text": text} for index, text in enumerate(originals)]
     bundle = {
@@ -8026,3 +8094,26 @@ def test_trusted_launch_binds_and_preserves_exact_inherited_conversation(monkeyp
         assert actual["inherited_conversation"]==inherited
         from workers_projects_runtime.store import canonical_parallel_clean_room_bootstrap
         assert canonical_parallel_clean_room_bootstrap(actual)["inherited_conversation"]==inherited
+
+
+def test_capability_remove_metadata_describes_exact_idle_contribution_and_forwards_ids():
+    client = FakeApiClient()
+    calls = []
+    client.revoke_workspace_grant = lambda worker_id, grant_id: calls.append((worker_id, grant_id)) or {"grant_id": grant_id, "state": "revoked"}
+    server = create_mcp_server(api_client=client)
+
+    async def scenario():
+        async with Client(server) as session:
+            tool = next(item for item in await session.list_tools() if item.name == "workspace_capability_remove")
+            assert "idle" in tool.description
+            assert "this exact capability grant's recorded contribution" in tool.description
+            assert "other grants" in tool.description and "edited or shared files" in tool.description
+            assert "unconfirmed file cleanup" in tool.description and "typed cause" in tool.description
+            assert "newest" not in tool.description and "rollback unsafe" not in tool.description
+            assert tool.inputSchema["required"] == ["worker_id", "grant_id"]
+            assert set(tool.inputSchema["properties"]) == {"worker_id", "grant_id"}
+            result = await session.call_tool("workspace_capability_remove", {"worker_id": "synthetic-worker", "grant_id": "exact-earlier-grant"})
+            assert not result.is_error
+            assert calls == [("synthetic-worker", "exact-earlier-grant")]
+
+    asyncio.run(scenario())

@@ -1,8 +1,17 @@
-import { renderAccountIdentity } from './account-menu.js?v=20261024journeys18';
-import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
-import { attachNativeControls } from './native-controls.js?v=20261024journeys18';
+import { createLibrarySelection } from './personal-library.js?v=20261024polish1';
+import { renderAccountIdentity } from './account-menu.js?v=20261024polish1';
+import MarkdownIt from './vendor/markdown-it-15.0.3.mjs';
+import { attachNativeControls } from './native-controls.js?v=20261024polish1';
 
 const $ = (id) => document.getElementById(id);
+function autoResizeMessage() {
+  const input = $('message');
+  input.style.height = 'auto';
+  const viewport = window.visualViewport?.height || window.innerHeight || 850;
+  const maximum = Math.min(360, Math.max(78, viewport * .42));
+  input.style.height = `${Math.min(Math.max(input.scrollHeight, 78), maximum)}px`;
+  if (document.activeElement === input) $('composer').scrollIntoView({block:'nearest'});
+}
 const markdown = new MarkdownIt({html:false,linkify:false,typographer:false});
 const base = '/v1/coordinator/conversations';
 let conversationId = new URLSearchParams(location.search).get('id') || '';
@@ -12,10 +21,17 @@ let closed = false;
 let submitting = false;
 let draftKey = '';
 let draftText = '';
+let draftLibrarySignature = '';
+let librarySelectionDirty = false;
+let libraryOwnerReady = false;
+const chatLibrary = createLibrarySelection({ button: $('chat-choose-library'), list: $('chat-library-selection'), scope: `chat.${conversationId || 'new'}`, onChange: () => { librarySelectionDirty = true; } });
 const nativeWidgets = new Map();
 const requestedProjectId = new URLSearchParams(location.search).get('project_id') || '';
 const states = {accepted:'Accepted',queued:'Waiting to start',running:'Working',paused:'Paused',needs_input:'Needs your input',completed:'Complete',failed:'Could not finish',cancelled:'Stopped',interrupted:'Interrupted',blocked:'Blocked'};
 const blockerMessages = Object.freeze({
+  worker_account_reconnect_required:'Reconnect this worker’s account in Connections.',
+  worker_review_required:'This worker needs review in Watch before it can receive work.',
+  worker_unavailable:'This worker is unavailable for new work. Check its status in Watch.',
   provider_account_busy:'The connected assistant is busy.',
   host_capacity:'The workspace is busy.',
   provider_unavailable:'The connected assistant is unavailable.',
@@ -53,8 +69,13 @@ function connectedUnavailableMessage(code) {
   return blockerMessages[code]
     || 'Conversations with a connected account are not available on this deployment right now. Use Run project for now.';
 }
+// Account/model failures need a setup change before another provider request.
+const endedSetupRequired = new Set(['model_configuration_required', 'provider_auth_missing', 'provider_connected_account_reconnect_required', 'provider_unauthorized']);
 // A turn whose provider attempt already ran has a final outcome; Retry would replay it.
 function endedMessage(code) {
+  if (endedSetupRequired.has(code)) return code === 'model_configuration_required'
+    ? 'The selected model is unavailable for this account. Check the account and model in Connections.'
+    : 'Reconnect the selected account in Connections before sending another message.';
   return code === 'cancelled' ? 'You stopped this reply.'
     : code === 'native_input_expired' ? 'The assistant stopped because a request for your response expired.'
     : 'The assistant could not finish this reply.';
@@ -108,6 +129,12 @@ function action(label, fn) {
 }
 function render(snapshot) {
   latest=snapshot;
+  if (libraryOwnerReady && !librarySelectionDirty && Array.isArray(snapshot.library?.refs)) {
+    chatLibrary.setRefs(snapshot.library?.refs, snapshot.library.refs.map(ref => { const item = (snapshot.library.items || []).find(item => item.item_id === ref.item_id); return item ? `${item.name} · v${item.version}` : 'Saved Library item'; }));
+  }
+  const notLoaded = (snapshot.library?.context || []).filter(source => source.loaded === false && ['binary', 'over_limit'].includes(source.reason));
+  $('chat-library-status').hidden = !notLoaded.length;
+  $('chat-library-status').textContent = notLoaded.length ? 'Some selected files are not loaded for this Queen. Their full references stay available to its workers.' : '';
   const firstPresentation=$('messages').dataset.version===undefined;
   const nearLatest=firstPresentation || (typeof window!=='undefined' && window.scrollY+window.innerHeight>=document.documentElement.scrollHeight-96);
   $('conversation-project-field').hidden=true;
@@ -124,12 +151,12 @@ function render(snapshot) {
     if (turn.origin === 'interactive' && turn.blocker && !turn.response_json && turn.request_id) {
       const ended=node('div',`${endedMessage(turn.blocker)} Your message is saved.`,'message');
       const resendKey=`resend:${turn.turn_id}`;
-      if (resendKey.length<=160 && !snapshot.turns.some((item) => item.turn_id===resendKey)) {
+      if (!endedSetupRequired.has(turn.blocker) && resendKey.length<=160 && !snapshot.turns.some((item) => item.turn_id===resendKey)) {
         ended.append(action('Send again',() => api(`${base}/${encodeURIComponent(conversationId)}/turns`,'POST',{
           idempotency_key:resendKey,message:turn.message,
         })));
       }
-      ended.append(action('Edit',async () => {$('message').value=turn.message;$('message').focus();}));
+      ended.append(action('Edit',async () => {$('message').value=turn.message;$('message').focus();autoResizeMessage();}));
       messages.push(ended);
     } else if (turn.origin === 'interactive' && turn.blocker && !turn.response_json && turn.retry_after_at) {
       messages.push(node('div',`${blockerMessage(turn.blocker)} Your message is saved and will start automatically.`,'message'));
@@ -269,6 +296,8 @@ async function loadAssistants() {
     try {
       const bootstrap = await api('/api/bootstrap');
       renderAccountIdentity(bootstrap.identity || {}, Boolean(bootstrap.csrf_token));
+      chatLibrary.setOwnerScope(bootstrap.csrf_token ? bootstrap.draft_owner_scope : null); libraryOwnerReady = Boolean(bootstrap.csrf_token);
+      if (latest && !librarySelectionDirty && Array.isArray(latest.library?.refs)) chatLibrary.setRefs(latest.library?.refs, latest.library.refs.map(ref => { const item = (latest.library.items || []).find(item => item.item_id === ref.item_id); return item ? `${item.name} · v${item.version}` : 'Saved Library item'; }));
     } catch (error) { showError(error); }
     return;
   }
@@ -279,16 +308,25 @@ async function loadAssistants() {
       api('/v1/coordinator/readiness').catch(() => null),
     ]);
     renderAccountIdentity(bootstrap.identity || {}, Boolean(bootstrap.csrf_token));
+      chatLibrary.setOwnerScope(bootstrap.csrf_token ? bootstrap.draft_owner_scope : null); libraryOwnerReady = Boolean(bootstrap.csrf_token);
+      if (latest && !librarySelectionDirty && Array.isArray(latest.library?.refs)) chatLibrary.setRefs(latest.library?.refs, latest.library.refs.map(ref => { const item = (latest.library.items || []).find(item => item.item_id === ref.item_id); return item ? `${item.name} · v${item.version}` : 'Saved Library item'; }));
     // The runtime's typed readiness decides; only a known failure withholds a way to start.
     const connectedCode=String(readiness?.connected_account?.code || '');
     const connectedHere=readiness?.connected_account?.available !== false;
     const defaultHere=readiness?.default?.available !== false;
     const select=$('conversation-assistant');
     const names={codex:'Codex',openai:'Codex',claude:'Claude Code',anthropic:'Claude Code',grok:'Grok Build',xai:'Grok Build'};
+    const supportedIds=readiness?.connected_account?.supported_account_ids;
+    const supportedAccounts=readiness?.connected_account?.supported_accounts || [];
+    const profiles={'codex-cli':'Codex','claude-code':'Claude Code','grok-build':'Grok Build','direct-openai':'OpenAI · Direct','direct-anthropic':'Anthropic · Direct','direct-xai':'Grok · Direct'};
     const accounts=(connectedHere ? bootstrap.provider_accounts || [] : []).filter((account) =>
-      account.status === 'ready' && account.account_id && names[String(account.provider || '').toLowerCase()]);
+      account.status === 'ready' && account.account_id && names[String(account.provider || '').toLowerCase()]
+      && (!Array.isArray(supportedIds) || supportedIds.includes(account.account_id)));
     const options=accounts.map((account) => {
-      const option=node('option',`${names[String(account.provider).toLowerCase()]} · ${account.label || 'Connected account'}`);
+      const supported=supportedAccounts.find(item=>item.account_id===account.account_id);
+      const assistant=profiles[supported?.profile] || names[String(account.provider).toLowerCase()];
+      const auth=supported?.auth_method === 'api_key' ? ' · API key' : '';
+      const option=node('option',`${assistant} · ${account.label || 'Connected account'}${auth}`);
       option.value=account.account_id; return option;
     });
     if (defaultHere && (bootstrap.workspace_type_options || []).some((item) => item.value === 'host' && !item.disabled)) {
@@ -323,16 +361,18 @@ $('composer').addEventListener('submit',async(event)=>{
         ...(accountId ? {account_id:accountId} : {}),
       });
       conversationId=created.conversation_id;
+      chatLibrary.setScope(`chat.${conversationId}`);
       history.replaceState(null,'',`?id=${encodeURIComponent(conversationId)}`);
       $('conversation-project-field').hidden=true;
       $('conversation-assistant-field').hidden=true;
       $('conversation-connect').hidden=true;
     }
-    if(draftText!==message){draftKey=crypto.randomUUID();draftText=message;}
+    const selectedLibrary = chatLibrary.refs(); const librarySignature = JSON.stringify(selectedLibrary);
+    if(draftText!==message || draftLibrarySignature!==librarySignature){draftKey=crypto.randomUUID();draftText=message;draftLibrarySignature=librarySignature;}
     const submittedKey=draftKey;
     try {
-      const receipt=await api(`${base}/${encodeURIComponent(conversationId)}/turns`,'POST',{idempotency_key:submittedKey,message});
-      $('message').value='';draftText='';draftKey='';
+      const receipt=await api(`${base}/${encodeURIComponent(conversationId)}/turns`,'POST',{idempotency_key:submittedKey,message,...(librarySelectionDirty || !latest ? {library_refs:selectedLibrary} : {})});
+      $('message').value='';autoResizeMessage();draftText='';draftKey='';draftLibrarySignature='';librarySelectionDirty=false;
       if(receipt.state==='blocked')$('status').textContent='Your message is saved. The assistant is not available yet.';
       await refresh();
     } catch (error) {
@@ -345,7 +385,7 @@ $('composer').addEventListener('submit',async(event)=>{
       } catch (_) { /* Keep the draft for an idempotent retry. */ }
       const saved=snapshot?.turns?.find((turn) => turn.origin==='interactive' && turn.turn_id===submittedKey && turn.message===message);
       if (!saved) throw error;
-      $('message').value='';draftText='';draftKey='';
+      $('message').value='';autoResizeMessage();draftText='';draftKey='';draftLibrarySignature='';librarySelectionDirty=false;
       clearError();
       $('status').textContent=saved.response_json ? ''
         : saved.request_id && !saved.blocker ? 'Working on your request.'
@@ -355,19 +395,23 @@ $('composer').addEventListener('submit',async(event)=>{
 });
 $('stop-response').addEventListener('click',async()=>{try{await api(`${base}/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent($('stop-response').dataset.turn)}/stop`,'POST');await refresh();clearError();}catch(error){showError(error);}});
 $('new-conversation').addEventListener('click',()=>{location.href=location.pathname;});
+$('message').addEventListener('input', autoResizeMessage);
+window.addEventListener('resize', autoResizeMessage);
+window.visualViewport?.addEventListener('resize', autoResizeMessage);
+autoResizeMessage();
 window.addEventListener('pagehide',()=>{closed=true;clearTimeout(timer);});
 loadProjects();
 loadAssistants();
 poll();
 
 async function leaveAccount(scope, button) {
-  button.disabled = true;
+  button.disabled = true; chatLibrary.setOwnerScope(null); libraryOwnerReady = false;
   try {
     const result = await api('/auth/logout', 'POST', {scope});
     closed = true;
     clearTimeout(timer);
     location.assign(result.redirect_url || '/login');
-  } catch (error) { showError(error); button.disabled = false; }
+  } catch (error) { showError(error); button.disabled = false; void loadAssistants(); }
 }
 $('switch-account')?.addEventListener('click', (event) => leaveAccount('provider', event.currentTarget));
 $('local-sign-out')?.addEventListener('click', (event) => leaveAccount('local', event.currentTarget));

@@ -1864,6 +1864,75 @@ def resolve_bootstrap_source_path(source: Path | str) -> Path:
     return resolved
 
 
+def remove_projected_library_files(
+    workspace_dir: Path, removed_files: list[dict], remaining_files: list[dict]
+) -> dict:
+    """Remove only unchanged recorded native Library contributions at their real root.
+
+    Called by the idle lifecycle owner with its resolved workspace, never by the
+    ordinary Files API. Native text skill paths keep their existing validator;
+    neither a link nor an edited/shared contribution is deleted.
+    """
+    from .library_registry import _validate_file_entry
+
+    retained_paths = {
+        str(entry.get("path") or "") for entry in remaining_files if isinstance(entry, dict)
+    }
+    result = {"removed": [], "retained": []}
+    if not removed_files:
+        return result
+    root_fd = os.open(workspace_dir, _sandbox_directory_open_flags())
+    try:
+        for entry in removed_files:
+            path = str(entry.get("path") or "")
+            expected = str(entry.get("sha256") or "")
+            if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+                raise ValueError("A native Library removal needs its recorded content hash")
+            _validate_file_entry({"scope": "workspace", "path": path, "content": "", "allow_empty": True})
+            relative = _safe_relative_path(path)
+            if path in retained_paths:
+                result["retained"].append({"path": path, "reason": "still_used"})
+                continue
+            directory_fd = os.dup(root_fd)
+            descriptor = None
+            try:
+                for part in relative.parts[:-1]:
+                    child_fd = os.open(part, _sandbox_directory_open_flags(), dir_fd=directory_fd)
+                    os.close(directory_fd)
+                    directory_fd = child_fd
+                descriptor = os.open(relative.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+                    result["retained"].append({"path": path, "reason": "edited"})
+                    continue
+                content_hash = hashlib.sha256()
+                while chunk := os.read(descriptor, 65536):
+                    content_hash.update(chunk)
+                after = os.fstat(descriptor)
+                current = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
+                unchanged = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                if (not unchanged or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+                        or content_hash.hexdigest() != expected):
+                    result["retained"].append({"path": path, "reason": "edited"})
+                    continue
+                os.unlink(relative.name, dir_fd=directory_fd)
+                result["removed"].append(path)
+            except FileNotFoundError:
+                pass  # Idempotent cleanup of a file already absent.
+            except OSError as exc:
+                if exc.errno not in {errno.ELOOP, errno.ENOTDIR}:
+                    raise
+                result["retained"].append({"path": path, "reason": "replaced_path"})
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                os.close(directory_fd)
+    finally:
+        os.close(root_fd)
+    return result
+
+
 def _write_project_files(
     home_dir: Path,
     workspace_dir: Path,

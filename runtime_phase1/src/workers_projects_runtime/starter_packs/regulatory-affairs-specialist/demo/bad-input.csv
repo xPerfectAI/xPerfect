@@ -1,0 +1,5 @@
+claim_id,statement,source_file,source_section,source_version,owner
+E-01,The supplied protocol defines the study design.,protocol.md,Design,2,Study reviewer
+E-02,The assay report is the current approved version.,assay-report.md,Results,2,Scientific reviewer
+E-03,The required stability evidence is available.,stability-report.md,Conclusion,1,Quality reviewer
+E-01,The supplied protocol defines the study design.,protocol.md,Design,2,Study reviewer

@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "id": "growth-marketer",
+  "name": "Alex · Growth Marketer",
+  "role": "Growth Marketer",
+  "description": "Create coherent campaign assets grounded in the company’s brand and evidence.",
+  "outcome": "Create coherent campaign assets grounded in the company’s brand and evidence.",
+  "tags": [
+    "Business",
+    "Growth Marketer"
+  ],
+  "profile": "claude-code",
+  "execution_mode": "host",
+  "project_definition": "You are Alex, a reusable AI Worker specializing as a Growth Marketer.\n\nUse the company’s brand, audience, product facts, approved proof and campaign data to plan and produce effective editable campaign assets and measurement plans. Verify claims, distinguish assumptions from results, and revise consistently. Publishing, contact and spending require explicit authority.\n\nUse the company material supplied for this job as the current source of its terminology, methods, units, approvals and desired output. Read the actual files before judging. Keep the original task and success criteria faithful. Use native tools when they help; professional judgment belongs to the model and qualified reviewer, not a host keyword rule. Show actual finished files and explain material limitations plainly. Reuse the same Worker and exact knowledge versions for follow-up work. The complete optional native Skill contains a bounded calculation/checking aid; check actual compatibility and setup rather than claiming an unavailable tool is loaded.",
+  "library_items": [
+    {
+      "key": "professional-method",
+      "selected": true,
+      "item": {
+        "name": "Brand and Campaign Strategy",
+        "kind": "note",
+        "text": "Use the company’s brand, audience, product facts, approved proof and campaign data to plan and produce effective editable campaign assets and measurement plans. Verify claims, distinguish assumptions from results, and revise consistently. Publishing, contact and spending require explicit authority.\n\nUse the company material supplied for this job as the current source of its terminology, methods, units, approvals and desired output. Read the actual files before judging. Keep the original task and success criteria faithful. Use native tools when they help; professional judgment belongs to the model and qualified reviewer, not a host keyword rule. Show actual finished files and explain material limitations plainly. Reuse the same Worker and exact knowledge versions for follow-up work. The complete optional native Skill contains a bounded calculation/checking aid; check actual compatibility and setup rather than claiming an unavailable tool is loaded."
+      }
+    },
+    {
+      "key": "analysis-skill",
+      "selected": true,
+      "item": {
+        "name": "Campaign Performance Analysis",
+        "kind": "skill",
+        "profiles": [
+          "claude-code"
+        ]
+      },
+      "file_sources": [
+        {
+          "source": "skill/SKILL.md",
+          "path": ".claude/skills/growth-marketer/SKILL.md"
+        },
+        {
+          "source": "skill/scripts/analyze.py",
+          "path": ".claude/skills/growth-marketer/scripts/analyze.py"
+        },
+        {
+          "source": "skill/references/method.md",
+          "path": ".claude/skills/growth-marketer/references/method.md"
+        }
+      ]
+    },
+    {
+      "key": "optional-community-source",
+      "selected": false,
+      "item": {
+        "name": "Marketing Tools and Methods · optional",
+        "kind": "native",
+        "source_uri": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/marketing"
+      }
+    },
+    {
+      "key": "curated-campaign-plan",
+      "selected": true,
+      "item": {
+        "name": "Campaign Planning",
+        "kind": "skill",
+        "profiles": [
+          "claude-code"
+        ]
+      },
+      "file_sources": [
+        {
+          "source": "curated/campaign-plan/LICENSE",
+          "path": ".claude/skills/campaign-plan/LICENSE"
+        },
+        {
+          "source": "curated/campaign-plan/NOTICE.txt",
+          "path": ".claude/skills/campaign-plan/NOTICE.txt"
+        },
+        {
+          "source": "curated/campaign-plan/SKILL.md",
+          "path": ".claude/skills/campaign-plan/SKILL.md"
+        },
+        {
+          "source": "curated/campaign-plan/references/CONNECTORS.md",
+          "path": ".claude/skills/campaign-plan/references/CONNECTORS.md"
+        }
+      ]
+    },
+    {
+      "key": "curated-brand-review",
+      "selected": true,
+      "item": {
+        "name": "Brand Voice Review",
+        "kind": "skill",
+        "profiles": [
+          "claude-code"
+        ]
+      },
+      "file_sources": [
+        {
+          "source": "curated/brand-review/LICENSE",
+          "path": ".claude/skills/brand-review/LICENSE"
+        },
+        {
+          "source": "curated/brand-review/NOTICE.txt",
+          "path": ".claude/skills/brand-review/NOTICE.txt"
+        },
+        {
+          "source": "curated/brand-review/SKILL.md",
+          "path": ".claude/skills/brand-review/SKILL.md"
+        },
+        {
+          "source": "curated/brand-review/references/CONNECTORS.md",
+          "path": ".claude/skills/brand-review/references/CONNECTORS.md"
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "publisher": "xPerfectAI",
+    "source": "curated://xperfect/starter-team",
+    "revision": "2026-10-24",
+    "license": "Apache-2.0",
+    "content_origin": "Original project starter methods and synthetic examples, with selected licensed curated native Skills identified below. Optional external references do not imply installation or connected tools.",
+    "references": [
+      {
+        "url": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/marketing",
+        "status": "Reference only; native setup, permissions, dependencies and per-component terms still apply.",
+        "license": "Apache-2.0; external services/data terms separate"
+      }
+    ],
+    "curated_skills": [
+      {
+        "name": "campaign-plan",
+        "publisher": "Anthropic",
+        "source": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/marketing/skills/campaign-plan",
+        "revision": "33d3dea41a341b341d4f5da2e8801ae0c89be2b8",
+        "license": "Apache-2.0",
+        "files_unchanged": false,
+        "setup": "Knowledge/Skill files only. Dependency installation and external tool authorization are separate.",
+        "curation_changes": [
+          "Local relative connector reference",
+          "Campaign-plan benchmark/heuristic scope clarification"
+        ],
+        "original_skill_sha256": "f0b146074b64ee0fd52f7864e30191eab83878c8c1e3e7cf24754e13c7dbfad3",
+        "curated_skill_sha256": "4e9ba53beed3e5f6dd33d67768f91a8054f9bfd0f3e9185c8723668ce6abcf66"
+      },
+      {
+        "name": "brand-review",
+        "publisher": "Anthropic",
+        "source": "https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/marketing/skills/brand-review",
+        "revision": "33d3dea41a341b341d4f5da2e8801ae0c89be2b8",
+        "license": "Apache-2.0",
+        "files_unchanged": false,
+        "setup": "Knowledge/Skill files only. Dependency installation and external tool authorization are separate.",
+        "curation_changes": [
+          "Local relative connector reference"
+        ],
+        "original_skill_sha256": "759f29397a908c32521080247292a4e1c52ac01643bea70ccd6e807e86c1fa4b",
+        "curated_skill_sha256": "df1e8f3d3c8f73cd5d2975528a1f265815c323f61ea130e453c313640a35f6c4"
+      }
+    ]
+  },
+  "demo": {
+    "job": "demo/job.md",
+    "inputs": [
+      "demo/data.csv",
+      "demo/plan.json",
+      "demo/company-onboarding.md",
+      "demo/brand-brief.md"
+    ],
+    "acceptance": "demo/acceptance.json"
+  }
+}

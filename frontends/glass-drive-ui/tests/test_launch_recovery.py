@@ -13,6 +13,7 @@ def run(case):
     show = re.search(r'^  function showLaunchRecovery\(.*?^  }\n', source, re.M | re.S).group(0)
     start = source.index("  form.addEventListener('submit', async (event) => {")
     handler = source[start:source.index('\n\n  const unfinishedLaunch', start)]
+    validation = source[source.index('  function clearLaunchValidation()'):source.index("  form.addEventListener('input', clearLaunchValidation)")]
     restore = source[source.index('  const unfinishedLaunch'):source.index('\n\n  const requestedAddWorker')]
     script = r'''
 import assert from 'node:assert/strict';
@@ -44,6 +45,9 @@ const launchRecovery=new Field(),launchRecoveryHelp=new Field(),launchStartAgain
 const window={location:{href:'https://operator.example.invalid/',assign(url){navigations.push(url);}}};
 const calls=[],navigations=[];let resets=0;
 const fileDraft={blocked:()=>false,readyRefs:()=>[{upload_id:'exact-file',revision:'exact-revision'}],reset(){resets++;}};
+const launchLibrary={refs:()=>[],resolve:async()=>({items:[]}),clear(){}};
+// Recovery here exercises native workers with no starter expert selected.
+const expertPicker={selection:()=>null,prepare(){throw new Error('No expert selected');}};
 const selectedWorkerEffort=()=>select.value.startsWith('new:')?codexEffort.value:'';
 const syncWorkspaceUI=()=>({statusText:'Starting…'}),syncDirectEffort=async()=>{},withAuth=url=>url,csrfToken='csrf';
 const launchFailureMessage=error=>error.message,responseError=async response=>Object.assign(new Error('Unavailable'),{status:response.status});
@@ -53,6 +57,7 @@ const fetch=async(_url,options)=>{calls.push(JSON.parse(options.body));return re
 let refreshFailure=false;const refreshBootstrap=async()=>{if(refreshFailure)throw new Error('Catalog unavailable');};
 SAFE
 SHOW
+VALIDATION
 HANDLER
 const send=id=>submit({preventDefault(){},submitter:{id:id||'launch-button'}});
 const reload=()=>{launchDraftState=freshDraft();launchDraftState.bindOwner(bootstrap.draft_owner_scope);RESTORE};
@@ -60,7 +65,7 @@ const saved=()=>JSON.parse(cache.get(`xperfect.launch-draft.v1.${owner}`));
 const choose=selection=>{select.value=selection;fields['worker-choice'].value=selection.startsWith('open:')?'existing':'new';select.dispatchEvent(new Event('input'));};
 ''' + case
     script = (script.replace('DRAFT', json.dumps((STATIC / 'launch-draft.js').as_uri()))
-              .replace('SAFE', safe).replace('SHOW', show).replace('HANDLER', handler).replace('RESTORE', restore))
+              .replace('SAFE', safe).replace('SHOW', show).replace('VALIDATION', validation).replace('HANDLER', handler).replace('RESTORE', restore))
     result = subprocess.run(['node', '--input-type=module'], input=script, text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -159,3 +164,28 @@ def test_confirmed_launch_is_not_unknown_when_its_followup_catalog_refresh_fails
             + 'assert.equal(status.textContent,' + json.dumps(expected) + r''');
 assert.equal(calls.length,1);assert.equal(launchRecovery.hidden,true);assert.equal(launchDraftState.unknownPayload(owner),null);
 ''')
+
+
+def test_upload_progress_keeps_refusals_until_uploads_become_ready_and_keeps_receipts():
+    source = (STATIC / 'app.js').read_text()
+    start = source.index('    onChange: ({ blocked }) => {')
+    callback = source[start + len('    onChange: '):source.index('\n    },', start) + len('\n    }')]
+    state = re.search(r'^  let uploadsBlocked = .*?;$', source, re.M).group(0)
+    clear = source[source.index('  function clearLaunchValidation()'):source.index('  function showLaunchValidation')]
+    script = "import assert from 'node:assert/strict';\n" + state + clear + 'const change = ' + callback + r''';
+const status={textContent:'',dataset:{}},button={title:'',removeAttribute(key){delete this[key];}};
+change({blocked:true});
+for(const refusal of ['Files must finish uploading before starting.','Choose a connected account.']){
+ status.textContent=refusal;status.dataset.validation='true';
+ for(let progress=1;progress<5;progress++){change({blocked:true});assert.equal(status.textContent,refusal);assert.equal(status.dataset.validation,'true');}
+ change({blocked:false});assert.equal(status.textContent,'');assert.equal(status.dataset.validation,undefined);assert.equal(button.title,undefined);
+ status.textContent=refusal;status.dataset.validation='true';
+ change({blocked:false});assert.equal(status.textContent,refusal,'an unchanged ready notification must not erase a refusal');
+ change({blocked:true});assert.equal(status.textContent,refusal);change({blocked:false});
+}
+status.textContent='The reply was lost. Check Activity before starting again.';delete status.dataset.validation;
+change({blocked:true});change({blocked:true});change({blocked:false});
+assert.equal(status.textContent,'The reply was lost. Check Activity before starting again.','upload readiness cannot erase a durable unknown-work receipt');
+'''
+    result = subprocess.run(['node', '--input-type=module'], input=script, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr

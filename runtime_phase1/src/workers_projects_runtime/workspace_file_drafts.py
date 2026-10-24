@@ -56,6 +56,8 @@ def move_draft(files, tenant, owner, upload_id, *, relative_path, revision):
         conn.execute("BEGIN IMMEDIATE")
         row = ready_row(files, conn, tenant, owner, upload_id, revision)
         if path != (row["relative_path"] or row["name"]):
+            if conn.execute("SELECT 1 FROM workspace_file_pins WHERE upload_id=? LIMIT 1", (upload_id,)).fetchone():
+                raise FileAdmissionError("This file version is retained by accepted work; rename its Library label or make a new version", 409, code="file_version_retained")
             for other in conn.execute(
                 "SELECT relative_path,name FROM workspace_file_uploads WHERE tenant_id=? AND owner_id=? AND draft_id=? AND upload_id!=? AND state NOT IN ('cancelled','expired')",
                 (tenant, owner, row["draft_id"], upload_id),

@@ -1,0 +1,5 @@
+Use these synthetic monthly accounts, budget and cash assumptions to prepare a board-ready performance and cash review. Deliver editable calculations, a variance bridge, a cash scenario and a concise memo that explains the source of the deterioration and the unreconciled cash difference. Separate observed results from forecast assumptions. Do not post entries, spend, transfer or make investment decisions.
+
+Use company-onboarding.md and the supplied plan/data. The example is synthetic. Use the native practical-method Skill when appropriate; inspect its actual output and independently verify representative values. Produce a polished evidence-first report plus editable analysis files, not just a chat answer. Include what remains uncertain and what an expert reviewer needs to decide. Do not publish, send, spend, submit or change source data.
+
+After the first delivery, use the same Worker for a follow-up: explain the impact of a corrected input or changed approved assumption. For the unhappy path, repeat on bad-input.csv, preserve inputs and explain why analysis cannot safely complete; never relabel that as success.

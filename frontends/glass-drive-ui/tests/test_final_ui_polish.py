@@ -23,6 +23,26 @@ def node(code):
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_chat_draft_grows_with_content_and_keeps_room_for_actions_on_short_viewports():
+    source = (STATIC / 'conversation.js').read_text()
+    node("import assert from 'node:assert/strict';\n" + function('autoResizeMessage', source) + '''
+const input={value:'A retained draft',style:{},scrollHeight:78};
+let revealed=0;const composer={scrollIntoView(options){assert.equal(options.block,'nearest');revealed++}};
+const $=id=>id==='composer'?composer:input;
+globalThis.document={activeElement:null};
+globalThis.window={innerHeight:900,visualViewport:{height:900}};
+autoResizeMessage();assert.equal(input.style.height,'78px');
+input.scrollHeight=600;autoResizeMessage();assert.equal(input.style.height,'360px');
+window.visualViewport.height=400;autoResizeMessage();assert.equal(input.style.height,'168px');
+assert.equal(input.value,'A retained draft','Sizing must not edit or send the draft');
+input.scrollHeight=24;autoResizeMessage();assert.equal(input.style.height,'78px');
+window.visualViewport=undefined;window.innerHeight=600;input.scrollHeight=600;
+autoResizeMessage();assert.equal(input.style.height,'252px');
+assert.equal(revealed,0,'Do not move the page while the user is reading');
+document.activeElement=input;autoResizeMessage();assert.equal(revealed,1);
+''')
+
+
 def test_queued_native_guidance_clears_only_unchanged_acknowledged_text():
     node('''
 import assert from 'node:assert/strict';
@@ -63,11 +83,14 @@ def test_native_button_styles_reach_app_watch_and_chat_with_existing_tokens():
     for token in ['--control-bg', '--control-hover', '--line', '--text']:
         assert token in theme
     styles = (STATIC / 'styles.css').read_text()
-    assert re.search(r'\.workspace-tile-more-actions > details\s*\{[^}]*flex:\s*1 1 100%', styles)
+    # The anchored menu retains its nested controls without expanding the workspace tile.
+    assert re.search(r'\.workspace-tile-more-actions > details\s*\{[^}]*padding:', styles)
+    assert not re.search(r'\.workspace-tile-more\[open\][^{]*\{[^}]*flex:\s*1 1 100%', styles)
+    assert '.action-menu-panel {' in theme
     for name in ['index.html', 'watch.html', 'conversation.html']:
-        assert '/static/theme.css?v=20261024journeys18' in (STATIC / name).read_text()
+        assert '/static/theme.css?v=20261024polish1' in (STATIC / name).read_text()
     for name in ['app.js', 'watch.js', 'conversation.js']:
-        assert "./native-controls.js?v=20261024journeys18" in (STATIC / name).read_text()
+        assert "./native-controls.js?v=20261024polish1" in (STATIC / name).read_text()
 
 
 def test_watch_terminal_status_labels_and_colors_use_typed_state():

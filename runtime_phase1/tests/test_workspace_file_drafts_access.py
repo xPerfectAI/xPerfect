@@ -259,7 +259,8 @@ def test_rename_keeps_accepted_schedule_and_binding_snapshots_immutable(drafts, 
     with files.store._connect() as conn:
         before = conn.execute("SELECT file_manifest_json FROM scheduled_runs WHERE schedule_id=?", (schedule["schedule_id"],)).fetchone()[0]
     old_blob = blob(files, item).stat()
-    files.move_upload("tenant", "owner", item["upload_id"], relative_path="new/name.bin", revision=item["revision"])
+    with pytest.raises(FileAdmissionError, match="retained"):
+        files.move_upload("tenant", "owner", item["upload_id"], relative_path="new/name.bin", revision=item["revision"])
     assert files.bind(worker["worker_id"], "tenant", "owner", [item["upload_id"]], "binding", directory="") == bound
     with files.store._connect() as conn:
         after = conn.execute("SELECT file_manifest_json FROM scheduled_runs WHERE schedule_id=?", (schedule["schedule_id"],)).fetchone()[0]
@@ -290,8 +291,9 @@ def test_binding_retry_keeps_the_accepted_destination(drafts, tmp_path, director
     if historical:
         with files.store._connect() as conn:
             conn.execute("UPDATE workspace_file_bindings SET request_directory_json=NULL WHERE request_key='same-key'")
-    files.move_upload("tenant", "owner", item["upload_id"],
-                      relative_path="renamed/input.bin", revision=item["revision"])
+    with pytest.raises(FileAdmissionError, match="retained"):
+        files.move_upload("tenant", "owner", item["upload_id"],
+                          relative_path="renamed/input.bin", revision=item["revision"])
     replay = client.post(path, json=payload)
     assert replay.status_code == 201, replay.text
     assert replay.json() == accepted.json()
@@ -325,7 +327,8 @@ def test_file_binding_rejects_stale_revision_but_keeps_id_only_compatibility(dra
         f"/v1/file-uploads/{item['upload_id']}",
         json={"relative_path": "renamed.txt", "revision": item["revision"]},
     )
-    assert moved.status_code == 200
+    assert moved.status_code == 409
+    other_revision = "0" * 64
     replay = client.post(
         prefix,
         json={
@@ -340,7 +343,7 @@ def test_file_binding_rejects_stale_revision_but_keeps_id_only_compatibility(dra
         prefix,
         json={
             "upload_ids": [item["upload_id"]],
-            "revisions": [moved.json()["revision"]],
+            "revisions": [other_revision],
             "idempotency_key": "binding-exact",
         },
     )
@@ -349,7 +352,7 @@ def test_file_binding_rejects_stale_revision_but_keeps_id_only_compatibility(dra
         prefix,
         json={
             "upload_ids": [item["upload_id"]],
-            "revisions": [item["revision"], moved.json()["revision"]],
+            "revisions": [item["revision"], other_revision],
             "idempotency_key": "binding-exact",
         },
     ).status_code == 422
@@ -357,7 +360,7 @@ def test_file_binding_rejects_stale_revision_but_keeps_id_only_compatibility(dra
         prefix,
         json={
             "upload_ids": [item["upload_id"]],
-            "revisions": [item["revision"]],
+            "revisions": [other_revision],
             "idempotency_key": "binding-stale",
         },
     )

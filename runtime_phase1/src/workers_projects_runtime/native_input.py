@@ -424,6 +424,13 @@ def codex_app_launch(command: list[str], *, native_profile: dict | None = None) 
             thread["runtimeWorkspaceRoots"].insert(0, thread["cwd"])
     if thread.get("approvalPolicy") != "never":
         return None
+    # Native notification copies need no inline media: the model and its journal
+    # retain the original input; generated files use the scoped artifact carrier.
+    features = overrides.setdefault("features", {})
+    if not isinstance(features, dict):
+        return None
+    features["omit_app_server_notification_media"] = True
+    argv.extend(["--enable", "omit_app_server_notification_media"])
     if native_profile is not None:
         # Native CLI overrides take priority over the selected config profile.
         # Preserve nested policy tables when several overrides touch one table.
@@ -436,6 +443,9 @@ def codex_app_launch(command: list[str], *, native_profile: dict | None = None) 
             "resumed": resumed, "workspace_policy": overrides.get("sandbox_workspace_write") or {}}
 
 
+CODEX_RPC_MAX_EVENT_BYTES = 8 * 1024 * 1024
+
+
 class CodexRpc:
     """One native stdio connection; control responses never block event reading."""
     def __init__(self, command: list[str], **process_options):
@@ -445,14 +455,22 @@ class CodexRpc:
         self.lock = threading.Lock()
         self.waiters = {}
         self.closed = False
+        self.closed_reason = "native_control_closed"
+        self.read_failure = None
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
 
     def _read(self):
+        failure = None
         try:
-            for line in self.process.stdout:
-                if len(line.encode()) > 8 * 1024 * 1024:
-                    raise NativeInputError("native_event_oversized")
+            # Bound the read itself, not just the already allocated JSON frame.
+            for line in iter(lambda: self.process.stdout.readline(CODEX_RPC_MAX_EVENT_BYTES + 1), ""):
+                observed_bytes = len(line.encode())
+                if observed_bytes > CODEX_RPC_MAX_EVENT_BYTES:
+                    failure = {"code": "native_event_oversized",
+                               "limit_bytes": CODEX_RPC_MAX_EVENT_BYTES,
+                               "observed_bytes_at_least": observed_bytes}
+                    raise NativeInputError(failure["code"])
                 value = json.loads(line)
                 if not isinstance(value, dict):
                     raise NativeInputError("native_event_invalid")
@@ -463,10 +481,16 @@ class CodexRpc:
                         waiter.put(value)
                 else:
                     self.events.put(value)
-        except (OSError, ValueError, NativeInputError):
-            pass
+        except NativeInputError as exc:
+            failure = failure or {"code": str(exc)}
+        except ValueError:
+            failure = {"code": "native_event_invalid"}
+        except OSError:
+            failure = {"code": "native_event_read_failed"}
         finally:
             with self.lock:
+                self.read_failure = failure
+                self.closed_reason = failure["code"] if failure else "native_control_closed"
                 self.closed = True
                 for waiter in self.waiters.values():
                     waiter.put(None)
@@ -475,7 +499,7 @@ class CodexRpc:
     def send(self, payload):
         with self.lock:
             if self.closed or self.process.stdin.closed:
-                raise NativeInputError("native_control_closed")
+                raise NativeInputError(self.closed_reason)
             self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
             self.process.stdin.flush()
 
@@ -484,7 +508,7 @@ class CodexRpc:
         waiter = queue.Queue()
         with self.lock:
             if self.closed:
-                raise NativeInputError("native_control_closed")
+                raise NativeInputError(self.closed_reason)
             self.waiters[identity] = waiter
         try:
             self.send({"id": identity, "method": method, "params": params})
@@ -493,7 +517,7 @@ class CodexRpc:
             except queue.Empty as exc:
                 raise NativeInputError("native_control_unconfirmed") from exc
             if value is None:
-                raise NativeInputError("native_control_closed")
+                raise NativeInputError(self.closed_reason)
             if "error" in value:
                 raise NativeInputError("native_control_rejected")
             result = value.get("result")
@@ -642,7 +666,7 @@ def codex_event(value, session_id, turn_id):
         if mapped["type"] == "web_search" and "results" in mapped:
             mapped["result"] = mapped["results"]
         return {"type": "item.started" if method == "item/started" else "item.completed", "item": mapped}
-    if method == "item/rawResponseItem/completed" and isinstance(params.get("item"), dict):
+    if method in {"rawResponseItem/completed", "item/rawResponseItem/completed"} and isinstance(params.get("item"), dict):
         return {"type": "response_item", "payload": params["item"]}
     # Raw native events preserve async call/acceptance evidence not present in an item summary.
     if str(method).startswith("codex/event/") and isinstance(params.get("msg"), dict):
@@ -793,7 +817,7 @@ def codex_relay(context_path: Path, command: list[str], *, initialized_rpc=None,
         while True:
             event = rpc.events.get()
             if event is None:
-                raise NativeInputError("native_control_closed")
+                raise NativeInputError(getattr(rpc, "closed_reason", "native_control_closed"))
             params = event.get("params") or {}
             if "id" in event and "method" in event:
                 rpc.send(codex_exec_response(event))
@@ -836,6 +860,10 @@ def codex_relay(context_path: Path, command: list[str], *, initialized_rpc=None,
             if projected:
                 emit(projected)
     except (NativeInputError, OSError, ValueError, KeyError) as exc:
+        failure = getattr(rpc, "read_failure", None)
+        if failure and str(exc) == failure["code"]:
+            emit({"type": "codex.rpc", "method": "stdout/read", "phase": "failed",
+                  "observed_at_ms": time.time_ns() / 1_000_000, **failure})
         emit({"type": "turn.failed", "error": {"message": str(exc)}})
         return 1
     finally:
