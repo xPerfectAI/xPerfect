@@ -112,7 +112,7 @@ def test_host_openclaw_requirement_is_exact_not_minimum():
 def test_host_openclaw_requirement_rejects_even_a_newer_unreviewed_version(monkeypatch):
     monkeypatch.setattr("workers_projects_runtime.runtime_requirements.shutil.which", lambda _binary: "/tmp/openclaw")
     monkeypatch.setattr(
-        "workers_projects_runtime.runtime_requirements.subprocess.run",
+        "workers_projects_runtime.runtime_requirements.capture_runtime_probe",
         lambda args, **kwargs: __import__("subprocess").CompletedProcess(
             args,
             returncode=0,
@@ -132,7 +132,7 @@ def test_host_openclaw_requirement_rejects_even_a_newer_unreviewed_version(monke
 def test_host_openclaw_requirement_accepts_selected_hyphenated_version(monkeypatch):
     monkeypatch.setattr("workers_projects_runtime.runtime_requirements.shutil.which", lambda _binary: "/tmp/openclaw")
     monkeypatch.setattr(
-        "workers_projects_runtime.runtime_requirements.subprocess.run",
+        "workers_projects_runtime.runtime_requirements.capture_runtime_probe",
         lambda args, **kwargs: __import__("subprocess").CompletedProcess(
             args,
             returncode=0,

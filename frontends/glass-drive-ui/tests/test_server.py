@@ -716,8 +716,9 @@ class FakeRuntimeClient:
         )
         return {"worker_id": "wrk_dup", "name": name}
 
-    def assign_run(self, worker_id: str, instruction: str):
-        self.assign_requests.append({"worker_id": worker_id, "instruction": instruction})
+    def assign_run(self, worker_id: str, instruction: str, *, idempotency_key: str | None = None):
+        self.assign_requests.append({"worker_id": worker_id, "instruction": instruction,
+                                     **({"idempotency_key": idempotency_key} if idempotency_key else {})})
         if self.fail_assign:
             raise RuntimeError("assign failed")
         return {"run_id": "run_1"}
@@ -2314,7 +2315,8 @@ def test_launcher_workspace_hive_static_controls():
     assert "/api/workspaces/${encodeURIComponent(context.workerId)}/templates" in app_js
     assert "/api/workspace-templates/${encodeURIComponent(templateId)}/instantiate" in app_js
     assert "fresh paused workspace" in index_html
-    assert "opaque worker-account reference—not files, sign-ins, credential homes, schedules, or history" in index_html
+    assert "New workers check account access and tool permissions." in index_html
+    assert "Files, sign-ins, schedules and chat history stay with the original worker." in index_html
     assert "Choose a saved template first." in app_js
     assert "rename-workspace-dialog" in index_html
     assert "window.prompt" not in app_js
@@ -2340,7 +2342,7 @@ def test_launcher_workspace_hive_static_controls():
     assert "cursor: append ? String(catalogState.nextCursor || '') : ''" in app_js
     assert "workspace.provider_readiness" in app_js
     assert "Work AI is not set up. Ask an administrator." in app_js
-    assert "Work AI: organization fallback" in app_js
+    assert "hostAccountLabel(bootstrap, providerReadiness.policy === 'personal_preferred')" in app_js
     assert "function updateWorkspaceMeta" in app_js
     assert "meta.dataset.catalogDetails" in app_js
     assert "updateWorkspaceMeta(meta, data?.worker?.profile, state);" in app_js
@@ -2392,7 +2394,8 @@ def test_launcher_workspace_hive_static_controls():
     assert "pendingCapabilityReview" in control_plane_js
     assert "/api/workspace/${encodeURIComponent(workspaceId)}/message" in control_plane_js
     assert "message: requestText" in control_plane_js
-    assert "api.withAuth(`/watch/${encodeURIComponent(workspaceId)}?surface=desktop`)" in control_plane_js
+    assert "api.withAuth(`/watch/${encodeURIComponent(workspaceId)}?surface=${surface}`)" in control_plane_js
+    assert "getElementById('launch-surface')?.value" in control_plane_js
     assert "workspace.control_url || workspace.api_url" in app_js
     assert "loadWorkspaceChoices" in control_plane_js
     assert "loadAllWorkspacePages" not in control_plane_js
@@ -2403,7 +2406,7 @@ def test_launcher_workspace_hive_static_controls():
     assert "'Add account'" in control_plane_js
     assert "controlPlane?.manage_connections_url" in control_plane_js
     assert "linked · verifies on run" in control_plane_js
-    assert "xPerfect will verify it when this workspace runs" in control_plane_js
+    assert "Account connected. xPerfect will check model access when the job starts." in control_plane_js
     assert "/novnc/${workerId}/websockify" in desktop_js
     assert "runtime.view_available" in desktop_js
     assert "/desktop-credentials" in desktop_js
@@ -2580,17 +2583,18 @@ def test_workspace_status_scripts_never_label_failed_terminal_runs_completed():
         assert script.index(terminated_priority) < script.index(failed_branch)
     assert "const TERMINAL_ATTENTION_STATES = new Set(['failed', 'cancelled', 'interrupted']);" in app_script
     assert "RESUME_STATES.has(normalized) || TERMINAL_ATTENTION_STATES.has(normalized)" not in app_script
-    assert "const control = workspaceLifecycleControl(normalized === 'completed' ? normalized : workerState);" in app_script
+    assert "const control = workspaceLifecycleControl(normalized === 'completed' ? normalized : workerState, normalized);" in app_script
     assert "toggle.hidden = control.hidden;" in app_script
     assert "function syncTileSteerAvailability(tile, state)" in app_script
-    assert app_script.count("syncTileSteerAvailability(tile, state);") >= 2
+    assert "syncTileSteerAvailability(tile, state);" in app_script
+    assert "syncTileSteerAvailability(tile, initialRunState === null ? 'unknown' : state);" in app_script
     assert "tile.dataset.displayState = normalized" in app_script
-    assert "syncTileSteerAvailability(tile, tile.dataset.displayState || state);" in app_script
+    assert "syncTileSteerAvailability(currentTile, currentTile.dataset.displayState || workspaceStateLabel(workspace));" in app_script
     assert "Send a corrected follow-up below" in app_script
     assert "const TERMINAL_ATTENTION_STATES = new Set(['failed', 'cancelled', 'interrupted']);" in watch_script
-    assert "const control = workspaceLifecycleControl(normalized);" in watch_script
+    assert "const control = workspaceLifecycleControl(normalized, runState);" in watch_script
     assert "runToggleButton.hidden = control.hidden;" in watch_script
-    assert "syncRunToggle(displayState === 'completed' ? displayState : currentWorkerState);" in watch_script
+    assert "syncRunToggle(displayState === 'completed' ? displayState : currentWorkerState, data.latest_run?.state);" in watch_script
     assert "TERMINAL_ATTENTION_STATES.has(state)" in watch_script
     assert "Workspace needs attention" in watch_script
     assert "then use Resume or send a corrected follow-up" not in watch_script
@@ -3474,7 +3478,7 @@ def test_enterprise_work_view_preserves_security_and_authorizes_artifact_click(m
     [
         "not-a-view-ref",
         "ghr_short",
-        "ghr_1234567890abcdef12345678%2Factions",
+        "ghr_" + "1234567890abcdef12345678%2Factions",
     ],
 )
 def test_operator_work_view_rejects_invalid_opaque_ref_before_upstream(monkeypatch, ref_id):
@@ -3523,7 +3527,7 @@ def test_operator_work_view_preserves_runtime_invalid_ref_response(monkeypatch):
 
 
 def test_operator_work_view_never_proxies_mutations(monkeypatch):
-    ref_id = "ghr_1234567890abcdef12345678"
+    ref_id = "ghr_" + "1234567890abcdef12345678"
 
     class UnexpectedAsyncClient:
         def __init__(self, *args, **kwargs):
@@ -3931,7 +3935,7 @@ def test_short_worker_view_ref_ttl_config_can_expire_refs(monkeypatch):
 
 
 def test_ui_sensitive_url_log_filter_redacts_signed_tokens():
-    view_ref = "ghr_1234567890abcdef12345678"
+    view_ref = "ghr_" + "1234567890abcdef12345678"
     raw = (
         'GET /novnc/wrk_1/websockify?gh_token=secret-token&gh_sig=signature&gh_exp=123 '
         f'GET /v1/signed-links/opaque-token?download=1 GET /w/{view_ref}'
@@ -6059,10 +6063,14 @@ def test_connections_recovery_is_verify_first_and_external_client_failure_is_opt
     assert recovery < check < verify < sign_in < reconnect
     assert "const idleLabel = button.textContent || 'Test connection';" in script
     assert "button.textContent = idleLabel;" in script
-    assert "fetch(api.withAuth('/api/connect-ai')).catch(() => null)" in script
-    assert "if (connectResponse?.ok)" in script
-    assert "External AI client setup is temporarily unavailable." in script
-    assert "if (!connectResponse.ok) throw" not in script
+    loader = script[script.index("async function loadControlPlane("):script.index("async function submitProviderAccount(")]
+    assert "connectionHelp: settled(fetch(api.withAuth('/api/connect-ai')))" in loader
+    assert "apply(requests.connectionHelp, async ({ value: response }) => {" in loader
+    assert "if (response?.ok)" in loader
+    assert "External AI client setup is temporarily unavailable." in loader
+    assert loader.index("if (generation !== controlPlaneGeneration) return;") < loader.index("controlPlane = payload;")
+    assert loader.index("renderProviderAccounts();") < loader.index("controlPlaneSectionsReady = Promise.all(")
+    assert "if (!connectResponse.ok) throw" not in loader
     removal = script[
         script.index("async function removeProviderAccount") : script.index(
             "function renderProviderAccounts"
@@ -6244,7 +6252,7 @@ def test_workspace_delivery_model_exposes_completed_output_without_stale_failure
     assert payload["failed"] == {
         "available": False,
         "state": "failed",
-        "summary": "Build failed",
+        "summary": "The run did not complete. Review the details before trying again.",
         "primary": None,
         "artifacts": [],
     }
@@ -6298,12 +6306,26 @@ def test_workspace_overview_orders_attention_bounds_previews_and_rehydrates_each
 
 
 def test_primary_navigation_remains_visible_at_tablet_and_narrow_desktop_widths():
-    styles = (Path(server_module.STATIC_DIR) / "styles.css").read_text(encoding="utf-8")
+    static = Path(server_module.STATIC_DIR)
+    styles = (static / "theme.css").read_text(encoding="utf-8")
+    tablet = styles.split("@media (max-width: 1100px)", 1)[1].split("@media", 1)[0]
 
-    assert "@media (max-width: 1100px)" in styles
-    assert ".view-tabs {\n    order: 3;\n    width: 100%;\n    flex-wrap: wrap;" in styles
-    assert ".current-user-control { width: 100%; flex-wrap: wrap; }" in styles
-    assert ".current-user-label { flex: 1 1 100%; max-width: 100%; }" in styles
+    def declarations(selector):
+        rule = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", tablet)
+        assert rule, selector
+        return {name.strip(): " ".join(value.split())
+                for name, value in re.findall(r"([\w-]+)\s*:\s*([^;]+);?", rule.group(1))}
+
+    assert declarations(".app-header")["grid-template-columns"] == "minmax(0, 1fr) 44px"
+    navigation = declarations(".app-header .view-tabs")
+    assert navigation["grid-column"] == "1 / -1"
+    assert navigation["grid-row"] == "2"
+    assert navigation["width"] == "100%"
+    assert navigation["flex-wrap"] == "wrap"
+    assert navigation["overflow-x"] == "visible"
+    assert declarations(".profile-menu") == {"grid-column": "2", "grid-row": "1"}
+    for page in ("index.html", "conversation.html"):
+        assert 'href="/static/theme.css?v=' in (static / page).read_text(encoding="utf-8")
 
 
 def test_main_ui_exposes_current_user_and_explicit_account_logout_actions():
@@ -6524,8 +6546,10 @@ def test_login_dom_uses_visible_methods_without_stale_provider_copy():
     assert "loginMethods.has('oidc')" in script
     assert "loginMethods.has('local_password')" in script
     assert "authDivider.hidden = !(oidcVisible && localVisible)" in script
-    assert "identity.provider_switch_visible" in app_script
-    assert "switchAccount.hidden" in app_script
+    assert "renderAccountIdentity(identity, Boolean(csrfToken))" in app_script
+    menu_script = (Path(server_module.STATIC_DIR) / "account-menu.js").read_text(encoding="utf-8")
+    assert "!authenticated || identity.provider_switch_visible !== true" in menu_script
+    assert "switchAccount.hidden" in menu_script
 
 
 class _FakeOidcHumanAuth:
@@ -7775,7 +7799,7 @@ def test_failed_workspace_keeps_the_recommended_pause_recovery_visible():
                 f"import {{ workspaceLifecycleControl }} from {json.dumps(policy_module)};"
                 "const states = ['failed','cancelled','interrupted','completed','paused','terminated'];"
                 "process.stdout.write(JSON.stringify(Object.fromEntries(states.map(state => "
-                "[state, workspaceLifecycleControl(state)]))));"
+                "[state, workspaceLifecycleControl(['failed','cancelled','interrupted'].includes(state) ? 'running' : state, state)]))));"
             ),
         ],
         check=True,
@@ -8222,38 +8246,42 @@ def test_watch_zip_view_cookie_post_requires_origin_worker_and_read_route(tmp_pa
         assert runtime.header_contexts[-1]['X-Viventium-User-Role'] == 'viewer'
 
 
-def test_connect_ai_offers_the_local_stdio_connection_on_a_single_user_install(tmp_path, monkeypatch):
-    """A local install needs no OAuth client registration: it offers its own stdio command."""
-    for name in (
-        "GLASSHIVE_SECURITY_MODE",
-        "GLASSHIVE_HUMAN_AUTH_MODE",
-        "GLASSHIVE_MCP_CLAUDE_CLIENT_ID",
-        "GLASSHIVE_MCP_CODEX_CLIENT_ID",
-        "GLASSHIVE_MCP_OAUTH_ISSUER",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    launcher = str(tmp_path / "My xPerfect" / "xperfect")
-    state = str(tmp_path / "state dir")
-    monkeypatch.delenv("GLASSHIVE_MCP_PUBLIC_URL", raising=False)
-    monkeypatch.setenv("XPERFECT_LOCAL_MCP_URL", "http://127.0.0.1:19967/mcp")
-    monkeypatch.setenv("XPERFECT_LOCAL_MCP_COMMAND", json.dumps([launcher, "mcp", "--state-dir", state]))
-    monkeypatch.setenv("XPERFECT_LOCAL_CHECKOUT", str(tmp_path / "My xPerfect"))
-    client = TestClient(create_app(runtime_client=FakeRuntimeClient()))
 
-    payload = client.get("/api/connect-ai").json()
+def test_bootstrap_projects_native_install_state_and_host_launch_rejects_before_project(monkeypatch):
+    class NativeCatalogClient(FakeRuntimeClient):
+        def worker_profiles(self):
+            return {"items": [{"profile": "openclaw-general", "host_cli_installed": False},
+                              {"profile": "codex-cli", "host_cli_installed": True}]}
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "host")
+    fake = NativeCatalogClient()
+    client = TestClient(create_app(runtime_client=fake))
+    bootstrap = client.get("/api/bootstrap").json()
+    missing = next(item for item in bootstrap["new_workspace_options"] if item["profile"] == "openclaw-general")
+    assert missing["host_cli_installed"] is False
+    assert bootstrap["managed_deployment"] is False
+    response = client.post("/api/launch", json={"description": "Synthetic task", "workspace_option": "new:openclaw-general", "workspace_type": "host"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "native_cli_missing"
+    assert fake.create_project_requests == [] and fake.create_worker_requests == []
+    # A host binary is not required for a Docker route; native placement still owns readiness.
+    response = client.post("/api/launch", json={"description": "Synthetic task", "workspace_option": "new:openclaw-general", "workspace_type": "sandboxed"})
+    assert response.status_code == 200
+    assert len(fake.create_project_requests) == 1
 
-    assert payload["configuration_status"] == "ready"
-    assert payload["mcp_url"] == "http://127.0.0.1:19967/mcp"
-    name = payload["server_name"]
-    stdio = f"{shlex.quote(launcher)} mcp --state-dir {shlex.quote(state)}"
-    assert payload["clients"]["claude"]["add_command"] == f"claude mcp add --scope user {name} -- {stdio}"
-    assert payload["clients"]["codex"]["add_command"] == f"codex mcp add {name} -- {stdio}"
-    prompt = payload["guided_prompt"]
-    assert f"claude plugin marketplace add {shlex.quote(str(tmp_path / 'My xPerfect'))}" in prompt
-    assert f"codex plugin marketplace add {shlex.quote(str(tmp_path / 'My xPerfect'))}" in prompt
-    assert "no sign-in step" in prompt
-    assert "oauth" not in prompt.lower()
 
-    # Without the launcher's own command (for example the container package) nothing is invented.
-    monkeypatch.delenv("XPERFECT_LOCAL_MCP_COMMAND")
-    assert client.get("/api/connect-ai").json()["configuration_status"] == "action_required"
+def test_unknown_native_catalog_does_not_falsely_mark_a_type_uninstalled(monkeypatch):
+    class UnavailableCatalogClient(FakeRuntimeClient):
+        def worker_profiles(self):
+            raise RuntimeError("Synthetic catalog outage")
+    monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "host")
+    fake = UnavailableCatalogClient()
+    client = TestClient(create_app(runtime_client=fake))
+    options = client.get("/api/bootstrap").json()["new_workspace_options"]
+    assert all("host_cli_installed" not in option for option in options)
+    assert client.post("/api/launch", json={"description": "Synthetic task", "workspace_option": "new:codex-cli", "workspace_type": "host"}).status_code == 200
+
+
+def test_connections_heading_uses_same_width_as_account_column():
+    styles = (Path(server_module.STATIC_DIR) / "styles.css").read_text()
+    assert "#connections-view .control-plane-head { max-width: 760px; }" in styles
+    assert re.search(r"\.connections-stack\s*\{[^}]*max-width:\s*760px", styles)

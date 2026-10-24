@@ -37,6 +37,12 @@ owns identity, authorization, lifecycle, scheduling, recovery and observability.
 exact inputs and results; adapters translate protocols; the UI makes actions and state clear.
 Keep these responsibilities modular. Do not turn transport or UI code into a second planning agent.
 
+xPerfect is an independent control plane, orchestrator, manager and harness of harnesses. Applications
+own their domain state and semantics; core extensions must work without a named application's
+code, database, formats, paths or channels. Keep client-specific translation with the client.
+The [application boundary contract](09_Application_Boundary_Contract.md) owns the concrete integration
+rules and proposed transition; retain working compatibility until its consumers pass acceptance.
+
 ## 5. Do not reinvent the wheel
 
 Study the existing codebase, related components and consumers before designing a solution. Search
@@ -52,6 +58,12 @@ Minimize the clicks, steps, required choices and time needed to reach useful val
 user to understand and use the product naturally, without training or a learning curve. Keep the
 normal path obvious; show advanced controls when useful. Simplicity must preserve capabilities,
 truthful errors and security, not hide them.
+
+Use the language of the user's job: the work, its outcome, onboarding material, the named AI worker
+and its workplace. Make identity distinct from worker type and execution location. Preserve the
+user's choices and draft through account connection and recovery. Shared navigation and account
+controls must remain stable between pages. The [operator UI contract](07_Minimal_Unified_Operator_UI.md)
+owns the concrete labels, grouping and interactions.
 
 ## 7. Think and plan, then complete the work
 

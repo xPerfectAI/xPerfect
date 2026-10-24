@@ -241,27 +241,31 @@ class CodexNativeWarmMixin(GrokNativeWarmMixin):
             scope=scope, stop_runtime=self)
 
     def _prepare_native_warm_command(self, worker, command, *, run_root):
-        if not NativeWarmConfig.from_performance(bootstrap_bundle_for(worker).get("runtime_performance")).workers:
-            return command
-        # Mission commands use the same proven translator when warming is opted in.
+        # Native mission control is independent of the optional warm pool.
         cold = command
         if len(command) > 1 and command[1] == "exec":
             command = self._prepare_native_midstream_command(worker, command, run_root=run_root)
+        if not NativeWarmConfig.from_performance(bootstrap_bundle_for(worker).get("runtime_performance")).workers:
+            return command
         context_path = run_root / "native-input-context.json"
+        cold_control = cold
         try:
             context = native_input.read_object(context_path)
             if (context.get("workerId") != worker.get("worker_id")
                     or context.get("runId") != worker.get("_active_run_id")
                     or context.get("attemptId") != worker.get("_run_attempt_id")):
                 return cold
+            # A validated native control relay remains the faithful cold path
+            # when startup-only policy is ineligible for a warm process.
+            cold_control = command
             overrides = command_config(context["launch"]["command"])
             project_config((self._host_codex_home(worker) / "config.toml").read_text(),
                            self._host_env(worker, worker.get("_active_run_id")), overrides)
         except (OSError, ValueError, KeyError, native_input.NativeInputError):
-            return cold
+            return cold_control
         prepared = super()._prepare_native_warm_command(worker, command, run_root=run_root)
         if prepared == command:
-            return cold
+            return cold_control
         config_path = self._host_codex_home(worker) / "config.toml"
         authority_path = run_root / "native-authority-context.json"
         authority = (native_input.read_object(authority_path)
@@ -273,7 +277,7 @@ class CodexNativeWarmMixin(GrokNativeWarmMixin):
                 native_input.publish(context_path, context)
         except (OSError, ValueError, native_input.NativeInputError):
             self._finish_native_warm(worker)
-            return cold
+            return cold_control
         attach_command = [sys.executable, str(Path(__file__).resolve()), "--attach", prepared[-1], str(context_path)]
         if authority:
             authority["command"] = attach_command

@@ -63,6 +63,15 @@ def bind_context_projection(configuration, worker, run):
     projected = configuration.prepare_run(worker, run)
     if not projected["_context_projection"]["manifest"]["context"]["retrievable_chars"]:
         return projected
+    return bind_native_tool_projection(
+        configuration.peers, projected, run, name="xperfect-context", purpose="context",
+        token_env="GLASSHIVE_CONTEXT_TOKEN", endpoint_path="/v1/native/context/",
+    )
+
+
+def bind_native_tool_projection(peers, projected, run, *, name, purpose, token_env, endpoint_path):
+    """Project an existing live-attempt MCP grant through the native transport."""
+    worker = projected
     from . import native_transport
 
     # A packaged box reaches the runtime only through its own socket, and a
@@ -71,47 +80,50 @@ def bind_context_projection(configuration, worker, run):
     base = native_transport.worker_route()
     if not base:
         raise context_route_unavailable()
-    token = configuration.peers.mint_native_session(
-        worker["worker_id"], run["run_id"], purpose="context"
+    token = peers.mint_native_session(
+        worker["worker_id"], run["run_id"], purpose=purpose
     )
-    projected["_context_tool_policy"]["runtime_ids"].append("xperfect-context")
+    policy = projected.setdefault("_context_tool_policy", {"mode": "inherit", "selected": []})
+    runtime_ids = policy.setdefault("runtime_ids", [])
+    if name not in runtime_ids:
+        runtime_ids.append(name)
     bundle = json.loads(str(projected["bootstrap_bundle_json"] or "{}"))
     bundle["_configured_removed_mcp_servers"] = [
-        name for name in (bundle.get("_configured_removed_mcp_servers") or [])
-        if name != "xperfect-context"
+        removed_name for removed_name in (bundle.get("_configured_removed_mcp_servers") or [])
+        if removed_name != name
     ]
     if bundle.get("grok_mcp_servers") is not None:
         bundle["grok_mcp_servers"] = [
             server for server in bundle["grok_mcp_servers"]
-            if server.get("name") != "xperfect-context"
+            if server.get("name") != name
         ]
     environment = bundle.setdefault("env", {})
-    environment["GLASSHIVE_CONTEXT_TOKEN"] = token
+    environment[token_env] = token
     servers = dict(mcp_servers(bundle))
     bundle["claude_project_mcp"] = {"mcpServers": servers}
-    url = base + "/v1/native/context/"
+    url = base + endpoint_path
     if native_transport.socket_route(base):
         interpreter = native_transport.bridge_interpreter(base)
-        servers["xperfect-context"] = native_transport.stdio_server(
-            url, "GLASSHIVE_CONTEXT_TOKEN", interpreter
+        servers[name] = native_transport.stdio_server(
+            url, token_env, interpreter
         )
         codex_block = native_transport.codex_stdio_block(
-            "xperfect-context", url, "GLASSHIVE_CONTEXT_TOKEN", interpreter
+            name, url, token_env, interpreter
         )
     else:
-        servers["xperfect-context"] = {
+        servers[name] = {
             "type": "http",
             "url": url,
-            "headers": {"Authorization": "Bearer ${GLASSHIVE_CONTEXT_TOKEN}"},
+            "headers": {"Authorization": "Bearer ${" + token_env + "}"},
         }
         codex_block = (
-            "[mcp_servers.xperfect-context]\nurl = "
+            "[mcp_servers." + name + "]\nurl = "
             + json.dumps(url)
-            + '\nbearer_token_env_var = "GLASSHIVE_CONTEXT_TOKEN"\n'
+            + "\nbearer_token_env_var = " + json.dumps(token_env) + "\n"
         )
     bundle["codex_config_append"] = (
         restrict_codex_connections(
-            str(bundle.get("codex_config_append") or ""), {"xperfect-context"}
+            str(bundle.get("codex_config_append") or ""), {name}
         )
         + "\n"
         + codex_block
@@ -143,6 +155,6 @@ def register_owner_configuration_tools(server, client):
         return client._request(
             "PUT",
             f"/v1/workers/{quote(worker_id, safe='')}/configuration",
-            json_body=configuration.model_dump(),
+            json_body=configuration.model_dump(exclude_unset=True),
             require_write_scope=True,
         )

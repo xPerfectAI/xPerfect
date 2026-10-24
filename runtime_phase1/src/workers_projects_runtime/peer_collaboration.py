@@ -129,7 +129,7 @@ def _redacted(text: str) -> str:
 def ensure_peer_schema(conn: sqlite3.Connection) -> None:
     from .peer_permissions import preserve_v1_grants, restore_v1_grants
 
-    require_compatible_schema(conn, component="peer_collaboration", target_version=3)
+    require_compatible_schema(conn, component="peer_collaboration", target_version=4)
     migration = preserve_v1_grants(conn)
     execute_schema_script(
         conn,
@@ -185,6 +185,22 @@ def ensure_peer_schema(conn: sqlite3.Connection) -> None:
     execute_schema_script(
         conn,
         """
+    CREATE TRIGGER IF NOT EXISTS schedule_session_run_revocation
+    AFTER UPDATE OF state,active_attempt_id ON runs
+    BEGIN DELETE FROM peer_native_sessions WHERE purpose='schedule' AND run_id=NEW.run_id
+      AND (NEW.state!='running' OR attempt_id!=COALESCE(NEW.active_attempt_id,'')); END;
+    CREATE TRIGGER IF NOT EXISTS schedule_session_attempt_revocation
+    AFTER UPDATE OF state,ended_at ON run_attempts
+    WHEN NEW.state!='running' OR NEW.ended_at IS NOT NULL
+    BEGIN DELETE FROM peer_native_sessions WHERE purpose='schedule' AND attempt_id=NEW.attempt_id; END;
+    CREATE TRIGGER IF NOT EXISTS schedule_session_lease_revocation
+    AFTER UPDATE OF status,released_at,attempt_id ON host_run_leases
+    WHEN NEW.status!='active' OR NEW.released_at IS NOT NULL OR NEW.attempt_id!=OLD.attempt_id
+    BEGIN DELETE FROM peer_native_sessions WHERE purpose='schedule' AND run_id=NEW.run_id; END;
+    CREATE TRIGGER IF NOT EXISTS schedule_session_worker_revocation
+    AFTER UPDATE OF state ON workers
+    WHEN NEW.state IN ('terminating','termination_failed','terminated')
+    BEGIN DELETE FROM peer_native_sessions WHERE purpose='schedule' AND worker_id=NEW.worker_id; END;
     CREATE TRIGGER IF NOT EXISTS context_session_run_revocation
     AFTER UPDATE OF state,active_attempt_id ON runs
     BEGIN DELETE FROM peer_native_sessions WHERE purpose='context' AND run_id=NEW.run_id
@@ -203,7 +219,7 @@ def ensure_peer_schema(conn: sqlite3.Connection) -> None:
     BEGIN DELETE FROM peer_native_sessions WHERE purpose='context' AND worker_id=NEW.worker_id; END;
     """,
     )
-    record_schema_version(conn, component="peer_collaboration", version=3)
+    record_schema_version(conn, component="peer_collaboration", version=4)
 
 
 def _worker(conn, worker_id, tenant_id, owner_id):
@@ -898,7 +914,7 @@ class PeerCollaboration:
     def mint_native_session(
         self, worker_id, run_id, *, lifetime_seconds=3600, purpose="peer"
     ):
-        if purpose not in {"peer", "context"}:
+        if purpose not in {"peer", "context", "schedule"}:
             raise PeerError("peer_native_unauthorized", 401)
         if not 1 <= lifetime_seconds <= 3600:
             raise PeerError("peer_expiry_invalid", 422)
@@ -912,7 +928,7 @@ class PeerCollaboration:
             if not row:
                 raise PeerError("peer_source_stale", 409)
             _worker(conn, worker_id, row["tenant_id"], row["owner_id"])
-            if purpose == "context" and not self._context_attempt_live(
+            if purpose in {"context", "schedule"} and not self._context_attempt_live(
                 conn, row, datetime.now(timezone.utc)
             ):
                 raise PeerError("peer_native_unauthorized", 401)
@@ -961,7 +977,7 @@ class PeerCollaboration:
         rows = conn.execute(
             """SELECT s.*,r.state,r.active_attempt_id,r.tenant_id,w.owner_id,w.state AS worker_state
             FROM peer_native_sessions s JOIN runs r ON r.run_id=s.run_id
-            JOIN workers w ON w.worker_id=s.worker_id WHERE s.purpose='context'"""
+            JOIN workers w ON w.worker_id=s.worker_id WHERE s.purpose IN ('context','schedule')"""
         ).fetchall()
         for row in rows:
             if (
@@ -977,7 +993,7 @@ class PeerCollaboration:
 
     def native_principal(self, token, *, purpose="peer"):
         if (
-            purpose not in {"peer", "context"}
+            purpose not in {"peer", "context", "schedule"}
             or not isinstance(token, str)
             or not 20 <= len(token) <= 128
         ):
@@ -1000,7 +1016,7 @@ class PeerCollaboration:
                 and row["worker_state"] not in CLOSED_WORKER_STATES
             )
             if valid and row["purpose"] == purpose:
-                if purpose == "context":
+                if purpose in {"context", "schedule"}:
                     # The credential covers only this live invocation. Extend the finite
                     # record on demand, including after idle expiry, only under a fresh lease.
                     conn.execute(

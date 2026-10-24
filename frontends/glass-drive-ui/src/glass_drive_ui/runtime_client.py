@@ -108,6 +108,9 @@ class RuntimeClient:
     def owner_storage(self) -> dict[str, Any]:
         return self._request("GET", "/v1/storage")
 
+    def worker_profiles(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/worker-profiles")
+
     def provider_readiness(self, profile: str) -> dict[str, str]:
         return self._request(
             "GET",
@@ -363,6 +366,7 @@ class RuntimeClient:
         bootstrap_bundle: dict[str, Any] | None = None,
         execution_mode: str = "docker",
         start_synchronously: bool = True,
+        workspace_kind: str = "ephemeral",
     ) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -377,7 +381,7 @@ class RuntimeClient:
                 # execution substrate; a packaged shared member has no host login.
                 "bootstrap_bundle": bootstrap_bundle,
                 "start_synchronously": start_synchronously,
-                "workspace_kind": "ephemeral",
+                "workspace_kind": workspace_kind,
             },
         )
 
@@ -400,8 +404,21 @@ class RuntimeClient:
             },
         )
 
-    def assign_run(self, worker_id: str, instruction: str) -> dict[str, Any]:
-        return self._request("POST", f"/v1/workers/{worker_id}/assign", json_body={"instruction": instruction})
+    def assign_run(
+        self,
+        worker_id: str,
+        instruction: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        scoped = self.with_headers({"x-glasshive-idempotency-key": idempotency_key}) if idempotency_key else self
+        return scoped._request("POST", f"/v1/workers/{quote(worker_id, safe='')}/assign", json_body={"instruction": instruction})
+
+    def assignment_by_idempotency(self, worker_id: str, idempotency_key: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/v1/workers/{quote(worker_id, safe='')}/assignments/by-idempotency/{quote(idempotency_key, safe='')}",
+        )
 
     def schedule_run(
         self,
@@ -427,6 +444,19 @@ class RuntimeClient:
             payload["delay_seconds"] = delay_seconds
         return self._request("POST", f"/v1/workers/{worker_id}/schedule", json_body=payload)
 
+    def create_target_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/v1/recurring-schedules", json_body=payload)
+
+    def webhook_destinations(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/v1/webhook-destinations").get("items", [])
+
+    def create_webhook_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/v1/webhook-destinations", json_body=payload)
+
+    def update_webhook_destination(self, destination_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        path_id = quote(destination_id, safe="")
+        return self._request("PATCH", f"/v1/webhook-destinations/{path_id}", json_body=payload)
+
     def create_recurring_schedule(self, worker_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -437,6 +467,9 @@ class RuntimeClient:
     def recurring_schedules(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
         suffix = "?include_inactive=true" if include_inactive else ""
         return self._request("GET", f"/v1/recurring-schedules{suffix}").get("items", [])
+
+    def recurring_schedule(self, definition_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/v1/recurring-schedules/{quote(definition_id, safe='')}")
 
     def recurring_schedule_occurrences(
         self,

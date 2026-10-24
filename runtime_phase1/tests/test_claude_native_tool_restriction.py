@@ -107,3 +107,37 @@ def test_only_typed_false_restricts_claude(runtime, tmp_path, monkeypatch, value
     assert '--chrome' in command and '--resume' in command
     assert command[command.index('--permission-mode') + 1] == 'bypassPermissions'
     assert runtime._host_workspace_dir(candidate) == tmp_path / 'Life'
+
+
+def test_restricted_claude_does_not_materialize_private_native_context(runtime, tmp_path):
+    candidate = worker(tmp_path)
+    authority = runtime._bootstrap_bundle_for_worker(candidate)
+    runtime._write_conversation_runtime_files(candidate, authority)
+    unadmitted = tmp_path / 'unadmitted-native-context'
+    candidate['_native_context_placement'] = {
+        'home_dir': str(unadmitted / 'home'),
+        'workspace_dir': str(tmp_path / 'Life'),
+        'private_project_dir': str(unadmitted / 'project'),
+        'host_native': True,
+    }
+    command, _ = runtime._build_command(candidate, 'Synthetic.', runtime._host_runtime_info(candidate))
+    assert not unadmitted.exists()
+    assert Path(command[command.index('--append-system-prompt-file') + 1]).read_text() == authority['developer_instructions']
+
+
+def test_restricted_claude_does_not_apply_preexisting_native_selectors(runtime, tmp_path):
+    candidate = worker(tmp_path)
+    authority = runtime._bootstrap_bundle_for_worker(candidate)
+    runtime._write_conversation_runtime_files(candidate, authority)
+    candidate['_native_context_placement'] = {'unadmitted': True}
+    candidate['_native_context_selectors'] = {
+        'settings_data': {'autoMemoryDirectory': str(tmp_path / 'unadmitted-memory')},
+        'mcp_config': str(tmp_path / 'unadmitted-mcp.json'),
+        'claude_instructions': str(tmp_path / 'unadmitted-instructions.md'),
+    }
+    command, env = runtime._build_command(candidate, 'Synthetic.', runtime._host_runtime_info(candidate))
+    assert Path(command[command.index('--mcp-config') + 1]).name == 'conversation-mcp.json'
+    assert Path(command[command.index('--append-system-prompt-file') + 1]).read_text() == authority['developer_instructions']
+    assert json.loads(command[command.index('--settings') + 1]) == {
+        'autoMemoryEnabled': False, 'disableAllHooks': True, 'permissions': {'defaultMode': 'dontAsk'}}
+    assert env['CLAUDE_CONFIG_DIR'].startswith(str(tmp_path / 'private-state'))

@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 from urllib.parse import quote
 
@@ -179,7 +180,7 @@ def _matches_input_version(root: str, relative: str, identity: tuple, digest: st
         return True
 
 
-def is_unmodified_user_input(worker: dict, path: Path) -> bool:
+def is_unmodified_user_input(worker: dict, path: Path, *, input_versions: dict | None = None) -> bool:
     """Only the accepted bytes of a typed input version are excluded as output.
 
     Native edits at the same file ID become output candidates. Filename, folder,
@@ -190,7 +191,8 @@ def is_unmodified_user_input(worker: dict, path: Path) -> bool:
         relative = path.relative_to(root).as_posix()
     except ValueError:
         return False
-    version = _input_versions(worker).get(relative)
+    versions = _input_versions(worker) if input_versions is None else input_versions
+    version = versions.get(relative)
     if version is None:
         return False
     try:
@@ -204,7 +206,7 @@ def is_unmodified_user_input(worker: dict, path: Path) -> bool:
     return _matches_input_version(str(root), relative, _file_identity(metadata), version["sha256"])
 
 
-def candidate_html_paths(worker: dict, max_entries: int = 20) -> list[Path]:
+def candidate_html_paths(worker: dict, max_entries: int = 20, *, latest_run: dict | None = None) -> list[Path]:
     raw_root = str(worker.get("workspace_dir") or "").strip()
     if not raw_root:
         return []
@@ -224,7 +226,7 @@ def candidate_html_paths(worker: dict, max_entries: int = 20) -> list[Path]:
             continue
         if not is_user_deliverable_relative_path(rel):
             continue
-        if is_unmodified_user_input(worker, path):
+        if is_unmodified_user_input(worker, path) or not _file_changed_during_run(path, latest_run):
             continue
         candidates.append(path)
         if len(candidates) >= max_entries:
@@ -232,13 +234,17 @@ def candidate_html_paths(worker: dict, max_entries: int = 20) -> list[Path]:
     return candidates
 
 
-def candidate_artifact_paths(worker: dict, max_entries: int = 50) -> list[Path]:
+def candidate_artifact_paths(worker: dict, max_entries: int = 50, *, latest_run: dict | None = None) -> list[Path]:
+    # Shared files need an explicit native selection; a directory cannot prove run ownership.
+    if workspace_files_are_shared(worker):
+        return []
     raw_root = str(worker.get("workspace_dir") or "").strip()
     if not raw_root:
         return []
     root = Path(raw_root)
     if not root.exists():
         return []
+    input_versions = _input_versions(worker)
     candidates: list[Path] = []
     for directory, subdirectories, filenames in os.walk(root, followlinks=False):
         relative_directory = Path(directory).relative_to(root)
@@ -257,7 +263,8 @@ def candidate_artifact_paths(worker: dict, max_entries: int = 50) -> list[Path]:
                     continue
             except OSError:
                 continue
-            if is_unmodified_user_input(worker, path):
+            if (is_unmodified_user_input(worker, path, input_versions=input_versions)
+                    or not _file_changed_during_run(path, latest_run)):
                 continue
             candidates.append(path)
 
@@ -665,6 +672,27 @@ def workspace_files_are_shared(worker: dict) -> bool:
     )
 
 
+
+def _file_changed_during_run(path: Path, run: dict | None) -> bool:
+    """Scope an isolated workspace's automatic preview to this native run.
+
+    Directory priority ranks files only after the run window is applied. Ctime
+    includes newly created downloads that retain their source's older mtime.
+    Missing timestamps retain the existing pre-run/legacy inventory behavior.
+    Shared workspaces are excluded by their structured ownership check.
+    """
+    if not run or not run.get("started_at"):
+        return True
+    try:
+        started = datetime.fromisoformat(str(run["started_at"]).replace("Z", "+00:00")).timestamp()
+        ended = (datetime.fromisoformat(str(run["ended_at"]).replace("Z", "+00:00")).timestamp()
+                 if run.get("ended_at") else float("inf"))
+        metadata = path.stat()
+    except (OSError, TypeError, ValueError):
+        return False
+    return any(started <= changed <= ended for changed in (metadata.st_mtime, metadata.st_ctime))
+
+
 def deliverable_payload(
     worker: dict,
     latest_run: dict | None,
@@ -679,7 +707,7 @@ def deliverable_payload(
     # A legacy host worker can point at an existing working directory. Its
     # files are not run-owned merely because its membership is isolated.
     shared = workspace_files_are_shared(worker)
-    artifact_candidates = [] if shared else candidate_artifact_paths(worker)
+    artifact_candidates = [] if shared else candidate_artifact_paths(worker, latest_run=latest_run)
     valid_artifact_candidates = [
         path
         for path in artifact_candidates
@@ -705,7 +733,7 @@ def deliverable_payload(
             "workspace_path": rel.as_posix(),
         }
 
-    html_candidates = [] if shared else candidate_html_paths(worker)
+    html_candidates = [] if shared else candidate_html_paths(worker, latest_run=latest_run)
     preferred_html = next((path for path in html_candidates if path.name.lower() == "index.html"), None)
     if preferred_html is None and html_candidates:
         preferred_html = html_candidates[0]

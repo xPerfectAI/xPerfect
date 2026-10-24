@@ -890,6 +890,68 @@ def test_idle_pause_and_resume_callbacks_are_durable_deterministic_effects(
         service.shutdown()
 
 
+@pytest.mark.parametrize(
+    "source_state,recover_interrupted",
+    [("queued", False), ("running", False), ("running", True)],
+)
+def test_steer_materializes_exact_retired_run_callback_without_stopping_replacement(
+    tmp_path, monkeypatch, source_state, recover_interrupted
+):
+    callbacks = {"events_webhook_url": "http://callback.local/events"}
+    store, service, project, worker = _runtime_fixture(tmp_path, callbacks=callbacks)
+    source = store.create_run(
+        worker["worker_id"], project["project_id"], "Read the public reference"
+    )
+    other_worker = store.create_worker(
+        project_id=project["project_id"], owner_id="owner-a", name="Other worker",
+        role="research", profile="openclaw-general", backend="openclaw",
+        runtime="openclaw-stub", model="stub-model",
+    )
+    other_run = store.create_run(
+        other_worker["worker_id"], project["project_id"], "Keep independent work queued"
+    )
+    if source_state == "running":
+        source = _truthfully_invoke_run(store, service, worker, source)
+        store.update_worker_state(worker["worker_id"], "running")
+    monkeypatch.setattr(service, "_ensure_worker_processor", lambda _worker_id: None)
+    if recover_interrupted:
+        finalize = store.finalize_worker_steer_claim
+
+        def resume_after_source_interruption(*args, **kwargs):
+            assert store.finalize_run(
+                source["run_id"], "interrupted", error_text="Replaced by operator steer",
+                **_exact_terminal_generation(store, source["run_id"]),
+            )
+            return finalize(*args, **kwargs)
+
+        monkeypatch.setattr(store, "finalize_worker_steer_claim", resume_after_source_interruption)
+
+    try:
+        replacement = service.steer_worker(
+            worker["worker_id"], "Keep the same work and correct its note",
+            run_id=source["run_id"], idempotency_key="correct-existing-work",
+        )
+        service._replay_pending_lifecycle_effects()
+        service._replay_pending_lifecycle_effects()
+
+        rows = _callback_rows(store)
+        assert len(rows) == 2
+        retired = [row for row in rows if row["run_id"] == source["run_id"]]
+        assert len(retired) == 1
+        payload = json.loads(retired[0]["payload_json"])
+        expected_state = "cancelled" if source_state == "queued" else "interrupted"
+        assert payload["event"] == f"run.{expected_state}"
+        assert payload["run_state"] == "cancelled"
+        assert store.get_run(source["run_id"])["state"] == expected_state
+        assert store.get_run(replacement["run_id"])["state"] == "queued"
+        assert store.get_run(other_run["run_id"])["state"] == "queued"
+        assert not any(row["worker_id"] == other_worker["worker_id"] for row in rows)
+        assert len([row for row in rows if row["run_id"] == replacement["run_id"]]) == 1
+        assert len({row["callback_id"] for row in rows}) == 2
+    finally:
+        service.shutdown()
+
+
 def test_work_stop_materializes_one_canonical_terminal_receipt(tmp_path):
     callbacks = {"events_webhook_url": "http://callback.local/events"}
     store, service, project, worker = _runtime_fixture(tmp_path, callbacks=callbacks)

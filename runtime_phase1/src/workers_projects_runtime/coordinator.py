@@ -596,7 +596,7 @@ class CoordinatorService:
         goal = self._goal(conversation_id, dispatch.goal_id)
         serialized = canonical(dispatch.model_dump())
         bundle = {**route.bootstrap_bundle,
-                  "viventium_launch_authority": {"version": 1, "kind": "conversation_orchestrator", "execution_mode": route.execution_mode,
+                  "launch_authority": {"version": 1, "kind": "conversation_orchestrator", "execution_mode": route.execution_mode,
                     "worker_model": route.model, "worker_reasoning_effort": route.effort}}
         if route.connection_id:
             configured_id = str(bundle.get("connection_id") or "").strip()
@@ -638,7 +638,7 @@ class CoordinatorService:
             standalone_model, bundle = self.service._configured_parallel_worker_route(
                 route.profile, route.execution_mode, bundle, tenant_id=tenant, owner_id=owner,
             )
-            bundle.pop("viventium_launch_authority")
+            bundle.pop("launch_authority")
             account_store = getattr(self.service, "control_plane_store", None)
             if account_store is None:
                 raise CoordinatorScopeError("Worker account choices are unavailable")

@@ -194,8 +194,32 @@ VIVENTIUM_RUNTIME_ENV_KEYS = {
 }
 
 
+# The neutral loader never discovers another application's directories. Legacy
+# callers keep their explicit compatibility selection below.
+RUNTIME_ENV_KEYS = {
+    key for key in VIVENTIUM_RUNTIME_ENV_KEYS
+    if not key.startswith("VIVENTIUM_") and key != "WPR_LIBRECHAT_UPLOADS_ROOT"
+} | {
+    "WPR_UPLOADS_ROOT",
+    "WPR_NATIVE_SELF_SCHEDULE_ENABLED",
+    "GLASSHIVE_PROVIDER_DEFAULT_WORKSPACE",
+    "GLASSHIVE_PROVIDER_ALLOWED_WORKSPACE_ROOTS",
+    "GLASSHIVE_PROVIDER_BOOTSTRAP_SIGNATURE_SECRET",
+    "GLASSHIVE_PROVIDER_API_KEY",
+    "GLASSHIVE_PROVIDER_PRINCIPAL_ID",
+    "GLASSHIVE_PROVIDER_TENANT_ID",
+    "GLASSHIVE_PROVIDER_TRUST_IDENTITY_HEADERS",
+    "GLASSHIVE_PROVIDER_ALLOW_FULL_ACCESS",
+    "GLASSHIVE_PROVIDER_DEFAULT_ACCESS",
+    "GLASSHIVE_PEER_RUNTIME_BASE_URL",
+    "GLASSHIVE_PUBLIC_BASE_URL",
+    "GLASSHIVE_MCP_API_KEY",
+}
+
+
 def _candidate_env_files() -> list[Path]:
-    explicit = os.environ.get("VIVENTIUM_ENV_FILE", "").strip()
+    explicit = (os.environ.get("WPR_RUNTIME_ENV_FILE")
+                or os.environ.get("VIVENTIUM_ENV_FILE") or "").strip()
     return [Path(explicit).expanduser()] if explicit else []
 
 
@@ -260,10 +284,8 @@ def _repair_local_upload_roots(loaded: dict[str, str]) -> None:
         loaded["WPR_BOOTSTRAP_SOURCE_ROOTS"] = repaired_roots
 
 
-def load_viventium_runtime_env(keys: set[str] | None = None) -> dict[str, str]:
-    wanted = keys or VIVENTIUM_RUNTIME_ENV_KEYS
+def _load_env_files(candidates: list[Path], wanted: set[str]) -> dict[str, str]:
     loaded: dict[str, str] = {}
-    candidates = _candidate_env_files()
     for env_file in candidates:
         try:
             lines = env_file.read_text(encoding="utf-8").splitlines()
@@ -278,6 +300,47 @@ def load_viventium_runtime_env(keys: set[str] | None = None) -> dict[str, str]:
                 continue
             os.environ[key] = value
             loaded[key] = value
+    return loaded
+
+
+def _repair_explicit_upload_root(loaded: dict[str, str]) -> None:
+    raw = os.environ.get("WPR_UPLOADS_ROOT", "").strip()
+    if not raw:
+        return
+    root = Path(raw).expanduser()
+    if not root.is_dir():
+        return
+    root = root.resolve(strict=True)
+    canonical = os.fspath(root)
+    if raw != canonical:
+        os.environ["WPR_UPLOADS_ROOT"] = canonical
+        loaded["WPR_UPLOADS_ROOT"] = canonical
+    roots = os.environ.get("WPR_BOOTSTRAP_SOURCE_ROOTS", "")
+    projected = _append_path_list_value(roots, root)
+    if projected != roots:
+        os.environ["WPR_BOOTSTRAP_SOURCE_ROOTS"] = projected
+        loaded["WPR_BOOTSTRAP_SOURCE_ROOTS"] = projected
+
+
+def load_runtime_env(
+    keys: set[str] | None = None, *, env_file: Path | str | None = None,
+) -> dict[str, str]:
+    """Load only an explicitly selected neutral file and trusted file roots."""
+    explicit = str(env_file or os.environ.get("WPR_RUNTIME_ENV_FILE") or "").strip()
+    wanted = RUNTIME_ENV_KEYS if keys is None else keys
+    loaded = _load_env_files([Path(explicit).expanduser()] if explicit else [], wanted)
+    if {"WPR_UPLOADS_ROOT", "WPR_BOOTSTRAP_SOURCE_ROOTS"} & wanted:
+        _repair_explicit_upload_root(loaded)
+    return loaded
+
+
+def load_viventium_runtime_env(keys: set[str] | None = None) -> dict[str, str]:
+    """Compatibility entry point; an explicit neutral file takes precedence."""
+    if os.environ.get("WPR_RUNTIME_ENV_FILE", "").strip():
+        return load_runtime_env(keys)
+    wanted = VIVENTIUM_RUNTIME_ENV_KEYS if keys is None else keys
+    candidates = _candidate_env_files()
+    loaded = _load_env_files(candidates, wanted)
     if candidates and {"WPR_LIBRECHAT_UPLOADS_ROOT", "WPR_BOOTSTRAP_SOURCE_ROOTS"} & wanted:
         _repair_local_upload_roots(loaded)
     return loaded

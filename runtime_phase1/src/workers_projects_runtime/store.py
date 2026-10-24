@@ -34,6 +34,12 @@ from .schema_version import (
     require_compatible_schema,
 )
 from .state_permissions import ensure_state_directory, secure_state_file
+from . import schedule_targets
+from .application_boundary import (
+    canonical_schedule_access,
+    launch_authority_for,
+    opaque_application_context,
+)
 
 import math
 
@@ -50,7 +56,7 @@ from .models import (
 )
 
 
-RUNTIME_STORE_SCHEMA_VERSION = 10
+RUNTIME_STORE_SCHEMA_VERSION = 11
 
 
 class SchedulePrincipalAuthorityStoreError(ValueError):
@@ -282,6 +288,9 @@ PARALLEL_CLEAN_ROOM_BOOTSTRAP_KEYS = frozenset(
         "glasshive_capability_broker",
         "glasshive_capability_requirement",
         "inherited_conversation",
+        "application_context_format",
+        "launch_authority",
+        "schedule_access",
         "project_definition",
         "provider_model",
         "system_instructions",
@@ -358,7 +367,7 @@ def is_parallel_clean_room_bootstrap(
     return bool(
         profile in {"clean-room", "viventium-parallel-clean-room-v1"}
         or bundle.get("execution_policy") == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
-        or isinstance(bundle.get("viventium_launch_authority"), dict)
+        or isinstance(launch_authority_for(bundle), dict)
     )
 
 def _liveness_mode_from_bootstrap_json(value: object) -> str:
@@ -403,6 +412,12 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
             result.pop(key, None)
     if result.get("execution_policy") != PARALLEL_CLEAN_ROOM_EXECUTION_POLICY:
         result.pop("execution_policy", None)
+
+    # Validate neutral carriers before projecting either compatibility alias.
+    launch_authority_for(result)
+    opaque_application_context(result)
+    if "schedule_access" in result:
+        result["schedule_access"] = canonical_schedule_access(result["schedule_access"])
 
     if "inherited_conversation" in result:
         from .models import InheritedConversationRequest
@@ -506,6 +521,7 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
         ),
         "viventium_run_liveness": frozenset({"version", "long_mission"}),
     }
+    nested_keys["launch_authority"] = nested_keys["viventium_launch_authority"]
     for key, allowed in nested_keys.items():
         if key in result:
             result[key] = _allowlisted_dict(result[key], allowed)
@@ -595,6 +611,7 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
             "long_mission": bool,
         },
     }
+    scalar_nested_schemas["launch_authority"] = scalar_nested_schemas["viventium_launch_authority"]
     for key, schema in scalar_nested_schemas.items():
         if key in result:
             result[key] = _scalar_fields(result.get(key), schema)
@@ -2019,7 +2036,8 @@ class Store:
             conn.execute("PRAGMA journal_mode=WAL")
             session_columns = {row["name"] for row in conn.execute("PRAGMA table_info(provider_sessions)")}
             migrate_session_scope = bool(session_columns and "actor_kind" not in session_columns)
-            if migrate_session_scope:
+            migrate_schedule_targets = schedule_targets.needs_nullable_migration(conn)
+            if migrate_session_scope or migrate_schedule_targets:
                 # SQLite's documented table-rebuild procedure requires this only on the
                 # private migration connection, before BEGIN; integrity is checked before commit.
                 conn.execute("PRAGMA foreign_keys = OFF")
@@ -2034,6 +2052,8 @@ class Store:
                 current_columns = {row["name"] for row in conn.execute("PRAGMA table_info(provider_sessions)")}
                 if "actor_kind" not in current_columns:
                     self._migrate_provider_session_scopes(conn)
+            if migrate_schedule_targets and schedule_targets.needs_nullable_migration(conn):
+                schedule_targets.migrate_nullable_targets(conn)
             execute_schema_script(
                 conn,
                 """
@@ -2357,8 +2377,8 @@ class Store:
 
                 CREATE TABLE IF NOT EXISTS callback_outbox (
                     callback_id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL,
-                    worker_id TEXT NOT NULL,
+                    project_id TEXT,
+                    worker_id TEXT,
                     tenant_id TEXT NOT NULL DEFAULT 'local',
                     run_id TEXT,
                     attempt_number INTEGER NOT NULL DEFAULT 0,
@@ -2703,8 +2723,8 @@ class Store:
 
                 CREATE TABLE IF NOT EXISTS recurring_schedule_definitions (
                     definition_id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL,
-                    worker_id TEXT NOT NULL,
+                    project_id TEXT,
+                    worker_id TEXT,
                     tenant_id TEXT NOT NULL DEFAULT 'local',
                     owner_id TEXT NOT NULL,
                     scheduler_owner TEXT NOT NULL,
@@ -2742,7 +2762,7 @@ class Store:
                     owner_id TEXT NOT NULL,
                     scheduled_for TEXT NOT NULL,
                     detected_at TEXT NOT NULL,
-                    scheduled_run_id TEXT NOT NULL,
+                    scheduled_run_id TEXT,
                     idempotency_key TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL DEFAULT 'pending',
                     outcome TEXT NOT NULL DEFAULT 'pending',
@@ -3883,7 +3903,7 @@ class Store:
                 "ON callback_outbox(run_id, event_type, attempt_number, "
                 "result_revision, result_digest)"
             )
-            conn.executescript(
+            execute_schema_script(conn,
                 """
                 CREATE TRIGGER IF NOT EXISTS callback_outbox_authority_immutable
                 BEFORE UPDATE ON callback_outbox
@@ -3910,6 +3930,7 @@ class Store:
 
                 CREATE TRIGGER IF NOT EXISTS callback_outbox_trace_insert
                 AFTER INSERT ON callback_outbox
+                WHEN NEW.run_id IS NOT NULL
                 BEGIN
                     INSERT INTO callback_trace_events (
                         callback_id, run_id, callback_sequence, run_sequence,
@@ -3978,6 +3999,7 @@ class Store:
 
                 CREATE TRIGGER IF NOT EXISTS callback_outbox_trace_update
                 AFTER UPDATE ON callback_outbox
+                WHEN NEW.run_id IS NOT NULL
                 BEGIN
                     INSERT INTO callback_trace_events (
                         callback_id, run_id, callback_sequence, run_sequence,
@@ -4524,6 +4546,7 @@ class Store:
                     (visible_admission_migration, utc_now()),
                 )
 
+            schedule_targets.ensure_target_columns(conn)
             ensure_parallel_orchestration_schema(conn)
             ensure_workspace_file_schema(conn)
 
@@ -7967,6 +7990,39 @@ class Store:
             row = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
         return self._row(row)
 
+    def reconcile_idle_worker_runtime(
+        self, worker_id: str, *, expected_updated_at: str,
+        expected_last_run_id: str, **fields: Any,
+    ) -> dict[str, Any] | None:
+        """Apply an idle process observation only to the unchanged, work-free generation."""
+        if set(fields) - (RUNTIME_INFO_FIELD_NAMES | {"state", "compute_released_at"}):
+            raise ValueError("Idle runtime reconciliation fields are invalid")
+        if fields.get("state") not in {"ready", "paused"}:
+            raise ValueError("Idle runtime reconciliation state is invalid")
+        fields["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key} = :{key}" for key in fields)
+        parameters = {**fields, "worker_id": worker_id,
+            "observed_updated_at": expected_updated_at,
+            "observed_last_run_id": expected_last_run_id}
+        states = ",".join("'" + state + "'" for state in sorted(NONTERMINAL_RUN_STATES))
+        with self._connect() as conn:
+            changed = conn.execute(
+                f"""UPDATE workers SET {assignments}
+                WHERE worker_id = :worker_id AND updated_at = :observed_updated_at
+                  AND COALESCE(last_run_id, '') = :observed_last_run_id
+                  AND state IN ('starting', 'running')
+                  AND compute_release_token = '' AND work_stop_id = ''
+                  AND NOT EXISTS (SELECT 1 FROM runs
+                      WHERE runs.worker_id = workers.worker_id AND runs.state IN ({states}))
+                  AND COALESCE((SELECT event_type FROM events
+                      WHERE events.worker_id = workers.worker_id AND event_type IN (
+                          'worker.paused', 'worker.resumed', 'worker.resumed_by_alias')
+                      ORDER BY rowid DESC LIMIT 1), '') != 'worker.paused'
+                """, parameters,
+            )
+            row = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+        return self._row(row) if changed.rowcount == 1 else None
+
     def persist_worker_runtime_info_for_run_start(
         self,
         *,
@@ -8699,6 +8755,13 @@ class Store:
                 conn.execute("COMMIT")
                 return self._row(existing) or {}, False
 
+            definition = conn.execute("SELECT d.version,d.retired_at,d.create_key,o.definition_version FROM recurring_schedule_occurrences o JOIN recurring_schedule_definitions d ON d.definition_id=o.definition_id WHERE o.scheduled_run_id=?", (schedule_id,)).fetchone()
+            if definition and definition["create_key"]:
+                if definition["retired_at"] or definition["version"] != definition["definition_version"]:
+                    raise ValueError("Scheduled definition was superseded before native dispatch")
+                schedule_targets._authority(conn, schedule["tenant_id"], schedule["owner_id"])
+            if runtime_bundle_json is None and str(schedule["bootstrap_json"] or "{}") != "{}":
+                runtime_bundle_json = str(schedule["bootstrap_json"])
             if str(schedule["state"] or "") != "running":
                 conn.execute("ROLLBACK")
                 raise RuntimeError("Scheduled run must be claimed before dispatch")
@@ -12415,6 +12478,11 @@ class Store:
             "dispatch_here" if owner == "glasshive_native" else "dispatch_via_viventium_cortex"
         )
         data["next_occurrence_at"] = str(data.get("next_run_at") or "")
+        data["target"] = json.loads(str(data.pop("target_json", "{}") or "{}")) or {"kind": "worker", "worker_id": data.get("worker_id")}
+        data["target_explicit"] = bool(data.get("create_key"))
+        data["version"] = int(data.get("version") or 1)
+        for private_key in ("bootstrap_json", "create_key", "create_digest"):
+            data.pop(private_key, None)
         return data
 
     def create_recurring_schedule_definition(
@@ -12717,6 +12785,11 @@ class Store:
             "dispatch_here" if owner == "glasshive_native" else "dispatch_via_viventium_cortex"
         )
         normalized["next_occurrence_at"] = str(normalized.get("next_run_at") or "")
+        normalized["target"] = json.loads(str(normalized.pop("target_json", "{}") or "{}")) or {"kind": "worker", "worker_id": normalized.get("worker_id")}
+        normalized["target_explicit"] = bool(normalized.get("create_key"))
+        normalized["version"] = int(normalized.get("version") or 1)
+        for private_key in ("bootstrap_json", "create_key", "create_digest"):
+            normalized.pop(private_key, None)
         return normalized
 
     def get_recurring_schedule_definition(
@@ -12764,6 +12837,7 @@ class Store:
         tenant_id: str,
         owner_id: str,
         include_inactive: bool = False,
+        destination_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         query = """
@@ -12771,6 +12845,9 @@ class Store:
             WHERE tenant_id = ? AND owner_id = ?
         """
         params: list[Any] = [tenant_id or "local", owner_id]
+        if destination_id:
+            query += " AND target_kind = 'webhook' AND json_extract(target_json, '$.destination_id') = ? AND retired_at IS NULL"
+            params.append(destination_id)
         if not include_inactive:
             query += " AND active = 1"
         query += " ORDER BY next_run_at ASC, definition_id ASC LIMIT ?"
@@ -12928,16 +13005,24 @@ class Store:
         *,
         scheduler_owner: str,
         limit: int = 50,
+        include_legacy: bool = True,
     ) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM recurring_schedule_definitions
-                WHERE scheduler_owner = ? AND active = 1 AND next_run_at <= ?
-                ORDER BY next_run_at ASC, definition_id ASC
+                SELECT * FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY tenant_id, owner_id
+                        ORDER BY next_run_at, definition_id
+                    ) AS owner_order
+                    FROM recurring_schedule_definitions
+                    WHERE scheduler_owner = ? AND active = 1 AND next_run_at <= ?
+                      AND (? OR create_key <> '')
+                )
+                ORDER BY owner_order, next_run_at, definition_id
                 LIMIT ?
                 """,
-                (scheduler_owner, now_iso, max(1, min(int(limit), 100))),
+                (scheduler_owner, now_iso, include_legacy, max(1, min(int(limit), 100))),
             ).fetchall()
         return [row for value in rows if (row := self._recurring_definition_row(value)) is not None]
 
@@ -13025,6 +13110,7 @@ class Store:
                     detected_at,
                 ),
             )
+            conn.execute("UPDATE scheduled_runs SET bootstrap_json=?,definition_version=? WHERE schedule_id=?", (definition["bootstrap_json"],definition["version"],schedule_id))
             conn.execute(
                 """
                 INSERT INTO recurring_schedule_occurrences (
@@ -13048,6 +13134,7 @@ class Store:
                     detected_at,
                 ),
             )
+            conn.execute("UPDATE recurring_schedule_occurrences SET definition_version=?,target_json=? WHERE occurrence_id=?",(definition["version"],definition["target_json"],occurrence_id))
             conn.execute(
                 """
                 UPDATE recurring_schedule_definitions
@@ -13163,7 +13250,7 @@ class Store:
                 ).fetchone()
                 conn.execute("COMMIT")
                 result = self._row(schedule) or {}
-                result.update({"occurrence_id": existing["occurrence_id"], "idempotency_key": idempotency_key})
+                result.update({"occurrence_id": existing["occurrence_id"], "idempotency_key": idempotency_key, "occurrence_created": False})
                 return result
             schedule_id = f"sch_{uuid.uuid4().hex[:10]}"
             conn.execute(
@@ -13186,6 +13273,7 @@ class Store:
                     scheduled_for,
                 ),
             )
+            conn.execute("UPDATE scheduled_runs SET bootstrap_json=?,definition_version=? WHERE schedule_id=?", (definition["bootstrap_json"],definition["version"],schedule_id))
             conn.execute(
                 """
                 INSERT INTO recurring_schedule_occurrences (
@@ -13206,13 +13294,14 @@ class Store:
                     scheduled_for,
                 ),
             )
+            conn.execute("UPDATE recurring_schedule_occurrences SET definition_version=?,target_json=? WHERE occurrence_id=?",(definition["version"],definition["target_json"],occurrence_id))
             schedule = conn.execute(
                 "SELECT * FROM scheduled_runs WHERE schedule_id = ?",
                 (schedule_id,),
             ).fetchone()
             conn.execute("COMMIT")
         result = self._row(schedule) or {}
-        result.update({"occurrence_id": occurrence_id, "idempotency_key": idempotency_key})
+        result.update({"occurrence_id": occurrence_id, "idempotency_key": idempotency_key, "occurrence_created": True})
         return result
 
     def finalize_recurring_schedule_occurrence(
@@ -13252,10 +13341,16 @@ class Store:
             rows = conn.execute(
                 """
                 SELECT occurrence.*, scheduled.state AS schedule_state,
-                       scheduled.queued_run_id, scheduled.last_error
+                       scheduled.queued_run_id, scheduled.last_error,
+                       delivery.expires_at AS delivery_expires_at
                 FROM recurring_schedule_occurrences AS occurrence
-                INNER JOIN scheduled_runs AS scheduled
+                LEFT JOIN scheduled_runs AS scheduled
                     ON scheduled.schedule_id = occurrence.scheduled_run_id
+                LEFT JOIN callback_outbox AS delivery
+                    ON delivery.callback_id = occurrence.callback_id
+                   AND delivery.event_type = 'schedule.due'
+                   AND delivery.tenant_id = occurrence.tenant_id
+                   AND delivery.owner_id = occurrence.owner_id
                 WHERE occurrence.definition_id = ?
                   AND occurrence.tenant_id = ?
                   AND occurrence.owner_id = ?
@@ -13268,7 +13363,9 @@ class Store:
         for row in rows:
             item = dict(row)
             schedule_state = item.pop("schedule_state")
-            if str(item.get("state") or "pending") in {"pending", "claimed", "queued", "running"}:
+            item["last_error"] = item.get("last_error") or ""
+            item["timings_ms"] = json.loads(item.pop("timings_json", "{}"))
+            if schedule_state is not None and str(item.get("state") or "pending") in {"pending", "claimed", "queued", "running"}:
                 item["state"] = schedule_state
             if not str(item.get("outcome") or "") or item.get("outcome") == "pending":
                 if schedule_state in {"completed", "failed", "cancelled"}:
@@ -14758,14 +14855,14 @@ class Store:
         return self._row(row)
 
     def _claim_pending_callback_parallel(
-        self, callback_id: str, *, recovery: dict[str, Any] | None = None
+        self, callback_id: str, *, recovery: dict[str, Any] | None = None, lease_seconds: int | None = None
     ) -> dict[str, Any] | None:
         now = utc_now()
         lease_token = "cbdel_" + uuid.uuid4().hex
         lease_expires_at = (
             _parse_utc(now)
             + timedelta(
-                seconds=_bounded_env_seconds(
+                seconds=max(1, min(int(lease_seconds), 3600)) if lease_seconds is not None else _bounded_env_seconds(
                     "GLASSHIVE_CALLBACK_DELIVERY_LEASE_S",
                     300,
                     minimum=1,
@@ -14814,8 +14911,8 @@ class Store:
                     return None
                 callback_id = str(candidate["callback_id"])
             pending = conn.execute(
-                "SELECT * FROM callback_outbox WHERE callback_id = ? AND status = ?",
-                (str(callback_id), expected_status),
+                "SELECT * FROM callback_outbox WHERE callback_id = ? AND status = ? AND (event_type <> 'schedule.due' OR next_attempt_at IS NULL OR next_attempt_at <= ?)",
+                (str(callback_id), expected_status, now),
             ).fetchone()
             if pending is None:
                 conn.execute("COMMIT")
@@ -14875,8 +14972,8 @@ class Store:
             conn.execute("COMMIT")
         return self._row(row)
 
-    def claim_pending_callback(self, callback_id: str) -> dict[str, Any] | None:
-        return self._claim_pending_callback_parallel(callback_id)
+    def claim_pending_callback(self, callback_id: str, *, lease_seconds: int | None = None) -> dict[str, Any] | None:
+        return self._claim_pending_callback_parallel(callback_id, lease_seconds=lease_seconds)
 
     def claim_terminal_callback_recovery(
         self, *, tenant_id: str, owner_id: str,
@@ -15067,7 +15164,7 @@ class Store:
             rows = conn.execute(
                 f"""
                 SELECT * FROM callback_outbox
-                WHERE status = 'pending'
+                WHERE status = 'pending' AND event_type <> 'schedule.due'
                 {created_clause}
                 ORDER BY updated_at ASC
                 LIMIT ?
@@ -15112,6 +15209,13 @@ class Store:
                 WHERE callback_id IN ({placeholders}) AND status = 'delivering'
                 """,
                 (reclaimed_at, *callback_ids),
+            )
+            # An expired sender lease does not prove the receiver did no work.
+            # Reuse occurrence disposition; a later known ACK can settle it.
+            conn.execute(
+                f"UPDATE recurring_schedule_occurrences SET outcome='unacknowledged' "
+                f"WHERE target_kind='webhook' AND terminal_at IS NULL AND callback_id IN ({placeholders})",
+                callback_ids,
             )
             for callback_id in callback_ids:
                 self._append_callback_trace_conn(
@@ -21909,6 +22013,16 @@ class Store:
 
             newly_expired = False
             if should_expire:
+                if (run and run_state == "queued" and run.get("failure_class") == "host_capacity"
+                        and not run.get("started_at") and not run.get("runtime_invoked_at")
+                        and not run.get("active_attempt_id") and not conn.execute(
+                            "SELECT 1 FROM host_run_leases WHERE run_id=? AND status='active'", (run_id,),
+                        ).fetchone()):
+                    failure_class = "host_capacity"
+                    failure_user_message = "Local execution could not start because host capacity is unavailable."
+                    failure_recommended_recovery = "Retry this turn when host capacity is available."
+                    failure_diagnostic_summary = str(run.get("failure_diagnostic_summary") or
+                                                     run.get("error_text") or failure_user_message)
                 conn.execute(
                     """
                     UPDATE provider_requests
@@ -25422,7 +25536,16 @@ class Store:
                     event_type="worker.steer",
                     message="Replacement steer instruction preserved",
                 )
-                effect_ids = (
+                effect_ids = self._enqueue_lifecycle_effects(
+                    conn,
+                    operation_token=operation_token,
+                    operation_epoch=0,
+                    operation_kind="steer_run",
+                    worker_id=worker_id,
+                    run_id=clean_target,
+                    effect_kinds=("callback.run_interrupted",),
+                ) if target_state == "interrupted" else []
+                effect_ids += (
                     self._enqueue_lifecycle_effects(
                         conn,
                         operation_token=operation_token,
@@ -25646,7 +25769,20 @@ class Store:
                     else "Replacement steer instruction preserved"
                 ),
             )
-            effect_ids = (
+            effect_ids = self._enqueue_lifecycle_effects(
+                conn,
+                operation_token=str(worker["compute_release_operation_id"] or token),
+                operation_epoch=0,
+                operation_kind="steer_run",
+                worker_id=worker_id,
+                run_id=clean_target,
+                effect_kinds=(
+                    "callback.run_cancelled"
+                    if interrupted_state == "cancelled"
+                    else "callback.run_interrupted",
+                ),
+            )
+            effect_ids += (
                 self._enqueue_lifecycle_effects(
                     conn,
                     operation_token=str(

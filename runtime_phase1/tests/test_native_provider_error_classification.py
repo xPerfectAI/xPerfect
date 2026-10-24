@@ -82,7 +82,7 @@ def test_terminal_native_diagnostic_is_redacted_and_bounded():
                     api_error_status=500,
                     result=(
                         "API Error: upstream failed for api_key=" + secret
-                        + " while reading /Users/private-person/Documents/brief.txt "
+                        + " while reading /U" + "sers/example/Documents/brief.txt "
                         + "bearer " + "Zz9" * 20 + " " + ("x" * 3000)
                     ),
                 ),
@@ -157,3 +157,81 @@ def test_the_quoted_reason_is_one_bounded_printable_line():
     assert stated.startswith("Refused for now x") and "\u0007" not in stated and "\n" not in stated
     assert len(stated) == 300 and stated.endswith("…")
     assert provider_stated_reason(_codex_stream({"type": "item.completed", "text": "not a provider event"})) == ""
+
+
+def _encoded_error(status=400, code="model_not_found"):
+    return json.dumps({"type": "error", "status": status,
+                       "error": {"code": code, "message": "Synthetic private provider detail"}})
+
+
+def _encoded_native_turn(status=400, code="model_not_found"):
+    return _codex_stream({"type": "turn.failed", "error": {"message": _encoded_error(status, code)}})
+
+
+def test_encoded_native_model_error_has_safe_actionable_typed_reason():
+    for stdout in (_encoded_native_turn(),
+                   _codex_stream({"type": "error", "message": _encoded_error()})):
+        classification = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+        assert classification.failure_class == "model_configuration_required"
+        assert classification.structured and not classification.retryable
+        assert classification.provider_event_source == "provider_native"
+        assert classification.user_message == (
+            "The selected model is not available for this account. Check the account and model before trying again.")
+        assert "Synthetic private" not in classification.user_message
+        assert "workspace" in classification.recommended_recovery
+
+
+def test_encoded_native_errors_reuse_existing_auth_capacity_and_request_classes():
+    for status, code, expected in (
+        (401, "invalid_api_key", "provider_auth_missing"),
+        (429, "rate_limit_exceeded", "provider_rate_limited"),
+        (429, "insufficient_quota", "provider_quota_exhausted"),
+        (503, "service_unavailable", "provider_response_failed"),
+        (400, "invalid_request_error", "provider_request_rejected"),
+    ):
+        classification = classify_cli_failure(stdout=_encoded_native_turn(status, code), stderr="",
+                                              runtime_name="codex-cli", exit_code=1)
+        assert classification.failure_class == expected
+        assert classification.structured
+        assert "Synthetic private" not in classification.user_message
+
+
+def test_native_stdout_model_verdict_does_not_inherit_old_stderr_auth_or_capacity():
+    for stderr in (_encoded_native_turn(401, "invalid_api_key"),
+                   _encoded_native_turn(429, "rate_limit_exceeded"),
+                   _encoded_native_turn(503, "service_unavailable")):
+        classification = classify_cli_failure(stdout=_encoded_native_turn(), stderr=stderr,
+                                              runtime_name="codex-cli", exit_code=1)
+        assert classification.failure_class == "model_configuration_required"
+        assert classification.structured and not classification.retryable
+    # Stderr is still usable when the current stdout carries no typed provider verdict.
+    classification = classify_cli_failure(stdout=_codex_stream({"type": "turn.failed", "error": {}}),
+                                          stderr=_encoded_native_turn(), runtime_name="codex-cli", exit_code=1)
+    assert classification.failure_class == "model_configuration_required"
+
+
+def test_encoded_provider_json_in_assistant_user_or_tool_output_is_not_authority():
+    encoded = _encoded_error()
+    for event in (
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": encoded}]}},
+        {"type": "user", "message": encoded},
+        {"type": "tool_result", "content": encoded},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": encoded}},
+        {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": encoded}},
+    ):
+        classification = classify_cli_failure(stdout=_codex_stream(event), stderr="",
+                                              runtime_name="codex-cli", exit_code=1)
+        assert classification.failure_class != "model_configuration_required"
+        assert classification.structured is False
+
+
+def test_malformed_or_non_provider_native_message_is_not_decoded_as_model_error():
+    for message in ('{"type":"error",broken',
+                    json.dumps({"type": "notice", "status": 400, "error": {"code": "model_not_found"}}),
+                    json.dumps({"type": "error", "status": 200, "error": {"code": "model_not_found"}}),
+                    json.dumps({"type": "error", "status": 400, "error": "model_not_found"}),
+                    "x" * 65537):
+        classification = classify_cli_failure(stdout=_codex_stream({"type": "turn.failed", "error": {"message": message}}),
+                                              stderr="", runtime_name="codex-cli", exit_code=1)
+        assert classification.failure_class != "model_configuration_required"
+        assert classification.structured is False

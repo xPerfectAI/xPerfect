@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .application_boundary import opaque_application_context
 from .auth import DEFAULT_TENANT_ID, multi_user_security_enabled
 from .codex_plugins import provision_codex_official_marketplace
 
@@ -175,7 +176,7 @@ PARALLEL_CLEAN_ROOM_BROKER_NAME = "glasshive-user-capabilities"
 
 PARALLEL_CLEAN_ROOM_BROKER_PROXY_URL = "http://host.docker.internal:8080/mcp"
 
-CLEAN_ROOM_RUNTIME_ENV_KEYS = {GLASSHIVE_CAPABILITY_BROKER_TOKEN_ENV, "GLASSHIVE_PEER_TOKEN", "GLASSHIVE_CONTEXT_TOKEN"}
+CLEAN_ROOM_RUNTIME_ENV_KEYS = {GLASSHIVE_CAPABILITY_BROKER_TOKEN_ENV, "GLASSHIVE_PEER_TOKEN", "GLASSHIVE_CONTEXT_TOKEN", "GLASSHIVE_SCHEDULE_TOKEN"}
 
 CLEAN_ROOM_HOME_AUTHORITY_PATHS = (
     ".grok/auth.json",
@@ -353,6 +354,8 @@ def native_instruction_before_tail(
         return "\n\n".join(_unique_instruction_parts(
             instructions.rstrip()[:-len(tail)], fact, tail,
         ))
+    if opaque_application_context(bundle):
+        return "\n\n".join(_unique_instruction_parts(instructions, fact))
     stable, capsules = _split_viventium_feeling_capsules(instructions)
     return "\n\n".join(_unique_instruction_parts(stable, fact, *capsules))
 
@@ -417,6 +420,7 @@ DEFAULT_ENTERPRISE_WORKER_ENV_KEYS = {
     "XAI_API_KEY",
     "GLASSHIVE_PEER_TOKEN",
     "GLASSHIVE_CONTEXT_TOKEN",
+    "GLASSHIVE_SCHEDULE_TOKEN",
     GLASSHIVE_CAPABILITY_BROKER_TOKEN_ENV,
     GLASSHIVE_PROVIDER_SESSION_MODE_ENV,
     GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV,
@@ -650,8 +654,12 @@ def _is_exact_conversation_feeling_mirror(
 
 @worker_prompt_layer_producer("viventium_feeling_state")
 def canonicalize_viventium_feeling_projection(bundle: JsonDict) -> JsonDict:
-    """Materialize one eligible capsule in AGENTS.md, or zero when scope is off."""
+    """Retain legacy projection; explicit prepared context stays uninterpreted."""
 
+    if opaque_application_context(bundle):
+        if "viventium_feelings_projection" in bundle:
+            raise ValueError("Opaque context cannot also request legacy projection")
+        return dict(bundle)
     capsules: list[str] = []
 
     def strip_capsules(value: Any) -> Any:
@@ -756,6 +764,8 @@ def glasshive_project_agents_md(bundle: JsonDict) -> str:
     merged = merge_glasshive_worker_instructions(
         bundle.get("agents_md"), bundle.get("system_instructions")
     )
+    if opaque_application_context(bundle):
+        return merged
     projection = bundle.get("viventium_feelings_projection")
     if not isinstance(projection, dict) or projection.get("enabled") is not True:
         return merged
@@ -2117,6 +2127,21 @@ def _write_codex_config(home_dir: Path, bundle: JsonDict, *, private: bool = Fal
         context_mcp = (raw_context_mcp.get("mcpServers", raw_context_mcp)).get("xperfect-context")
         if isinstance(context_mcp, dict) and "GLASSHIVE_CONTEXT_TOKEN" in bundle.get("env", {}):
             append += "\n" + "\n".join(("[mcp_servers.xperfect-context]", "url = " + json.dumps(context_mcp["url"]), 'bearer_token_env_var = "GLASSHIVE_CONTEXT_TOKEN"')) + "\n"
+    if clean_room:
+        from . import native_transport
+        native_mcp = bundle.get("claude_project_mcp") or {}
+        schedule_mcp = native_mcp.get("mcpServers", native_mcp).get("xperfect-schedules")
+        if isinstance(schedule_mcp, dict) and "GLASSHIVE_SCHEDULE_TOKEN" in bundle.get("env", {}):
+            if schedule_mcp.get("type") == "http":
+                append += "\n[mcp_servers.xperfect-schedules]\nurl = " + json.dumps(schedule_mcp["url"]) + '\nbearer_token_env_var = "GLASSHIVE_SCHEDULE_TOKEN"\n'
+            else:
+                args = schedule_mcp.get("args") or []
+                if (len(args) != 4 or args[3] != "GLASSHIVE_SCHEDULE_TOKEN"
+                        or not native_transport.is_projected_stdio(schedule_mcp, args[2])):
+                    raise ValueError("Invalid native schedule transport")
+                append += "\n" + native_transport.codex_stdio_block(
+                    "xperfect-schedules", args[2], "GLASSHIVE_SCHEDULE_TOKEN", schedule_mcp["command"],
+                )
     target = home_dir / ".codex" / "config.toml"
     if not clean_room and not private:
         target.parent.mkdir(parents=True, exist_ok=True)

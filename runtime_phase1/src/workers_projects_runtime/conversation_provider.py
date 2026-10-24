@@ -49,6 +49,7 @@ from .agent_builder_control import (
     NativeConversationParts,
 )
 from .auth import GlassHiveAuthError, NativeOwnerUnavailableError, require_native_installed_owner
+from .application_boundary import opaque_application_context
 from .bootstrap import (
     _split_viventium_feeling_capsules,
     GLASSHIVE_PROVIDER_SESSION_MODE_ENV,
@@ -256,11 +257,42 @@ def _graph_execution_digest(
 
 def _provider_failure_http_status(run: dict[str, Any]) -> int:
     failure_class = str(run.get("failure_class") or "").strip()
+    if failure_class == "host_capacity":
+        return 503
     if failure_class == "provider_rate_limited":
         return 429
     if failure_class == "native_output_files_identity_unavailable":
         return 409
     return 502
+
+
+def _public_host_capacity_fields(detail: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    capacity_class = str(detail.get("capacityClass") or "").strip()
+    if capacity_class:
+        result["capacityClass"] = capacity_class[:80]
+    for field in ("available", "required", "shortage"):
+        values = detail.get(field)
+        if not isinstance(values, dict):
+            continue
+        safe = {key: value for key, value in values.items()
+                if key in {"childProcesses", "threads", "memoryBytes", "diskBytes"}
+                and type(value) in {int, float} and math.isfinite(value) and value >= 0}
+        if safe:
+            result[field] = safe
+    return result
+
+
+def _run_host_capacity_fields(run: dict[str, Any]) -> dict[str, Any]:
+    if run.get("failure_class") != "host_capacity":
+        return {}
+    detail: dict[str, Any] = {"capacityClass": run.get("capacity_class")}
+    for field in ("available", "required", "shortage"):
+        try:
+            detail[field] = json.loads(str(run.get(f"capacity_{field}_json") or "{}"))
+        except (TypeError, ValueError):
+            pass
+    return _public_host_capacity_fields(detail)
 
 
 # Typed failure classes that provider clients already recognize. They travel as the error code
@@ -276,6 +308,7 @@ _PUBLIC_FAILURE_CODES = frozenset({
     "provider_access_denied",
     "provider_quota_exhausted",
     "provider_temporarily_unavailable",
+    "provider_unavailable",
     "provider_response_failed",
     "provider_request_rejected",
     "native_output_files_identity_unavailable",
@@ -1115,7 +1148,7 @@ class StreamingRedactor:
                 self._buffer = _redact_text(complete_lines) + self._buffer[last_newline + 1 :]
         stable_limit = max(0, len(self._buffer) - self.overlap)
         sensitive_tail = re.search(
-            r"(?i)(?:/Users/|/(?:home|root|Volumes|private/var)/|~/|bearer(?:\s+)?|(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]?\s*|sk-|ghp_|xoxb-|eyJ|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|data:image/)[^\n]*$",
+            r"(?i)(?:" + "/Users" + r"/|/(?:home|root|Volumes|private/var)/|~/|bearer(?:\s+)?|(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]?\s*|sk-|ghp_|xoxb-|eyJ|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|data:image/)[^\n]*$",
             self._buffer,
         )
         multiline_opener = re.search(
@@ -1632,6 +1665,7 @@ def _admit_conversation_history(
     current_input_indices: set[int] | None = None,
     source_ordinals_by_index: dict[int, list[int]] | None = None,
     attachment_context: str = "",
+    historical_attachment_context: str = "",
     delivery_by_index: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], str]:
     """Build one bounded bootstrap/delta instruction and its persisted ReplayDecisionV1."""
@@ -1764,7 +1798,7 @@ def _admit_conversation_history(
                 if role in {"tool", "function"} and index not in protected_indices:
                     text, pruned = _clip_utf8(text, CONVERSATION_TOOL_RESULT_MAX_BYTES)
                     tool_payloads_pruned += int(pruned)
-                if text:
+                if text or index in current_input_indices:
                     delivery = (delivery_by_index or {}).get(index)
                     qualifier = ("<message_delivery>" + json.dumps(delivery, sort_keys=True, separators=(",", ":")) + "</message_delivery>\n") if delivery else ""
                     source_ordinals = (source_ordinals_by_index or {}).get(index) if index in current_input_indices else None
@@ -1774,6 +1808,8 @@ def _admit_conversation_history(
         if historical_turns:
             lines.append("Earlier conversation history (non-actionable evidence):")
             append_messages(historical_turns)
+        if historical_attachment_context:
+            lines.append(historical_attachment_context)
         if current_turn:
             lines.extend(
                 [
@@ -1970,8 +2006,42 @@ def _default_workspace_dir() -> Path:
     return Path(configured).expanduser().resolve()
 
 
+# These old names remain accepted only as transport aliases. Domain state is
+# supplied by the application, not inferred from the alias it used.
+_LEGACY_CONTEXT_HEADERS = {
+    'x-glasshive-actor-kind': 'x-viventium-actor-kind',
+    'x-glasshive-audio-eligible': 'x-viventium-audio-eligible',
+    'x-glasshive-continuity-agent-id': 'x-viventium-continuity-agent-id',
+    'x-glasshive-continuity-domain-id': 'x-viventium-continuity-domain-id',
+    'x-glasshive-conversation-id': 'x-viventium-conversation-id',
+    'x-glasshive-foreground-attention': 'x-viventium-foreground-attention',
+    'x-glasshive-input-mode': 'x-viventium-input-mode',
+    'x-glasshive-logical-turn-id': 'x-viventium-logical-turn-id',
+    'x-glasshive-logical-turn-revision': 'x-viventium-logical-turn-revision',
+    'x-glasshive-main-context-epoch': 'x-viventium-main-context-epoch',
+    'x-glasshive-main-context-owner': 'x-viventium-main-context-owner',
+    'x-glasshive-main-context-protocol': 'x-viventium-main-context-protocol',
+    'x-glasshive-main-context-snapshot-sha256': 'x-viventium-main-context-snapshot-sha256',
+    'x-glasshive-message-id': 'x-viventium-message-id',
+    'x-glasshive-native-body-sha256': 'x-viventium-native-body-sha256',
+    'x-glasshive-native-invocation-id': 'x-viventium-native-invocation-id',
+    'x-glasshive-origin': 'x-viventium-origin',
+    'x-glasshive-stream-id': 'x-viventium-stream-id',
+    'x-glasshive-surface': 'x-viventium-surface',
+    'x-glasshive-user-id': 'x-viventium-user-id',
+    'x-glasshive-visible-message-chain-b64': 'x-viventium-visible-message-chain-b64',
+}
+
+
 def _header(request: Request, name: str) -> str:
-    return str(request.headers.get(name) or "").strip()
+    value = str(request.headers.get(name) or "").strip()
+    previous_name = _LEGACY_CONTEXT_HEADERS.get(name)
+    if previous_name is None:
+        return value
+    previous = str(request.headers.get(previous_name) or "").strip()
+    if value and previous and value != previous:
+        raise HTTPException(status_code=400, detail="Conflicting conversation header carriers")
+    return value or previous
 
 
 def _optional_boolean_header(request: Request, name: str) -> bool | None:
@@ -2023,7 +2093,8 @@ def _decode_bootstrap_bundle(request: Request, encoded_body: str = "") -> dict[s
     if not encoded:
         return {}
     signature_secret = str(
-        os.environ.get("VIVENTIUM_GLASSHIVE_CAPABILITY_BROKER_SECRET") or ""
+        os.environ.get("GLASSHIVE_PROVIDER_BOOTSTRAP_SIGNATURE_SECRET")
+        or os.environ.get("VIVENTIUM_GLASSHIVE_CAPABILITY_BROKER_SECRET") or ""
     ).strip()
     if not signature_secret:
         raise HTTPException(
@@ -2078,7 +2149,7 @@ def _decode_turn_context(request: Request) -> str:
         raise HTTPException(status_code=400, detail="Invalid GlassHive turn context header") from exc
 
 def _decode_visible_message_chain(request: Request) -> list[dict[str, Any]]:
-    encoded = _header(request, "x-viventium-visible-message-chain-b64")
+    encoded = _header(request, "x-glasshive-visible-message-chain-b64")
     if not encoded:
         return []
     if len(encoded) > VISIBLE_MESSAGE_CHAIN_MAX_ENCODED_BYTES:
@@ -2159,7 +2230,7 @@ def _hydrate_metadata(
         if payload.metadata is not None
         else {}
     )
-    asserted_owner = _header(request, "x-viventium-user-id")
+    asserted_owner = _header(request, "x-glasshive-user-id")
     incoming_owner = str(incoming.get("owner_id") or "").strip()
     if asserted_owner and incoming_owner and asserted_owner != incoming_owner:
         raise HTTPException(status_code=403, detail="Authenticated owner does not match completion metadata")
@@ -2176,7 +2247,7 @@ def _hydrate_metadata(
 
     authoring_scope = {}
     for field, default in (("actor_kind", "external_user"), ("origin", "interactive")):
-        declared = _header(request, f"x-viventium-{field.replace('_', '-')}")
+        declared = _header(request, f"x-glasshive-{field.replace('_', '-')}")
         body_value = str(incoming.get(field) or "").strip()
         if declared and body_value and declared != body_value:
             raise HTTPException(status_code=403, detail="Authoring scope conflicts with trusted transport")
@@ -2187,26 +2258,26 @@ def _hydrate_metadata(
 
     audio_eligible_header = _optional_boolean_header(
         request,
-        "x-viventium-audio-eligible",
+        "x-glasshive-audio-eligible",
     )
     encoded_bootstrap_body = incoming.pop("bootstrap_bundle_b64", "")
     metadata = {
         **incoming,
         **authoring_scope,
         "owner_id": owner_id,
-        "conversation_id": _header(request, "x-viventium-conversation-id")
+        "conversation_id": _header(request, "x-glasshive-conversation-id")
         or str(incoming.get("conversation_id") or "").strip()
         or f"conversation-{uuid.uuid4().hex}",
         "agent_id": _header(request, "x-glasshive-agent-id")
         or str(incoming.get("agent_id") or "").strip()
         or "glasshive-direct",
-        "message_id": _header(request, "x-viventium-message-id")
+        "message_id": _header(request, "x-glasshive-message-id")
         or str(incoming.get("message_id") or "").strip(),
-        "stream_id": _header(request, "x-viventium-stream-id")
+        "stream_id": _header(request, "x-glasshive-stream-id")
         or str(incoming.get("stream_id") or "").strip(),
-        "surface": _header(request, "x-viventium-surface")
+        "surface": _header(request, "x-glasshive-surface")
         or str(incoming.get("surface") or "web").strip(),
-        "input_mode": _header(request, "x-viventium-input-mode")
+        "input_mode": _header(request, "x-glasshive-input-mode")
         or str(incoming.get("input_mode") or "text").strip(),
         "audio_eligible": (
             audio_eligible_header
@@ -2215,8 +2286,8 @@ def _hydrate_metadata(
         ),
         "idempotency_key": _header(request, "x-glasshive-idempotency-key")
         or str(incoming.get("idempotency_key") or "").strip(),
-        "native_invocation_id": _header(request, "x-viventium-native-invocation-id"),
-        "native_body_sha256": _header(request, "x-viventium-native-body-sha256"),
+        "native_invocation_id": _header(request, "x-glasshive-native-invocation-id"),
+        "native_body_sha256": _header(request, "x-glasshive-native-body-sha256"),
         # Only the trusted transport boundary can disable native continuity.
         "provider_session_mode": _header(
             request, "x-glasshive-provider-session-mode"
@@ -2241,14 +2312,14 @@ def _hydrate_metadata(
 
     for field, header in {
         "stable_authority_sha256": "x-glasshive-stable-authority-sha256",
-        "main_context_protocol": "x-viventium-main-context-protocol",
-        "main_context_owner": "x-viventium-main-context-owner",
-        "main_context_snapshot_sha256": "x-viventium-main-context-snapshot-sha256",
-        "main_context_epoch": "x-viventium-main-context-epoch",
-        "continuity_domain_id": "x-viventium-continuity-domain-id",
-        "continuity_agent_id": "x-viventium-continuity-agent-id",
-        "logical_turn_id": "x-viventium-logical-turn-id",
-        "logical_turn_revision": "x-viventium-logical-turn-revision",
+        "main_context_protocol": "x-glasshive-main-context-protocol",
+        "main_context_owner": "x-glasshive-main-context-owner",
+        "main_context_snapshot_sha256": "x-glasshive-main-context-snapshot-sha256",
+        "main_context_epoch": "x-glasshive-main-context-epoch",
+        "continuity_domain_id": "x-glasshive-continuity-domain-id",
+        "continuity_agent_id": "x-glasshive-continuity-agent-id",
+        "logical_turn_id": "x-glasshive-logical-turn-id",
+        "logical_turn_revision": "x-glasshive-logical-turn-revision",
     }.items():
         declared = _header(request, header)
         if declared:
@@ -2412,7 +2483,11 @@ def _resolve_workspace(options: GlassHiveOptions) -> Path:
             for value in str(os.environ.get("GLASSHIVE_PROVIDER_ALLOWED_WORKSPACE_ROOTS") or "").split(os.pathsep)
             if value.strip()
         ]
-        allowed_roots = configured_roots or [_canonical_life_dir().parent.resolve()]
+        # Explicit compatibility mode retains its existing root. The neutral
+        # provider defaults to its configured workspace, never an app folder.
+        legacy_root = str(os.environ.get("VIVENTIUM_LIFE_DIR") or "").strip()
+        fallback = _canonical_life_dir().parent if legacy_root else _default_workspace_dir()
+        allowed_roots = configured_roots or [fallback.resolve()]
         if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
             raise HTTPException(
                 status_code=403,
@@ -4898,12 +4973,15 @@ class ConversationProvider:
         if existing and authority_update_present and model.harness_profile == "codex-cli":
             previous_tail = str(previous_bundle.get("declared_developer_instruction_tail") or "")
             current_tail = str(metadata.developer_instruction_tail or "")
-            _, previous_capsules = _split_viventium_feeling_capsules(previous_tail)
-            _, current_capsules = _split_viventium_feeling_capsules(current_tail)
-            authority_removed = bool(
-                (previous_tail and not current_tail)
-                or (previous_capsules and not current_capsules)
-            )
+            previous_opaque = opaque_application_context(previous_bundle)
+            current_opaque = opaque_application_context(requested_bundle)
+            authority_removed = bool(previous_tail and not current_tail)
+            if previous_opaque != current_opaque:
+                authority_removed = True
+            elif not current_opaque:
+                _, previous_capsules = _split_viventium_feeling_capsules(previous_tail)
+                _, current_capsules = _split_viventium_feeling_capsules(current_tail)
+                authority_removed = authority_removed or bool(previous_capsules and not current_capsules)
         released_failure_reuse = bool(
             existing and existing_worker and existing_worker.get("state") == "failed"
             and metadata.provider_session_mode == "stateless"
@@ -5419,6 +5497,11 @@ class ConversationProvider:
             session_started = time.monotonic_ns() if native_timing_enabled() else None
             session_status = "failed"
             try:
+                # Reject measured resource pressure before any new session/source effects.
+                # Slot contention and unavailable probes retain native durable queue ownership.
+                pressure = self.service._host_resource_capacity_error(docker_cached_only=True)
+                if pressure is not None and pressure.capacity_class == "resource_pressure":
+                    raise pressure
                 session, new_native_session = self._session(
                     payload,
                     model,
@@ -5452,6 +5535,7 @@ class ConversationProvider:
             context_started = time.monotonic_ns() if native_timing_enabled() else None
             turn_context = str(getattr(payload.metadata, "turn_context", "") or "")
             attachment_context = self._request_attachment_context(payload)
+            historical_attachment_context = self._request_attachment_context(payload, historical=True)
             # Bounded admission: the same durable decision (ReplayDecisionV1) and the admitted
             # instruction are created atomically with the request row, so a rapid second turn or
             # a restart never observes a request without its admitted context.
@@ -5516,6 +5600,7 @@ class ConversationProvider:
                     context_window=_effective_native_context_window(model, session_manifest)[0],
                     include_indices=include_indices, protected_indices=protected,
                     current_input_indices=current_input, source_ordinals_by_index=source_ordinals_by_index, attachment_context=attachment_context,
+                    historical_attachment_context=historical_attachment_context,
                     delivery_by_index=_message_delivery_indices(payload, keys),
                 )
                 occupancy = self._native_occupancy_projection(
@@ -5542,6 +5627,7 @@ class ConversationProvider:
                                 current_input_indices=current_input,
                                 source_ordinals_by_index=source_ordinals_by_index,
                                 attachment_context=attachment_context,
+                                historical_attachment_context=historical_attachment_context,
                                 delivery_by_index=_message_delivery_indices(payload, keys),
                             )
                         )
@@ -5664,6 +5750,7 @@ class ConversationProvider:
                         current_input_indices=current_input,
                         source_ordinals_by_index=source_ordinals_by_index,
                         attachment_context=attachment_context,
+                        historical_attachment_context=historical_attachment_context,
                         delivery_by_index=_message_delivery_indices(payload, keys),
                     )
                     fallback_instruction = predecessor_qualifier + fallback_instruction
@@ -5737,6 +5824,7 @@ class ConversationProvider:
                     "current_input_indices": list(current_input),
                     "source_ordinals_by_index": source_ordinals_by_index,
                     "attachment_context": attachment_context,
+                    "historical_attachment_context": historical_attachment_context,
                     "delivery_by_index": _message_delivery_indices(payload, keys),
                     "predecessor_qualifier": predecessor_qualifier,
                 }
@@ -6707,7 +6795,8 @@ class ConversationProvider:
             _error_type, error_code = _provider_failure_error(current_run)
             raise HTTPException(
                 status_code=_provider_failure_http_status(current_run),
-                detail={"message": _redact_text(detail), "code": error_code},
+                detail={"message": _redact_text(detail), "code": error_code,
+                        **_run_host_capacity_fields(current_run)},
             )
         cached = str(request_record.get("response_json") or "").strip()
         if cached:
@@ -7394,6 +7483,7 @@ class ConversationProvider:
                             "message": error,
                             "type": error_type,
                             "code": error_code,
+                            **_run_host_capacity_fields(run),
                         },
                         "choices": [],
                     }
@@ -7841,7 +7931,8 @@ class ConversationProvider:
             self.store.add_provider_activity(
                 str(request["request_id"]), "failed", ACTIVITY_SUMMARIES["failed"],
                 {
-                    "failure_class": PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS,
+                    "failure_class": str((arbitration.get("run") or {}).get("failure_class")
+                                         or PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS),
                     "timeout_seconds": timeout,
                     "native_cleanup": "not_started",
                 },
@@ -8004,7 +8095,7 @@ class ConversationProvider:
                 "failed",
                 ACTIVITY_SUMMARIES["failed"],
                 {
-                    "failure_class": PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS,
+                    "failure_class": str(run.get("failure_class") or PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS),
                     "timeout_seconds": effective_timeout,
                     "native_cleanup": "accepted" if cleanup_succeeded else "unconfirmed",
                 },
@@ -8022,10 +8113,11 @@ class ConversationProvider:
                 "message": _redact_text(
                     str(run.get("failure_user_message") or self._deadline_message(timeout_seconds))
                 ),
-                "type": "glasshive_timeout_error",
-                "code": PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS,
+                "type": "glasshive_runtime_error" if run.get("failure_class") == "host_capacity" else "glasshive_timeout_error",
+                "code": "host_capacity" if run.get("failure_class") == "host_capacity" else PROVIDER_RESPONSE_DEADLINE_FAILURE_CLASS,
                 "request_id": str(request_record["request_id"]),
                 "timeout_seconds": timeout_seconds,
+                **_run_host_capacity_fields(run),
             }
         }
 
@@ -8059,9 +8151,9 @@ class ConversationProvider:
         return fallback_model, effort
 
     def _assert_owner(self, payload: ChatCompletionRequest, request: Request) -> None:
-        asserted = str(request.headers.get("x-viventium-user-id") or "").strip()
+        asserted = _header(request, "x-glasshive-user-id")
         if not asserted:
-            raise HTTPException(status_code=401, detail="X-Viventium-User-Id is required")
+            raise HTTPException(status_code=401, detail="X-GlassHive-User-Id is required")
         if asserted != payload.metadata.owner_id:
             raise HTTPException(status_code=403, detail="Authenticated owner does not match completion metadata")
 
@@ -8096,7 +8188,9 @@ class ConversationProvider:
         public_records = public_upload_ledger(records)
         if public_records:
             scoped["viventium_upload_context"] = {
-                "selected_uploads": public_records
+                "selected_uploads": public_records,
+                **({"current_upload_ids": upload_context["current_upload_ids"]}
+                   if isinstance(upload_context, dict) and "current_upload_ids" in upload_context else {}),
             }
         else:
             scoped.pop("viventium_upload_context", None)
@@ -8109,8 +8203,26 @@ class ConversationProvider:
         return scoped
 
     @classmethod
-    def _request_attachment_context(cls, payload: ChatCompletionRequest) -> str:
+    def _request_attachment_context(
+        cls, payload: ChatCompletionRequest, *, historical: bool = False,
+    ) -> str:
         projected = cls._projected_request_uploads(payload)
+        incoming = payload.metadata.bootstrap_bundle or {}
+        upload_context = incoming.get("viventium_upload_context")
+        if not isinstance(upload_context, dict):
+            return ""
+        current_ids = upload_context.get("current_upload_ids")
+        if "current_upload_ids" not in upload_context:
+            if historical:
+                return ""
+        else:
+            if (not isinstance(current_ids, list) or len(current_ids) > 64
+                    or any(not isinstance(value, str) or not value or len(value) > 256
+                           for value in current_ids)):
+                raise HTTPException(status_code=400, detail="Invalid current attachment identity projection")
+            current_ids = set(current_ids)
+            projected = [item for item in projected
+                         if (item.get("file_id") in current_ids) is not historical]
         ledger = public_upload_ledger(projected)
         for item, supplied in zip(ledger, projected, strict=True):
             item["inputKind"] = (
@@ -8125,16 +8237,16 @@ class ConversationProvider:
         ]
         if not paths:
             return ""
+        tag = "viventium_historical_workspace_files" if historical else "viventium_attached_workspace_files"
         return "\n".join(
             [
-                '<viventium_attached_workspace_files version="1">',
+                f'<{tag} version="1">',
                 json.dumps({"selected_uploads": ledger}, ensure_ascii=False, separators=(",", ":")),
-                "Read the supplied attachment representations from their ordered workspace paths.",
                 "inputKind identifies original bytes, extracted text, or metadata only. "
                 "Extracted text does not establish access to original bytes. "
                 "Metadata-only entries report unavailable input.",
                 *(f"{index}. {path}" for index, path in enumerate(paths, 1)),
-                "</viventium_attached_workspace_files>",
+                f"</{tag}>",
             ]
         )
 
@@ -8523,6 +8635,7 @@ class ConversationProvider:
                     current_input_indices=set(source["current_input_indices"]),
                     source_ordinals_by_index=source["source_ordinals_by_index"],
                     attachment_context=str(source["attachment_context"]),
+                    historical_attachment_context=str(source.get("historical_attachment_context", "")),
                     delivery_by_index=source["delivery_by_index"],
                 )
                 recovery_instruction = str(source["predecessor_qualifier"]) + recovery_instruction
@@ -9283,7 +9396,9 @@ async def _responses_stream(
             "code": str(runtime_error.get("code") or "server_error"),
             "message": _redact_text(str(runtime_error.get("message") or "GlassHive run failed")),
         }
-        yield _responses_sse("error", sequence, code=error["code"], message=error["message"], param=None)
+        if error["code"] == "host_capacity":
+            error.update(_public_host_capacity_fields(runtime_error))
+        yield _responses_sse("error", sequence, **error, param=None)
         sequence += 1
         failed_response = _responses_payload(
             request_id,
@@ -9364,7 +9479,8 @@ def _is_provider_path(path: str) -> bool:
 
 def _openai_error(status_code: int, message: str, code: str, *, param: str | None = None,
                   native_admission: dict[str, str | int | bool] | None = None,
-                  foreground_attention: dict[str, Any] | None = None) -> JSONResponse:
+                  foreground_attention: dict[str, Any] | None = None,
+                  capacity_detail: dict[str, Any] | None = None) -> JSONResponse:
     error_type = "invalid_request_error" if status_code < 500 else "server_error"
     if status_code == 401:
         error_type = "authentication_error"
@@ -9380,6 +9496,7 @@ def _openai_error(status_code: int, message: str, code: str, *, param: str | Non
                 "type": error_type,
                 "param": param,
                 "code": code,
+                **(_public_host_capacity_fields(capacity_detail or {}) if code == "host_capacity" else {}),
                 **({"native_admission": native_admission} if native_admission is not None else {}),
                 **({"foregroundAttention": foreground_attention} if foreground_attention is not None else {}),
             }
@@ -9456,6 +9573,7 @@ def install_conversation_provider_routes(
                 param=param,
                 foreground_attention=(exc.detail.get("foregroundAttention")
                     if code == "provider_progress_stalled" else None),
+                capacity_detail=exc.detail if code == "host_capacity" else None,
             )
         return _openai_error(
             exc.status_code,
@@ -9494,7 +9612,7 @@ def install_conversation_provider_routes(
         return auth_context
 
     def owner_for_request(request: Request, auth: ProviderAuthContext) -> str:
-        asserted = _header(request, "x-viventium-user-id")
+        asserted = _header(request, "x-glasshive-user-id")
         if asserted and asserted != auth.principal_id and not auth.trust_identity_headers:
             raise HTTPException(status_code=403, detail="Provider credential cannot delegate another owner")
         owner_id = asserted if asserted and auth.trust_identity_headers else auth.principal_id
@@ -9518,8 +9636,8 @@ def install_conversation_provider_routes(
     async def glasshive_chat_completions(payload: ChatCompletionRequest, request: Request):
         route_started = time.monotonic_ns() if native_timing_enabled() else None
         trace_identity = (
-            _header(request, "x-viventium-message-id") or getattr(payload.metadata, "message_id", ""),
-            _header(request, "x-viventium-native-invocation-id") or getattr(payload.metadata, "native_invocation_id", ""),
+            _header(request, "x-glasshive-message-id") or getattr(payload.metadata, "message_id", ""),
+            _header(request, "x-glasshive-native-invocation-id") or getattr(payload.metadata, "native_invocation_id", ""),
         ) if route_started is not None else None
         _provider_admission_event(payload, "route_enter", route_started, status="started", identity=trace_identity)
         with _provider_admission_phase(payload, "auth_hydrate_digest", identity=trace_identity):
@@ -9551,7 +9669,7 @@ def install_conversation_provider_routes(
     @app.post("/v1/responses")
     async def glasshive_responses(payload: ResponsesRequest, request: Request):
         auth = require_provider_auth(request)
-        if _optional_boolean_header(request, "x-viventium-audio-eligible") is True:
+        if _optional_boolean_header(request, "x-glasshive-audio-eligible") is True:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -9802,7 +9920,7 @@ def install_conversation_provider_routes(
     def glasshive_cancel(request_id: str, request: Request) -> dict[str, Any]:
         auth = require_provider_auth(request)
         provider.assert_request_owner(request_id, owner_for_request(request, auth))
-        foreground_invocation = str(request.headers.get("x-viventium-foreground-attention") or "").strip()
+        foreground_invocation = _header(request, "x-glasshive-foreground-attention")
         with provider._start_lock:
             if not foreground_invocation:
                 record = provider.cancel(request_id)

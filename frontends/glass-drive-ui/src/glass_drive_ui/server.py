@@ -26,7 +26,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from .prompt_template import (
@@ -382,6 +382,8 @@ class LaunchRequest(BaseModel):
     success_criteria: str = ""
     context: str | None = None
     workspace_option: str | None = None
+    worker_name: str | None = Field(default=None, max_length=120)
+    execution_workspace_id: str | None = Field(default=None, max_length=128)
     workspace_type: str | None = None
     workspace_mode: Literal["isolated", "shared"] = "isolated"
     workspace_file_placement: Literal["common", "member_private"] = "common"
@@ -505,7 +507,33 @@ class RecurringScheduleRequest(BaseModel):
     schedule_text: str = ""
 
 
+class TargetRecurringScheduleRequest(RecurringScheduleRequest):
+    model_config = ConfigDict(extra="forbid")
+    instruction: str = Field(default="", max_length=10000)
+    target: dict[str, Any]
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class WebhookDestinationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+    name: str = Field(min_length=1, max_length=120)
+    url: str = Field(min_length=1, max_length=8192)
+    secret: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    payload_mode: Literal["envelope", "raw"] = "envelope"
+
+
+class WebhookDestinationUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    secret: str | None = None
+    headers: dict[str, str] | None = None
+    enabled: bool | None = None
+
+
 class RecurringScheduleUpdateRequest(BaseModel):
+    target: dict[str, Any] | None = None
     instruction: str | None = Field(default=None, min_length=1, max_length=10000)
     recurrence_type: Literal["once", "daily", "interval", "cron", "rfc5545"] | None = None
     interval_seconds: int | None = None
@@ -740,7 +768,7 @@ def flatten_workspaces(
         seen_worker_ids.add(worker_id)
         project_title = str(worker.get("project_title") or worker.get("name") or project_id)
         worker_name = str(worker.get("name") or worker_id)
-        watch_url = f"/watch/{worker_id}?project_id={project_id}&surface=desktop"
+        watch_url = f"/watch/{worker_id}?project_id={project_id}&surface={_default_launch_surface()}"
         project_url = f"/ui/projects/{project_id}?worker_id={worker_id}"
         desktop_url = f"/desktop/{worker_id}"
         desktop_preview_url = f"/desktop/{worker_id}?preview=1"
@@ -1039,15 +1067,15 @@ def _default_workspace_type() -> str:
     return "sandboxed"
 
 
-def _new_workspace_options() -> list[dict[str, str]]:
+def _new_workspace_options() -> list[dict[str, Any]]:
     options = [
         {"value": "new:codex-cli", "label": "Codex worker", "profile": "codex-cli"},
         {"value": "new:claude-code", "label": "Claude Code worker", "profile": "claude-code"},
         {"value": "new:grok-build", "label": "Grok Build worker", "profile": "grok-build"},
         {"value": "new:openclaw-general", "label": "OpenClaw worker", "profile": "openclaw-general"},
-        {"value": "new:direct-openai", "label": "Direct / OpenAI API", "profile": "direct-openai"},
-        {"value": "new:direct-anthropic", "label": "Direct / Anthropic API", "profile": "direct-anthropic"},
-        {"value": "new:direct-xai", "label": "Direct / xAI API", "profile": "direct-xai"},
+        {"value": "new:direct-openai", "label": "Direct / OpenAI API", "profile": "direct-openai", "account_auth_methods": ["api_key"]},
+        {"value": "new:direct-anthropic", "label": "Direct / Anthropic API", "profile": "direct-anthropic", "account_auth_methods": ["api_key"]},
+        {"value": "new:direct-xai", "label": "Direct / xAI API", "profile": "direct-xai", "account_auth_methods": ["api_key"]},
     ]
     raw = (
         os.environ.get("GLASSHIVE_ALLOWED_WORKER_PROFILES", "").strip()
@@ -1060,6 +1088,20 @@ def _new_workspace_options() -> list[dict[str, str]]:
     if filtered:
         return filtered
     raise RuntimeError("GLASSHIVE_ALLOWED_WORKER_PROFILES must include at least one supported worker profile")
+
+
+def _workspace_options_with_native_readiness(active_client) -> list[dict[str, Any]]:
+    options = _new_workspace_options()
+    loader = getattr(active_client, "worker_profiles", None)
+    if not callable(loader):
+        return options
+    try:
+        profiles = {item["profile"]: item for item in loader().get("items", [])
+                    if isinstance(item, dict) and item.get("profile")}
+    except Exception:
+        return options  # Unknown availability retains native admission as its authority.
+    return [{**item, "host_cli_installed": profiles[item["profile"]].get("host_cli_installed")}
+            if item["profile"] in profiles else item for item in options]
 
 
 def _default_worker_profile() -> str:
@@ -2915,7 +2957,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             "launch_surface_options": _launch_surface_options(),
             "default_workspace_type": _default_workspace_type(),
             "workspace_type_options": _workspace_type_options(),
-            "new_workspace_options": _new_workspace_options(),
+            "new_workspace_options": _workspace_options_with_native_readiness(active_client),
+            "managed_deployment": enterprise,
             "provider_accounts": provider_accounts,
             "profile_account_providers": profile_account_providers,
             "workspace_templates": workspace_templates,
@@ -3010,9 +3053,53 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/control-plane")
-    def control_plane_bootstrap(request: Request) -> dict[str, object]:
+    async def control_plane_bootstrap(
+        request: Request, sections: Literal["all", "accounts", "resources"] = "all",
+    ) -> dict[str, object]:
         active_client = _client_for_request(request)
-        runtime_health = active_client.health() or {}
+        readers = {
+            "me": active_client.current_user,
+            "runtime_health": active_client.health,
+            "provider_accounts": active_client.list_provider_accounts,
+            "connections": active_client.list_connections,
+            "library": active_client.list_library,
+        }
+        section_status = {name: "not_requested" for name in readers}
+        if sections == "accounts":
+            readers = {name: readers[name] for name in ("me", "runtime_health", "provider_accounts")}
+        elif sections == "resources":
+            readers = {name: readers[name] for name in ("me", "connections", "library")}
+        results = await asyncio.gather(
+            *(run_in_threadpool(read) for read in readers.values()),
+            return_exceptions=True,
+        )
+        loaded: dict[str, Any] = {
+            "runtime_health": {}, "provider_accounts": [], "connections": [], "library": [],
+        }
+        for name, result in zip(readers, results):
+            if isinstance(result, BaseException):
+                if not isinstance(result, Exception) or isinstance(result, AuthGatewayError):
+                    raise result
+                if isinstance(result, httpx.HTTPStatusError) and (
+                    name == "me" or result.response.status_code in {401, 403}
+                ):
+                    raise _runtime_http_exception(result, "Sign in again to load your account") from result
+                if name == "me" or (
+                    isinstance(result, HTTPException) and result.status_code in {401, 403}
+                ):
+                    raise result
+                logger.warning("Control plane section unavailable: %s", name)
+                section_status[name] = "unavailable"
+                loaded[name] = {} if name == "runtime_health" else []
+            else:
+                loaded[name] = result
+                section_status[name] = "ready"
+        if sections == "resources":
+            return {
+                "me": loaded["me"], "connections": loaded["connections"],
+                "library": loaded["library"], "sections": section_status,
+            }
+        runtime_health = loaded["runtime_health"] or {}
         native_key_support = dict(runtime_health.get("native_api_key_support") or {})
         runtime_provider_setup_support = dict(runtime_health.get("provider_setup_support") or {})
         recurrence_owner = str(
@@ -3060,10 +3147,11 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             else "managed_connection_required"
         )
         return {
-            "me": active_client.current_user(),
-            "provider_accounts": active_client.list_provider_accounts(),
-            "connections": active_client.list_connections(),
-            "library": active_client.list_library(),
+            "me": loaded["me"],
+            "provider_accounts": loaded["provider_accounts"],
+            "connections": loaded["connections"],
+            "library": loaded["library"],
+            "sections": section_status,
             "provider_options": [
                 {
                     "provider": "codex",
@@ -3433,8 +3521,9 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     @app.get("/api/workspaces/{worker_id}")
     def get_saved_workspace(request: Request, worker_id: str) -> dict[str, Any]:
         try:
-            worker = _client_for_request(request, worker_id).get_worker(worker_id)
-            return {
+            active_client = _client_for_request(request, worker_id)
+            worker = active_client.get_worker(worker_id)
+            result = {
                 "worker_id": str(worker.get("worker_id") or worker_id),
                 "duplication_report": (
                     worker.get("duplication_report")
@@ -3442,8 +3531,31 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     else {}
                 ),
             }
+            result.update({key: worker[key] for key in (
+                "name", "profile", "model", "state", "close_state", "project_id", "workspace_id",
+                "workspace_kind", "execution_mode",
+            ) if key in worker})
+            if worker.get("project_id"):
+                result["workspace_name"] = _project_title_for_worker(active_client, str(worker["project_id"]))
+            if worker.get("workspace_id"):
+                try:
+                    roster = active_client.execution_workspace_members(str(worker["workspace_id"]))
+                    result["execution_workspace_mode"] = roster.get("mode")
+                    member = next((item for item in roster.get("members", []) if item.get("worker_id") == worker_id), {})
+                    selection = member.get("provider_account")
+                    if isinstance(selection, dict):
+                        result["provider_account"] = {
+                            key: str(selection[key]) for key in ("policy", "account_id") if key in selection
+                        }
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {401, 403}:
+                        raise
+                except httpx.HTTPError:
+                    pass
+            return result
         except httpx.HTTPStatusError as exc:
-            status_code = 404 if exc.response is not None and exc.response.status_code == 404 else 502
+            upstream_status = exc.response.status_code if exc.response is not None else 502
+            status_code = upstream_status if upstream_status in {401, 403, 404} else 502
             raise HTTPException(
                 status_code=status_code,
                 detail=("Workspace not found" if status_code == 404 else "GlassHive could not load this workspace"),
@@ -3525,6 +3637,51 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="Workspace template launch failed") from exc
 
+    @app.get("/api/webhook-destinations")
+    def webhook_destinations(request: Request) -> dict[str, object]:
+        active_client = _client_for_request(request)
+        try:
+            return {"items": active_client.webhook_destinations()}
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail="Webhook destinations could not be loaded") from None
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Webhook destinations are unavailable") from None
+
+    @app.post("/api/webhook-destinations", status_code=201)
+    def create_webhook_destination(request: Request, payload: WebhookDestinationRequest) -> dict[str, Any]:
+        active_client = _client_for_request(request)
+        try:
+            result = active_client.create_webhook_destination(payload.model_dump())
+            return JSONResponse(status_code=201, content=result, headers={"Cache-Control": "no-store"})
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail="Webhook destination could not be saved; check the configuration") from None
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Webhook destination service is unavailable") from None
+
+    @app.patch("/api/webhook-destinations/{destination_id}")
+    def update_webhook_destination(request: Request, destination_id: str,
+                                   payload: WebhookDestinationUpdateRequest) -> dict[str, Any]:
+        destination_id = _recurring_path_id(destination_id, "destination id")
+        active_client = _client_for_request(request)
+        try:
+            result = active_client.update_webhook_destination(destination_id, payload.model_dump(exclude_none=True))
+            return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail="Webhook destination could not be updated") from None
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Webhook destination service is unavailable") from None
+
+    @app.post("/api/recurring-schedules", status_code=201)
+    def create_target_schedule(request: Request, payload: TargetRecurringScheduleRequest) -> dict[str, Any]:
+        active_client = _client_for_request(request)
+        try:
+            return active_client.create_target_schedule(payload.model_dump())
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code,
+                                detail=_runtime_status_detail(exc, "The schedule could not be saved")) from None
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Schedule service is unavailable") from None
+
     @app.get("/api/recurring-schedules")
     def recurring_schedules(
         request: Request,
@@ -3541,6 +3698,19 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             ) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="GlassHive schedules could not be loaded") from exc
+
+    @app.get("/api/recurring-schedules/{definition_id}")
+    def recurring_schedule(request: Request, definition_id: str) -> JSONResponse:
+        definition_id = _recurring_path_id(definition_id, "recurring schedule id")
+        active_client = _client_for_request(request)
+        try:
+            return JSONResponse(content=active_client.recurring_schedule(definition_id),
+                                headers={"Cache-Control": "no-store"})
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code,
+                                detail="This schedule could not be loaded") from None
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Schedule service is unavailable") from None
 
     @app.post("/api/workspace/{worker_id}/recurring-schedules", status_code=201)
     def create_recurring_schedule(
@@ -3731,6 +3901,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def private_credential_validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path.startswith("/api/webhook-destinations"):
+            return JSONResponse(status_code=422, content={"detail": "Invalid webhook destination fields"})
         if request.url.path.endswith("/credentials"):
             return JSONResponse(status_code=422, content={"detail": "Enter a valid API key"})
         return await request_validation_exception_handler(request, exc)
@@ -4002,15 +4174,31 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 detail="Each selected file needs its matching revision",
             )
         bootstrap_bundle = None
-        execution_mode = _execution_mode_from_workspace_type(payload.workspace_type)
+        existing_workspace_id = str(payload.execution_workspace_id or "").strip()
+        requested_worker_name = str(payload.worker_name or "").strip()
+        execution_mode = (
+            "" if existing_workspace_id
+            else _execution_mode_from_workspace_type(payload.workspace_type)
+        )
         project_id: str
         worker_id: str | None = None
         profile: str
         created_new_worker = False
+        assignment_outcome_uncertain = False
         duplication_reapproval_count = 0
         duplication_reapproval_items: list[dict[str, Any]] = []
         new_workspace = not workspace_option.startswith(("open:", "existing:", "duplicate:"))
-        shared_workspace = payload.workspace_mode == "shared"
+        if existing_workspace_id and not new_workspace:
+            raise HTTPException(status_code=409, detail={
+                "code": "existing_worker_workspace_locked",
+                "message": "An existing worker keeps its workspace. Choose New worker to add a worker elsewhere.",
+            })
+        if requested_worker_name and workspace_option.startswith(("open:", "existing:")):
+            raise HTTPException(status_code=409, detail={
+                "code": "existing_worker_name_locked",
+                "message": "Reusing a worker keeps its name. Choose Create copy to name a new worker.",
+            })
+        shared_workspace = payload.workspace_mode == "shared" or bool(existing_workspace_id)
         if shared_workspace and not new_workspace:
             raise HTTPException(
                 status_code=409,
@@ -4019,7 +4207,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     "message": "Shared workspaces are available when creating a new workspace.",
                 },
             )
-        if shared_workspace and execution_mode != "docker":
+        if shared_workspace and not existing_workspace_id and execution_mode != "docker":
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -4080,6 +4268,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 worker = active_client.get_worker(worker_id)
                 project_id = str(worker["project_id"])
                 profile = str(worker.get("profile") or "codex-cli")
+                if worker.get("workspace_kind") == "ephemeral":
+                    active_client.update_worker_metadata(worker_id, {"workspace_kind": "named"})
             elif workspace_option.startswith("duplicate:"):
                 source_worker_id = workspace_option.split(":", 1)[1]
                 source_worker = active_client.get_worker(source_worker_id)
@@ -4087,6 +4277,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 duplicated = active_client.duplicate_workspace(
                     source_worker_id,
                     idempotency_key=payload.idempotency_key,
+                    name=requested_worker_name,
                 )
                 project = duplicated.get("project") or {}
                 worker = duplicated.get("workspace") or {}
@@ -4112,6 +4303,14 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 created_new_worker = True
             else:
                 profile = workspace_option.split(":", 1)[1] if ":" in workspace_option else _default_worker_profile()
+                if execution_mode == "host":
+                    native_option = next((item for item in _workspace_options_with_native_readiness(active_client)
+                                          if item["profile"] == profile), {})
+                    if native_option.get("host_cli_installed") is False:
+                        raise HTTPException(status_code=409, detail={
+                            "code": "native_cli_missing",
+                            "message": "This worker type is not installed on this computer. Choose another type or set up its native app first.",
+                        })
                 effort = _effort_for_profile(profile, payload.effort, preferences)
                 selected_policy = str(
                     (provider_account_selection or {}).get("policy") or "legacy"
@@ -4132,14 +4331,35 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                                 "setup or connect a personal account in Connections."
                             ),
                         )
-                project = active_client.create_project(owner_id, build_project_title(payload.description), payload.description.strip(), profile)
-                project_id = str(project["project_id"])
+                if existing_workspace_id:
+                    shared = active_client.execution_workspace_members(existing_workspace_id)
+                    if (
+                        str(shared.get("workspace_id") or "") != existing_workspace_id
+                        or not str(shared.get("project_id") or "").strip()
+                    ):
+                        raise RuntimeError("xPerfect returned an incomplete workspace identity")
+                    if shared.get("mode") != "shared":
+                        raise HTTPException(status_code=409, detail={
+                            "code": "existing_workspace_isolated",
+                            "message": "This workspace belongs to one worker. Reuse that worker or create a copy in a new workspace.",
+                        })
+                    execution_mode = str(shared.get("execution_mode") or "")
+                    if execution_mode != "docker":
+                        raise HTTPException(status_code=409, detail={
+                            "code": "shared_host_execution_unavailable",
+                            "message": "Shared workspaces require managed container placement.",
+                        })
+                    project_id = str(shared["project_id"])
+                else:
+                    project = active_client.create_project(owner_id, build_project_title(payload.description), payload.description.strip(), profile)
+                    project_id = str(project["project_id"])
+                    if shared_workspace:
+                        shared = active_client.create_execution_workspace(
+                            project_id,
+                            execution_mode=execution_mode,
+                            file_placement=payload.workspace_file_placement,
+                        )
                 if shared_workspace:
-                    shared = active_client.create_execution_workspace(
-                        project_id,
-                        execution_mode=execution_mode,
-                        file_placement=payload.workspace_file_placement,
-                    )
                     readiness = shared.get("runtime_readiness") or {}
                     if readiness.get("available") is not True:
                         code = str(readiness.get("code") or "shared_runtime_unavailable")
@@ -4154,8 +4374,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     if not workspace_id:
                         raise RuntimeError("GlassHive returned an incomplete shared workspace")
                     member_payload: dict[str, Any] = {
-                        "name": build_project_title(payload.description),
-                        "role": payload.success_criteria.strip()[:160] or "main",
+                        "name": requested_worker_name or build_project_title(payload.description),
+                        "role": payload.success_criteria.strip()[:80] or "main",
                         "profile": profile,
                     }
                     if effort:
@@ -4182,7 +4402,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                         project_id,
                         owner_id,
                         profile,
-                        name=build_project_title(payload.description),
+                        name=requested_worker_name or build_project_title(payload.description),
                         role=payload.success_criteria.strip()[:160] or "main",
                         bootstrap_bundle=bootstrap_bundle,
                         execution_mode=execution_mode,
@@ -4190,6 +4410,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                         # browser request budget. The immediately assigned run transitions this
                         # prepared workspace to starting and the watch surface reports progress.
                         start_synchronously=False,
+                        workspace_kind="named" if requested_worker_name else "ephemeral",
                     )
                 worker_id = str(worker["worker_id"])
                 created_new_worker = True
@@ -4220,24 +4441,65 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     str(worker_id), brief, schedule_text=schedule_text, **schedule_payload
                 )
             else:
-                run = active_client.assign_run(str(worker_id), brief)
+                try:
+                    run = active_client.assign_run(
+                        str(worker_id), brief,
+                        **({"idempotency_key": payload.idempotency_key} if payload.idempotency_key else {}),
+                    )
+                except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError) as assignment_error:
+                    if isinstance(assignment_error, httpx.HTTPStatusError) and assignment_error.response.status_code < 500:
+                        raise
+                    # A missing reply cannot authorize cancelling work which may already be durable.
+                    assignment_outcome_uncertain = True
+                    recovered_run = None
+                    if payload.idempotency_key:
+                        try:
+                            recovered_run = active_client.assignment_by_idempotency(
+                                str(worker_id), payload.idempotency_key,
+                            )
+                        except Exception:
+                            pass
+                    if not (
+                        isinstance(recovered_run, dict)
+                        and recovered_run.get("run_id")
+                        and recovered_run.get("worker_id") == str(worker_id)
+                        and recovered_run.get("instruction") == brief
+                    ):
+                        raise assignment_error
+                    run = recovered_run
+                    assignment_outcome_uncertain = False
         except HTTPException:
             raise
-        except httpx.HTTPStatusError as exc:
-            reason = _runtime_status_detail(exc, _format_launch_error(exc))
+        except Exception as exc:
+            if assignment_outcome_uncertain:
+                recovery_surface = normalize_launch_surface(payload.launch_surface, _default_launch_surface())
+                recovery_watch_url = f"/watch/{worker_id}?project_id={project_id}&surface={recovery_surface}"
+                try:
+                    recovery_watch_url = _append_signed_worker_token(
+                        recovery_watch_url, str(worker_id), identity,
+                        storage_timeout_seconds=0.1,
+                    )
+                except (OSError, sqlite3.Error):
+                    pass
+                raise HTTPException(status_code=502, detail={
+                    "code": "launch_outcome_unknown",
+                    "message": "The job may have started. Check Workspaces or Activity before running it again.",
+                    "worker_id": str(worker_id),
+                    "project_id": project_id,
+                    "watch_url": recovery_watch_url,
+                }) from exc
+            reason = (
+                _runtime_status_detail(exc, _format_launch_error(exc))
+                if isinstance(exc, httpx.HTTPStatusError)
+                else _format_launch_error(exc)
+            )
             if created_new_worker and worker_id:
                 try:
                     active_client.launch_failed(str(worker_id), str(reason))
                 except Exception:
                     pass
-            raise _runtime_http_exception(exc, _format_launch_error(exc)) from exc
-        except Exception as exc:
-            reason = _format_launch_error(exc)
-            if created_new_worker and worker_id:
-                try:
-                    active_client.launch_failed(str(worker_id), reason)
-                except Exception:
-                    pass
+            if isinstance(exc, httpx.HTTPStatusError):
+                raise _runtime_http_exception(exc, _format_launch_error(exc)) from exc
             raise HTTPException(status_code=502, detail=reason) from exc
 
         surface = normalize_launch_surface(payload.launch_surface, _default_launch_surface())

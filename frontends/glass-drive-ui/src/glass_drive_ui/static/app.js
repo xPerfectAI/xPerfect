@@ -1,12 +1,39 @@
-import { createLaunchDraft } from './launch-draft.js?v=20260922u';
+import { renderAccountIdentity } from './account-menu.js?v=20261024journeys18';
+import {
+  mountWorkerOnboarding,
+  workerChoiceLabel,
+  hostAccountLabel,
+  workerTypeOption,
+} from './worker-onboarding.js?v=20261024journeys18';
+import { createLaunchDraft } from './launch-draft.js?v=20261024journeys18';
 import { openWorkspaceMembers } from './workspace-members.js?v=20260924peerfocus2';
-import { attachNativeControls, selectConnectedClaudeAccount } from './native-controls.js?v=20260922o03c';
-import { initializeControlPlane, refreshControlPlane, renderActivity } from './control-plane.js?v=20260924notice1';
-import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20260924notice1';
-import { workspaceDeliveryModel } from './delivery-presenter.js?v=20260923closed1';
-import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20260811m';
-import { createFileDraft } from './files.js?v=20260927attach2';
-import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
+import {
+  attachNativeControls,
+  canGuideNativeTurn,
+  selectConnectedClaudeAccount,
+} from './native-controls.js?v=20261024journeys18';
+import {
+  initializeControlPlane,
+  refreshControlPlane,
+  renderActivity,
+  persistCapabilityReview,
+} from './control-plane.js?v=20261024journeys18';
+import {
+  credentialPolicyTransition,
+  preferredProviderAccountId,
+  shouldResumeOnWorkspaceOpen,
+  workerAccountSummary,
+  workspaceLifecycleControl,
+  workspaceSetupAction,
+} from './launch-policy.js?v=20261024journeys18';
+import { workspaceDeliveryModel } from './delivery-presenter.js?v=20261024journeys18';
+import {
+  compareWorkspacePriority,
+  previewWorkerIds,
+  shouldHydrateWorkspaceDelivery,
+} from './workspace-overview.js?v=20260811m';
+import { createFileDraft } from './files.js?v=20261024journeys18';
+import { createResultMarkdown } from './result-markdown.js?v=20261024journeys18';
 import { showLaunchedWorkspace, watchHref } from './launch-result.js?v=20260924launch1';
 import { initializeStorageAdmin } from './storage-admin.js?v=20260924storage3';
 
@@ -14,8 +41,22 @@ const ACTIVE_STATES = new Set(['created', 'starting', 'queued', 'running', 'resu
 const ACTIVE_RUN_STATES = new Set(['queued', 'running']);
 const TERMINAL_ATTENTION_STATES = new Set(['failed', 'cancelled', 'interrupted']);
 const INTERRUPTIBLE_STATES = new Set(['queued', 'running', 'resuming']);
-const RESUME_STATES = new Set(['ready', 'paused', 'idle', 'idle_terminated', 'stopped', 'completed', 'retained']);
-const DISABLED_CONTROL_STATES = new Set(['created', 'starting', 'terminating', 'termination_failed', 'terminated']);
+const RESUME_STATES = new Set([
+  'ready',
+  'paused',
+  'idle',
+  'idle_terminated',
+  'stopped',
+  'completed',
+  'retained',
+]);
+const DISABLED_CONTROL_STATES = new Set([
+  'created',
+  'starting',
+  'terminating',
+  'termination_failed',
+  'terminated',
+]);
 const MAX_VIEW_ONLY_PREVIEWS = 3;
 const ACTIVE_TILE_REFRESH_MS = 7000;
 const RETAINED_TILE_REFRESH_MS = 60000;
@@ -24,9 +65,13 @@ const CAPABILITY_REVIEW_KEY = 'glasshive.capability-review';
 let workspaceRefreshInFlight = false;
 let csrfToken = '';
 let launchDraftState = null;
+let workspaceInteractionOwnerScope = '';
+const workspaceSteerInFlight = new Map();
 function fileCsrfToken() {
   if (csrfToken) return csrfToken;
-  const cookie = document.cookie.split(';').map((value) => value.trim())
+  const cookie = document.cookie
+    .split(';')
+    .map((value) => value.trim())
     .find((value) => value.startsWith('glasshive_csrf='));
   return cookie ? decodeURIComponent(cookie.slice('glasshive_csrf='.length)) : '';
 }
@@ -38,18 +83,21 @@ const signedToken = pageParams.get('gh_token') || '';
 
 function rememberCapabilityReview(workerId, count, items = []) {
   const normalizedItems = Array.isArray(items)
-    ? items.filter((item) => (
-      item
-      && typeof item === 'object'
-      && String(item.action_id || '')
-      && String(item.resolution || '')
-    )).map((item) => ({ ...item }))
+    ? items
+        .filter(
+          (item) =>
+            item &&
+            typeof item === 'object' &&
+            String(item.action_id || '') &&
+            String(item.resolution || ''),
+        )
+        .map((item) => ({ ...item }))
     : [];
-  sessionStorage.setItem(CAPABILITY_REVIEW_KEY, JSON.stringify({
-    worker_id: String(workerId || ''),
+  persistCapabilityReview({
+    workerId: String(workerId || ''),
     count: Math.max(Number(count || 0), normalizedItems.length),
     items: normalizedItems,
-  }));
+  });
   return normalizedItems.some((item) => item.route === 'connections') ? 'connections' : 'library';
 }
 
@@ -62,7 +110,8 @@ const defaultHivePrefs = {
 
 async function loadBootstrap() {
   const response = await fetch(withAuth('/api/bootstrap'));
-  if (!response.ok) throw new Error(await responseMessage(response, 'Failed to load workspace options'));
+  if (!response.ok)
+    throw new Error(await responseMessage(response, 'Failed to load workspace options'));
   const payload = await response.json();
   return payload;
 }
@@ -91,7 +140,9 @@ async function responseMessage(response, fallback) {
     if (contentType.includes('application/json')) {
       const payload = await response.json();
       if (payload.detail && typeof payload.detail === 'object') {
-        return [payload.detail.message, payload.detail.recovery].filter(Boolean).join(' ') || fallback;
+        return (
+          [payload.detail.message, payload.detail.recovery].filter(Boolean).join(' ') || fallback
+        );
       }
       return String(payload.detail || payload.message || fallback);
     }
@@ -105,9 +156,18 @@ async function responseMessage(response, fallback) {
 async function responseError(response, fallback) {
   let code = '';
   let sameKeyRetryAllowed;
+  let recoveryUrl = '';
+  let validationFields = [];
   try {
     const body = await response.clone().json();
     code = String(body?.detail?.code || '');
+    recoveryUrl = String(body?.detail?.watch_url || '');
+    if (Array.isArray(body?.detail))
+      validationFields = body.detail.flatMap((issue) =>
+        Array.isArray(issue.loc)
+          ? issue.loc.filter((part) => typeof part === 'string' && part !== 'body')
+          : [],
+      );
     if (typeof body?.detail?.same_key_retry_allowed === 'boolean') {
       sameKeyRetryAllowed = body.detail.same_key_retry_allowed;
     }
@@ -115,8 +175,11 @@ async function responseError(response, fallback) {
     code = '';
   }
   const error = new Error(await responseMessage(response, fallback));
+  error.status = response.status;
+  error.recoveryUrl = recoveryUrl;
   error.code = code;
   error.sameKeyRetryAllowed = sameKeyRetryAllowed;
+  error.validationFields = validationFields;
   return error;
 }
 
@@ -131,14 +194,17 @@ function decorateCatalogWorkspace(workspace) {
   const projectId = String(workspace?.project_id || '');
   const state = rawWorkspaceState(workspace);
   const projectTitle = String(workspace?.project_title || workspace?.name || 'Workspace');
+  const surface =
+    document.getElementById('launch-surface')?.value === 'terminal' ? 'terminal' : 'desktop';
   return {
     ...workspace,
+    profile_label: workspaceProfileLabel(workspace.profile),
     workspace_label: projectTitle,
     state_label: state === 'ready' ? 'retained' : state,
     is_active: ACTIVE_STATES.has(state),
     is_resumable: RESUME_STATES.has(state),
-    watch_url: `/watch/${encodeURIComponent(workerId)}?project_id=${encodeURIComponent(projectId)}&surface=desktop`,
-    workspace_url: `/watch/${encodeURIComponent(workerId)}?project_id=${encodeURIComponent(projectId)}&surface=desktop`,
+    watch_url: `/watch/${encodeURIComponent(workerId)}?project_id=${encodeURIComponent(projectId)}&surface=${surface}`,
+    workspace_url: `/watch/${encodeURIComponent(workerId)}?project_id=${encodeURIComponent(projectId)}&surface=${surface}`,
     desktop_url: `/desktop/${encodeURIComponent(workerId)}`,
     api_url: `/api/worker/${encodeURIComponent(workerId)}`,
     control_url: `/api/worker/${encodeURIComponent(workerId)}`,
@@ -174,7 +240,7 @@ async function patchJson(url, payload) {
     },
     body: payload ? JSON.stringify(payload) : undefined,
   });
-  if (!response.ok) throw new Error(await responseMessage(response, 'Request failed'));
+  if (!response.ok) throw await responseError(response, 'Request failed');
   return response.json();
 }
 
@@ -188,27 +254,25 @@ async function deleteJson(url) {
 }
 
 function renderCurrentUser(identity = {}) {
-  const control = document.getElementById('current-user-control');
-  const label = document.getElementById('current-user-label');
-  const switchAccount = document.getElementById('switch-account');
-  if (!control || !label || !csrfToken) return;
-  const name = String(identity.display_name || '').trim();
-  const email = String(identity.email || '').trim();
-  label.textContent = name && email ? `${name} · ${email}` : name || email || 'Signed in';
-  label.title = label.textContent;
-  if (switchAccount) switchAccount.hidden = identity.provider_switch_visible !== true;
-  control.hidden = false;
+  renderAccountIdentity(identity, Boolean(csrfToken));
 }
 
 async function signOut(scope) {
+  await waitForWorkspaceSteers();
+  bindWorkspaceInteractionOwner('');
   const response = await postJson('/auth/logout', { scope });
-  try { sessionStorage.removeItem(CAPABILITY_REVIEW_KEY); } catch { /* Optional browser hint. */ }
+  try {
+    sessionStorage.removeItem(CAPABILITY_REVIEW_KEY);
+  } catch {
+    /* Optional browser hint. */
+  }
   launchDraftState?.clear();
   window.location.assign(String(response.redirect_url || '/login'));
 }
 
 function renderWorkspaceTypeOptions(select, help, data) {
-  const managedDescription = 'Runs on managed xPerfect workspace compute with project files and browser state preserved for resume.';
+  const managedDescription =
+    'Runs on managed xPerfect workspace compute with project files and browser state preserved for resume.';
   const options = [];
   const items = data.workspace_type_options?.length
     ? data.workspace_type_options
@@ -224,15 +288,17 @@ function renderWorkspaceTypeOptions(select, help, data) {
     option.value = String(item.value || '');
     option.textContent = String(item.label || item.value || '');
     option.disabled = Boolean(item.disabled);
-    option.dataset.description = option.value === 'sandboxed'
-      ? managedDescription : String(item.description || '');
+    option.dataset.unavailable = String(Boolean(item.disabled));
+    option.dataset.description =
+      option.value === 'sandboxed' ? managedDescription : String(item.description || '');
     options.push(option);
   }
   select.replaceChildren(...options);
   select.value = String(data.default_workspace_type || 'sandboxed');
   if (help) {
     const selected = select.selectedOptions?.[0];
-    help.textContent = selected?.dataset.description || 'Runs on managed xPerfect workspace compute.';
+    help.textContent =
+      selected?.dataset.description || 'Runs on managed xPerfect workspace compute.';
   }
 }
 
@@ -241,7 +307,8 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
   const isNewWorkspace = String(workspaceValue || '').startsWith('new:');
   const profile = isNewWorkspace ? String(workspaceValue).split(':', 2)[1] || '' : '';
   const supportedProviders = new Set(data?.profile_account_providers?.[profile] || []);
-  const currentAccount = accountSelect.dataset.renderedProfile === profile ? accountSelect.value : '';
+  const currentAccount =
+    accountSelect.dataset.renderedProfile === profile ? accountSelect.value : '';
   accountSelect.dataset.renderedProfile = profile;
   const previousLabel = accountSelect.dataset.explicitAccountLabel || 'Selected account';
 
@@ -253,15 +320,20 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
     accountSelect.disabled = true;
     accountSelect.dataset.accountState = 'saved';
     policySelect.disabled = true;
-    if (help) help.textContent = 'Existing workspaces keep their saved worker account and credential policy.';
+    if (help)
+      help.textContent =
+        'Existing workspaces keep their saved worker account and credential policy.';
     return;
   }
-  const catalogUnavailable = Boolean(data?.bootstrap_sections
-    && data.bootstrap_sections.provider_accounts !== 'ready');
+  const catalogUnavailable = Boolean(
+    data?.bootstrap_sections && data.bootstrap_sections.provider_accounts !== 'ready',
+  );
   if (catalogUnavailable) {
-    const explicitId = accountSelect.dataset.explicitChoice === 'true'
-      && accountSelect.dataset.explicitProfile === profile
-      ? String(accountSelect.dataset.explicitAccountId || '') : '';
+    const explicitId =
+      accountSelect.dataset.explicitChoice === 'true' &&
+      accountSelect.dataset.explicitProfile === profile
+        ? String(accountSelect.dataset.explicitAccountId || '')
+        : '';
     // An outage must not turn a user's strict account choice into deployment fallback.
     if (explicitId && policySelect.dataset.forcedLegacy === 'true') {
       policySelect.value = policySelect.dataset.personalPolicy || 'personal_required';
@@ -271,12 +343,14 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
     const option = document.createElement('option');
     option.value = explicitId;
     option.textContent = explicitId
-      ? `${previousLabel} · Status unavailable` : 'Account options unavailable';
+      ? `${previousLabel} · Status unavailable`
+      : 'Account options unavailable';
     option.disabled = Boolean(explicitId);
     accountSelect.replaceChildren(option);
     accountSelect.disabled = true;
     accountSelect.dataset.accountState = 'catalog_unavailable';
-    if (help) help.textContent = 'Account status is unavailable. Check Connections, then try again.';
+    if (help)
+      help.textContent = 'Account status is unavailable. Check Connections, then try again.';
     return;
   }
   const policyTransition = credentialPolicyTransition({
@@ -316,35 +390,51 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
     if (help) help.textContent = 'This worker uses the deployment-managed account.';
     return;
   }
-  const providerAccounts = (data?.provider_accounts || []).filter((account) => (
-    supportedProviders.has(String(account.provider || '').toLowerCase())
-    && Boolean(account.account_id)
-  ));
-  const readyAccounts = providerAccounts.filter((account) => (
-    String(account.status || '').toLowerCase() === 'ready'
-  ));
-  const explicitlyChosen = accountSelect.dataset.explicitChoice === 'true'
-    && accountSelect.dataset.explicitProfile === profile;
+  const allowedMethods = new Set(
+    (data?.new_workspace_options || []).find((item) => item.profile === profile)
+      ?.account_auth_methods || [],
+  );
+  const providerAccounts = (data?.provider_accounts || []).filter(
+    (account) =>
+      supportedProviders.has(String(account.provider || '').toLowerCase()) &&
+      Boolean(account.account_id) &&
+      (!allowedMethods.size || allowedMethods.has(account.auth_method)),
+  );
+  const readyAccounts = providerAccounts.filter(
+    (account) => String(account.status || '').toLowerCase() === 'ready',
+  );
+  const explicitlyChosen =
+    accountSelect.dataset.explicitChoice === 'true' &&
+    accountSelect.dataset.explicitProfile === profile;
   const explicitId = explicitlyChosen ? String(accountSelect.dataset.explicitAccountId || '') : '';
   const preferredAccountId = explicitlyChosen
     ? explicitId
-    : catalogUnavailable ? '' : preferredProviderAccountId(readyAccounts, currentAccount);
-  const selectedAccount = providerAccounts.find((account) => String(account.account_id) === preferredAccountId);
-  const selectedReady = !catalogUnavailable && Boolean(selectedAccount)
-    && String(selectedAccount.status || '').toLowerCase() === 'ready';
+    : catalogUnavailable
+      ? ''
+      : preferredProviderAccountId(readyAccounts, currentAccount);
+  const selectedAccount = providerAccounts.find(
+    (account) => String(account.account_id) === preferredAccountId,
+  );
+  const selectedReady =
+    !catalogUnavailable &&
+    Boolean(selectedAccount) &&
+    String(selectedAccount.status || '').toLowerCase() === 'ready';
   const options = [];
   if (!preferredAccountId) {
     const placeholder = document.createElement('option');
     placeholder.value = '';
     placeholder.textContent = catalogUnavailable
       ? 'Account status unavailable'
-      : readyAccounts.length ? 'Choose an account' : 'No ready account';
+      : readyAccounts.length
+        ? 'Choose an account'
+        : 'No ready account';
     options.push(placeholder);
   }
-  for (const account of providerAccounts.filter((item) => (
-    String(item.status || '').toLowerCase() === 'ready'
-    || String(item.account_id) === preferredAccountId
-  ))) {
+  for (const account of providerAccounts.filter(
+    (item) =>
+      String(item.status || '').toLowerCase() === 'ready' ||
+      String(item.account_id) === preferredAccountId,
+  )) {
     const option = document.createElement('option');
     option.value = String(account.account_id || '');
     const ready = !catalogUnavailable && String(account.status || '').toLowerCase() === 'ready';
@@ -364,15 +454,21 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
 
   const policy = policySelect.value;
   accountSelect.disabled = catalogUnavailable || readyAccounts.length === 0;
-  accountSelect.dataset.accountState = selectedReady ? 'ready'
-    : catalogUnavailable ? 'catalog_unavailable'
-      : preferredAccountId ? 'needs_attention'
-        : readyAccounts.length ? 'choose' : 'none';
+  accountSelect.dataset.accountState = selectedReady
+    ? 'ready'
+    : catalogUnavailable
+      ? 'catalog_unavailable'
+      : preferredAccountId
+        ? 'needs_attention'
+        : readyAccounts.length
+          ? 'choose'
+          : 'none';
   if (!help) return;
   if (catalogUnavailable) {
     help.textContent = 'Account status is unavailable. Check Connections, then try again.';
   } else if (preferredAccountId && !selectedReady) {
-    help.textContent = 'This account needs attention. Reconnect it or choose another ready account.';
+    help.textContent =
+      'This account needs attention. Reconnect it or choose another ready account.';
   } else if (!preferredAccountId && readyAccounts.length) {
     help.textContent = 'Choose one of your connected accounts.';
   } else if (policy === 'personal_required') {
@@ -398,11 +494,18 @@ function renderDefaultWorkerOptions(select, data) {
     const option = document.createElement('option');
     const profile = String(item.profile || String(item.value || '').split(':', 2)[1] || '');
     option.value = profile;
-    option.textContent = String(item.label || profile || 'Worker');
+    const choice = workerTypeOption(
+      { ...item, profile },
+      (document.getElementById('workspace-type')?.value || data.default_workspace_type) === 'host',
+    );
+    option.textContent = String(choice.label || profile || 'Worker');
+    option.disabled = choice.disabled;
     options.push(option);
   }
   select.replaceChildren(...options);
-  select.value = Array.from(select.options).some((option) => option.value === current) ? current : '';
+  select.value = Array.from(select.options).some((option) => option.value === current)
+    ? current
+    : '';
 }
 
 function syncPreferenceControls(data, controls) {
@@ -423,7 +526,7 @@ function renderWorkspaceOptions(select, data, selectedValue = '') {
     for (const workspace of existing) {
       const option = document.createElement('option');
       option.value = `open:${String(workspace.worker_id || '')}`;
-      option.textContent = workspaceOptionLabel(workspace);
+      option.textContent = workspaceOptionLabel(workspace, data);
       openGroup.appendChild(option);
     }
     groups.push(openGroup);
@@ -435,7 +538,7 @@ function renderWorkspaceOptions(select, data, selectedValue = '') {
       duplicateGroup.label = 'Duplicate selected workspace';
       const option = document.createElement('option');
       option.value = selectedValue;
-      option.textContent = `Duplicate ${workspaceOptionLabel(workspace)}`;
+      option.textContent = `Duplicate ${workspaceOptionLabel(workspace, data)}`;
       duplicateGroup.appendChild(option);
       groups.push(duplicateGroup);
     }
@@ -451,16 +554,46 @@ function renderWorkspaceOptions(select, data, selectedValue = '') {
   }
   groups.push(newGroup);
 
+  const savedChoice = ['open:', 'existing:', 'duplicate:'].some((prefix) =>
+    selectedValue.startsWith(prefix),
+  );
+  const selectedWorker = savedChoice
+    ? existing.find((item) => item.worker_id === selectedValue.split(':', 2)[1])
+    : null;
+  if (
+    savedChoice &&
+    !groups.some((group) =>
+      Array.from(group.children || []).some((option) => option.value === selectedValue),
+    )
+  ) {
+    const retained = document.createElement('optgroup');
+    retained.label = 'Selected worker';
+    const option = document.createElement('option');
+    option.value = selectedValue;
+    option.textContent = selectedWorker
+      ? workspaceOptionLabel(selectedWorker, data)
+      : 'Selected worker unavailable — choose another';
+    option.disabled = !selectedWorker;
+    retained.appendChild(option);
+    groups.push(retained);
+  }
+  select.dataset.workerChoiceState = savedChoice && !selectedWorker ? 'unavailable' : '';
+
   select.replaceChildren(...groups);
   const optionValues = Array.from(select.querySelectorAll('option')).map((option) => option.value);
   const policySelect = document.getElementById('provider-account-policy');
+  select.dataset.draftDefault = runnableDefaultOption(data, optionValues, {
+    currentPolicy: policySelect?.value,
+    savedPersonalPolicy: policySelect?.dataset.personalPolicy,
+    forcedLegacy: policySelect?.dataset.forcedLegacy === 'true',
+  });
   select.value = optionValues.includes(selectedValue)
     ? selectedValue
     : runnableDefaultOption(data, optionValues, {
-      currentPolicy: policySelect?.value,
-      savedPersonalPolicy: policySelect?.dataset.personalPolicy,
-      forcedLegacy: policySelect?.dataset.forcedLegacy === 'true',
-    });
+        currentPolicy: policySelect?.value,
+        savedPersonalPolicy: policySelect?.dataset.personalPolicy,
+        forcedLegacy: policySelect?.dataset.forcedLegacy === 'true',
+      });
 }
 
 // Without a saved worker choice, start on a worker this user can run. The deployment default
@@ -470,18 +603,30 @@ function renderWorkspaceOptions(select, data, selectedValue = '') {
 function runnableDefaultOption(data, optionValues, policyState = {}) {
   const fallback = String(data?.default_workspace_option || '');
   const sections = data?.bootstrap_sections || {};
-  if (sections.preferences !== 'ready' || sections.provider_accounts !== 'ready'
-      || String(data?.user_preferences?.default_worker_profile || '')) return fallback;
-  const ready = new Set((data?.provider_accounts || [])
-    .filter((account) => String(account.status || '').toLowerCase() === 'ready')
-    .map((account) => String(account.provider || '').toLowerCase()));
+  if (
+    sections.preferences !== 'ready' ||
+    sections.provider_accounts !== 'ready' ||
+    String(data?.user_preferences?.default_worker_profile || '')
+  )
+    return fallback;
+  const ready = new Set(
+    (data?.provider_accounts || [])
+      .filter((account) => String(account.status || '').toLowerCase() === 'ready')
+      .map((account) => String(account.provider || '').toLowerCase()),
+  );
   const providers = (value) => data?.profile_account_providers?.[value.slice(4)] || [];
-  const hasReadyAccount = (value) => providers(value).some((provider) => ready.has(String(provider).toLowerCase()));
-  const needsPersonalAccount = (value) => credentialPolicyTransition({
-    ...policyState, supportsPersonalAccounts: providers(value).length > 0,
-  }).value === 'personal_required';
-  if (!fallback.startsWith('new:') || !needsPersonalAccount(fallback) || hasReadyAccount(fallback)) return fallback;
-  return optionValues.find((value) => value.startsWith('new:') && hasReadyAccount(value)) || fallback;
+  const hasReadyAccount = (value) =>
+    providers(value).some((provider) => ready.has(String(provider).toLowerCase()));
+  const needsPersonalAccount = (value) =>
+    credentialPolicyTransition({
+      ...policyState,
+      supportsPersonalAccounts: providers(value).length > 0,
+    }).value === 'personal_required';
+  if (!fallback.startsWith('new:') || !needsPersonalAccount(fallback) || hasReadyAccount(fallback))
+    return fallback;
+  return (
+    optionValues.find((value) => value.startsWith('new:') && hasReadyAccount(value)) || fallback
+  );
 }
 
 function uniqueWorkspaces(workspaces) {
@@ -497,7 +642,11 @@ function uniqueWorkspaces(workspaces) {
 }
 
 function rawWorkspaceState(workspace) {
-  return String(workspace?.close_state || workspace?.state || 'unknown').trim().toLowerCase() || 'unknown';
+  return (
+    String(workspace?.close_state || workspace?.state || 'unknown')
+      .trim()
+      .toLowerCase() || 'unknown'
+  );
 }
 
 function workspaceStateLabel(workspace) {
@@ -515,19 +664,25 @@ function isWorkspaceResumable(workspace) {
 }
 
 function workspaceProfileLabel(profile) {
-  return {
-    'codex-cli': 'Codex',
-    'claude-code': 'Claude Code',
-    'grok-build': 'Grok Build',
-    'direct-openai': 'Direct / OpenAI API',
-    'direct-anthropic': 'Direct / Anthropic API',
-    'direct-xai': 'Direct / xAI API',
-    'openclaw-general': 'OpenClaw',
-  }[profile] || profile || 'Worker';
+  return (
+    {
+      'codex-cli': 'Codex',
+      'claude-code': 'Claude Code',
+      'grok-build': 'Grok Build',
+      'direct-openai': 'Direct / OpenAI API',
+      'direct-anthropic': 'Direct / Anthropic API',
+      'direct-xai': 'Direct / xAI API',
+      'openclaw-general': 'OpenClaw',
+    }[profile] ||
+    profile ||
+    'Worker'
+  );
 }
 
 function displayStateLabel(state) {
-  const normalized = String(state || '').trim().toLowerCase();
+  const normalized = String(state || '')
+    .trim()
+    .toLowerCase();
   if (normalized === 'completed') return 'Completed';
   if (normalized === 'terminated') return 'Closed';
   if (normalized === 'idle_terminated') return 'Idle stopped';
@@ -547,13 +702,18 @@ function workspaceTileTitle(workspace) {
   return name || label || 'Workspace';
 }
 
-function workspaceOptionLabel(workspace) {
+function workspaceOptionLabel(workspace, data = {}) {
   if (!workspace) return 'selected workspace';
-  return `${workspaceTileTitle(workspace)} · ${workspaceProfileLabel(workspace.profile)} · ${workspaceStateLabel(workspace)}`;
+  return workerChoiceLabel(
+    { ...workspace, profile_label: workspaceProfileLabel(workspace.profile) },
+    data,
+  );
 }
 
 function syncTileSteerAvailability(tile, state) {
-  const normalized = String(state || '').trim().toLowerCase();
+  const normalized = String(state || '')
+    .trim()
+    .toLowerCase();
   tile.dataset.displayState = normalized;
   const closed = ['terminating', 'termination_failed', 'terminated'].includes(normalized);
   const input = tile.querySelector('.workspace-steer textarea');
@@ -562,7 +722,133 @@ function syncTileSteerAvailability(tile, state) {
     input.disabled = closed;
     input.placeholder = closed ? 'This workspace is closed' : 'Steer this workspace';
   }
-  if (button) button.disabled = closed;
+  if (button)
+    button.disabled =
+      closed || Boolean(pendingWorkspaceSteer(tile.dataset.workerId, tile.dataset.ownerScope));
+}
+
+function bindWorkspaceInteractionOwner(scope) {
+  const owner = String(scope || '');
+  if (owner !== workspaceInteractionOwnerScope) workspaceSteerInFlight.clear();
+  workspaceInteractionOwnerScope = owner;
+}
+
+function currentWorkspaceTile(workerId, ownerScope = workspaceInteractionOwnerScope) {
+  return Array.from(document.querySelectorAll('.workspace-tile')).find(
+    (tile) =>
+      tile.dataset.workerId === String(workerId || '') &&
+      String(tile.dataset.ownerScope || '') === String(ownerScope || ''),
+  );
+}
+
+function pendingWorkspaceSteer(workerId, ownerScope) {
+  const pending = workspaceSteerInFlight.get(String(workerId || ''));
+  return pending?.ownerScope === String(ownerScope || '') ? pending : null;
+}
+
+async function waitForWorkspaceSteers(ownerScope = workspaceInteractionOwnerScope) {
+  const accepted = new Set();
+  while (true) {
+    if (ownerScope !== workspaceInteractionOwnerScope)
+      throw new Error('The account changed. Open the workspace again.');
+    const pending = Array.from(workspaceSteerInFlight.entries()).filter(
+      ([, operation]) => operation.ownerScope === ownerScope,
+    );
+    if (!pending.length) return accepted;
+    await Promise.all(pending.map(([, operation]) => operation.promise));
+    for (const [workerId] of pending) accepted.add(workerId);
+  }
+}
+
+async function waitForWorkspaceSteer(workspace, control) {
+  const ownerScope = String(control?.closest('.workspace-tile')?.dataset.ownerScope || '');
+  return (await waitForWorkspaceSteers(ownerScope)).has(String(workspace?.worker_id || ''));
+}
+
+async function guardWorkspacePageNavigation(event) {
+  const link = event.target?.closest?.('a[href]');
+  if (
+    !link ||
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey ||
+    (link.target && link.target !== '_self') ||
+    link.hasAttribute('download') ||
+    link.classList.contains('workspace-glass-open')
+  )
+    return;
+  const href = String(link.getAttribute('href') || '');
+  const target = new URL(href, window.location.href);
+  if (
+    target.origin !== window.location.origin ||
+    href.startsWith('#') ||
+    (target.hash &&
+      target.pathname === window.location.pathname &&
+      target.search === window.location.search) ||
+    !workspaceSteerInFlight.size
+  )
+    return;
+  const ownerScope = workspaceInteractionOwnerScope;
+  event.preventDefault();
+  try {
+    await waitForWorkspaceSteers(ownerScope);
+    if (ownerScope === workspaceInteractionOwnerScope) window.location.assign(target.href);
+  } catch (_error) {
+    // The sending workspace keeps its draft and already shows the actual cause.
+  }
+}
+
+async function submitWorkspaceSteer(workspace, tile, input, refreshBootstrap) {
+  const workerId = String(workspace?.worker_id || '');
+  const ownerScope = String(tile.dataset.ownerScope || '');
+  if (ownerScope !== workspaceInteractionOwnerScope || pendingWorkspaceSteer(workerId, ownerScope))
+    return;
+  const message = input.value.trim();
+  const output = () =>
+    currentWorkspaceTile(workerId, ownerScope)?.querySelector('[data-worker-output]');
+  if (!message) {
+    if (output()) output().textContent = 'Add a steer instruction first.';
+    input.focus();
+    return;
+  }
+  const operation = {
+    ownerScope,
+    message,
+    promise: postJson(workerApiUrl(workerId, '/steer'), { message }),
+  };
+  workspaceSteerInFlight.set(workerId, operation);
+  syncTileSteerAvailability(tile, tile.dataset.displayState || workspaceStateLabel(workspace));
+  if (output()) output().textContent = 'Sending steer instruction...';
+  let accepted = false;
+  try {
+    await operation.promise;
+    if (ownerScope !== workspaceInteractionOwnerScope) return;
+    accepted = true;
+    const currentInput = currentWorkspaceTile(workerId, ownerScope)?.querySelector(
+      '.workspace-steer textarea',
+    );
+    if (currentInput?.value.trim() === message) {
+      currentInput.value = '';
+      autoResizeTextarea(currentInput);
+    }
+    if (output()) output().textContent = 'Steer instruction accepted.';
+  } catch (error) {
+    if (ownerScope === workspaceInteractionOwnerScope && output())
+      output().textContent = error.message;
+  } finally {
+    if (workspaceSteerInFlight.get(workerId) === operation) workspaceSteerInFlight.delete(workerId);
+    const currentTile = currentWorkspaceTile(workerId, ownerScope);
+    if (ownerScope === workspaceInteractionOwnerScope && currentTile) {
+      syncTileSteerAvailability(
+        currentTile,
+        currentTile.dataset.displayState || workspaceStateLabel(workspace),
+      );
+    }
+  }
+  if (accepted) await refreshBootstrap().catch(() => {});
 }
 
 function workerDesktopUrl(workerId, signedUrl = '') {
@@ -587,7 +873,9 @@ function appendUrlPath(url, path) {
 }
 
 function workerApiUrl(workerId, path = '') {
-  const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === String(workerId || ''));
+  const tile = Array.from(document.querySelectorAll('.workspace-tile')).find(
+    (item) => item.dataset.workerId === String(workerId || ''),
+  );
   const signedBase = String(tile?.dataset.apiUrl || '');
   if (signedBase) return appendUrlPath(signedBase, path);
   return `/api/worker/${encodeURIComponent(String(workerId || ''))}${path}`;
@@ -595,12 +883,8 @@ function workerApiUrl(workerId, path = '') {
 
 // A result's short summary reads as formatted text, as in Watch: raw HTML is escaped and
 // unsafe link schemes are refused. Links open beside this page.
-const inlineMarkdown = new MarkdownIt({ html: false, linkify: false, typographer: false });
-inlineMarkdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
-  tokens[index].attrSet('target', '_blank');
-  tokens[index].attrSet('rel', 'noopener noreferrer');
-  return self.renderToken(tokens, index, options);
-};
+const inlineMarkdown = createResultMarkdown();
+
 function setInlineResult(element, text) {
   element.innerHTML = inlineMarkdown.renderInline(String(text || ''));
 }
@@ -608,13 +892,15 @@ function setInlineResult(element, text) {
 function summarizeLive(data) {
   const runState = String(data?.latest_run?.state || '').trim();
   const output = String(data?.latest_output || '').trim();
-  const deliverable = data?.deliverable && Object.keys(data.deliverable).length
-    ? data.deliverable
-    : null;
-  if (Array.isArray(data?.native_control?.pending_requests) && data.native_control.pending_requests.length) {
+  const deliverable =
+    data?.deliverable && Object.keys(data.deliverable).length ? data.deliverable : null;
+  if (
+    Array.isArray(data?.native_control?.pending_requests) &&
+    data.native_control.pending_requests.length
+  ) {
     return data.native_control.read_only === true
-      ? 'Grok is waiting for a workspace member to respond.'
-      : 'Grok is waiting for your response.';
+      ? 'The worker is waiting for a workspace member to respond.'
+      : 'The worker is waiting for your response.';
   }
   if (runState === 'queued') return 'Queued follow-up is waiting for this workspace.';
   if (runState === 'running') return 'Workspace is running now.';
@@ -622,18 +908,21 @@ function summarizeLive(data) {
     const label = deliverable.kind === 'file' ? 'Delivered file ready' : 'Delivered page ready';
     return `Completed · ${label} · ${String(deliverable.label || deliverable.workspace_path || deliverable.browser_url || 'deliverable')}`;
   }
-  if (runState === 'completed') return output ? `Completed · ${output.split(/\n\s*\n|\n/)[0].trim()}` : 'Completed.';
-  if (output) {
-    const firstLine = output.split(/\n\s*\n|\n/)[0].trim();
-    return firstLine.length <= 150 ? firstLine : `${firstLine.slice(0, 147)}...`;
-  }
+  if (runState === 'completed')
+    return output ? `Completed · ${output.split(/\n\s*\n|\n/)[0].trim()}` : 'Completed.';
+  if (runState) return workspaceDeliveryModel(data).summary;
   const state = String(data?.worker?.state || '').trim();
   return state === 'ready' ? 'Workspace is ready for the next instruction.' : 'No run output yet.';
 }
 
 function updateTileControlLabels(tile, state, workerState = state) {
-  const normalized = String(state || '').trim().toLowerCase();
-  const control = workspaceLifecycleControl(normalized === 'completed' ? normalized : workerState);
+  const normalized = String(state || '')
+    .trim()
+    .toLowerCase();
+  const control = workspaceLifecycleControl(
+    normalized === 'completed' ? normalized : workerState,
+    normalized,
+  );
   const toggle = tile.querySelector('[data-worker-action-toggle]');
   if (toggle) {
     toggle.hidden = control.hidden;
@@ -665,7 +954,9 @@ function setGlassPane(glass, workerId, state, hasLiveDesktop, refreshBootstrap) 
     pane.replaceChildren();
     return;
   }
-  const normalized = String(state || '').trim().toLowerCase();
+  const normalized = String(state || '')
+    .trim()
+    .toLowerCase();
   const alreadyHasFrame = Boolean(pane.querySelector('.workspace-live-preview'));
   const previewIds = previewWorkerIds(
     Array.from(document.querySelectorAll('.workspace-tile')).map((candidate) => ({
@@ -676,7 +967,11 @@ function setGlassPane(glass, workerId, state, hasLiveDesktop, refreshBootstrap) 
     MAX_VIEW_ONLY_PREVIEWS,
   );
   const canMountLiveFrame = alreadyHasFrame || previewIds.includes(String(workerId || ''));
-  if ((ACTIVE_STATES.has(normalized) || normalized === 'running' || normalized === 'queued') && hasLiveDesktop && canMountLiveFrame) {
+  if (
+    (ACTIVE_STATES.has(normalized) || normalized === 'running' || normalized === 'queued') &&
+    hasLiveDesktop &&
+    canMountLiveFrame
+  ) {
     let frame = pane.querySelector('.workspace-live-preview');
     if (!frame) {
       frame = document.createElement('iframe');
@@ -701,8 +996,8 @@ function setGlassPane(glass, workerId, state, hasLiveDesktop, refreshBootstrap) 
     note.textContent = hasLiveDesktop
       ? 'Live available'
       : normalized === 'ready'
-      ? 'Workspace ready'
-      : 'Live surface warming up';
+        ? 'Workspace ready'
+        : 'Live surface warming up';
     pane.replaceChildren(note);
     allowPreviewOpen(true);
     return;
@@ -720,7 +1015,12 @@ function setGlassPane(glass, workerId, state, hasLiveDesktop, refreshBootstrap) 
   if (['terminating', 'termination_failed', 'terminated'].includes(normalized)) {
     const note = document.createElement('div');
     note.className = 'workspace-glass-note';
-    note.textContent = normalized === 'terminating' ? 'Workspace closing' : normalized === 'termination_failed' ? 'Close needs attention' : 'Workspace closed';
+    note.textContent =
+      normalized === 'terminating'
+        ? 'Workspace closing'
+        : normalized === 'termination_failed'
+          ? 'Close needs attention'
+          : 'Workspace closed';
     pane.replaceChildren(note);
     allowPreviewOpen(true);
     return;
@@ -763,11 +1063,13 @@ function renderWorkspaceDelivery(tile, data) {
   if (!panel || !action) return;
   panel.replaceChildren();
   panel.dataset.available = String(model.available);
-  const closedLabel = model.available ? 'View delivery' : model.state === 'completed' ? 'View result' : 'View status';
+  const closedLabel = model.available
+    ? 'View delivery'
+    : model.state === 'completed'
+      ? 'View result'
+      : 'View status';
   action.dataset.closedLabel = closedLabel;
-  action.textContent = panel.hidden
-    ? closedLabel
-    : closedLabel.replace(/^View\s+/, 'Hide ');
+  action.textContent = panel.hidden ? closedLabel : closedLabel.replace(/^View\s+/, 'Hide ');
 
   const summary = document.createElement('p');
   summary.className = 'workspace-delivery-summary';
@@ -778,8 +1080,12 @@ function renderWorkspaceDelivery(tile, data) {
   if (model.primary) {
     const primaryActions = document.createElement('div');
     primaryActions.className = 'workspace-delivery-actions';
-    if (model.primary.openUrl) primaryActions.appendChild(deliveryLink('Open output', model.primary.openUrl));
-    if (model.primary.downloadUrl) primaryActions.appendChild(deliveryLink('Download', model.primary.downloadUrl, { download: true }));
+    if (model.primary.openUrl)
+      primaryActions.appendChild(deliveryLink('Open output', model.primary.openUrl));
+    if (model.primary.downloadUrl)
+      primaryActions.appendChild(
+        deliveryLink('Download', model.primary.downloadUrl, { download: true }),
+      );
     panel.appendChild(primaryActions);
   }
 
@@ -792,7 +1098,8 @@ function renderWorkspaceDelivery(tile, data) {
       label.textContent = artifact.label;
       row.appendChild(label);
       if (artifact.openUrl) row.appendChild(deliveryLink('Open', artifact.openUrl));
-      if (artifact.downloadUrl) row.appendChild(deliveryLink('Download', artifact.downloadUrl, { download: true }));
+      if (artifact.downloadUrl)
+        row.appendChild(deliveryLink('Download', artifact.downloadUrl, { download: true }));
       list.appendChild(row);
     }
     panel.appendChild(list);
@@ -800,13 +1107,20 @@ function renderWorkspaceDelivery(tile, data) {
 }
 
 function displayStateForLive(data) {
-  const workerState = String(data?.worker?.close_state || data?.worker?.state || '').trim().toLowerCase();
-  const runState = String(data?.latest_run?.state || '').trim().toLowerCase();
+  const workerState = String(data?.worker?.close_state || data?.worker?.state || '')
+    .trim()
+    .toLowerCase();
+  const runState = String(data?.latest_run?.state || '')
+    .trim()
+    .toLowerCase();
   if (['terminating', 'termination_failed', 'terminated'].includes(workerState)) return workerState;
   if (runState === 'completed') return 'completed';
   if (ACTIVE_RUN_STATES.has(runState)) return runState;
   if (['failed', 'cancelled', 'interrupted'].includes(runState)) return runState;
-  if (['paused', 'idle', 'idle_terminated', 'stopped', 'ready'].includes(workerState) && !ACTIVE_RUN_STATES.has(runState)) {
+  if (
+    ['paused', 'idle', 'idle_terminated', 'stopped', 'ready'].includes(workerState) &&
+    !ACTIVE_RUN_STATES.has(runState)
+  ) {
     return workerState;
   }
   return workerState || 'unknown';
@@ -823,11 +1137,29 @@ function updateWorkspaceMeta(meta, profile, state, catalogDetails = null) {
   } catch {
     details = [];
   }
-  meta.textContent = [workspaceProfileLabel(profile), displayStateLabel(state), ...details].join(' · ');
+  meta.textContent = [workspaceProfileLabel(profile), displayStateLabel(state), ...details].join(
+    ' · ',
+  );
+}
+
+function syncWorkspaceNativeControls(tile, workerId, data) {
+  if (
+    canGuideNativeTurn(data?.native_control, signedToken) &&
+    !tile.__nativeControls &&
+    tile.__nativeControlsMount
+  ) {
+    tile.__nativeControls = attachNativeControls(tile.__nativeControlsMount, workerId, {
+      getJson,
+      postJson,
+    });
+  }
+  tile.__nativeControls?.updateLive(data?.native_control || null);
 }
 
 async function refreshWorkspaceTile(workerId, refreshBootstrap) {
-  const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+  const tile = Array.from(document.querySelectorAll('.workspace-tile')).find(
+    (item) => item.dataset.workerId === workerId,
+  );
   if (!tile || tile.dataset.refreshing === 'true') return;
   const output = tile.querySelector('[data-worker-output]');
   const markNextRefresh = (delayMs) => {
@@ -836,23 +1168,34 @@ async function refreshWorkspaceTile(workerId, refreshBootstrap) {
   };
   tile.dataset.refreshing = 'true';
   try {
-    const response = await fetch(withAuth(workerApiUrl(workerId, '/live?compact=1')), { cache: 'no-store' });
+    const response = await fetch(withAuth(workerApiUrl(workerId, '/live?compact=1')), {
+      cache: 'no-store',
+    });
     if (!response.ok) throw new Error(await responseMessage(response, 'Live status unavailable'));
     let data = await response.json();
-    const rawState = String(data?.worker?.state || '').trim().toLowerCase() || 'unknown';
-    const runState = String(data?.latest_run?.state || '').trim().toLowerCase();
+    const rawState =
+      String(data?.worker?.state || '')
+        .trim()
+        .toLowerCase() || 'unknown';
+    const runState = String(data?.latest_run?.state || '')
+      .trim()
+      .toLowerCase();
     const runId = String(data?.latest_run?.run_id || data?.latest_run?.ended_at || '').trim();
     if (runState && runState !== 'completed') {
       delete tile.dataset.deliveryRunId;
       tile.dataset.deliveryLoaded = 'false';
     }
-    if (shouldHydrateWorkspaceDelivery({
-      runState,
-      runId,
-      hydratedRunId: tile.dataset.deliveryRunId || '',
-      legacyLoaded: tile.dataset.deliveryLoaded === 'true',
-    })) {
-      const deliveryResponse = await fetch(withAuth(workerApiUrl(workerId, '/live')), { cache: 'no-store' });
+    if (
+      shouldHydrateWorkspaceDelivery({
+        runState,
+        runId,
+        hydratedRunId: tile.dataset.deliveryRunId || '',
+        legacyLoaded: tile.dataset.deliveryLoaded === 'true',
+      })
+    ) {
+      const deliveryResponse = await fetch(withAuth(workerApiUrl(workerId, '/live')), {
+        cache: 'no-store',
+      });
       if (deliveryResponse.ok) {
         data = await deliveryResponse.json();
         tile.dataset.deliveryLoaded = 'true';
@@ -863,17 +1206,27 @@ async function refreshWorkspaceTile(workerId, refreshBootstrap) {
       }
     }
     const state = displayStateForLive(data);
-    tile.dataset.state = ACTIVE_RUN_STATES.has(runState) || ACTIVE_STATES.has(rawState)
-      ? 'active'
-      : RESUME_STATES.has(rawState) || state === 'completed'
-        ? 'resumable'
-        : 'inactive';
-    markNextRefresh(tile.dataset.state === 'active' ? ACTIVE_TILE_REFRESH_MS : RETAINED_TILE_REFRESH_MS);
+    tile.dataset.state =
+      ACTIVE_RUN_STATES.has(runState) || ACTIVE_STATES.has(rawState)
+        ? 'active'
+        : RESUME_STATES.has(rawState) || state === 'completed'
+          ? 'resumable'
+          : 'inactive';
+    markNextRefresh(
+      tile.dataset.state === 'active' ? ACTIVE_TILE_REFRESH_MS : RETAINED_TILE_REFRESH_MS,
+    );
     updateTileControlLabels(tile, state, rawState);
     const glass = tile.querySelector('.workspace-tile-glass');
-    if (glass) setGlassPane(glass, workerId, state, Boolean(data?.runtime_details?.view_available || data?.runtime_details?.view_url), refreshBootstrap);
+    if (glass)
+      setGlassPane(
+        glass,
+        workerId,
+        state,
+        Boolean(data?.runtime_details?.view_available || data?.runtime_details?.view_url),
+        refreshBootstrap,
+      );
     renderWorkspaceDelivery(tile, data);
-    tile.__nativeControls?.updateLive(data?.native_control || null);
+    syncWorkspaceNativeControls(tile, workerId, data);
     const meta = tile.querySelector('[data-worker-meta]');
     updateWorkspaceMeta(meta, data?.worker?.profile, state);
     const favorite = tile.querySelector('[data-worker-favorite]');
@@ -910,7 +1263,9 @@ async function refreshVisibleWorkspaceTiles(refreshBootstrap, { force = false } 
   if (!workerIds.length) return;
   workspaceRefreshInFlight = true;
   try {
-    await Promise.all(workerIds.map((workerId) => refreshWorkspaceTile(workerId, refreshBootstrap)));
+    await Promise.all(
+      workerIds.map((workerId) => refreshWorkspaceTile(workerId, refreshBootstrap)),
+    );
   } finally {
     workspaceRefreshInFlight = false;
   }
@@ -930,9 +1285,25 @@ function autoResizeTextarea(textarea) {
   textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 44), 168)}px`;
 }
 
-function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', viewPrefs = defaultHivePrefs, bootstrap = {}) {
+function renderWorkspaceTile(
+  workspace,
+  refreshBootstrap,
+  draftMessage = '',
+  viewPrefs = defaultHivePrefs,
+  bootstrap = {},
+) {
   const workerId = String(workspace.worker_id || '');
   const state = workspaceStateLabel(workspace).toLowerCase();
+  const initialRunState =
+    state === 'completed' || TERMINAL_ATTENTION_STATES.has(state)
+      ? state
+      : workspace.last_run_id
+        ? null
+        : state;
+  const lifecycleControl = workspaceLifecycleControl(
+    state === 'completed' ? state : rawWorkspaceState(workspace),
+    initialRunState,
+  );
   const isActive = isWorkspaceActive(workspace);
   const isResumable = isWorkspaceResumable(workspace);
   const currentSelection = workspace.provider_account || {};
@@ -946,6 +1317,7 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   tile.className = 'workspace-tile';
   tile.dataset.state = isActive ? 'active' : isResumable ? 'resumable' : 'inactive';
   tile.dataset.workerId = workerId;
+  tile.dataset.ownerScope = String(bootstrap.draft_owner_scope || workspaceInteractionOwnerScope);
   tile.dataset.desktopUrl = String(workspace.desktop_url || '');
   tile.dataset.desktopPreviewUrl = String(workspace.desktop_preview_url || '');
   tile.dataset.apiUrl = String(workspace.control_url || workspace.api_url || '');
@@ -971,7 +1343,12 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   if (['terminating', 'termination_failed', 'terminated'].includes(state)) {
     const note = document.createElement('div');
     note.className = 'workspace-glass-note';
-    note.textContent = state === 'terminating' ? 'Workspace closing' : state === 'termination_failed' ? 'Close needs attention' : 'Workspace closed';
+    note.textContent =
+      state === 'terminating'
+        ? 'Workspace closing'
+        : state === 'termination_failed'
+          ? 'Close needs attention'
+          : 'Workspace closed';
     glassPane.appendChild(note);
   } else if (isActive) {
     const note = document.createElement('div');
@@ -984,12 +1361,24 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
       note.className = 'workspace-glass-note workspace-glass-complete';
       note.textContent = 'Delivery ready';
       glassPane.appendChild(note);
-    } else {
+    } else if (
+      !lifecycleControl.hidden &&
+      !lifecycleControl.disabled &&
+      lifecycleControl.action === 'resume'
+    ) {
       const wakeButton = createButton('Resume workspace', 'workspace-glass-action');
       wakeButton.addEventListener('click', async () => {
         await runWorkerAction(workerId, 'resume', wakeButton, refreshBootstrap);
       });
       glassPane.appendChild(wakeButton);
+    } else {
+      const note = document.createElement('div');
+      note.className = 'workspace-glass-note';
+      note.textContent =
+        initialRunState === null
+          ? 'Checking latest work…'
+          : 'Needs attention · Send a corrected follow-up below';
+      glassPane.appendChild(note);
     }
   }
   glass.appendChild(glassPane);
@@ -1002,6 +1391,12 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
     previewLink.setAttribute('aria-hidden', 'true');
     previewLink.setAttribute('aria-label', `Open ${workspaceTileTitle(workspace)} workspace`);
     previewLink.title = 'Open workspace';
+    previewLink.addEventListener('click', async (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+        return;
+      event.preventDefault();
+      await openWorkspaceSurface(workspace, previewLink);
+    });
     glass.appendChild(previewLink);
   }
 
@@ -1020,38 +1415,55 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
     if (providerReadiness.status === 'deployment_provider_unavailable') {
       metaParts.push('Work AI is not set up. Ask an administrator.');
     } else {
-      const accountLabel = String(providerReadiness.label || selectedAccount?.label || 'saved personal account');
+      const accountLabel = String(
+        providerReadiness.label || selectedAccount?.label || 'saved personal account',
+      );
       metaParts.push(`${accountLabel}: reconnect required`);
     }
   } else if (providerReadiness.readiness === 'ready') {
-    metaParts.push(`${String(providerReadiness.label || selectedAccount?.label || 'personal account')}: ready`);
+    metaParts.push(
+      `${String(providerReadiness.label || selectedAccount?.label || 'personal account')}: ready`,
+    );
   } else if (providerReadiness.readiness === 'deployment_managed') {
-    metaParts.push(providerReadiness.policy === 'personal_preferred'
-      ? 'Work AI: organization fallback'
-      : 'Work AI: managed by your organization');
+    metaParts.push(hostAccountLabel(bootstrap, providerReadiness.policy === 'personal_preferred'));
   } else if (currentPolicy === 'legacy') {
-    metaParts.push('Work AI: managed by your organization');
+    metaParts.push(hostAccountLabel(bootstrap));
   } else if (selectedAccount) {
-    const accountLabel = String(selectedAccount.label || selectedAccount.provider || 'personal account');
-    metaParts.push(`${accountLabel}: ${String(selectedAccount.status || 'unknown').replaceAll('_', ' ')}`);
+    const accountLabel = String(
+      selectedAccount.label || selectedAccount.provider || 'personal account',
+    );
+    metaParts.push(
+      `${accountLabel}: ${String(selectedAccount.status || 'unknown').replaceAll('_', ' ')}`,
+    );
   } else {
     metaParts.push('personal account: reconnect required');
   }
   const capabilityReadiness = workspace.capability_readiness || {};
   if (capabilityReadiness.readiness === 'action_required') {
-    metaParts.push(`${Number(capabilityReadiness.unavailable_grants || 0)} connection${Number(capabilityReadiness.unavailable_grants || 0) === 1 ? '' : 's'} need attention`);
+    metaParts.push(
+      `${Number(capabilityReadiness.unavailable_grants || 0)} connection${Number(capabilityReadiness.unavailable_grants || 0) === 1 ? '' : 's'} need attention`,
+    );
   } else if (Number(capabilityReadiness.active_grants || 0) > 0) {
-    metaParts.push(`${Number(capabilityReadiness.active_grants)} connected capabilit${Number(capabilityReadiness.active_grants) === 1 ? 'y' : 'ies'}`);
+    metaParts.push(
+      `${Number(capabilityReadiness.active_grants)} connected capabilit${Number(capabilityReadiness.active_grants) === 1 ? 'y' : 'ies'}`,
+    );
   }
-  if (workspace.next_schedule_at) metaParts.push(`Next: ${scheduleLabel(workspace.next_schedule_at)}`);
+  if (workspace.next_schedule_at)
+    metaParts.push(`Next: ${scheduleLabel(workspace.next_schedule_at)}`);
   if (workspace.schedule_readiness === 'unavailable') metaParts.push('schedule status unavailable');
   if ((workspace.tags || []).length) metaParts.push(`Tags: ${(workspace.tags || []).join(', ')}`);
   const nextSchedule = (bootstrap.recurring_schedules || [])
-    .filter((schedule) => String(schedule.worker_id || '') === workerId && schedule.enabled !== false)
-    .sort((left, right) => String(left.next_run_at || '').localeCompare(String(right.next_run_at || '')))[0];
+    .filter(
+      (schedule) => String(schedule.worker_id || '') === workerId && schedule.enabled !== false,
+    )
+    .sort((left, right) =>
+      String(left.next_run_at || '').localeCompare(String(right.next_run_at || '')),
+    )[0];
   if (nextSchedule?.next_run_at && !workspace.next_schedule_at) {
     const nextRun = new Date(String(nextSchedule.next_run_at));
-    metaParts.push(`Next: ${Number.isNaN(nextRun.getTime()) ? String(nextSchedule.next_run_at) : nextRun.toLocaleString()}`);
+    metaParts.push(
+      `Next: ${Number.isNaN(nextRun.getTime()) ? String(nextSchedule.next_run_at) : nextRun.toLocaleString()}`,
+    );
   } else if (bootstrap.recurring_schedules_status === 'unavailable') {
     metaParts.push('schedule status unavailable');
   }
@@ -1062,7 +1474,10 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   report.type = 'button';
   report.className = 'workspace-status-report workspace-status-button';
   report.setAttribute('aria-expanded', 'false');
-  report.setAttribute('aria-label', `Open latest workspace output for ${workspaceTileTitle(workspace)}`);
+  report.setAttribute(
+    'aria-label',
+    `Open latest workspace output for ${workspaceTileTitle(workspace)}`,
+  );
   const deliveryPanelId = `workspace-delivery-${workerId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
   report.setAttribute('aria-controls', deliveryPanelId);
   report.addEventListener('click', () => {
@@ -1073,9 +1488,7 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
     const action = report.querySelector('[data-worker-delivery-action]');
     if (action) {
       const closedLabel = action.dataset.closedLabel || 'View delivery';
-      action.textContent = panel.hidden
-        ? closedLabel
-        : closedLabel.replace(/^View\s+/, 'Hide ');
+      action.textContent = panel.hidden ? closedLabel : closedLabel.replace(/^View\s+/, 'Hide ');
     }
   });
   const reportHead = document.createElement('span');
@@ -1116,9 +1529,12 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   const moreActions = document.createElement('div');
   moreActions.className = 'workspace-tile-more-actions';
   more.append(moreSummary, moreActions);
-  if (workspace.profile === 'grok-build') {
-    tile.__nativeControls = attachNativeControls(moreActions, workerId, { getJson, postJson });
-  }
+  more.addEventListener('toggle', () => {
+    if (more.open && tile.dataset.displayState === 'unknown') {
+      refreshWorkspaceTile(workerId, refreshBootstrap).catch(() => {});
+    }
+  });
+  tile.__nativeControlsMount = moreActions;
 
   const favorite = createButton(workspace.favorite ? '★' : '☆', 'workspace-icon-button');
   favorite.dataset.workerFavorite = 'true';
@@ -1127,9 +1543,16 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   favorite.setAttribute('aria-label', favorite.title);
   favorite.addEventListener('click', async () => {
     const next = favorite.dataset.favorite !== 'true';
+    const previous = favorite.dataset.favorite === 'true';
     favorite.textContent = next ? '★' : '☆';
     favorite.dataset.favorite = String(next);
-    await runWorkerMetadata(workerId, { favorite: next }, favorite, refreshBootstrap);
+    const saved = await runWorkerMetadata(workerId, { favorite: next }, favorite, refreshBootstrap);
+    if (!saved) {
+      favorite.dataset.favorite = String(previous);
+      favorite.textContent = previous ? '★' : '☆';
+      favorite.title = previous ? 'Remove favorite' : 'Mark favorite';
+      favorite.setAttribute('aria-label', favorite.title);
+    }
   });
   actions.appendChild(favorite);
 
@@ -1141,39 +1564,55 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
 
   if (workspace.execution_workspace_mode === 'shared') {
     const addWorker = createButton('Add worker');
-    addWorker.addEventListener('click', () => openWorkspaceMembers(workspace, {
-      requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
-      providerAccounts: bootstrap.provider_accounts || [],
-      profileAccountProviders: bootstrap.profile_account_providers || {},
-      onChanged: refreshBootstrap,
-      startAdd: true,
-    }));
+    addWorker.addEventListener('click', () =>
+      openWorkspaceMembers(workspace, {
+        requestHeaders: (headers) => ({
+          ...headers,
+          ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}),
+        }),
+        providerAccounts: bootstrap.provider_accounts || [],
+        profileAccountProviders: bootstrap.profile_account_providers || {},
+        onChanged: refreshBootstrap,
+        startAdd: true,
+      }),
+    );
     actions.appendChild(addWorker);
   }
 
   if (!['terminating', 'termination_failed', 'terminated'].includes(state)) {
     const workTogether = createButton('Work together');
-    workTogether.addEventListener('click', () => openWorkspaceMembers(workspace, {
-      requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
-      providerAccounts: bootstrap.provider_accounts || [],
-      profileAccountProviders: bootstrap.profile_account_providers || {},
-      onChanged: refreshBootstrap,
-      startPeers: true,
-    }));
+    workTogether.addEventListener('click', () =>
+      openWorkspaceMembers(workspace, {
+        requestHeaders: (headers) => ({
+          ...headers,
+          ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}),
+        }),
+        providerAccounts: bootstrap.provider_accounts || [],
+        profileAccountProviders: bootstrap.profile_account_providers || {},
+        onChanged: refreshBootstrap,
+        startPeers: true,
+      }),
+    );
     actions.appendChild(workTogether);
   }
 
   const members = createButton('Workspace settings');
-  members.addEventListener('click', () => openWorkspaceMembers(workspace, {
-    requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
-    providerAccounts: bootstrap.provider_accounts || [],
-    profileAccountProviders: bootstrap.profile_account_providers || {},
-    onChanged: refreshBootstrap,
-  }));
+  members.addEventListener('click', () =>
+    openWorkspaceMembers(workspace, {
+      requestHeaders: (headers) => ({
+        ...headers,
+        ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}),
+      }),
+      providerAccounts: bootstrap.provider_accounts || [],
+      profileAccountProviders: bootstrap.profile_account_providers || {},
+      onChanged: refreshBootstrap,
+    }),
+  );
   moreActions.appendChild(members);
 
   const setupTools = createButton('Set up tools');
-  setupTools.title = 'Open this workspace’s native AI so you can add or reconnect its tools and accounts.';
+  setupTools.title =
+    'Open this workspace’s native AI so you can add or reconnect its tools and accounts.';
   setupTools.setAttribute('aria-label', `Set up tools in ${workspaceTileTitle(workspace)}`);
   setupTools.disabled = ['terminating', 'termination_failed', 'terminated'].includes(state);
   setupTools.addEventListener('click', async () => {
@@ -1182,7 +1621,9 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   actions.appendChild(setupTools);
 
   const duplicate = createButton('Duplicate');
-  duplicate.addEventListener('click', () => duplicateSavedWorkspace(workspace, duplicate, refreshBootstrap));
+  duplicate.addEventListener('click', () =>
+    duplicateSavedWorkspace(workspace, duplicate, refreshBootstrap),
+  );
   moreActions.appendChild(duplicate);
 
   const saveTemplate = createButton('Save as template');
@@ -1195,9 +1636,15 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   const deploymentOption = document.createElement('option');
   deploymentOption.value = 'legacy:';
   deploymentOption.textContent = 'Account · deployment-managed';
-  const supportedProviders = new Set(bootstrap.profile_account_providers?.[workspace.profile] || []);
+  const supportedProviders = new Set(
+    bootstrap.profile_account_providers?.[workspace.profile] || [],
+  );
   const accountOptions = (bootstrap.provider_accounts || [])
-    .filter((account) => supportedProviders.has(String(account.provider || '').toLowerCase()) && account.status === 'ready')
+    .filter(
+      (account) =>
+        supportedProviders.has(String(account.provider || '').toLowerCase()) &&
+        account.status === 'ready',
+    )
     .flatMap((account) => {
       const label = String(account.label || account.provider || 'my account');
       const preferred = document.createElement('option');
@@ -1210,9 +1657,9 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
     });
   const selectedValue = `${currentPolicy}:${currentAccountId}`;
   if (
-    currentPolicy !== 'legacy'
-    && currentAccountId
-    && !accountOptions.some((option) => option.value === selectedValue)
+    currentPolicy !== 'legacy' &&
+    currentAccountId &&
+    !accountOptions.some((option) => option.value === selectedValue)
   ) {
     const unavailable = document.createElement('option');
     unavailable.value = selectedValue;
@@ -1220,15 +1667,29 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
     accountOptions.unshift(unavailable);
   }
   accountSelect.replaceChildren(deploymentOption, ...accountOptions);
-  accountSelect.value = Array.from(accountSelect.options).some((option) => option.value === selectedValue)
+  accountSelect.value = Array.from(accountSelect.options).some(
+    (option) => option.value === selectedValue,
+  )
     ? selectedValue
     : 'legacy:';
-  accountSelect.disabled = !supportedProviders.size || ['created', 'starting', 'queued', 'running', 'resuming', 'terminating', 'termination_failed', 'terminated'].includes(state);
+  accountSelect.disabled =
+    !supportedProviders.size ||
+    [
+      'created',
+      'starting',
+      'queued',
+      'running',
+      'resuming',
+      'terminating',
+      'termination_failed',
+      'terminated',
+    ].includes(state);
   accountSelect.addEventListener('change', async () => {
     const priorValue = selectedValue;
     const [policy, accountId = ''] = String(accountSelect.value || '').split(':', 2);
     accountSelect.disabled = true;
     try {
+      await waitForWorkspaceSteers(String(tile.dataset.ownerScope || ''));
       const pending = await postJson('/api/pending-changes', {
         change_type: 'workspace_provider_account',
         target_id: workerId,
@@ -1237,7 +1698,9 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
       const changeId = encodeURIComponent(String(pending.change_id || ''));
       const token = encodeURIComponent(String(pending.confirmation_token || ''));
       if (!changeId || !token) throw new Error('xPerfect could not prepare the account review.');
-      window.location.assign(`/confirm-change#change_id=${changeId}&token=${token}`);
+      if (String(tile.dataset.ownerScope || '') === workspaceInteractionOwnerScope) {
+        window.location.assign(`/confirm-change#change_id=${changeId}&token=${token}`);
+      }
     } catch (error) {
       accountSelect.value = priorValue;
       accountSelect.disabled = false;
@@ -1258,7 +1721,6 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   rename.addEventListener('click', () => openRenameWorkspace(workspace, refreshBootstrap));
   moreActions.appendChild(rename);
 
-  const lifecycleControl = workspaceLifecycleControl(state);
   const toggle = createButton(lifecycleControl.label, 'workspace-run-toggle');
   toggle.dataset.workerActionToggle = 'true';
   toggle.dataset.action = lifecycleControl.action;
@@ -1299,35 +1761,19 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   steerForm.append(steerInput, steerButton);
   steerForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const message = steerInput.value.trim();
-    if (!message) {
-      liveOutput.textContent = 'Add a steer instruction first.';
-      steerInput.focus();
-      return;
-    }
-    steerButton.disabled = true;
-    liveOutput.textContent = 'Sending steer instruction...';
-    try {
-      await postJson(workerApiUrl(workerId, '/steer'), { message });
-      steerInput.value = '';
-      autoResizeTextarea(steerInput);
-      liveOutput.textContent = 'Steer instruction accepted.';
-      await refreshBootstrap();
-    } catch (error) {
-      liveOutput.textContent = error.message;
-    } finally {
-      syncTileSteerAvailability(tile, tile.dataset.displayState || state);
-    }
+    await submitWorkspaceSteer(workspace, tile, steerInput, refreshBootstrap);
   });
 
   tile.append(glass, body, actions, steerForm);
-  syncTileSteerAvailability(tile, state);
+  syncTileSteerAvailability(tile, initialRunState === null ? 'unknown' : state);
   requestAnimationFrame(() => autoResizeTextarea(steerInput));
   return tile;
 }
 
 async function openWorkspaceSurface(workspace, button) {
+  if (button?.disabled) return;
   const workerId = String(workspace?.worker_id || '');
+  const ownerScope = String(button?.closest('.workspace-tile')?.dataset.ownerScope || '');
   const shouldResume = shouldResumeOnWorkspaceOpen({
     workspaceKind: workspace?.workspace_kind,
     renderedState: button?.closest('.workspace-tile')?.dataset.displayState,
@@ -1336,13 +1782,21 @@ async function openWorkspaceSurface(workspace, button) {
   const originalText = button?.textContent || '';
   if (button) button.disabled = true;
   try {
-    if (shouldResume) {
+    const acceptedSteer = await waitForWorkspaceSteer(workspace, button);
+    if (shouldResume && !acceptedSteer) {
       if (button) button.textContent = 'Resuming…';
       await postJson(workerApiUrl(workerId, '/action/resume'));
     }
-    window.location.href = String(workspace?.workspace_url || workspace?.watch_url || '#');
+    if (ownerScope === workspaceInteractionOwnerScope) {
+      window.location.href = withAuth(
+        String(workspace?.workspace_url || workspace?.watch_url || '#'),
+      );
+    }
   } catch (error) {
-    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+    const tile =
+      ownerScope === workspaceInteractionOwnerScope
+        ? currentWorkspaceTile(workerId, ownerScope)
+        : null;
     const output = tile?.querySelector('[data-worker-output]');
     if (output) output.textContent = error.message;
     if (button) {
@@ -1353,7 +1807,9 @@ async function openWorkspaceSurface(workspace, button) {
 }
 
 async function openWorkspaceTools(workspace, button) {
+  if (button?.disabled) return;
   const workerId = String(workspace?.worker_id || '');
+  const ownerScope = String(button?.closest('.workspace-tile')?.dataset.ownerScope || '');
   const action = workspaceSetupAction(workspace?.profile);
   const originalText = button?.textContent || '';
   if (button) {
@@ -1361,10 +1817,18 @@ async function openWorkspaceTools(workspace, button) {
     button.textContent = 'Opening…';
   }
   try {
+    await waitForWorkspaceSteer(workspace, button);
     await postJson(workerApiUrl(workerId, `/action/${encodeURIComponent(action)}`));
-    window.location.href = String(workspace?.workspace_url || workspace?.watch_url || '#');
+    if (ownerScope === workspaceInteractionOwnerScope) {
+      window.location.href = withAuth(
+        String(workspace?.workspace_url || workspace?.watch_url || '#'),
+      );
+    }
   } catch (error) {
-    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+    const tile =
+      ownerScope === workspaceInteractionOwnerScope
+        ? currentWorkspaceTile(workerId, ownerScope)
+        : null;
     const output = tile?.querySelector('[data-worker-output]');
     if (output) output.textContent = error.message;
     if (button) {
@@ -1377,12 +1841,15 @@ async function openWorkspaceTools(workspace, button) {
 async function runWorkerAction(workerId, action, button, refreshBootstrap) {
   const originalText = button.textContent;
   button.disabled = true;
-  button.textContent = action === 'resume' ? 'Starting...' : `${action.charAt(0).toUpperCase()}${action.slice(1)}...`;
+  button.textContent =
+    action === 'resume' ? 'Starting...' : `${action.charAt(0).toUpperCase()}${action.slice(1)}...`;
   try {
     await postJson(workerApiUrl(workerId, `/action/${encodeURIComponent(action)}`));
     await refreshBootstrap();
   } catch (error) {
-    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find(
+      (item) => item.dataset.workerId === workerId,
+    );
     const output = tile?.querySelector('[data-worker-output]');
     if (output) output.textContent = error.message;
     button.disabled = false;
@@ -1395,11 +1862,15 @@ async function runWorkerMetadata(workerId, payload, button, refreshBootstrap) {
   button.disabled = true;
   try {
     await postJson(workerApiUrl(workerId, '/metadata'), payload);
-    await refreshBootstrap();
+    await refreshBootstrap().catch(() => {});
+    return true;
   } catch (error) {
-    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find(
+      (item) => item.dataset.workerId === workerId,
+    );
     const output = tile?.querySelector('[data-worker-output]');
     if (output) output.textContent = error.message;
+    return false;
   } finally {
     button.disabled = false;
     button.textContent = originalText;
@@ -1413,33 +1884,40 @@ async function duplicateSavedWorkspace(workspace, button, refreshBootstrap) {
   let resetText = originalText;
   button.disabled = true;
   button.textContent = 'Duplicating…';
-  button.dataset.idempotencyKey ||= globalThis.crypto?.randomUUID?.()
-    || `duplicate-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  button.dataset.idempotencyKey ||=
+    globalThis.crypto?.randomUUID?.() ||
+    `duplicate-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
-    const payload = await postJson(
-      `/api/workspaces/${encodeURIComponent(workerId)}/duplicate`,
-      { idempotency_key: button.dataset.idempotencyKey },
-    );
+    const payload = await postJson(`/api/workspaces/${encodeURIComponent(workerId)}/duplicate`, {
+      idempotency_key: button.dataset.idempotencyKey,
+    });
     delete button.dataset.idempotencyKey;
     const copiedWorker = payload.worker || {};
-    const approvals = Number(copiedWorker.duplication_report?.capabilities_requiring_reapproval || 0);
+    const approvals = Number(
+      copiedWorker.duplication_report?.capabilities_requiring_reapproval || 0,
+    );
     button.textContent = 'Copied';
     await refreshBootstrap();
     if (approvals > 0) {
       const route = rememberCapabilityReview(
         copiedWorker.worker_id,
         approvals,
-        copiedWorker.duplication_report?.outstanding_reapproval_items
-          || copiedWorker.duplication_report?.reapproval_items
-          || [],
+        copiedWorker.duplication_report?.outstanding_reapproval_items ||
+          copiedWorker.duplication_report?.reapproval_items ||
+          [],
       );
-      const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+      const tile = Array.from(document.querySelectorAll('.workspace-tile')).find(
+        (item) => item.dataset.workerId === workerId,
+      );
       const output = tile?.querySelector('[data-worker-output]');
-      if (output) output.textContent = `Workspace copied. Review ${approvals} capabilit${approvals === 1 ? 'y' : 'ies'} before running it.`;
+      if (output)
+        output.textContent = `Workspace copied. Review ${approvals} capabilit${approvals === 1 ? 'y' : 'ies'} before running it.`;
       window.location.hash = route;
     }
   } catch (error) {
-    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find((item) => item.dataset.workerId === workerId);
+    const tile = Array.from(document.querySelectorAll('.workspace-tile')).find(
+      (item) => item.dataset.workerId === workerId,
+    );
     const output = tile?.querySelector('[data-worker-output]');
     if (error.code === 'workspace_duplication_failed' || error.sameKeyRetryAllowed === false) {
       delete button.dataset.idempotencyKey;
@@ -1500,23 +1978,26 @@ function observeWorkspaceTiles(grid, refreshBootstrap) {
     for (const tile of tiles) tile.dataset.viewportVisible = 'true';
     return;
   }
-  workspaceVisibilityObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      const tile = entry.target;
-      tile.dataset.viewportVisible = String(entry.isIntersecting);
-      if (!entry.isIntersecting) {
-        const frame = tile.querySelector('.workspace-live-preview');
-        if (frame) {
-          const note = document.createElement('div');
-          note.className = 'workspace-glass-note';
-          note.textContent = 'Live preview paused offscreen';
-          frame.closest('[data-worker-glass]')?.replaceChildren(note);
+  workspaceVisibilityObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const tile = entry.target;
+        tile.dataset.viewportVisible = String(entry.isIntersecting);
+        if (!entry.isIntersecting) {
+          const frame = tile.querySelector('.workspace-live-preview');
+          if (frame) {
+            const note = document.createElement('div');
+            note.className = 'workspace-glass-note';
+            note.textContent = 'Live preview paused offscreen';
+            frame.closest('[data-worker-glass]')?.replaceChildren(note);
+          }
+          continue;
         }
-        continue;
+        refreshWorkspaceTile(String(tile.dataset.workerId || ''), refreshBootstrap).catch(() => {});
       }
-      refreshWorkspaceTile(String(tile.dataset.workerId || ''), refreshBootstrap).catch(() => {});
-    }
-  }, { rootMargin: '240px 0px', threshold: 0.01 });
+    },
+    { rootMargin: '240px 0px', threshold: 0.01 },
+  );
   for (const tile of tiles) workspaceVisibilityObserver.observe(tile);
 }
 
@@ -1533,8 +2014,12 @@ function renderWorkspaceHive(data, refreshBootstrap, viewPrefs = defaultHivePref
   const workspaces = uniqueWorkspaces(data?.existing_workspaces || []);
   const catalogUnavailable = data?.workspace_catalog_status === 'unavailable';
   const active = workspaces.filter((workspace) => isWorkspaceActive(workspace));
-  const resumable = workspaces.filter((workspace) => !isWorkspaceActive(workspace) && isWorkspaceResumable(workspace));
-  const inactive = workspaces.filter((workspace) => !isWorkspaceActive(workspace) && !isWorkspaceResumable(workspace));
+  const resumable = workspaces.filter(
+    (workspace) => !isWorkspaceActive(workspace) && isWorkspaceResumable(workspace),
+  );
+  const inactive = workspaces.filter(
+    (workspace) => !isWorkspaceActive(workspace) && !isWorkspaceResumable(workspace),
+  );
   const visible = prefs.showInactive
     ? [...active, ...resumable, ...inactive].sort(compareWorkspacePriority)
     : [...active].sort(compareWorkspacePriority);
@@ -1560,12 +2045,19 @@ function renderWorkspaceHive(data, refreshBootstrap, viewPrefs = defaultHivePref
   const drafts = new Map(
     Array.from(document.querySelectorAll('.workspace-tile')).map((tile) => [
       tile.dataset.workerId,
-      tile.querySelector('.workspace-steer textarea')?.value || '',
+      String(tile.dataset.ownerScope || '') ===
+      String(data?.draft_owner_scope || workspaceInteractionOwnerScope)
+        ? tile.querySelector('.workspace-steer textarea')?.value || ''
+        : '',
     ]),
   );
   const tiles = visible.map((workspace) => {
     const workerId = String(workspace.worker_id || '');
-    return renderWorkspaceTile(workspace, refreshBootstrap, drafts.get(workerId) || '', prefs, data || {});
+    const draft = drafts.has(workerId)
+      ? drafts.get(workerId)
+      : pendingWorkspaceSteer(workerId, data?.draft_owner_scope || workspaceInteractionOwnerScope)
+          ?.message || '';
+    return renderWorkspaceTile(workspace, refreshBootstrap, draft, prefs, data || {});
   });
   grid.replaceChildren(...tiles);
   observeWorkspaceTiles(grid, refreshBootstrap);
@@ -1628,17 +2120,19 @@ function workspaceMeta(selectValue, data) {
   }
 
   const profile = (selectValue || '').split(':', 2)[1] || 'codex-cli';
-  const profileLabel = {
-    'codex-cli': 'Codex',
-    'claude-code': 'Claude Code',
-    'grok-build': 'Grok Build',
-    'direct-openai': 'Direct / OpenAI API',
-    'direct-anthropic': 'Direct / Anthropic API',
-    'direct-xai': 'Direct / xAI API',
-    'openclaw-general': 'OpenClaw',
-  }[profile] || profile;
+  const profileLabel =
+    {
+      'codex-cli': 'Codex',
+      'claude-code': 'Claude Code',
+      'grok-build': 'Grok Build',
+      'direct-openai': 'Direct / OpenAI API',
+      'direct-anthropic': 'Direct / Anthropic API',
+      'direct-xai': 'Direct / xAI API',
+      'openclaw-general': 'OpenClaw',
+    }[profile] || profile;
   const workspaceType = document.getElementById('workspace-type')?.value || 'sandboxed';
-  const workspaceKind = workspaceType === 'host' ? 'on your computer' : 'in a fresh sandboxed workspace';
+  const workspaceKind =
+    workspaceType === 'host' ? 'on your computer' : 'in a fresh sandboxed workspace';
   return {
     buttonText: 'Run Project',
     statusText: 'Starting project...',
@@ -1678,25 +2172,55 @@ async function syncDirectEffort(profile, selector) {
   if (!direct) return;
   effort.disabled = true;
   try {
-    directProfileCatalogPromise ||= fetch('/api/worker-profiles', { credentials:'same-origin', cache:'no-store' })
-      .then(response => { if (!response.ok) throw new Error('Model options unavailable'); return response.json(); })
-      .catch(error => { directProfileCatalogPromise = null; throw error; });
+    directProfileCatalogPromise ||= fetch('/api/member-profiles', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error('Model options unavailable');
+        return response.json();
+      })
+      .catch((error) => {
+        directProfileCatalogPromise = null;
+        throw error;
+      });
     const catalog = await directProfileCatalogPromise;
     if (String(selector.value) !== `new:${profile}`) return;
-    const model = catalog.items?.find(item => item.profile === profile)?.models?.[0];
-    if (!model || !Array.isArray(model.effort_choices) || !model.effort_choices.length) throw new Error('Model options unavailable');
+    const model = catalog.items?.find((item) => item.profile === profile)?.models?.[0];
+    if (!model || !Array.isArray(model.effort_choices) || !model.effort_choices.length)
+      throw new Error('Model options unavailable');
     const previous = effort.dataset.profile === profile ? effort.value : model.recommended_effort;
-    effort.replaceChildren(...model.effort_choices.map(value => {
-      const option = document.createElement('option'); option.value = value;
-      option.textContent = value === 'default' ? 'Provider default' : value[0].toUpperCase() + value.slice(1);
-      return option;
-    }));
-    effort.value = model.effort_choices.includes(previous) ? previous : model.recommended_effort;
+    const unavailableChoice =
+      effort.dataset.profile === profile &&
+      effort.selectedOptions?.[0]?.disabled &&
+      !model.effort_choices.includes(previous);
+    effort.replaceChildren(
+      ...model.effort_choices.map((value) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent =
+          value === 'default' ? 'Provider default' : value[0].toUpperCase() + value.slice(1);
+        return option;
+      }),
+    );
+    if (unavailableChoice) {
+      const option = document.createElement('option');
+      option.value = previous;
+      option.textContent = 'Selected effort unavailable — choose another';
+      option.disabled = true;
+      effort.appendChild(option);
+    }
+    effort.value =
+      unavailableChoice || model.effort_choices.includes(previous)
+        ? previous
+        : model.recommended_effort;
     effort.dataset.profile = profile;
     effort.disabled = false;
   } catch (_) {
     if (String(selector.value) !== `new:${profile}`) return;
-    const option = document.createElement('option'); option.value = ''; option.textContent = 'Model options unavailable';
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'Model options unavailable';
     effort.replaceChildren(option);
   }
 }
@@ -1713,10 +2237,17 @@ function syncLaunchChoiceUI(select, accountSelect, policySelect, summary) {
   if (policyField) policyField.hidden = !supportsPersonalAccounts;
   if (connectButton) {
     const state = accountSelect?.dataset.accountState || '';
-    connectButton.hidden = !supportsPersonalAccounts || policySelect?.value === 'legacy'
-      || state === 'ready' || state === 'choose';
-    connectButton.textContent = state === 'needs_attention' ? 'Reconnect account'
-      : state === 'catalog_unavailable' ? 'Check connections' : 'Connect an account';
+    connectButton.hidden =
+      !supportsPersonalAccounts ||
+      policySelect?.value === 'legacy' ||
+      state === 'ready' ||
+      state === 'choose';
+    connectButton.textContent =
+      state === 'needs_attention'
+        ? 'Reconnect account'
+        : state === 'catalog_unavailable'
+          ? 'Check connections'
+          : 'Connect an account';
   }
   if (summary) summary.hidden = isNew;
   for (const field of document.querySelectorAll('[data-effort-profile]')) {
@@ -1724,21 +2255,38 @@ function syncLaunchChoiceUI(select, accountSelect, policySelect, summary) {
   }
 }
 
-function syncWorkspaceModeUI(modeSelect, placementField, _placementSelect, modeHelp, workspaceSelect, workspaceType) {
+function syncWorkspaceModeUI(
+  modeSelect,
+  placementField,
+  _placementSelect,
+  modeHelp,
+  workspaceSelect,
+  workspaceType,
+) {
   if (!modeSelect) return;
   const selectedWorkspace = String(workspaceSelect?.value || '');
-  const isNewWorkspace = !['open:', 'existing:', 'duplicate:'].some((prefix) => selectedWorkspace.startsWith(prefix));
-  const sandboxOption = Array.from(workspaceType?.options || []).find((option) => option.value === 'sandboxed' && !option.disabled);
-  const sharedOption = Array.from(modeSelect.options || []).find((option) => option.value === 'shared');
+  const isNewWorkspace = !['open:', 'existing:', 'duplicate:'].some((prefix) =>
+    selectedWorkspace.startsWith(prefix),
+  );
+  const sandboxOption = Array.from(workspaceType?.options || []).find(
+    (option) => option.value === 'sandboxed' && !option.disabled,
+  );
+  const sharedOption = Array.from(modeSelect.options || []).find(
+    (option) => option.value === 'shared',
+  );
   if (sharedOption) sharedOption.disabled = !isNewWorkspace || !sandboxOption;
-  if ((!isNewWorkspace || !sandboxOption) && modeSelect.value === 'shared') modeSelect.value = 'isolated';
+  if ((!isNewWorkspace || !sandboxOption) && modeSelect.value === 'shared')
+    modeSelect.value = 'isolated';
   const shared = modeSelect.value === 'shared';
   if (shared && workspaceType?.value !== 'sandboxed') workspaceType.value = 'sandboxed';
-  const hostOption = Array.from(workspaceType?.options || []).find((option) => option.value === 'host');
-  if (hostOption) hostOption.disabled = shared;
+  const hostOption = Array.from(workspaceType?.options || []).find(
+    (option) => option.value === 'host',
+  );
+  if (hostOption) hostOption.disabled = shared || hostOption.dataset.unavailable === 'true';
   const workspaceTypeHelp = document.getElementById('workspace-type-help');
   if (workspaceTypeHelp && workspaceType?.selectedOptions?.[0]) {
-    workspaceTypeHelp.textContent = workspaceType.selectedOptions[0].dataset.description || 'Runs on managed workspace compute.';
+    workspaceTypeHelp.textContent =
+      workspaceType.selectedOptions[0].dataset.description || 'Runs on managed workspace compute.';
   }
   if (placementField) placementField.hidden = !shared;
   if (!modeHelp) return;
@@ -1761,17 +2309,61 @@ function launchFailureMessage(error) {
   return error.message;
 }
 
+function canRetryLaunchWithSameKey(payload) {
+  // Scheduling and new worker/member creation have no full-launch receipt.
+  return (
+    !payload.schedule_text &&
+    !payload.execution_workspace_id &&
+    ['open:', 'duplicate:'].some((prefix) =>
+      String(payload.workspace_option || '').startsWith(prefix),
+    )
+  );
+}
+
 async function main() {
+  document.addEventListener('click', guardWorkspacePageNavigation, true);
   const frame = document.querySelector('.composer-frame');
   const tabs = Array.from(document.querySelectorAll('[data-view-tab]'));
   const viewRegistry = new Map(
-    tabs.map((tab) => [String(tab.dataset.viewTab), document.getElementById(String(tab.getAttribute('aria-controls')))]),
+    tabs.map((tab) => [
+      String(tab.dataset.viewTab),
+      document.getElementById(String(tab.getAttribute('aria-controls'))),
+    ]),
   );
   const form = document.getElementById('launch-form');
-  launchDraftState = createLaunchDraft({ fields: Object.fromEntries(
-    ['description', 'success_criteria', 'context', 'schedule-text', 'workspace-mode', 'workspace-file-placement']
-      .map(id => [id, document.getElementById(id)]),
-  ) });
+  launchDraftState = createLaunchDraft({
+    fields: Object.fromEntries(
+      [
+        'description',
+        'success_criteria',
+        'context',
+        'schedule-text',
+        'workspace-option',
+        'provider-account-selection',
+        'provider-account-policy',
+        'worker-name',
+        'worker-choice',
+        'workspace-choice',
+        'execution-workspace',
+        'workspace-mode',
+        'workspace-file-placement',
+        'workspace-type',
+        'launch-surface',
+        'codex-effort',
+        'claude-effort',
+        'grok-effort',
+        'openclaw-effort',
+        'direct-effort',
+      ].map((id) => [id, document.getElementById(id)]),
+    ),
+    exactSelects: [
+      'workspace-type',
+      'codex-effort',
+      'claude-effort',
+      'openclaw-effort',
+      'direct-effort',
+    ],
+  });
   const select = document.getElementById('workspace-option');
   const help = document.getElementById('workspace-help');
   const launchSurface = document.getElementById('launch-surface');
@@ -1786,6 +2378,27 @@ async function main() {
   const providerAccountHelp = document.getElementById('provider-account-help');
   const connectWorkerAccount = document.getElementById('connect-worker-account');
   const status = document.getElementById('launch-status');
+  const launchRecovery = document.getElementById('launch-recovery');
+  const launchRecoveryHelp = document.getElementById('launch-recovery-help');
+  const launchStartAgain = document.getElementById('launch-start-again');
+  let launchRecoveryTarget = null;
+  function showLaunchRecovery(payload, ownerScope) {
+    launchRecoveryTarget = payload
+      ? {
+          ownerScope,
+          signature: JSON.stringify(payload),
+          scheduled: Boolean(payload.schedule_text),
+        }
+      : null;
+    if (!launchRecovery || !launchStartAgain || !launchRecoveryHelp) return;
+    launchRecovery.hidden = !payload;
+    if (!payload) return;
+    const sameJob = canRetryLaunchWithSameKey(payload);
+    launchStartAgain.textContent = sameJob ? 'Retry job' : 'Start again';
+    launchRecoveryHelp.textContent = sameJob
+      ? 'Retry keeps the same job. It does not create another.'
+      : 'Check Workspaces or Activity first. Starting again may start a second job.';
+  }
   const button = document.getElementById('launch-button');
   const scheduleButton = document.getElementById('schedule-button');
   const scheduleText = document.getElementById('schedule-text');
@@ -1794,8 +2407,11 @@ async function main() {
   const fileDrop = document.getElementById('project-file-drop');
   const fileList = document.getElementById('project-file-list');
   const fileDraft = createFileDraft({
-    input: fileInput, folderInput: document.getElementById('project-folder'),
-    drop: fileDrop, list: fileList, help: fileHelp,
+    input: fileInput,
+    folderInput: document.getElementById('project-folder'),
+    drop: fileDrop,
+    list: fileList,
+    help: fileHelp,
     addButton: document.getElementById('project-add-files'),
     clearAllButton: document.getElementById('project-clear-all-files'),
     status: document.getElementById('project-file-status'),
@@ -1857,12 +2473,19 @@ async function main() {
   const templateStartButton = document.getElementById('workspace-template-start');
   let bootstrap = null;
   let bootstrapGeneration = 0;
+  let bootstrapFlight = null;
   let identityTransition = false;
+  let workerChoiceGeneration = 0;
   const syncAccountSummary = () => {
-    if (typeof workerAccountSummaryNode !== 'undefined' && workerAccountSummaryNode) workerAccountSummaryNode.textContent = workerAccountSummary({
-      workspaceValue: select.value, accountId: providerAccount?.value,
-      policy: providerAccountPolicy?.value, data: bootstrap,
-    });
+    if (launchRecoveryTarget && launchRecoveryTarget.ownerScope !== bootstrap?.draft_owner_scope)
+      showLaunchRecovery(null);
+    if (typeof workerAccountSummaryNode !== 'undefined' && workerAccountSummaryNode)
+      workerAccountSummaryNode.textContent = workerAccountSummary({
+        workspaceValue: select.value,
+        accountId: providerAccount?.value,
+        policy: providerAccountPolicy?.value,
+        data: bootstrap,
+      });
     syncLaunchChoiceUI(select, providerAccount, providerAccountPolicy, workerAccountSummaryNode);
   };
   let activeView = 'project';
@@ -1895,7 +2518,8 @@ async function main() {
     if (identityTransition || !bootstrap || (append && catalogState.loading)) return;
     const generation = ++catalogState.generation;
     catalogState.loading = true;
-    if (workspaceCatalogStatus) workspaceCatalogStatus.textContent = append ? 'Loading more…' : 'Loading workspaces…';
+    if (workspaceCatalogStatus)
+      workspaceCatalogStatus.textContent = append ? 'Loading more…' : 'Loading workspaces…';
     if (workspaceLoadMore) workspaceLoadMore.disabled = true;
     try {
       const payload = await fetchCatalogPage({
@@ -1906,12 +2530,15 @@ async function main() {
       });
       if (generation !== catalogState.generation) return;
       const incoming = (payload.items || []).map(decorateCatalogWorkspace);
-      catalogState.items = append ? uniqueWorkspaces([...catalogState.items, ...incoming]) : incoming;
+      catalogState.items = append
+        ? uniqueWorkspaces([...catalogState.items, ...incoming])
+        : incoming;
       catalogState.nextCursor = payload.next_cursor || null;
       renderWorkspaceHive(workspaceViewData(), refreshBootstrap, hivePrefs());
       if (workspaceCatalogStatus) workspaceCatalogStatus.textContent = '';
     } catch (error) {
-      if (generation === catalogState.generation && workspaceCatalogStatus) workspaceCatalogStatus.textContent = error.message;
+      if (generation === catalogState.generation && workspaceCatalogStatus)
+        workspaceCatalogStatus.textContent = error.message;
     } finally {
       if (generation !== catalogState.generation) return;
       catalogState.loading = false;
@@ -1919,40 +2546,319 @@ async function main() {
     }
   };
 
-  const refreshBootstrap = async () => {
-    if (identityTransition) return bootstrap;
-    const generation = ++bootstrapGeneration;
+  const onboarding = mountWorkerOnboarding({
+    getData: () => bootstrap,
+    onChoice: (value) => {
+      if (bootstrap) delete bootstrap.worker_choice_error;
+      renderWorkspaceOptions(select, bootstrap, value);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+    onBrowse: (options) => loadWorkerChoices(options),
+  });
+  const loadWorkerChoices = async ({ append = false, search } = {}) => {
+    if (!bootstrap || identityTransition || (append && bootstrap.worker_catalog?.loading)) return;
+    const owner = bootstrap.draft_owner_scope;
+    const generation = ++workerChoiceGeneration;
+    const previous = bootstrap.worker_catalog || { items: bootstrap.existing_workspaces || [] };
+    const query = search === undefined ? String(previous.search || '') : search;
+    bootstrap.worker_catalog = { ...previous, search: query, loading: true, error: '' };
+    onboarding.render();
+    try {
+      const page = await fetchCatalogPage({
+        kind: 'named,ephemeral,legacy',
+        search: query,
+        cursor: append ? String(previous.next_cursor || '') : '',
+      });
+      if (
+        identityTransition ||
+        generation !== workerChoiceGeneration ||
+        owner !== bootstrap?.draft_owner_scope
+      )
+        return;
+      const incoming = (page.items || []).map(decorateCatalogWorkspace);
+      bootstrap.existing_workspaces = uniqueWorkspaces([
+        ...incoming,
+        ...(bootstrap.existing_workspaces || []),
+      ]);
+      bootstrap.worker_catalog = {
+        items: append ? uniqueWorkspaces([...(previous.items || []), ...incoming]) : incoming,
+        next_cursor: page.next_cursor || null,
+        search: query,
+        loading: false,
+        error: '',
+      };
+      renderWorkspaceOptions(select, bootstrap, select.value);
+    } catch (error) {
+      if (
+        identityTransition ||
+        generation !== workerChoiceGeneration ||
+        owner !== bootstrap?.draft_owner_scope
+      )
+        return;
+      bootstrap.worker_catalog = {
+        ...previous,
+        search: query,
+        loading: false,
+        error: error.message,
+      };
+    }
+    onboarding.render();
+  };
+  const currentBootstrapResult = () => {
+    if (identityTransition || bootstrapFlight?.generation !== bootstrapGeneration) return null;
+    return bootstrapFlight.promise;
+  };
+
+  const loadCurrentBootstrap = async (generation) => {
     const selectedValue = select.value;
+    const locationSelect = document.getElementById('execution-workspace');
+    const selectedLocation = locationSelect?.value || '';
+    const locationChoice = document.getElementById('workspace-choice');
+    const selectedLocationChoice = locationChoice?.value || '';
     let incoming;
     try {
       incoming = await loadBootstrap();
     } catch (error) {
-      if (generation !== bootstrapGeneration) return bootstrap;
+      if (generation !== bootstrapGeneration) return currentBootstrapResult();
       throw error;
     }
-    if (generation !== bootstrapGeneration) return bootstrap;
+    if (generation !== bootstrapGeneration) return currentBootstrapResult();
     let namedCatalog = {
       items: incoming.existing_workspaces || [],
       next_cursor: null,
     };
     if (incoming.bootstrap_sections?.workspace_catalog !== 'unavailable') {
       try {
-        namedCatalog = await fetchCatalogPage({ kind: 'named' });
+        namedCatalog = await fetchCatalogPage({ kind: 'named,ephemeral,legacy' });
       } catch (_error) {
         incoming.bootstrap_sections ||= {};
         incoming.bootstrap_sections.workspace_catalog = 'unavailable';
       }
     }
-    if (generation !== bootstrapGeneration) return bootstrap;
+    if (generation !== bootstrapGeneration) return currentBootstrapResult();
     incoming.existing_workspaces = (namedCatalog.items || []).map(decorateCatalogWorkspace);
+    const sameOwner = bootstrap?.draft_owner_scope === incoming.draft_owner_scope;
+    let desiredValue =
+      launchDraftState.peekValue?.(incoming.draft_owner_scope, 'workspace-option') ??
+      (sameOwner ? selectedValue : '');
+    if (
+      ['open:', 'existing:', 'duplicate:'].some((prefix) => desiredValue.startsWith(prefix)) &&
+      !incoming.existing_workspaces.some((item) => item.worker_id === desiredValue.split(':', 2)[1])
+    ) {
+      select.dataset.workerChoiceState = 'pending';
+      try {
+        const worker = await getJson(
+          `/api/workspaces/${encodeURIComponent(desiredValue.split(':', 2)[1])}`,
+          'The selected worker could not be loaded. Refresh or choose another.',
+        );
+        if (generation !== bootstrapGeneration) return currentBootstrapResult();
+        if (
+          worker.worker_id !== desiredValue.split(':', 2)[1] ||
+          ['terminated', 'terminating', 'termination_failed'].includes(
+            worker.close_state || worker.state,
+          )
+        ) {
+          throw new Error('The selected worker is unavailable. Choose another worker.');
+        }
+        const selection = worker.provider_account;
+        const account = (incoming.provider_accounts || []).find(
+          (item) => item.account_id === selection?.account_id,
+        );
+        worker.provider_readiness = account
+          ? {
+              label: account.label || account.provider,
+              account_id: account.account_id,
+              policy: selection.policy,
+              readiness: account.status === 'ready' ? 'ready' : 'action_required',
+            }
+          : selection?.policy === 'legacy'
+            ? { policy: 'legacy', readiness: 'ready' }
+            : undefined;
+        incoming.existing_workspaces.push(decorateCatalogWorkspace(worker));
+      } catch (error) {
+        if (generation !== bootstrapGeneration) return currentBootstrapResult();
+        incoming.worker_choice_error = { value: desiredValue, message: error.message };
+      }
+    }
+    if (sameOwner && select.value !== selectedValue) {
+      desiredValue = select.value;
+      const chosen = (bootstrap.existing_workspaces || []).find(
+        (item) => item.worker_id === desiredValue.split(':', 2)[1],
+      );
+      if (
+        chosen &&
+        !incoming.existing_workspaces.some((item) => item.worker_id === chosen.worker_id)
+      )
+        incoming.existing_workspaces.push(chosen);
+      if (incoming.worker_choice_error?.value !== desiredValue) delete incoming.worker_choice_error;
+    }
+    let desiredLocation =
+      launchDraftState.peekValue?.(incoming.draft_owner_scope, 'execution-workspace') ??
+      (sameOwner ? selectedLocation : '');
+    const desiredLocationChoice =
+      launchDraftState.peekValue?.(incoming.draft_owner_scope, 'workspace-choice') ??
+      (sameOwner ? selectedLocationChoice : '');
+    incoming.execution_workspace_choices = [];
+    if (
+      desiredValue.startsWith('new:') &&
+      desiredLocationChoice === 'existing' &&
+      desiredLocation &&
+      !incoming.existing_workspaces.some((item) => item.workspace_id === desiredLocation)
+    ) {
+      if (locationSelect) locationSelect.dataset.workspaceChoiceState = 'pending';
+      try {
+        const workspace = await getJson(
+          `/api/execution-workspaces/${encodeURIComponent(desiredLocation)}/members`,
+          'The selected shared workspace could not be loaded. Refresh or choose another.',
+        );
+        if (generation !== bootstrapGeneration) return currentBootstrapResult();
+        if (workspace.workspace_id !== desiredLocation || workspace.mode !== 'shared') {
+          throw new Error(
+            'The selected shared workspace is unavailable. Choose another workspace.',
+          );
+        }
+        const member =
+          (workspace.members || []).find(
+            (item) => item.worker_id === workspace.default_worker_id,
+          ) || workspace.members?.[0];
+        incoming.execution_workspace_choices.push({
+          workspace_id: desiredLocation,
+          execution_workspace_mode: workspace.mode,
+          workspace_name: member?.name
+            ? `Workspace with ${member.name}`
+            : 'Selected shared workspace',
+        });
+      } catch (error) {
+        if (generation !== bootstrapGeneration) return currentBootstrapResult();
+        incoming.execution_workspace_choices.push({
+          workspace_id: desiredLocation,
+          unavailable: true,
+          workspace_name: 'Selected shared workspace unavailable',
+        });
+        incoming.workspace_choice_error = { value: desiredLocation, message: error.message };
+      }
+    }
+    if (
+      sameOwner &&
+      (locationSelect?.value !== selectedLocation ||
+        locationChoice?.value !== selectedLocationChoice)
+    ) {
+      desiredLocation = locationSelect?.value || '';
+      const chosen = [
+        ...(bootstrap.execution_workspace_choices || []),
+        ...(bootstrap.existing_workspaces || []),
+      ].find((item) => item.workspace_id === desiredLocation);
+      if (
+        chosen &&
+        !incoming.execution_workspace_choices.some(
+          (item) => item.workspace_id === chosen.workspace_id,
+        )
+      ) {
+        incoming.execution_workspace_choices.push(chosen);
+      }
+      if (incoming.workspace_choice_error?.value !== desiredLocation)
+        delete incoming.workspace_choice_error;
+    }
+    incoming.worker_catalog = {
+      items: (namedCatalog.items || []).map(decorateCatalogWorkspace),
+      next_cursor: namedCatalog.next_cursor || null,
+      search: '',
+      loading: false,
+      error:
+        incoming.bootstrap_sections?.workspace_catalog === 'unavailable'
+          ? 'Workers could not be loaded. Search to retry.'
+          : '',
+    };
+    workerChoiceGeneration += 1;
     bootstrap = incoming;
+    bindWorkspaceInteractionOwner(bootstrap.draft_owner_scope);
     csrfToken = String(bootstrap.csrf_token || '');
     catalogState.generation += 1;
     catalogState.loading = false;
+    // Populate typed choices before restoring a saved select value. An empty
+    // native select discards a restored value even when its owner is correct.
+    renderWorkspaceOptions(select, bootstrap, desiredValue);
+    onboarding.render();
+    if (providerAccount?.dataset) {
+      const savedWorker = launchDraftState.peekValue?.(
+        bootstrap.draft_owner_scope,
+        'workspace-option',
+      );
+      const savedAccount = launchDraftState.peekValue?.(
+        bootstrap.draft_owner_scope,
+        'provider-account-selection',
+      );
+      const previousOwner = providerAccount.dataset.draftOwnerScope;
+      if (previousOwner !== bootstrap.draft_owner_scope && providerAccountPolicy?.dataset) {
+        delete providerAccountPolicy.dataset.forcedLegacy;
+        delete providerAccountPolicy.dataset.personalPolicy;
+      }
+      if (previousOwner !== bootstrap.draft_owner_scope || savedWorker !== select.value) {
+        for (const key of [
+          'explicitChoice',
+          'explicitProfile',
+          'explicitAccountId',
+          'explicitAccountLabel',
+          'renderedProfile',
+        ])
+          delete providerAccount.dataset[key];
+      }
+      if (savedAccount != null && savedWorker === select.value && select.value.startsWith('new:')) {
+        providerAccount.dataset.explicitChoice = 'true';
+        providerAccount.dataset.explicitProfile = select.value.slice(4);
+        providerAccount.dataset.explicitAccountId = savedAccount;
+        providerAccount.dataset.explicitAccountLabel =
+          (bootstrap.provider_accounts || []).find((item) => item.account_id === savedAccount)
+            ?.label || 'Selected account';
+      }
+      providerAccount.dataset.draftOwnerScope = bootstrap.draft_owner_scope;
+    }
+    if (!sameOwner) {
+      syncPreferenceControls(bootstrap, {
+        defaultWorker,
+        codexEffort,
+        claudeEffort,
+        openclawEffort,
+      });
+      const placement = document.getElementById('workspace-type');
+      if (placement)
+        renderWorkspaceTypeOptions(
+          placement,
+          document.getElementById('workspace-type-help'),
+          bootstrap,
+        );
+      const surface = document.getElementById('launch-surface');
+      if (surface) surface.value = String(bootstrap.default_launch_surface || 'desktop');
+      const direct = document.getElementById('direct-effort');
+      if (direct) direct.replaceChildren();
+      for (const id of [
+        'workspace-type',
+        'launch-surface',
+        'codex-effort',
+        'claude-effort',
+        'openclaw-effort',
+      ]) {
+        const field = document.getElementById(id);
+        if (field?.dataset) field.dataset.draftDefault = field.value;
+      }
+    }
+    renderLaunchProviderAccounts(
+      providerAccount,
+      providerAccountPolicy,
+      providerAccountHelp,
+      bootstrap,
+      select.value,
+    );
     launchDraftState.bindOwner(bootstrap.draft_owner_scope);
+    const directEffort = document.getElementById('direct-effort');
+    if (!sameOwner && directEffort)
+      directEffort.dataset.profile = select.value.startsWith('new:direct-')
+        ? select.value.slice(4)
+        : '';
     fileDraft.setOwnerScope(bootstrap.draft_owner_scope);
     renderCurrentUser(bootstrap.identity || {});
-    renderWorkspaceOptions(select, bootstrap, selectedValue);
+    renderWorkspaceOptions(select, bootstrap, select.value || selectedValue);
+    onboarding.render();
     renderLaunchProviderAccounts(
       providerAccount,
       providerAccountPolicy,
@@ -1961,11 +2867,10 @@ async function main() {
       select.value,
     );
     syncAccountSummary();
-    syncPreferenceControls(bootstrap, { defaultWorker, codexEffort, claudeEffort, openclawEffort });
     if (
-      String(workspaceKindFilter?.value || 'named,ephemeral,legacy') === 'named'
-      && !String(workspaceSearch?.value || '').trim()
-      && !String(workspaceTagFilter?.value || '').trim()
+      String(workspaceKindFilter?.value || 'named,ephemeral,legacy') === 'named,ephemeral,legacy' &&
+      !String(workspaceSearch?.value || '').trim() &&
+      !String(workspaceTagFilter?.value || '').trim()
     ) {
       catalogState.items = [...bootstrap.existing_workspaces];
       catalogState.nextCursor = namedCatalog.next_cursor || null;
@@ -1973,7 +2878,7 @@ async function main() {
     } else {
       await refreshWorkspaceCatalog();
     }
-    if (generation !== bootstrapGeneration) return bootstrap;
+    if (generation !== bootstrapGeneration) return currentBootstrapResult();
     renderActivity(
       bootstrap.activity || bootstrap.existing_workspaces || [],
       bootstrap.bootstrap_sections?.activity || 'ready',
@@ -1988,7 +2893,8 @@ async function main() {
       templateStartStatus.textContent = 'Saved templates could not be loaded. Refresh to retry.';
     }
     if (bootstrap.bootstrap_sections?.workspace_catalog !== 'ready' && workspaceCatalogStatus) {
-      workspaceCatalogStatus.textContent = 'Your workspaces are temporarily unavailable. Refresh to retry; this does not mean they were removed.';
+      workspaceCatalogStatus.textContent =
+        'Your workspaces are temporarily unavailable. Refresh to retry; this does not mean they were removed.';
     }
     syncWorkspaceUI(select, bootstrap, button, help);
     syncWorkspaceModeUI(
@@ -2000,6 +2906,14 @@ async function main() {
       workspaceType,
     );
     return bootstrap;
+  };
+
+  const refreshBootstrap = async () => {
+    if (identityTransition) return null;
+    const generation = ++bootstrapGeneration;
+    const flight = { generation, promise: loadCurrentBootstrap(generation) };
+    bootstrapFlight = flight;
+    return flight.promise;
   };
 
   function stopHivePolling() {
@@ -2043,7 +2957,8 @@ async function main() {
   function startHivePolling() {
     stopHivePolling();
     hivePollTimer = window.setInterval(() => {
-      if (activeView === 'workspaces') refreshVisibleWorkspaceTiles(refreshBootstrap).catch(() => {});
+      if (activeView === 'workspaces')
+        refreshVisibleWorkspaceTiles(refreshBootstrap).catch(() => {});
     }, ACTIVE_TILE_REFRESH_MS);
   }
 
@@ -2055,8 +2970,8 @@ async function main() {
     }
     for (const tab of tabs) {
       const selected = tab.dataset.viewTab === activeView;
-      tab.setAttribute('aria-selected', String(selected));
-      tab.tabIndex = selected ? 0 : -1;
+      if (selected) tab.setAttribute('aria-current', 'page');
+      else tab.removeAttribute('aria-current');
     }
     if (activeView === 'workspaces') {
       if (bootstrap) renderWorkspaceHive(workspaceViewData(), refreshBootstrap, hivePrefs());
@@ -2079,31 +2994,63 @@ async function main() {
     }
   }
 
+  let accountRefreshFlight = null;
   window.addEventListener('glasshive:control-plane-updated', (event) => {
-    refreshBootstrap().then(() => {
-      selectConnectedClaudeAccount({ connected: event.detail?.connectedAccount,
-        workspaceValue: select.value, accountSelect: providerAccount, policySelect: providerAccountPolicy });
-      syncAccountSummary();
-    }).catch(() => {});
+    accountRefreshFlight = refreshBootstrap()
+      .then(() => {
+        selectConnectedClaudeAccount({
+          connected: event.detail?.connectedAccount,
+          workspaceValue: select.value,
+          accountSelect: providerAccount,
+          policySelect: providerAccountPolicy,
+        });
+        syncAccountSummary();
+      })
+      .catch(() => {});
   });
-  initializeControlPlane({ withAuth, postJson, patchJson, deleteJson, responseMessage, setView: setActiveView });
+  initializeControlPlane({
+    withAuth,
+    postJson,
+    patchJson,
+    deleteJson,
+    responseMessage,
+    setView: setActiveView,
+  });
+
+  // Restore the selected surface before network startup, through the same registry.
+  setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });
+  window.addEventListener('hashchange', () => {
+    setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });
+  });
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', (event) => {
+      // Keep native link behaviour for new tabs/windows and keyboard navigation.
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+        return;
+      event.preventDefault();
+      setActiveView(tab.dataset.viewTab);
+    });
+  });
 
   try {
-    await refreshBootstrap();
-    void initializeStorageAdmin({
-      identity: bootstrap.identity || {}, getJson, patchJson,
-    });
-    if (launchSurface) launchSurface.value = String(bootstrap.default_launch_surface || 'desktop');
-    if (workspaceType) renderWorkspaceTypeOptions(workspaceType, workspaceTypeHelp, bootstrap);
-    syncWorkspaceModeUI(
-      workspaceMode,
-      workspaceFilePlacementField,
-      workspaceFilePlacement,
-      workspaceModeHelp,
-      select,
-      workspaceType,
-    );
-    syncWorkspaceUI(select, bootstrap, button, help);
+    const initialBootstrap = await refreshBootstrap();
+    if (initialBootstrap && !identityTransition && initialBootstrap === bootstrap) {
+      void initializeStorageAdmin({
+        identity: initialBootstrap.identity || {},
+        getJson,
+        patchJson,
+      });
+      syncWorkspaceModeUI(
+        workspaceMode,
+        workspaceFilePlacementField,
+        workspaceFilePlacement,
+        workspaceModeHelp,
+        select,
+        workspaceType,
+      );
+      syncWorkspaceUI(select, initialBootstrap, button, help);
+    }
   } catch (error) {
     button.disabled = true;
     if (scheduleButton) scheduleButton.disabled = true;
@@ -2114,20 +3061,6 @@ async function main() {
     form.classList.add('is-unavailable');
     status.textContent = error.message;
   }
-
-  tabs.forEach((tab) => {
-    tab.addEventListener('click', () => setActiveView(tab.dataset.viewTab));
-    tab.addEventListener('keydown', (event) => {
-      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-      event.preventDefault();
-      const currentIndex = tabs.indexOf(tab);
-      const nextIndex = event.key === 'ArrowRight'
-        ? (currentIndex + 1) % tabs.length
-        : (currentIndex + tabs.length - 1) % tabs.length;
-      tabs[nextIndex].focus();
-      setActiveView(tabs[nextIndex].dataset.viewTab);
-    });
-  });
 
   for (const toggle of [inactiveToggle, watchToggle, statusToggle]) {
     toggle?.addEventListener('change', () => {
@@ -2151,6 +3084,7 @@ async function main() {
 
   select.addEventListener('change', () => {
     if (!bootstrap) return;
+    onboarding.render();
     renderLaunchProviderAccounts(
       providerAccount,
       providerAccountPolicy,
@@ -2185,13 +3119,48 @@ async function main() {
   providerAccount?.addEventListener('change', () => {
     providerAccount.dataset.explicitChoice = 'true';
     providerAccount.dataset.explicitProfile = String(select.value).startsWith('new:')
-      ? String(select.value).split(':', 2)[1] : '';
+      ? String(select.value).split(':', 2)[1]
+      : '';
     providerAccount.dataset.explicitAccountId = providerAccount.value;
-    providerAccount.dataset.explicitAccountLabel = providerAccount.selectedOptions?.[0]?.textContent || 'Selected account';
+    providerAccount.dataset.explicitAccountLabel =
+      providerAccount.selectedOptions?.[0]?.textContent || 'Selected account';
     providerAccount.dataset.accountState = providerAccount.value ? 'ready' : 'choose';
     syncAccountSummary();
   });
-  connectWorkerAccount?.addEventListener('click', () => document.getElementById('connections-tab')?.click());
+  connectWorkerAccount?.addEventListener('click', () => {
+    window.dispatchEvent(
+      new CustomEvent('xperfect:connect-account', {
+        detail: {
+          profile: String(select.value || '').split(':', 2)[1],
+          authMethods:
+            (bootstrap?.new_workspace_options || []).find((item) => item.value === select.value)
+              ?.account_auth_methods || [],
+          returnView: 'project',
+        },
+      }),
+    );
+  });
+  window.addEventListener('xperfect:account-connected', (event) => {
+    Promise.resolve(accountRefreshFlight)
+      .then(() => {
+        if (
+          identityTransition ||
+          event.detail?.profile !== String(select.value || '').split(':', 2)[1]
+        )
+          return;
+        if (
+          Array.from(providerAccount?.options || []).some(
+            (option) => option.value === event.detail?.account_id,
+          )
+        ) {
+          providerAccount.value = event.detail.account_id;
+          providerAccount.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      })
+      .catch((error) => {
+        status.textContent = error.message;
+      });
+  });
 
   providerAccountPolicy?.addEventListener('change', () => {
     if (!bootstrap) return;
@@ -2208,7 +3177,8 @@ async function main() {
   workspaceType?.addEventListener('change', () => {
     const selected = workspaceType.selectedOptions?.[0];
     if (workspaceTypeHelp) {
-      workspaceTypeHelp.textContent = selected?.dataset.description || 'Runs on managed workspace compute.';
+      workspaceTypeHelp.textContent =
+        selected?.dataset.description || 'Runs on managed workspace compute.';
     }
     if (bootstrap) syncWorkspaceUI(select, bootstrap, button, help);
     syncWorkspaceModeUI(
@@ -2244,7 +3214,10 @@ async function main() {
     if (submit) submit.disabled = true;
     if (renameStatus) renameStatus.textContent = 'Saving…';
     try {
-      await postJson(`/api/worker/${encodeURIComponent(context.workerId)}/metadata`, { name, tags });
+      await postJson(`/api/worker/${encodeURIComponent(context.workerId)}/metadata`, {
+        name,
+        tags,
+      });
       await context.refreshBootstrap();
       renameDialog.close();
     } catch (error) {
@@ -2279,7 +3252,9 @@ async function main() {
       await context.refreshBootstrap();
       saveTemplateDialog.close();
       document.getElementById('workspace-template-panel')?.setAttribute('open', '');
-      if (templateStartStatus) templateStartStatus.textContent = 'Template saved. It is ready to create a fresh workspace.';
+      if (templateStartStatus)
+        templateStartStatus.textContent =
+          'Template saved. It is ready to create a fresh workspace.';
     } catch (error) {
       if (saveTemplateStatus) saveTemplateStatus.textContent = error.message;
     } finally {
@@ -2301,8 +3276,9 @@ async function main() {
       templateSelect?.focus();
       return;
     }
-    templateStartButton.dataset.idempotencyKey ||= globalThis.crypto?.randomUUID?.()
-      || `template-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    templateStartButton.dataset.idempotencyKey ||=
+      globalThis.crypto?.randomUUID?.() ||
+      `template-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     templateStartButton.disabled = true;
     templateStartButton.textContent = 'Creating…';
     if (templateStartStatus) templateStartStatus.textContent = 'Creating a fresh paused workspace…';
@@ -2318,10 +3294,20 @@ async function main() {
       );
       delete templateStartButton.dataset.idempotencyKey;
       if (templateInstanceName) templateInstanceName.value = '';
-      await refreshBootstrap();
-      const reviewItems = payload.workspace?.duplication_report?.outstanding_reapproval_items
-        || payload.workspace?.duplication_report?.reapproval_items
-        || [];
+      if (workspaceSearch) workspaceSearch.value = '';
+      if (workspaceTagFilter) workspaceTagFilter.value = '';
+      if (workspaceKindFilter) workspaceKindFilter.value = 'named,ephemeral,legacy';
+      if (inactiveToggle) inactiveToggle.checked = true;
+      let catalogUnavailable = false;
+      try {
+        await refreshBootstrap();
+      } catch (_error) {
+        catalogUnavailable = true;
+      }
+      const reviewItems =
+        payload.workspace?.duplication_report?.outstanding_reapproval_items ||
+        payload.workspace?.duplication_report?.reapproval_items ||
+        [];
       const approvals = Array.isArray(reviewItems) ? reviewItems.length : 0;
       if (approvals > 0) {
         window.location.hash = rememberCapabilityReview(
@@ -2330,13 +3316,16 @@ async function main() {
           reviewItems,
         );
       }
-      if (templateStartStatus) templateStartStatus.textContent = approvals
-        ? `Workspace copied. Review ${approvals} capabilit${approvals === 1 ? 'y' : 'ies'} before running it.`
-        : 'Workspace created and paused. Turn on Inactive Workspaces to find it.';
+      if (templateStartStatus)
+        templateStartStatus.textContent = approvals
+          ? `Workspace copied. Review ${approvals} capabilit${approvals === 1 ? 'y' : 'ies'} before running it.`
+          : `Workspace created and paused.${catalogUnavailable ? ' Reload this page to see it.' : ''}`;
     } catch (error) {
-      if (templateStartStatus) templateStartStatus.textContent = `${error.message} Retry will use the same request key.`;
+      if (templateStartStatus)
+        templateStartStatus.textContent = `${error.message} Retry will use the same request key.`;
     } finally {
-      templateStartButton.disabled = !Array.isArray(bootstrap?.workspace_templates) || !bootstrap.workspace_templates.length;
+      templateStartButton.disabled =
+        !Array.isArray(bootstrap?.workspace_templates) || !bootstrap.workspace_templates.length;
       templateStartButton.textContent = 'Start workspace';
     }
   });
@@ -2358,7 +3347,13 @@ async function main() {
         : String(bootstrap.deployment_default_workspace_option || 'new:codex-cli');
       renderWorkspaceOptions(select, bootstrap, select.value);
       syncWorkspaceUI(select, bootstrap, button, help);
-      renderLaunchProviderAccounts(providerAccount, providerAccountPolicy, providerAccountHelp, bootstrap, select.value);
+      renderLaunchProviderAccounts(
+        providerAccount,
+        providerAccountPolicy,
+        providerAccountHelp,
+        bootstrap,
+        select.value,
+      );
       syncAccountSummary();
       if (preferencesStatus) preferencesStatus.textContent = 'Defaults saved.';
     } catch (error) {
@@ -2376,34 +3371,94 @@ async function main() {
     document.getElementById('project-folder')?.click();
   });
 
+  let launchInFlight = false;
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (launchInFlight) return;
     if (!bootstrap) {
       status.textContent = 'Workspace options are not available for this session.';
       return;
     }
+    if (['pending', 'unavailable'].includes(select.dataset.workerChoiceState)) {
+      status.textContent =
+        'The selected AI Worker is not available yet. Refresh its details or explicitly choose a different worker.';
+      return;
+    }
+    if (
+      document.getElementById('worker-choice')?.value === 'existing' &&
+      !select.value.startsWith('open:')
+    ) {
+      status.textContent = 'Choose an existing AI Worker, or choose New to create one.';
+      document.getElementById('existing-worker')?.focus();
+      return;
+    }
+    if (
+      select.value.startsWith('new:') &&
+      document.getElementById('workspace-choice')?.value === 'existing' &&
+      (!document.getElementById('execution-workspace')?.value ||
+        ['pending', 'unavailable'].includes(
+          document.getElementById('execution-workspace')?.dataset.workspaceChoiceState,
+        ))
+    ) {
+      status.textContent = 'Choose a shared workspace, or choose New for a private workspace.';
+      document.getElementById('execution-workspace')?.focus();
+      return;
+    }
     const submitterId = event.submitter?.id || 'launch-button';
-    const wantsSchedule = submitterId === 'schedule-button';
+    const recoverySubmit = submitterId === 'launch-start-again';
+    const wantsSchedule =
+      submitterId === 'schedule-button' ||
+      (recoverySubmit && launchRecoveryTarget?.scheduled === true);
     const scheduleValue = scheduleText?.value.trim() || '';
     if (wantsSchedule && !scheduleValue) {
       status.textContent = 'Add a schedule before saving this for later.';
       scheduleText?.focus();
       return;
     }
-    if (select.value.startsWith('new:') && providerAccountPolicy?.value === 'personal_required'
-        && (providerAccount?.dataset.accountState !== 'ready' || !providerAccount.value)) {
+    if (
+      select.value.startsWith('new:') &&
+      document.getElementById('worker-type')?.selectedOptions?.[0]?.disabled
+    ) {
+      status.textContent =
+        'This worker type is not installed on this computer. Choose an available type before starting.';
+      document.getElementById('worker-type')?.focus();
+      return;
+    }
+    if (
+      select.value.startsWith('new:') &&
+      providerAccountPolicy?.value === 'personal_required' &&
+      (providerAccount?.dataset.accountState !== 'ready' || !providerAccount.value)
+    ) {
       const state = providerAccount?.dataset.accountState || '';
-      status.textContent = state === 'choose' ? 'Choose a connected account before running.'
-        : state === 'needs_attention' ? 'Reconnect the selected account or choose another ready account.'
-          : state === 'catalog_unavailable' ? 'Account status is unavailable. Check Connections, then try again.'
-            : 'Connect an AI account to start.';
+      status.textContent =
+        state === 'choose'
+          ? 'Choose a connected account before running.'
+          : state === 'needs_attention'
+            ? 'Reconnect the selected account or choose another ready account.'
+            : state === 'catalog_unavailable'
+              ? 'Account status is unavailable. Check Connections, then try again.'
+              : 'Connect an AI account to start.';
       if (state === 'choose') providerAccount?.focus();
       return;
     }
     if (fileDraft.blocked()) {
-      status.textContent = 'Files must finish uploading. Retry failed files or remove them before starting.';
+      status.textContent =
+        'Files must finish uploading. Retry failed files or remove them before starting.';
       return;
     }
+    const launchOwnerScope = bootstrap.draft_owner_scope;
+    if (
+      select.value.startsWith('new:') &&
+      (workspaceType?.selectedOptions?.[0]?.disabled ||
+        Array.from(document.querySelectorAll('[data-effort-profile]')).some(
+          (field) => !field.hidden && field.querySelector('select')?.selectedOptions?.[0]?.disabled,
+        ))
+    ) {
+      status.textContent =
+        'A saved workspace or effort option is unavailable. Choose an available option before starting.';
+      return;
+    }
+    launchInFlight = true;
     button.disabled = true;
     if (scheduleButton) scheduleButton.disabled = true;
     const meta = syncWorkspaceUI(select, bootstrap, button, help);
@@ -2413,32 +3468,94 @@ async function main() {
       const directProfile = String(select.value).split(':', 2)[1];
       await syncDirectEffort(directProfile, select);
       const effort = document.getElementById('direct-effort');
-      if (!effort || effort.disabled || effort.dataset.profile !== directProfile || select.value !== `new:${directProfile}`) {
+      if (
+        !effort ||
+        effort.disabled ||
+        effort.selectedOptions?.[0]?.disabled ||
+        effort.dataset.profile !== directProfile ||
+        select.value !== `new:${directProfile}`
+      ) {
         status.textContent = 'Model options are not ready. Check the selected model and try again.';
         button.disabled = false;
         if (scheduleButton) scheduleButton.disabled = false;
+        launchInFlight = false;
         return;
       }
+    }
+    if (identityTransition || bootstrap?.draft_owner_scope !== launchOwnerScope) {
+      button.disabled = false;
+      if (scheduleButton) scheduleButton.disabled = false;
+      launchInFlight = false;
+      return;
     }
     const payload = {
       description: document.getElementById('description').value.trim(),
       success_criteria: document.getElementById('success_criteria').value.trim(),
       context: document.getElementById('context').value.trim(),
       workspace_option: select.value || null,
+      worker_name: select.value.startsWith('open:')
+        ? null
+        : document.getElementById('worker-name')?.value.trim() || null,
+      execution_workspace_id:
+        select.value.startsWith('new:') &&
+        document.getElementById('workspace-choice')?.value === 'existing'
+          ? document.getElementById('execution-workspace')?.value || null
+          : null,
       workspace_type: workspaceType?.value || 'sandboxed',
       workspace_mode: workspaceMode?.value || 'isolated',
       workspace_file_placement: workspaceFilePlacement?.value || 'common',
       launch_surface: launchSurface?.value || 'desktop',
       schedule_text: wantsSchedule ? scheduleValue : '',
-      effort: selectedWorkerEffort(select.value, { codexEffort, claudeEffort, grokEffort, openclawEffort }),
-      provider_account_policy: select.value.startsWith('new:') ? providerAccountPolicy?.value || null : null,
-      provider_account_id: select.value.startsWith('new:') && providerAccountPolicy?.value !== 'legacy'
-        ? providerAccount?.value || null
+      effort: selectedWorkerEffort(select.value, {
+        codexEffort,
+        claudeEffort,
+        grokEffort,
+        openclawEffort,
+      }),
+      provider_account_policy: select.value.startsWith('new:')
+        ? providerAccountPolicy?.value || null
         : null,
+      provider_account_id:
+        select.value.startsWith('new:') && providerAccountPolicy?.value !== 'legacy'
+          ? providerAccount?.value || null
+          : null,
       file_upload_ids: fileRefs.map(({ upload_id }) => upload_id),
       file_upload_revisions: fileRefs.map(({ revision }) => revision),
     };
-    payload.idempotency_key = button.dataset.launchIdempotencyKey = launchDraftState.requestKey(payload);
+    const launchSignature = JSON.stringify(payload);
+    const unknown = launchDraftState.unknownRequest(payload);
+    if (
+      recoverySubmit &&
+      (!launchRecoveryTarget ||
+        launchRecoveryTarget.ownerScope !== launchOwnerScope ||
+        launchRecoveryTarget.signature !== launchSignature ||
+        !unknown)
+    ) {
+      showLaunchRecovery(null);
+      status.textContent =
+        'This job changed. Use Run Project or Schedule to start the updated job.';
+      button.disabled = false;
+      if (scheduleButton) scheduleButton.disabled = false;
+      launchInFlight = false;
+      return;
+    }
+    if (unknown && !canRetryLaunchWithSameKey(payload)) {
+      if (!recoverySubmit || !launchDraftState.restartUnknown(payload, launchOwnerScope)) {
+        showLaunchRecovery(payload, launchOwnerScope);
+        status.textContent =
+          'I couldn’t confirm whether this job started. Your job details are still here.';
+        button.disabled = false;
+        if (scheduleButton) scheduleButton.disabled = false;
+        launchInFlight = false;
+        return;
+      }
+    }
+    const originalPayload = { ...payload };
+    payload.idempotency_key = button.dataset.launchIdempotencyKey =
+      launchDraftState.requestKey(originalPayload);
+    // A page close or owner change can end the request before its catch runs.
+    launchDraftState.markUnknown(originalPayload, launchOwnerScope);
+    showLaunchRecovery(null);
     try {
       const response = await fetch(withAuth('/api/launch'), {
         method: 'POST',
@@ -2452,13 +3569,19 @@ async function main() {
         throw await responseError(response, 'Launch failed');
       }
       const data = await response.json();
+      if (identityTransition || bootstrap?.draft_owner_scope !== launchOwnerScope) return;
+      launchDraftState.confirmRequest(originalPayload, launchOwnerScope);
       delete button.dataset.launchIdempotencyKey;
       fileDraft.reset();
       if (data.status === 'action_required') {
         const approvals = Number(data.capabilities_requiring_reapproval || 0);
-        const route = rememberCapabilityReview(data.worker_id, approvals, data.reapproval_items || []);
+        const route = rememberCapabilityReview(
+          data.worker_id,
+          approvals,
+          data.reapproval_items || [],
+        );
         status.textContent = `Workspace copied. Review ${approvals} capabilit${approvals === 1 ? 'y' : 'ies'} before running it.`;
-        await refreshBootstrap();
+        await refreshBootstrap().catch(() => {});
         window.location.hash = route;
         button.disabled = false;
         if (scheduleButton) scheduleButton.disabled = false;
@@ -2467,7 +3590,7 @@ async function main() {
       launchDraftState.clear();
       if (data.status === 'scheduled') {
         status.textContent = `Scheduled for ${data.scheduled_for || scheduleValue}.`;
-        await refreshBootstrap();
+        await refreshBootstrap().catch(() => {});
         setActiveView('workspaces');
         button.disabled = false;
         if (scheduleButton) scheduleButton.disabled = false;
@@ -2478,13 +3601,23 @@ async function main() {
       const href = watchHref(data.watch_url, window.location.href);
       if (!href) {
         status.textContent = 'Project started. Open it from Workspaces.';
-        await refreshBootstrap();
+        await refreshBootstrap().catch(() => {});
         setActiveView('workspaces');
         return;
       }
       showLaunchedWorkspace(status, href, () => document.createElement('a'));
-      window.location.assign(href);
+      try {
+        await waitForWorkspaceSteers(launchOwnerScope);
+      } catch (_error) {
+        if (!identityTransition && bootstrap?.draft_owner_scope === launchOwnerScope) {
+          status.append(' A workspace message could not be confirmed. Its draft is kept.');
+        }
+        return;
+      }
+      if (!identityTransition && bootstrap?.draft_owner_scope === launchOwnerScope)
+        window.location.assign(href);
     } catch (error) {
+      if (identityTransition || bootstrap?.draft_owner_scope !== launchOwnerScope) return;
       button.disabled = false;
       if (scheduleButton) scheduleButton.disabled = false;
       if (error.code === 'workspace_duplication_failed' && select.value.startsWith('duplicate:')) {
@@ -2492,7 +3625,25 @@ async function main() {
         launchDraftState.clearRequest();
         button.textContent = 'Start fresh copy';
       }
-      status.textContent = launchFailureMessage(error);
+      if (!error.status || error.status >= 500) {
+        launchDraftState.markUnknown(originalPayload, launchOwnerScope);
+        await refreshBootstrap().catch(() => {});
+        if (identityTransition || bootstrap?.draft_owner_scope !== launchOwnerScope) return;
+        showLaunchRecovery(originalPayload, launchOwnerScope);
+        status.textContent =
+          'I couldn’t confirm whether this job started. Your job details are still here.';
+      } else {
+        launchDraftState.confirmRequest(originalPayload, launchOwnerScope);
+        status.textContent = launchFailureMessage(error);
+      }
+      const recovery = watchHref(error.recoveryUrl, window.location.href);
+      if (recovery) {
+        const link = document.createElement('a');
+        link.href = recovery;
+        link.className = 'card-action';
+        link.textContent = 'Check this worker';
+        status.append(' ', link);
+      }
       if (error.code === 'provider_account_required') {
         const connect = document.createElement('a');
         connect.href = '#connections';
@@ -2500,19 +3651,32 @@ async function main() {
         connect.textContent = 'Connect account';
         status.append(' ', connect);
       }
+    } finally {
+      launchInFlight = false;
     }
   });
 
-  setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });
+  const unfinishedLaunch = launchDraftState.unknownPayload(bootstrap?.draft_owner_scope);
+  if (unfinishedLaunch) {
+    showLaunchRecovery(unfinishedLaunch, bootstrap.draft_owner_scope);
+    status.textContent =
+      'I couldn’t confirm whether this job started. Your job details are still here.';
+  }
+
   const requestedAddWorker = pageParams.get('add_worker');
   if (requestedAddWorker && !signedToken && bootstrap) {
     try {
-      const live = await getJson(`/api/workspace/${encodeURIComponent(requestedAddWorker)}/live`,
-        'This worker is no longer available.');
+      const live = await getJson(
+        `/api/workspace/${encodeURIComponent(requestedAddWorker)}/live`,
+        'This worker is no longer available.',
+      );
       if (live.execution_workspace_mode === 'shared' && live.can_manage_workspace === true) {
         setActiveView('workspaces');
         openWorkspaceMembers(live.worker, {
-          requestHeaders: headers => ({ ...headers, ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}) }),
+          requestHeaders: (headers) => ({
+            ...headers,
+            ...(csrfToken ? { 'X-GlassHive-CSRF': csrfToken } : {}),
+          }),
           providerAccounts: bootstrap.provider_accounts || [],
           profileAccountProviders: bootstrap.profile_account_providers || {},
           onChanged: refreshBootstrap,
@@ -2526,9 +3690,6 @@ async function main() {
       window.history.replaceState(null, '', `${window.location.pathname}#workspaces`);
     }
   }
-  window.addEventListener('hashchange', () => {
-    setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });
-  });
 }
 
 main();

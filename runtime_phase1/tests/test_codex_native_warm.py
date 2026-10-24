@@ -241,6 +241,9 @@ def test_fallback_is_impossible_after_native_dispatch_or_completion(tmp_path, mo
 
 @pytest.fixture
 def runtime_fixture(tmp_path, monkeypatch):
+    # Load the real SDK before replacing Popen: its platform helpers use
+    # Popen as a generic type during their first import.
+    import mcp.client.stdio  # noqa: F401
     from test_codex_native_midstream import fake_native
     runtime = HostCodexCliRuntime(str(tmp_path / 'runtime'))
     cli = fake_native(tmp_path)

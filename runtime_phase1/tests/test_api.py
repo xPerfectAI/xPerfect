@@ -14937,3 +14937,20 @@ def test_assign_run_drops_a_saved_codex_model_once_no_model_is_configured(
         if event["event_type"] == "worker.model_refreshed"
     ]
     assert refreshed == ["Worker model refreshed from gpt-5.4 to <native default>"]
+
+
+
+def test_profile_inventory_reuses_native_host_binary_availability(tmp_path, monkeypatch):
+    class CatalogRuntime(StubRuntime):
+        host_codex = object()
+        host_claude = object()
+        def host_cli_installed(self, profile):
+            return {"codex-cli": True, "claude-code": False}.get(profile)
+    monkeypatch.setenv("GLASSHIVE_ALLOWED_WORKER_PROFILES", "codex-cli,claude-code,direct-xai")
+    monkeypatch.setenv("GLASSHIVE_HOST_WORKERS_ENABLED", "true")
+    runtime = CatalogRuntime()
+    with TestClient(create_app(str(tmp_path / "native-catalog.db"), runtime_backend="stub", runtime=runtime)) as client:
+        items = {item["profile"]: item for item in client.get("/v1/worker-profiles").json()["items"]}
+        assert items["codex-cli"]["host_cli_installed"] is True
+        assert items["claude-code"]["host_cli_installed"] is False
+        assert items["direct-xai"]["host_cli_installed"] is None

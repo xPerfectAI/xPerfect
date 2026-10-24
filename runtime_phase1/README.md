@@ -6,6 +6,10 @@ The commands below start individual services for development.
 
 The Python package name `workers_projects_runtime` remains a compatibility identifier.
 
+Application integration: [explicit context, environment, files and scoped native scheduling](../docs/03_Bootstrap_Auth_and_Identity_Projection.md#independent-application-inputs).
+The [application boundary contract](../docs/09_Application_Boundary_Contract.md) owns the independent
+project contract and standalone acceptance.
+
 ## What It Does
 
 - creates persistent `Projects` and `Workers`
@@ -48,8 +52,8 @@ disconnecting a default clears it so a newly connected replacement can become th
 
 Legacy one-shot schedules remain xPerfect-native and retain their existing API and database
 contract. Standalone recurrence is additive: durable definitions are stored separately from
-immutable occurrence rows, and each occurrence is atomically materialized into the existing
-one-shot queue.
+immutable occurrence rows. Worker occurrences enter the existing one-shot queue; webhook
+occurrences enter the existing callback outbox without an AI worker or provider.
 
 - Standalone xPerfect defaults `GLASSHIVE_RECURRING_SCHEDULE_OWNER` to `glasshive_native`.
   The legacy `native` value remains accepted without rewriting stored definitions.
@@ -70,6 +74,116 @@ disables startup queue reconciliation, both immediate and replay/retry callback 
 reapers, and the scheduler while a cloned database is inspected. Newly emitted callback records stay
 durably pending for the live phase. The live single-runtime service sets the flag back to `true`; a
 passive rehearsal must never deliver callbacks or execute copied queued/scheduled work.
+
+## Generic worker and webhook schedules
+
+Use the same owner-authenticated HTTP session as the other control-plane operations. The generated
+OpenAPI from the running runtime is the request/response schema owner. The operator UI and MCP call
+the same service; [MCP tools](../docs/04_MCP_Publication_and_Client_Compatibility.md#scheduled-work-through-the-same-control-plane)
+and the [editor journey](../docs/07_Minimal_Unified_Operator_UI.md#schedule-an-ai-workspace-or-an-application-webhook)
+are documented in their own owners.
+
+1. Save a protected destination with `POST /v1/webhook-destinations`:
+
+   ```json
+   {
+     "name": "Example app",
+     "url": "https://example.com/hooks/schedules",
+     "idempotency_key": "example-destination-01"
+   }
+   ```
+
+   Save its returned `destination_id`. Install the returned `secret_once` in the receiver's secret
+   store. Supplying an existing Standard Webhooks signing secret and optional auth headers is also
+   supported. An exact retry key recovers that creation receipt; changed configuration under the
+   same key conflicts. GET lists public references only; PATCH can rename, rotate credentials and
+   disable/re-enable the destination. URLs are immutable and remain private, including their paths
+   and query strings.
+
+2. Create a definition with `POST /v1/recurring-schedules`:
+
+   ```json
+   {
+     "target": {
+       "kind": "webhook",
+       "destination_id": "whd_0123456789abcdef0123456789abcdef",
+       "request_data": { "request_ref": "daily-summary" }
+     },
+     "instruction": "Prepare today's summary",
+     "idempotency_key": "example-schedule-01",
+     "recurrence_type": "daily",
+     "local_time": "09:00",
+     "timezone_name": "Etc/UTC"
+   }
+   ```
+
+   A webhook needs no project, worker, workspace, model or provider account. Its optional instruction
+   is scheduled request data, not an AI execution inside the clock. Worker targets use
+   `{"kind":"worker","worker_id":"wrk_example"}` and require an instruction; their selected native
+   harness, accounts, context and admission remain owned by existing execution paths. The existing
+   worker-specific creation route remains supported.
+
+3. The existing clock saves one occurrence and outbox intent. After commit, transport POSTs a
+   Standard Webhooks `schedule.due` envelope. It includes the schedule ID/version, occurrence ID,
+   scheduled time, effective expiry, authenticated principal, instruction and approved request data.
+   `webhook-id` stays stable across attempts; `webhook-timestamp` and `webhook-signature` are fresh.
+   An explicitly configured raw-payload destination receives only its request JSON; it must not
+   infer unsigned schedule metadata.
+
+A receiver uses the stock `standardwebhooks` verifier on bounded raw bytes, before interpreting
+JSON. For example: `Webhook(receiver_secret).verify(raw_body, dict(request.headers))`. It scopes
+its durable dedupe receipt by authenticated sender/owner and event ID, rejects a changed digest for
+that identity, and commits admission before returning HTTP 2xx. It then releases ACK and background
+work independently through its existing application mechanisms. No xPerfect client SDK, client
+registry or result-callback protocol is required. A receiver remains responsible for its own work,
+context and selected output surfaces. See [Standard Webhooks](https://www.standardwebhooks.com/) and
+its [Python package](https://pypi.org/project/standardwebhooks/).
+
+Explicit typed definitions use xPerfect's native clock even when a compatibility deployment has an
+external owner for its older definitions. One definition has one owner; get/list/update/run-now and
+history resolve its saved target without requiring that external owner for the local definition.
+Pause uses `PATCH {"enabled":false}` or `/deactivate`; resume uses `PATCH {"enabled":true}`; DELETE
+retires. Exact creation and Run-now retries recover saved owner-scoped receipts without admitting
+another occurrence. Editing versions future work and preserves original occurrence requests.
+
+### Delivery states and recovery
+
+| State                  | Meaning                                                                                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pending                | Saved delivery awaits capacity or its persisted retry time. No AI slot is required.                                                          |
+| Accepted               | Valid HTTP 2xx ACK received; application completion is separate. A later optional body error cannot undo this ACK.                           |
+| Rejected               | Delivery was refused by the receiver or current destination/security policy; inspect the safe reason and numeric HTTP status.                |
+| Expired                | No initial accepted delivery was obtained before the effective deadline. An already attempted request can instead remain unacknowledged.     |
+| Unacknowledged         | The sender lacks a final ACK and the receiver may already have acted. Do not invent success, no-effect or exactly-once guarantees.           |
+| Cancelled / superseded | Future eligible delivery stopped. Existing ACKs and uncertainty about earlier sends are retained; cancelling does not retract external work. |
+
+Retries use the same event ID and immutable body with a fresh attempt timestamp/signature. Backoff
+is persisted; no transport slot sleeps between attempts. An expired attempt is not started, and an
+active attempt is bounded by its remaining expiry budget. A restart preserves lease/generation
+fences; it cannot assume that a former sender is dead. A receiver's durable dedupe handles lost
+replies. Inspect history before explicitly requesting another distinct occurrence.
+
+HTTPS with verified certificates is the default. Environment proxy settings, redirects, shared auth
+and cookies are not used. DNS results and actual IPv4/IPv6 peers are checked, with numeric pinned
+connections and bounded fallback. Loopback/private/link-local/metadata destinations are denied by
+default. Operators may enable a scoped local receiver using `WPR_WEBHOOK_ALLOW_LOCAL_HTTP=true`
+and its exact `WPR_WEBHOOK_ALLOWED_PORTS`; plain HTTP still connects only to loopback. Explicit
+HTTPS private-network grants use `WPR_WEBHOOK_ALLOWED_NETWORKS` CIDRs. Workers cannot set these
+operator policies or choose arbitrary URLs. Payload, response/header bytes, attempts, connections,
+owners and destinations have bounds. `WPR_WEBHOOK_TRANSPORT_SLOTS` controls the separate bounded
+sender capacity; this is not another scheduler.
+
+History exposes safe `http_status` and `timings_ms`, separating scheduled time→clock detection,
+clock detection→sender entry, executor wait and the signed HTTP attempt. No raw URL, auth,
+signature or receiver body appears in normal status. A local prototype or an API pass alone does
+not prove installed UI/native-worker acceptance or a universal latency guarantee.
+
+Native workers receive only the current `schedule_access` choices through the existing live
+worker/run/attempt grant. `schedule_list` returns their usable targets; `schedule_create` accepts one
+unchanged with a recurrence and stable retry key. The [bootstrap contract](../docs/03_Bootstrap_Auth_and_Identity_Projection.md#independent-application-inputs)
+owns setup and revocation. Specialized Direct Queens keep their existing small handoff interface.
+Applications prepare their own context and handle their own results; none is required to install
+xPerfect's clock or native scheduling.
 
 ## Bootstrap Contract
 
@@ -309,6 +423,10 @@ Accepted run pins and retained bytes remain after replacement cancellation, as f
 Queue. Permanent file-admission failures settle the run; transient file-service failures use the
 existing admission retry path.
 
+Exact Steer also records the retired run's terminal callback in the same durable lifecycle
+transaction as its replacement. Clients can settle that run's activity without cancelling the
+accepted work or replacement. Callback replay retains the same identity; a retired run does not
+gain the replacement's terminal result authority.
 
 All operations use the runtime owner/tenant and worker authorization boundary. File writes reject view-only identities. Managed source projection requires an explicitly trusted managed-storage root. API admission monitoring alone does not enforce a native disk quota. Standalone startup loads only an explicit `VIVENTIUM_ENV_FILE`, if provided.
 

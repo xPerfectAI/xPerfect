@@ -115,7 +115,11 @@ from .openclaw_runtime import (
 from .openclaw_release import reviewed_openclaw_env
 from .native_model_selection import gateway_codex_model_required
 from .provider_accounts import ProviderAccountHomeManager
-from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS, host_runtime_requirement_issue
+from .runtime_requirements import (
+    CLAUDE_CODE_EFFORT_LEVELS,
+    capture_runtime_probe,
+    host_runtime_requirement_issue,
+)
 from .run_evidence import (
     final_report_text,
     markdown_body_lines,
@@ -948,10 +952,7 @@ def _claude_effort_help_supports(help_text: str, effort: str) -> bool:
 def _claude_binary_help(resolved: str, identity: tuple[int, ...]) -> str:
     # Help is a property of the installed binary, not a per-turn provider call.
     # Exceptions are not cached; an unavailable probe can recover on retry.
-    completed = subprocess.run(
-        [resolved, "--help"], check=False, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, timeout=5,
-    )
+    completed = capture_runtime_probe([resolved, "--help"], timeout=5)
     if completed.returncode:
         raise RuntimeError("Claude Code capability probe failed")
     return f"{completed.stdout}\n{completed.stderr}"
@@ -10117,7 +10118,7 @@ _LOCAL_MARKDOWN_CITATION = re.compile(
 )
 _SECRET_REDACTIONS: tuple[RedactionRule, ...] = (
     *CREDENTIAL_REDACTIONS,
-    (re.compile(r"/Users/[^/\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
+    (re.compile("/Users" + r"/[^/\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
     (re.compile(r"/(?:home|root|Volumes|private/var)/[^\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
     (re.compile(r"~/[^\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
     (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "[REDACTED_AWS_ACCESS_KEY]"),
@@ -12097,10 +12098,42 @@ raise SystemExit(exit_code)
         self._project_private_capability_directory(
             source_home / "skills", target_codex_home / "skills"
         )
+        # Native Codex discovers HOME/.agents/skills even when a selected account
+        # owns CODEX_HOME. Keep the same existing worker catalog, not a second copy.
+        catalog = target_codex_home / "skills"
+        if catalog.is_dir():
+            alias = self._host_codex_skill_alias(target_codex_home, create=True)
+            if alias.is_symlink() and alias.readlink() == catalog:
+                pass
+            elif alias.exists() or alias.is_symlink():
+                raise RuntimeErrorBase("The native skill catalog path is already used; its existing local entry was preserved.")
+            else:
+                alias.symlink_to(catalog, target_is_directory=True)
         self._project_private_capability_directory(
             source_home / "plugins" / "cache",
             target_codex_home / "plugins" / "cache",
         )
+
+    def _host_codex_skill_alias(self, target_codex_home: Path, *, create=False) -> Path | None:
+        home = target_codex_home.parent
+        for directory in (home, home / ".agents", home / ".agents" / "skills"):
+            if not directory.exists() and not directory.is_symlink():
+                if not create:
+                    return None
+                directory.mkdir(mode=0o700)
+            info = directory.lstat()
+            if (not directory.is_absolute() or directory.resolve(strict=True) != directory
+                    or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & 0o022):
+                raise RuntimeErrorBase("The private native skill catalog path is unavailable or unsafe; existing local entries were preserved.")
+        return home / ".agents" / "skills" / "native-codex"
+
+    def _remove_host_codex_skill_alias(self, target_codex_home: Path) -> None:
+        alias = self._host_codex_skill_alias(target_codex_home)
+        # Retract only this derived alias when native tools are no longer allowed.
+        # Preserve real local data and every unrelated link.
+        if alias is not None and alias.is_symlink() and alias.readlink() == target_codex_home / "skills":
+            alias.unlink()
 
     def _source_host_claude_home(self) -> Path:
         raw = os.environ.get("GLASSHIVE_HOST_CLAUDE_CONFIG", "").strip()
@@ -12398,50 +12431,62 @@ raise SystemExit(exit_code)
     def _write_host_claude_mcp_config(
         self, worker: dict, target: Path, bundle: dict[str, object], project_mcp: dict,
     ) -> None:
+        from .native_warm_pool import _native_state_lock
+
         payload, filters = self._host_claude_project_mcp_payload(bundle, project_mcp)
         state = self._state_dir(str(worker["worker_id"]))
         state.mkdir(parents=True, exist_ok=True)
-        policies = {}
         transport = Path(__file__).with_name("native_mcp_tool_filter.py")
-        for name, rule in filters.items():
-            server = payload["mcpServers"][name]
-            policy = state / ("native-mcp-tools-" + hashlib.sha256(name.encode()).hexdigest() + ".json")
-            data = (json.dumps({"command": server["command"], "args": server["args"],
-                "filter": rule}, sort_keys=True) + "\n").encode()
-            policy.write_bytes(data)
-            policy.chmod(0o600)
-            digest = hashlib.sha256(data).hexdigest()
-            server.update(command=sys.executable, args=[str(transport), str(policy), digest])
-            policies[name] = {"path": str(policy), "sha256": digest}
-        data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
-        target.write_bytes(data)
-        target.chmod(0o600)
-        identity = state / "native-mcp-tool-policy.json"
-        identity.write_text(json.dumps({"mcp_path": str(target.resolve()),
-            "mcp_sha256": hashlib.sha256(data).hexdigest(), "policies": policies}, sort_keys=True) + "\n")
-        identity.chmod(0o600)
+
+        def publish(path: Path, data: bytes) -> None:
+            # Viewing an existing workspace must not truncate its active MCP child's policy.
+            if not path.is_file() or path.read_bytes() != data:
+                _atomic_write_private_text(path, data.decode("utf-8"))
+            path.chmod(0o600)
+
+        with _native_state_lock(state, timeout=2.0):
+            policies = {}
+            for name, rule in filters.items():
+                server = payload["mcpServers"][name]
+                policy = state / ("native-mcp-tools-" + hashlib.sha256(name.encode()).hexdigest() + ".json")
+                data = (json.dumps({"command": server["command"], "args": server["args"],
+                    "filter": rule}, sort_keys=True) + "\n").encode()
+                publish(policy, data)
+                digest = hashlib.sha256(data).hexdigest()
+                server.update(command=sys.executable, args=[str(transport), str(policy), digest])
+                policies[name] = {"path": str(policy), "sha256": digest}
+            data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+            publish(target, data)
+            identity = state / "native-mcp-tool-policy.json"
+            publish(identity, (json.dumps({"mcp_path": str(target.resolve()),
+                "mcp_sha256": hashlib.sha256(data).hexdigest(), "policies": policies},
+                sort_keys=True) + "\n").encode())
 
     def _assert_host_claude_mcp_config(self, worker: dict, mcp_path: Path) -> None:
         from .native_mcp_tool_filter import read_policy
+        from .native_warm_pool import _native_state_lock
 
-        identity = self._state_dir(str(worker["worker_id"])) / "native-mcp-tool-policy.json"
-        if not identity.exists():
-            if mcp_path.is_file():
-                raise RuntimeErrorBase("Claude native MCP tool policy is missing; prepare the workspace again")
-            return
+        state = self._state_dir(str(worker["worker_id"]))
+        identity = state / "native-mcp-tool-policy.json"
         try:
-            metadata = json.loads(identity.read_bytes())
-            if Path(metadata["mcp_path"]) != mcp_path.resolve():
-                raise ValueError("Native MCP policy points to a different config")
-            data = mcp_path.read_bytes()
-            if hashlib.sha256(data).hexdigest() != metadata["mcp_sha256"]:
-                raise ValueError("Native MCP config changed after materialization")
-            servers = json.loads(data)["mcpServers"]
-            transport = Path(__file__).with_name("native_mcp_tool_filter.py")
-            for name, policy in metadata["policies"].items():
-                read_policy(Path(policy["path"]), policy["sha256"])
-                if not transport.is_file() or servers[name]["command"] != sys.executable or servers[name]["args"] != [str(transport), policy["path"], policy["sha256"]]:
-                    raise ValueError("Native MCP transport does not match its selected policy")
+            # Native preparation can also run through resume, terminal and details requests.
+            with _native_state_lock(state, timeout=2.0):
+                if not identity.exists():
+                    if mcp_path.is_file():
+                        raise RuntimeErrorBase("Claude native MCP tool policy is missing; prepare the workspace again")
+                    return
+                metadata = json.loads(identity.read_bytes())
+                if Path(metadata["mcp_path"]) != mcp_path.resolve():
+                    raise ValueError("Native MCP policy points to a different config")
+                data = mcp_path.read_bytes()
+                if hashlib.sha256(data).hexdigest() != metadata["mcp_sha256"]:
+                    raise ValueError("Native MCP config changed after materialization")
+                servers = json.loads(data)["mcpServers"]
+                transport = Path(__file__).with_name("native_mcp_tool_filter.py")
+                for name, policy in metadata["policies"].items():
+                    read_policy(Path(policy["path"]), policy["sha256"])
+                    if not transport.is_file() or servers[name]["command"] != sys.executable or servers[name]["args"] != [str(transport), policy["path"], policy["sha256"]]:
+                        raise ValueError("Native MCP transport does not match its selected policy")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise RuntimeErrorBase("Claude native MCP tool policy is unavailable or stale") from exc
 
@@ -12494,7 +12539,8 @@ raise SystemExit(exit_code)
             from .native_context_projection import native_context_authority
             developer_instructions = native_context_authority(_host_native_context_bundle(bundle))
         if (
-            codex_config_append
+            worker.get("profile") == "codex-cli"
+            or codex_config_append
             or self._host_plugin_denylist()
             or self._host_codex_personality() != "inherit"
             or developer_instructions is not None
@@ -12516,9 +12562,12 @@ raise SystemExit(exit_code)
                 target.chmod(0o600)
                 codex_target.write_text(codex_config + "\n")
                 codex_target.chmod(0o600)
+                if not _native_tools_disabled(bundle):
+                    self._project_host_codex_capability_roots(codex_home)
+                else:
+                    self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
                 self._copy_host_codex_auth(codex_home)
-            self._project_host_codex_capability_roots(codex_home)
 
     def _write_conversation_runtime_files(self, worker: dict, bundle: dict[str, object]) -> None:
         """Write harness configuration under private worker state, never inside LIFE."""
@@ -12543,10 +12592,12 @@ raise SystemExit(exit_code)
             with _native_state_lock(codex_home, timeout=2.0):
                 config_path.write_text((codex_config.rstrip() + "\n") if codex_config else "")
                 config_path.chmod(0o600)
+                if not _native_tools_disabled(bundle):
+                    self._project_host_codex_capability_roots(codex_home)
+                else:
+                    self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
                 self._copy_host_codex_auth(codex_home)
-            if not _native_tools_disabled(bundle):
-                self._project_host_codex_capability_roots(codex_home)
             return
 
         if profile != "claude-code":
@@ -13669,7 +13720,10 @@ raise SystemExit(exit_code)
         except ProcessLookupError:
             pass
         except OSError:
-            return False
+            # A native child can exit after the ownership snapshot. Some OSes
+            # reject a signal to its zombie-only group; require the usual exact
+            # death and empty-live-group proof rather than retrying the signal.
+            return self._native_child_proven_gone(child)
         return True
 
     def _clear_active_session(
@@ -15676,7 +15730,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
         try:
             version = subprocess.run([self.binary, "--version"], capture_output=True, text=True,
                 timeout=5, check=False)
-            if version.returncode != 0 or version.stdout.strip() != native_input.CODEX_EXEC_REVIEWED_VERSION:
+            if version.returncode != 0 or version.stdout.strip() not in native_input.CODEX_EXEC_REVIEWED_VERSIONS:
                 self.__dict__["_native_midstream_schema_cache"] = (identity, False)
                 return False
             with tempfile.TemporaryDirectory(prefix="xperfect-native-schema-") as directory:
@@ -15691,7 +15745,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
                     methods = {entry["properties"]["method"]["enum"][0] for entry in requests.get("oneOf") or []}
                     supported = (set(steer.get("required") or []) == {"threadId", "input", "expectedTurnId"}
                         and methods == native_input.CODEX_EXEC_REQUEST_METHODS
-                        and all({"runtimeWorkspaceRoots", "model", "sandbox", "approvalPolicy"}
+                        and all({"runtimeWorkspaceRoots", "model", "sandbox", "approvalPolicy", "config"}
                             <= set(schema.get("properties") or {}) for schema in (start, resume)))
         except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired):
             pass
@@ -15699,7 +15753,28 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
         return supported
 
     def _prepare_native_midstream_command(self, worker, command, *, run_root):
-        launch = native_input.codex_app_launch(command)
+        config = None
+        if command[2:3] == ["--profile"]:
+            # Only the profile just projected for this selected account/worker
+            # can become first-class native thread config. No global config read.
+            expected = "xperfect-" + hashlib.sha256(str(worker["worker_id"]).encode()).hexdigest()[:24]
+            if (not worker.get("_glasshive_provider_account_bound")
+                    or len(command) < 4 or command[3] != expected):
+                return command
+            home = Path(str((worker.get("_glasshive_provider_account_env") or {}).get("CODEX_HOME") or ""))
+            path = home / (expected + ".config.toml")
+            try:
+                directory, file = home.lstat(), path.lstat()
+                if (not home.is_absolute() or home.resolve(strict=True) != home
+                        or not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid()
+                        or stat.S_IMODE(directory.st_mode) != 0o700
+                        or not stat.S_ISREG(file.st_mode) or file.st_uid != os.getuid()
+                        or file.st_nlink != 1 or stat.S_IMODE(file.st_mode) != 0o600):
+                    raise ValueError("unsafe native profile")
+                config = tomllib.loads(path.read_text())
+            except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+                raise RuntimeErrorBase("The selected account's private worker configuration is unavailable or unsafe.") from exc
+        launch = native_input.codex_app_launch(command, native_profile=config)
         if launch is None or not self._native_midstream_schema_supported():
             return command
         attempt = str(worker.get("_run_attempt_id") or "")
@@ -15742,18 +15817,41 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
 
     def supports_native_control(self, worker, action, *, run_id="", attempt_id=""):
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
-        return bool(context and (context.get("nativeControlCapabilities") or {}).get(action) is True)
+        return self._native_control_capabilities(context).get(action, False)
+
+    def _native_control_capabilities(self, context):
+        capabilities = context.get("nativeControlCapabilities") if context else None
+        return {name: value is True for name, value in capabilities.items()
+                if isinstance(name, str)} if isinstance(capabilities, dict) else {}
+
+    def _finalize_stop_reason(self, worker_id, run_id=None, *, attempt_id=""):
+        super()._finalize_stop_reason(worker_id, run_id=run_id, attempt_id=attempt_id)
+        if not run_id or not attempt_id:
+            return
+        try:
+            context = native_input.read_object(self._run_root(worker_id, run_id) / "native-input-context.json")
+        except (OSError, ValueError, native_input.NativeInputError):
+            return
+        if (context.get("protocol") == "codex-app-server" and context.get("workerId") == worker_id
+                and context.get("runId") == run_id and context.get("attemptId") == attempt_id
+                and context.get("nativeSessionActive") is False
+                and context.get("nativeTerminalStatus") == "interrupted"
+                and context.get("nativeCancelAcknowledged") is True
+                and isinstance(context.get("nativeSessionId"), str) and context["nativeSessionId"]
+                and isinstance(context.get("nativeTurnId"), str) and context["nativeTurnId"]):
+            raise WorkerInterruptedError("Worker run was cancelled by the operator")
 
     def native_control_state(self, worker, *, run_id, attempt_id):
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
         if not context:
             raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
         return {"run_id": run_id, "attempt_id": attempt_id, "session_id": context["nativeSessionId"],
-            "interject_graph_control": context.get("nativeGraphControl"), "pending_requests": []}
+            "interject_graph_control": context.get("nativeGraphControl"), "pending_requests": [],
+            "capabilities": self._native_control_capabilities(context)}
 
     def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
-        if not context or (context.get("nativeControlCapabilities") or {}).get(action) is not True:
+        if not context or self._native_control_capabilities(context).get(action) is not True:
             raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
         from .grok_control import submit_control
         body = {**(payload or {}), "run_id": run_id, "attempt_id": attempt_id,
@@ -16081,6 +16179,54 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
             self._ensure_git_workspace(str(workspace))
         return info
 
+    def _project_bound_codex_worker_config(self, worker, command, env):
+        """Keep native account/history ownership while loading this worker's private policy."""
+        if not worker.get("_glasshive_provider_account_bound"):
+            return
+        source = self._host_codex_home(worker) / "config.toml"
+        account_home = Path(str(env.get("CODEX_HOME") or ""))
+        if account_home == source.parent:
+            return
+        if not source.is_file():
+            raise RuntimeErrorBase("The selected account's private worker configuration is unavailable or unsafe.")
+        profile = "xperfect-" + hashlib.sha256(str(worker["worker_id"]).encode()).hexdigest()[:24]
+        target = account_home / (profile + ".config.toml")
+        try:
+            from .native_warm_pool import _native_state_lock
+            with _native_state_lock(source.parent, timeout=2.0):
+                for directory in (source.parent, account_home):
+                    metadata = directory.lstat()
+                    if (not directory.is_absolute() or directory.resolve(strict=True) != directory
+                        or not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+                        or stat.S_IMODE(metadata.st_mode) != 0o700):
+                        raise ValueError("unsafe native configuration directory")
+                base = account_home / "config.toml"
+                for path in (source, target, base):
+                    if not path.exists() and not path.is_symlink():
+                        continue
+                    metadata = path.lstat()
+                    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                        or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600):
+                        raise ValueError("unsafe native configuration file")
+                # This is the isolated setup home, not an ambient native installation.
+                # A profile layers over its base: never inherit undeclared account tools.
+                base_config = tomllib.loads(base.read_text()) if base.is_file() else {}
+                if base_config.get("mcp_servers") or base_config.get("plugins"):
+                    raise ValueError("account home has undeclared native capabilities")
+                text = source.read_text()
+                config = tomllib.loads(text)
+                if not _native_tools_disabled(self._bootstrap_bundle_for_worker(worker)):
+                    from .native_plugin_assets import project_selected
+                    project_selected(config, account_home,
+                        owner_home=self._source_host_codex_home(), cache=self._host_codex_plugin_cache_root())
+                if not target.exists() or target.read_text() != text:
+                    _atomic_write_private_text(target, text)
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+            raise RuntimeErrorBase("The selected account's private worker configuration is unavailable or unsafe.") from exc
+        # Native exec owns the profile; the selected account still owns login,
+        # refresh and saved session history. No credential or history is copied.
+        command[2:2] = ["--profile", profile]
+
     def _codex_reasoning_effort_for_worker(self, worker: dict) -> str:
         requested = (
             self._bootstrap_env_value(worker, "WPR_CODEX_CLI_REASONING_EFFORT")
@@ -16247,6 +16393,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
             env,
             runtime_name=self.runtime_name,
         )
+        self._project_bound_codex_worker_config(worker, command, env)
         projection = validated_codex_broker_projection(worker)
         if projection is not None:
             for key in _CODEX_BROKER_CONFLICTING_ENV:
@@ -16334,18 +16481,23 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         return context
 
     def supports_native_control(self, worker, action, *, run_id="", attempt_id=""):
-        return bool(action == "interject" and self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id))
+        context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
+        return self._native_control_capabilities(context).get(action, False)
+
+    def _native_control_capabilities(self, context):
+        return {"interject": bool(context)}
 
     def native_control_state(self, worker, *, run_id, attempt_id):
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
         if not context:
             raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
         return {"run_id": run_id, "attempt_id": attempt_id,
-            "session_id": context["nativeSessionId"], "pending_requests": []}
+            "session_id": context["nativeSessionId"], "pending_requests": [],
+            "capabilities": self._native_control_capabilities(context)}
 
     def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
-        if action != "interject" or not context:
+        if not context or self._native_control_capabilities(context).get(action) is not True:
             raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
         from .grok_control import submit_control
         body = {**(payload or {}), "run_id": run_id, "attempt_id": attempt_id,
@@ -16578,7 +16730,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         model = self._provider_model_for_worker(worker)
         native_web_locked = _host_native_web_access() == "disabled"
         permission_mode = os.environ.get("WPR_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions")
-        selectors = prepare_private_command(self, worker, bundle)
+        selectors = None if restricted else prepare_private_command(self, worker, bundle)
         access_mode = (
             str(bundle.get("access_mode") or "full").strip().lower()
             if self._conversation_mode_from_worker(worker) else "full"
@@ -16718,6 +16870,15 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 permissions = settings["permissions"]
                 allowed = permissions.get("allow") if isinstance(permissions.get("allow"), list) else []
                 permissions["allow"] = [*allowed, *coordinator_rules]
+        if mcp_path.is_file():
+            from .schedule_mcp import claude_schedule_tool_rules
+            schedule_rules = claude_schedule_tool_rules(
+                worker, bundle, json.loads(mcp_path.read_text()).get("mcpServers") or {},
+            )
+            if schedule_rules and isinstance(settings.setdefault("permissions", {}), dict):
+                permissions = settings["permissions"]
+                allowed = permissions.get("allow") if isinstance(permissions.get("allow"), list) else []
+                permissions["allow"] = [*allowed, *schedule_rules]
         if native_web_locked:
             sandbox = settings.setdefault("sandbox", {})
             if isinstance(sandbox, dict):

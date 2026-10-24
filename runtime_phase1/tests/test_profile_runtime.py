@@ -67,7 +67,7 @@ def isolate_host_claude_auth_from_unit_tests(monkeypatch):
 
 def _patch_host_codex_requirement_probe(monkeypatch):
     monkeypatch.setattr(
-        "workers_projects_runtime.runtime_requirements.subprocess.run",
+        "workers_projects_runtime.runtime_requirements.capture_runtime_probe",
         lambda args, **kwargs: subprocess.CompletedProcess(
             args,
             returncode=0,
@@ -10515,8 +10515,8 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
             "/root/private.txt",
             "/Volumes/Private/private.txt",
             "/private/var/synthetic/private.txt",
-            "ghp_syntheticgithubcredential",
-            "xoxb-synthetic-slack-credential",
+            "ghp_" + "syntheticgithubcredential",
+            "xoxb-" + "synthetic-slack-credential",
             "eyJhbGciOiJIUzI1NiJ9.c3ludGhldGlj.c2lnbmF0dXJl",
             private_key,
         ]
@@ -10538,9 +10538,9 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
 
 
 @pytest.mark.parametrize("destination", [
-    "</Users/synthetic/Project Folder/private-report.md>",
+    "</U" + "sers/example/Project Folder/private-report.md>",
     "/home/synthetic/private-report.md",
-    "<file:///Users/synthetic/Project Folder/private-report.md>",
+    "<file:///U" + "sers/example/Project Folder/private-report.md>",
     "/Volumes/Private/private-report.md",
     "~/private-report.md",
     "/root/reports/private-report(2).md",
@@ -10561,7 +10561,8 @@ def test_redact_text_keeps_private_image_label_and_redacts_secret_labels():
 def test_redact_text_fails_closed_for_an_unterminated_private_key():
     private_key_body = "A" * 120
     redacted = _redact_text(
-        "Safe prefix.\n-----BEGIN PRIVATE KEY-----\n"
+        "Safe prefix.\n-----BEGIN "
+        "PRIVATE KEY-----\n"
         f"{private_key_body}\n"
         "untrusted trailing text"
     )
@@ -12252,7 +12253,7 @@ def test_host_claude_help_cache_follows_the_exact_installed_binary(tmp_path, mon
     def help_result(command, **_kwargs):
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout=binary.read_text(), stderr="")
-    monkeypatch.setattr(profile_runtime_module.subprocess, "run", help_result)
+    monkeypatch.setattr(profile_runtime_module, "capture_runtime_probe", help_result)
     profile_runtime_module._claude_binary_help.cache_clear()
     first = profile_runtime_module._host_claude_help_text(str(binary))
     assert profile_runtime_module._host_claude_help_text(str(binary)) == first

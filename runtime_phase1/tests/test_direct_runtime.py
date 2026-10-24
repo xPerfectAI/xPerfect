@@ -152,7 +152,7 @@ def test_direct_final_tail_and_receipt_match_actual_stdin_authority(tmp_path):
         runtime._command_stdin_text(broken, "Any", info)
 
 
-@pytest.mark.parametrize("status,kind", [(401,"provider_auth_missing"),(403,"provider_request_rejected"),(429,"provider_rate_limited"),(400,"provider_request_rejected"),(503,"provider_unavailable")])
+@pytest.mark.parametrize("status,kind", [(401,"provider_auth_missing"),(402,"provider_access_denied"),(403,"provider_access_denied"),(429,"provider_rate_limited"),(400,"provider_request_rejected"),(503,"provider_unavailable")])
 def test_direct_safe_typed_error_survives_existing_failure_classification(tmp_path, status, kind):
     runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
     w = worker(tmp_path)
@@ -1217,7 +1217,7 @@ def test_direct_failure_diagnostics_reset_before_early_configuration_in_a_reused
     assert shape["cause_types"] == ["ValueError"]
 
 
-def test_direct_403_request_refusal_does_not_assert_missing_credentials(tmp_path):
+def test_direct_403_access_denial_does_not_assert_missing_credentials(tmp_path):
     runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
     failure, _ = runtime._provider_failure_for_process(
         worker=worker(tmp_path), run_id="refused-request",
@@ -1225,7 +1225,7 @@ def test_direct_403_request_refusal_does_not_assert_missing_credentials(tmp_path
             "error_type": "ModelHTTPError", "stage": "provider_request",
             "cause_types": ["ModelHTTPError", "PermissionDeniedError"]}),
         stderr="", exit_code=1)
-    assert failure.failure_class == "provider_request_rejected"
+    assert failure.failure_class == "provider_access_denied"
     assert failure.structured and not failure.retryable
     assert "reconnect" not in failure.user_message.lower()
     assert "credential" not in failure.user_message.lower()
@@ -1305,3 +1305,107 @@ def test_direct_sdk_tool_round_keeps_billing_sum_and_last_request_context_separa
         "call_read_fact", "call_record_marker"}
     assert terminal["usage"]["input_tokens"] == 365000
     assert terminal["context_usage"] == {"source": "sdk_last_response", "input_tokens": 185000, "output_tokens": 9}
+
+
+def test_stream_failure_retains_declared_code_without_provider_message():
+    from pydantic_ai.exceptions import ModelAPIError
+    from workers_projects_runtime.direct_runner import safe_failure_shape
+    for code in ("server_error", "rate_limit_exceeded", "invalid_image"):
+        value = safe_failure_shape(ModelAPIError("synthetic-model", code + ": private input must not leak"))
+        assert value["provider_error_code"] == code
+        assert "private input" not in json.dumps(value)
+    value = safe_failure_shape(ModelAPIError("synthetic-model", "private-input: secret"))
+    assert "provider_error_code" not in value
+    assert "secret" not in json.dumps(value)
+
+
+def test_stream_rate_limit_uses_existing_rate_limit_classification(tmp_path):
+    runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
+    event = {"type": "direct.error", "error_type": "ModelAPIError", "status_code": None,
+             "stage": "provider_request", "provider_error_code": "rate_limit_exceeded"}
+    value, evidence = runtime._supplemental_provider_failure(worker=worker(tmp_path), run_id="run_stream_rate",
+        stdout=json.dumps(event), stderr="", exit_code=1)
+    assert value.failure_class == "provider_rate_limited"
+    assert value.retryable is True
+    assert evidence["evidence_kind"] == "direct_sdk_stream_error_code"
+
+
+def test_stream_content_rejection_is_not_provider_outage(tmp_path):
+    runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
+    event = {"type": "direct.error", "error_type": "ModelAPIError", "status_code": None,
+             "stage": "provider_request", "provider_error_code": "invalid_image"}
+    value, evidence = runtime._supplemental_provider_failure(worker=worker(tmp_path), run_id="run_stream_content",
+        stdout=json.dumps(event), stderr="", exit_code=1)
+    assert value.failure_class == "provider_request_rejected"
+    assert value.retryable is False
+    assert evidence is None
+
+
+def test_stream_sdk_cause_keeps_only_declared_code_and_bounded_request_id():
+    from pydantic_ai.exceptions import ModelAPIError
+    from workers_projects_runtime.direct_runner import safe_failure_shape, safe_response_request_id
+    cause = type("SyntheticSDKError", (Exception,), {})("private provider input")
+    cause.code = "rate_limit_exceeded"
+    error = ModelAPIError("synthetic-model", "Private detail")
+    error.__cause__ = cause
+    assert safe_failure_shape(error)["provider_error_code"] == "rate_limit_exceeded"
+    assert "private provider input" not in json.dumps(safe_failure_shape(error))
+    assert safe_response_request_id({"x-request-id": "req-synthetic_123"}) == {"provider_request_id": "req-synthetic_123"}
+    assert safe_response_request_id({"x-request-id": "private payload with spaces"}) == {}
+    assert safe_response_request_id({"x-request-id": "a" * 129}) == {}
+
+
+@pytest.mark.parametrize("status", [None, 400, 402, 403])
+def test_declared_content_policy_rejection_precedes_http_access_fallback(tmp_path, status):
+    runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
+    event = {"type": "direct.error", "status_code": status, "error_type": "ModelHTTPError",
+             "stage": "provider_request", "provider_error_code": "misalignment_policy_violation"}
+    failure, _ = runtime._provider_failure_for_process(worker=worker(tmp_path), run_id="policy",
+        stdout=json.dumps(event), stderr="", exit_code=1)
+    assert failure.failure_class == "provider_request_rejected"
+    assert failure.retryable is False
+
+
+@pytest.mark.parametrize("status,code,expected", [
+    (200, "rate_limit_exceeded", "provider_rate_limited"),
+    (200, "misalignment_policy_violation", "provider_request_rejected"),
+    (402, None, "provider_access_denied"),
+    (403, None, "provider_access_denied"),
+    (403, "misalignment_policy_violation", "provider_request_rejected"),
+])
+def test_official_sdk_error_transport_retains_declared_recovery_class(tmp_path, monkeypatch, status, code, expected):
+    import importlib
+    import io
+    import openai
+    from workers_projects_runtime import direct_runner
+    original = openai.DefaultAsyncHttpxClient
+    httpx = importlib.import_module("httpx2" if any(c.__module__.startswith("httpx2") for c in original.__mro__) else "httpx")
+    events, sent = [], []
+    def handler(request):
+        sent.append(request.url.path)
+        if status == 200:
+            event = {"type": "error", "code": code, "message": "private synthetic request detail", "param": None, "sequence_number": 0}
+            return httpx.Response(200, text="event: error\ndata: " + json.dumps(event) + "\n\n",
+                headers={"content-type": "text/event-stream", "x-request-id": "req-synthetic-error"})
+        return httpx.Response(status, json={"error": {"message": "private synthetic request detail", "type": "access_error", "code": code}},
+            headers={"x-request-id": "req-synthetic-error"})
+    class MockClient(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **{**kwargs, "transport": httpx.MockTransport(handler)})
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", MockClient)
+    monkeypatch.setenv("XAI_API_KEY", "synthetic-not-used")
+    monkeypatch.setattr(direct_runner, "emit", events.append)
+    request = {"provider": "xai", "model": "grok-4.7", "effort": "low", "instructions": "Synthetic test.",
+        "instruction": "Reply.", "history_enabled": False, "history_path": str(tmp_path / "history.json"),
+        "history_scope": {"worker": "fixture"}, "session_id": "direct:fixture", "run_id": "sdk-error", "mcp_servers": []}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    with pytest.raises(SystemExit) as result:
+        direct_runner.main()
+    assert result.value.code == 1 and len(sent) == 1, events
+    error = events[-1]
+    assert error["type"] == "direct.error"
+    assert "private synthetic request detail" not in json.dumps(error)
+    runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
+    failure, _ = runtime._provider_failure_for_process(worker=worker(tmp_path), run_id="sdk-error",
+        stdout="\n".join(json.dumps(event) for event in events), stderr="", exit_code=1)
+    assert failure.failure_class == expected

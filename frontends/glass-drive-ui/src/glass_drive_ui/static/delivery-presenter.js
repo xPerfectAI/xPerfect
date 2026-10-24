@@ -46,11 +46,20 @@ function referencePaths(value) {
   return [...new Set(paths)];
 }
 
+function structuredFailureSummary(data) {
+  return String(data?.latest_run?.state || '').trim().toLowerCase() === 'failed'
+    && Number(data?.latest_run?.failure_structured) === 1
+    ? boundedSummary(data?.latest_run?.failure_user_message) : '';
+}
+
 export function workspaceDeliveryModel(data) {
   const state = String(data?.latest_run?.state || '').trim().toLowerCase();
   const summary = boundedSummary(data?.latest_output);
   if (state !== 'completed') {
-    return { available: false, state, summary, primary: null, artifacts: [] };
+    const progress = workspaceProgressModel({ runState: state,
+      workerState: data?.worker?.close_state || data?.worker?.state });
+    return { available: false, state, summary: structuredFailureSummary(data) || progress.summary,
+      primary: null, artifacts: [] };
   }
 
   const declaredPrimary = actionModel(data?.deliverable, 'Delivered result');
@@ -71,7 +80,10 @@ export function workspaceDeliveryModel(data) {
   const primary = declaredPrimary
     || artifacts.find((artifact) => artifactReferences.get(artifact).some((path) => intendedPaths.has(path)))
     || artifacts.find((artifact) => referenceBasename(artifact) === intendedBasename)
-    || artifacts[0]
+    // A current runtime's explicit null means no file belongs to this reply.
+    // Keep historical Files browsable; only older payloads without this field
+    // retain their inventory-first preview fallback.
+    || (!Object.prototype.hasOwnProperty.call(data || {}, 'deliverable') ? artifacts[0] : null)
     || null;
   return {
     available: Boolean(summary || primary || artifacts.length),
@@ -129,11 +141,27 @@ export function watchOutputModel(data, technical = '') {
       result: raw, technical };
   }
   // A structured runtime classification is typed state; its user message says why.
-  const failure = state === 'failed' && Number(data?.latest_run?.failure_structured) === 1
-    ? String(data?.latest_run?.failure_user_message || '').trim() : '';
+  const failure = structuredFailureSummary(data);
   const closedFailure = workerState === 'terminated' && state === 'failed';
   return { ...progress, ...(closedFailure
     ? { summary: 'This work could not finish. The workspace is closed. Start new work from Workspaces.' }
     : failure ? { summary: failure } : {}), result: '',
     technical: [...new Set([...(closedFailure ? [failure] : []), raw, technical].filter(Boolean))].join('\n\n') };
+}
+
+// Measured wall-clock time for the latest job, not an inferred progress or ETA.
+export function watchTimingModel(run, now = Date.now()) {
+  if (!run || typeof run !== 'object') return null;
+  const state = String(run.state || '').trim().toLowerCase();
+  const waiting = state === 'queued';
+  const settled = ['completed', 'failed', 'cancelled', 'interrupted'].includes(state);
+  if (!waiting && !settled && !['running', 'settling'].includes(state)) return null;
+  const start = Date.parse(waiting ? run.queued_at : run.started_at);
+  const end = settled ? Date.parse(run.ended_at) : Number(now);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  const seconds = Math.floor((end - start) / 1000);
+  const value = seconds < 60 ? `${seconds}s`
+    : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+    : `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return { label: waiting ? 'Waiting' : settled ? 'Run time' : 'Running for', value };
 }

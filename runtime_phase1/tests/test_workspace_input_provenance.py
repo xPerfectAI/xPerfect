@@ -1,5 +1,6 @@
 """Accepted user input versions must not become worker deliverables on upload."""
 import json
+import hashlib
 import os
 from pathlib import Path
 
@@ -12,6 +13,33 @@ from workers_projects_runtime.openclaw_runtime import StubRuntime
 from workers_projects_runtime.run_evidence import _artifact_inventory
 from workers_projects_runtime.store import Store, work_artifact_observation
 from workers_projects_runtime.workspace_files import WorkspaceFiles, materialize_managed_file
+
+
+def test_isolated_inventory_resolves_input_versions_once_and_rechecks_changed_bytes(tmp_path, monkeypatch):
+    from workers_projects_runtime import deliverables
+    data = b"accepted"
+    source = tmp_path / "source.txt"
+    source.write_bytes(data)
+    for name in ("first.txt", "second.txt"):
+        (tmp_path / name).write_text("new output")
+    worker = {"workspace_dir": str(tmp_path), "bootstrap_bundle_json": json.dumps({"files": [{
+        "path": "source.txt", "managed_upload_id": "upload-synthetic",
+        "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+    }]})}
+    original = deliverables._input_versions
+    calls = []
+    def read_versions(value):
+        calls.append(value)
+        return original(value)
+    monkeypatch.setattr(deliverables, "_input_versions", read_versions)
+    assert set(candidate_artifact_paths(worker)) == {tmp_path / "first.txt", tmp_path / "second.txt"}
+    assert len(calls) == 1
+    metadata = source.stat()
+    source.write_bytes(b"modified")
+    os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    calls.clear()
+    assert set(candidate_artifact_paths(worker)) == {source, tmp_path / "first.txt", tmp_path / "second.txt"}
+    assert len(calls) == 1
 
 
 @pytest.fixture

@@ -551,7 +551,7 @@ def test_each_failed_admission_remains_visible_and_siblings_are_attempted(coordi
         coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id=str(i), route_id='route', instruction=f'goal {i}'))
     assert len(attempted) == 10
     assert all(not x['emit_callback'] and not x['start_run'] for x in attempted)
-    assert all(x['bootstrap_bundle']['viventium_launch_authority']['worker_model'] == 'exact-worker-model' for x in attempted)
+    assert all(x['bootstrap_bundle']['launch_authority']['worker_model'] == 'exact-worker-model' for x in attempted)
     assert [x['state'] for x in coordinator.snapshot('local', 'owner', cid)['goals']] == ['blocked'] * 10
     with pytest.raises(CoordinatorConflict):
         coordinator.dispatch('local', 'owner', cid, Dispatch(goal_id='0', route_id='route', instruction='changed'))

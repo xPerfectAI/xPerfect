@@ -6,7 +6,50 @@ Define a separate, minimal, modern operator UI for xPerfect that does not alter 
 
 ## Visual Thesis
 
-Calm dark glass over a bright signal core, like a modern appliance or Tesla control surface rather than a developer dashboard.
+Use the established [xPerfect website](https://www.xperfect.ai/) identity: graphite, pearl and
+restrained taupe, with a quiet gradient behind readable working surfaces. Light and dark use
+separate surface, text, border and semantic state colours. Keep the same visual language across
+Run Project, Chat, Workspaces, Connections, Library, Schedules, Activity, sign-in and Watch chrome.
+The native desktop and terminal retain their own appearance.
+
+### Shared appearance and navigation
+
+`frontends/glass-drive-ui/src/glass_drive_ui/static/theme.css` owns shared colours, atmosphere,
+application header and appearance controls. Existing page styles own their layouts and consume
+these tokens; they must not introduce another page-specific palette. Keep error, warning, pending,
+unknown and success states readable in both themes, including text on translucent surfaces.
+
+**Run Project** is the first navigation item and the default entry. **Chat** is second, followed by
+Workspaces, Connections, Library, Schedules and Activity. Navigation uses native links so reload,
+new-tab and browser history retain the selected destination. Chat is the visible label; existing
+conversation URLs, APIs, state identities and behaviour remain unchanged.
+
+The compact **Light / Auto / Dark** control uses labelled native radio buttons with sun, device and
+moon symbols. Auto follows the operating system; Light and Dark override it. The selected preference
+persists in browser-local storage, applies before styles paint, and synchronizes across tabs.
+Clearing storage or an unknown saved value restores Auto. If storage is blocked, the choice still
+works for the current page. Native Tab, arrow-key and Space behaviour and visible segment focus
+remain available; no custom keyboard router or account/runtime setting is required.
+
+Navigation uses a segmented menu with one raised selected surface. The signed-in account appears
+as an avatar button at the top right of the same header. Its menu contains the user's name,
+Light / Auto / Dark control and existing switch-account and sign-out actions. Account appearance
+is a preference, not the primary task action. Keep its native radio behaviour inside the menu.
+The menu must support keyboard access, visible focus, Escape, outside-click close and returning
+focus to its trigger. Signed-out and loading states must be clear without moving another action.
+
+The main shell has a common 1360px maximum width with responsive gutters. A wider workspace body
+may retain its existing cap, while the shared header, brand mark, navigation and account anchor
+stay aligned with the other pages. Keep the same header dimensions and stable interaction targets
+across Run Project, Chat and the hash views. On narrow screens, wrap deliberately without hiding
+navigation or creating horizontal page overflow. Account loading must not move a pending navigation
+tap onto another action. Preserve accessible names and tooltips when a control uses icons.
+
+The monochrome **Forward pair** symbol and favicon reuse the first-party mark selected for the
+[current website](https://www.xperfect.ai/brand/xperfect-forward-pair.svg). The local
+`brand-symbol.svg` and `favicon.svg` retain that vector geometry. The website's earlier P mark and
+the former orange GlassHive icon are superseded. Keep first-party asset provenance public-safe;
+do not copy private brand research or user prompts into this repository.
 
 ## Content Plan
 
@@ -25,14 +68,15 @@ Calm dark glass over a bright signal core, like a modern appliance or Tesla cont
 - after submit, the interface should hand off immediately into live watch mode
 - advanced controls stay tucked away until the user explicitly asks for them
 - the default watch handoff should land on the live desktop, not the raw terminal page
-- user-facing language should call long-lived personal environments `Workspaces`, not `workers` or `sandboxes`
+- distinguish the named AI `Worker`, its `Worker type` and its `Workspace`; use `sandbox` only where an execution-mode detail is needed
 - apply the [first-use simplicity principle](01_Vision_Requirements_and_Terminology.md#first-use-simplicity):
   use configured defaults, remove unnecessary required inputs and choices, and reveal advanced controls on demand
 - Schedules open to saved definitions or a clear empty state. Creating or editing opens a compact
   form with Once, Every day, Every week, and Custom choices. The workspace list includes one-off
   runs; creating their first schedule keeps the chosen run as a saved workspace in the same action.
-  When no workspace exists, show Start project and Cancel instead of an unusable schedule form;
-  Start project returns to the visible goal field, not Advanced.
+  When the AI-workspace target has no workspace, show Start project and Cancel;
+  Start project returns to the visible goal field, not Advanced. The webhook target remains usable
+  without any project, workspace, model or provider account.
   Saved rows keep Run now, Edit, and
   Pause or Resume visible, with History and Remove under More. They show the authoritative next
   occurrence with its saved timezone. A failed refresh keeps the last known list visible with an
@@ -43,6 +87,130 @@ Calm dark glass over a bright signal core, like a modern appliance or Tesla cont
   submit the new local anchor, while untouched stored recurrence fields retain their exact values.
   A failed occurrence puts View history on the row and keeps technical error text behind Error
   details. A failed history request has its own Retry action.
+  Run now does not consume a future one-time clock. Pausing after a manual run still offers Resume;
+  only the clock's actual one-time occurrence can finish it. Use the authoritative `clock_finished`
+  field, not the latest manual result, for that distinction.
+
+## Schedule an AI workspace or an application webhook
+
+The **Schedules → New schedule** editor asks three plain questions:
+
+- **What?** Choose **Run a task** or **Send to an app**, then enter the task or an optional message.
+- **Where?** Choose a named workspace or connected app. Existing apps need no connection setup again.
+- **When?** Choose one time, every day, every week or an optional custom rule. A short preview repeats
+  the friendly date/time, city and selected place before saving. **Tomorrow** updates that preview.
+  The detected city is shown by default. **Change** opens city search and selection; direct time-zone
+  identifiers remain optional.
+
+The ordinary flow requires no JSON, auth headers, signing configuration or reliability-policy
+choices. Both targets retain the same saved list, edit, pause/resume, Run now, history and removal.
+An app schedule does not create a project, workspace or AI account. With no workspace, the task
+choice shows **Start project** and **Cancel**; unrelated time/reliability fields stay hidden. Opening
+the form focuses its visible selected choice. Reloading a named surface restores it through the
+existing navigation registry before waiting for network startup.
+
+**Connect an app** opens a compact native dialog. Its basic fields are **App name** and **App address**.
+Existing signing/auth/payload options stay under **Advanced connection settings**. A generated key is
+shown on the successful creation receipt for the receiver's one-time setup. Closing the dialog,
+pressing Escape, resetting the form or changing owners clears private key/header/address fields.
+The dialog uses native keyboard focus and background isolation; visible labels identify its fields.
+**Manage connection** renames, disables/re-enables or rotates credentials for the selected app. Its
+saved address and credentials are never read back. A new address requires a new connection.
+
+A saved app schedule with an instruction shows and edits that instruction in its plain task field.
+Otherwise, its plain message maps to request data’s `message` string. A new app schedule never
+inherits hidden text from the task-workspace choice. **Extra app details** holds
+optional typed fields and a further explicit JSON editor for complex data. Editing a plain message
+changes only that field; existing request references, arrays, nested data and other fields remain
+intact. A custom non-string message disables the plain message field and explains where to edit it.
+Existing app data keys are read-only in the field list; deliberate changes use **Edit as JSON**.
+Very large JSON integers remain JSON-only and keep their exact decimal digits through the current
+browser’s native source-aware JSON parser and raw-JSON serializer. Typed number fields reject
+unsafe integers rather than rounding them. No app context is summarized or reconstructed. Invalid numbers, duplicate
+field names or invalid JSON produce a visible error rather than silently sending an older value.
+
+Repeating an interrupted creation keeps the same key for the exact unchanged request. Changing the
+request uses a new key. Run-now recovery retains its separate existing same-owner receipt. Failed
+refreshes preserve the saved list; unavailable app choices show Retry. Save, Run now and history
+states use plain text and distinguish uncertainty from an acknowledged request. A save leaves a
+visible page/card receipt and scrolls to the exact saved definition. Run now checks only the saved request until its delivery settles or its saved delivery window ends.
+Checks use capped backoff and stop when the view is hidden or its owner changes. While an app
+delivery is pending, Run now is disabled; a lost status read does not permit a duplicate. The
+card and history use the receipt state, with error codes kept as details. An unknown terminal
+receipt warns that sending again may repeat the action. The original recovery receipt is retained. A completed
+one-time schedule says Done/Sent and offers no misleading Resume action. Known ACKs win; an
+unacknowledged send remains visibly uncertain even when later cancelled or rejected. A generated
+signing key has a **Copy key** action. Known field errors use a plain explanation, error colour and
+focus on the field; successful receipts use a distinct success tone.
+
+Schedules use the same shared appearance and compact visual hierarchy, with readable spacing,
+visible focus and responsive controls down to a 320px viewport. Its simple What / Where / When
+flow and progressively disclosed technical fields remain unchanged by appearance settings. This is an existing
+vanilla frontend and native dialog, informed by [shadcn field grouping](https://ui.shadcn.com/docs/components/base/field),
+[dialog guidance](https://ui.shadcn.com/docs/components/base/dialog) and [progressive disclosure](https://www.nngroup.com/articles/progressive-disclosure/);
+it does not install or claim a React/shadcn component migration.
+
+History shows the receiver's numeric HTTP status and optional **Delivery times**. These times keep
+clock detection, sender queue, signing, connection, sending and response waits distinct; the HTTP
+attempt total is inclusive and must not be added to its component times. Raw response bodies stay
+out of the UI. **Received** means the app acknowledged delivery; its application task can continue in the background. A cancelled or superseded schedule cannot retract an already sent request; known ACKs and
+unacknowledged attempts stay truthful. See the [runtime state definitions](../runtime_phase1/README.md#delivery-states-and-recovery).
+
+UI source/BFF tests cover structured requests and private error handling. Real browser create,
+edit, pause/resume, Run now, history and reload acceptance belongs to the completed running candidate;
+those tests are not replaced by source checks.
+
+## Watch clarity and spacing
+
+Watch is a working view for ordinary users, not a diagnostics dashboard. Its compact header keeps
+one direct Workspaces action, the named worker and its type, a truthful status, Files and a labelled
+More button. A separate Latest workspace output row gives a clear result/status action. Use the
+shared palette and small consistent icons with visible labels. A live native desktop or terminal
+keeps its own appearance; the surrounding application and settled answer use the shared surfaces.
+
+More uses compact left-aligned menu rows grouped into View, Open in workspace and Workspace,
+with separated destructive close styling. Native desktop launch actions appear only where the runtime reports a desktop and management
+access; host-only workers do not offer desktop no-ops. Show the worker's own declared native app,
+not another provider app bound to no account. Read-only and closed views keep observation and saved
+results without offering management actions. Retain the original server authorization; presentation
+is not a new permission grant. Close opens a native confirmation with Keep workspace open focused;
+only explicit confirmation sends the existing close action. Cancel/Escape leave the workspace
+unchanged, duplicate confirmation is blocked, and an already-dispatched close cannot be cancelled
+through the dialog. Menu focus supports arrows, Home/End, Escape with
+return to its trigger, Tab exit and outside-click dismissal. Its position follows the real header
+height and its scrollable bounds fit a narrow or short viewport.
+
+The latest job's recorded start/end times can show Run time; active work shows Running for and a
+queued job shows Waiting from its queue timestamp. These are elapsed wall-clock times, not model
+inference, an estimate, a completion percentage or a promise of speed. Missing or invalid timestamps
+hide the measurement. Use the existing live refresh; do not add another clock, API or poller.
+
+A settled result has natural content height and presents its readable answer before historical
+workspace files. Current declared file actions remain prominent. The optional Workspace files
+section is collapsed by default and labels its bounded available inventory honestly; it is not a
+count of all files or a claim that every file belongs to the latest reply. The Files drawer remains
+a direct browse/upload path. Native requests stay above the file inventory; Technical details and
+the unchanged native Technical log remain secondary. Ended turns hide empty native-control chrome
+after its existing state controller clears the old target; pending and unknown active turns keep
+their existing native request and draft behavior. Preserve current-result identity, signed and
+read-only access, failed/unknown state distinctions, draft recovery and native turn controls.
+
+The shared theme owns the Run Project title/form width, centring, card padding and spacing. Page
+styles must not override it with older layout values. Chat keeps its readable column and compact
+fixed empty-state spacing. Empty status regions stay mounted but reserve no blank paragraph space;
+a real status or error remains visible. Browser QA checks the actual affected pages, results,
+Files and menu keyboard/focus flows in light/dark, wide/narrow and short layouts.
+
+Native `artifact_sha256:` references are file-transport identities, not browser URLs. The shared
+result renderer used by Watch and workspace summaries renders unresolved references as plain
+labels, including image labels. It must not guess a digest-to-file binding from a filename, alter
+the native answer, or send the identifier to a browser route. Existing declared Open/Download
+artifact actions remain the authoritative one-click delivery paths. Normal safe Markdown links,
+formatting and literal code examples retain their behavior; raw HTML and unsafe schemes stay blocked.
+
+These patterns follow the current [shadcn menu guidance](https://ui.shadcn.com/docs/components/aria/dropdown-menu)
+and [WAI menu-button pattern](https://www.w3.org/WAI/ARIA/apg/patterns/menu-button/), adapted to the
+existing native HTML/vanilla frontend. No frontend framework or harness replacement is required.
 
 ## Hard Requirements
 
@@ -50,25 +218,61 @@ Calm dark glass over a bright signal core, like a modern appliance or Tesla cont
 2. Do not mix this frontend into xPerfect core runtime code.
 3. The new UI must live in a separate service/surface.
 4. The entry screen must present one centered project definition box.
-5. `Describe your project` is the only required project input. Adding files is a primary optional action.
-6. `Success criteria` is optional and visible with `Background` in the default composer. An omitted
-   value stays omitted; the host must not invent, copy, or silently inject a replacement rubric.
-7. Background/context are optional and visible in the composer; technical settings remain
-   progressively disclosed. This replaces the earlier fixed three-field form and required
-   success-criteria step.
-8. There must be an optional smooth workspace selector for:
-   - `New workspace`
-   - existing named workspaces
+5. **What's the Job?** is the required project input, with the explanation
+   **Explain the work/project for this specialized AI Worker**. Keep the original goal unchanged.
+6. **What's the required outcome?** maps to the existing optional success criteria. An omitted value
+   stays omitted; the host must not invent, copy or silently inject a replacement rubric.
+7. **Required Knowledge** groups the existing **Background Context** text and Files controls in one
+   onboarding card. Explain: **What background context, files, material does this AI Worker need to
+   get itself fully onboarded?** Retain the existing upload, drop, replace, remove, folder, revision
+   and draft-preservation behaviour. Existing native setup and approved Library references remain
+   the knowledge mechanisms; this grouping does not create a new catalog. Background and files are
+   optional, and technical settings remain progressively disclosed.
+8. **Who's Doing The Job?** offers **Existing** or **New**:
+   - A saved worker or shared-workspace choice outside the first page is checked by its exact
+     owner-scoped ID before restore; unavailable choices stay visible and block launch until
+     explicitly changed. Search and Load more use the existing paged catalog. Existing shows them
+     beside its chooser; New keeps them inside the optional Copy disclosure, available before
+     selecting a worker to copy. The ordinary new-worker form has no previous-worker search box.
+   - Existing choices show the safe name, worker type, account label and workspace label. Reuse keeps
+     those exact stored choices rather than applying New-worker settings to the saved worker.
+   - New offers an optional name, worker type, account and workspace, with **Copy existing** using
+     the existing safe-copy or template mechanism. Blank name preserves the current automatic name.
+     Naming keeps the worker for reuse. Unnamed one-off workers are marked as such; explicit reuse
+     promotes them to saved workers before the next run.
+     Native types known to be absent on the selected computer stay visible as **Not installed on
+     this computer** and cannot start a project. This uses the runtime's existing binary-availability
+     catalog, without launching a CLI. A saved unavailable selection is kept until explicitly changed;
+     unknown availability stays subject to native admission. A missing host binary does not disable
+     a supported sandboxed route. Host account labels remain local on local deployments; organization
+     account wording is reserved for managed deployments.
+   - Copy creates a new identity; it does not promise a native conversation/session fork, copy
+     credentials or browser logins, or bypass capability reapproval.
+     It copies files and project notes, type, placement and the eligible same-owner AI account
+     reference. Learned native chat history is not copied. The form makes retained settings read-only.
+     8a. **Where should I work?** offers an existing or new workspace using the existing supported runtime
+     paths. A new member can join an eligible shared workspace. An existing isolated workspace keeps
+     its one-worker contract: offer its current worker or a safe copy instead of silently moving an
+     identity or changing isolation. Shared/separate mode and host/sandbox placement remain distinct
+     advanced choices, with truthful platform and capability limits.
 9. On submit:
    - create or reuse the selected workspace's underlying worker
    - faithfully send the goal, supplied criteria/context/files, and authorized capabilities
    - redirect automatically to the live watch screen
+     An uncertain immediate Existing or Copy request can retry the same native request key; it must
+     not start another assignment or duplicate workspace. New-worker, new-member and scheduled
+     creation retain the uncertain receipt until the user explicitly chooses **Start again**, with a
+     plain warning that another job may start. Preserve the exact draft, files and account, and fence
+     recovery by owner and payload. Persist uncertainty before dispatch so reload cannot turn an
+     unconfirmed create into a blind replay. A confirmed result stays successful if a later catalog
+     refresh or optional browser storage hint fails.
+
 10. The watch screen must prioritize the live sandbox view.
 11. For webpage, app, and browser-visible deliverables, the watch screen must end on the delivered result itself rather than a raw terminal transcript.
-11a. Chat/tool takeover links must target the configured xPerfect operator `/watch/{worker}` URL
+    11a. Chat/tool takeover links must target the configured xPerfect operator `/watch/{worker}` URL
     as the primary user-facing surface. The compatibility `worker_url` field is an alias for that
     operator URL; raw noVNC and runtime takeover URLs are diagnostic-only.
-11b. The secondary `Open` action for a self-contained `.html` or `.htm` artifact must render the
+    11b. The secondary `Open` action for a self-contained `.html` or `.htm` artifact must render the
     page inside the existing xPerfect file landing page, not show raw markup. That preview runs in
     a credentialless, no-referrer, unique-origin iframe sandbox with no scripts, authenticated
     same-origin access, forms, popups, top-level navigation, connection APIs, or external
@@ -77,6 +281,10 @@ Calm dark glass over a bright signal core, like a modern appliance or Tesla cont
     workspace desktop. `Download` remains a distinct attachment action and must not navigate the
     user into an error page.
 12. The raw live terminal session must still exist and stay available as a secondary surface for takeover and debugging.
+    A settled terminal-only workspace opens its readable result in the main view. The same native
+    session remains available in a collapsed **Technical log**. Live work and pending native input
+    retain the native interaction surface; a new run restores it. Users can reopen the log without
+    polling closing it again. No native-output renderer or replacement harness is introduced.
 13. When desktop-first watch is enabled, the active worker terminal must also be visible inside the desktop itself by default so the operator can watch the real live session without leaving desktop view.
 14. The watch screen must expose a direct, obvious path back to the modern xPerfect Workspaces
     control room. Ordinary product navigation must not send users to the legacy runtime `/ui`
@@ -96,62 +304,100 @@ The exact catalog also includes `gpt-6-sol`, `gpt-6-luna`, `claude-opus-5-5`, an
 
 Standalone native replay uses neutral conversation wording. Existing versioned `viventium_*` delimiters remain as compatibility markers for the accepted-turn protocol.
 
-A selected Docker account starts in a private execution-workspace member. Its prepared workspace path stays under the provisioned owner root across a continued conversation and fresh recovery members. A server-side `custom` or `life` workspace path is rejected for that route; files enter through the authorized Files attachment flow.
-16. If project launch fails after a worker was created, the UI/runtime must record that launch as an explicit failure instead of leaving a healthy-looking but runless worker behind.
-17. The main controls must be simple and obvious:
-   - pause
-   - resume/play
-   - interrupt
-   - more menu
-   - delete/shut down available from more menu
+A selected Docker account starts in a private execution-workspace member. Its prepared workspace path stays under the provisioned owner root across a continued conversation and fresh recovery members. A server-side `custom` or `life` workspace path is rejected for that route; files enter through the authorized Files attachment flow. 16. If project launch fails after a worker was created, the UI/runtime must record that launch as an explicit failure instead of leaving a healthy-looking but runless worker behind. 17. The main controls must be simple and obvious:
+
+- pause
+- resume/play
+- interrupt
+- more menu
+- delete/shut down available from more menu
+
 18. The latest result must be visible in the top ribbon and expandable without leaving the live view.
-18a. The latest workspace output affordance must look and read like an explicit action wherever it
-   appears. The watch ribbon and workspace overview tiles should show `Latest workspace output`,
-   the current status/summary, and a clear output/status action so users do not have to guess which
-   text is clickable. Inspecting output must never resume or restart compute.
-18b. Workspaces is the executive control room. It must show direct safe delivery actions and a
-   bounded, view-only overview of active workers without mounting an unbounded wall of interactive
-   desktops. Only active workspaces reserve a live-preview panel; retained and closed cards present
-   the result/status and available actions directly. Overview polling is compact, non-overlapping, and limited to visible tiles; at most a
-   small fixed number of live previews may be connected at once. A full interactive desktop remains
-   one click away in Watch / Steer.
+    In an isolated workspace, automatic file previews use the current run's recorded start/end
+    window. Older files remain available in Files and the output's workspace-file list, but a
+    text-only follow-up must not claim an older report as its new result. Newly created files
+    with preserved modification dates are recognized through filesystem change time. Shared
+    workspaces still require an explicit native selection; timestamps do not prove which member
+    authored a shared file. When the runtime explicitly has no current file result, the UI must
+    not replace it with the first historical file.
+    Library setup and workspace catalog links use the same configured initial Watch surface as
+    Run Project. A terminal-first deployment must not be redirected to an unavailable desktop.
+    18a. The latest workspace output affordance must look and read like an explicit action wherever it
+    appears. The watch ribbon and workspace overview tiles should show `Latest workspace output`,
+    the current status/summary, and a clear output/status action so users do not have to guess which
+    text is clickable. Inspecting output must never resume or restart compute.
+    18b. Workspaces is the executive control room. It must show direct safe delivery actions and a
+    bounded, view-only overview of active workers without mounting an unbounded wall of interactive
+    desktops. Only active workspaces reserve a live-preview panel; retained and closed cards present
+    the result/status and available actions directly. Overview polling is compact, non-overlapping, and limited to visible tiles; at most a
+    small fixed number of live previews may be connected at once. A full interactive desktop remains
+    one click away in Watch / Steer.
 19. The steering box must remain visible across normal desktop widths and mobile-safe layouts.
+    Keep each sent message's acceptance promise under its exact account and worker identity across
+    tile refreshes. App-owned full-page navigation waits for those HTTP receipts, never for worker
+    completion: Open workspace, Set up tools, normal preview links, Chat/home links, account handoff
+    and automatic launch navigation must not cancel an input still being sent. An accepted steer
+    already owns its startup, so opening that same worker must not add a redundant Resume request.
+    Pending sends cannot be duplicated by a refreshed tile. A failed send keeps its draft and actual
+    cause on the current page. Edited follow-up drafts and a changed account cannot be overwritten by
+    an older reply. Hash tabs, modified clicks, downloads and new-tab links keep native behavior.
 20. A non-technical user should be able to understand the flow with near-zero explanation.
 21. `Steer + send` must behave like a real redirect, not a passive note:
-   - interrupt the active run
-   - stop the exact live run session and its process tree
-   - queue the replacement steer run automatically
-   - keep the replacement steer run in execution mode until the requested action is actually performed or a blocker is raised
-   - if the exact source finishes or fails after the correction was durably accepted, keep its
-     terminal result and execute that same reserved correction after release proof; never treat
-     ordinary completion as cancellation of the new instruction
-   - preserve exact operation/run/mission ownership, Stop and closure fences during recovery
-     and receipt replay; an unapplied control must be shown truthfully and keep the draft
+
+- interrupt the active run
+- stop the exact live run session and its process tree
+- queue the replacement steer run automatically
+- keep the replacement steer run in execution mode until the requested action is actually performed or a blocker is raised
+- if the exact source finishes or fails after the correction was durably accepted, keep its
+  terminal result and execute that same reserved correction after release proof; never treat
+  ordinary completion as cancellation of the new instruction
+- preserve exact operation/run/mission ownership, Stop and closure fences during recovery
+  and receipt replay; an unapplied control must be shown truthfully and keep the draft
+
 22. The watch footer must expose a safe secondary queue gesture without diluting the default steer meaning:
-   - normal `Send` or plain Enter redirects now
-   - long-pressing `Send` queues a follow-up without interrupting current work
-   - `Cmd/Ctrl+Enter` and modifier-click send must also queue the follow-up
-   - the primary action stays obvious; queue behavior is explained in its contextual menu or accessible help without a persistent instruction block
-   - once queued, the UI/runtime contract must keep the workspace marked `running` until that queued follow-up actually settles
-22a. Session-authenticated watch actions must forward the current double-submit CSRF cookie in the
-    `X-GlassHive-CSRF` header on every state-changing request. Worker-bound signed links retain only
-    their deliberately narrow communication exception; the watch UI must not broaden that bypass.
+
+- normal `Send` or plain Enter redirects now
+- long-pressing `Send` queues a follow-up without interrupting current work
+- `Cmd/Ctrl+Enter` and modifier-click send must also queue the follow-up
+- the primary action stays obvious; queue behavior is explained in its contextual menu or accessible help without a persistent instruction block
+- once queued, the UI/runtime contract must keep the workspace marked `running` until that queued follow-up actually settles
+  22a. Session-authenticated watch actions must forward the current double-submit CSRF cookie in the
+  `X-GlassHive-CSRF` header on every state-changing request. Worker-bound signed links retain only
+  their deliberately narrow communication exception; the watch UI must not broaden that bypass.
+
 23. Exact run interruption depends on standard process utilities being present inside the sandbox image:
-   - workstation images must include `ps`, `awk`, and `pkill`/procps
-   - xPerfect uses those tools to stop the exact `.glasshive-runs/<run_id>` process tree during steer redirects
+
+- workstation images must include `ps`, `awk`, and `pkill`/procps
+- xPerfect uses those tools to stop the exact `.glasshive-runs/<run_id>` process tree during steer redirects
+
+## Account connection without a detour
+
+When Run Project needs an account, **Connect an account** carries the selected worker type and
+compatible provider intent into the existing connection flow. Preserve the unsent job, context,
+file receipts and worker/workspace choices, then return to them after connection. Do not silently
+change the selected type, model, account policy or saved worker to make setup pass.
+
+Show concise provider-branded choices using official current marks with source/usage provenance.
+Keep availability and unsupported-method explanations visible; empty method lists are not an empty
+account catalog. Use the existing native sign-in, existing local-account attachment and API-key
+setup mechanisms. Hide technical details until useful. Loading an unrelated workspace, Library or
+schedule catalog must not prevent available account controls from rendering or opening sign-in.
+Cancel, expiry, verification failure, disconnect and retry each keep a clear next action. Never
+expose credentials in page markup, errors, logs, history, public docs or reviewer material.
 
 ## User-Facing Workspace Model
 
 - In the user-facing xPerfect UI, a persistent personal execution environment is called a
   `Workspace`.
-- Internally, xPerfect runtime terms remain:
-  - `worker` for the AI runtime identity
-  - `sandbox` for the isolated workstation container
-- A workspace is therefore a friendly label over:
-  - one stable worker alias
-  - one persistent home directory
-  - one persistent project workspace
-  - one browser profile / website-login state surface
+- A named `Worker` is the reusable AI identity. `Worker type` selects its registered native harness
+  or direct adapter. Its selected AI account is distinct from the signed-in operator account.
+- A `Workspace` is the persistent execution place: files, compute and supported work surfaces.
+  Isolated workspaces have one worker; supported shared workspaces have separate member identities
+  and native account homes. Existing owner/project and platform admission remain authoritative.
+- Reopening uses the same worker and retained state. Safe duplication creates a new identity with
+  permitted files/context and clean authentication state. It is not an unproved native session fork.
+- Internal worker, sandbox, project, workspace and conversation API identities remain unchanged;
+  clearer labels do not require a data migration or a new worker registry.
 
 ## Least-Resistance V1 UX
 
@@ -168,8 +414,11 @@ The easiest non-technical user flow should be:
 8. expose the latest delivery directly on each workspace card, with `Open output` and `Download`
    distinct from `Open workspace`
 
-`Open workspace` should automatically resume a paused workspace. Non-technical users should not
-need to choose between `open` and `resume`.
+`Open workspace` automatically resumes an eligible paused workspace once its current job status
+is known. Non-technical users should not need to choose between `open` and `resume`. When the
+catalog has a prior run ID without its current state, Open goes to the workspace view while the
+existing live read resolves it; it must not blindly restart compute. Failed, cancelled and
+interrupted jobs require a corrected follow-up rather than automatic Resume.
 
 Opening or downloading an existing delivery is always read-only. A completed workspace restarts
 only through an explicit `Continue` or new-message action; output inspection never calls resume.
@@ -293,7 +542,7 @@ Use a separate frontend service that:
 12. The UI feels simple enough for a non-technical user.
 13. A non-technical user can understand that reopening a named workspace returns them to the same files, browser setup, and login state.
 14. The primary action set is open-duplicate-new and each action is understandable to a non-technical user.
-15. `Open workspace` is the single reuse verb and automatically resumes paused workspaces.
+15. `Open workspace` is the single reuse verb and automatically resumes eligible paused workspaces after the current job state is known.
 16. `Duplicate workspace` creates a new workspace with copied files/context but a clean browser-session state.
 17. Workspaces exposes a delivery without opening Watch / Steer or changing lifecycle state.
 18. The overview bounds live previews and compact polling as the catalog grows; no offscreen tile
@@ -307,14 +556,14 @@ The sandbox desktop currently relies on noVNC. Clipboard support is available th
 
 These are required interaction outcomes, not a claim that the current build passes them.
 
-| User action | Expected experience and evidence |
-| --- | --- |
-| Start with only a goal | Configured defaults work without opening Advanced or requiring an invented criterion. Missing connection setup asks only for the necessary choice or credential. Record inputs, clicks, visible choices, and actual result. |
-| Add files at kickoff or in Watch | One obvious add/drop area and one file list. Completed transfers become normal file rows; duplicate progress rows and repeated internal explanations disappear. Folder hierarchy, exact bytes, retry, and authorization remain correct. |
-| Browse and organize | File/folder names are the direct targets. Row actions are contextual; bulk controls appear with a selection. Moving files does not require knowledge of internal paths. Empty selection/trash sections do not consume the default view. |
-| Recover from a failure or deletion | One clear status and useful recovery action preserve work. Recoverable deletion offers Undo; retry does not duplicate files, runs, or effects. A user upload is never presented as a worker-authored result. |
-| Use advanced options | Context, tools, members, placement, access, limits, and diagnostics remain discoverable on demand, with exact saved-state readback. Hiding complexity never broadens authority or removes a required capability. |
-| Use supported displays and input methods | Exercise the actual desktop and small-screen paths, light/dark states, keyboard/focus, touch, and accessibility. Visually inspect the rendered result; compare it to state/logs and exact artifact bytes. |
+| User action                              | Expected experience and evidence                                                                                                                                                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Start with only a goal                   | Configured defaults work without opening Advanced or requiring an invented criterion. Missing connection setup asks only for the necessary choice or credential. Record inputs, clicks, visible choices, and actual result.             |
+| Add files at kickoff or in Watch         | One obvious add/drop area and one file list. Completed transfers become normal file rows; duplicate progress rows and repeated internal explanations disappear. Folder hierarchy, exact bytes, retry, and authorization remain correct. |
+| Browse and organize                      | File/folder names are the direct targets. Row actions are contextual; bulk controls appear with a selection. Moving files does not require knowledge of internal paths. Empty selection/trash sections do not consume the default view. |
+| Recover from a failure or deletion       | One clear status and useful recovery action preserve work. Recoverable deletion offers Undo; retry does not duplicate files, runs, or effects. A user upload is never presented as a worker-authored result.                            |
+| Use advanced options                     | Context, tools, members, placement, access, limits, and diagnostics remain discoverable on demand, with exact saved-state readback. Hiding complexity never broadens authority or removes a required capability.                        |
+| Use supported displays and input methods | Exercise the actual desktop and small-screen paths, light/dark states, keyboard/focus, touch, and accessibility. Visually inspect the rendered result; compare it to state/logs and exact artifact bytes.                               |
 
 ## Retained members and collaboration settings
 
@@ -392,9 +641,9 @@ The normal workspace card still requires no configuration. Browser fixtures prov
 interaction, owner-facade behavior, configured API readback and persisted synthetic state only.
 Integrated runtime and actual native worker turns remain separate acceptance gates.
 
-## Conversation entry
+## Chat entry
 
-`conversation.html` provides a single message composer using the configured assistant. Accepted
+The second navigation item, **Chat**, opens `conversation.html`, which provides a single message composer using the configured assistant. Accepted
 goals and results appear beside the conversation; no task schema, route, capacity or context form is
 required to send the first message. The model may handle work directly or use available helpers.
 If a send response fails after the server saved the turn, the composer reads back the exact saved
@@ -464,7 +713,6 @@ Files downloads bind the selected revision and abort if the open file changes du
 
 Unlimited logical-storage admission does not scan retained work for an unused total. Upload reservation, transfer checks, and accepted-input copy reservation still validate the storage adapter and owner policy. Finite logical limits and native hard quotas retain their existing accounting and guards. The storage display always computes actual usage; canonical root ancestry prevents double counting without comparing every prior workspace.
 
-
 ## Run and Watch status readback
 
 Run shows the worker and its account beside the workspace choice before Advanced settings. A
@@ -484,9 +732,33 @@ available.
 Watch derives status from run and worker lifecycle fields, never instruction prefixes or console
 phrasing. A ready worker is not a completed run. Human status and completed result text are separate
 from technical output; technical details start collapsed and preserve diagnostics on demand.
+Watch and workspace cards show the same plain cause when the runtime has a typed failure. A
+provider-reported model/account mismatch explains that the selected model is unavailable for that
+account; it never silently changes the model. Unclassified failures keep a neutral status, with raw
+native errors available only in technical details.
 If the Watch session expires, the status distinguishes sign-in from a denied workspace and gives a
 direct Sign in again link that returns to the current Watch URL. A denied workspace does not offer
 that link as an access workaround.
+Native turn controls use the current run’s declared action capabilities, never its provider name.
+Watch and Workspaces show the same existing Guide or respond panel for supported owner actions;
+signed and read-only views cannot submit them. Send to active turn preserves that native turn.
+The normal Send action redirects work; Queue keeps a later follow-up.
+The shared native panel uses the same theme controls in Chat, Watch and Workspaces; its workspace
+More panel occupies its own row. A queued native guidance receipt clears only the unchanged text
+that was sent. Edits made while waiting, rejected sends and uncertain receipts keep the draft.
+An unconfirmed native guidance receipt disables repeat guidance for that exact run/attempt,
+including across temporary unavailable reads. A different confirmed target releases that guard;
+Cancel and native permission responses retain their separate capabilities. Old-target replies do
+not clear a new target’s draft or status.
+An unavailable or missing-ID native state object is not an empty request list. Keep same-target
+question forms and partly typed answers, with actions disabled, until an authoritative snapshot
+changes the requests, a valid new target arrives, or the live API reports `null`. That `null` means
+there is no active native turn: clear its question forms, response-needed headings and notices,
+disable its actions, and retain unsent freeform guidance. Recovered same-turn reads clear transient
+availability/read notices; accepted action receipts and real action errors keep their own notice
+until that turn ends.
+Watch uses capitalized Failed, Interrupted and Cancelled labels, with error or attention colors
+from the shared theme rather than a green failure state.
 Accepted guidance does not claim the worker has already redirected. Failed or uncertain actions
 keep the draft and show an action notice until dismissed or another action succeeds; polling does
 not silently erase it. A temporary polling error clears after the next successful poll.

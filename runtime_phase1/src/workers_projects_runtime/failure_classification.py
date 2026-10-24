@@ -405,6 +405,7 @@ def classify_cli_failure(
             structured=True,
             provider_event_source="core_provider_proxy",
         )
+    provider_statuses, provider_codes = _structured_provider_signals(stdout, stderr)
     structured_capacity = _structured_provider_capacity_class(stdout, stderr)
     if structured_capacity == "provider_quota_exhausted":
         return FailureClassification(
@@ -452,6 +453,8 @@ def classify_cli_failure(
             structured=True,
             provider_event_source="provider_native",
         )
+    if provider_codes & _STRUCTURED_PROVIDER_MODEL_CODES:
+        return _model_access_failure(diagnostic_summary)
     if "content_filter" in lowered or "content filter" in lowered:
         return FailureClassification(
             failure_class="provider_content_filter",
@@ -467,7 +470,9 @@ def classify_cli_failure(
             structured=bool(evidence),
         )
     if (
-        "request rejected" in lowered
+        400 in provider_statuses
+        or bool(provider_codes & _STRUCTURED_PROVIDER_REQUEST_CODES)
+        or "request rejected" in lowered
         or "invalid_request_error" in lowered
         or "invalid request" in lowered
         or (_has_contextual_status_code(lowered, ("400",)) and "bad request" in lowered)
@@ -483,6 +488,8 @@ def classify_cli_failure(
                 "the provider route, request shape, or unsupported option that caused the rejection."
             ),
             diagnostic_summary=diagnostic_summary,
+            structured=400 in provider_statuses or bool(provider_codes & _STRUCTURED_PROVIDER_REQUEST_CODES),
+            provider_event_source="provider_native" if provider_statuses or provider_codes else "",
         )
     if structured_capacity == "provider_response_failed":
         return FailureClassification(
@@ -1122,6 +1129,27 @@ _STRUCTURED_PROVIDER_AUTH_CODES = frozenset(
     }
 )
 
+_STRUCTURED_PROVIDER_MODEL_CODES = frozenset({"model_not_found"})
+
+
+def _model_access_failure(diagnostic_summary: str) -> FailureClassification:
+    return FailureClassification(
+        failure_class="model_configuration_required",
+        retryable=False,
+        user_message=(
+            "The selected model is not available for this account. Check the account and model "
+            "before trying again."
+        ),
+        recommended_recovery=(
+            "Review the AI accounts in Connections. After changing this worker's account or "
+            "model configuration, send a new instruction in the same workspace; its files are kept."
+        ),
+        diagnostic_summary=diagnostic_summary,
+        structured=True,
+        provider_event_source="provider_native",
+    )
+
+
 _STRUCTURED_PROVIDER_REQUEST_CODES = frozenset(
     {
         "bad_request",
@@ -1185,9 +1213,10 @@ def _trusted_provider_control_event(value: object) -> dict[str, Any] | None:
             | _STRUCTURED_PROVIDER_OUTAGE_CODES
             | _STRUCTURED_PROVIDER_AUTH_CODES
             | _STRUCTURED_PROVIDER_REQUEST_CODES
+            | _STRUCTURED_PROVIDER_MODEL_CODES
             | _STRUCTURED_PROVIDER_CONTENT_FILTER_CODES
         )
-        return value if code in known_codes else None
+        return value if code in known_codes or _decoded_native_provider_error(value.get("message")) else None
     if event_type == "result" and value.get("is_error") is True:
         terminal_reason = str(
             value.get("terminal_reason") or ""
@@ -1210,6 +1239,7 @@ def _trusted_provider_control_event(value: object) -> dict[str, Any] | None:
             | _STRUCTURED_PROVIDER_OUTAGE_CODES
             | _STRUCTURED_PROVIDER_AUTH_CODES
             | _STRUCTURED_PROVIDER_REQUEST_CODES
+            | _STRUCTURED_PROVIDER_MODEL_CODES
             | _STRUCTURED_PROVIDER_CONTENT_FILTER_CODES
         )
         if terminal_reason and terminal_reason != "api_error":
@@ -1217,13 +1247,30 @@ def _trusted_provider_control_event(value: object) -> dict[str, Any] | None:
         return value if 400 <= status <= 599 or code in known_codes else None
     return None
 
+def _decoded_native_provider_error(value: object) -> dict[str, Any] | None:
+    """Unwrap only the provider error schema inside a trusted native control message."""
+
+    if not isinstance(value, str) or len(value) > 65536:
+        return None
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, RecursionError):
+        return None
+    if not isinstance(decoded, dict) or decoded.get("type") != "error":
+        return None
+    status = _safe_http_status(decoded.get("status"))
+    if status is None or status < 400 or not isinstance(decoded.get("error"), dict):
+        return None
+    return {**decoded, "api_error_status": status}
+
+
 def _structured_provider_signals(*texts: str) -> tuple[set[int], set[str]]:
     """Extract exact provider control fields from JSONL without reading prose."""
 
     statuses: set[int] = set()
     codes: set[str] = set()
 
-    def visit(value: object) -> None:
+    def visit(value: object, *, decode_message: bool = True) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
@@ -1239,10 +1286,14 @@ def _structured_provider_signals(*texts: str) -> tuple[set[int], set[str]]:
                     if code:
                         codes.add(code)
                 if isinstance(child, (dict, list)):
-                    visit(child)
+                    visit(child, decode_message=decode_message)
+                elif decode_message and normalized_key in {"message", "error"}:
+                    decoded = _decoded_native_provider_error(child)
+                    if decoded is not None:
+                        visit(decoded, decode_message=False)
         elif isinstance(value, list):
             for child in value:
-                visit(child)
+                visit(child, decode_message=decode_message)
 
     for text in texts:
         for line in str(text or "").splitlines():
@@ -1256,6 +1307,18 @@ def _structured_provider_signals(*texts: str) -> tuple[set[int], set[str]]:
             trusted = _trusted_provider_control_event(decoded)
             if trusted is not None:
                 visit(trusted)
+        # Native stdout owns the current attempt. Unscoped stderr may contain a
+        # prior provider refusal; use it only when stdout has no typed failure.
+        if statuses or codes & (
+            _STRUCTURED_RATE_LIMIT_CODES
+            | _STRUCTURED_QUOTA_CODES
+            | _STRUCTURED_PROVIDER_OUTAGE_CODES
+            | _STRUCTURED_PROVIDER_AUTH_CODES
+            | _STRUCTURED_PROVIDER_REQUEST_CODES
+            | _STRUCTURED_PROVIDER_MODEL_CODES
+            | _STRUCTURED_PROVIDER_CONTENT_FILTER_CODES
+        ):
+            break
     return statuses, codes
 
 def _structured_provider_capacity_class(*texts: str) -> str:
@@ -1412,6 +1475,7 @@ def _terminal_native_provider_error(*texts: str) -> dict[str, Any] | None:
         | _STRUCTURED_PROVIDER_OUTAGE_CODES
         | _STRUCTURED_PROVIDER_AUTH_CODES
         | _STRUCTURED_PROVIDER_REQUEST_CODES
+        | _STRUCTURED_PROVIDER_MODEL_CODES
         | _STRUCTURED_PROVIDER_CONTENT_FILTER_CODES
     )
     return (
@@ -1557,6 +1621,8 @@ def _classify_terminal_native_provider_error(
             structured=True,
             provider_event_source="provider_native",
         )
+    if codes & _STRUCTURED_PROVIDER_MODEL_CODES:
+        return _model_access_failure(diagnostic_summary)
     if status == 400 or codes & _STRUCTURED_PROVIDER_REQUEST_CODES:
         return FailureClassification(
             failure_class="provider_request_rejected",

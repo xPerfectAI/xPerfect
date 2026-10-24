@@ -2,13 +2,50 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Conversation · xPerfect</title>
-<link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/conversation.css">
+<title>Chat · xPerfect</title>
+<script src="/static/theme.js?v=20261024journeys18"></script>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/theme.css?v=20261024journeys18">
+<link rel="stylesheet" href="/static/conversation.css?v=20261024journeys18">
 </head>
-<body>
-<header><a href="/" class="brand">xPerfect</a><nav aria-label="Main"><a href="/">Workspaces</a><button id="new-conversation" type="button">New conversation</button></nav></header>
-<main>
-<section class="conversation" aria-label="Conversation">
+<body class="conversation-body">
+<div class="app-shell">
+<div class="app-frame conversation-frame">
+<header class="app-header">
+<a href="/" class="brand-mark" aria-label="xPerfect home">xPerfect</a>
+<nav class="view-tabs" aria-label="Main">
+<a class="view-tab" href="/#project">Run Project</a>
+<a class="view-tab" href="/conversation" aria-current="page">Chat</a>
+<a class="view-tab" href="/#workspaces">Workspaces</a>
+<a class="view-tab" href="/#connections">Connections</a>
+<a class="view-tab" href="/#library">Library</a>
+<a class="view-tab" href="/#schedules">Schedules</a>
+<a class="view-tab" href="/#activity">Activity</a>
+</nav>
+<details class="profile-menu" id="profile-menu">
+            <summary class="profile-avatar" aria-label="Your account" title="Your account">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 21v-2a7.5 7.5 0 0 1 15 0v2"/></svg>
+            </summary>
+            <div class="profile-menu-panel">
+              <div id="current-user-control" class="current-user-control" hidden>
+                <span id="current-user-label" class="current-user-label"></span>
+              </div>
+              <span class="profile-menu-caption">Appearance</span>
+              <fieldset class="appearance-toggle"><legend class="appearance-legend">Appearance</legend>
+<label class="appearance-option" title="Use light appearance"><input type="radio" name="appearance" value="light" data-theme-picker aria-label="Light"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg><span>Light</span></label>
+<label class="appearance-option" title="Follow your device appearance"><input type="radio" name="appearance" value="system" data-theme-picker aria-label="Auto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span>Auto</span></label>
+<label class="appearance-option" title="Use dark appearance"><input type="radio" name="appearance" value="dark" data-theme-picker aria-label="Dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z"/></svg><span>Dark</span></label>
+</fieldset>
+              <a class="profile-menu-action" href="/#connections">Manage connections</a>
+              <button id="switch-account" class="account-action" type="button" hidden>Switch account</button>
+              <button id="local-sign-out" class="account-action" type="button" hidden>Sign out here</button>
+              <p id="profile-menu-status" role="status" hidden></p>
+            </div>
+          </details>
+</header>
+<div class="chat-toolbar"><button id="new-conversation" type="button">New chat</button></div>
+<main class="conversation-layout">
+<section class="conversation" aria-label="Chat">
 <div id="empty"><h1>What would you like to do?</h1></div>
 <label id="conversation-project-field" class="project-choice" for="conversation-project"><span>Use a project <small>(optional)</small></span><select id="conversation-project"><option value="">New project</option></select></label>
 <label id="conversation-assistant-field" class="project-choice" for="conversation-assistant"><span>Assistant</span><select id="conversation-assistant"><option value="">Loading your connections…</option></select></label>
@@ -20,6 +57,8 @@
 </section>
 <aside id="work" aria-label="Your work" hidden><h2>Your work</h2><div id="native-controls"></div><div id="goals"></div></aside>
 </main>
-<script type="module" src="/static/conversation.js?v=20260927blocked1"></script>
+</div>
+</div>
+<script type="module" src="/static/conversation.js"></script>
 </body>
 </html>

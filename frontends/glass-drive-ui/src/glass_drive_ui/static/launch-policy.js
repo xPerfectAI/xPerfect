@@ -60,13 +60,16 @@ export function workspaceSetupAction(profile) {
   return 'terminal';
 }
 
-export function workspaceLifecycleControl(state) {
+export function workspaceLifecycleControl(state, runState = state) {
   const normalized = String(state || '').trim().toLowerCase();
-  const action = WORKSPACE_LIFECYCLE_RESUME_STATES.has(normalized) ? 'resume' : 'pause';
+  const terminalRun = ['failed', 'cancelled', 'interrupted'].includes(String(runState || '').trim().toLowerCase());
+  const runningCompute = ['queued', 'running', 'resuming'].includes(normalized);
+  const action = !terminalRun && WORKSPACE_LIFECYCLE_RESUME_STATES.has(normalized) ? 'resume' : 'pause';
   return {
     action,
     label: normalized === 'completed' ? 'Continue' : action === 'resume' ? 'Resume' : 'Pause',
-    hidden: WORKSPACE_LIFECYCLE_HIDDEN_STATES.has(normalized),
+    hidden: WORKSPACE_LIFECYCLE_HIDDEN_STATES.has(normalized)
+      || (terminalRun && !runningCompute) || (runState === null && action === 'resume'),
     disabled: WORKSPACE_LIFECYCLE_DISABLED_STATES.has(normalized),
   };
 }

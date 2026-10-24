@@ -31,15 +31,47 @@ def digest(value: object) -> str:
 
 
 def read_object(path: Path) -> dict:
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-        raise NativeInputError("native_input_invalid")
-    if info.st_mode & 0o077 or info.st_size > 1048576:
-        raise NativeInputError("native_input_invalid")
-    value = json.loads(path.read_bytes())
-    if not isinstance(value, dict):
-        raise NativeInputError("native_input_invalid")
-    return value
+    def checked(info):
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_size > 1048576 or info.st_nlink > 1):
+            raise NativeInputError("native_input_invalid")
+
+    # Atomic publication may unlink the opened old inode before metadata/read.
+    # Reread only that replacement window; accept the current named inode at
+    # the final check. Private-file checks stay strict and continuous churn fails.
+    for _ in range(3):
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError):
+                raise
+            raise NativeInputError("native_input_invalid") from exc
+        try:
+            before = os.fstat(descriptor)
+            checked(before)
+            if before.st_nlink == 0:
+                continue
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                data = stream.read(1048577)
+            after = os.fstat(descriptor)
+            checked(after)
+            if after.st_nlink == 0:
+                continue
+            current = path.lstat()
+            checked(current)
+            if current.st_nlink == 0 or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
+                continue
+            identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                                     info.st_ctime_ns, info.st_mode, info.st_uid, info.st_nlink)
+            if identity(before) != identity(after) or identity(after) != identity(current) or len(data) > 1048576:
+                raise NativeInputError("native_input_invalid")
+        finally:
+            os.close(descriptor)
+        value = json.loads(data)
+        if not isinstance(value, dict):
+            raise NativeInputError("native_input_invalid")
+        return value
+    raise NativeInputError("native_input_invalid")
 
 
 def read_response(path: Path) -> dict:
@@ -275,15 +307,29 @@ def relay(context_path: Path, command: list[str]) -> int:
         publish(context_path, {**context, "nativeSessionActive": False})
 
 
-def codex_app_launch(command: list[str]) -> dict | None:
+def codex_app_launch(command: list[str], *, native_profile: dict | None = None) -> dict | None:
     """Translate only understood exec flags; unknown policy keeps the exec path."""
     if len(command) < 3 or command[1] != "exec" or command[-1] != "-":
         return None
     argv = [command[0], "app-server", "--stdio"]
     thread, turn, images = {}, {}, []
     overrides = {}
-    resumed = command[2] == "resume"
-    tokens = command[3:-1] if resumed else command[2:-1]
+    def merge(target, incoming):
+        for key, value in incoming.items():
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                merge(target[key], value)
+            else:
+                target[key] = json.loads(json.dumps(value))
+    tokens = command[2:-1]
+    if tokens[:1] == ["--profile"]:
+        # app-server has no --profile flag. Its first-class thread config accepts
+        # the same validated private policy, without putting its values in argv.
+        if len(tokens) < 2 or not isinstance(native_profile, dict):
+            return None
+        tokens = tokens[2:]
+    resumed = bool(tokens and tokens[0] == "resume")
+    if resumed:
+        tokens = tokens[1:]
     positionals = []
     index = 0
     while index < len(tokens):
@@ -313,7 +359,7 @@ def codex_app_launch(command: list[str]) -> dict | None:
                     parsed = tomllib.loads(value)
                 except tomllib.TOMLDecodeError:
                     return None
-                overrides.update(parsed)
+                merge(overrides, parsed)
                 # Speed belongs to this admitted turn. Do not make an opt-in
                 # experiment the app server's or resumed thread's default.
                 if "service_tier" in parsed:
@@ -323,6 +369,7 @@ def codex_app_launch(command: list[str]) -> dict | None:
                     argv.extend([token, value])
             elif token in {"--enable", "--disable"}:
                 argv.extend([token, value])
+                overrides.setdefault("features", {})[value] = token == "--enable"
             elif token in {"-m", "--model"}:
                 thread["model"] = value
             elif token in {"-C", "--cd"}:
@@ -377,6 +424,12 @@ def codex_app_launch(command: list[str]) -> dict | None:
             thread["runtimeWorkspaceRoots"].insert(0, thread["cwd"])
     if thread.get("approvalPolicy") != "never":
         return None
+    if native_profile is not None:
+        # Native CLI overrides take priority over the selected config profile.
+        # Preserve nested policy tables when several overrides touch one table.
+        config = json.loads(json.dumps(native_profile))
+        merge(config, {key: value for key, value in overrides.items() if key != "service_tier"})
+        thread["config"] = config
     if not resumed:
         thread["experimentalRawEvents"] = True
     return {"command": argv, "thread": thread, "turn": turn, "images": images,
@@ -473,6 +526,7 @@ class CodexTurn:
     def __init__(self, rpc, session_id, turn_id):
         self.rpc, self.session_id, self.turn_id = rpc, session_id, turn_id
         self.active = True
+        self.cancel_acknowledged = False
         self.lock = threading.Lock()
 
     def interject(self, text, message_id):
@@ -487,8 +541,14 @@ class CodexTurn:
         return {"status": "queued", "message_id": message_id}
 
     def cancel(self):
-        self.end()
-        self.rpc.call("turn/interrupt", {"threadId": self.session_id, "turnId": self.turn_id})
+        # RPC replies are dispatched by the independent reader, not this lock.
+        # Terminal handling waits here if its notification arrives before ACK.
+        with self.lock:
+            if not self.active:
+                raise NativeInputError("native_turn_ended")
+            self.rpc.call("turn/interrupt", {"threadId": self.session_id, "turnId": self.turn_id})
+            self.cancel_acknowledged = True
+            self.active = False
 
     def end(self):
         with self.lock:
@@ -593,6 +653,7 @@ def codex_event(value, session_id, turn_id):
 
 
 CODEX_EXEC_REVIEWED_VERSION = "codex-cli 0.162.0-alpha.17.2"
+CODEX_EXEC_REVIEWED_VERSIONS = frozenset({CODEX_EXEC_REVIEWED_VERSION, "codex-cli 0.164.0-alpha.11.1"})
 CODEX_EXEC_REQUEST_REJECTIONS = {
     "item/commandExecution/requestApproval": ("command execution approval", "threadId"),
     "item/fileChange/requestApproval": ("file change approval", "threadId"),
@@ -611,7 +672,7 @@ CODEX_EXEC_REQUEST_METHODS = {*CODEX_EXEC_REQUEST_REJECTIONS, "mcpServer/elicita
 def codex_exec_response(event: dict) -> dict:
     """Keep the reviewed native exec's typed server-request behavior, including bees.
 
-    Source: openai/codex rust-v0.162.0-alpha.17.2, exec/src/lib.rs,
+    Source: openai/codex rust-v0.162.0-alpha.17.2 and 0.164.0-alpha.11.1, exec/src/lib.rs,
     canceled_mcp_server_elicitation_response and handle_server_request.
     This does not advertise interactive request_user_input support.
     """
@@ -636,6 +697,8 @@ def codex_relay(context_path: Path, command: list[str], *, initialized_rpc=None,
     except ImportError:
         from grok_control import ControlMailbox
     context = read_object(context_path)
+    context.pop("nativeTerminalStatus", None)
+    context.pop("nativeCancelAcknowledged", None)
     if instruction is None:
         instruction = sys.stdin.buffer.read().decode()
     launch = context["launch"]
@@ -750,8 +813,14 @@ def codex_relay(context_path: Path, command: list[str], *, initialized_rpc=None,
                 continue
             if event.get("method") == "turn/completed" and (params.get("turn") or {}).get("id") == turn_id:
                 turn.end()
-                publish(context_path, {**context, "nativeSessionActive": False})
                 status = params["turn"].get("status")
+                context = {**context, "nativeSessionActive": False,
+                           "nativeTerminalStatus": status,
+                           "nativeCancelAcknowledged": turn.cancel_acknowledged}
+                publish(context_path, context)
+                if status == "interrupted" and turn.cancel_acknowledged:
+                    emit({"type": "turn.interrupted", "thread_id": session_id, "turn_id": turn_id})
+                    return 130
                 if status == "completed":
                     counts = {"input_tokens": usage.get("inputTokens"), "cached_input_tokens": usage.get("cachedInputTokens", 0),
                               "output_tokens": usage.get("outputTokens")} if isinstance(usage, dict) else None

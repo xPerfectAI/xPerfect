@@ -1,5 +1,6 @@
+import { renderAccountIdentity } from './account-menu.js?v=20261024journeys18';
 import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
-import { attachNativeControls } from './native-controls.js?v=20260923conversation1';
+import { attachNativeControls } from './native-controls.js?v=20261024journeys18';
 
 const $ = (id) => document.getElementById(id);
 const markdown = new MarkdownIt({html:false,linkify:false,typographer:false});
@@ -238,7 +239,7 @@ async function refreshNativeControls(snapshot) {
         const widget=attachNativeControls(mount,workerId,{
           getJson:(path)=>api(path),
           postJson:(path,body)=>api(path,'POST',body),
-          onResponseNeeded:({waiting})=>{document.title=waiting?'Response needed · xPerfect':'Conversation · xPerfect';},
+          onResponseNeeded:({waiting})=>{document.title=waiting?'Response needed · xPerfect':'Chat · xPerfect';},
         });
         entry={mount,widget};nativeWidgets.set(workerId,entry);
       }
@@ -264,13 +265,20 @@ async function loadProjects() {
   } catch (error) { showError(error); }
 }
 async function loadAssistants() {
-  if (conversationId) return;
+  if (conversationId) {
+    try {
+      const bootstrap = await api('/api/bootstrap');
+      renderAccountIdentity(bootstrap.identity || {}, Boolean(bootstrap.csrf_token));
+    } catch (error) { showError(error); }
+    return;
+  }
   try {
     const [bootstrap,readiness]=await Promise.all([
       api('/api/bootstrap'),
       // Without readiness (an older runtime), every way to start stays offered, as before.
       api('/v1/coordinator/readiness').catch(() => null),
     ]);
+    renderAccountIdentity(bootstrap.identity || {}, Boolean(bootstrap.csrf_token));
     // The runtime's typed readiness decides; only a known failure withholds a way to start.
     const connectedCode=String(readiness?.connected_account?.code || '');
     const connectedHere=readiness?.connected_account?.available !== false;
@@ -351,3 +359,15 @@ window.addEventListener('pagehide',()=>{closed=true;clearTimeout(timer);});
 loadProjects();
 loadAssistants();
 poll();
+
+async function leaveAccount(scope, button) {
+  button.disabled = true;
+  try {
+    const result = await api('/auth/logout', 'POST', {scope});
+    closed = true;
+    clearTimeout(timer);
+    location.assign(result.redirect_url || '/login');
+  } catch (error) { showError(error); button.disabled = false; }
+}
+$('switch-account')?.addEventListener('click', (event) => leaveAccount('provider', event.currentTarget));
+$('local-sign-out')?.addEventListener('click', (event) => leaveAccount('local', event.currentTarget));

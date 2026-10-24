@@ -254,6 +254,103 @@ def _core_state_request_projection(original, projected, state, metrics):
     return result
 
 
+def _core_inline_source_projection(original, projected, state, metrics):
+    """Reuse identical authorized source prefixes; retain their exact raw carriers."""
+    from dataclasses import replace
+    import hashlib
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    previous = {}
+    result = list(projected)
+    for message_index, message in enumerate(original):
+        if not isinstance(message, ModelRequest):
+            continue
+        marker = (message.metadata or {}).get("xperfect_core_input")
+        for index, part in enumerate(message.parts):
+            if not isinstance(part, UserPromptPart):
+                continue
+            text = part.content if isinstance(part.content, str) else part.content[0] if part.content else None
+            if not (isinstance(marker, dict) and marker.get("protocol") == state["protocol"]
+                    and marker.get("owner") == state["owner"] and marker.get("snapshot_sha256")
+                    and marker.get("context_epoch") == state["context_epoch"]
+                    and type(marker.get("part_index")) is int and marker["part_index"] == index
+                    and isinstance(text, str)
+                    and hashlib.sha256(text.encode()).hexdigest() == marker.get("input_sha256")):
+                previous = {}
+                continue
+            try:
+                carrier = json.loads(text)
+                manifest = carrier["context_manifest"]
+                sources = manifest["sources"]
+                if (set(carrier) != {"instruction", "context", "context_manifest"}
+                        or not isinstance(carrier["context"], list) or not isinstance(sources, list)
+                        or not isinstance(manifest.get("run_id"), str) or not manifest["run_id"]
+                        or type(manifest.get("inline_chars")) is not int
+                        or type(manifest.get("retrievable_chars")) is not int):
+                    raise ValueError("Unknown source carrier")
+                by_id = {source["id"]: source for source in sources}
+                if len(by_id) != len(sources):
+                    raise ValueError("Ambiguous source identity")
+                current = result[message_index]
+                current_part = current.parts[index]
+                current_text = current_part.content if isinstance(current_part.content, str) else current_part.content[0]
+                outgoing = json.loads(current_text)
+                inline, accepted, removed = [], {}, {}
+                for source in carrier["context"]:
+                    identity, data = source["id"], source["text"]
+                    declared = by_id[identity]
+                    digest = declared["sha256"]
+                    if (not isinstance(identity, str) or not isinstance(data, str)
+                            or not isinstance(digest, str) or len(digest) != 64
+                            or any(c not in "0123456789abcdef" for c in digest)
+                            or declared.get("status") != "available"
+                            or type(declared.get("chars")) is not int
+                            or declared["chars"] < len(data)
+                            or type(declared.get("inline_chars")) is not int
+                            or declared["inline_chars"] != len(data)
+                            or declared.get("delivery") != ("inline" if len(data) == declared["chars"]
+                                                          else "mixed" if data else "retrieval")):
+                        raise ValueError("Unconfirmed source prefix")
+                    key = (digest, data)
+                    if identity in accepted:
+                        raise ValueError("Ambiguous inline identity")
+                    earlier = previous.get(identity)
+                    duplicate = bool(data) and earlier is not None and earlier[:2] == key
+                    reference = earlier[2] if duplicate else {
+                        "run_id": manifest["run_id"], "source_id": identity, "sha256": digest,
+                        "offset": 0, "chars": len(data),
+                    }
+                    accepted[identity] = (*key, reference)
+                    inline.append({**source, "text": ""} if duplicate else source)
+                    if duplicate:
+                        removed[identity] = (data, reference)
+                inline_chars = sum(len(source["text"]) for source in carrier["context"])
+                if (set(accepted) != set(by_id) or manifest["inline_chars"] != inline_chars
+                        or manifest["retrievable_chars"] != sum(source["chars"] for source in sources) - inline_chars):
+                    raise ValueError("Unconfirmed source totals")
+                if removed:
+                    removed_chars = sum(len(data) for data, _ in removed.values())
+                    projected_manifest = {**outgoing["context_manifest"],
+                        "inline_chars": manifest["inline_chars"] - removed_chars,
+                        "retrievable_chars": manifest["retrievable_chars"] + removed_chars,
+                        "sources": [{**source, "inline_chars": 0, "delivery": "retrieval",
+                                     "retained_inline": removed[source["id"]][1]}
+                                    if source["id"] in removed else source for source in sources]}
+                    replacement = json.dumps({**outgoing, "context": inline,
+                                              "context_manifest": projected_manifest}, ensure_ascii=False,
+                                             sort_keys=True, separators=(",", ":"))
+                    content = replacement if isinstance(current_part.content, str) else [replacement, *current_part.content[1:]]
+                    parts = list(current.parts)
+                    parts[index] = replace(current_part, content=content)
+                    result[message_index] = replace(current, parts=parts)
+                    metrics["removed_context_sources"] = metrics.get("removed_context_sources", 0) + len(removed)
+                    metrics["removed_context_data_utf8_bytes"] = metrics.get("removed_context_data_utf8_bytes", 0) + sum(len(data.encode()) for data, _ in removed.values())
+                previous = accepted
+            except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+                previous = {}
+    return result
+
+
 def core_archive_request_projection(messages, archive, state=None, metrics=None):
     """Request-only copy: keep the raw SDK journal and all unique protocol content."""
     from dataclasses import replace
@@ -293,8 +390,11 @@ def core_archive_request_projection(messages, archive, state=None, metrics=None)
         content = replacement if isinstance(part.content, str) else [replacement, *part.content[1:]]
         parts[index] = replace(part, content=content)
         projected.append(replace(message, parts=parts))
-    return (_core_state_request_projection(messages, projected, state, metrics if metrics is not None else {})
-        if state is not None else projected)
+    if state is None:
+        return projected
+    metrics = metrics if metrics is not None else {}
+    projected = _core_state_request_projection(messages, projected, state, metrics)
+    return _core_inline_source_projection(messages, projected, state, metrics)
 
 
 def core_archive_mark_input(messages, current, request, archive, state=None):
@@ -431,7 +531,8 @@ async def execute(request):
         CURRENT_STAGE = "provider_request"
         emit({"type": "direct.stage", "stage": "provider_request_sent"})
     async def on_response(response):
-        emit({"type": "direct.stage", "stage": "provider_headers_received", "status_code": response.status_code})
+        emit({"type": "direct.stage", "stage": "provider_headers_received", "status_code": response.status_code,
+              **safe_response_request_id(response.headers)})
     CURRENT_STAGE = "provider_configuration"
     # The official providers can use different HTTPX generations. Their native
     # client class owns that compatibility; a client from another SDK is invalid.
@@ -550,7 +651,9 @@ async def execute(request):
                         emit({"type": "direct.stage", "stage": "core_state_projection",
                             "removed_blocks": projection_metrics.get("removed_blocks", 0),
                               "removed_data_utf8_bytes": projection_metrics.get("removed_data_utf8_bytes", 0),
-                            "removed_utf8_bytes": projection_metrics.get("removed_utf8_bytes", 0)})
+                            "removed_utf8_bytes": projection_metrics.get("removed_utf8_bytes", 0),
+                            "removed_context_sources": projection_metrics.get("removed_context_sources", 0),
+                            "removed_context_data_utf8_bytes": projection_metrics.get("removed_context_data_utf8_bytes", 0)})
                 return model_request
             capabilities.append(Hooks(before_model_request=prepare_history))
         agent = Agent(selected, instructions=request["instructions"], toolsets=toolsets,
@@ -773,14 +876,38 @@ async def execute(request):
               **({"deliveryDispositionRanges": ranges} if ranges else {})})
 
 
+def safe_response_request_id(headers):
+    value = headers.get("x-request-id") or headers.get("request-id")
+    if (isinstance(value, str) and 1 <= len(value) <= 128
+            and all(char.isascii() and (char.isalnum() or char in "_-.:" ) for char in value)):
+        return {"provider_request_id": value}
+    return {}
+
+
 def safe_failure_shape(exc):
     chain = []
     current = exc
     while current is not None and len(chain) < 4:
         chain.append(type(current).__name__[:80])
         current = current.__cause__
-    return {"output_mode": CURRENT_OUTPUT_MODE, "response_shape": dict(LAST_RESPONSE_SHAPE),
-            "cause_types": chain}
+    shape = {"output_mode": CURRENT_OUTPUT_MODE, "response_shape": dict(LAST_RESPONSE_SHAPE),
+             "cause_types": chain}
+    # An HTTP-200 stream can fail directly or wrap the provider's typed SDK error.
+    # Keep only declared error codes. Never retain provider prose or request content.
+    from typing import get_args
+    from openai.types.responses.response_error import ResponseError
+    declared = get_args(ResponseError.model_fields["code"].annotation)
+    current = exc
+    for _ in range(4):
+        if current is None:
+            break
+        code = (str(getattr(current, "message", "")).partition(":")[0]
+                if type(current).__name__ == "ModelAPIError" else getattr(current, "code", None))
+        if code in declared:
+            shape["provider_error_code"] = code
+            break
+        current = current.__cause__
+    return shape
 
 
 def main():

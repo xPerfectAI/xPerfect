@@ -14,6 +14,7 @@ import tempfile
 import time
 from datetime import datetime
 
+from .application_boundary import launch_authority_for
 from .bootstrap import bootstrap_env_for, bootstrap_bundle_for, native_profile_tool_access_instructions, native_instruction_before_tail, worker_prompt_layer_producer
 from .agent_builder_control import conversation_output_schema, conversation_output_contract_instructions, conversation_controls_from_schema
 from .mission_provider_accounts import apply_bound_provider_account_environment, native_current_account_allowed
@@ -340,7 +341,7 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         if restricted:
             command += ['--yolo-mode', 'false']
         elif admitted_mission:
-            authority = bundle.get('viventium_launch_authority') or {}
+            authority = launch_authority_for(bundle) or {}
             command += ['--yolo-mode', 'true' if (
                 isinstance(authority, dict)
                 and authority.get('version') == 1
@@ -443,7 +444,8 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
                 continue
         return {'run_id':run_id,'attempt_id':attempt_id,
             'session_id': self._read_session_key(worker['worker_id']),
-            'pending_requests':pending,'receipts':receipts}
+            'pending_requests':pending,'receipts':receipts,
+            'capabilities':self._native_control_capabilities(active, run_id=run_id, attempt_id=attempt_id)}
 
     def pending_native_input(self, worker, *, run_id):
         from .provider_native_input import project_native_request
@@ -619,14 +621,16 @@ class GrokBuildRuntime(BaseCliWorkerRuntime):
         raise RuntimeErrorBase('native_input_stale')
 
     def supports_native_control(self, worker, action, *, run_id='', attempt_id=''):
-        if action != 'interject':
-            return action in {'cancel', 'permission'}
-        active = self._read_active_session(worker['worker_id']) or {}
+        active = (self._read_active_session(worker['worker_id']) or {}) if action == 'interject' else {}
+        return self._native_control_capabilities(active, run_id=run_id, attempt_id=attempt_id).get(action, False)
+
+    def _native_control_capabilities(self, active, *, run_id, attempt_id):
         capabilities = active.get('native_control_capabilities')
-        return bool(run_id and attempt_id and active.get('run_id') == run_id
+        interject = bool(run_id and attempt_id and active.get('run_id') == run_id
                     and active.get('attempt_id') == attempt_id
                     and active.get('native_session_id')
                     and isinstance(capabilities, dict) and capabilities.get('interject') is True)
+        return {'interject':interject, 'cancel':True, 'permission':True}
 
     def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
         from .grok_control import submit_control

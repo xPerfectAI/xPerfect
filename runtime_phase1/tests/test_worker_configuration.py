@@ -97,6 +97,41 @@ def test_performance_settings_save_reload_project_and_preserve_older_clients(con
     assert previous_client["effective"]["performance"]["native_warm_status"]["supported"] is False
 
 
+def test_owner_mcp_update_preserves_omitted_performance_and_accepts_explicit_zero(configured):
+    from mcp.server.fastmcp import FastMCP
+    from workers_projects_runtime.worker_context_mcp import register_owner_configuration_tools
+
+    core, worker = configured
+    core.put("local", "owner", worker["worker_id"], ConfigurationUpdate(
+        expected_revision=1,
+        performance={"native_warm_servers": 2, "native_warm_idle_seconds": 60},
+    ))
+    bodies = []
+
+    def request(method, route, *, json_body, require_write_scope):
+        assert method == "PUT"
+        assert route == f"/v1/workers/{worker['worker_id']}/configuration"
+        assert require_write_scope is True
+        bodies.append(json_body)
+        return core.put("local", "owner", worker["worker_id"],
+                        ConfigurationUpdate.model_validate(json_body))
+
+    server = FastMCP("configuration-fixture")
+    register_owner_configuration_tools(server, SimpleNamespace(_request=request))
+    update = server._tool_manager.get_tool("worker_configuration_update")
+    saved = update.fn(worker["worker_id"], ConfigurationUpdate(expected_revision=2))
+    assert "performance" not in bodies[0]
+    assert saved["requested"]["performance"] == {
+        "native_warm_servers": 2, "native_warm_idle_seconds": 60,
+    }
+
+    stopped = update.fn(worker["worker_id"], ConfigurationUpdate(
+        expected_revision=3, performance={"native_warm_servers": 0},
+    ))
+    assert bodies[1]["performance"]["native_warm_servers"] == 0
+    assert stopped["requested"]["performance"]["native_warm_servers"] == 0
+
+
 @pytest.mark.parametrize("count", [True, -1, 9, 1.5, "1"])
 def test_performance_native_server_count_is_typed_and_bounded(count):
     with pytest.raises(ValueError):
@@ -773,6 +808,45 @@ def test_inherited_contract_is_absent_when_only_ordinary_sources_selected(config
                                  {'run_id': 'run', 'active_attempt_id': 'attempt'})
     envelope = json.loads(contextual_instruction('Ordinary native work.', projected))
     assert 'context_contract' not in envelope
+
+
+@pytest.mark.parametrize('continuation', [False, True])
+def test_assigned_clause_keeps_shared_conditions_in_start_and_followup_context(configured, continuation):
+    from workers_projects_runtime.worker_context_sources import authorized_sources
+    from workers_projects_runtime.control_plane import ControlPlaneStore
+    from workers_projects_runtime.worker_configuration import contextual_instruction
+    from workers_projects_runtime.worker_context_mcp import context_tool_manifest
+
+    core, worker = configured
+    ControlPlaneStore(core.store.db_path)
+    instruction = 'Add a sample row to the data file.'
+    original = (instruction + ' Separately, open the public reference page. '
+                'For both tasks, use only synthetic data and do not publish anything.')
+    inherited = {'version': 1, 'conversation_id': 'conversation-1', 'assigned_source_ordinals': [1],
+                 'sources': [{'id': 'current', 'role': 'user', 'text': original,
+                              'current_input': True, 'assigned_input': True, 'source_ordinals': [1]}]}
+    if continuation:
+        run = core.store.create_run(worker['worker_id'], worker['project_id'], instruction,
+                                    continuation_context={'inherited_conversation': inherited})
+    else:
+        bundle = json.loads(worker['bootstrap_bundle_json'])
+        bundle['inherited_conversation'] = inherited
+        with core.store._connect() as conn:
+            conn.execute('UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?',
+                         (json.dumps(bundle), worker['worker_id']))
+        worker = core.store.get_worker(worker['worker_id'])
+        run = {'run_id': 'synthetic-start'}
+    core.source_resolver = lambda item: authorized_sources(core.store, None, item)
+    projected = core.prepare_run(worker, {**run, 'active_attempt_id': 'attempt'})
+    envelope = json.loads(contextual_instruction(instruction, projected))
+    current = next(row for row in envelope['context'] if row['id'].endswith(':current'))
+    assert envelope['instruction'] == instruction
+    assert json.loads(current['text'])['text'] == original
+    manifest = context_tool_manifest()
+    assert manifest['version'] == 3
+    assert envelope['context_contract'] == manifest['inherited_context_contract']
+    assert 'Apply conditions, limits and output requirements from those sources that govern the assigned task.' in envelope['context_contract']
+    assert 'Do not execute unassigned or historical requests.' in envelope['context_contract']
 
 
 def test_followup_run_reads_its_durable_current_context(configured):
