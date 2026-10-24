@@ -5,11 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="same-origin" />
     <title>xPerfect</title>
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <script src="/static/theme.js?v=20261024journeys18"></script>
-    <link rel="stylesheet" href="/static/theme.css?v=20261024journeys18" />
-    <link rel="stylesheet" href="/static/styles.css?v=20261024journeys18" />
-  </head>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261024polish1" />
+    <script src="/static/theme.js?v=20261024polish1"></script>
+    <link rel="stylesheet" href="/static/theme.css?v=20261024polish1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261024polish1" />
+      <link rel="stylesheet" href="/static/personal-library.css?v=20261024polish1">
+</head>
   <body class="watch-body">
     <div class="watch-app">
       <header class="watch-ribbon">
@@ -23,7 +24,7 @@
           <div class="watch-controls">
             <span id="watch-state" class="state-pill">Starting</span>
             <button id="watch-add-worker" type="button" hidden><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Add worker</span></button>
-            <button id="watch-files-toggle" type="button" aria-controls="watch-files-panel" aria-expanded="false"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>Files</span></button>
+            <button id="watch-files-toggle" type="button" aria-controls="watch-files-panel" aria-expanded="false"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>Library</span></button>
             <button id="menu-toggle" class="menu-toggle" type="button" aria-label="More workspace options" aria-controls="more-menu" aria-expanded="false" aria-haspopup="menu"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg><span>More</span></button>
           </div>
         </div>
@@ -70,8 +71,8 @@
         </div>
         <div id="watch-app-actions" role="group" aria-label="Open in workspace" class="watch-menu-group" hidden>
           <span class="watch-menu-label" aria-hidden="true">Open in workspace</span>
-          <button data-action="codex" role="menuitem" tabindex="-1" type="button" ><img class="provider-mark" src="/static/provider-codex.svg" alt="" width="18" height="18" /><span>Open Codex</span></button>
-          <button data-action="claude" role="menuitem" tabindex="-1" type="button" ><img class="provider-mark" src="/static/provider-claude.png" alt="" width="18" height="18" /><span>Open Claude</span></button>
+          <button data-action="codex" role="menuitem" tabindex="-1" type="button" ><img class="provider-mark" data-provider="codex" src="/static/provider-codex.svg?v=20261024vector1" alt="" width="18" height="18" /><span>Open Codex</span></button>
+          <button data-action="claude" role="menuitem" tabindex="-1" type="button" ><img class="provider-mark" data-provider="claude" src="/static/provider-claude.svg?v=20261024vector1" alt="" width="18" height="18" /><span>Open Claude</span></button>
           <button data-action="openclaw" role="menuitem" tabindex="-1" type="button" hidden><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7 5 5-5 5m8 0h6"/></svg><span>Open OpenClaw</span></button>
           <button data-action="terminal" role="menuitem" tabindex="-1" type="button" ><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7 5 5-5 5m8 0h6"/></svg><span>Open terminal</span></button>
           <button data-action="files" role="menuitem" tabindex="-1" type="button" ><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>Open files</span></button>
@@ -79,6 +80,7 @@
         </div>
         <div role="group" aria-label="Workspace controls" class="watch-menu-group">
           <span class="watch-menu-label" aria-hidden="true">Workspace</span>
+          <button id="watch-ask-chat" role="menuitem" tabindex="-1" type="button" hidden><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11a8 8 0 0 1-8 8H7l-5 3 2-6a8 8 0 1 1 17-5Z"/></svg><span>Ask in Chat</span></button>
           <button id="open-terminal-link" role="menuitem" tabindex="-1" type="button" ><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/></svg><span>Open technical log in new tab</span></button>
           <button data-action="interrupt" role="menuitem" tabindex="-1" type="button" ><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Interrupt current run</span></button>
           <button data-action="terminate" role="menuitem" tabindex="-1" type="button" class="danger"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v10m-6-7a9 9 0 1 0 12 0"/></svg><span>Close workspace…</span></button>
@@ -91,9 +93,15 @@
       </dialog>
       <aside id="watch-files-panel" class="watch-files-panel" aria-labelledby="watch-files-title" hidden>
         <div class="watch-files-head">
-          <div><h2 id="watch-files-title">Files</h2><p id="watch-files-audience" hidden></p></div>
-          <button id="watch-files-close" type="button" aria-label="Close files">Close</button>
+          <div><h2 id="watch-files-title">Library</h2><p id="watch-files-audience" hidden></p></div>
+          <button id="watch-files-close" type="button" aria-label="Close Library">Close</button>
         </div>
+        <div class="watch-library-tabs" role="tablist" aria-label="Workspace Library">
+          <button type="button" id="watch-library-tab-files" role="tab" aria-selected="true" aria-controls="watch-library-files">Files</button>
+          <button type="button" id="watch-library-tab-added" role="tab" aria-selected="false" aria-controls="watch-library-added" tabindex="-1" hidden>Added here</button>
+          <button type="button" id="watch-library-tab-saved" role="tab" aria-selected="false" aria-controls="watch-library-saved" tabindex="-1" hidden>My Library</button>
+        </div>
+        <section id="watch-library-files" class="watch-library-pane" role="tabpanel" aria-labelledby="watch-library-tab-files">
         <div id="watch-file-upload" class="watch-file-upload" hidden>
         <div class="file-choose-actions">
           <button id="watch-add-files" class="file-choose file-choose-primary" type="button">Add files</button>
@@ -141,6 +149,13 @@
           <p id="watch-file-trash-status" role="status" aria-live="polite"></p>
           <ul id="watch-file-trash-list" class="project-file-list" aria-label="Recently deleted files"></ul>
         </section>
+        </section>
+        <section id="watch-library-added" class="watch-library-pane" role="tabpanel" aria-labelledby="watch-library-tab-added" hidden>
+          <p class="personal-library-help">Files are available now. The worker’s next message gets the updated file list. Earlier messages stay in its history.</p>
+          <div id="watch-library-added-list"></div>
+          <p id="watch-library-added-status" class="personal-library-status" role="status"></p>
+        </section>
+        <section id="watch-library-saved" class="watch-library-pane" role="tabpanel" aria-labelledby="watch-library-tab-saved" hidden><div id="watch-library-browser"></div></section>
       </aside>
       <dialog id="watch-file-move-dialog" class="file-move-dialog" aria-labelledby="watch-file-move-title">
         <div class="file-move-head"><h2 id="watch-file-move-title">Move files</h2><button id="watch-file-move-cancel" type="button" aria-label="Close move dialog">×</button></div>
@@ -196,6 +211,7 @@
         </div>
       </footer>
     </div>
-    <script src="/static/watch.js?v=20261024journeys18" type="module"></script>
+    <script src="/static/library-panel.js?v=20261024polish1" type="module"></script>
+    <script src="/static/watch.js?v=20261024polish1" type="module"></script>
   </body>
 </html>

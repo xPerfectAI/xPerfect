@@ -99,14 +99,41 @@ def test_native_capture_rejects_workspace_escape_and_cleans_partial_output(tmp_p
     assert not destination.exists()
 
 
-def test_native_capture_rejects_unreviewed_future_database_without_touching_source(tmp_path):
+@pytest.mark.parametrize("component,version", [
+    ("runtime_store", 999), ("peer_collaboration", 3), ("peer_collaboration", 999),
+])
+def test_native_capture_rejects_unreviewed_future_database_without_touching_source(tmp_path, component, version):
     from workers_projects_runtime.native_continuity import capture_state
 
     database, _, _, _ = source_state(tmp_path)
     with sqlite3.connect(database) as connection:
-        connection.execute("UPDATE glasshive_schema_versions SET version = 999 WHERE component = 'runtime_store'")
+        connection.execute(
+            "UPDATE glasshive_schema_versions SET version = ? WHERE component = ?", (version, component),
+        )
     with pytest.raises(ValueError, match="schema"):
         capture_state(database, tmp_path / "snapshot")
+
+
+def test_native_capture_excludes_runtime_evidence_and_preserves_ordinary_work(tmp_path):
+    from workers_projects_runtime.native_continuity import capture_state
+
+    database, _, _, _ = source_state(tmp_path)
+    workspace = database.parent / "workspace"
+    evidence = workspace / "glasshive-run" / "runs" / "run_source"
+    evidence.mkdir(parents=True)
+    (evidence / "active-run.json").write_text('{"run_id":"run_source"}')
+    (evidence / "evidence.json").write_text('{"source_audit":true}')
+    ordinary = workspace / "reports"
+    ordinary.mkdir()
+    (ordinary / "evidence.json").write_bytes(b'{"user_evidence":true}\n')
+    snapshot = tmp_path / "snapshot"
+
+    report = capture_state(database, snapshot)
+
+    assert report["workspace_files"] == 2
+    assert not list(snapshot.rglob("glasshive-run"))
+    assert next(snapshot.rglob("reports/evidence.json")).read_bytes() == b'{"user_evidence":true}\n'
+    assert (evidence / "active-run.json").read_text() == '{"run_id":"run_source"}'
 
 
 def test_native_schema_accepts_only_complete_owner_compositions(tmp_path):
@@ -185,7 +212,8 @@ def test_native_coordinator_projection_retains_intent_and_unicode_resume(tmp_pat
     from workers_projects_runtime.native_continuity import capture_state, prepare_restored_state
 
     class Provider:
-        def _model(self, _):
+        def _model(self, _, *, tenant_id, owner_id):
+            assert (tenant_id, owner_id) == ("local", "owner-a")
             return SimpleNamespace(effort_choices=("high",))
 
     database, source, _, _ = source_state(tmp_path)
@@ -536,6 +564,94 @@ def test_native_completed_file_projection_rebinds_without_old_inode_authority(tm
         assert connection.execute("SELECT COUNT(*) FROM workspace_file_projection_targets").fetchone()[0] == 0
     with store._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM workspace_file_projection_targets").fetchone()[0] == 1
+    store.close()
+
+
+def _completed_projection_with_device_change(tmp_path, monkeypatch):
+    from workers_projects_runtime.workspace_files import WorkspaceFiles
+
+    database, store, worker, _ = source_state(tmp_path)
+    files = WorkspaceFiles(store)
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(database.parent))
+    upload = files.create_upload("local", "owner-a", draft_id="draft", name="input.txt",
+                                 size_bytes=3, idempotency_key="upload")
+
+    async def chunks():
+        yield b"abc"
+
+    asyncio.run(files.receive("local", "owner-a", upload["upload_id"], chunks()))
+    binding = files.bind(worker["worker_id"], "local", "owner-a", [upload["upload_id"]], "bind")
+    item = binding["items"][0]
+    receipt = files.storage_adapter.receipt("local", "owner-a", item["projection_id"])
+    with store._connect() as connection:
+        connection.execute("UPDATE workspace_file_projection_targets SET workspace_device=workspace_device+1")
+        row = dict(connection.execute("SELECT * FROM workspace_file_projection_targets").fetchone())
+    return database, store, files, worker, item, receipt, row
+
+
+def test_completed_projection_device_renumbering_keeps_continuity_and_worker_edits(tmp_path, monkeypatch):
+    from workers_projects_runtime.native_continuity import capture_state, check_quiescent
+
+    database, store, files, worker, item, _, row = _completed_projection_with_device_change(tmp_path, monkeypatch)
+    workspace = Path(store.get_worker(worker["worker_id"])["workspace_dir"])
+    (workspace / item["path"]).write_bytes(b"worker's later revision")
+    check_quiescent(database)
+    snapshot = tmp_path / "snapshot"
+    capture_state(database, snapshot)
+    assert next(snapshot.rglob("input.txt")).read_bytes() == b"worker's later revision"
+    with store._connect() as connection:
+        assert dict(connection.execute("SELECT * FROM workspace_file_projection_targets").fetchone()) == row
+    assert files.storage_adapter.receipt("local", "owner-a", item["projection_id"]).is_file()
+    store.close()
+
+
+@pytest.mark.parametrize("bad", ["missing", "legacy_only", "nonempty", "symlink", "hardlink", "directory"])
+def test_device_renumbering_needs_current_private_valid_completion(tmp_path, monkeypatch, bad):
+    from workers_projects_runtime.native_continuity import check_quiescent
+
+    database, store, files, _, item, receipt, row = _completed_projection_with_device_change(tmp_path, monkeypatch)
+    receipt.unlink()
+    if bad == "legacy_only":
+        legacy = files._owner_root("local", "owner-a") / f"{item['projection_id']}.receipt"
+        legacy.touch()
+        with store._connect() as connection:
+            connection.execute("UPDATE workspace_file_storage_config SET receipt_migration_at=?", (time.time() + 60,))
+    elif bad == "nonempty":
+        receipt.write_bytes(b"invalid")
+    elif bad == "symlink":
+        other = tmp_path / "empty-receipt"
+        other.touch()
+        receipt.symlink_to(other)
+    elif bad == "hardlink":
+        other = tmp_path / "empty-receipt"
+        other.touch()
+        receipt.hardlink_to(other)
+    elif bad == "directory":
+        receipt.mkdir()
+    with pytest.raises(ValueError, match="projection (workspace identity changed|receipt is invalid)"):
+        check_quiescent(database)
+    with store._connect() as connection:
+        assert dict(connection.execute("SELECT * FROM workspace_file_projection_targets").fetchone()) == row
+    store.close()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("workspace_inode", -1), ("owner_id", "another-owner"),
+    ("workspace_path", "/different-workspace"),
+    ("source_path", "/different/input.blob"), ("sha256", "0" * 64),
+    ("size_bytes", 4), ("scope_id", "another-scope"), ("relative_path", "different/input.txt"),
+])
+def test_device_renumbering_does_not_admit_changed_projection_lineage(tmp_path, monkeypatch, field, value):
+    from workers_projects_runtime.native_continuity import check_quiescent
+
+    database, store, _, _, _, _, _ = _completed_projection_with_device_change(tmp_path, monkeypatch)
+    with store._connect() as connection:
+        connection.execute(f"UPDATE workspace_file_projection_targets SET {field}=?", (value,))
+        row = dict(connection.execute("SELECT * FROM workspace_file_projection_targets").fetchone())
+    with pytest.raises(ValueError, match="projection (version lineage|source owner|workspace identity|workspace owner|accepted owner manifest)"):
+        check_quiescent(database)
+    with store._connect() as connection:
+        assert dict(connection.execute("SELECT * FROM workspace_file_projection_targets").fetchone()) == row
     store.close()
 
 
@@ -982,6 +1098,9 @@ def _owners(database):
     ControlPlaneStore(str(database))
     CoordinatorService(store, object(), object())
     WorkerConfiguration(store, object())
+    from workers_projects_runtime.personal_library import ensure_personal_library_schema
+    with store._connect() as connection:
+        ensure_personal_library_schema(connection)
     return store
 
 
@@ -1858,3 +1977,176 @@ def test_a_lease_generation_rewritten_under_the_same_id_after_review_refuses(tmp
         reconcile_closed_worker_work(database, apply=True, expect=identities, expect_generation=review["generation"])
     assert _open_work_rows(store, worker_id) == before
     store.close()
+
+
+def _personal_library_state(tmp_path):
+    from types import SimpleNamespace
+    from workers_projects_runtime.personal_library import PersonalLibrary
+    from workers_projects_runtime.workspace_files import WorkspaceFiles
+
+    database = tmp_path / 'source' / 'runtime.sqlite'
+    database.parent.mkdir(mode=0o700)
+    store = Store(str(database))
+    control = ControlPlaneStore(str(database))
+    files = WorkspaceFiles(store)
+    library = PersonalLibrary(SimpleNamespace(store=store, files=files, control_plane_store=control))
+    note = library.create_item('local', 'owner-a', {'name': 'Study background', 'kind': 'note',
+        'text': 'Exact study context — retained version one\n'}, 'study-note')
+    changed = library.revise_item('local', 'owner-a', note['item_id'],
+        {'text': 'New context must not replace the accepted old version\n'}, note['version_id'])
+    binary = b'\x00Exact binary reference\xff\n'
+    upload = files.create_upload('local', 'owner-a', draft_id='library-fixture', name='reference.bin',
+        size_bytes=len(binary), idempotency_key='library-reference')
+
+    async def chunks():
+        yield binary
+
+    ready = asyncio.run(files.receive('local', 'owner-a', upload['upload_id'], chunks()))
+    knowledge = library.create_item('local', 'owner-a', {'name': 'Reference material', 'kind': 'knowledge',
+        'upload_ids': [ready['upload_id']], 'upload_revisions': [ready['revision']]}, 'reference-item')
+    skill_files = [{'path': '.claude/skills/evidence/SKILL.md', 'content': 'Complete evidence-review instructions.\n'},
+                   {'path': '.claude/skills/evidence/references/checklist.md', 'content': 'Preserve the source evidence.\n'}]
+    skill = library.create_item('local', 'owner-a', {'name': 'Evidence review', 'kind': 'skill',
+        'files': skill_files, 'profiles': ['claude-code']}, 'evidence-skill')
+    refs = [{'item_id': item['item_id'], 'version_id': item['version_id']} for item in (note, knowledge, skill)]
+    bundle = library.create_item('local', 'owner-a', {'name': 'Research onboarding', 'kind': 'bundle',
+        'refs': refs}, 'onboarding-pack')
+    return database, store, library, {'note': note, 'changed': changed, 'knowledge': knowledge,
+        'skill': skill, 'skill_files': skill_files, 'bundle': bundle, 'refs': refs, 'binary': binary}
+
+
+def test_native_continuity_roundtrips_library_versions_bytes_skill_and_owner_fences_without_workers(tmp_path):
+    from types import SimpleNamespace
+    from workers_projects_runtime.native_continuity import capture_state, prepare_restored_state
+    from workers_projects_runtime.personal_library import PersonalLibrary, LibraryError
+    from workers_projects_runtime.workspace_files import WorkspaceFiles
+
+    database, source, library, saved = _personal_library_state(tmp_path)
+    assert source.list_all_workers() == []
+    snapshot = tmp_path / 'snapshot'
+    report = capture_state(database, snapshot)
+    assert report['workers'] == 0 and report['managed_files'] == 3
+    with source._connect() as connection:
+        expected_bytes = connection.execute("SELECT SUM(size_bytes) FROM workspace_file_uploads WHERE state='ready'").fetchone()[0]
+    assert report['managed_bytes'] == expected_bytes
+    prepare_restored_state(snapshot, tmp_path / 'restored')
+    restored = Store(str(snapshot / 'runtime.sqlite'))
+    files = WorkspaceFiles(restored)
+    result = PersonalLibrary(SimpleNamespace(store=restored, files=files, control_plane_store=None))
+    bundle_ref = [{'item_id': saved['bundle']['item_id'], 'version_id': saved['bundle']['version_id']}]
+    resolved = result.resolve_refs('local', 'owner-a', bundle_ref)
+    assert resolved['selected_items'][0]['refs'] == saved['refs']
+    assert result.get_item('local', 'owner-a', saved['skill']['item_id'])['payload']['files'] == saved['skill_files']
+    sources = result.knowledge_context('local', 'owner-a', resolved=resolved)['sources']
+    assert any(item.get('text') == 'Exact study context — retained version one\n' for item in sources)
+    assert not any(item.get('text') == 'New context must not replace the accepted old version\n' for item in sources)
+    upload = saved['knowledge']['uploads'][0]
+    assert (files._owner_root('local', 'owner-a') / f"{upload['upload_id']}.blob").read_bytes() == saved['binary']
+    with pytest.raises(LibraryError):
+        result.get_item('local', 'other-owner', saved['note']['item_id'])
+    with pytest.raises(LibraryError):
+        result.get_item('other-tenant', 'owner-a', saved['note']['item_id'])
+    with pytest.raises(LibraryError):
+        result.resolve_refs('local', 'other-owner', bundle_ref)
+    restored.close()
+    source.close()
+
+
+@pytest.mark.parametrize('damage', ['partial', 'extra-column', 'missing-index', 'unknown-table'])
+def test_native_continuity_library_shape_is_an_exact_complete_owned_schema(tmp_path, damage):
+    from workers_projects_runtime.native_continuity import capture_state
+
+    database, store, _, _ = _personal_library_state(tmp_path)
+    with store._connect() as connection:
+        if damage == 'partial':
+            connection.execute('DROP TABLE personal_library_apply_requests')
+        elif damage == 'extra-column':
+            connection.execute('ALTER TABLE personal_library_versions ADD COLUMN unrelated TEXT')
+        elif damage == 'missing-index':
+            connection.execute('DROP INDEX personal_library_owner')
+        else:
+            connection.execute('CREATE TABLE unreviewed_library_payload (data TEXT)')
+    snapshot = tmp_path / 'snapshot'
+    with pytest.raises(ValueError, match='schema'):
+        capture_state(database, snapshot)
+    assert not snapshot.exists()
+    store.close()
+
+
+def test_native_continuity_rejects_a_missing_library_blob_instead_of_capturing_metadata_only(tmp_path):
+    from workers_projects_runtime.native_continuity import capture_state
+
+    database, source, library, saved = _personal_library_state(tmp_path)
+    upload = saved['knowledge']['uploads'][0]
+    (library.files._owner_root('local', 'owner-a') / f"{upload['upload_id']}.blob").unlink()
+    snapshot = tmp_path / 'snapshot'
+    with pytest.raises(ValueError, match='missing|payload'):
+        capture_state(database, snapshot)
+    assert not snapshot.exists()
+    assert library.get_item('local', 'owner-a', saved['skill']['item_id'])['payload']['files'] == saved['skill_files']
+    source.close()
+
+
+def test_native_continuity_restore_rejects_corrupt_library_bytes(tmp_path):
+    from workers_projects_runtime.native_continuity import capture_state, prepare_restored_state
+
+    database, source, _, saved = _personal_library_state(tmp_path)
+    snapshot = tmp_path / 'snapshot'
+    capture_state(database, snapshot)
+    upload = saved['knowledge']['uploads'][0]
+    payload = next(snapshot.rglob(f"{upload['upload_id']}.blob"))
+    original = payload.read_bytes()
+    payload.write_bytes(b'Z' * len(original))
+    with pytest.raises(ValueError, match='digest'):
+        prepare_restored_state(snapshot, tmp_path / 'restored')
+    source.close()
+
+
+@pytest.mark.parametrize('damage', ['busy', 'nonempty', 'symlink', 'public', 'unknown-file'])
+def test_native_continuity_library_control_lock_is_safe_quiescent_and_never_a_payload_escape(tmp_path, damage):
+    import fcntl
+    import os
+    from workers_projects_runtime.native_continuity import capture_state
+
+    database, source, library, _ = _personal_library_state(tmp_path)
+    root = library.files._owner_root('local', 'owner-a')
+    lock = root / '.xperfect-files.lock'
+    descriptor = None
+    if damage == 'busy':
+        descriptor = os.open(lock, os.O_RDONLY)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif damage == 'nonempty':
+        lock.write_bytes(b'Unreviewed payload must not be skipped')
+    elif damage == 'symlink':
+        lock.unlink()
+        other = tmp_path / 'outside-control'
+        other.write_bytes(b'')
+        lock.symlink_to(other)
+    elif damage == 'public':
+        lock.chmod(0o644)
+    else:
+        (root / 'unknown-payload').write_bytes(b'Never silently discard unknown data')
+    snapshot = tmp_path / 'snapshot'
+    try:
+        with pytest.raises(ValueError, match='lock|mutations|payload'):
+            capture_state(database, snapshot)
+        assert not snapshot.exists()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        source.close()
+
+
+def test_native_continuity_does_not_restore_the_sources_library_mutation_lock(tmp_path):
+    from workers_projects_runtime.native_continuity import capture_state, prepare_restored_state
+
+    database, source, _, _ = _personal_library_state(tmp_path)
+    snapshot = tmp_path / 'snapshot'
+    capture_state(database, snapshot)
+    assert not list(snapshot.rglob('.xperfect-files.lock'))
+    root = next((snapshot / 'managed-files').iterdir())
+    lock = root / '.xperfect-files.lock'
+    lock.touch(mode=0o600)
+    with pytest.raises(ValueError, match='source mutation lock'):
+        prepare_restored_state(snapshot, tmp_path / 'restored')
+    source.close()

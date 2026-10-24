@@ -15,7 +15,7 @@ import time
 from threading import get_ident
 from hashlib import sha256
 from collections import deque
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -23,6 +23,7 @@ from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -74,6 +75,7 @@ from .control_plane_models import (
 from .deliverables import (
     NATIVE_IMAGE_SUFFIXES, NATIVE_MEDIA_PREFIX, deliverable_payload,
     is_user_deliverable_relative_path, is_unmodified_user_input, verified_native_file,
+    native_output_delivery_names, native_output_sha256, NativeFileSnapshot,
 )
 from .failure_classification import classify_runtime_error
 from .inference_broker import GlassHiveInferenceBroker, InferenceBrokerError
@@ -129,7 +131,7 @@ from .schedule_mcp import native_schedule_server
 from .coordinator_mcp import native_coordinator_server
 from .peer_collaboration import PeerError
 from .profile_registry import PROFILES, require_worker_profile, UnsupportedWorkerProfileError
-from .service import host_workers_enabled
+from .service import CallbackTransportBusyError, host_workers_enabled
 from .provider_accounts import ProviderSetupManager, provider_platform_support
 from .native_api_keys import NativeApiKeyManager, enabled as native_api_keys_enabled, native_key_account
 from .recurrence import DELEGATED_RECURRENCE_OWNER
@@ -1561,8 +1563,8 @@ def create_app(
             subtitle="Worker terminal",
         )
 
-    def _read_tail(path: Path, max_bytes: int = 16000) -> str:
-        if not path.exists():
+    def _read_tail(path: Path | None, max_bytes: int = 16000) -> str:
+        if path is None or not path.exists():
             return ""
         with path.open("rb") as handle:
             handle.seek(0, 2)
@@ -1577,7 +1579,7 @@ def create_app(
             backend=worker.get("backend"),
         )
 
-    def _log_paths(worker: dict) -> tuple[Path, Path]:
+    def _log_paths(worker: dict, run: dict | None = None) -> tuple[Path | None, Path | None]:
         raw_state_dir = str(worker.get("state_dir") or "").strip()
         if raw_state_dir:
             state_dir = Path(raw_state_dir)
@@ -1587,6 +1589,13 @@ def create_app(
             except (OSError, json.JSONDecodeError):
                 metadata = {}
             if isinstance(metadata, dict):
+                # Startup can fail before a new native session is created. A
+                # previous run or resumed attempt must not become its output.
+                if (run and ("run_id" in metadata or "attempt_id" in metadata)
+                        and (str(metadata.get("run_id") or "") != str(run.get("run_id") or "")
+                             or (run.get("active_attempt_id")
+                                 and metadata.get("attempt_id") != run["active_attempt_id"]))):
+                    return None, None
                 candidate_paths: list[Path] = []
                 safe = True
                 resolved_state_dir = state_dir.resolve(strict=False)
@@ -2618,7 +2627,7 @@ def create_app(
         latest_run = runs[0] if runs else None
         active_run = store.get_active_run(worker_id)
         telemetry_run = active_run or latest_run
-        stdout_path, _stderr_path = _log_paths(worker)
+        stdout_path, _stderr_path = _log_paths(worker, telemetry_run)
         stdout_text = _read_tail(stdout_path)
         telemetry = _telemetry_for_run(worker, telemetry_run, stdout_text)
         show_internal = _can_show_internal_details(ctx)
@@ -2783,7 +2792,7 @@ def create_app(
         latest_run = runs[0] if runs else None
         active_run = store.get_active_run(worker_id)
         telemetry_run = active_run or latest_run
-        stdout_path, stderr_path = _log_paths(worker)
+        stdout_path, stderr_path = _log_paths(worker, telemetry_run)
         stdout_text = _read_tail(stdout_path)
         stderr_text = _read_tail(stderr_path)
         telemetry = _telemetry_for_run(worker, telemetry_run, stdout_text)
@@ -3888,10 +3897,16 @@ def create_app(
                 "code": "callback_association_not_found",
                 "message": "The callback association was not found.",
             })
-        recovered = service.recover_terminal_callback(
-            tenant_id=tenant_id, owner_id=owner_id,
-            **payload.model_dump(),
-        )
+        try:
+            recovered = service.recover_terminal_callback(
+                tenant_id=tenant_id, owner_id=owner_id,
+                **payload.model_dump(),
+            )
+        except CallbackTransportBusyError as exc:
+            raise HTTPException(status_code=503, headers={"Retry-After": "1"}, detail={
+                "code": "callback_transport_busy", "retryable": True,
+                "message": "Callback delivery is busy. Retry shortly.",
+            }) from exc
         response.status_code = 202 if recovered else 200
         response.headers["Cache-Control"] = "no-store"
         return {"state": "delivering" if recovered else "unchanged"}
@@ -4403,7 +4418,9 @@ def create_app(
             current_native_available = True
         except ControlPlaneError:
             current_native_available = False
+        consumers = service.background_consumer_health()
         payload: dict[str, object] = {
+            "background_consumers": consumers,
             "current_native_claude": {"available": current_native_available, "provider": "claude", "execution_mode": "host"},
             "status": "ok",
             "version": app.version,
@@ -4424,6 +4441,9 @@ def create_app(
         }
         if not auth_settings.enterprise:
             payload["metrics"] = store.metrics()
+        if consumers["status"] in {"degraded", "stopping"}:
+            payload["status"] = "degraded"
+            return JSONResponse(status_code=503, content=jsonable_encoder(payload))
         return payload
 
     @app.get("/v1/worker-profiles")
@@ -5515,14 +5535,21 @@ def create_app(
         grant_id: str,
         request: Request,
     ) -> dict[str, object]:
-        _, tenant_id, owner_id = _current_principal(request)
-        worker = require_worker(worker_id, request)
-        revoked = control_plane.revoke_workspace_grant(
-            grant_id=grant_id,
-            tenant_id=tenant_id,
-            owner_id=owner_id,
-            worker_id=worker_id,
-        )
+        ctx, tenant_id, owner_id = _current_principal(request)
+        if ctx.auth_mode == "signed_link" or str(ctx.role or "").lower() == "viewer":
+            raise HTTPException(403, detail="Workspace management access is required")
+        worker = require_worker(worker_id, request, heal=False)
+        with service.files.native_start_guard(worker):
+            if service.files.scope_has_active_run(worker):
+                raise HTTPException(409, detail={"code": "library_worker_busy", "message": "Available when the worker is idle"})
+            revoked = control_plane.revoke_workspace_grant(
+                grant_id=grant_id,
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                worker_id=worker_id,
+            )
+            _cleanup_removed_library_files(worker, revoked, grant_id)
+        revoked["native_effect"] = "next_native_start"
         store.add_event(
             str(worker.get("project_id") or ""),
             worker_id,
@@ -5531,6 +5558,21 @@ def create_app(
             "Workspace capability removed",
         )
         return revoked
+
+    def _cleanup_removed_library_files(worker, receipt, grant_id):
+        removed_files = receipt.get("removed_native_files") or []
+        if not removed_files:
+            return
+        from .bootstrap import remove_projected_library_files
+        try:
+            receipt["native_cleanup"] = remove_projected_library_files(service.files._root(worker),
+                removed_files, service.files.scope_bootstrap_paths(worker))
+        except (ValueError, RuntimeErrorBase, OSError) as exc:
+            receipt["native_cleanup"] = {"state": "unconfirmed", "code": getattr(exc, "code", "native_cleanup_unavailable")}
+            # Upgrade stores the retired grant's same durable removal receipt.
+            # Its existing DELETE can retry cleanup without confirming or upgrading again.
+            receipt["cleanup_retry"] = {"method": "DELETE",
+                "path": f"/v1/workspaces/{worker['worker_id']}/capability-grants/{grant_id}"}
 
     @app.post("/v1/pending-changes", status_code=201)
     def create_pending_change(payload: CreatePendingChangeRequest, request: Request) -> dict[str, object]:
@@ -5619,14 +5661,18 @@ def create_app(
                 tenant_id=tenant_id,
                 owner_id=owner_id,
             )
-            result = control_plane.confirm_pending_change(
-                change_id=change_id,
-                tenant_id=tenant_id,
-                owner_id=owner_id,
-                confirmation_token=payload.confirmation_token,
-            )
-            worker = require_worker(str(pending.get("target_id") or ""), request)
             pending_type = str(pending.get("change_type") or "")
+            worker = require_worker(str(pending.get("target_id") or ""), request, heal=False)
+            with service.files.native_start_guard(worker) if pending_type == "library_upgrade" else nullcontext():
+                if pending_type == "library_upgrade" and service.files.scope_has_active_run(worker):
+                    raise HTTPException(409, detail={"code": "library_worker_busy", "message": "Available when the worker is idle"})
+                result = control_plane.confirm_pending_change(
+                    change_id=change_id, tenant_id=tenant_id, owner_id=owner_id,
+                    confirmation_token=payload.confirmation_token)
+                applied = result.get("applied") or {}
+                if pending_type == "library_upgrade":
+                    _cleanup_removed_library_files(worker, applied, str(applied.get("replaced_grant_id") or ""))
+                    applied["native_effect"] = "next_native_start"
             if pending_type == "workspace_provider_account":
                 event_type = "workspace.provider_account_changed"
                 event_summary = "Workspace account selection changed for future runs"
@@ -6826,16 +6872,36 @@ def create_app(
         fallback = relative.name
         if relative.parent.parent != NATIVE_MEDIA_PREFIX:
             return fallback
+        run = store.get_run(relative.parent.name, tenant_id=str(worker.get("tenant_id") or "local"))
+        if not run or run.get("worker_id") != worker.get("worker_id"):
+            return fallback
         delegation = store.get_delegation_for_worker(
             str(worker.get("worker_id") or ""),
             tenant_id=str(worker.get("tenant_id") or "local"),
             owner_id=str(worker.get("owner_id") or ""),
         )
-        if not delegation:
-            return fallback
-        run = store.get_run(relative.parent.name, tenant_id=str(worker.get("tenant_id") or "local"))
         selected = [file for file in _mission_result_file_metadata(worker, run, delegation)
-                    if file["artifact_path"] == relative]
+                    if file["artifact_path"] == relative] if delegation else []
+        if not selected:
+            # Ordinary Chat workers have no mission callback. Their native capture
+            # already owns the exact selected names, run, attempt and file bytes.
+            resolver = getattr(service.runtime, "provider_native_image_output", None)
+            if callable(resolver):
+                try:
+                    _output, files = resolver(worker, run, "")
+                except (OSError, ValueError, RuntimeErrorBase):
+                    return fallback
+                names = native_output_delivery_names(files)
+                for path, mime, data in files:
+                    digest = native_output_sha256(data)
+                    artifact = NATIVE_MEDIA_PREFIX / run["run_id"] / (
+                        digest + (NATIVE_IMAGE_SUFFIXES.get(mime) or Path(path).suffix or ".bin"))
+                    name = names[(Path(path).name, mime)]
+                    if (artifact != relative or not name or len(name) > 255
+                            or any(ord(char) < 32 or char in "/\\" for char in name)):
+                        continue
+                    selected.append({"path": name, "sha256": digest,
+                                     "size": data.size_bytes if isinstance(data, NativeFileSnapshot) else len(data)})
         if len({file["path"] for file in selected}) != 1:
             return fallback
         file = selected[0]
@@ -7193,6 +7259,10 @@ def create_app(
         )
 
     install_workspace_file_routes(app, service.files, _auth_context, require_worker)
+    from .starter_templates import install_starter_routes
+    install_starter_routes(app, service, _current_principal)
+    from .personal_library_api import install_personal_library_routes
+    install_personal_library_routes(app, service, _auth_context, require_worker)
 
     @app.get("/v1/workers/{worker_id}/artifacts")
     def list_worker_artifacts(

@@ -1450,6 +1450,19 @@ def _host_native_web_access() -> str:
     return mode
 
 
+def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
+    """The same native skill policy governs admission receipts and actual launch."""
+    if execution_mode != "host":
+        return None
+    if _native_tools_disabled(bundle):
+        return "Not available while native tools are disabled"
+    if str(bundle.get("access_mode") or "full").strip().lower() != "full":
+        return "Not available with this worker access policy; native text skills require full access"
+    if _host_native_web_access() == "disabled":
+        return "Not available while native web access is disabled"
+    return None
+
+
 def _host_codex_personality_policy_state() -> str:
     configured = _host_codex_personality()
     if configured != "inherit":
@@ -5749,10 +5762,10 @@ class BaseCliWorkerRuntime:
         return f"{str(configuration['provider_proxy_url']).rstrip('/')}/{provider_path}"
 
     def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
-        """The terminal for exactly this run and attempt: its live session while it runs and its
-        saved output once it has ended. None while it has no session yet, never another run's."""
+        """This exact attempt's live session, or saved output while children settle or after it ends.
+        None while it has no session yet, never another run's."""
         run_id = str(run.get("run_id") or "").strip()
-        if str(run.get("state") or "").strip() in _ENDED_RUN_STATES:
+        if str(run.get("state") or "").strip() in _ENDED_RUN_STATES | {"settling"}:
             return self._saved_run_output_terminal(worker, run)
         attempt_id = str(run.get("active_attempt_id") or "").strip()
         if not run_id or not attempt_id:
@@ -10118,7 +10131,7 @@ _LOCAL_MARKDOWN_CITATION = re.compile(
 )
 _SECRET_REDACTIONS: tuple[RedactionRule, ...] = (
     *CREDENTIAL_REDACTIONS,
-    (re.compile("/Users" + r"/[^/\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
+    (re.compile(r"/Users/[^/\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
     (re.compile(r"/(?:home|root|Volumes|private/var)/[^\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
     (re.compile(r"~/[^\s\"'`]+(?:/[^\s\"'`]*)*"), "[REDACTED_LOCAL_PATH]"),
     (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "[REDACTED_AWS_ACCESS_KEY]"),
@@ -15283,9 +15296,9 @@ raise SystemExit(exit_code)
         return None
 
     def run_terminal_target(self, worker: dict, run: dict) -> TerminalTarget | None:
-        """This exact run's host session, or its saved output once ended; None until it starts."""
+        """This exact run's host session, or saved output while children settle or after it ends."""
         run_id = str(run.get("run_id") or "").strip()
-        if str(run.get("state") or "").strip() in _ENDED_RUN_STATES:
+        if str(run.get("state") or "").strip() in _ENDED_RUN_STATES | {"settling"}:
             return self._saved_run_output_terminal(worker, run)
         attempt_id = str(run.get("active_attempt_id") or "").strip()
         if not run_id or not attempt_id:
@@ -15867,6 +15880,16 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
             str(bundle.get("declared_developer_instruction_tail") or ""),
         )
 
+    def _native_codex_session_home(self, worker: dict) -> Path:
+        """Read native history from the same validated home used by the command.
+
+        Worker policy stays private to the worker. A selected account owns its
+        login and session ledger; it must also own authority reconciliation.
+        """
+        env = {"CODEX_HOME": str(self._host_codex_home(worker))}
+        apply_bound_provider_account_environment(worker, env, runtime_name=self.runtime_name)
+        return Path(env["CODEX_HOME"])
+
     def _prepare_conversation_authority_command(
         self, worker: dict, command: list[str], *, run_root: Path,
         timeout_sec: float | None,
@@ -15885,13 +15908,14 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
         epoch = self._bootstrap_env_value(worker, GLASSHIVE_PROVIDER_SESSION_EPOCH_ENV)
         try:
             current = self._authority_units(worker)
+            session_home = self._native_codex_session_home(worker)
             state = codex_authority.session_state(codex_authority.read_json(manifest_path), session, epoch)
-            state = codex_authority.reconcile(self._host_codex_home(worker), session, current, state,
+            state = codex_authority.reconcile(session_home, session, current, state,
                 full_authority=str(self._bootstrap_bundle_for_worker(worker).get("developer_instructions") or ""))
             if not codex_authority.missing_units(current, state):
                 codex_authority.save_state(manifest_path, session, epoch, state)
                 return command
-        except (codex_authority.AuthorityUnconfirmed, OSError, ValueError) as exc:
+        except (codex_authority.AuthorityUnconfirmed, OSError, ValueError, RuntimeErrorBase) as exc:
             raise RuntimeErrorBase("Native developer authority cannot be reconciled") from exc
         deadline = time.monotonic() + (timeout_sec if timeout_sec else 8)
         response_deadline = str(worker.get("_provider_response_deadline_at") or "")
@@ -15902,7 +15926,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
         _atomic_write_private_text(context_path, json.dumps({
             "authority": str(self._bootstrap_bundle_for_worker(worker).get("developer_instructions") or ""),
             "declared_tail": current["dynamic"], "session": session, "epoch": epoch,
-            "manifest_path": str(manifest_path), "codex_home": str(self._host_codex_home(worker)),
+            "manifest_path": str(manifest_path), "codex_home": str(session_home),
             "binary": self.binary, "command": command, "deadline_monotonic": deadline,
             "receipt_path": str(run_root / "native-provider-authority-receipt.json"),
             "failure_path": str(run_root / "native-authority-failure.json"),
@@ -15920,7 +15944,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
         try:
             current = self._authority_units(worker)
             state = codex_authority.session_state(codex_authority.read_json(path), session_key, epoch)
-            state = codex_authority.reconcile(self._host_codex_home(worker), session_key, current, state,
+            state = codex_authority.reconcile(self._native_codex_session_home(worker), session_key, current, state,
                 full_authority=str(self._bootstrap_bundle_for_worker(worker).get("developer_instructions") or ""))
             if codex_authority.missing_units(current, state):
                 return  # thread.started can precede the persisted initial developer frame
@@ -15934,7 +15958,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
                     "delivered_stable_sha256": state["delivered"]["stable"],
                     "delivered_dynamic_sha256": state["delivered"]["dynamic"],
                 })
-        except (codex_authority.AuthorityUnconfirmed, OSError, ValueError):
+        except (codex_authority.AuthorityUnconfirmed, OSError, ValueError, RuntimeErrorBase):
             # The next serialized turn must reconcile or inject; never claim delivery here.
             return
 
@@ -15983,7 +16007,11 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
             for key, value in source_env.items()
             if key in allowed_env or key.startswith("LC_")
         }
-        env["CODEX_HOME"] = str(self._host_codex_home(worker))
+        try:
+            env["CODEX_HOME"] = str(self._native_codex_session_home(worker))
+        except RuntimeErrorBase:
+            # A public worker snapshot cannot borrow an account's native ledger.
+            return None
         process: subprocess.Popen[str] | None = None
         reader: Thread | None = None
         messages: queue.Queue[dict[str, object] | None] = queue.Queue()
@@ -16507,6 +16535,85 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             body, message_id=identity, timeout=0)
     binary_env_var = "WPR_CLAUDE_CODE_BIN"
 
+    def _declared_skill_plugin_directories(self, bundle: dict, workspace: Path) -> list[Path]:
+        """Select exact approved text folders through Claude's native root-skill layout.
+
+        Bootstrap file authority already owns these bytes. Library labels and source
+        references confer no authority. A plugin selector must not turn supporting
+        files into additional native hooks, configuration, tools or executables.
+        """
+        from .bootstrap import _sandbox_parent_descriptor
+
+        groups: dict[Path, dict[Path, bytes]] = {}
+        for entry in bundle.get("files", []):
+            if not isinstance(entry, dict) or entry.get("scope", "workspace") != "workspace":
+                continue
+            path = Path(str(entry.get("path") or ""))
+            if (path.is_absolute() or ".." in path.parts or len(path.parts) < 4
+                    or path.parts[:2] != (".claude", "skills")):
+                continue
+            if (not isinstance(entry.get("content"), str) or entry.get("source_path")
+                    or entry.get("managed_upload_id") or entry.get("content_base64")
+                    or str(entry.get("encoding") or "").lower() == "base64"):
+                continue
+            root = Path(*path.parts[:3])
+            relative = path.relative_to(root)
+            content = entry["content"].encode("utf-8")
+            files = groups.setdefault(root, {})
+            if relative in files and files[relative] != content:
+                raise RuntimeErrorBase("Claude native skill files contain conflicting declarations")
+            files[relative] = content
+
+        # Documented native plugin defaults, not names inferred from skill text.
+        # These locations can add authority or displace the single root skill.
+        components = {".claude-plugin", "skills", "commands", "agents", "hooks",
+                      ".mcp.json", ".lsp.json", "output-styles", "workflows",
+                      "themes", "monitors", "bin", "settings.json"}
+        selected = []
+        for root, files in sorted(groups.items()):
+            if Path("SKILL.md") not in files:
+                continue
+            if any(path.parts[0].casefold() in components for path in files):
+                raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
+            expected = set(files)
+            expected_dirs = {parent for path in files for parent in path.parents}
+            actual = set()
+            try:
+                for parent in (workspace, workspace / ".claude", workspace / ".claude/skills", workspace / root):
+                    metadata = parent.lstat()
+                    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+                        raise PermissionError("Skill directories must be owned regular directories")
+                for directory, directories, filenames in os.walk(workspace / root, followlinks=False):
+                    relative_dir = Path(directory).relative_to(workspace / root)
+                    if relative_dir not in expected_dirs:
+                        raise PermissionError("Undeclared skill directory")
+                    for name in directories:
+                        child = Path(directory) / name
+                        metadata = child.lstat()
+                        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+                            raise PermissionError("Skill directories must be owned regular directories")
+                    actual.update(relative_dir / name for name in filenames)
+                if actual != expected:
+                    raise PermissionError("Skill files differ from their declaration")
+                for relative, content in files.items():
+                    with _sandbox_parent_descriptor(workspace, root / relative) as (parent, name):
+                        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                        try:
+                            metadata = os.fstat(descriptor)
+                            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                                    or metadata.st_uid != os.getuid()):
+                                raise PermissionError("Skill files must be owned regular unlinked files")
+                            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                                actual_content = source.read(len(content) + 1)
+                            if hashlib.sha256(actual_content).digest() != hashlib.sha256(content).digest():
+                                raise PermissionError("Skill file content has changed")
+                        finally:
+                            os.close(descriptor)
+            except (OSError, ValueError) as exc:
+                raise RuntimeErrorBase("Claude native skill files are unavailable or changed; review them before retrying") from exc
+            selected.append(workspace / root)
+        return selected
+
     def _host_workspace_dir(self, worker: dict) -> Path:
         if _native_tools_disabled(self._bootstrap_bundle_for_worker(worker)):
             workspace = self._state_dir(str(worker["worker_id"])) / "conversation-workspace"
@@ -17000,6 +17107,20 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 )
         if selectors is not None:
             command = apply_claude_context(command, selectors)
+        if host_claude_skill_policy_reason(bundle) is None:
+            skills = self._declared_skill_plugin_directories(bundle, Path(str(info.workspace_dir)))
+            if skills:
+                if not self._help_supports("--plugin-dir"):
+                    raise RuntimeDependencyMissingError(
+                        "Claude Code does not advertise the native skill directory selector.",
+                        binary=self.binary, runtime_name=self.runtime_name,
+                        profile=str(worker.get("profile") or "claude-code"), execution_mode="host",
+                        dependency_label="Claude Code", recovery_hint="Update Claude Code, then retry the same request.",
+                    )
+                if "--setting-sources" not in command:
+                    command.extend(["--setting-sources", ""])
+                for directory in skills:
+                    command.extend(["--plugin-dir", str(directory)])
         return command, env
 
 

@@ -456,6 +456,13 @@ class WorkspaceFiles:
 
     def _logical_usage(self, conn, tenant_id: str, owner_id: str) -> tuple[int, int]:
         used = logical_bytes(self._roots(tenant_id, owner_id))
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='personal_library_versions'").fetchone():
+            # Inline native text packages use this same owner quota. Ordinary
+            # Library knowledge bytes are already counted in canonical Files.
+            used += conn.execute(
+                "SELECT COALESCE(SUM(LENGTH(CAST(v.payload_json AS BLOB))),0) FROM personal_library_versions v JOIN personal_library_items i ON i.item_id=v.item_id WHERE i.tenant_id=? AND i.owner_id=?",
+                (tenant_id, owner_id),
+            ).fetchone()[0]
         reserved = conn.execute(
             "SELECT COALESCE(SUM(MAX(0,size_bytes-received_bytes)),0) FROM workspace_file_uploads WHERE tenant_id=? AND owner_id=? AND state IN ('pending','receiving')",
             (tenant_id, owner_id),
@@ -1116,6 +1123,16 @@ class WorkspaceFiles:
                 return True
         return False
 
+    def scope_bootstrap_paths(self,worker:dict) -> list[dict]:
+        """Native cleanup must keep paths still declared in this physical scope."""
+        worker=self._scope_worker(worker)
+        key=self._workspace_key(worker)
+        paths=set()
+        for member in self.store.list_all_workers():
+            if member.get("tenant_id")==worker["tenant_id"] and member.get("owner_id")==worker["owner_id"] and self._workspace_key(self._scope_worker(member))==key:
+                paths.update(entry["path"] for entry in json.loads(member.get("bootstrap_bundle_json") or "{}").get("files",[]) if isinstance(entry,dict) and isinstance(entry.get("path"),str))
+        return [{"path":path} for path in sorted(paths)]
+
     @staticmethod
     def _workspace_key(worker: dict) -> str:
         # Logical workspace membership never implies a common physical root.
@@ -1668,7 +1685,7 @@ def materialize_managed_file(
     import fcntl
     from .workspace_file_storage import resolve_projection_control
 
-    adapter, item, receipt = resolve_projection_control(entry, worker, root)
+    adapter, item, receipt, completed_only = resolve_projection_control(entry, worker, root)
     tenant, owner = str(worker.get("tenant_id") or "local"), str(worker.get("owner_id") or "")
     if adapter.backend is not None:
         with adapter.files.store._connect() as conn:
@@ -1682,8 +1699,12 @@ def materialize_managed_file(
         if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1:
             raise FileAdmissionError("Projection control lock is invalid", 503)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if completed_only and not (receipt.exists() or receipt.is_symlink()):
+            raise FileAdmissionError("Completed file projection receipt is unavailable", 409)
         if adapter.completed(tenant, owner, item):
             return
+        if completed_only:
+            raise FileAdmissionError("Completed file projection receipt is unavailable", 409)
         trusted_worker = adapter.files._worker(str(worker["worker_id"]), tenant, owner)
         # A native member's worktree grants that member an inherited ACL. Stage
         # beside the accepted upload when it shares the destination filesystem,

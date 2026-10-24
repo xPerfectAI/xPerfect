@@ -70,14 +70,45 @@ def authorized_sources(store, peers, worker):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_goals'"
         ).fetchone()
         turns = []
+        originating_user_turns = set()
+        latest_user_turns = set()
         if exists:
             turns = conn.execute(
-                """SELECT DISTINCT c.conversation_id,t.turn_id,t.message,t.response_json
+                """SELECT DISTINCT c.conversation_id,t.turn_id,t.message,t.response_json,t.origin
             FROM coordinator_goals g JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id
             JOIN runs r ON r.run_id=g.run_id JOIN coordinator_turns t ON t.conversation_id=c.conversation_id
-            WHERE r.worker_id=? AND c.tenant_id=? AND c.owner_id=? ORDER BY t.created_at,t.turn_id""",
-                (worker["worker_id"], worker["tenant_id"], worker["owner_id"]),
+            WHERE r.worker_id=? AND c.tenant_id=? AND c.owner_id=?
+            AND (g.work_ref<>'' OR g.run_id=?) ORDER BY t.created_at,t.turn_id""",
+                (worker["worker_id"], worker["tenant_id"], worker["owner_id"], worker.get("_context_run_id", "")),
             ).fetchall()
+            origins = conn.execute(
+                """SELECT DISTINCT c.conversation_id,t.created_at,t.turn_id
+                FROM coordinator_goals g
+                JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id
+                JOIN coordinator_turns t ON t.conversation_id=c.conversation_id AND t.turn_id=g.source_turn_id
+                JOIN runs r ON r.run_id=g.run_id
+                WHERE r.worker_id=? AND c.tenant_id=? AND c.owner_id=? AND (g.work_ref<>'' OR g.run_id=?)""",
+                (worker["worker_id"], worker["tenant_id"], worker["owner_id"], worker.get("_context_run_id", "")),
+            ).fetchall()
+            for origin in origins:
+                # A goal may be accepted on a result turn. Its originating user
+                # remains the latest interactive turn at or before that event.
+                user = conn.execute(
+                    """SELECT turn_id FROM coordinator_turns
+                    WHERE conversation_id=? AND origin='interactive'
+                    AND (created_at<? OR (created_at=? AND turn_id<=?))
+                    ORDER BY created_at DESC,turn_id DESC LIMIT 1""",
+                    (origin["conversation_id"], origin["created_at"], origin["created_at"], origin["turn_id"]),
+                ).fetchone()
+                if user:
+                    originating_user_turns.add((origin["conversation_id"], user["turn_id"]))
+            for conversation_id in {turn["conversation_id"] for turn in turns}:
+                user = conn.execute(
+                    """SELECT turn_id FROM coordinator_turns WHERE conversation_id=? AND origin='interactive'
+                    ORDER BY created_at DESC,turn_id DESC LIMIT 1""", (conversation_id,),
+                ).fetchone()
+                if user:
+                    latest_user_turns.add((conversation_id, user["turn_id"]))
     for turn in turns:
         prefix = f"conversation:{turn['conversation_id']}:{turn['turn_id']}"
         result.append(
@@ -85,6 +116,9 @@ def authorized_sources(store, peers, worker):
                 "id": prefix + ":user",
                 "label": "Conversation message",
                 "kind": "conversation",
+                "inline_priority": 0 if (turn["conversation_id"], turn["turn_id"]) in originating_user_turns
+                else 1 if (turn["conversation_id"], turn["turn_id"]) in latest_user_turns
+                else 2 if turn["origin"] == "interactive" else 3,
                 "text": turn["message"],
             }
         )
@@ -97,6 +131,7 @@ def authorized_sources(store, peers, worker):
                         "id": prefix + f":assistant:{index}",
                         "label": "Conversation reply",
                         "kind": "conversation",
+                        "inline_priority": 3,
                         "text": content,
                     }
                 )

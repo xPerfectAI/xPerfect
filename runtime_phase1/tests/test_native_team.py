@@ -342,8 +342,8 @@ def test_service_persists_native_session_capability_child_summary_and_structured
         worker["worker_id"],
         project["project_id"],
         "Do work",
-        state=RunRestorationState.RUNNING,
     )
+    run = _invoke_test_run(store, worker, run, executor_id="native-persistence-owner")
     service = WorkersProjectsService(
         store,
         StubRuntime(),
@@ -355,6 +355,7 @@ def test_service_persists_native_session_capability_child_summary_and_structured
             {
                 "worker_id": worker["worker_id"],
                 "run_id": run["run_id"],
+                "attempt_id": run["active_attempt_id"],
                 "provider": "codex",
                 "event": {
                     "event_type": "provider.session.started",
@@ -372,6 +373,7 @@ def test_service_persists_native_session_capability_child_summary_and_structured
             {
                 "worker_id": worker["worker_id"],
                 "run_id": run["run_id"],
+                "attempt_id": run["active_attempt_id"],
                 "provider": "codex",
                 "event": {
                     "event_type": "provider.child.started",
@@ -857,7 +859,7 @@ def test_docker_native_child_projection_holds_root_in_bounded_settling(
     stopped.set()
     try:
         runtime._observe_native_session_events(
-            worker["worker_id"], stdout, stopped, run["run_id"]
+            worker["worker_id"], stdout, stopped, run["run_id"], run["active_attempt_id"]
         )
         expected_state = service._settle_native_children(
             worker, run, "Docker root result"
@@ -871,3 +873,105 @@ def test_docker_native_child_projection_holds_root_in_bounded_settling(
     assert durable["state"] == "settling"
     assert summary["degraded"] is True
     assert summary["lostChildRefs"] == ["docker-child-live"]
+
+
+@pytest.fixture
+def native_attempt(tmp_path):
+    store = Store(str(tmp_path / 'native-attempt.db'))
+    project = store.create_project('owner', 'Native work', 'Finish the work', 'claude-code')
+    worker = store.create_worker(project['project_id'], 'owner', 'Worker', 'Review',
+                                 'claude-code', 'claude-code', 'claude-code', 'configured', execution_mode='host')
+    worker = store.update_worker(worker['worker_id'], session_key='saved-native-session')
+    run = store.create_run(worker['worker_id'], project['project_id'], 'Review the input')
+    run = _invoke_test_run(store, worker, run, executor_id='first-executor')
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    yield store, service, worker, run
+    service.shutdown(); store.close()
+
+
+def _observe_attempt(service, worker, run, child='child-current', *, attempt=None, event_type='provider.child.started'):
+    event = _event(event_type, childRef=child, role='reviewer', state='completed' if event_type.endswith('.completed') else 'running')
+    service._observe_native_event({'worker_id':worker['worker_id'], 'run_id':run['run_id'],
+                                  'attempt_id':run['active_attempt_id'] if attempt is None else attempt,
+                                  'provider':'claude', 'event':event})
+
+
+@pytest.mark.parametrize('event_type', ['provider.child.started', 'provider.child.snapshot', 'provider.session.started'])
+@pytest.mark.parametrize('attempt', ['old-attempt', ''])
+def test_native_projection_ignores_old_or_missing_attempt_events(native_attempt, event_type, attempt):
+    store, service, worker, run = native_attempt
+    _observe_attempt(service, worker, run)
+    before = store.get_run(run['run_id'])
+    before_events = store.list_events(worker['worker_id'])
+    payload = {'sessionId':'old-session'} if event_type.endswith('session.started') else {'childRef':'old-child','state':'running'}
+    service._observe_native_event({'worker_id':worker['worker_id'],'run_id':run['run_id'],
+                                  'attempt_id':attempt,'provider':'claude','event':_event(event_type, **payload)})
+    after = store.get_run(run['run_id'])
+    for key in ['native_child_summary_json','native_capabilities_json','native_session_id']:
+        assert after[key] == before[key]
+    assert store.list_events(worker['worker_id']) == before_events
+
+
+def test_new_native_attempt_resets_old_projection_without_changing_worker_session(native_attempt):
+    store, service, worker, run = native_attempt
+    _observe_attempt(service, worker, run, 'old-child')
+    first_lease = store.get_active_host_run_lease_for_run(run['run_id'])
+    store.release_host_run_lease(first_lease['lease_id'], executor_id='first-executor', reason='synthetic-restart')
+    assert store.requeue_run_for_retry(run['run_id'], retry_after='2000-01-01T00:00:00+00:00',
+        error_text='Retry same work', last_retry_class='provider_temporarily_unavailable',
+        expected_attempt_id=run['active_attempt_id'], expected_lease_id=first_lease['lease_id'],
+        expected_executor_id='first-executor', expected_startup_token=first_lease['startup_token'])
+    resumed = _invoke_test_run(store, worker, run, executor_id='second-executor')
+    assert resumed['active_attempt_id'] != run['active_attempt_id']
+    assert resumed['native_session_id'] == ''
+    assert json.loads(resumed['native_child_summary_json']) == {}
+    assert json.loads(resumed['native_capabilities_json']) == {}
+    assert store.get_worker(worker['worker_id'])['session_key'] == 'saved-native-session'
+    _observe_attempt(service, worker, resumed, 'new-child')
+    _observe_attempt(service, worker, resumed, 'old-child', attempt=run['active_attempt_id'])
+    summary = json.loads(store.get_run(run['run_id'])['native_child_summary_json'])
+    assert [c['childRef'] for c in summary['children']] == ['new-child']
+    current_lease = store.get_active_host_run_lease_for_run(run['run_id'])
+    duplicate = store.mark_run_runtime_invoked(run['run_id'], lease_id=current_lease['lease_id'], executor_id='second-executor')
+    assert duplicate['native_child_summary_json'] == store.get_run(run['run_id'])['native_child_summary_json']
+    assert json.loads(duplicate['native_child_summary_json'])['activeCount'] == 1
+
+
+def test_concurrent_current_native_children_are_reduced_without_lost_updates(native_attempt, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Lock
+    store, service, worker, run = native_attempt
+    get_run = store.get_run; barrier = Barrier(2); lock = Lock(); reads = 0
+    def same_initial_snapshot(run_id):
+        nonlocal reads
+        snapshot = get_run(run_id)
+        with lock:
+            reads += 1; first_pair = reads <= 2
+        if first_pair: barrier.wait(timeout=5)
+        return snapshot
+    monkeypatch.setattr(store, 'get_run', same_initial_snapshot)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda child: _observe_attempt(service, worker, run, child), ['child-a','child-b']))
+    summary = json.loads(get_run(run['run_id'])['native_child_summary_json'])
+    assert {c['childRef'] for c in summary['children']} == {'child-a','child-b'}
+    assert summary['activeCount'] == 2
+
+
+@pytest.mark.parametrize('state', ['settling','paused','needs_input'])
+def test_exact_native_child_bookend_is_retained_while_current_attempt_waits(native_attempt, state):
+    store, service, worker, run = native_attempt
+    _observe_attempt(service, worker, run)
+    store.update_run(run['run_id'], state=state)
+    _observe_attempt(service, worker, run, event_type='provider.child.completed')
+    durable = store.get_run(run['run_id'])
+    assert durable['state'] == state
+    assert json.loads(durable['native_child_summary_json'])['activeCount'] == 0
+
+
+def test_terminal_native_run_cannot_be_changed_by_a_late_child_frame(native_attempt):
+    store, service, worker, run = native_attempt
+    _observe_attempt(service, worker, run)
+    store.update_run(run['run_id'], state='completed', output_text='Saved result')
+    before = store.get_run(run['run_id'])
+    _observe_attempt(service, worker, run, 'late-child')
+    assert store.get_run(run['run_id']) == before

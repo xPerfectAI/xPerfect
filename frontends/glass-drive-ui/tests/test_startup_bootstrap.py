@@ -35,6 +35,7 @@ function harness() {
   const workspaceCatalogStatus = {}, templateStartStatus = {}, catalogState = {generation:0, loading:false};
   const form = {classList:{add(name) { this.added = name; }}};
   const launchDraftState = {bindOwner() {}}, fileDraft = {setOwnerScope() {}};
+  const launchLibrary = {setOwnerScope() {}}, mainLibrary = {setAccess() {}}, expertPicker = {update() {}}, signedToken = '';
   const document = {getElementById: () => null};
   const fetchCatalogPage = async () => ({items:[]});
   const decorateCatalogWorkspace = value => value;

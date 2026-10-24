@@ -1,0 +1,127 @@
+/* Shared Library surfaces extend the existing shell, Files transport and native dialogs. */
+.personal-library { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.personal-library[hidden], .personal-library [hidden], .watch-library-pane[hidden] { display: none !important; }
+.personal-library-toolbar { display: flex; align-items: center; gap: 10px; }
+.personal-library-toolbar > input { flex: 1; min-width: 0; }
+.personal-library input:not([type="checkbox"]), .personal-library select,
+.personal-library-dialog input:not([type="checkbox"]), .personal-library-dialog textarea,
+.personal-library-dialog select { width: 100%; box-sizing: border-box; min-height: var(--control-height); padding: 10px 12px; border: 1px solid var(--control-line); border-radius: var(--radius-control); color: var(--text); background-color: var(--control-bg, var(--panel)); font: inherit; }
+.personal-library-dialog textarea { resize: vertical; }
+.personal-library button, .personal-library-dialog button, .personal-library-selected button,
+.watch-library-pane button { cursor: pointer; font: inherit; }
+.personal-library button:disabled, .personal-library-dialog button:disabled { cursor: default; opacity: .55; }
+.personal-library button:focus-visible, .personal-library input:focus-visible,
+.personal-library-dialog button:focus-visible, .personal-library-dialog input:focus-visible,
+.personal-library-dialog textarea:focus-visible, .personal-library-dialog summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.personal-library-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.personal-library-options label, .personal-library-check { display: flex; align-items: center; gap: 9px; font-size: .82rem; color: var(--muted); }
+.personal-library-options input, .personal-library-check input { width: 16px; height: 16px; accent-color: var(--accent); flex: 0 0 16px; }
+.personal-library-add { position: relative; flex: 0 0 auto; }
+.personal-library-add > summary { display: flex; align-items: center; min-height: var(--control-height); padding: 9px 14px; list-style: none; cursor: pointer; border-radius: var(--radius-control); border: 1px solid var(--line); background: var(--control-bg, var(--panel)); font-size: var(--font-label); font-weight: 600; white-space: nowrap; }
+.personal-library-add > summary::-webkit-details-marker { display: none; }
+.personal-library-add-menu {  width: 210px; gap: 3px; padding: 6px; background: var(--overlay-surface, var(--panel)); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow, 0 8px 28px #0003); }
+.personal-library-add-menu button { text-align: left; border: 0; border-radius: 8px; padding: 10px 12px; background: transparent; color: var(--text); font-size: .86rem; }
+.personal-library-add-menu button:hover { background: var(--surface-hover, var(--control-bg)); }
+.personal-library-list { display: grid; align-content: start; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 12px; min-height: 0; }
+.personal-library-item { display: flex; align-items: center; gap: 12px; padding: 15px; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft, var(--control-bg, var(--panel))); }
+.personal-library-item > input[type="checkbox"] { flex: 0 0 17px; width: 17px; height: 17px; accent-color: var(--accent); }
+.personal-library-item:has(> input:checked) { border-color: var(--accent); }
+.personal-library-item-copy { display: grid; gap: 4px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.personal-library-item-copy strong, .personal-library .personal-library-name { font-size: .9rem; font-weight: 650; color: var(--text); text-align: left; }
+.personal-library .personal-library-name { border: 0; background: transparent; padding: 0; line-height: 1.4; cursor: pointer; }
+.personal-library-item-copy small { font-size: var(--font-help); color: var(--muted); line-height: 1.5; }
+.personal-library-item-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: end; max-width: 135px; }
+.personal-library-item button.secondary-button, .personal-library-item-actions button { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--control-bg, var(--panel)); color: var(--text); font-size: .76rem; }
+.personal-library-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: .82rem; color: var(--muted); }
+.personal-library-status, .personal-library-help { font-size: var(--font-help); line-height: 1.6; color: var(--muted); margin: 0; }
+.personal-library-empty { padding: 26px 12px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); font-size: .88rem; grid-column: 1 / -1; }
+.personal-library-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 18px; background: var(--overlay-surface); color: var(--text); box-shadow: var(--shadow-pop, 0 24px 80px #0005); }
+.personal-library-dialog::backdrop { background: #0008; backdrop-filter: blur(5px); }
+.personal-library-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.personal-library-dialog-head h2 { margin: 0; font-size: 1.2rem; letter-spacing: -.025em; }
+.personal-library-close { border: 0; background: transparent; color: var(--text); font-size: 1.5rem !important; padding: 2px 7px; }
+.personal-library-form, .personal-library-form-body { display: grid; gap: 16px; min-width: 0; }
+.personal-library-form-body { padding: 6px; margin: -6px; max-height: calc(100dvh - 220px); overflow: auto; }
+.personal-library-field { display: grid; gap: 7px; min-width: 0; color: var(--text); font-size: .85rem; }
+.personal-library-dialog-actions { display: flex; align-items: center; justify-content: end; gap: 9px; padding-top: 8px; }
+.personal-library-dialog-actions button, .personal-library-footer button { min-height: var(--control-height); border: 1px solid var(--line); border-radius: var(--radius-control); padding: 9px 14px; color: var(--text); background: var(--control-bg, var(--panel)); font-size: var(--font-label); }
+.personal-library-dialog-actions button.primary-button, .personal-library-footer button.primary-button { background: var(--button-bg); color: var(--button-text); border-color: var(--button-bg); font-weight: 600; }
+.personal-library-error { margin: 0; color: var(--danger); font-size: .85rem; }
+.personal-library-picker-dialog[open] { display: flex; flex-direction: column; height: min(720px, calc(100dvh - 32px)); overflow: hidden; }
+.personal-library-picker-dialog .personal-library-dialog-head { flex: 0 0 auto; }
+.personal-library-picker-dialog .personal-library-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.personal-library-picker { display: flex; flex-direction: column; flex: 1; min-height: 0; max-height: none; overflow: auto; }
+.personal-library-picker-dialog .personal-library-footer { flex: 0 0 auto; }
+.personal-library-picker-dialog .personal-library-footer .personal-library-dialog-actions { padding-top: 0; }
+.personal-library-picker .personal-library-toolbar, .personal-library-picker .personal-library-options, .personal-library-picker .personal-library-footer { flex-shrink: 0; }
+.personal-library-picker .personal-library-list { padding: 5px; margin: -5px; overflow: auto; flex: 1; grid-template-columns: 1fr; }
+.personal-library-source, .personal-library-note { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--control-bg, var(--panel)); color: var(--text); font-size: .82rem; line-height: 1.6; }
+.personal-library-version { border: 1px solid var(--line); border-radius: 9px; padding: 10px; color: var(--text); background: var(--control-bg, var(--panel)); text-align: left; }
+.personal-library-selection { min-width: 0; }
+.personal-library-selection > ul { display: grid; gap: 7px; padding: 0; margin: 10px 0 0; list-style: none; }
+.personal-library-selection > ul:empty { display: none; }
+.personal-library-selected { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; font-size: .83rem; }
+.personal-library-selected button { border: 0; background-color: transparent; color: var(--muted); font-size: .78rem; }
+.library-native-details > summary, #approved-library-details > summary { cursor: pointer; font-size: .92rem; font-weight: 600; }
+.library-native-details[open] > summary, #approved-library-details[open] > summary { margin-bottom: 18px; }
+.watch-files-panel:has(.watch-library-tabs) { display: flex; flex-direction: column; overflow: hidden; }
+.watch-library-tabs { display: flex; gap: 4px; padding: 4px; background: var(--control-bg); border: 1px solid var(--line); border-radius: 10px; flex-shrink: 0; }
+.watch-library-tabs button { border: 0; border-radius: 7px; padding: 8px 10px; background: transparent; color: var(--muted); font-size: .8rem; }
+.watch-library-tabs button[aria-selected="true"] { color: var(--text); background-color: var(--surface-hover, var(--panel)); box-shadow: inset 0 0 0 1px var(--accent); }
+.watch-library-pane { display: grid; align-content: start; gap: 12px; overflow: auto; min-height: 0; flex: 1; }
+.watch-library-pane .personal-library { height: 100%; min-height: 0; }
+.watch-library-pane .personal-library-list { grid-template-columns: 1fr; overflow: auto; flex: 1; }
+.watch-library-pane .personal-library-toolbar, .watch-library-pane .personal-library-options, .watch-library-pane .personal-library-footer { flex-shrink: 0; }
+.watch-files-head { flex-shrink: 0; }
+.personal-library-dialog .project-file-list { padding: 0; list-style: none; display: grid; gap: 8px; }
+.personal-library-dialog .file-row { display: flex; gap: 8px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 9px; font-size: .82rem; }
+.personal-library-dialog .file-drop { border: 1px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); font-size: .85rem; cursor: pointer; }
+@media (max-width: 600px) { .personal-library-dialog { padding: 18px; } .personal-library-list { grid-template-columns: 1fr; } .personal-library-toolbar { gap: 7px; } .personal-library-add > summary { padding-inline: 10px; } .watch-library-tabs button { flex: 1; padding-inline: 6px; } .personal-library-item { padding: 12px; } }
+
+/* One approachable abilities browser, shared by the main view and worker pickers. */
+.personal-library-options { align-items: start; }
+.personal-library-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.library-filter-group { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; background: var(--control-bg); border: 1px solid var(--line); border-radius: 11px; }
+.library-filter-group button { border: 0; border-radius: 8px; padding: 7px 10px; color: var(--muted); background: transparent; font-size: .78rem; white-space: nowrap; }
+.library-filter-group button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent), 0 1px 3px #0001; }
+.library-ability-icon { display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+.library-ability-icon svg { width: 24px; height: 24px; }
+.personal-library-item { align-items: start; padding: 19px 16px; gap: 12px; border-radius: 16px; background: var(--panel); transition: border-color .15s ease, box-shadow .15s ease; }
+.personal-library-item:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 3px 12px #00000005; }
+.personal-library-item > input[type="checkbox"] { margin-top: 13px; }
+.personal-library-item-copy { gap: 6px; }
+.library-ability-purpose { margin: 2px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.personal-library-item .file-row-menu { flex: 0 0 auto; }
+.personal-library-item .file-row-menu > summary { border: 0; background: transparent; width: 30px; min-height: 30px; }
+.watch-files-panel { box-sizing: border-box; min-width: 0; }
+.watch-library-pane .personal-library-list { grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); align-content: start; }
+.personal-library-picker .personal-library-list { grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); }
+.library-resize-handle { position: absolute; z-index: 20; top: 16px; bottom: 16px; left: 0; width: 14px; cursor: col-resize; touch-action: none; border-radius: 8px; }
+.library-resize-handle::after { content: ''; position: absolute; width: 3px; height: 48px; top: 50%; left: 5px; transform: translateY(-50%); border-radius: 4px; background: var(--line); transition: background .15s ease; }
+.library-resize-handle:hover::after, .library-resize-handle:focus-visible::after, .library-is-resizing .library-resize-handle::after { background: var(--accent); }
+.library-resize-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.library-is-resizing { user-select: none; }
+#library-view .section-kicker { color: var(--muted); }
+#library-view .library-request-card { background: transparent; border: 0; box-shadow: none; padding: 0; }
+#library-view .library-request-card .section-kicker { display: none; }
+#library-view .library-request-card h2 { font-size: 1.1rem; }
+#library-view .library-request-card p { max-width: 62ch; line-height: 1.6; }
+@media (max-width: 600px) {
+  .library-resize-handle { display: none; }
+  .personal-library-options { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
+  .personal-library-filters { display: contents; }
+  .library-filter-group:first-child { grid-area: 1 / 1; justify-self: start; }
+  .personal-library-options > button { grid-area: 1 / 2; }
+  .library-filter-group:last-child { grid-area: 2 / 1 / auto / -1; flex-wrap: nowrap; }
+  .library-filter-group:last-child button { flex: 1; padding-inline: 6px; white-space: normal; text-wrap: balance; }
+  .personal-library-item { padding: 14px 12px; }
+}
+@media (max-width: 400px) {
+  .personal-library-picker .library-ability-icon, .watch-library-pane .library-ability-icon { display: none; }
+  .library-filter-group:first-child button { padding-inline: 4px; }
+  .personal-library-picker-dialog .personal-library-footer button { padding-inline: 10px; }
+}
+@media (max-height: 560px) {
+  .personal-library-picker .personal-library-list { flex: 0 0 auto; overflow: visible; }
+}
+@media (prefers-reduced-motion: reduce) { .personal-library-item, .library-resize-handle::after { transition: none; } }

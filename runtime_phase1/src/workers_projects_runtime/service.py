@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import shutil
+import sqlite3
 import stat
 import time
 import uuid
@@ -23,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event, Lock, Thread, Timer, current_thread
+from threading import Event, Lock, RLock, Thread, Timer, current_thread
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -34,6 +35,7 @@ from .run_notifications import RunNotifications
 from .peer_collaboration import PeerCollaboration
 from .auth import multi_user_security_enabled
 from .bootstrap import GLASSHIVE_PROVIDER_SESSION_MODE_ENV
+from .run_evidence import RUN_EVIDENCE_DIR_NAME
 
 from .deliverables import (
     is_unmodified_user_input,
@@ -44,7 +46,7 @@ from .deliverables import (
     is_valid_professional_artifact,
     native_media_observations,
     NATIVE_MEDIA_PREFIX, NATIVE_IMAGE_SUFFIXES, _publish_native_media, _native_media_snapshot,
-    NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256,
+    NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256, native_output_delivery_names,
     NATIVE_MARKDOWN_LINK_OR_ESCAPE,
 )
 from .control_plane import (
@@ -497,6 +499,10 @@ class _WorkerLifecycleGuard:
             self._released = True
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
             self._handle.close()
+
+
+class NativeFilePublicationUnavailable(RuntimeErrorBase):
+    """Selected native files cannot be published under this exact request authority."""
 
 
 class ParallelExecutionIsolationError(RuntimeError):
@@ -1072,6 +1078,10 @@ def _workspace_native_skill_path(relative_path: Path) -> bool:
 
 
 def _workspace_duplicate_path_is_excluded(relative_path: Path) -> bool:
+    # The workspace-root evidence tree belongs to the runtime. A nested project
+    # directory with the same basename is still ordinary project context.
+    if relative_path.parts and relative_path.parts[0].casefold() == RUN_EVIDENCE_DIR_NAME:
+        return True
     # A copied expert keeps its ordinary native skill files. The rest of the Claude project
     # folder (settings, credentials, session state) stays excluded, and the ordinary name
     # exclusions below still apply inside the skills folder.
@@ -1537,6 +1547,19 @@ def native_parallel_policy_enabled() -> bool:
         and _env_truthy("GLASSHIVE_PROVIDER_ALLOW_FULL_ACCESS")
     )
 
+
+def standalone_coordinator_host_enabled() -> bool:
+    """Local xPerfect uses ordinary owner host admission, not a client policy grant."""
+    return (
+        os.environ.get("GLASSHIVE_SECURITY_MODE") == "local"
+        and os.environ.get("GLASSHIVE_AUTH_MODE") == "local"
+        and os.environ.get("WPR_DEFAULT_EXECUTION_MODE") == "host"
+        and not os.environ.get("XPERFECT_EXECUTION_PROFILE", "").strip()
+        and not os.environ.get("VIVENTIUM_PARALLEL_WORK_EXECUTION_MODE", "").strip()
+        and not isolated_parallel_policy_enabled()
+        and host_workers_enabled()
+    )
+
 class HostWorkersDisabledError(RuntimeError):
     pass
 
@@ -1793,7 +1816,20 @@ def _required_capability_servers(bundle: dict | None) -> list[str]:
 _SHARED_GRANT_WAITER_OWNER = object()
 
 
+class CallbackTransportBusyError(RuntimeError):
+    """Transient HTTP capacity, not a changed callback recovery decision."""
+
+
 class WorkersProjectsService:
+    @property
+    def personal_library(self):
+        """Lazy owner-private references over this service's canonical Files store."""
+        with self._personal_library_lock:
+            if not hasattr(self, "_personal_library"):
+                from .personal_library import PersonalLibrary
+                self._personal_library = PersonalLibrary(self)
+            return self._personal_library
+
     def __init__(
         self,
         store: Store,
@@ -1806,6 +1842,7 @@ class WorkersProjectsService:
         start_background_consumers: bool = True,
     ) -> None:
         self.store = store
+        self._personal_library_lock = RLock()
         self.peers = PeerCollaboration(store, self)
         self.runtime = runtime
         configure_workspaces = getattr(runtime, "configure_execution_workspaces", None)
@@ -1943,6 +1980,7 @@ class WorkersProjectsService:
         self._isolated_readiness_thread: Thread | None = None
         self._background_consumer_lifecycle_lock = Lock()
         self._background_consumers_started = False
+        self._required_background_consumers: dict[str, Thread] = {}
         self._background_consumers_enabled = _background_consumers_enabled()
         if reconcile_on_startup is None:
             reconcile_on_startup = _reconcile_on_startup_enabled()
@@ -2002,6 +2040,7 @@ class WorkersProjectsService:
                 name="wpr-callback-retry",
                 daemon=True,
             )
+            self._required_background_consumers["callback_retry"] = self._callback_retry_thread
             self._callback_retry_thread.start()
             if self._lifecycle_reaper_enabled():
                 self._idle_reaper_thread = Thread(
@@ -2009,18 +2048,21 @@ class WorkersProjectsService:
                     name="wpr-idle-reaper",
                     daemon=True,
                 )
+                self._required_background_consumers["idle_reaper"] = self._idle_reaper_thread
                 self._idle_reaper_thread.start()
             self._scheduler_thread = Thread(
                 target=self._scheduler_loop,
                 name="wpr-scheduler",
                 daemon=True,
             )
+            self._required_background_consumers["scheduler"] = self._scheduler_thread
             self._scheduler_thread.start()
             self._host_lease_heartbeat_thread = Thread(
                 target=self._host_lease_heartbeat_loop,
                 name="wpr-host-lease-heartbeat",
                 daemon=True,
             )
+            self._required_background_consumers["host_lease_heartbeat"] = self._host_lease_heartbeat_thread
             self._host_lease_heartbeat_thread.start()
             if callable(
                 getattr(self.runtime, "refresh_isolated_parallel_readiness", None)
@@ -2030,10 +2072,31 @@ class WorkersProjectsService:
                     name="wpr-isolated-readiness",
                     daemon=True,
                 )
+                self._required_background_consumers["isolated_readiness"] = self._isolated_readiness_thread
                 self._isolated_readiness_thread.start()
             if self.store.has_compute_release_claims():
                 self.executor.submit(self.recover_expired_compute_release_claims_once)
             self._background_consumers_started = True
+
+    def background_consumer_health(self) -> dict[str, object]:
+        """Inspect periodic owners without treating finite startup recovery as a daemon."""
+        with self._background_consumer_lifecycle_lock:
+            if not self._background_consumers_enabled:
+                return {"status": "disabled", "consumers": {}}
+            if self._shutdown_event.is_set():
+                return {"status": "stopping", "consumers": {}}
+            if not self._background_consumers_started:
+                return {"status": "not_started", "consumers": {}}
+            consumers = {
+                name: "running" if thread.is_alive() else "stopped"
+                for name, thread in self._required_background_consumers.items()
+            }
+            recovery = self._startup_recovery_thread
+            return {
+                "status": "ok" if all(state == "running" for state in consumers.values()) else "degraded",
+                "consumers": consumers,
+                "startup_recovery": "running" if recovery is not None and recovery.is_alive() else "finished",
+            }
 
     def release_owned_host_run_leases(
         self, *, reason: str = MANAGED_SHUTDOWN_LEASE_RELEASE_REASON
@@ -2282,7 +2345,11 @@ class WorkersProjectsService:
         self.begin_shutdown()
         # Stop owned running generations before releasing their dispatch fences. Unknown
         # termination keeps the exact lease for startup reconciliation to prove safe later.
-        self.release_owned_host_run_leases()
+        cleanup_errors = []
+        try:
+            self.release_owned_host_run_leases()
+        except Exception as exc:
+            cleanup_errors.append(("Owned run lease cleanup remains unconfirmed", exc))
         close_native_warm = getattr(self.runtime, "close_native_warm", None)
         native_warm_cleanup_error = None
         if callable(close_native_warm):
@@ -2295,7 +2362,10 @@ class WorkersProjectsService:
             self._run_local_grant_waiters.clear()
             self._run_local_grant_claimants.clear()
             self._run_local_bundles_lock.notify_all()
-        self.store.release_active_work_action_leases(self._executor_id)
+        try:
+            self.store.release_active_work_action_leases(self._executor_id)
+        except Exception as exc:
+            cleanup_errors.append(("Active work action lease cleanup remains unconfirmed", exc))
         self._scheduler_wake_event.set()
         background_threads = tuple(
             thread
@@ -2328,7 +2398,9 @@ class WorkersProjectsService:
         self.executor.shutdown(wait=True, cancel_futures=False)
         self.conversation_executor.shutdown(wait=True, cancel_futures=False)
         if native_warm_cleanup_error is not None:
-            raise RuntimeError("Native idle process cleanup remains unconfirmed") from native_warm_cleanup_error
+            cleanup_errors.append(("Native idle process cleanup remains unconfirmed", native_warm_cleanup_error))
+        if cleanup_errors:
+            raise RuntimeError("; ".join(message for message, _ in cleanup_errors)) from cleanup_errors[0][1]
 
     def set_provider_request_reconciler(
         self,
@@ -2585,7 +2657,11 @@ class WorkersProjectsService:
             attempts=attempts,
             payload_json=payload_json,
             last_error=reason,
+            retry_delay_seconds=min(300.0, _bounded_float_env(
+                "GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S", 0.5, min_value=0.0, max_value=60.0,
+            ) * (2 ** min(max(0, total_attempts - 1), 10))),
         )
+        self._scheduler_wake_event.set()
         if updated is None:
             return
         try:
@@ -2620,18 +2696,80 @@ class WorkersProjectsService:
             return
         self._deliver_claimed_callback_record(worker, record, callbacks)
 
-    def recover_terminal_callback(self, **identity: Any) -> bool:
-        record = self.store.claim_terminal_callback_recovery(**identity)
-        if record is None:
+    def _submit_callback_delivery(
+        self, worker: dict, record: dict, callbacks: dict, *, recovery: dict | None = None
+    ) -> bool:
+        if self._shutdown_event.is_set() or not self._background_consumers_enabled:
             return False
-        worker = self.store.get_worker(str(record["worker_id"]))
-        run = self.store.get_run(str(record["run_id"]))
+        url = str(callbacks.get("events_webhook_url") or callbacks.get("url") or record.get("url") or "")
+        destination = hashlib.sha256(url.encode()).hexdigest()
+        key = (str(worker.get("tenant_id") or "local"), str(worker.get("owner_id") or ""),
+               destination, str(record.get("callback_id") or (recovery or {}).get("callback_ref") or ""))
+        if not schedule_targets.reserve_transport(self, key):
+            if recovery is not None:
+                with self._schedule_transport_lock:
+                    same_delivery_active = any(item[3] == key[3] for item in self._schedule_transport_active)
+                if not same_delivery_active:
+                    raise CallbackTransportBusyError("Callback transport capacity is busy")
+            return False
+        submitted = False
+        claimed = None
+        try:
+            claimed = (self.store.claim_terminal_callback_recovery(**recovery) if recovery is not None
+                       else self.store.claim_pending_callback(str(record["callback_id"])))
+            if claimed is None:
+                return False
+            # A recovered terminal result has its own explicit one-attempt allowance.
+            self.schedule_transport_executor.submit(
+                self._deliver_transport_callback, dict(worker), claimed, dict(callbacks), key,
+                recovery=recovery is not None,
+            )
+            submitted = True
+            return True
+        except Exception:
+            try:
+                if claimed is not None:
+                    if recovery is not None:
+                        self._dead_letter_callback(worker, claimed, callback_id=claimed["callback_id"],
+                            attempts=0, payload_json=claimed["payload_json"], reason="transport_executor_unavailable")
+                    else:
+                        self.store.mark_callback_pending(claimed["callback_id"],
+                            lease_token=claimed["delivery_lease_token"], delivery_generation=claimed["delivery_generation"],
+                            attempts=0, payload_json=claimed["payload_json"], last_error="transport_executor_unavailable")
+            except Exception:
+                logger.error("Callback admission lease cleanup failed", extra={"error_code": "transient_dependency"})
+            if recovery is not None:
+                raise
+            # The intent is already durable. A transient delivery-admission
+            # fault must not fail the native action or its result producer.
+            logger.error("Callback transport admission failed", extra={"error_code": "transient_dependency"})
+            return False
+        finally:
+            if not submitted:
+                schedule_targets.release_transport(self, key)
+
+    def _deliver_transport_callback(self, worker: dict, record: dict, callbacks: dict,
+                                    key: tuple, *, recovery: bool = False) -> None:
+        try:
+            if not recovery and int(record.get("attempts") or 0) >= self._callback_max_total_attempts():
+                self._dead_letter_callback(worker, record, callback_id=record["callback_id"], attempts=0,
+                    payload_json=record["payload_json"], reason="callback retry budget exhausted before delivery")
+                return
+            self._deliver_claimed_callback_record(worker, record, callbacks, delivery_attempts=1)
+        except Exception:
+            # A possible send cannot be declared accepted or repeated as native work.
+            # The same durable callback lease/outbox is reclaimed after its expiry.
+            logger.error("Callback transport settlement failed", extra={"error_code": "transient_dependency"})
+        finally:
+            schedule_targets.release_transport(self, key)
+
+    def recover_terminal_callback(self, **identity: Any) -> bool:
+        worker = self.store.get_worker(str(identity.get("worker_id") or ""))
+        if worker is None:
+            return False
+        run = self.store.get_run(str(identity.get("run_id") or ""))
         callbacks = self._callback_config_for_event(worker, run)
-        self.executor.submit(
-            self._deliver_claimed_callback_record, worker, record, callbacks,
-            delivery_attempts=1,
-        )
-        return True
+        return self._submit_callback_delivery(worker, identity, callbacks, recovery=identity)
 
     def _deliver_claimed_callback_record(
         self, worker: dict, record: dict, callbacks: dict, *, delivery_attempts: int | None = None
@@ -2924,7 +3062,7 @@ class WorkersProjectsService:
                 worker,
                 self.store.get_run(run_id) if run_id else None,
             )
-            self._deliver_callback_record(worker, record, callbacks)
+            self._submit_callback_delivery(worker, record, callbacks)
 
     def _callback_retry_loop(self) -> None:
         interval = _bounded_int_env(
@@ -2935,6 +3073,20 @@ class WorkersProjectsService:
         )
         while not self._shutdown_event.wait(interval):
             self._callback_retry_tick()
+
+    def _require_conversation_session_binding(self, worker: dict) -> dict:
+        """Keep prepared conversation identity separate from permission to run."""
+
+        worker_id = str(worker.get("worker_id") or "")
+        session = self.store.get_provider_session_by_worker(worker_id) if worker_id else None
+        if not session or any(
+            str(session.get(field) or "") != str(worker.get(field) or "")
+            for field in ("worker_id", "tenant_id", "owner_id", "project_id")
+        ):
+            raise ParallelExecutionIsolationError(
+                "The conversation worker does not have a durable provider-session binding."
+            )
+        return session
 
     def _ensure_execution_allowed(
         self,
@@ -2970,6 +3122,8 @@ class WorkersProjectsService:
                 else "mission"
             )
         )
+        if isinstance(worker_or_mode, dict) and lane == "conversation":
+            self._require_conversation_session_binding(worker_or_mode)
         if (
             execution_mode == "host"
             and lane == "mission"
@@ -3321,6 +3475,17 @@ class WorkersProjectsService:
             if action_id in waived:
                 return True
             resolution = str(item.get("resolution") or "")
+            if resolution == "personal_library":
+                applications = self.personal_library.list_worker_items(tenant_id, owner_id, worker_id)["items"]
+                selected = next((row for row in applications if row["version_id"] == reference
+                                 and row.get("active", True)), None)
+                if selected is None:
+                    # Removing an optional contribution resolves its review.
+                    return True
+                if selected["state"] in {"in_files", "ready_for_next_start"}:
+                    return True
+                library_id = selected.get("receipt", {}).get("library_id")
+                return bool(library_id and any(grant.get("library_id") == library_id for grant in grants))
             policy = str(item.get("policy") or "")
             if resolution == "provider_selection" and policy:
                 return bool(
@@ -3349,6 +3514,15 @@ class WorkersProjectsService:
             ))
 
         return [item for item in items if not resolved(item)]
+
+    def _personal_library_reapprovals(self, tenant_id, owner_id, worker_id):
+        """Executable material requires review; source-only setup remains a native task."""
+        return [{
+            "action_id": "rea_" + hashlib.sha256(("personal_library\0" + item["version_id"]).encode()).hexdigest()[:24],
+            "kind": "library", "resolution": "personal_library", "reference": item["version_id"],
+            "label": item.get("name") or "Saved Library item", "route": "library", "scopes": [],
+        } for item in self.personal_library.list_worker_items(tenant_id, owner_id, worker_id)["items"]
+            if item["state"] in {"needs_review", "not_available"}]
 
     def _runtime_start_lock(self, worker_id: str) -> Lock:
         with self._processors_lock:
@@ -4396,7 +4570,7 @@ class WorkersProjectsService:
         resolver = getattr(self.runtime, "provider_native_image_output", None)
         if not worker or not callable(resolver):
             if re.search(r"\]\(\s*<?artifact_sha256:", output):
-                raise RuntimeErrorBase("Selected native image is unavailable for this request")
+                raise NativeFilePublicationUnavailable("Selected native image is unavailable for this request")
             return output
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", run_id)
@@ -4404,26 +4578,9 @@ class WorkersProjectsService:
             or not request.get("owner_id") or request.get("owner_id") != worker.get("owner_id")
             or request.get("tenant_id") != worker.get("tenant_id")
         ):
-            raise RuntimeErrorBase("Native image output does not match the request owner and run")
+            raise NativeFilePublicationUnavailable("Native image output does not match the request owner and run")
         projected, images = resolver(worker, run, output)
-        source_names = {(Path(path).name, mime) for path, mime, _data in images}
-        delivery_names = {key: key[0] for key in source_names}
-        used_names = {name for name, _mime in source_names}
-        for name, mime in sorted(source_names):
-            suffix = NATIVE_IMAGE_SUFFIXES.get(mime)
-            source_suffix = Path(name).suffix.lower()
-            if (not suffix or source_suffix == suffix
-                    or (mime == "image/jpeg" and source_suffix in {".jpeg", ".jpe", ".jfif"})):
-                continue
-            stem = Path(name).stem
-            candidate = stem[:255 - len(suffix)] + suffix
-            index = 2
-            while candidate in used_names:
-                ending = f" ({index}){suffix}"
-                candidate = stem[:255 - len(ending)] + ending
-                index += 1
-            delivery_names[(name, mime)] = candidate
-            used_names.add(candidate)
+        delivery_names = native_output_delivery_names(images)
         rejection_reader = getattr(self.runtime, "provider_native_output_file_rejections", None)
         if output_rejections is not None and callable(rejection_reader):
             output_rejections.extend(rejection_reader(worker, run))
@@ -4447,17 +4604,23 @@ class WorkersProjectsService:
                 try:
                     verified_native_file(workspace, relative, data.sha256, data.size_bytes)
                 except (OSError, ValueError):
-                    copy_native_file(data.root, data.relative, workspace, target=relative, expected=data)
+                    try:
+                        copy_native_file(data.root, data.relative, workspace, target=relative, expected=data)
+                    except (OSError, ValueError) as exc:
+                        raise NativeFilePublicationUnavailable("Selected native file snapshot is unavailable") from exc
             else:
                 try:
                     published = _native_media_snapshot(workspace, relative, len(data))
                 except (OSError, ValueError):
                     published = None
                 if published != data:
-                    _publish_native_media(workspace, relative, data)
+                    try:
+                        _publish_native_media(workspace, relative, data)
+                    except (OSError, ValueError) as exc:
+                        raise NativeFilePublicationUnavailable("Selected native file publication is unavailable") from exc
             url = self._signed_artifact_download_url(worker, relative.as_posix())
             if not url:
-                raise RuntimeErrorBase("Selected native image download is unavailable")
+                raise NativeFilePublicationUnavailable("Selected native image download is unavailable")
             published_urls[key] = url
             return url
 
@@ -4492,7 +4655,12 @@ class WorkersProjectsService:
             if not reference.startswith("artifact_sha256:"):
                 return match.group(0)
             if reference not in authorized:
-                raise RuntimeErrorBase("Selected native image is unavailable for this request")
+                from .coordinator import render_coordinator_result_file
+                inherited = render_coordinator_result_file(
+                    self, request, reference, match.group(0), output_files)
+                if inherited is not None:
+                    return inherited
+                raise NativeFilePublicationUnavailable("Selected native image is unavailable for this request")
             return f"{match.group(1)}({describe(reference)})"
 
         rendered = NATIVE_MARKDOWN_LINK_OR_ESCAPE.sub(render, projected)
@@ -4838,7 +5006,7 @@ class WorkersProjectsService:
                 if not persist_callback:
                     return {**retained_intent, "tenant_id": str(worker.get("tenant_id") or "local")}
                 if submit_delivery:
-                    self.executor.submit(self._deliver_callback_record, dict(worker), record, callbacks)
+                    self._submit_callback_delivery(dict(worker), record, callbacks)
                 return record
         link_safe = event_type != "worker.terminated"
         # Model-selected file refs use the same immutable, owner/run/attempt-bound
@@ -5091,9 +5259,7 @@ class WorkersProjectsService:
                 # stale intent instead of attaching it to that generation.
                 return None
         if submit_delivery:
-            self.executor.submit(
-                self._deliver_callback_record, dict(worker), record, callbacks
-            )
+            self._submit_callback_delivery(dict(worker), record, callbacks)
         return record
 
     def _emit_callback(
@@ -5127,12 +5293,7 @@ class WorkersProjectsService:
         if not record:
             return
         callbacks = self._callback_config_for(worker)
-        self.executor.submit(
-            self._deliver_callback_record,
-            dict(worker),
-            record,
-            callbacks,
-        )
+        self._submit_callback_delivery(dict(worker), record, callbacks)
 
     def _completion_deliverable(self, worker: dict, run: dict, output_text: str, error_text: str = "") -> dict[str, object] | None:
         return deliverable_payload(self.files.artifact_worker(worker), run, output_text, output_text, error_text)
@@ -5819,11 +5980,20 @@ class WorkersProjectsService:
     def _idle_reaper_loop(self) -> None:
         interval = self._idle_reaper_interval_s()
         while not self._shutdown_event.wait(interval):
-            self.reap_terminated_workers_once()
-            self.reap_ephemeral_workspaces_once()
-            self.reap_idle_workers_once()
-            self.reap_paused_workers_once()
-            self.reap_expired_runs_once()
+            for phase_name, phase in (
+                ("terminated workers", self.reap_terminated_workers_once),
+                ("ephemeral workspaces", self.reap_ephemeral_workspaces_once),
+                ("idle workers", self.reap_idle_workers_once),
+                ("paused workers", self.reap_paused_workers_once),
+                ("expired runs", self.reap_expired_runs_once),
+            ):
+                if self._shutdown_event.is_set():
+                    return
+                try:
+                    phase()
+                except Exception:
+                    logger.error("Worker lifecycle phase failed: %s", phase_name,
+                                 extra={"error_code": "transient_dependency"})
 
     def _scheduler_interval_s(self) -> int:
         return _bounded_int_env("GLASSHIVE_SCHEDULER_INTERVAL_S", 5, min_value=1, max_value=3600)
@@ -7574,12 +7744,36 @@ class WorkersProjectsService:
                 from .execution_profile import packaged_linux
                 from .conversation_provider import GLASSHIVE_MODELS, _configured_grok_conversation_model
                 configured_grok = _configured_grok_conversation_model(model) if profile == "grok-build" else None
-                catalog = list(GLASSHIVE_MODELS.values()) + ([configured_grok] if configured_grok else [])
-                selected = [item for item in catalog
+                catalog = dict(GLASSHIVE_MODELS)
+                if configured_grok is not None:
+                    catalog[configured_grok.id] = configured_grok
+                selected = [item for item in catalog.values()
                             if item.harness_profile == profile
                             and item.native_model == trusted_coordinator_model]
-                if (not packaged_linux() or origin_surface != "coordinator"
-                        or not origin_ref or execution_mode != "docker"
+                allowed_placement = (packaged_linux() and execution_mode == "docker") or (
+                    standalone_coordinator_host_enabled() and execution_mode == "host")
+                owned_host_route = True
+                if execution_mode == "host":
+                    # This private server argument must still name the actual
+                    # owner's durable accepted goal and its configured route.
+                    owned_host_route = False
+                    try:
+                        with self.store._connect() as conn:
+                            origin = conn.execute(
+                                "SELECT c.config_json,g.dispatch_json FROM coordinator_conversations c "
+                                "JOIN coordinator_goals g ON g.conversation_id=c.conversation_id "
+                                "WHERE c.tenant_id=? AND c.owner_id=? AND c.conversation_id || ':' || g.goal_id=?",
+                                (tenant_id,owner_id,origin_ref),
+                            ).fetchone()
+                        route_id = json.loads(origin["dispatch_json"])["route_id"] if origin else None
+                        declared = next((route for route in json.loads(origin["config_json"])["routes"] if route["id"]==route_id), {}) if origin else {}
+                        owned_host_route = bool(len(selected)==1 and declared.get("model")==selected[0].id
+                            and declared.get("profile")==profile and declared.get("execution_mode")=="host")
+                    except (sqlite3.OperationalError,ValueError,KeyError,TypeError):
+                        pass
+                if (not allowed_placement or origin_surface != "coordinator"
+                        or not origin_ref
+                        or not owned_host_route
                         or bootstrap_profile is not None
                         or not isinstance(bootstrap_bundle, dict)
                         or bootstrap_bundle.get("provider_model") != trusted_coordinator_model
@@ -9428,18 +9622,11 @@ class WorkersProjectsService:
     def activate_prepared_conversation_worker(self, worker_id: str) -> dict:
         with self._worker_compute_release_lock(worker_id):
             worker = self.require_worker(worker_id)
-            session = self.store.get_provider_session_by_worker(worker_id)
-            if (
-                not session
-                or self._trusted_run_lane(worker) != "conversation"
-                or str(session.get("tenant_id") or "")
-                != str(worker.get("tenant_id") or "")
-                or str(session.get("owner_id") or "")
-                != str(worker.get("owner_id") or "")
-            ):
+            if self._trusted_run_lane(worker) != "conversation":
                 raise ParallelExecutionIsolationError(
                     "The conversation worker does not have a durable provider-session binding."
                 )
+            self._require_conversation_session_binding(worker)
             if (
                 worker.get("compute_release_token")
                 or worker.get("work_stop_id")
@@ -11462,22 +11649,65 @@ class WorkersProjectsService:
             },
             "library_refs": library_refs,
         }
+        applications = [item for item in self.personal_library.list_worker_items(tenant_id, owner_id, worker_id)["items"]
+                        if item.get("active", True)]
+        personal_refs = [{"item_id": item["item_id"], "version_id": item["version_id"]} for item in applications]
+        if personal_refs:
+            selected = []
+            for application, reference in zip(applications, personal_refs):
+                retained = self.personal_library.resolve_retained_refs(tenant_id, owner_id, [reference],
+                    "application", application["application_id"])
+                selected.extend(retained["items"])
+            resolved = {"items": selected, "selected_items": selected}
+            content["personal_library_refs"] = personal_refs
+            # The API binds both owners to this runtime database. Keep the
+            # immutable template and its retention references in one commit.
+            if Path(self.control_plane_store.db_path).resolve() != Path(self.store.db_path).resolve():
+                raise ValueError("Library templates require the canonical shared runtime datastore")
+            with self.store._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                template = self.control_plane_store.create_workspace_template(
+                    tenant_id=tenant_id, owner_id=owner_id, name=name,
+                    description=description, content=content, lineage_id=lineage_id,
+                    connection=conn)
+                self.personal_library.retain_refs(tenant_id, owner_id, personal_refs,
+                    "workspace_template", str(template["template_id"]),
+                    connection=conn, resolved=resolved)
+                return template
         return self.control_plane_store.create_workspace_template(
-            tenant_id=tenant_id,
-            owner_id=owner_id,
-            name=name,
-            description=description,
-            content=content,
-            lineage_id=lineage_id,
-        )
+            tenant_id=tenant_id, owner_id=owner_id, name=name,
+            description=description, content=content, lineage_id=lineage_id)
 
     def list_workspace_templates(self, *, tenant_id: str, owner_id: str) -> list[dict[str, object]]:
         if self.control_plane_store is None:
             return []
-        return self.control_plane_store.list_workspace_templates(
+        templates = self.control_plane_store.list_workspace_templates(
             tenant_id=tenant_id,
             owner_id=owner_id,
         )
+        references = {str(ref["version_id"]) for template in templates
+                      for ref in template.get("personal_library_refs", [])}
+        if references:
+            # Catalog cards and management clients need exact-version labels, not
+            # private skill/file bodies or a separate resolve request per card.
+            with self.store._connect() as conn:
+                rows = conn.execute(
+                    "SELECT v.item_id,v.version_id,v.version,v.metadata_json "
+                    "FROM personal_library_versions v JOIN personal_library_items i ON i.item_id=v.item_id "
+                    "WHERE i.tenant_id=? AND i.owner_id=? AND v.version_id IN ("
+                    + ",".join("?" for _ in references) + ")",
+                    (tenant_id, owner_id, *sorted(references)),
+                ).fetchall()
+            labels = {(str(row["item_id"]), str(row["version_id"])):
+                      {"name": json.loads(row["metadata_json"]).get("name", "Saved expertise"),
+                       "kind": json.loads(row["metadata_json"]).get("kind", "knowledge"),
+                       "version": int(row["version"]), "included": True}
+                      for row in rows}
+            for template in templates:
+                template["abilities"] = [labels[(ref["item_id"], ref["version_id"])]
+                                         for ref in template.get("personal_library_refs", [])
+                                         if (ref["item_id"], ref["version_id"]) in labels]
+        return templates
 
     def instantiate_workspace_template(
         self,
@@ -11586,6 +11816,10 @@ class WorkersProjectsService:
             worker = self.store.get_worker(str(reservation.get("worker_id") or ""))
             if not project or not worker:
                 raise RuntimeError("Completed template instantiation record is inconsistent")
+            if content.get("personal_library_refs"):
+                approvals_required.extend(row for row in self.personal_library.list_worker_items(
+                    tenant_id, owner_id, str(worker["worker_id"]))["items"]
+                    if row["state"] in {"needs_review", "needs_setup", "not_available"})
             return {
                 "template": {key: value for key, value in template.items() if key != "content"},
                 "project": project,
@@ -11640,6 +11874,21 @@ class WorkersProjectsService:
                 },
                 start_synchronously=False,
             )
+            personal_refs = content.get("personal_library_refs") or []
+            if personal_refs:
+                personal_result = self.personal_library.apply_retained_to_worker(
+                    tenant_id, owner_id, str(worker["worker_id"]), personal_refs,
+                    "template:" + idempotency_key,
+                    holder_kind="workspace_template", holder_id=template_id,
+                    confirm_native=False)
+                approvals_required.extend(personal_result.get("requirements", personal_result.get("pending", [])))
+                private_reviews = self._personal_library_reapprovals(tenant_id, owner_id, str(worker["worker_id"]))
+                if private_reviews:
+                    report = dict(worker.get("duplication_report") or {})
+                    report["reapproval_items"] = reapproval_items + private_reviews
+                    report["capabilities_requiring_reapproval"] = len(report["reapproval_items"])
+                    self.store.update_worker(str(worker["worker_id"]), duplication_report_json=json.dumps(report))
+                    worker = self.store.get_worker(str(worker["worker_id"])) or worker
             self.control_plane_store.complete_workspace_template_instantiation(
                 tenant_id=tenant_id,
                 owner_id=owner_id,
@@ -12061,6 +12310,9 @@ class WorkersProjectsService:
     def start_assigned_run(self, worker_id: str) -> None:
         """Start processing after an external owner has durably attached a queued run."""
 
+        worker = self.store.get_worker(worker_id) or {}
+        if self._trusted_run_lane(worker) == "conversation":
+            self._require_conversation_session_binding(worker)
         self._ensure_worker_processor(worker_id)
 
     def verify_action_capability(self, capability: str) -> dict[str, object]:
@@ -13147,14 +13399,21 @@ class WorkersProjectsService:
         cancelled = None
         released_running_capacity = state in {"running", "needs_input"}
         if state == "needs_input":
-            if self.store.get_active_host_run_lease_for_run(run_id):
-                self._release_needs_input_compute(worker, run)
-            # Reconcile only this cancelled provider turn after its compute is
-            # released; stopping the whole mission would discard later turns.
+            # The existing recovery CAS settles only an already-cancelled provider
+            # request with no live lease. A newer active turn must remain untouched.
             reconciled = self.store.reconcile_cancelled_provider_needs_input_runs_for_worker(
                 worker_id, run_id=run_id
             )
             cancelled = next((item for item in reconciled if item["run_id"] == run_id), None)
+        if not cancelled and state in {"paused", "needs_input", "claimed", "admitted", "settling"}:
+            # A reused worker can contain unrelated queued goals. Keep the existing
+            # native termination proof while cancelling only this run, not its work queue.
+            self._execute_stop_run_claim(worker, run_id, run_scope=True)
+            self._replay_pending_lifecycle_effects(effect_kinds=("callback.run_cancelled",))
+            current = self.store.get_worker(worker_id) or worker
+            if not current.get("compute_release_token") and self.store.has_queued_runs(worker_id):
+                self._ensure_worker_processor(worker_id)
+            return current
         if state == "queued":
             cancelled = self.store.finalize_run_if_state(
                 run_id,
@@ -17489,7 +17748,7 @@ class WorkersProjectsService:
             ),
         ]
         if self._provider_request_reconciler is not None:
-            operations.append(
+            operations.insert(0,
                 (
                     lambda: self._provider_request_reconciler(""),
                     "GlassHive provider request reconciliation faulted safely",
@@ -17899,12 +18158,7 @@ class WorkersProjectsService:
             delivery_record = {
                 key: value for key, value in record.items() if key != "_inserted"
             }
-            self.executor.submit(
-                self._deliver_callback_record,
-                dict(worker),
-                delivery_record,
-                callbacks,
-            )
+            self._submit_callback_delivery(dict(worker), delivery_record, callbacks)
 
     @staticmethod
     def _trusted_run_lane(worker: dict | None) -> str:
@@ -19038,6 +19292,7 @@ class WorkersProjectsService:
         for phase_name, phase in (
             ("scheduled runs", self.process_due_schedules_once),
             ("schedule webhook delivery", self.process_pending_schedule_webhooks_once),
+            ("worker callback delivery", self._replay_pending_callbacks),
             ("queued work status", self.process_queued_work_status_once),
             (
                 "expired lifecycle claims",
@@ -20100,6 +20355,8 @@ class WorkersProjectsService:
     def _acquire_host_run_lease(self, worker: dict, run: dict) -> dict | None:
         execution_mode = str(worker.get("execution_mode") or "docker")
         lane = self._host_run_lane(worker)
+        if lane == "conversation":
+            self._require_conversation_session_binding(worker)
         if (
             execution_mode == "host"
             and lane == "mission"
@@ -20417,12 +20674,7 @@ class WorkersProjectsService:
             and isinstance(worker, dict)
         ):
             # Network delivery happens only after the durable CAS and flock release.
-            self.executor.submit(
-                self._deliver_callback_record,
-                dict(worker),
-                callback,
-                dict(callbacks),
-            )
+            self._submit_callback_delivery(dict(worker), callback, dict(callbacks))
 
     def _confirm_in_process_run_start(self, pending: dict[str, object]) -> None:
         self._observe_run_start(
@@ -20473,45 +20725,15 @@ class WorkersProjectsService:
                     and str(run.get("state") or "") == "running"):
                 self.run_notifications.notify(run_id)
             return
+        run = self.store.observe_native_event_if_current(
+            worker_id=worker_id, run_id=run_id,
+            attempt_id=str(observation.get("attempt_id") or ""), provider=provider, event=event,
+        )
+        if run is None:
+            return
         worker = self.store.get_worker(worker_id)
         if not worker:
             return
-
-        capabilities = self._json_object(run.get("native_capabilities_json"))
-        child_projection_observed = event_type.startswith("provider.child.") or (
-            event_type == "provider.team.message"
-        )
-        capabilities.update(
-            {
-                "provider": provider,
-                "providerStream": True,
-            }
-        )
-        if child_projection_observed:
-            capabilities["childProjection"] = True
-        else:
-            capabilities.setdefault("childProjection", False)
-        existing_summary = self._json_object(run.get("native_child_summary_json"))
-        projection = NativeTeamProjection.from_summary(existing_summary)
-        if not projection.observable:
-            projection = NativeTeamProjection(provider=provider, observable=True)
-        projection.apply(event)
-
-        updates: dict[str, object] = {
-            "native_capabilities_json": json.dumps(capabilities, sort_keys=True),
-            "native_child_summary_json": json.dumps(projection.summary() or {}, sort_keys=True),
-        }
-        if event_type == "provider.session.started":
-            updates["native_session_id"] = str(payload.get("sessionId") or "")[:256]
-        self.store.update_run(run_id, **updates)
-        self.store.add_event(
-            str(worker.get("project_id") or run.get("project_id") or ""),
-            worker_id,
-            run_id,
-            event_type,
-            "Native provider lifecycle updated",
-            payload=payload,
-        )
 
         if event_type in {"provider.native.input.requested", "provider.native.input.resolved"}:
             attempt_id = str(observation.get("attempt_id") or "")
@@ -21498,12 +21720,7 @@ class WorkersProjectsService:
             guard.release()
             if callback_delivery is not None:
                 callback_worker, callback, callbacks = callback_delivery
-                self.executor.submit(
-                    self._deliver_callback_record,
-                    callback_worker,
-                    callback,
-                    callbacks,
-                )
+                self._submit_callback_delivery(callback_worker, callback, callbacks)
 
     def _finalize_run_if_state(
         self,
@@ -22380,10 +22597,37 @@ class WorkersProjectsService:
         run_id: str,
         *,
         action_use_id: str = "",
+        run_scope: bool = False,
     ) -> dict[str, object] | None:
         """Own, execute, and atomically finalize one exact run stop."""
 
         worker_id = str(worker.get("worker_id") or "")
+        operation_kind = "cancel_run" if run_scope else "stop_run"
+
+        def finalize(claimed_worker, token, epoch, target, runtime_fields):
+            if not run_scope:
+                return self.store.finalize_worker_work_stop_claim(
+                    worker_id, token, epoch, target_run_id=run_id,
+                    runtime_fields=runtime_fields,
+                    compute_released_at=claimed_worker.get("compute_released_at"),
+                    error_text="Stopped by operator",
+                )
+            if target["state"] not in TERMINAL_RUN_STATES:
+                if self.store.confirm_worker_control_runtime_effect(
+                        worker_id, token, epoch, kind=operation_kind, target_run_id=run_id) is None:
+                    raise RuntimeErrorBase("Exact cancellation proof ownership changed")
+                self.store.finalize_run_if_state(
+                    run_id, expected_state=target["state"], state="cancelled",
+                    output_text=str(target.get("output_text") or ""), error_text="Stopped by operator",
+                    cancellation_claim={"token":token,"epoch":epoch,"message":"Run stopped by operator"},
+                    **self._terminal_generation_for_run(target),
+                )
+            return self.store.finalize_worker_run_control_claim(
+                worker_id, token, epoch, kind=operation_kind, target_run_id=run_id,
+                target_expected_states=(target["state"],), target_state="cancelled",
+                worker_state="ready", runtime_fields=runtime_fields,
+                error_text="Stopped by operator", release_lease=True,
+            )
         with self._worker_compute_release_lock(worker_id):
             current = self.store.get_worker(worker_id)
             target = self.store.get_run(run_id)
@@ -22405,20 +22649,23 @@ class WorkersProjectsService:
                 if existing_token
                 else self._runtime_compute_container_id(current)
             )
-            claim = self.store.try_claim_worker_compute_release(
-                worker_id,
-                expected_updated_at=str(current.get("updated_at") or ""),
-                expected_last_run_id=str(current.get("last_run_id") or ""),
-                expected_state=str(current.get("state") or ""),
-                expected_container_id=expected_container_id,
-                owner=self._executor_id,
-                ttl_s=self._compute_release_claim_ttl_s(),
-                kind="stop_run",
-                target_run_id=run_id,
-                expected_target_started_at=str(target.get("started_at") or ""),
-                action_use_id=action_use_id,
-                action_executor_id=self._executor_id if action_use_id else "",
-            )
+            if run_scope and self._cancel_claim_pending(current, run_id):
+                claim = self._owned_cancel_claim(current, target)
+            else:
+                claim = self.store.try_claim_worker_compute_release(
+                    worker_id,
+                    expected_updated_at=str(current.get("updated_at") or ""),
+                    expected_last_run_id=str(current.get("last_run_id") or ""),
+                    expected_state=str(current.get("state") or ""),
+                    expected_container_id=expected_container_id,
+                    owner=self._executor_id,
+                    ttl_s=self._compute_release_claim_ttl_s(),
+                    kind=operation_kind,
+                    target_run_id=run_id,
+                    expected_target_started_at=str(target.get("started_at") or ""),
+                    action_use_id=action_use_id,
+                    action_executor_id=self._executor_id if action_use_id else "",
+                )
             if claim is None:
                 return None
             claimed_worker = dict(claim.get("worker") or current)
@@ -22433,15 +22680,7 @@ class WorkersProjectsService:
                 # Terminal truth that committed before recovery is authoritative.
                 # Settle only the durable Stop/tombstone transaction; there is
                 # no exact live target left that this control may signal.
-                result = self.store.finalize_worker_work_stop_claim(
-                    worker_id,
-                    token,
-                    epoch,
-                    target_run_id=run_id,
-                    runtime_fields={},
-                    compute_released_at=claimed_worker.get("compute_released_at"),
-                    error_text="Stopped by operator",
-                )
+                result = finalize(claimed_worker, token, epoch, durable_target, {})
                 if result is None:
                     raise RuntimeError(
                         "Terminal-won run stop ownership changed before finalization"
@@ -22541,19 +22780,8 @@ class WorkersProjectsService:
                     "confirmation_pending": True,
                     "target_transitioned": False,
                 }
-            result = self.store.finalize_worker_work_stop_claim(
-                worker_id,
-                token,
-                epoch,
-                target_run_id=run_id,
-                runtime_fields=self._runtime_info_fields(
-                    worker_id,
-                    info,
-                    last_error="",
-                ),
-                compute_released_at=claimed_worker.get("compute_released_at"),
-                error_text="Stopped by operator",
-            )
+            result = finalize(claimed_worker, token, epoch, durable_target,
+                              self._runtime_info_fields(worker_id, info, last_error=""))
             if result is None:
                 raise RuntimeError("Run stop ownership changed before finalization")
             return {

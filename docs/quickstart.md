@@ -13,10 +13,10 @@ If someone hosts xPerfect for you, no local xPerfect install is needed:
 
 1. Open their app address and sign in with the account they admitted.
 2. In **Connections**, connect your AI subscription and wait for **Ready**.
-3. In **Run project**, choose that worker and account, describe the goal, and **Add files**.
+3. In **Run Project**, choose that worker and account, describe the goal, and **Add files**.
    A ZIP can contain ordinary input files and a native skill folder. Ask the worker to unpack it;
    Codex uses `.agents/skills/<name>/SKILL.md`, Claude Code uses `.claude/skills/<name>/SKILL.md`.
-4. Open **Watch** and its result. Use **Files** to open or download outputs. Reload to check they stay.
+4. Open **Watch** and its result. Use **Library → Files** to open or download outputs. Reload to check they stay.
 5. In **Workspaces**, mark the expert as a favorite. Send a follow-up, or choose **More → Duplicate**
    for a separate copy. Files and native skills stay in the workspace; no extra skill router is needed.
 6. In **Schedules → New schedule**, choose the workspace, instruction, time and time zone.
@@ -73,64 +73,85 @@ Wait until the account shows **Ready**. A running app is not yet a connected AI.
 
 ## 4. Start a project
 
-Open **Run project**. Under **What would you like to do?**:
+The retained screenshots illustrate an earlier interface; the steps use the current labels.
 
-1. Describe the goal. Add **Success criteria** or **Background** if they help.
-2. Check the **Worker** and its **Account**: xPerfect starts on a worker whose account is ready.
-   Keep **Separate workspace (default)**.
-3. Select **Add files** to attach files. The worker gets their exact bytes; a file name typed in
-   the goal is not an upload.
-4. Select **Run Project**.
+Open **Run Project**.
+
+1. Under **What's the Job?**, describe the work. **What's the required outcome?** is optional:
+   use it for anything the result must include.
+2. In **Required Knowledge**, add useful **Background Context**, use **Add files**, or select
+   **Choose from Library**. A file name in the job is not an upload.
+3. Under **Who's Doing The Job?**, keep **New**, then check **Worker type** and **Account**.
+   Add a name if you want to find this worker again. **Existing** reuses a saved worker;
+   **Copy an existing worker** under New starts from its files and setup. A same-owner copy can
+   retain its selected ready account; new grants still need approval. It does not copy chat history
+   or browser sign-ins.
+4. Under **Where should I work?**, keep **New → My own workspace** for your first job.
+   **Existing** offers only workspaces this worker can actually use. A saved worker keeps its
+   existing location and account.
+5. Select **Run Project**.
 
 Try: “Write a short note explaining rain and save it as a text file.”
 
 ![Run project with a goal, an attached file, a worker and a ready account](assets/screens/run-project.png)
 
-The workspace's live view opens. If the page stays on “Starting project...”, open the workspace
-from **Workspaces**.
+The workspace's live view opens. If the page stays on “Starting project...”, check **Workspaces**
+before sending the job again. Your draft and any accepted job receipt stay available for recovery.
 
 ## 5. Watch and steer
 
-The live view shows the work as it happens. Type guidance in **Steer this workspace** and select
-**Send**. Use **Pause**, or **Interrupt current run** in the **☰** menu. Controls act only on this
-workspace.
+The live view names the worker and shows its current work and latest output. Type in **Message
+this worker** and select **Send** to redirect it now. To add a follow-up without interrupting,
+hold **Send** or use **Cmd/Ctrl+Enter**.
 
-Some AI tools, such as Grok, ask before running a command. Answer in the live view: a request
-left unanswered expires after about a minute and stops the run. Send a follow-up to continue.
+Use the footer's **Pause**, **Resume** or **Continue** when offered. **More** contains the actions
+available for this workspace, such as **Interrupt current run**. These controls affect this worker,
+not the other workspaces.
+
+If the AI asks for a response or permission, answer in its visible native controls. An unanswered
+request can expire and stop that run. Check its status, then send a follow-up when ready.
 
 ## 6. Open the result
 
-When the work is done, select **Open result** to read the answer, or open **Files**, then **Open**
-or **Download** what it made. Reload the page: the result is still there. It also survives
-`./xperfect restart`.
+When the work is done, select **Open result** to read the answer. A delivered file offers **Open
+file** and **Download file**. **Library → Files** lets you browse the workspace's other files.
+Reload the page: the saved result is still there. It also survives `./xperfect restart`.
 
 ![Open result: release-notes.md with Open file and Download file, above the answer](assets/screens/open-result.png)
 
+To keep a workspace file for another job, use its menu's **Keep for reuse**. It saves the selected
+version privately in **My Library**. Removing a saved Library item does not delete the workspace's
+copy. See [Library](07_Minimal_Unified_Operator_UI.md#one-library-across-the-app).
+
 ## 7. Come back to it
 
-In **Workspaces**, choose **Open workspace**. In **Files**, **Add files**, then send a new
-instruction. The workspace keeps its files and history.
+Open the saved worker from **Workspaces** and send a new instruction. It keeps its files and
+history. To add more files, open **Library → Files → Add files**. Its existing tools can read
+attached files; the prepared context list updates on the next start.
 
 ![Workspaces listing two finished workspaces with their delivered files](assets/screens/workspaces.png)
 
-To run it later or repeatedly, open **Schedules** and select **New schedule**. Choose the
-workspace, write what it should do, choose when it repeats and select **Create schedule**.
-Scheduling a one-off run keeps it as a saved workspace.
+Use the workspace menu's **Rename** to change its display name. It remains the same worker with
+the same files and account. To start a separate copy, use **Run Project → New → Copy an existing
+worker**.
+
+To run work later or repeatedly, open **Schedules → New schedule**, choose **Run a task**, select
+the workspace, enter the job and choose when it should run. Select **Create schedule**. A one-off
+workspace becomes saved when you schedule it.
 
 ## Good to know
 
-- **Several goals at once.** In **Conversation**, write them in one message. A conversation with a
-  connected account needs xPerfect on a configured Linux host, such as the packaged install. With
-  `./xperfect start`, **Assistant on this computer** is offered when the AI tool chosen as **Default
-  Worker** (Run project → **More settings**) is installed on this computer; otherwise the page
-  explains the limit and offers **Run project**. xPerfect keeps every
-  goal and shows each as Working, Waiting to start or Complete. The AI decides whether to answer a
-  goal itself or hand it to a worker. Ten goals do not mean ten workers at once: a worker starts
-  when its account is free and the machine has room. See [several goals](capability-matrix.md#working-on-several-goals).
-- **Separate or shared.** By default each worker has its own workspace. A shared workspace lets
-  several workers, even different AI tools, work together with **Common project files** or
-  **Private files per member**. It needs xPerfect on a configured Linux host, such as the packaged
-  install; with `./xperfect start` on a Mac, use a separate workspace. See [workspace modes](assets/workspaces.png).
+- **Several goals at once.** In **Chat**, write them in one message. Choose a ready account that
+  the page offers, or **Assistant on this computer** when available. Supported local host accounts
+  can use Chat; a Linux container is not required for that local route. The page checks the actual
+  deployment and installed AI tool before offering a choice. xPerfect tracks accepted goals and
+  the AI decides whether to answer directly or hand work to a worker. Account limits and machine
+  capacity still apply. See [several goals](capability-matrix.md#working-on-several-goals).
+- **Own or shared workspace.** **My own workspace** keeps one worker's files and history separate.
+  **Shared with other workers** offers **Common project files** or **Private files per member**
+  on a configured Linux host. It is unavailable with `./xperfect start` on a Mac; keep **My own
+  workspace** there. This shared-workspace limit is separate from local Chat support. See
+  [workspace modes](02_Architecture_and_Components.md#workspace-file-placement).
 - **Your computer or a server.** With `./xperfect start`, workers run on this computer as your
   user. On a hosted server, each workspace runs in its own container. Your files stay on your
   machine or server; your AI provider receives the task content it needs. See [deployment](deployment.md).
@@ -148,13 +169,13 @@ Scheduling a one-off run keeps it as a saved workspace.
 | “Connect an AI account to start.” | Connect an account in Connections and wait for **Ready**. |
 | A run stopped with your provider's words, such as a usage limit | Follow them. Connections shows the message under that account until a later run completes. xPerfect never switches accounts for you. |
 | “Queued” or “Waiting to start” | The account is busy or the machine is short of room. It starts on its own when that clears. |
-| “Another project is already running on this computer” | With `./xperfect start`, projects run one at a time. Wait until the current one finishes in **Workspaces**, then select **Run Project** again. |
+| “Another project is already running on this computer” | Check **Workspaces** and wait for the work using the available slot to finish, then try again. The deployment's capacity decides how much can run at once. |
 | A host resource message after **Run Project** | The machine is busy. Check **Workspaces** so you do not start the same work twice, wait a moment, then try again. |
 | “Not enough storage for this file” | Delete files you no longer need, or ask your administrator to raise your limit, then **Retry**. |
-| “Shared workspaces need xPerfect on a configured Linux host.” | Choose **Separate workspace** on this computer. |
-| “Conversations with a connected account need xPerfect on a configured Linux host” | On this computer, use **Run project**. |
+| “Shared workspaces need xPerfect on a configured Linux host.” | Keep **Where should I work? → New → My own workspace** on this computer. |
+| Chat offers no connected account | Read its setup message. Check that the selected AI tool is installed and the account is Ready in **Connections**. A deployment without a supported conversation route offers **Run Project** instead. |
 | An account says “The exact native process was not confirmed stopped” | Wait until that workspace's run has ended, then select **Verify** in Connections. |
-| The result is missing | Check the workspace's status and **Files** before running it again. |
+| The result is missing | Check the workspace's status and **Library → Files** before running it again. |
 
 Use the same `--state-dir` for every command if you chose one. `./xperfect stop` keeps your
 files, accounts and history. Interrupt running work before a planned stop; interrupted work does
@@ -167,8 +188,8 @@ not always continue by itself.
 - **Duplicate** copies a workspace's files and native skill folders. A same-owner copy retains
   the selected ready account's authorized connection. Copies do not share private credentials
   between owners; a new owner must connect their own account.
-- Several goals in one conversation and shared workspaces were verified on the packaged Linux
-  install, not with `./xperfect start`.
+- Shared workspace acceptance is bounded to the packaged Linux route. Local Chat and reuse of
+  existing workers also have local acceptance; that does not certify every provider or deployment.
 
 ## Connect an MCP client
 
@@ -178,3 +199,17 @@ tokens in URLs, screenshots or Git. See the [developer walkthrough](developer.md
 
 More: [account setup](host-setup.md) · [capabilities](capability-matrix.md) ·
 [deployment and recovery](deployment.md)
+
+
+## Start with an expert
+
+In **Run Project**, choose a ready-made professional, or use **My experts** for your own saved
+expertise. Add the job, its required outcome and the company material they need. Check the AI
+account and workplace, then choose **Run Project**. Review included native abilities when asked.
+The same named AI Worker opens in Watch, where you can follow progress, steer the work and open
+its actual results. Reuse that worker from Workspaces for the next job.
+
+**Create my own** keeps the normal worker choices. Starting templates currently use Claude Code
+on your computer; this does not change your default worker or account. Optional community tools
+show their actual connection/setup needs. Company material stays in your private selection; it
+is never added to the public starting package.

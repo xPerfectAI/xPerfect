@@ -26,7 +26,7 @@ class WorkerProfile:
 PROFILES = (
     WorkerProfile('direct-openai', 'Direct / OpenAI API', 'direct_openai', 'api', 'WPR_MODEL_DIRECT_OPENAI'),
     WorkerProfile('direct-anthropic', 'Direct / Anthropic API', 'direct_anthropic', 'api', 'WPR_MODEL_DIRECT_ANTHROPIC'),
-    WorkerProfile('direct-xai', 'Direct / xAI API', 'direct_xai', 'api', 'WPR_MODEL_DIRECT_XAI'),
+    WorkerProfile('direct-xai', 'Direct / Grok API', 'direct_xai', 'api', 'WPR_MODEL_DIRECT_XAI'),
     WorkerProfile('codex-cli', 'Codex CLI', 'codex', 'cli', 'WPR_MODEL_CODEX_CLI'),
     WorkerProfile('claude-code', 'Claude Code', 'claude', 'cli', 'WPR_MODEL_CLAUDE_CODE'),
     WorkerProfile('openclaw-general', 'OpenClaw', 'openclaw', 'gateway', 'WPR_MODEL_OPENCLAW_GENERAL'),

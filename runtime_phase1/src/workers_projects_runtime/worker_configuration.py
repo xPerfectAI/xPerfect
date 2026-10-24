@@ -246,6 +246,7 @@ def restrict_codex_connections(text, removed):
 
 def _run_context_worker(worker: dict, run: dict) -> dict:
     """Only the owner-admitted continuation supplies newer conversation evidence."""
+    worker = {**worker, "_context_run_id": str(run.get("run_id") or "")}
     raw = run.get("continuation_context_json")
     context = json.loads(raw) if isinstance(raw, str) and raw else raw
     inherited = context.get("inherited_conversation") if isinstance(context, dict) else None
@@ -332,7 +333,16 @@ class WorkerConfiguration:
 
     def sources(self, worker):
         bundle = bootstrap_bundle_for(worker)
+        selected_library = bundle.get("library_selection")
+        selected_uploads = selected_library.get("upload_ids", []) if isinstance(selected_library, dict) else []
+        if not isinstance(selected_uploads, list) or any(not isinstance(value, str) for value in selected_uploads):
+            raise ConfigurationError("library_selection_invalid")
+        library_upload_ids = set(selected_uploads)
         result = []
+        if isinstance(selected_library, dict) and selected_library.get("items"):
+            result.append({"id": "library:selection", "label": "Selected Library items",
+                           "kind": "library_selection", "inline_priority": 4,
+                           "text": _json({key: selected_library.get(key, []) for key in ("refs", "items", "pending")})})
         # These are exact owner-authored bootstrap values, not descriptors or summaries.
         for key in ("project_definition",):
             text = bundle.get(key)
@@ -381,6 +391,10 @@ class WorkerConfiguration:
                         "kind": "bootstrap",
                         "text": text,
                         "status": "unavailable" if unavailable else "available",
+                        # Only an explicit source descriptor changes packing. Native
+                        # instructions and other files keep their existing behavior.
+                        **({"packing": "lookup"} if entry.get("context_delivery") == "lookup"
+                           or entry.get("managed_upload_id") in library_upload_ids else {}),
                     }
                 )
         if self.source_resolver:
@@ -402,7 +416,7 @@ class WorkerConfiguration:
         return {
             key: source[key]
             for key in ("id", "label", "kind", "sha256", "chars", "status")
-        }
+        } | ({"packing": "lookup"} if source.get("packing") == "lookup" else {})
 
     def _effective(self, worker, config):
         sources = self.sources(worker)
@@ -476,7 +490,7 @@ class WorkerConfiguration:
         budget, inline = config.context.inline_chars, 0
         descriptors = []
         for source in selected:
-            count = min(budget, source["chars"])
+            count = 0 if source.get("packing") == "lookup" else min(budget, source["chars"])
             budget -= count
             inline += count
             descriptors.append(
@@ -702,7 +716,7 @@ class WorkerConfiguration:
             )
             _, config = self._config(conn, worker["worker_id"])
             revision = self._context_revision(conn, worker["worker_id"])
-            run = conn.execute("SELECT continuation_context_json FROM runs WHERE run_id=? AND worker_id=?",
+            run = conn.execute("SELECT run_id,continuation_context_json FROM runs WHERE run_id=? AND worker_id=?",
                                (principal["run_id"], worker["worker_id"])).fetchone()
             worker = _run_context_worker(worker, dict(run) if run else {})
             row = conn.execute(

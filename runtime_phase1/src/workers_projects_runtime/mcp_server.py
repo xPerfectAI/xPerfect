@@ -2034,6 +2034,7 @@ def _public_artifact_base_url() -> str:
     return (
         os.environ.get("GLASSHIVE_ARTIFACT_BASE_URL", "").strip()
         or os.environ.get("GLASSHIVE_OPERATOR_BASE_URL", "").strip()
+        or os.environ.get("WPR_OPERATOR_BASE_URL", "").strip()
         or os.environ.get("WPR_MCP_PUBLIC_URL", "").strip()
         or DEFAULT_BASE_URL
     ).rstrip("/")
@@ -4339,6 +4340,9 @@ def create_mcp_server(
         auth=oauth[1] if oauth else None,
     )
 
+    from .personal_library_mcp import register_personal_library_tools
+    register_personal_library_tools(server, client)
+
     @server.custom_route("/health", methods=["GET"], include_in_schema=False)
     async def mcp_health(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", "release": release_provenance()})
@@ -5148,8 +5152,10 @@ def create_mcp_server(
         name="workspace_capability_remove",
         title="Remove Workspace Capability",
         description=(
-            "Remove the newest active capability from a workspace. GlassHive refuses removal if a newer "
-            "capability or later workspace configuration change would make rollback unsafe."
+            "When the workspace is idle, remove this exact capability grant's recorded contribution. "
+            "Preserve other grants, unrelated configuration, and edited or shared files. "
+            "A busy refusal or unconfirmed file cleanup returns its typed cause; retry the same "
+            "removal after that cause is resolved."
         ),
         structured_output=True,
     )
@@ -5262,6 +5268,8 @@ def create_mcp_server(
         uploaded_files: UploadedFilesParam = None,
         file_upload_ids: FileUploadIdsParam = None,
         file_binding_key: FileBindingKeyParam = None,
+        library_refs: list[dict[str, str]] | None = None,
+        confirm_library: Annotated[bool, Field(strict=True)] = False,
 
         effort: Annotated[
             str | None,
@@ -5301,6 +5309,10 @@ def create_mcp_server(
             "require_callback": require_callback,
             "expose_diagnostics": expose_diagnostics,
         }
+        if library_refs:
+            from .personal_library import LibraryRef
+            library_refs = [LibraryRef.model_validate(ref).model_dump() for ref in library_refs]
+            signed_launch_payload.update(library_refs=library_refs, confirm_library=confirm_library)
         raw_bundle = (json.loads(bootstrap_bundle_json) if isinstance(bootstrap_bundle_json, str)
                       and bootstrap_bundle_json.strip() else bootstrap_bundle_json)
         inherited_conversation_wire = raw_bundle.get("inherited_conversation") if isinstance(raw_bundle, dict) else None
@@ -5435,7 +5447,7 @@ def create_mcp_server(
             }
 
         atomic_delegate = getattr(client, "create_delegation", None)
-        if callable(atomic_delegate) and not project_id and not reuse_existing_workspace and not favorite:
+        if callable(atomic_delegate) and not project_id and not reuse_existing_workspace and not favorite and not library_refs:
             tenant_id, account_owner_id = _account_request_scope(resolved_owner_id)
             request_surface = _header_value(_request_headers(), HEADER_SURFACE).lower()
             origin_surface = (
@@ -5642,6 +5654,13 @@ def create_mcp_server(
 
         if file_upload_ids:
             WorkspaceFilesMcpClient(client).bind(worker_id, file_upload_ids, file_binding_key)
+        library_result = None
+        if library_refs:
+            # Reuse the existing prepare-then-run path so Library material is
+            # applied before the first admission, just as it is in Run Project.
+            library_result = client._request("POST", f"/v1/workspaces/{worker_id}/personal-library",
+                json_body={"refs": library_refs, "request_key": "mcp-library-" + uuid.uuid4().hex,
+                           "confirm_native": confirm_library}, require_write_scope=True)
         try:
             run = client.assign_run(
                 worker_id,
@@ -5690,6 +5709,8 @@ def create_mcp_server(
             "missing_callback_fields": missing_callback_fields,
             **dispatch_context,
         }
+        if library_result is not None:
+            result["library_requirements"] = library_result.get("requirements", library_result.get("pending", []))
         if runtime_recovery:
             result["runtime_recovery"] = runtime_recovery
         if expose_diagnostics:
@@ -5835,6 +5856,8 @@ def create_mcp_server(
         uploaded_files: UploadedFilesParam = None,
         file_upload_ids: FileUploadIdsParam = None,
         file_binding_key: FileBindingKeyParam = None,
+        library_refs: list[dict[str, str]] | None = None,
+        confirm_library: Annotated[bool, Field(strict=True)] = False,
 
         effort: Annotated[
             str | None,
@@ -5917,6 +5940,8 @@ def create_mcp_server(
             uploaded_files=uploaded_files,
             file_upload_ids=file_upload_ids,
             file_binding_key=file_binding_key,
+            library_refs=library_refs,
+            confirm_library=confirm_library,
             effort=effort,
             provider_account_policy=provider_account_policy,
             provider_account_id=provider_account_id,
@@ -7941,6 +7966,8 @@ def create_mcp_server(
         )
 
     register_owner_peer_tools(server, client)
+    from .starter_templates import register_starter_tools
+    register_starter_tools(server, client)
     register_owner_configuration_tools(server, client)
     from .workspace_file_mcp import install_workspace_file_tools
 

@@ -318,10 +318,10 @@ class FileMutations:
                 raise
 
     def _prepare(
-        self, *, file_id, kind, source, target, original, metadata, revision, undo_of=""
+        self, *, file_id, kind, source, target, original, metadata, revision, undo_of="", operation_id=None
     ):
         operation = {
-            "operation_id": "fop_" + uuid.uuid4().hex,
+            "operation_id": operation_id or "fop_" + uuid.uuid4().hex,
             "tenant_id": self.scope[0],
             "owner_id": self.scope[1],
             "workspace_key": self.scope[2],
@@ -353,54 +353,66 @@ class FileMutations:
 
     def mutate(self, file_id: str, *, revision: str, path: str | None, delete: bool):
         with _locked(self.lock_root):
-            self._recover()
-            self._idle()
+            return self._mutate_locked(file_id, revision=revision, path=path, delete=delete)
+
+    def _mutate_locked(self, file_id: str, *, revision: str, path: str | None, delete: bool, operation_id=None):
+        """Internal composition under this scope’s existing file control lock."""
+        self._recover()
+        self._idle()
+        if operation_id is not None:
             with self.files.store._connect() as conn:
-                entry = self.files._entry(conn, self.worker, file_id)
-            source = _relative(entry["path"])
-            with _directory(self.root, source.parent) as source_parent:
-                current, metadata = _revision(source_parent, source.name)
-                if current != revision:
-                    raise FileAdmissionError(
-                        "File changed; refresh before trying again", 409
-                    )
-                _audit_tree(source_parent, source.name, source)
-                if delete:
-                    trash_name = "item_" + uuid.uuid4().hex
-                    target = Path(TRASH) / trash_name
-                    with _directory(self.root, Path(TRASH), create=True):
-                        pass
-                else:
-                    target = _relative(str(path or ""))
-                    if target == source:
-                        return {"file_id": file_id, "path": source.as_posix()}
-                    if target.is_relative_to(source):
-                        raise FileAdmissionError(
-                            "A folder cannot move inside itself", 409
-                        )
-                # Verify the destination parent before durable intent is recorded.
-                with _directory(self.root, target.parent) as target_parent:
-                    if self.files._exists_at(target_parent, target.name):
-                        raise FileAdmissionError(
-                            "Destination already exists; choose another name", 409
-                        )
-                operation = self._prepare(
-                    file_id=file_id,
-                    kind="delete" if delete else "move",
-                    source=source,
-                    target=target,
-                    original=source.as_posix(),
-                    metadata=metadata,
-                    revision=current,
+                previous=conn.execute("SELECT * FROM workspace_file_operations WHERE operation_id=? AND file_id=? AND tenant_id=? AND owner_id=? AND workspace_key=?", (operation_id,file_id,*self.scope)).fetchone()
+            if previous is not None:
+                if not delete or previous["kind"]!="delete" or previous["state"]!="applied":
+                    raise FileAdmissionError("This file removal cannot be replayed",409)
+                return {"file_id":file_id,"state":"deleted","undo_id":operation_id}
+        with self.files.store._connect() as conn:
+            entry = self.files._entry(conn, self.worker, file_id)
+        source = _relative(entry["path"])
+        with _directory(self.root, source.parent) as source_parent:
+            current, metadata = _revision(source_parent, source.name)
+            if current != revision:
+                raise FileAdmissionError(
+                    "File changed; refresh before trying again", 409
                 )
-            self._finish(operation)
+            _audit_tree(source_parent, source.name, source)
             if delete:
-                return {
-                    "file_id": file_id,
-                    "state": "deleted",
-                    "undo_id": operation["operation_id"],
-                }
-            return {"file_id": file_id, "path": target.as_posix()}
+                trash_name = "item_" + uuid.uuid4().hex
+                target = Path(TRASH) / trash_name
+                with _directory(self.root, Path(TRASH), create=True):
+                    pass
+            else:
+                target = _relative(str(path or ""))
+                if target == source:
+                    return {"file_id": file_id, "path": source.as_posix()}
+                if target.is_relative_to(source):
+                    raise FileAdmissionError(
+                        "A folder cannot move inside itself", 409
+                    )
+            # Verify the destination parent before durable intent is recorded.
+            with _directory(self.root, target.parent) as target_parent:
+                if self.files._exists_at(target_parent, target.name):
+                    raise FileAdmissionError(
+                        "Destination already exists; choose another name", 409
+                    )
+            operation = self._prepare(
+                file_id=file_id,
+                kind="delete" if delete else "move",
+                source=source,
+                target=target,
+                original=source.as_posix(),
+                metadata=metadata,
+                revision=current,
+                operation_id=operation_id,
+            )
+        self._finish(operation)
+        if delete:
+            return {
+                "file_id": file_id,
+                "state": "deleted",
+                "undo_id": operation["operation_id"],
+            }
+        return {"file_id": file_id, "path": target.as_posix()}
 
     def undo(self, file_id: str, undo_id: str):
         with _locked(self.lock_root):

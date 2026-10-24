@@ -5162,9 +5162,7 @@ def test_max_run_duration_treats_malformed_run_timestamp_as_expired(
 def test_callbacks_sign_utf8_canonical_json_for_unicode_messages(
     tmp_path,
     monkeypatch,
-    background_consumers_disabled,
 ):
-    _ = background_consumers_disabled
     captured: dict[str, object] = {}
 
     class Response:
@@ -5186,7 +5184,7 @@ def test_callbacks_sign_utf8_canonical_json_for_unicode_messages(
         "effective": "medium",
         "fallback_reason": "xhigh_route_not_proven",
     }
-    service = WorkersProjectsService(store, runtime)
+    service = WorkersProjectsService(store, runtime, start_background_consumers=False)
     try:
         project = store.create_project("owner", "Callbacks", "Verify callback signatures", "codex-cli")
         worker = store.create_worker(
@@ -5343,7 +5341,7 @@ def test_callbacks_retry_transient_delivery_failures(tmp_path, monkeypatch):
         service.shutdown()
 
     assert len(attempts) == 2
-    assert not [event for event in store.list_events(worker["worker_id"]) if event["event_type"] == "callback.failed"]
+    assert len([event for event in store.list_events(worker["worker_id"]) if event["event_type"] == "callback.failed"]) == 1
 
 
 def test_duplicate_callback_without_durable_receipt_stays_pending(tmp_path, monkeypatch):
@@ -5366,7 +5364,7 @@ def test_duplicate_callback_without_durable_receipt_stays_pending(tmp_path, monk
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_ATTEMPTS", "1")
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S", "0")
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime())
+    service = WorkersProjectsService(store, StubRuntime(), start_background_consumers=False)
     try:
         project = store.create_project("owner", "Callbacks", "Verify callback dedupe", "codex-cli")
         worker = store.create_worker(
@@ -5599,7 +5597,7 @@ def test_callbacks_retry_budget_is_configurable(tmp_path, monkeypatch):
         attempts.append(1)
         return Response(500 if len(attempts) < 4 else 200)
 
-    monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_ATTEMPTS", "4")
+    monkeypatch.setenv("GLASSHIVE_CALLBACK_MAX_TOTAL_ATTEMPTS", "4")
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S", "0")
     monkeypatch.setattr("workers_projects_runtime.service.httpx.post", fake_post)
     store = Store(str(tmp_path / "runtime.db"))
@@ -5635,7 +5633,7 @@ def test_callbacks_retry_budget_is_configurable(tmp_path, monkeypatch):
         service.shutdown()
 
     assert len(attempts) == 4
-    assert not [event for event in store.list_events(worker["worker_id"]) if event["event_type"] == "callback.failed"]
+    assert len([event for event in store.list_events(worker["worker_id"]) if event["event_type"] == "callback.failed"]) == 3
 
 
 def _create_callback_outbox_record(store: Store, *, payload_json: str | None = None, url: str = "http://callback.local/glasshive"):
@@ -9113,6 +9111,10 @@ def test_duplicate_worker_copies_workspace_into_new_worker(tmp_path):
     source_workspace.mkdir(parents=True, exist_ok=True)
     (source_workspace / "app.txt").write_text("copied from source")
     (source_workspace / ".mcp.json").write_text('{"seed":"source"}')
+    evidence = source_workspace / "glasshive-run/runs/run_source"
+    evidence.mkdir(parents=True)
+    (evidence / "active-run.json").write_text('{"run_id":"run_source"}')
+    (evidence / "evidence.json").write_text('{"source_audit":true}')
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "UPDATE workers SET backend = ? WHERE worker_id = ?",
@@ -9145,10 +9147,11 @@ def test_duplicate_worker_copies_workspace_into_new_worker(tmp_path):
     assert duplicated_worker["backend"] == "codex-cli"
     assert (duplicated_workspace / "app.txt").read_text() == "copied from source"
     assert not (duplicated_workspace / ".mcp.json").exists()
+    assert not (duplicated_workspace / "glasshive-run").exists()
     assert duplicated_worker["duplication_report"] == {
         "source_state": "copied",
         "copied_files": 1,
-        "skipped_items": 1,
+        "skipped_items": 2,
     }
 
     events = client.get(f"/v1/workers/{duplicated_worker['worker_id']}/events")
@@ -9176,6 +9179,12 @@ def test_duplicate_worker_copies_workspace_into_new_worker(tmp_path):
     assert duplicate_payload["workspace"]["name"] == "Independent Workspace"
     assert duplicate_payload["project"]["goal"] == source_project["goal"]
     assert duplicate_payload["workspace"]["duplication_report"]["copied_files"] == 1
+    with sqlite3.connect(db_path) as conn:
+        catalog_copy_root = conn.execute(
+            "SELECT workspace_dir FROM workers WHERE worker_id=?",
+            (duplicate_payload["workspace"]["worker_id"],),
+        ).fetchone()[0]
+    assert not (Path(catalog_copy_root) / "glasshive-run").exists()
     assert "workspace_dir" not in duplicate_payload["workspace"]
     assert "bootstrap_bundle_json" not in duplicate_payload["workspace"]
 
@@ -14954,3 +14963,37 @@ def test_profile_inventory_reuses_native_host_binary_availability(tmp_path, monk
         assert items["codex-cli"]["host_cli_installed"] is True
         assert items["claude-code"]["host_cli_installed"] is False
         assert items["direct-xai"]["host_cli_installed"] is None
+
+
+@pytest.mark.parametrize("metadata_identity", ["current", "other_run", "other_attempt", "legacy"])
+def test_live_console_never_attributes_a_previous_native_attempt_to_the_current_run(tmp_path, monkeypatch, metadata_identity):
+    monkeypatch.setattr(api_module, "load_viventium_runtime_env", lambda: None)
+    monkeypatch.setenv("GLASSHIVE_BACKGROUND_CONSUMERS_ENABLED", "false")
+    app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=StubRuntime(), reconcile_on_startup=False)
+    store = app.state.store
+    project = store.create_project("owner", "Native reuse", "Current run output", "claude-code")
+    worker = store.create_worker(project["project_id"], "owner", "Worker", "Review", "claude-code", "claude-code", "claude-code", "configured")
+    state_dir = tmp_path / "native-state"; state_dir.mkdir()
+    worker = store.update_worker(worker["worker_id"], state_dir=str(state_dir), state="failed")
+    run = store.create_run(worker["worker_id"], worker["project_id"], "Review again")
+    store.update_run(run["run_id"], state="failed", error_text="Current input could not load", active_attempt_id="current-attempt")
+    output = state_dir / "stdout.log"; output.write_text("Native output for the recorded attempt")
+    error = state_dir / "stderr.log"; error.write_text("Native diagnostic for the recorded attempt")
+    (state_dir / "active_terminal_session.json").write_text(json.dumps({
+        "run_id": "old-run" if metadata_identity == "other_run" else run["run_id"],
+        "attempt_id": "old-attempt" if metadata_identity == "other_attempt" else "current-attempt",
+        "stdout_path": str(output), "stderr_path": str(error),
+    }))
+    if metadata_identity == "legacy":
+        (state_dir / "active_terminal_session.json").write_text(json.dumps({
+            "stdout_path": str(output), "stderr_path": str(error),
+        }))
+    try:
+        live = TestClient(app).get(f"/v1/workers/{worker['worker_id']}/live").json()
+        assert live["latest_run"]["run_id"] == run["run_id"]
+        assert live["latest_output"] == "Current input could not load"
+        expected = metadata_identity in {"current", "legacy"}
+        assert bool(live["console"]["stdout"]) is expected
+        assert bool(live["console"]["stderr"]) is expected
+    finally:
+        app.state.service.shutdown(); app.state.store.close()

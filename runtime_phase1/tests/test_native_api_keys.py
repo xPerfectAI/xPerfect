@@ -496,6 +496,29 @@ def test_fixed_endpoint_check_rejects_redirect_and_hides_provider_body(monkeypat
     assert keys._NoRedirect().redirect_request(None,None,302,'',{},'https://invalid.example') is None
 
 
+@pytest.mark.parametrize('provider', ['grok', 'xai'])
+@pytest.mark.parametrize('changed,expected', [({}, True), ({'api_key_blocked': True}, False),
+    ({'api_key_disabled': True}, False), ({'team_blocked': True}, False),
+    ({'api_key_disabled': 'false'}, False), ({'api_key_disabled': None}, False)])
+def test_xai_auth_check_uses_key_status_without_requiring_model_list_permission(monkeypatch, provider, changed, expected):
+    import json
+    payload = {'api_key_blocked': False, 'api_key_disabled': False, 'team_blocked': False, **changed}
+    class Response:
+        status=200
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, limit): return json.dumps(payload).encode()
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == 'https://api.x.ai/v1/api-key'
+            assert timeout == 12
+            return Response()
+    monkeypatch.setattr(keys, 'build_opener', lambda *_: Opener())
+    accepted, message = keys.check_key(provider, 'synthetic-key')
+    assert accepted is expected
+    assert 'synthetic-key' not in message
+
+
 def test_credential_api_validation_never_echoes_key(connected, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from workers_projects_runtime.api import create_app

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "expected_calculation_checks": {
+    "cost_per_qualified_lead": {
+      "Paid search": 40,
+      "Webinar": 20,
+      "Email": 6.25
+    },
+    "cost_per_customer": {
+      "Paid search": 200,
+      "Webinar": 100,
+      "Email": 31.25
+    },
+    "no_publication_or_spending": true
+  },
+  "required_deliverables": [
+    "Executive review brief",
+    "Editable calculation/trace files",
+    "Source and assumption references",
+    "Specific unresolved issues"
+  ],
+  "company_context_check": "The brief follows the supplied company reporting instruction and distinguishes facts, assumptions and approval.",
+  "bad_input": {
+    "data": "bad-input.csv",
+    "expected_exit": 2,
+    "expected_status": "needs_input",
+    "must_not_claim_complete": true
+  },
+  "native_execution_required": true,
+  "qualified_expert_acceptance": "NOT ESTABLISHED by the demonstration; requires an actual domain reviewer."
+}

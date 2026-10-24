@@ -42,4 +42,4 @@ pythonpath = ["src"]
 addopts = "-q"
 
 [tool.setuptools.package-data]
-workers_projects_runtime = ["prompts/*.md", "prompts/*.json"]
+workers_projects_runtime = ["prompts/*.md", "prompts/*.json", "starter_packs/**/*"]

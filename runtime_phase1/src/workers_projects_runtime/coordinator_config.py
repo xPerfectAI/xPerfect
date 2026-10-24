@@ -24,6 +24,14 @@ def explicit_coordinator_config() -> CoordinatorConfig | None:
     return validate_configured_coordinator(explicit) if explicit else None
 
 
+def connected_account_execution_mode(profile: str) -> str:
+    """Use the deployment's existing supported placement, never caller policy."""
+    from .service import standalone_coordinator_host_enabled
+    if profile in {"direct-openai", "direct-anthropic", "direct-xai"} or standalone_coordinator_host_enabled():
+        return "host"
+    return "docker"
+
+
 def configured_coordinator(service, provider, tenant_id: str = "local", owner_id: str = "",
                            selected_profile: str = "") -> CoordinatorConfig:
     # Optional advanced deployment/owner configuration is explicit. It never becomes
@@ -40,12 +48,14 @@ def configured_coordinator(service, provider, tenant_id: str = "local", owner_id
     preferences = service.store.get_user_preferences(tenant_id, owner_id) if owner_id else {}
     preferences = preferences or {}
     profile = selected_profile or preferences.get("default_worker_profile") or os.environ.get("GLASSHIVE_DEFAULT_WORKER_PROFILE") or os.environ.get("WPR_DEFAULT_WORKER_PROFILE") or "codex-cli"
-    mode = "host" if profile in {"direct-openai", "direct-anthropic", "direct-xai"} else "docker" if selected_profile else os.environ.get("WPR_DEFAULT_EXECUTION_MODE", "docker")
+    mode = connected_account_execution_mode(profile) if selected_profile else ("host" if profile in {"direct-openai", "direct-anthropic", "direct-xai"} else os.environ.get("WPR_DEFAULT_EXECUTION_MODE", "docker"))
     model = service._resolve_worker_model(profile, mode, tenant_id=tenant_id, owner_id=owner_id)
     from .conversation_provider import GLASSHIVE_MODELS, _configured_grok_conversation_model
     configured_grok = _configured_grok_conversation_model(model) if profile == "grok-build" else None
-    catalog = list(GLASSHIVE_MODELS.values()) + ([configured_grok] if configured_grok else [])
-    matches = [item for item in catalog if item.harness_profile == profile and item.native_model == model]
+    catalog = dict(GLASSHIVE_MODELS)
+    if configured_grok is not None:
+        catalog[configured_grok.id] = configured_grok
+    matches = [item for item in catalog.values() if item.harness_profile == profile and item.native_model == model]
     if len(matches) != 1:
         raise CoordinatorConflict("The configured assistant is unavailable for conversations")
     selected = matches[0]

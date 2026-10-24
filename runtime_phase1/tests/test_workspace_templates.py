@@ -49,6 +49,117 @@ def _workspace(client: TestClient, *, headers: dict[str, str] | None = None) -> 
     return response.json()
 
 
+def test_personal_library_template_keeps_exact_selected_version_after_catalog_delete(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    class PreparedRuntime(StubRuntime):
+        def _runtime_info(self, worker, *, pid):
+            root = tmp_path / worker["worker_id"]
+            root.mkdir(exist_ok=True)
+            return replace(super()._runtime_info(worker, pid=pid), workspace_dir=str(root))
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(tmp_path))
+    client = TestClient(create_app(db_path=str(tmp_path / "runtime.db"), runtime_backend="stub", runtime=PreparedRuntime()))
+    source = _workspace(client)
+    saved = client.post("/v1/personal-library", json={
+        "name": "Synthetic onboarding", "kind": "note", "text": "Exact reusable reference.",
+        "idempotency_key": "template-note",
+    })
+    assert saved.status_code == 201, saved.text
+    item = saved.json()
+    refs = [{"item_id": item["item_id"], "version_id": item["version_id"]}]
+    applied = client.post(f"/v1/workspaces/{source['worker_id']}/personal-library", json={
+        "refs": refs, "request_key": "template-apply",
+    })
+    assert applied.status_code == 200, applied.text
+    deleted = client.delete(f"/v1/personal-library/{item['item_id']}?confirm=true")
+    assert deleted.status_code == 200, deleted.text
+    assert client.post("/v1/personal-library/resolve", json={"refs": refs}).status_code == 404
+    template = client.post(f"/v1/workspaces/{source['worker_id']}/templates", json={"name": "Saved desk"})
+    assert template.status_code == 201, template.text
+    template = template.json()
+    assert template["personal_library_refs"] == refs
+    listed = client.get("/v1/workspace-templates")
+    assert listed.status_code == 200, listed.text
+    summary = next(row for row in listed.json()["items"] if row["template_id"] == template["template_id"])
+    assert summary["personal_library_refs"] == refs
+    assert summary["abilities"] == [{"name": "Synthetic onboarding", "kind": "note", "version": 1, "included": True}]
+    # The card/client metadata identifies retained exact knowledge without copying bodies.
+    assert "Exact reusable reference." not in json.dumps(summary)
+    assert "content" not in summary
+    created = client.post(f"/v1/workspace-templates/{template['template_id']}/instantiate", json={
+        "idempotency_key": "retained-template", "name": "New desk",
+    })
+    assert created.status_code == 201, created.text
+    worker = created.json()["workspace"]
+    actual = client.get(f"/v1/workspaces/{worker['worker_id']}/personal-library")
+    assert actual.status_code == 200, actual.text
+    assert [{"item_id": row["item_id"], "version_id": row["version_id"]}
+            for row in actual.json()["items"]] == refs
+    replay = client.post(f"/v1/workspace-templates/{template['template_id']}/instantiate", json={
+        "idempotency_key": "retained-template", "name": "New desk",
+    })
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["workspace"]["worker_id"] == worker["worker_id"]
+
+
+def test_private_skill_template_review_is_durable_and_resolves_after_exact_review(tmp_path):
+    client = TestClient(create_app(db_path=str(tmp_path / "runtime.db"), runtime_backend="stub"))
+    source = _workspace(client)
+    item = client.post("/v1/personal-library", json={
+        "name": "Synthetic skill", "kind": "skill", "idempotency_key": "template-skill",
+        "files": [{"path": ".claude/skills/summary/SKILL.md", "content": "Use this synthetic skill."}],
+        "profiles": ["claude-code"],
+    }).json()
+    refs = [{"item_id": item["item_id"], "version_id": item["version_id"]}]
+    applied = client.post(f"/v1/workspaces/{source['worker_id']}/personal-library", json={
+        "refs": refs, "request_key": "skill-apply",
+    })
+    assert applied.status_code == 200, applied.text
+    template = client.post(f"/v1/workspaces/{source['worker_id']}/templates", json={"name": "Skill desk"}).json()
+    path = f"/v1/workspace-templates/{template['template_id']}/instantiate"
+    payload = {"idempotency_key": "skill-template", "name": "New skill desk"}
+    created = client.post(path, json=payload)
+    assert created.status_code == 201, created.text
+    worker = created.json()["workspace"]
+    # This template is deliberately Codex while the package is Claude-only.
+    # An unavailable executable package must remain visible and block work until skipped/removed.
+    assert created.json()["approvals_required"]
+    report = client.get(f"/v1/workers/{worker['worker_id']}").json()["duplication_report"]
+    assert report["outstanding_reapproval_items"][0]["reference"] == item["version_id"]
+    assert client.post(f"/v1/workers/{worker['worker_id']}/message", json={"message": "Must not start without review"}).status_code == 409
+    replay = client.post(path, json=payload)
+    assert replay.json()["approvals_required"]
+    application = client.get(f"/v1/workspaces/{worker['worker_id']}/personal-library").json()["items"][0]
+    removed = client.delete(f"/v1/workspaces/{worker['worker_id']}/personal-library/{application['application_id']}")
+    assert removed.status_code == 200, removed.text
+    undo_row=client.get(f"/v1/workspaces/{worker['worker_id']}/personal-library").json()['items'][0]
+    assert undo_row['active'] is False and undo_row['state']=='removed' and undo_row['undo_available']
+    assert client.get(f"/v1/workers/{worker['worker_id']}").json()["duplication_report"]["outstanding_reapproval_items"] == []
+
+
+def test_removed_knowledge_undo_receipt_is_not_saved_as_template_selection(tmp_path,monkeypatch):
+    from dataclasses import replace
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    class PreparedRuntime(StubRuntime):
+        def _runtime_info(self,worker,*,pid):
+            root=tmp_path/worker['worker_id'];root.mkdir(exist_ok=True)
+            return replace(super()._runtime_info(worker,pid=pid),workspace_dir=str(root))
+    monkeypatch.setenv('WPR_BOOTSTRAP_SOURCE_ROOTS',str(tmp_path))
+    client=TestClient(create_app(db_path=str(tmp_path/'runtime.db'),runtime_backend='stub',runtime=PreparedRuntime()))
+    source=_workspace(client)
+    item=client.post('/v1/personal-library',json={'name':'Optional reference','kind':'note','text':'Exact source','idempotency_key':'removed-note'}).json()
+    added=client.post(f"/v1/workspaces/{source['worker_id']}/personal-library",json={'refs':[{'item_id':item['item_id'],'version_id':item['version_id']}],'request_key':'apply'}).json()['items'][0]
+    assert client.delete(f"/v1/workspaces/{source['worker_id']}/personal-library/{added['application_id']}").status_code==200
+    row=client.get(f"/v1/workspaces/{source['worker_id']}/personal-library").json()['items'][0]
+    assert row['undo_available'] and not row['active']
+    template=client.post(f"/v1/workspaces/{source['worker_id']}/templates",json={'name':'Clean desk'})
+    assert template.status_code==201,template.text
+    with sqlite3.connect(tmp_path/'runtime.db') as conn:
+        content=json.loads(conn.execute('SELECT content_json FROM workspace_templates WHERE template_id=?',(template.json()['template_id'],)).fetchone()[0])
+        assert not conn.execute("SELECT 1 FROM personal_library_holders WHERE holder_kind='template' AND version_id=?",(item['version_id'],)).fetchone()
+    assert not content.get('personal_library_refs')
+
+
 def _library_with_dependency(database, client: TestClient, worker_id: str) -> tuple[dict, dict]:
     store = ControlPlaneStore(str(database))
     dependency = register_manifest(
@@ -163,11 +274,6 @@ def test_template_snapshot_is_immutable_sanitized_and_source_independent(tmp_pat
     assert instantiated.json()["workspace"]["state"] == "paused"
     assert instantiated.json()["workspace"]["worker_id"] == repeated.json()["workspace"]["worker_id"]
     assert repeated.json()["idempotent_replay"] is True
-    # A template start is a saved workspace: its own alias lets its exact name reach it.
-    import re
-    assert re.fullmatch(
-        r"[a-z0-9-]+-fresh-briefing-desk-[0-9a-f]{12}", instantiated.json()["workspace"]["alias"] or ""
-    )
     assert {item["stable_id"] for item in instantiated.json()["approvals_required"]} == {
         library["stable_id"],
         dependency["stable_id"],

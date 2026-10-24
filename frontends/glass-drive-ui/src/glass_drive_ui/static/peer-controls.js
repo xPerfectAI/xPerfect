@@ -1,4 +1,4 @@
-import { mountPeerPermissions } from './peer-permissions.js?v=20260922peers2';
+import { mountPeerPermissions } from './peer-permissions.js?v=20261024polish1';
 
 // Optional, owner-controlled peer collaboration. Mount once per selected member.
 export function mountPeerControls(container, worker, { requestHeaders = headers => headers } = {}) {

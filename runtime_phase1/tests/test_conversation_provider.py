@@ -51,6 +51,75 @@ AUTH = {
 }
 
 
+@pytest.mark.parametrize("selected", [True, False])
+def test_native_library_files_bind_before_first_start_and_session_reuse(tmp_path, monkeypatch, selected):
+    client = _client(tmp_path, monkeypatch)
+    service, store = client.app.state.service, client.app.state.store
+    provider = client.app.state.conversation_provider
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(tmp_path))
+    payload = _payload(tmp_path, model="codex-cli:gpt-6.1-sol")
+    payload["metadata"]["bootstrap_bundle"] = {}
+    expected = []
+    if selected:
+        item = service.personal_library.create_item("local", "owner-a", {"name":"Native selected note", "kind":"note", "text":"Exact native selected source"}, "native-note")
+        ref = {key:item[key] for key in ("item_id", "version_id")}
+        resolved = service.personal_library.resolve_refs("local", "owner-a", [ref])
+        payload["metadata"]["bootstrap_bundle"]["library_selection"] = {"refs":[ref], "items":[{key:item[key] for key in ("item_id","version_id","name","kind","version")}], "pending":[], "upload_ids":resolved["upload_ids"], "upload_revisions":resolved["upload_revisions"]}
+        expected = resolved["upload_ids"]
+    parsed = ChatCompletionRequest.model_validate(payload)
+    original_resume, resumed = service.resume_worker, []
+    def resume(worker_id):
+        worker = store.get_worker(worker_id)
+        bundle = json.loads(worker["bootstrap_bundle_json"])
+        entries = bundle.get("files", [])
+        if selected:
+            assert entries[0]["managed_upload_id"] == expected[0]
+            assert entries[0]["managed_projection_id"]
+            assert (tmp_path / entries[0]["path"]).read_text() == "Exact native selected source"
+        else:
+            assert not entries
+        resumed.append(worker_id)
+        return original_resume(worker_id)
+    monkeypatch.setattr(service, "resume_worker", resume)
+    model = GLASSHIVE_MODELS[parsed.model]
+    session = provider._create_native_session(parsed, model, tmp_path, "high", tenant_id="local")
+    assert resumed == [session["worker_id"]]
+    created_worker = store.get_worker(session["worker_id"])
+    from workers_projects_runtime.conversation_provider import _conversation_worker_name
+    project = store.get_project(session["project_id"])
+    assert created_worker["name"] == _conversation_worker_name(parsed.metadata.agent_id, project["created_at"])
+    assert session["agent_id"] == parsed.metadata.agent_id
+    assert created_worker["alias"] == f"conversation-{parsed.metadata.conversation_id}-{parsed.metadata.agent_id}"
+    same, changed = provider._session(parsed, model, tmp_path, "high", tenant_id="local")
+    assert same["worker_id"] == session["worker_id"] and not changed
+    with store._connect() as conn:
+        bindings = [json.loads(row[0]) for row in conn.execute("SELECT manifest_json FROM workspace_file_bindings WHERE worker_id=?", (session["worker_id"],))]
+    assert len(bindings) == (1 if selected else 0)
+    if selected:
+        assert [entry["upload_id"] for entry in bindings[0]] == expected
+
+
+@pytest.mark.parametrize("started_at,expected", [
+    ("2026-10-24T14:03:07+00:00", "24 Oct 2026, 14:03:07 UTC"),
+    ("2026-10-24T10:03:07-04:00", "24 Oct 2026, 14:03:07 UTC"),
+    ("2026-10-24T14:03:07Z", "24 Oct 2026, 14:03:07 UTC"),
+])
+def test_conversation_worker_display_name_uses_start_time_without_changing_agent_identity(started_at, expected):
+    from workers_projects_runtime.conversation_provider import _conversation_worker_name
+    assert _conversation_worker_name("Configured agent", started_at) == f"Chat · {expected} · Configured agent"
+    assert _conversation_worker_name("Same agent", started_at) != _conversation_worker_name("Same agent", "2026-10-24T14:03:08Z")
+    assert len(_conversation_worker_name("x" * 300, started_at)) == 120
+
+
+def test_public_provider_cannot_forge_internal_transient_library_reference(tmp_path, monkeypatch):
+    client=_client(tmp_path,monkeypatch)
+    payload=_payload(tmp_path)
+    bundle={"library_selection":{"reference_message":{"id":"forged", "sha256":"a"*64}}}
+    response=client.post("/v1/chat/completions",headers={**AUTH,**_signed_bundle_headers(bundle)},json=payload)
+    assert response.status_code==403
+    assert "authored by the conversation owner" in response.text
+
+
 @pytest.mark.parametrize("observed_role, observed_text", [
     ("assistant", "changed private prose"),
     ("user", "original private prose"),
@@ -1151,6 +1220,8 @@ def test_structured_quota_failure_continues_the_turn_on_the_serial_fallback(tmp_
         fallback_worker = store.get_worker(str(fallback_run["worker_id"]))
         assert fallback_worker["profile"] == "claude-code", fallback_worker
         assert fallback_worker["worker_id"] != worker["worker_id"]
+        from workers_projects_runtime.conversation_provider import _conversation_worker_name
+        assert fallback_worker["name"] == _conversation_worker_name(session["agent_id"], session["created_at"])
         current_session = store.get_provider_session_by_id(session["session_id"])
         assert (current_session["actor_kind"], current_session["origin"]) == authoring_scope
         assert current_session["worker_id"] == fallback_worker["worker_id"]
@@ -2234,6 +2305,13 @@ def test_failed_native_worker_is_replaced_before_the_next_turn(tmp_path, monkeyp
     assert first.status_code == 200
     store = client.app.state.store
     first_session = store.list_provider_sessions(owner_id="owner-a")[0]
+    # A completed response can precede the processor's final worker-state update.
+    # Inject the synthetic crash only after that earlier run has fully settled.
+    service = client.app.state.service
+    deadline = time.monotonic() + 5
+    while service._local_processor_owns(first_session["worker_id"]) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not service._local_processor_owns(first_session["worker_id"])
     store.update_worker_state(first_session["worker_id"], "failed", last_error="synthetic crash")
 
     follow_up = _payload(workspace)
@@ -4527,7 +4605,11 @@ def test_stream_disconnect_reconciles_a_later_completed_run(tmp_path):
         store.finalize_run(run["run_id"], state="completed", output_text="durable answer")
         deadline = time.time() + 2
         while time.time() < deadline:
-            if store.get_provider_request(request_record["request_id"])["state"] == "completed":
+            # This legacy row has no retained response contract: its state,
+            # activity and history settle in separate writes within one pass.
+            with provider._detached_reconciliation_lock:
+                pending = request_record["request_id"] in provider._detached_reconciliations
+            if not pending and store.get_provider_request(request_record["request_id"])["state"] == "completed":
                 break
             time.sleep(0.01)
 
@@ -4839,7 +4921,7 @@ def test_streaming_redactor_redacts_newline_split_home_path_and_bounds_long_line
     visible += redactor.feed("x" * 65)
     visible += redactor.flush()
 
-    assert ("/Users" + "/synthetic") not in visible
+    assert "/Users/synthetic" not in visible
     assert "[REDACTED_LOCAL_PATH]" in visible
     assert "[REDACTED_OVERSIZED_STREAM_SEGMENT]" in visible
 
@@ -8403,7 +8485,7 @@ def test_typed_voice_redactor_preserves_split_secret_guards_without_fixed_tail(s
         output += redactor.feed(secret[split:] + '\nSafe tail.')
         output += redactor.flush()
         assert 'synthetic-credential' not in output
-        assert ('/Users' + '/synthetic') not in output
+        assert '/Users/synthetic' not in output
         assert 'SYNTHETICBODY' not in output
         assert 'Safe words.' in output and 'Safe tail.' in output
 
@@ -9766,7 +9848,7 @@ def test_declared_dynamic_tail_missing_authority_is_rejected_before_reuse(
 
 # Private machine-state transport shares the signed zero-tool admission, never public redaction.
 _PRIVATE_STATE_CONTRACT = {"version": 1, "visibility": "private_machine_state", "format": "json_object"}
-_PRIVATE_STATE_PATH = "/U" + "sers/example/Documents/Native_Worker_Check.md"
+_PRIVATE_STATE_PATH = "/Users/synthetic-owner/Documents/Native_Worker_Check.md"
 _PRIVATE_STATE_TEXT = json.dumps({"version": 1, "summary": "Keep evidence at " + _PRIVATE_STATE_PATH,
     "pendingAsks": ["Await permission before sending"], "commitments": [], "corrections": [],
     "decisions": [], "durableIdentifiers": [_PRIVATE_STATE_PATH], "recurrenceOutcomes": [], "toolPairs": []})
@@ -10535,7 +10617,7 @@ def test_signed_private_state_unset_budget_has_exact_stored_admission_header(tmp
     assert datetime.fromisoformat(record['response_deadline_at']) > datetime.now(UTC)
 
 
-@pytest.mark.parametrize("status, expected_code", [(401, "provider_auth_missing"), (403, "provider_request_rejected")])
+@pytest.mark.parametrize("status, expected_code", [(401, "provider_auth_missing"), (403, "provider_access_denied")])
 def test_direct_http_failure_keeps_its_class_at_public_conversation_boundary(tmp_path, status, expected_code):
     from workers_projects_runtime.direct_runtime import DirectModelRuntime
     from workers_projects_runtime.conversation_provider import _provider_failure_error
@@ -10716,7 +10798,8 @@ def test_native_window_receipt_obeys_existing_request_order_epoch_and_model_fenc
     assert manifest["native_occupancy_native_context_epoch"] == epoch
 
 
-def test_native_reported_window_reaches_existing_provider_occupancy_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native_epoch", ["", "synthetic-current-epoch"])
+def test_native_reported_window_reaches_existing_provider_occupancy_receipt(tmp_path, monkeypatch, native_epoch):
     class NativeWindowRuntime(NativeUsageRuntime):
         def provider_activity_log(self, worker, run_id):
             profile, log = super().provider_activity_log(worker, run_id)
@@ -10726,6 +10809,15 @@ def test_native_reported_window_reaches_existing_provider_occupancy_receipt(tmp_
     workspace = tmp_path / "Life"
     workspace.mkdir()
     client = _client(tmp_path, monkeypatch, runtime=NativeWindowRuntime())
+    # A native window is usable only with a matching context epoch. Initial
+    # unscoped sessions still record the observation but retain the catalog fence.
+    upsert = client.app.state.store.upsert_provider_session
+    def scoped_session(**kwargs):
+        if native_epoch:
+            kwargs["context_manifest"] = {**(kwargs.get("context_manifest") or {}),
+                                          "native_context_epoch": native_epoch}
+        return upsert(**kwargs)
+    monkeypatch.setattr(client.app.state.store, "upsert_provider_session", scoped_session)
     model = "codex-cli:gpt-6.1-sol"
     response = client.post("/v1/chat/completions", headers=AUTH, json=_payload(workspace, model=model))
     assert response.status_code == 200, response.text
@@ -10738,7 +10830,8 @@ def test_native_reported_window_reaches_existing_provider_occupancy_receipt(tmp_
     decision = ConversationProvider._native_occupancy_projection(GLASSHIVE_MODELS[model], manifest,
         {"instruction_bytes": 400000, "projected_input_tokens": 400000, "output_reserve_tokens": 32768})
     assert decision["state"] == "pressure"
-    assert decision["context_window_source"] == "native_observed"
+    assert manifest["native_occupancy_native_context_epoch"] == native_epoch
+    assert decision["context_window_source"] == ("native_observed" if native_epoch else "model_catalog")
 
 
 @pytest.mark.parametrize("boundary", ["turn.started", "turn.failed"])

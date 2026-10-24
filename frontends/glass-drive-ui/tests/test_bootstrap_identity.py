@@ -20,7 +20,7 @@ const between = (start, end) => {
   return source.slice(first, last);
 };
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => {resolve=a;reject=b;}); return {promise,resolve,reject}; };
-const fetches=[], catalogs=[], bindings=[], fileScopes=[], renderedOwners=[], handlers={};
+const fetches=[], catalogs=[], bindings=[], fileScopes=[], libraryScopes=[], libraryAccess=[], expertOwners=[], renderedOwners=[], handlers={};
 const logout=deferred();
 const context = vm.createContext({
   fetch: () => { const request=deferred();fetches.push(request);return request.promise; },
@@ -30,6 +30,9 @@ const context = vm.createContext({
   launchRecoveryTarget: null, showLaunchRecovery: () => {},
   document: {getElementById: () => null},
   fileDraft: {setOwnerScope: value => fileScopes.push(value)},
+  launchLibrary: {setOwnerScope: value => libraryScopes.push(value)},
+  mainLibrary: {setAccess: (allowed, owner) => libraryAccess.push([allowed, owner])}, signedToken: '',
+  expertPicker: {update: data => expertOwners.push(data?.draft_owner_scope || null), selection: () => null},
   select: {value:''}, catalogState: {generation:0,loading:false,items:[]},
   workspaceKindFilter: {value:'named'},workspaceSearch: {value:''},workspaceTagFilter: {value:''},
   providerAccount:{},providerAccountPolicy:{},providerAccountHelp:{},workerAccountSummaryNode:null,defaultWorker:{},
@@ -63,7 +66,7 @@ async function run() {
     await context.refresh();assert.equal(fetches.length,1);
     fetches[0].resolve(response('A'));await a;
     assert.equal(bindings.length,0);assert.equal(context.current().csrf,'');
-    assert.deepEqual(fileScopes,[null]);assert.deepEqual(renderedOwners,[]);
+    assert.deepEqual(fileScopes,[null]);assert.deepEqual(libraryScopes,[null]);assert.deepEqual(libraryAccess,[[false,null]]);assert.deepEqual(expertOwners,[null]);assert.deepEqual(renderedOwners,[]);
     logout.resolve({});await exit;return;
   }
   const b=context.refresh();fetches[1].resolve(response('B'));await tick();
@@ -74,6 +77,8 @@ async function run() {
   await a;
   assert.deepEqual(bindings,['B']);
   assert.deepEqual(fileScopes,['B']);
+  assert.deepEqual(libraryScopes,['B']);assert.deepEqual(libraryAccess,[[true,'B']]);
+  assert.deepEqual(expertOwners,['B']);
   assert.ok(renderedOwners.length > 0 && renderedOwners.every(owner => owner === 'B'));
   assert.equal(context.current().owner,'B');assert.equal(context.current().csrf,'csrf-B');
 }

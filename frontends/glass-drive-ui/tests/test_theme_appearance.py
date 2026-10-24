@@ -92,10 +92,14 @@ def test_actual_theme_critical_solid_colour_pairs_remain_readable():
     tokens = {name: (light.lower(), dark.lower()) for name, light, dark in re.findall(
         r"(--[a-z-]+):\s*light-dark\((#[0-9a-fA-F]{6}),\s*(#[0-9a-fA-F]{6})\)", css)}
     for mode in (0, 1):
-        for foreground in ("--text", "--muted", "--placeholder", "--accent", "--danger", "--warning", "--success"):
-            for background in ("--bg", "--panel", "--panel-strong"):
+        for foreground in ("--text", "--muted", "--placeholder", "--accent", "--queue", "--danger", "--warning", "--success"):
+            for background in ("--bg", "--panel", "--panel-strong", "--overlay-surface", "--control-bg", "--control-hover", "--surface-hover", "--segment-selected"):
                 ratio = _contrast(tokens[foreground][mode], tokens[background][mode])
                 assert ratio >= 4.5, (mode, foreground, background, round(ratio, 2))
+        # Boundaries used to identify ordinary fields and focus remain visible.
+        for background in ("--panel", "--panel-strong", "--overlay-surface", "--control-bg"):
+            assert _contrast(tokens["--control-line"][mode], tokens[background][mode]) >= 3
+            assert _contrast(tokens["--accent"][mode], tokens[background][mode]) >= 3
         assert _contrast(tokens["--button-text"][mode], tokens["--button-bg"][mode]) >= 4.5
         assert _contrast(tokens["--on-accent"][mode], tokens["--accent"][mode]) >= 4.5
         assert _contrast(tokens["--text"][mode], tokens["--segment-selected"][mode]) >= 4.5
@@ -126,3 +130,25 @@ def test_actual_theme_critical_solid_colour_pairs_remain_readable():
             "Watch loading/recovery text must be readable outside the native desktop"
         assert _contrast(colour(sign_in["color"], mode), colour(sign_in["background"], mode)) >= 4.5, \
             "Watch sign-in action must use readable text on its accent surface"
+
+
+def test_accent_text_retains_contrast_on_its_composited_selection_tint():
+    css = (STATIC / "theme.css").read_text()
+    tokens = {name: (light.lower(), dark.lower()) for name, light, dark in re.findall(
+        r"(--[a-z-]+):\s*light-dark\((#[0-9a-fA-F]{6}),\s*(#[0-9a-fA-F]{6})\)", css)}
+    tints = re.search(r"--accent-soft:\s*light-dark\(rgba\(([^)]+)\),\s*rgba\(([^)]+)\)\)", css)
+    assert tints
+    for mode in (0, 1):
+        red, green, blue, alpha = map(float, tints[mode + 1].split(","))
+        for background in ("--panel", "--panel-strong", "--overlay-surface", "--surface-hover"):
+            base = tokens[background][mode]
+            channels = [int(base[index:index + 2], 16) for index in (1, 3, 5)]
+            # Evaluate the composed surface, not just the unpainted solid token.
+            mixed = [channel * alpha + below * (1 - alpha)
+                     for channel, below in zip((red, green, blue), channels)]
+            def luminance(values):
+                values = [value / 255 for value in values]
+                return sum((value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4) * weight
+                           for value, weight in zip(values, (.2126, .7152, .0722)))
+            lower, upper = sorted((_luminance(tokens["--accent"][mode]), luminance(mixed)))
+            assert (upper + .05) / (lower + .05) >= 4.5, (mode, background)

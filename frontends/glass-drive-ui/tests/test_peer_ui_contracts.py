@@ -21,7 +21,7 @@ def test_peer_ui_modules_parse_and_keep_exact_current_owner_choice():
     assert "includes_future_members !== false" in permissions
     assert "An idle worker cannot receive a new message until this is allowed." in permissions
     assert "[data-options-reload]" in permissions
-    assert "peer-permissions.js?v=20260922peers2" in controls
+    assert "peer-permissions.js?v=20261024polish1" in controls
 
 
 def test_peer_ui_keeps_discovery_separate_and_revokes_only_active_directions():

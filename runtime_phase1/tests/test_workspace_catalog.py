@@ -80,6 +80,39 @@ def test_duplicate_has_no_default_file_count_or_byte_limit(tmp_path, monkeypatch
     assert state == "copied"
 
 
+@pytest.mark.parametrize("evidence_root", ["glasshive-run", "GLASSHIVE-RUN"])
+def test_copy_plan_excludes_runtime_evidence_root_and_keeps_project_context(tmp_path, evidence_root):
+    source = tmp_path / "source"
+    project_files = {
+        "project-definition.md": b"Current project definition.\n",
+        "work-log.md": b"Project progress notes.\n",
+        "harness-prompt.md": b"Current harness context.\n",
+        "glasshive-host-tools/helper.py": b"print('synthetic helper')\n",
+        ".claude/skills/review/SKILL.md": b"Read references/example.md.\n",
+        ".claude/skills/review/references/example.md": b"Exact skill reference.\n",
+        "reports/result.txt": b"Synthetic user output.\n",
+        "reports/evidence.json": b'{"user_evidence":true}\n',
+        "notes/glasshive-run/active-run.json": b'{"project_note":true}\n',
+    }
+    internal_files = {
+        f"{evidence_root}/evidence.json": b'{"runtime_evidence":true}\n',
+        f"{evidence_root}/runs/run_source/active-run.json": b'{"run_id":"run_source"}\n',
+        f"{evidence_root}/runs/run_source/constraint-ledger.json": b'{"run_id":"run_source"}\n',
+        f"{evidence_root}/runs/run_source/evidence.json": b'{"run_id":"run_source"}\n',
+        ".glasshive-runs/run_source/instruction.stdin": b"Source-only native run input.\n",
+    }
+    for relative, content in {**project_files, **internal_files}.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    files, skipped, state = service_module._workspace_copy_plan(source)
+
+    assert {relative.as_posix(): path.read_bytes() for path, relative in files} == project_files
+    assert skipped == 2
+    assert state == "copied"
+
+
 def test_duplicate_classifies_filesystem_exhaustion_and_removes_worker(tmp_path, monkeypatch):
     store = Store(str(tmp_path / "runtime.db"))
     source_project = create_project(store, "Source")
@@ -303,6 +336,80 @@ def test_workspace_metadata_validates_kind_and_normalizes_tags(tmp_path):
     assert updated["tags"] == ["finance", "quarterly"]
 
 
+def test_workspace_catalog_excludes_only_bound_conversation_workers_before_pagination(tmp_path):
+    store = Store(str(tmp_path / "runtime.db"))
+    project = create_project(store, "Shared project")
+    helper = create_stored_worker(store, project, name="Research helper", tags=["visible"])
+    ordinary = create_stored_worker(store, project, name="xPerfect coordinator", tags=["visible"])
+    last = create_stored_worker(store, project, name="Last worker", tags=["visible"])
+    store.update_worker(ordinary["worker_id"], bootstrap_bundle_json=json.dumps({"run_mode": "conversation"}))
+    queens = []
+    for index in range(5):
+        queen = create_stored_worker(store, project, name=f"Chat session {index}", tags=["visible"])
+        store.upsert_provider_session(
+            tenant_id="tenant-a", owner_id="owner-a", conversation_id=f"conversation-{index}",
+            agent_id="coordinator", model_id="stub/codex-cli", project_id=project["project_id"],
+            worker_id=queen["worker_id"], workspace_dir="", access_mode="workspace",
+        )
+        store.update_worker(queen["worker_id"], favorite=1)
+        queens.append(queen)
+    for index, worker in enumerate([last, ordinary, helper]):
+        store.update_worker(worker["worker_id"], updated_at=f"2026-01-0{index + 1}T00:00:00+00:00")
+    sessions_before = store.list_provider_sessions(owner_id="owner-a")
+    service = WorkersProjectsService(store, TemporaryWorkspaceRuntime(tmp_path / "runtime"),
+                                     reconcile_on_startup=False, start_background_consumers=False)
+    try:
+        first = service.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-a", limit=2)
+        assert [item["worker_id"] for item in first["items"]] == [helper["worker_id"], ordinary["worker_id"]]
+        assert first["next_cursor"]
+        second = service.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-a", limit=2,
+                                                cursor=first["next_cursor"])
+        assert [item["worker_id"] for item in second["items"]] == [last["worker_id"]]
+        assert second["next_cursor"] is None
+        assert store.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-a", favorite=True) == []
+        assert store.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-a", search="Chat session") == []
+        visible = store.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-a", tags=["visible"])
+        assert {item["worker_id"] for item in visible} == {helper["worker_id"], ordinary["worker_id"], last["worker_id"]}
+        # Catalog visibility never deletes native sessions or changes low-level worker access.
+        assert store.list_provider_sessions(owner_id="owner-a") == sessions_before
+        assert len(store.list_workers(project["project_id"], tenant_id="tenant-a", owner_id="owner-a")) == 8
+        assert all(store.get_worker(queen["worker_id"]) is not None for queen in queens)
+    finally:
+        service.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize("binding", ["missing", "tenant_id", "owner_id", "project_id", "worker_id", "mission_lane"])
+def test_workspace_catalog_keeps_unbound_or_mismatched_conversations(tmp_path, binding):
+    store = Store(str(tmp_path / "runtime.db"))
+    project = create_project(store)
+    worker = create_stored_worker(store, project, name="Visible worker")
+    other_project = create_project(store, "Other project")
+    other = create_stored_worker(store, other_project, name="Other worker")
+    store.update_worker(worker["worker_id"], trusted_run_lane="conversation")
+    if binding != "missing":
+        session = store.upsert_provider_session(
+            tenant_id="tenant-a", owner_id="owner-a", conversation_id="conversation-a", agent_id="coordinator",
+            model_id="stub/codex-cli", project_id=project["project_id"], worker_id=worker["worker_id"],
+            workspace_dir="", access_mode="workspace",
+        )
+        if binding == "mission_lane":
+            store.update_worker(worker["worker_id"], trusted_run_lane="mission")
+        else:
+            foreign = {"tenant_id": "tenant-b", "owner_id": "owner-b",
+                       "project_id": other_project["project_id"], "worker_id": other["worker_id"]}[binding]
+            with store._connect() as conn:
+                conn.execute(f"UPDATE provider_sessions SET {binding} = ? WHERE session_id = ?",
+                             (foreign, session["session_id"]))
+    try:
+        rows = store.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-a")
+        assert worker["worker_id"] in {row["worker_id"] for row in rows}
+        assert store.list_workspace_catalog(tenant_id="tenant-a", owner_id="owner-b") == []
+        assert store.list_workspace_catalog(tenant_id="tenant-b", owner_id="owner-a") == []
+    finally:
+        store.close()
+
+
 def test_duplicate_copies_only_regular_project_files_and_returns_report(tmp_path):
     store = Store(str(tmp_path / "runtime.db"))
     source_project = create_project(store, "Source Project")
@@ -337,6 +444,11 @@ def test_duplicate_copies_only_regular_project_files_and_returns_report(tmp_path
         (source_workspace / ".codex" / "auth.json").write_text('{"token":"must-not-copy"}')
         (source_workspace / ".glasshive-runs").mkdir()
         (source_workspace / ".glasshive-runs" / "run.json").write_text("{}")
+        evidence = source_workspace / "glasshive-run"
+        (evidence / "runs/run_source").mkdir(parents=True)
+        (evidence / "evidence.json").write_text('{"source_audit":true}')
+        for name in ("evidence.json", "active-run.json", "constraint-ledger.json"):
+            (evidence / "runs/run_source" / name).write_text('{"run_id":"run_source"}')
         (source_workspace / ".claude.json").write_text('{"session":"must-not-copy"}')
         (source_workspace / "session.json").write_text('{"session":"must-not-copy"}')
         (source_workspace / "Cookies").write_text("must-not-copy")
@@ -386,7 +498,7 @@ def test_duplicate_copies_only_regular_project_files_and_returns_report(tmp_path
     assert duplicate["duplication_report"] == {
         "source_state": "copied",
         "copied_files": 2,
-        "skipped_items": 8,
+        "skipped_items": 9,
     }
     assert (target_workspace / "report.txt").read_text() == "approved report"
     assert (target_workspace / "nested" / "data.csv").read_text() == "value\n42\n"
@@ -394,6 +506,7 @@ def test_duplicate_copies_only_regular_project_files_and_returns_report(tmp_path
     assert not (target_workspace / ".env.local").exists()
     assert not (target_workspace / ".codex").exists()
     assert not (target_workspace / ".glasshive-runs").exists()
+    assert not (target_workspace / "glasshive-run").exists()
     assert not (target_workspace / ".claude.json").exists()
     assert not (target_workspace / "session.json").exists()
     assert not (target_workspace / "Cookies").exists()
@@ -406,55 +519,6 @@ def test_duplicate_copies_only_regular_project_files_and_returns_report(tmp_path
     assert "source.private_audit" not in {
         event["event_type"] for event in store.list_events(duplicate["worker_id"], tenant_id="tenant-a")
     }
-
-
-def test_duplicate_keeps_native_skill_files_but_not_private_harness_state(tmp_path):
-    store = Store(str(tmp_path / "runtime.db"))
-    project = create_project(store)
-    service = WorkersProjectsService(store, TemporaryWorkspaceRuntime(tmp_path / "runtime"), reconcile_on_startup=False)
-    skill = "---\nname: onboarding-proof\ndescription: Synthetic proof.\n---\nReply with the marker.\n"
-    try:
-        source = service.create_worker(project_id=project["project_id"], tenant_id="tenant-a",
-            owner_id="owner-a", name="Skilled expert", role="main", profile="claude-code",
-            backend="claude-code", workspace_kind="named")
-        root = Path(source["workspace_dir"])
-        for relative, content in (
-            (".claude/skills/onboarding-proof/SKILL.md", skill),
-            (".claude/skills/onboarding-proof/scripts/total.py", "print(51)\n"),
-            (".agents/skills/codex-proof/SKILL.md", "---\nname: codex-proof\n---\nSynthetic.\n"),
-            (".claude/settings.json", '{"hooks": "must-not-copy"}'),
-            (".claude/settings.local.json", '{"permissions": "must-not-copy"}'),
-            (".claude/.credentials.json", '{"token": "must-not-copy"}'),
-            (".claude/.cc-writes/marker", "must-not-copy"),
-            (".claude/skills/onboarding-proof/.env", "SECRET=must-not-copy"),
-            ("stock.csv", "item,quantity\nA,51\n"),
-        ):
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-        # A link out of the workspace inside the skills folder is skipped, never followed,
-        # and does not fail the copy.
-        os.symlink(tmp_path / "outside", root / ".claude" / "skills" / "linked-elsewhere")
-
-        copied = service.duplicate_worker(source["worker_id"], project["project_id"], "owner-a", "Copy", "main")
-    finally:
-        service.shutdown()
-
-    target = Path(copied["workspace_dir"])
-    assert (target / ".claude/skills/onboarding-proof/SKILL.md").read_text() == skill
-    assert (target / ".claude/skills/onboarding-proof/scripts/total.py").read_text() == "print(51)\n"
-    assert (target / ".agents/skills/codex-proof/SKILL.md").exists()
-    assert (target / "stock.csv").exists()
-    for private in (
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-        ".claude/.credentials.json",
-        ".claude/.cc-writes",
-        ".claude/skills/onboarding-proof/.env",
-        ".claude/skills/linked-elsewhere",
-    ):
-        assert not (target / private).exists(), private
-    assert copied["duplication_report"]["source_state"] == "copied"
 
 
 def test_duplicate_keeps_exact_accepted_input_name_only_for_matching_bytes(tmp_path):

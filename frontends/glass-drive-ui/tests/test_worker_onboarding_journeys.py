@@ -88,6 +88,25 @@ assert.equal(fields.get('copy-worker').value,'');assert.equal(select.value,'new:
 ''')
 
 
+def test_worker_types_distinguish_loading_failure_empty_and_recovery_without_fallback():
+    onboarding(r'''
+const ready=data;data=null;adapter.render();
+const type=fields.get('worker-type');
+assert.equal(type.options[0].textContent,'Loading worker types…');assert.equal(type.disabled,true);
+assert.equal(type.dataset.availability,'loading');assert.equal(type.value,'');
+adapter.render('unavailable');adapter.render();
+assert.equal(type.options[0].textContent,'Worker types unavailable — refresh to retry');
+assert.equal(type.dataset.availability,'unavailable');assert.equal(type.value,'');
+data={...ready,new_workspace_options:[]};nativeChoices('');adapter.render();
+assert.equal(type.options[0].textContent,'No worker types available');assert.equal(type.disabled,true);
+assert.equal(type.dataset.availability,'empty');assert.equal(select.value,'');assert.equal(choices.length,0);
+data=ready;nativeChoices('new:direct-xai');adapter.render();
+assert.equal(type.value,'new:direct-xai');assert.equal(type.disabled,false);assert.equal(type.dataset.availability,'ready');
+nativeChoices('');adapter.render();assert.equal(type.options[0].textContent,'Choose a worker type');
+assert.equal(type.value,'');assert.equal(choices.length,0);
+''')
+
+
 def test_pending_existing_choice_survives_a_catalog_render_before_selection():
     onboarding(r'''
 adapter.render();radio(workerRadios,'existing');

@@ -169,15 +169,7 @@ def environment(state: Path, config: dict, instance: str) -> dict:
         "GLASSHIVE_RUNTIME_BASE_URL": f"http://127.0.0.1:{ports['api']}",
         "GLASSHIVE_PEER_RUNTIME_BASE_URL": f"http://127.0.0.1:{ports['api']}",
         "WPR_OPERATOR_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
-        # Watch, confirmation and file links returned to people and MCP clients open on this
-        # instance's own UI (as the Docker package does). GLASSHIVE_MCP_PUBLIC_URL stays unset: it
-        # is hosted OAuth configuration; the UI shows this instance's MCP address from its own name.
         "GLASSHIVE_OPERATOR_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
-        "XPERFECT_LOCAL_MCP_URL": f"http://127.0.0.1:{ports['mcp']}/mcp",
-        # The UI shows AI apps the one local connection that needs no sign-in: this checkout's
-        # own stdio MCP command for this instance, and this checkout as the skill's source.
-        "XPERFECT_LOCAL_MCP_COMMAND": json.dumps([str(ROOT / "xperfect"), "mcp", "--state-dir", str(state)]),
-        "XPERFECT_LOCAL_CHECKOUT": str(ROOT),
         "GLASSHIVE_PUBLIC_BASE_URL": f"http://127.0.0.1:{ports['ui']}",
         "WPR_API_TOKEN": secret["api_token"], "GLASSHIVE_MCP_API_KEY": secret["mcp_token"],
         "GLASSHIVE_SIGNED_LINK_SECRET": secret["link_secret"],
@@ -234,7 +226,8 @@ def role_environment(state: Path, config: dict, env: dict, role: str) -> dict:
                    if role != "api" else set())
     env = {k: v for k, v in env.items()
            if k not in ASSERTION_KEYS and not k.startswith("GLASSHIVE_INTERNAL_ASSERTION_")
-           and k not in model_names}
+           and k not in model_names
+           and k not in {"XPERFECT_LOCAL_MCP_COMMAND", "XPERFECT_LOCAL_MCP_URL", "XPERFECT_LOCAL_CHECKOUT"}}
     if role == "mcp":
         return env
     secret = json.loads((state / "secrets.json").read_text())
@@ -248,6 +241,9 @@ def role_environment(state: Path, config: dict, env: dict, role: str) -> dict:
     })
     if role == "ui":
         env.update({
+            "XPERFECT_LOCAL_MCP_COMMAND": json.dumps([sys.executable, str(ROOT / "xperfect"), "mcp", "--state-dir", str(state)]),
+            "XPERFECT_LOCAL_MCP_URL": f"http://127.0.0.1:{config['ports']['mcp']}/mcp",
+            "XPERFECT_LOCAL_CHECKOUT": str(ROOT),
             "GLASSHIVE_INTERNAL_ASSERTION_PRIVATE_KEY_FILE": str(key),
             "GLASSHIVE_INTERNAL_ASSERTION_KEY_ID": json.loads(jwks.read_text())["keys"][0]["kid"],
             "GLASSHIVE_INTERNAL_ASSERTION_TTL_SECONDS": "30",
@@ -544,7 +540,7 @@ def main() -> int:
                         help="start/restart: save the exact model for a harness, e.g. grok-build=<model>")
     args = parser.parse_args()
     os.umask(0o077)
-    # One instance, one identity: a relative or linked path names the same instance as its canonical form.
+    # Relative and linked state paths must name the same instance.
     state = args.state_dir.expanduser().resolve()
     try:
         config = configuration(state, {name: getattr(args, f"{name}_port") for name in DEFAULT_PORTS})
@@ -565,8 +561,8 @@ def main() -> int:
             command = commands(state, config)["mcp"]
             command[command.index("streamable-http")] = "stdio"
             env = environment(state, config, "stdio")
-            # The AI app starting this connection may have another PATH. The running service
-            # runs host workers, so the connection reports the CLIs that service can find.
+            # The service executes workers; report the CLIs it can find, even when
+            # the connecting AI app starts with a different PATH.
             if running.get("path"):
                 env["PATH"] = running["path"]
             os.execve(command[0], command, role_environment(state, config, env, "mcp"))

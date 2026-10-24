@@ -1,0 +1,23 @@
+{
+  "currency": "USD",
+  "opening_cash": 180000,
+  "bank_cash": 178500,
+  "ledger_cash": 180000,
+  "cash_plan": [
+    {
+      "month": "2026-10",
+      "receipts": 50000,
+      "payments": 70000
+    },
+    {
+      "month": "2026-11",
+      "receipts": 40000,
+      "payments": 90000
+    },
+    {
+      "month": "2026-12",
+      "receipts": 90000,
+      "payments": 80000
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import MarkdownIt from './vendor/markdown-it-15.0.2.mjs';
+import MarkdownIt from './vendor/markdown-it-15.0.3.mjs';
 
 // Native file references are transport identities, not browser URLs. The owning
 // artifact actions provide authorized Open/Download links; do not guess a file

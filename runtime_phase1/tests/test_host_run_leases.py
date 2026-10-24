@@ -432,6 +432,15 @@ def test_durable_capacity_reservation_uses_worker_lane_clock(
     store = Store(str(tmp_path / "reservation-lane-retry.sqlite3"))
     service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
                                      start_background_consumers=False)
+    project = store.create_project("synthetic-owner", "Capacity", "Synthetic", "codex-cli",
+                                   tenant_id="synthetic")
+    worker = store.create_worker(
+        project_id=project["project_id"], owner_id="synthetic-owner", tenant_id="synthetic",
+        name="Capacity worker", role="worker", profile="codex-cli", backend="codex-cli",
+        runtime="codex-cli", model="synthetic", execution_mode="host", trusted_run_lane=lane,
+    )
+    if lane == "conversation":
+        _bind_conversation_session(store, worker)
     monkeypatch.setattr(service, "_host_resource_capacity_error", lambda *_args, **_kwargs: (None, {}))
     # Only the atomic reservation result is replaced; exercise its owning lane and retry clock.
     def full_lane(**kwargs):
@@ -442,8 +451,7 @@ def test_durable_capacity_reservation_uses_worker_lane_clock(
     try:
         with pytest.raises(HostCapacityError) as blocked:
             service._acquire_host_run_lease(
-                {"worker_id": "synthetic-worker", "profile": "codex-cli", "execution_mode": "host",
-                 "trusted_run_lane": lane, "owner_id": "synthetic-owner", "tenant_id": "synthetic"},
+                worker,
                 {"run_id": "synthetic-run", "state": "claimed"},
             )
         delay = (datetime.fromisoformat(blocked.value.next_retry_at) - before).total_seconds()
@@ -552,6 +560,20 @@ def test_heal_worker_does_not_race_a_locally_owned_active_run(tmp_path, monkeypa
 
     assert result["worker_id"] == worker["worker_id"]
     assert store.get_run(run["run_id"])["state"] == "running"
+
+
+def _bind_conversation_session(store: Store, worker: dict) -> dict:
+    return store.upsert_provider_session(
+        tenant_id=str(worker["tenant_id"]),
+        owner_id=str(worker["owner_id"]),
+        conversation_id=f"synthetic-{worker['worker_id']}",
+        agent_id="synthetic-agent",
+        model_id=str(worker["model"]),
+        project_id=str(worker["project_id"]),
+        worker_id=str(worker["worker_id"]),
+        workspace_dir=str(worker.get("workspace_dir") or ""),
+        access_mode="workspace",
+    )
 
 
 def _active_worker_and_run(
@@ -2708,9 +2730,12 @@ def test_isolated_parallel_policy_rejects_every_untrusted_host_mission_admission
             start_synchronously=False,
             _trusted_run_lane="conversation",
         )
-        # A trusted caller can prepare the row, but it remains a mission lane
-        # until an actual provider_session binds it durably.
-        assert prepared["trusted_run_lane"] == "mission"
+        # The private trusted identity permits native projection preparation.
+        # Actual execution still requires the matching durable session.
+        assert prepared["trusted_run_lane"] == "conversation"
+        assert service._host_run_lane(prepared) == "conversation"
+        with pytest.raises(ParallelExecutionIsolationError):
+            service.activate_prepared_conversation_worker(prepared["worker_id"])
         store.upsert_provider_session(
             tenant_id="tenant-a",
             owner_id="owner-a",
@@ -2745,10 +2770,12 @@ def test_isolated_parallel_policy_rejects_every_untrusted_host_mission_admission
         service.shutdown()
 
 
+@pytest.mark.parametrize("isolated", ["0", "1"])
+@pytest.mark.parametrize("action", ["activate", "assign", "assign_ready", "assign_parallel", "resume", "resume_run", "start", "lease"])
 def test_conversation_worker_creation_crash_before_session_link_never_buys_lane(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, isolated, action
 ):
-    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", "1")
+    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", isolated)
     monkeypatch.setenv("GLASSHIVE_HOST_WORKERS_ENABLED", "true")
     store = Store(str(tmp_path / "create-race.sqlite3"))
     service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
@@ -2773,17 +2800,88 @@ def test_conversation_worker_creation_crash_before_session_link_never_buys_lane(
             Store(str(tmp_path / "create-race.sqlite3")),
             StubRuntime(),
             reconcile_on_startup=False,
+            start_background_consumers=False,
         )
         try:
             orphan = restarted.store.get_worker(prepared["worker_id"])
             assert restarted.store.get_provider_session_by_worker(prepared["worker_id"]) is None
-            assert restarted._host_run_lane(orphan) == "mission"
-            with pytest.raises(ParallelExecutionIsolationError):
-                restarted._ensure_execution_allowed(orphan)
+            assert restarted._host_run_lane(orphan) == "conversation"
+            if action in {"assign_ready", "start", "lease"}:
+                orphan = restarted.store.update_worker_state(orphan["worker_id"], "ready")
+            queued = None
+            if action in {"resume_run", "start", "lease"}:
+                queued = restarted.store.create_run(
+                    orphan["worker_id"], orphan["project_id"], "Previously accepted synthetic work",
+                    state="paused" if action == "resume_run" else "queued",
+                )
+            original_runs = restarted.store.list_nonterminal_runs_for_worker(orphan["worker_id"])
+            starts = []
+            monkeypatch.setattr(restarted, "_ensure_worker_processor", lambda worker_id: starts.append(worker_id))
+            with pytest.raises(ParallelExecutionIsolationError, match="durable provider-session binding"):
+                if action == "activate":
+                    restarted.activate_prepared_conversation_worker(orphan["worker_id"])
+                elif action in {"assign", "assign_ready"}:
+                    restarted.assign_run(orphan["worker_id"], "Synthetic work", start_processor=False)
+                elif action == "assign_parallel":
+                    restarted.assign_run(orphan["worker_id"], "Synthetic work", idempotency_key="synthetic-orphan", start_processor=False)
+                elif action == "resume":
+                    restarted.resume_worker(orphan["worker_id"])
+                elif action == "resume_run":
+                    restarted.resume_worker(orphan["worker_id"], run_id=queued["run_id"])
+                elif action == "start":
+                    restarted.start_assigned_run(orphan["worker_id"])
+                elif action == "lease":
+                    restarted._acquire_host_run_lease(orphan, queued)
+            assert starts == []
+            assert restarted.store.list_nonterminal_runs_for_worker(orphan["worker_id"]) == original_runs
+            if queued is not None:
+                assert restarted.store.get_active_host_run_lease_for_run(queued["run_id"]) is None
+            assert restarted.store.get_worker(orphan["worker_id"])["state"] == orphan["state"]
         finally:
             restarted.shutdown()
     finally:
         service.shutdown()
+
+
+@pytest.mark.parametrize("mismatch", ["", "tenant_id", "owner_id", "project_id", "worker_id"])
+def test_conversation_compute_requires_exact_session_scope(tmp_path, monkeypatch, mismatch):
+    monkeypatch.setenv("GLASSHIVE_HOST_WORKERS_ENABLED", "true")
+    monkeypatch.setenv("VIVENTIUM_GLASSHIVE_ISOLATED_PARALLEL_POLICY", "1")
+    store = Store(str(tmp_path / "conversation-scope.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = service.create_project("synthetic-owner", "Conversation", "Synthetic work", "codex-cli",
+                                     tenant_id="synthetic-tenant")
+    try:
+        prepared = service.create_worker(
+            project_id=project["project_id"], owner_id="synthetic-owner", name="Prepared conversation",
+            role="conversation-agent", profile="codex-cli", backend="", execution_mode="host",
+            tenant_id="synthetic-tenant", start_synchronously=False, _trusted_run_lane="conversation",
+        )
+        session = _bind_conversation_session(store, prepared)
+        if mismatch:
+            # Simulate corrupt/foreign persisted binding, not a caller-supplied authority flag.
+            with sqlite3.connect(store.db_path) as connection:
+                connection.execute(f"UPDATE provider_sessions SET {mismatch} = ? WHERE session_id = ?",
+                                   ("synthetic-foreign", session["session_id"]))
+            with pytest.raises(ParallelExecutionIsolationError, match="durable provider-session binding"):
+                service.resume_worker(prepared["worker_id"])
+            with pytest.raises(ParallelExecutionIsolationError, match="durable provider-session binding"):
+                service.assign_run(prepared["worker_id"], "Synthetic work", start_processor=False)
+            assert store.list_nonterminal_runs_for_worker(prepared["worker_id"]) == []
+            assert store.get_worker(prepared["worker_id"])["state"] == prepared["state"]
+        else:
+            resumed = service.resume_worker(prepared["worker_id"])
+            assert resumed["state"] == "ready"
+            run = service.assign_run(prepared["worker_id"], "Synthetic work", start_processor=False)
+            assert run["state"] == "queued"
+            starts = []
+            monkeypatch.setattr(service, "_ensure_worker_processor", lambda worker_id: starts.append(worker_id))
+            service.start_assigned_run(prepared["worker_id"])
+            assert starts == [prepared["worker_id"]]
+    finally:
+        service.shutdown()
+        store.close()
 
 
 def test_docker_missions_use_the_same_persisted_family_and_account_admission(
@@ -5642,6 +5740,7 @@ def test_runtime_return_keeps_exact_lease_until_terminal_cas(
             },
         },
     )
+    _bind_conversation_session(store, worker)
     store.update_worker_state(worker["worker_id"], "ready")
     bearer = "synthetic-single-use-runtime-return-bearer"
     run = service.assign_run(
@@ -5986,6 +6085,7 @@ def test_other_conversation_family_dispatches_while_four_turns_are_running(
             backend=profile, runtime=profile, model="test", execution_mode="host",
             trusted_run_lane="conversation", bootstrap_bundle={"run_mode": "conversation"},
         )
+        _bind_conversation_session(store, worker)
         store.update_worker_state(worker["worker_id"], "ready")
         run = service.assign_run(worker["worker_id"], "Continue.", start_processor=False)
         started[str(worker["worker_id"])] = Event()
@@ -6042,6 +6142,7 @@ def test_cancelled_conversation_cannot_invoke_after_dispatch_wait(tmp_path, monk
         runtime="codex-cli", model="test", execution_mode="host",
         trusted_run_lane="conversation", bootstrap_bundle={"run_mode": "conversation"},
     )
+    _bind_conversation_session(store, worker)
     store.update_worker_state(worker["worker_id"], "ready")
     run = service.assign_run(worker["worker_id"], "Continue.", start_processor=False)
 
@@ -8531,6 +8632,7 @@ def _queued_conversation_turn(tmp_path, suffix: str, *, grant: str = ""):
             },
         },
     )
+    _bind_conversation_session(store, worker)
     store.update_worker_state(worker["worker_id"], "ready")
     # Without a grant, admission must wait for the provider to deliver one.
     run = service.assign_run(

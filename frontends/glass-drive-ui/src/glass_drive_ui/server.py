@@ -13,6 +13,7 @@ import sqlite3
 import sys
 import time
 from hashlib import sha256
+from html import escape, unescape
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, unquote, urlparse
@@ -28,6 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Scope
 
 from .prompt_template import (
     build_operator_brief,
@@ -397,6 +399,8 @@ class LaunchRequest(BaseModel):
     files: list[UploadedFileRequest] = Field(default_factory=list)
     file_upload_ids: list[str] = Field(default_factory=list)
     file_upload_revisions: list[str] = Field(default_factory=list)
+    library_refs: list[dict[str, str]] = Field(default_factory=list, max_length=128)
+    confirm_library: bool = False
 
 
 class PreferencesRequest(BaseModel):
@@ -1075,7 +1079,7 @@ def _new_workspace_options() -> list[dict[str, Any]]:
         {"value": "new:openclaw-general", "label": "OpenClaw worker", "profile": "openclaw-general"},
         {"value": "new:direct-openai", "label": "Direct / OpenAI API", "profile": "direct-openai", "account_auth_methods": ["api_key"]},
         {"value": "new:direct-anthropic", "label": "Direct / Anthropic API", "profile": "direct-anthropic", "account_auth_methods": ["api_key"]},
-        {"value": "new:direct-xai", "label": "Direct / xAI API", "profile": "direct-xai", "account_auth_methods": ["api_key"]},
+        {"value": "new:direct-xai", "label": "Direct / Grok API", "profile": "direct-xai", "account_auth_methods": ["api_key"]},
     ]
     raw = (
         os.environ.get("GLASSHIVE_ALLOWED_WORKER_PROFILES", "").strip()
@@ -1171,8 +1175,8 @@ def _bootstrap_bundle_with_effort(bundle: dict[str, Any] | None, profile: str, e
         next_bundle["env"] = env
         return next_bundle
     if profile == "claude-code":
-        if clean_effort not in {"default", "max", "xhigh"}:
-            raise HTTPException(status_code=400, detail="Claude effort must be default, max, or xhigh")
+        if clean_effort not in {"default", "low", "medium", "high", "xhigh", "max"}:
+            raise HTTPException(status_code=400, detail="Claude effort must be default, low, medium, high, xhigh, or max")
         if clean_effort == "default":
             return next_bundle
         env = dict(next_bundle.get("env") or {})
@@ -1309,6 +1313,39 @@ def _format_launch_error(exc: Exception) -> str:
     return "The project launch failed before the first run could start."
 
 
+class _RevalidatingStaticFiles(StaticFiles):
+    """Keep cached bytes, but validate mutable frontend URLs before reuse."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        # Set this after native conditional handling so 304s carry it too.
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _fingerprint_static_asset(page: str, asset: str) -> str:
+    fingerprint = sha256((STATIC_DIR / asset).read_bytes()).hexdigest()[:16]
+
+    def replace_url(match: re.Match[str]) -> str:
+        url = urlparse(unescape(match["url"]))
+        query = [
+            (key, value)
+            for key, value in parse_qsl(url.query, keep_blank_values=True)
+            if key != "v"
+        ]
+        query.append(("v", fingerprint))
+        versioned_url = escape(url._replace(query=urlencode(query)).geturl(), quote=True)
+        return f'{match["attribute"]}{match["quote"]}{versioned_url}{match["quote"]}'
+
+    return re.sub(
+        rf'(?P<attribute>\s(?:src|href)\s*=\s*)(?P<quote>["\'])'
+        rf'(?P<url>/static/{re.escape(asset)}(?:[?#][^"\']*)?)(?P=quote)',
+        replace_url,
+        page,
+        flags=re.IGNORECASE,
+    )
+
+
 def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     _load_viventium_runtime_env()
     install_sensitive_url_log_filter()
@@ -1346,7 +1383,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         redoc_url=None if enterprise or public_links_only else "/redoc",
         openapi_url=None if enterprise or public_links_only else "/openapi.json",
     )
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", _RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
     oidc_start_limiter = _BoundedAttemptLimiter(
         window_seconds=OIDC_START_WINDOW_SECONDS,
         max_attempts=OIDC_START_MAX_ATTEMPTS,
@@ -3477,7 +3514,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             "clients": clients,
             "configuration_status": "ready" if clients else "action_required",
             "configuration_note": (
-                "Copy a command below, then complete your organization's sign-in."
+                "Copy the instruction or use the command for your AI app. No sign-in is needed on this computer."
+                if local_command else "Copy a command below, then complete your organization's sign-in."
                 if clients
                 else "No complete pre-registered and allowlisted AI client is available for this deployment. Ask an administrator to verify its token audiences, delegated scopes, client id, and fixed callback registration."
             ),
@@ -4187,6 +4225,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         assignment_outcome_uncertain = False
         duplication_reapproval_count = 0
         duplication_reapproval_items: list[dict[str, Any]] = []
+        library_requirements: list[dict[str, Any]] = []
+        library_setup_pending: list[dict[str, Any]] = []
         new_workspace = not workspace_option.startswith(("open:", "existing:", "duplicate:"))
         if existing_workspace_id and not new_workspace:
             raise HTTPException(status_code=409, detail={
@@ -4425,6 +4465,28 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     "POST", f"/v1/workers/{worker_id}/files",
                     payload=binding_payload,
                 )
+            if payload.library_refs:
+                library_result = active_client.file_request(
+                    "POST", f"/v1/workspaces/{worker_id}/personal-library",
+                    payload={"refs": payload.library_refs,
+                        "request_key": "launch:" + (payload.idempotency_key or secrets.token_hex(16)),
+                        "confirm_native": payload.confirm_library})
+                applications = {
+                    (item.get("item_id"), item.get("version_id")): item
+                    for item in library_result.get("items", [])
+                }
+                for item in library_result.get("requirements", library_result.get("pending", [])):
+                    kind = item.get("kind") or applications.get(
+                        (item.get("item_id"), item.get("version_id")), {}
+                    ).get("kind")
+                    if item.get("state") == "needs_setup" and kind == "native":
+                        # A source reference grants nothing. The selected native worker can
+                        # perform its ordinary setup from the retained exact source metadata.
+                        library_setup_pending.append(item)
+                    else:
+                        library_requirements.append(item)
+            # Pending Library references add no executable grant. Keep their actual states
+            # visible while the original job runs with supported material and native abilities.
             scheduled = None
             run = None
             if duplication_reapproval_count:
@@ -4535,6 +4597,11 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             ),
             "capabilities_requiring_reapproval": duplication_reapproval_count,
             "reapproval_items": duplication_reapproval_items,
+            "library_action_required": bool(library_requirements),
+            "library_requirements": library_requirements,
+            "library_setup_pending": library_setup_pending,
+            # Personal Library is owner-only; do not reduce this navigation to a signed viewer.
+            "library_watch_url": watch_url + "&library=added" if library_requirements or library_setup_pending else None,
             "watch_url": launch_watch_url,
         }
 
@@ -4550,6 +4617,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     install_allowed_ai_policy_ui_routes(app, _client_for_request)
 
     install_file_routes(app, _client_for_request, _request_identity, _restricted_identity, _runtime_http_exception)
+    from .personal_library_routes import install_personal_library_routes
+    install_personal_library_routes(app, _client_for_request, _request_identity, _restricted_identity, _runtime_http_exception)
 
     @app.get("/api/workspace/{worker_id}/live")
     @app.get("/api/worker/{worker_id}/live")
@@ -4877,8 +4946,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         _require_ui_auth(request)
         page = (STATIC_DIR / "conversation.html").read_text(encoding="utf-8")
         for asset in ("conversation.css", "conversation.js"):
-            fingerprint = sha256((STATIC_DIR / asset).read_bytes()).hexdigest()[:16]
-            page = page.replace(f'/static/{asset}"', f'/static/{asset}?v={fingerprint}"')
+            page = _fingerprint_static_asset(page, asset)
         return Response(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     @app.get("/confirm-change")

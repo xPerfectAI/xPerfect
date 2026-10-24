@@ -10,6 +10,43 @@ ROOT = Path(__file__).parents[1]
 STATIC = ROOT / "src" / "glass_drive_ui" / "static"
 
 
+def test_readonly_files_keep_requires_explicit_owner_access_without_enabling_mutation():
+    module = STATIC / "files.js"
+    script = r'''
+import assert from 'node:assert/strict';
+class Element {
+ constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.listeners={};this.hidden=false;this.textContent='';this.open=false;this.classList={add(){},remove(){}};}
+ addEventListener(name,fn){(this.listeners[name] ||= []).push(fn);}
+ replaceChildren(...children){this.children=children;}
+ append(...children){this.children.push(...children);}
+ appendChild(child){this.children.push(child);return child;}
+ setAttribute(name,value){this[name]=value;} focus(){} close(){} showModal(){}
+}
+const nodes=e=>[e,...e.children.flatMap(nodes)];
+const controls={},kept=[];let reads=0;
+const opts=new Proxy({workerId:'closed-worker',csrf:()=>'',canUpload:()=>false,onAccess:()=>{},onKeepForReuse:async entry=>{kept.push(entry);return {item_id:'saved-item'};}},
+ {get(target,name){return name in target?target[name]:(controls[name]??=new Element());}});
+globalThis.document={createElement:tag=>new Element(tag),body:new Element(),addEventListener(){}};
+globalThis.window={addEventListener(){}};
+const entry={file_id:'file-1',path:'report.txt',name:'report.txt',revision:'exact-revision',size_bytes:12,is_dir:false};
+globalThis.fetch=async()=>{reads++;return {ok:true,json:async()=>({items:[entry],can_write:false})};};
+const files=createWorkspaceFiles(opts);await files.open();
+assert.ok(!nodes(controls.list).some(e=>e.textContent==='Keep for reuse'));
+files.setKeepForReuseAccess('true');assert.ok(!nodes(controls.list).some(e=>e.textContent==='Keep for reuse'));
+files.setKeepForReuseAccess(true);
+const keep=nodes(controls.list).find(e=>e.textContent==='Keep for reuse');assert.ok(keep);
+for(const action of ['Rename','Move','Delete'])assert.ok(!nodes(controls.list).some(e=>e.textContent===action));
+await keep.listeners.click[0]();assert.equal(kept[0].revision,'exact-revision');assert.equal(controls.noticeText.textContent,'report.txt saved privately in My Library.');assert.equal(controls.notice.hidden,false);
+files.setKeepForReuseAccess(false);assert.ok(!nodes(controls.list).some(e=>e.textContent==='Keep for reuse'));
+assert.equal(reads,1);
+console.log('pass');
+'''
+    result = subprocess.run(["node", "--input-type=module", "--eval",
+        f"import {{createWorkspaceFiles}} from {json.dumps(module.as_uri())};\n" + script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "pass"
+
+
 def test_watch_access_refresh_preserves_upload_area_during_same_owner_recheck():
     source = (STATIC / "watch.js").read_text()
     start = source.index("async function activateWatchDraft")

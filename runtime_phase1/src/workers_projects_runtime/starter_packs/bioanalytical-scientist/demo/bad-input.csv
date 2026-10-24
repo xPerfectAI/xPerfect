@@ -1,0 +1,11 @@
+sample_id,kind,nominal,signal,dilution
+STD0,standard,0,0.1,1
+STD1,standard,5,0.2,1
+STD2,standard,10,0.30000000000000004,1
+STD3,standard,20,0.5,1
+STD4,standard,40,0.9,1
+QC-OK,control,15,0.4,1
+QC-REVIEW,control,15,0.6,1
+SAMPLE-01,unknown,,0.5,2
+SAMPLE-02,unknown,,0.3,1
+STD0,standard,0,0.1,1

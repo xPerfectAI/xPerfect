@@ -500,3 +500,112 @@ def test_unsafe_staging_object_is_retained_and_rejected(injected):
         materialize_managed_file(root, entry, worker)
     assert stage.is_symlink()
     assert not (root / item["path"]).exists()
+
+
+def test_completed_projection_device_change_keeps_accepted_files_and_receipt(injected, monkeypatch):
+    files, _, worker, root = injected
+    upload = draft(files, 1)
+    receive(files, upload, b"x")
+    item = files.bind(worker["worker_id"], TENANT, OWNER, [upload["upload_id"]], "binding", directory="")["items"][0]
+    entry = files.bootstrap_entries(TENANT, OWNER, [item])[0]
+    target = root / item["path"]
+    target.write_bytes(b"worker edits remain")
+    receipt = files.storage_adapter.receipt(TENANT, OWNER, item["projection_id"])
+    receipt_before = receipt.stat()
+    with files.store._connect() as conn:
+        conn.execute("UPDATE workspace_file_projection_targets SET workspace_device=workspace_device+1")
+        binding_before = tuple(conn.execute("SELECT * FROM workspace_file_projection_targets").fetchone())
+    def no_write(*_args, **_kwargs):
+        raise AssertionError("A completed projection must not write again")
+    monkeypatch.setattr("workers_projects_runtime.workspace_files._materialize_managed_file", no_write)
+    materialize_managed_file(root, entry, worker)
+    materialize_managed_file(root, entry, worker)
+    assert target.read_bytes() == b"worker edits remain"
+    assert receipt.stat().st_ino == receipt_before.st_ino
+    with files.store._connect() as conn:
+        assert tuple(conn.execute("SELECT * FROM workspace_file_projection_targets").fetchone()) == binding_before
+
+
+@pytest.mark.parametrize('field', ['workspace_inode', 'workspace_path', 'source_path', 'relative_path',
+                                  'scope_id', 'upload_id', 'sha256', 'size_bytes', 'tenant_id', 'owner_id'])
+def test_completed_projection_device_change_never_ignores_other_binding_fields(injected, field):
+    files, _, worker, root = injected
+    upload = draft(files, 1)
+    receive(files, upload, b'x')
+    item = files.bind(worker['worker_id'], TENANT, OWNER, [upload['upload_id']], 'binding', directory='')['items'][0]
+    entry = files.bootstrap_entries(TENANT, OWNER, [item])[0]
+    with files.store._connect() as conn:
+        old = conn.execute('SELECT * FROM workspace_file_projection_targets').fetchone()[field]
+        changed = old + 1 if isinstance(old, int) else old + '-changed'
+        conn.execute(f'UPDATE workspace_file_projection_targets SET workspace_device=workspace_device+1,{field}=?', (changed,))
+    with pytest.raises(FileAdmissionError, match='another workspace root or version'):
+        materialize_managed_file(root, entry, worker)
+    assert (root / item['path']).read_bytes() == b'x'
+
+
+@pytest.mark.parametrize('kind', ['missing', 'symlink', 'hardlink', 'nonempty', 'legacy_only'])
+def test_device_change_requires_a_valid_current_private_receipt(injected, kind):
+    files, _, worker, root = injected
+    upload = draft(files, 1)
+    receive(files, upload, b'x')
+    item = files.bind(worker['worker_id'], TENANT, OWNER, [upload['upload_id']], 'binding', directory='')['items'][0]
+    entry = files.bootstrap_entries(TENANT, OWNER, [item])[0]
+    receipt = files.storage_adapter.receipt(TENANT, OWNER, item['projection_id'])
+    with files.store._connect() as conn:
+        conn.execute('UPDATE workspace_file_projection_targets SET workspace_device=workspace_device+1')
+    receipt.unlink()
+    if kind == 'symlink': receipt.symlink_to(root / item['path'])
+    elif kind == 'hardlink': os.link(root / item['path'], receipt)
+    elif kind == 'nonempty': receipt.write_bytes(b'not a control receipt')
+    elif kind == 'legacy_only':
+        cutoff = files.storage_adapter.migration_at - 10
+        legacy = files._owner_root(TENANT, OWNER) / (item['projection_id'] + '.receipt')
+        legacy.touch(); os.utime(legacy, (cutoff, cutoff))
+        with files.store._connect() as conn:
+            conn.execute('UPDATE workspace_file_uploads SET created_at=?', (cutoff,))
+        assert files.storage_adapter.completed(TENANT, OWNER, item)
+    with pytest.raises(FileAdmissionError):
+        materialize_managed_file(root, entry, worker)
+    assert (root / item['path']).read_bytes() == b'x'
+
+
+def test_pending_projection_device_change_cannot_write_without_a_receipt(injected):
+    files, _, worker, root = injected
+    item, entry = deferred_projection(injected)
+    adapter_module.resolve_projection_control(entry, worker, root)
+    with files.store._connect() as conn:
+        conn.execute('UPDATE workspace_file_projection_targets SET workspace_device=workspace_device+1')
+    with pytest.raises(FileAdmissionError, match='another workspace root or version'):
+        materialize_managed_file(root, entry, worker)
+    assert not (root / item['path']).exists()
+    assert not files.storage_adapter.receipt(TENANT, OWNER, item['projection_id']).exists()
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_device_change_receipt_removed_before_lock_cannot_fall_through_to_write(injected, monkeypatch, legacy):
+    files, _, worker, root = injected
+    upload = draft(files, 1)
+    receive(files, upload, b'x')
+    item = files.bind(worker['worker_id'], TENANT, OWNER, [upload['upload_id']], 'binding', directory='')['items'][0]
+    entry = files.bootstrap_entries(TENANT, OWNER, [item])[0]
+    receipt = files.storage_adapter.receipt(TENANT, OWNER, item['projection_id'])
+    with files.store._connect() as conn:
+        conn.execute('UPDATE workspace_file_projection_targets SET workspace_device=workspace_device+1')
+    resolve = adapter_module.resolve_projection_control
+    def removed_after_resolve(*args):
+        result = resolve(*args)
+        assert result[3] is True
+        receipt.unlink()
+        if legacy:
+            cutoff = files.storage_adapter.migration_at - 10
+            old = files._owner_root(TENANT, OWNER) / (item['projection_id'] + '.receipt')
+            old.touch(); os.utime(old, (cutoff, cutoff))
+            with files.store._connect() as conn:
+                conn.execute('UPDATE workspace_file_uploads SET created_at=?', (cutoff,))
+        return result
+    def no_write(*_args, **_kwargs): raise AssertionError('Completed-only binding must not write')
+    monkeypatch.setattr(adapter_module, 'resolve_projection_control', removed_after_resolve)
+    monkeypatch.setattr('workers_projects_runtime.workspace_files._materialize_managed_file', no_write)
+    with pytest.raises(FileAdmissionError, match='receipt is unavailable'):
+        materialize_managed_file(root, entry, worker)
+    assert (root / item['path']).read_bytes() == b'x'

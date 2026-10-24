@@ -15,6 +15,7 @@ WATCH_JS = Path(__file__).resolve().parents[1] / "src/glass_drive_ui/static/watc
 
 _HARNESS = r"""
 let filesCanWrite; let watchDraftScopeLoad = 0; let watchDraftScopeController = null;
+let libraryManager = false; let libraryOwnerScope = ''; const syncLibraryAccess = () => {};
 const errors = []; const added = []; const fileError = (m) => errors.push(m);
 const filesPanel = { hidden: true }; const filesToggle = { setAttribute() {} }; const filesUploadArea = { hidden: true };
 const filesStatus = { textContent: '', hidden: true };

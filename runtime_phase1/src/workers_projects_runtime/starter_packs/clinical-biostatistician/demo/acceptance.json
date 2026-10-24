@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "expected_calculation_checks": {
+    "assigned_each": 22,
+    "observed_each": 20,
+    "missing_each": 2,
+    "responses": [
+      8,
+      13
+    ],
+    "risk_difference": 0.25,
+    "ci95_includes_zero": true
+  },
+  "required_deliverables": [
+    "Executive review brief",
+    "Editable calculation/trace files",
+    "Source and assumption references",
+    "Specific unresolved issues"
+  ],
+  "company_context_check": "The brief follows the supplied company reporting instruction and distinguishes facts, assumptions and approval.",
+  "bad_input": {
+    "data": "bad-input.csv",
+    "expected_exit": 2,
+    "expected_status": "needs_input",
+    "must_not_claim_complete": true
+  },
+  "native_execution_required": true,
+  "qualified_expert_acceptance": "NOT ESTABLISHED by the demonstration; requires an actual domain reviewer."
+}

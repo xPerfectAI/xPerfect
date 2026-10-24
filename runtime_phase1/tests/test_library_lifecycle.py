@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 
 import pytest
@@ -57,6 +58,121 @@ def _enable(store: ControlPlaneStore, library_id: str, *, change_type: str = "li
         owner_id="user-a",
         confirmation_token=pending["confirmation_token"],
     )
+
+
+def test_remove_earlier_contribution_preserves_later_capability_and_files(tmp_path):
+    database=tmp_path/'runtime.db'
+    store=ControlPlaneStore(str(database))
+    _workspace_record(database,bootstrap={'project_definition':'Keep this'})
+    first=register_manifest(store,library_manifest(stable_id='skill.synthetic.first',files=[{'path':'FIRST.md','content':'A'}]))
+    second=register_manifest(store,library_manifest(stable_id='skill.synthetic.second',files=[{'path':'SECOND.md','content':'B'}]))
+    a=_enable(store,first['library_id'])['applied']
+    b=_enable(store,second['library_id'])['applied']
+    with sqlite3.connect(database) as conn:
+        current=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+        current['files'].append({'path':'inputs/file.txt','content':'User material'})
+        current['unrelated']='User change'
+        conn.execute("UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id='wrk_public_safe'",(json.dumps(current),))
+    result=store.revoke_workspace_grant(grant_id=a['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    assert result['removed_native_files']==[{'path':'FIRST.md','sha256':hashlib.sha256(b'A').hexdigest()}]
+    with sqlite3.connect(database) as conn:
+        current=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert {entry['path'] for entry in current['files']}=={'SECOND.md','inputs/file.txt'}
+    assert current['unrelated']=='User change' and current['project_definition']=='Keep this'
+    store.revoke_workspace_grant(grant_id=b['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    with sqlite3.connect(database) as conn:
+        current=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert current['files']==[{'path':'inputs/file.txt','content':'User material'}]
+    assert current['unrelated']=='User change'
+
+
+def test_remove_later_overlay_never_resurrects_retired_capability(tmp_path):
+    database=tmp_path/'runtime.db'
+    store=ControlPlaneStore(str(database))
+    _workspace_record(database,bootstrap={'files':[{'path':'REPORT.md','content':'Base'}]})
+    first=register_manifest(store,library_manifest(stable_id='skill.synthetic.first',files=[{'path':'REPORT.md','content':'A'}]))
+    second=register_manifest(store,library_manifest(stable_id='skill.synthetic.second',files=[{'path':'REPORT.md','content':'B'}]))
+    a=_enable(store,first['library_id'])['applied']
+    b=_enable(store,second['library_id'])['applied']
+    store.revoke_workspace_grant(grant_id=a['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    store.revoke_workspace_grant(grant_id=b['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    with sqlite3.connect(database) as conn:
+        current=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert current=={'files':[{'path':'REPORT.md','content':'Base'}]}
+
+
+def test_remove_shared_file_preserves_other_active_capability(tmp_path):
+    database=tmp_path/'runtime.db'
+    store=ControlPlaneStore(str(database))
+    _workspace_record(database)
+    files=[{'path':'SHARED.md','content':'Shared'}]
+    first=register_manifest(store,library_manifest(stable_id='skill.synthetic.first',files=files))
+    second=register_manifest(store,library_manifest(stable_id='skill.synthetic.second',files=files))
+    a=_enable(store,first['library_id'])['applied']
+    b=_enable(store,second['library_id'])['applied']
+    result=store.revoke_workspace_grant(grant_id=a['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    assert not result['removed_native_files']
+    with sqlite3.connect(database) as conn:
+        current=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert current=={'files':files}
+    store.revoke_workspace_grant(grant_id=b['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    with sqlite3.connect(database) as conn:
+        current=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert current=={}
+
+
+def test_upgrade_earlier_grant_preserves_later_grant_files_and_library_metadata(tmp_path):
+    database=tmp_path/'runtime.db';store=ControlPlaneStore(str(database))
+    _workspace_record(database,bootstrap={'project_definition':'Baseline'})
+    first=register_manifest(store,library_manifest(stable_id='skill.synthetic.upgrade',version='1.0.0',files=[{'path':'OLD.md','content':'Old'}]))
+    later=register_manifest(store,library_manifest(stable_id='skill.synthetic.later',files=[{'path':'LATER.md','content':'Later'}]))
+    next_version=register_manifest(store,library_manifest(stable_id='skill.synthetic.upgrade',version='2.0.0',files=[{'path':'NEW.md','content':'New'}]))
+    first_grant=_enable(store,first['library_id'])['applied'];later_grant=_enable(store,later['library_id'])['applied']
+    with sqlite3.connect(database) as conn:
+        bundle=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+        bundle['files'].append({'path':'inputs/user.txt','content':'User file'})
+        bundle['library_selection']={'refs':[],'items':[],'pending':[],'upload_ids':[]}
+        conn.execute("UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id='wrk_public_safe'",(json.dumps(bundle),))
+    upgraded=_enable(store,next_version['library_id'],change_type='library_upgrade',replaces_grant_id=first_grant['grant_id'])['applied']
+    assert {entry['path'] for entry in upgraded['removed_native_files']}=={'OLD.md'}
+    with sqlite3.connect(database) as conn:
+        bundle=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert {entry['path'] for entry in bundle['files']}=={'NEW.md','LATER.md','inputs/user.txt'}
+    assert 'library_selection'in bundle
+    store.revoke_workspace_grant(grant_id=upgraded['grant_id'],tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe')
+    with sqlite3.connect(database) as conn:
+        bundle=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert {entry['path'] for entry in bundle['files']}=={'LATER.md','inputs/user.txt'}
+    assert any(grant['grant_id']==later_grant['grant_id'] for grant in store.list_workspace_grants(tenant_id='tenant-a',owner_id='user-a',worker_id='wrk_public_safe'))
+
+
+def test_upgrade_refuses_only_its_edited_path_without_overwriting_other_work(tmp_path):
+    database=tmp_path/'runtime.db';store=ControlPlaneStore(str(database))
+    _workspace_record(database)
+    first=register_manifest(store,library_manifest(stable_id='skill.synthetic.upgrade',files=[{'path':'EDITED.md','content':'Old'}]))
+    next_version=register_manifest(store,library_manifest(stable_id='skill.synthetic.upgrade',version='2.0.0',files=[{'path':'EDITED.md','content':'New'}]))
+    grant=_enable(store,first['library_id'])['applied']
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id='wrk_public_safe'",(json.dumps({'files':[{'path':'EDITED.md','content':'User edit'}],'user_state':'Keep'}),))
+    with pytest.raises(ControlPlaneConflict,match='path was edited'):
+        _enable(store,next_version['library_id'],change_type='library_upgrade',replaces_grant_id=grant['grant_id'])
+    with sqlite3.connect(database) as conn:
+        bundle=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert bundle=={'files':[{'path':'EDITED.md','content':'User edit'}],'user_state':'Keep'}
+
+
+def test_upgrade_does_not_replace_file_required_by_another_active_grant(tmp_path):
+    database=tmp_path/'runtime.db';store=ControlPlaneStore(str(database))
+    _workspace_record(database)
+    first=register_manifest(store,library_manifest(stable_id='skill.synthetic.upgrade',files=[{'path':'SHARED.md','content':'Shared'}]))
+    later=register_manifest(store,library_manifest(stable_id='skill.synthetic.later',files=[{'path':'SHARED.md','content':'Shared'}]))
+    next_version=register_manifest(store,library_manifest(stable_id='skill.synthetic.upgrade',version='2.0.0',files=[{'path':'SHARED.md','content':'Different'}]))
+    grant=_enable(store,first['library_id'])['applied'];_enable(store,later['library_id'])
+    with pytest.raises(ControlPlaneConflict,match='Another active capability'):
+        _enable(store,next_version['library_id'],change_type='library_upgrade',replaces_grant_id=grant['grant_id'])
+    with sqlite3.connect(database) as conn:
+        bundle=json.loads(conn.execute("SELECT bootstrap_bundle_json FROM workers WHERE worker_id='wrk_public_safe'").fetchone()[0])
+    assert bundle=={'files':[{'path':'SHARED.md','content':'Shared'}]}
 
 
 def test_library_manifest_rejects_missing_hash_secret_schema_and_unsafe_activation(tmp_path):

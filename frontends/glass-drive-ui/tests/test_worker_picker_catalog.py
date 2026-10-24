@@ -64,6 +64,7 @@ function harness(savedValue=null,savedLocation=null){
  const decorateCatalogWorkspace=value=>value;
  const onboarding=mountWorkerOnboarding({root:document,getData:()=>bootstrap,onChoice:value=>{select.value=value;}});
  const fileDraft={setOwnerScope(){}};
+ const launchLibrary={setOwnerScope(){}},mainLibrary={setAccess(){}},expertPicker={update(){}},signedToken='';
  const catalogState={generation:0,items:[],loading:false};
  const providerAccount={},providerAccountHelp={},defaultWorker={},codexEffort={},claudeEffort={},openclawEffort={};
  const workspaceKindFilter={value:'named,ephemeral,legacy'},workspaceSearch={value:''},workspaceTagFilter={value:''};

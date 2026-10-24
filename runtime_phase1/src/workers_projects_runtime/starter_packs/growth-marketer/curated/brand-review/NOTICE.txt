@@ -1,0 +1,7 @@
+Third-party Skill: brand-review
+Source: https://github.com/anthropics/knowledge-work-plugins/tree/33d3dea41a341b341d4f5da2e8801ae0c89be2b8/marketing/skills/brand-review
+Revision: 33d3dea41a341b341d4f5da2e8801ae0c89be2b8
+License: Apache-2.0; see LICENSE.
+Curated modifications: local CONNECTORS.md link normalized; campaign-plan labels numerical heuristics as illustrative rather than verified benchmarks. Original upstream revision is retained above.
+Dependencies and external tools retain their own terms and actual setup status.
+Curation does not install packages, connect services or grant access.

@@ -6,6 +6,25 @@ from pathlib import Path
 
 SOURCE = Path(__file__).parents[1] / "src" / "glass_drive_ui" / "static" / "conversation.js"
 
+# These tests extract individual page functions. Supply the module-level Library
+# collaborator they do not import; actual Library UI behavior has its own cases.
+LIBRARY_STUBS = r"""
+let libraryOwnerReady=false, librarySelectionDirty=false, draftLibrarySignature='';
+const chatLibrary={refs(){return [];},setRefs(){},setScope(){},setOwnerScope(){}};
+const nativeWidgets=new Map();
+const window={innerHeight:900,scrollY:0};
+globalThis.document ||= {activeElement:null};
+const markdown={render(text){return text;}};
+function attachNativeControls(){return {refresh(){},destroy(){}};}
+"""
+
+
+def with_collaborators(code):
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index("function autoResizeMessage()")
+    resize = source[start:source.index("\n}", start) + 2]
+    return LIBRARY_STUBS + resize + "\n" + code
+
 
 def test_ended_turns_state_their_outcome_and_blocked_turns_keep_the_durable_retry():
     source = SOURCE.read_text(encoding="utf-8")
@@ -16,13 +35,13 @@ def test_ended_turns_state_their_outcome_and_blocked_turns_keep_the_durable_retr
     code = r'''
 const posts = [];
 class El {
-  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.style={};this.scrollHeight=78;this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
   append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
   addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){this.focused=true;}
 }
 const elements = {};
 const $ = (id) => (elements[id] ||= new El('div'));
-globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null};
+globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null,documentElement:{scrollHeight:0}};
 const base = '/v1/coordinator/conversations'; const conversationId = 'c1'; let latest = null;
 const states = {};
 async function refresh() {}
@@ -75,11 +94,26 @@ const closedControls = $('goals').children[0].children.find((child) => child.cla
 if (closedControls.children.some((child) => child.textContent === 'Retry')) throw new Error('nonretryable child still offers Retry');
 render({turns:[],goals:[],foreground_native_runs:[{worker_id:'foreground',run_id:'active'}]});
 if ($('work').hidden) throw new Error('foreground native input is hidden before goals exist');
+// A typed account/model prerequisite keeps the text but cannot blindly resend.
+const setupFailures = [
+  ['model_configuration_required', 'The selected model is unavailable for this account. Check the account and model in Connections.'],
+  ['provider_auth_missing', 'Reconnect the selected account in Connections before sending another message.'],
+  ['provider_connected_account_reconnect_required', 'Reconnect the selected account in Connections before sending another message.'],
+  ['provider_unauthorized', 'Reconnect the selected account in Connections before sending another message.'],
+];
+render({turns:setupFailures.map(([code]) => turn(code, code, `request-${code}`)),goals:[]});
+for (const [i, [code, expected]] of setupFailures.entries()) {
+  const message = $('messages').children.filter((item) => item.children.length)[i];
+  if (!message || message.textContent !== `${expected} Your message is saved.` || message.children.length !== 1 || message.children[0].textContent !== 'Edit') throw new Error(`${code}: missing recovery or unsafe resend`);
+  await message.children[0].listeners.click();
+  if ($('message').value !== `msg ${code}` || !$('message').focused) throw new Error(`${code}: saved message lost`);
+}
+if (!$('stop-response').hidden) throw new Error('ended setup failure kept Stop response');
 globalThis.fetch = async () => ({ok:false,status:409,json:async()=>({detail:'Choose a connected assistant before starting a conversation'})});
 try { await api('/v1/coordinator/conversations'); throw new Error('expected refusal'); }
 catch (error) { if (error.message !== 'Choose a connected assistant before starting a conversation') throw error; }
 '''
-    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([node, "--input-type=module"], input=with_collaborators(code), text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
 
 
@@ -91,13 +125,13 @@ def test_a_goal_the_runtime_refused_to_start_says_it_is_blocked_and_why():
     assert node, "Node is required for the goal state proof"
     code = r"""
 class El {
-  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.style={};this.scrollHeight=78;this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
   append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
   addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){} setAttribute(){}
 }
 const elements = {};
 const $ = (id) => (elements[id] ||= new El('div'));
-globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null};
+globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null,documentElement:{scrollHeight:0}};
 const base = '/v1/coordinator/conversations'; const conversationId = 'c1'; let latest = null;
 const states = {accepted:'Accepted',queued:'Waiting to start',blocked:'Waiting to start'};
 async function refresh() {}
@@ -109,8 +143,25 @@ const labels = $('goals').children.map((card) => card.children.find((c) => c.cla
 if (labels[0] !== 'Blocked: The worker runtime is not ready. Check setup, then Retry.') throw new Error(labels[0]);
 if (labels[1] !== 'Waiting to start') throw new Error(labels[1]);
 if (!$('goals').children[0].children.some((c) => c.textContent === 'Stop')) throw new Error('blocked goal lost Stop');
+// Existing-worker admission blockers must name the recovery, not blame the assistant.
+const workerBlockers = [
+  ['worker_account_reconnect_required', 'Reconnect this worker’s account in Connections.'],
+  ['worker_review_required', 'This worker needs review in Watch before it can receive work.'],
+  ['worker_unavailable', 'This worker is unavailable for new work. Check its status in Watch.'],
+];
+render({turns:[],goals:workerBlockers.map(([blocker], i) => ({...refused,goal_id:`worker-${i}`,worker_id:'existing-worker',blocker}))});
+for (const [i, [blocker, expected]] of workerBlockers.entries()) {
+  const card = $('goals').children[i];
+  const label = card.children.find((c) => c.className === 'goal-state').textContent;
+  if (label !== `Blocked: ${expected}`) throw new Error(`${blocker}: ${label}`);
+  if (!card.children.some((c) => c.textContent === 'Stop')) throw new Error(`${blocker}: lost Stop`);
+  if (card.children.some((c) => c.textContent === 'Retry')) throw new Error(`${blocker}: invented Retry`);
+}
+if (blockerMessage('future_unknown_blocker') !== 'The assistant is unavailable right now.') throw new Error('unknown blocker lost safe fallback');
+if (goalStateLabel({...queued,blocker:'worker_unavailable'}) !== 'Waiting to start') throw new Error('stale blocker replaced current queue state');
+
 """
-    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([node, "--input-type=module"], input=with_collaborators(code), text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
 
 
@@ -121,12 +172,12 @@ def test_uncertain_send_reconciles_saved_turn_and_reuses_key_if_not_saved():
     assert node, "Node is required for the conversation recovery proof"
     code = r'''
 class El {
-  constructor(){this.value='';this.disabled=false;this.textContent='';this.classList={add(){},remove(){}};this.listeners={};}
+  constructor(){this.value='';this.style={};this.scrollHeight=78;this.disabled=false;this.textContent='';this.classList={add(){},remove(){}};this.listeners={};}
   addEventListener(type, fn){this.listeners[type]=fn;} focus(){}
 }
 const elements={}; const $=(id)=>(elements[id] ||= new El());
 const base='/v1/coordinator/conversations';let conversationId='c1';let submitting=false;
-let draftKey='';let draftText='';let posted=[];let saved=true;
+let draftKey='';let draftText='';let posted=[];let saved=true;let latest=null;
 const history={replaceState(){}};
 function showError(error){$('status').textContent=error.message;$('status').classList.add('error');}
 function clearError(){$('status').textContent='';$('status').classList.remove('error');}
@@ -147,7 +198,7 @@ if ($('message').value!=='Another task' || $('status').textContent!=='The reques
 await send({preventDefault(){}});
 if (posted[1].idempotency_key!==posted[2].idempotency_key || posted[1].idempotency_key===firstKey) throw new Error('retry duplicated a turn');
 '''
-    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([node, "--input-type=module"], input=with_collaborators(code), text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
 
 
@@ -161,13 +212,13 @@ def test_a_conversation_this_deployment_cannot_run_says_why_and_offers_no_retry(
     assert node, "Node is required for the conversation recovery proof"
     code = r'''
 class El {
-  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.style={};this.scrollHeight=78;this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
   append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
   addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){}
 }
 const elements = {};
 const $ = (id) => (elements[id] ||= new El('div'));
-globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null};
+globalThis.document = {createElement:(t)=>new El(t), cookie:'', activeElement:null,documentElement:{scrollHeight:0}};
 const base = '/v1/coordinator/conversations'; const conversationId = 'c1'; let latest = null;
 const states = {};
 async function refresh() {}
@@ -181,7 +232,7 @@ if (rows[0].children.length !== 0) throw new Error('a blocker this deployment ca
 if (rows[1].children.length !== 1 || rows[1].children[0].textContent !== 'Retry') throw new Error('a retryable blocker lost Retry');
 console.log('ok');
 '''
-    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([node, "--input-type=module"], input=with_collaborators(code), text=True, capture_output=True, timeout=20)
     assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr or result.stdout
 
 
@@ -200,7 +251,7 @@ class El { constructor(){this.hidden=false;this.disabled=false;this.textContent=
 const elements = {}; const $ = (id) => (elements[id] ||= new El());
 globalThis.document = {getElementById:$};
 function node(tag, text){ const e = new El(); e.textContent = text; return e; }
-let conversationId = ''; let responses = {};
+let conversationId = ''; let responses = {}; let latest=null;
 async function api(path){ if (!(path in responses)) throw new Error('unexpected ' + path); const r = responses[path]; if (r instanceof Error) throw r; return r; }
 function showError(error){ throw error; }
 ''' + head + load + r'''
@@ -219,12 +270,14 @@ console.log(JSON.stringify({
   here: await run({connected_account:{available:false,code:'shared_linux_runtime_required'},default:{available:false,code:'native_cli_missing'}}),
   older: await run(new Error('Not found')),
   packaged: await run({connected_account:{available:true,code:'ready'},default:{available:false,code:'native_cli_missing'}}),
+  typedDirect: await run({connected_account:{available:true,code:'ready',supported_account_ids:['acct_1'],supported_accounts:[{account_id:'acct_1',profile:'direct-anthropic',auth_method:'api_key'}]},default:{available:false,code:'native_cli_missing'}}),
+  unsupported: await run({connected_account:{available:true,code:'ready',supported_account_ids:[]},default:{available:true,code:'ready'}}),
   // A Linux host whose shared workspace is not set up: a known failure, before any input.
   unconfigured: await run({connected_account:{available:false,code:'shared_configuration_required'},default:{available:true,code:'ready'}},
     {...bootstrap, workspace_type_options: []}),
 }));
 '''
-    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([node, "--input-type=module"], input=with_collaborators(code), text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
     shown = json.loads(result.stdout)
     assert shown["here"] == {
@@ -236,6 +289,8 @@ console.log(JSON.stringify({
     assert shown["older"]["project"] is False
     assert shown["older"]["options"] == ["Claude Code · Existing Claude sign-in", "Assistant on this computer"]
     assert shown["packaged"]["options"] == ["Claude Code · Existing Claude sign-in"] and shown["packaged"]["value"] == "acct_1"
+    assert shown["typedDirect"]["options"] == ["Anthropic · Direct · Existing Claude sign-in · API key"]
+    assert shown["unsupported"]["options"] == ["Assistant on this computer"]
     assert shown["unconfigured"]["options"] == [] and shown["unconfigured"]["send"] and shown["unconfigured"]["message"]
     assert shown["unconfigured"]["run"] is False and shown["unconfigured"]["connect"] is True
     assert shown["unconfigured"]["status"] == ("Conversations with a connected account need this deployment's shared workspace, "
@@ -250,12 +305,12 @@ def test_native_work_guidance_uses_declared_actions_and_dismiss_keeps_history():
     assert node, "Node is required for the native work control proof"
     code = r'''
 class El {
-  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
+  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.hidden=false;this.value='';this.style={};this.scrollHeight=78;this.textContent='';this.listeners={};this.classList={add(){},remove(){}};}
   append(...c){this.children.push(...c);} replaceChildren(...c){this.children=c;}
   addEventListener(t,f){this.listeners[t]=f;} contains(){return false;} focus(){} setAttribute(){}
 }
 const elements={}; const $=(id)=>(elements[id] ||= new El('div'));
-globalThis.document={createElement:(tag)=>new El(tag),cookie:'',activeElement:null};
+globalThis.document={createElement:(tag)=>new El(tag),cookie:'',activeElement:null,documentElement:{scrollHeight:0}};
 const base='/v1/coordinator/conversations'; const conversationId='c1'; let latest=null;
 const states={completed:'Completed',running:'Running'};
 const posts=[]; let fail=true;
@@ -293,5 +348,5 @@ if(!resume)throw new Error('queued result hid native paused Resume');
 await resume.listeners.click();
 if(posts.at(-1)[1].action!=='resume'||posts.at(-1)[1].run_id!=='paused-source')throw new Error('Resume targeted the queued result instead of exact paused source');
 '''
-    result = subprocess.run([node, "--input-type=module"], input=code, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([node, "--input-type=module"], input=with_collaborators(code), text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr

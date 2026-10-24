@@ -1,8 +1,8 @@
-import { mountPeerControls } from './peer-controls.js?v=20260924peerauto1';
-import { renderMemberActions } from './member-actions.js';
-import { renderAddMember } from './member-create.js';
-import { mountWorkerConfiguration } from './worker-configuration.js';
-import { mountAllowedAiPolicy } from './allowed-ai-policy.js?v=20260923manager1';
+import { mountPeerControls } from './peer-controls.js?v=20261024polish1';
+import { renderMemberActions } from './member-actions.js?v=20261024polish1';
+import { renderAddMember } from './member-create.js?v=20261024polish1';
+import { mountWorkerConfiguration } from './worker-configuration.js?v=20261024polish1';
+import { mountAllowedAiPolicy } from './allowed-ai-policy.js?v=20261024polish1';
 
 let activePanel = null;
 function element(tag, className, text) {
@@ -22,10 +22,10 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
   activePanel?.close();
   const previousFocus = document.activeElement;
   if (!document.querySelector('link[data-member-styles]')) {
-    const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/workspace-members.css?v=20260924peerfocus2'; stylesheet.dataset.memberStyles = 'true'; document.head.append(stylesheet);
+    const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/workspace-members.css?v=20261024polish1'; stylesheet.dataset.memberStyles = 'true'; document.head.append(stylesheet);
   }
   if (!document.querySelector('link[data-allowed-ai-styles]')) {
-    const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/allowed-ai.css?v=20260922choices12'; stylesheet.dataset.allowedAiStyles = 'true'; document.head.append(stylesheet);
+    const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/static/allowed-ai.css?v=20261024polish1'; stylesheet.dataset.allowedAiStyles = 'true'; document.head.append(stylesheet);
   }
   const dialog = element('dialog', 'workspace-members');
   dialog.setAttribute('aria-labelledby', 'member-panel-title');

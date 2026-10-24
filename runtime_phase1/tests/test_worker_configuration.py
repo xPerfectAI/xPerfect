@@ -819,7 +819,7 @@ def test_assigned_clause_keeps_shared_conditions_in_start_and_followup_context(c
 
     core, worker = configured
     ControlPlaneStore(core.store.db_path)
-    instruction = 'Add a sample row to the data file.'
+    instruction = 'Add a raincoat to the packing file.'
     original = (instruction + ' Separately, open the public reference page. '
                 'For both tasks, use only synthetic data and do not publish anything.')
     inherited = {'version': 1, 'conversation_id': 'conversation-1', 'assigned_source_ordinals': [1],

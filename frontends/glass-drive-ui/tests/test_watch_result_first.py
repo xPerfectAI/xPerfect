@@ -24,7 +24,8 @@ def test_real_watch_result_presentation_follows_runs_and_keeps_takeover_availabl
         "syncTerminalResultPresentation"))
     script = f"""
 import {{watchOutputModel}} from {json.dumps((STATIC/'delivery-presenter.js').as_uri())};
-const element=()=>({{hidden:true,open:false,dataset:{{}},textContent:'',setAttribute(name,value){{this[name]=value;}}}});
+let focused=null;
+const element=()=>({{hidden:true,open:false,dataset:{{}},textContent:'',setAttribute(name,value){{this[name]=value;}},focus(){{focused=this;}}}});
 const watchApp=element(),terminalLog=element(),terminalLogSummary=element(),resultClose=element(),
  resultPanel=element(),resultToggle=element(),resultToggleAction=element(),latestOutputFull=element();
 let currentFullOutput='',activeSurface='terminal',currentDesktopAvailable=false,
@@ -38,12 +39,19 @@ const data=(id,state,extra={{}})=>({{latest_run:{{run_id:id,state,active_attempt
 const step=(value)=>{{const output=watchOutputModel(value,'native trace');
  currentFullOutput=[output.summary,output.result,output.technical].filter(Boolean).join('\\n');
  latestOutputFull.hidden=!output.result;syncTerminalResultPresentation(value);return view();}};
+let openWrites=0, logOpen=terminalLog.open;
+Object.defineProperty(terminalLog,'open',{{get:()=>logOpen,set:value=>{{openWrites++;logOpen=value;}}}});
 const running=step(data('run-a','running'));
+const writesAfterOpen=openWrites;
+step(data('run-a','running'));step(data('run-a','running'));
+if(openWrites!==writesAfterOpen) throw new Error('Unchanged running refresh rewrote the iframe ancestor open attribute');
 const completedText=step(data('run-a','completed'));
 terminalLog.open=true;
 const logChoiceSurvives=step(data('run-a','completed'));
 closeResultPanel();
 const closedByUser=step(data('run-a','completed'));
+openResultPanel();closeResultPanel({{restoreFocus:true}});
+if(focused!==resultToggle)throw new Error('Closing a result did not restore its trigger focus');
 const newRun=step(data('run-b','queued'));
 const failure=step(data('run-b','failed'));
 const pending=step(data('run-b','failed',{{native_control:{{read_only:false,pending_requests:[{{kind:'permission'}}]}}}}));
@@ -80,9 +88,10 @@ def test_watch_uses_native_collapsible_log_and_same_human_result_renderer():
     assert '<details id="terminal-log" class="watch-terminal-log" open>' in html
     assert '<summary id="terminal-log-summary" hidden>Technical log</summary>' in html
     assert html.index('id="terminal-log"') < html.index('class="watch-stage"') < html.index('id="desktop-frame"')
-    assert "syncTerminalResultPresentation(data);" in source
+    refresh = source[source.index("async function refresh() {"):source.index("for (const button of document.querySelectorAll('[data-action]')") ]
+    assert refresh.index("syncTerminalResultPresentation(data);") < refresh.index("setSurface(activeSurface, { force: false });")
     assert "!terminalResultPreferred && !resultPanel.hidden" in source
-    assert "if (!terminalResultPreferred) closeResultPanel();" in source
+    assert "else if (!resultPanel.hidden) closeResultPanel({ restoreFocus: true });" in source
     assert "resultMarkdown.render(output.result)" in source
     assert "frame.src = url;" in source
 

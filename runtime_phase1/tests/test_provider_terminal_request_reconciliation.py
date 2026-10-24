@@ -17,6 +17,7 @@ def test_recovery_reconciles_abandoned_terminal_provider_request_exactly_once(tm
         store,
         StubRuntime(),
         reconcile_on_startup=False,
+        start_background_consumers=False,
     )
     try:
         ConversationProvider(store, service)
@@ -202,12 +203,14 @@ def test_two_provider_processes_reconcile_each_terminal_state_once(
         store_a,
         StubRuntime(),
         reconcile_on_startup=False,
+        start_background_consumers=False,
     )
     store_b = Store(str(database))
     service_b = WorkersProjectsService(
         store_b,
         StubRuntime(),
         reconcile_on_startup=False,
+        start_background_consumers=False,
     )
     try:
         provider_a = ConversationProvider(store_a, service_a)

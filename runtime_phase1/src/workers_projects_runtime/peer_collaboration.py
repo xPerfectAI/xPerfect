@@ -29,6 +29,7 @@ from .workspace_continuation import (
     continuation_instruction,
 )
 
+PEER_COLLABORATION_SCHEMA_VERSION = 4
 SUPPORTED_SCOPES = frozenset({"message", "wake", "context_read"})
 
 Scope = Literal[
@@ -129,7 +130,9 @@ def _redacted(text: str) -> str:
 def ensure_peer_schema(conn: sqlite3.Connection) -> None:
     from .peer_permissions import preserve_v1_grants, restore_v1_grants
 
-    require_compatible_schema(conn, component="peer_collaboration", target_version=4)
+    require_compatible_schema(
+        conn, component="peer_collaboration", target_version=PEER_COLLABORATION_SCHEMA_VERSION,
+    )
     migration = preserve_v1_grants(conn)
     execute_schema_script(
         conn,
@@ -219,7 +222,9 @@ def ensure_peer_schema(conn: sqlite3.Connection) -> None:
     BEGIN DELETE FROM peer_native_sessions WHERE purpose='context' AND worker_id=NEW.worker_id; END;
     """,
     )
-    record_schema_version(conn, component="peer_collaboration", version=4)
+    record_schema_version(
+        conn, component="peer_collaboration", version=PEER_COLLABORATION_SCHEMA_VERSION,
+    )
 
 
 def _worker(conn, worker_id, tenant_id, owner_id):

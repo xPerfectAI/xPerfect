@@ -21,7 +21,9 @@
   terminal.open(host);
   // The live view names the exact run this terminal shows; the runtime attaches only that run.
   const runId = new URLSearchParams(location.search).get('run') || '';
-  const ended = new URLSearchParams(location.search).get('phase') === 'ended';
+  const phase = new URLSearchParams(location.search).get('phase') || '';
+  let ended = phase === 'ended';
+  let savedOutput = ended || phase === 'settling';
   let socket;
   let retryTimer = 0;
   let sessionEndRetries = 0;
@@ -40,7 +42,9 @@
     }
     if (runId && code === 4410) {
       return reason === 'No saved output'
-        ? { text: 'This run has ended. No terminal output was kept for it.', retryMs: 0 }
+        ? { text: phase === 'settling' ? 'Work is finishing. No terminal output is available yet.'
+          : ended ? 'This run has ended. No terminal output was kept for it.'
+            : 'No terminal output is available. Check the workspace status.', retryMs: 0 }
         : { text: 'Saved output closed. Select Reconnect to view it again.', retryMs: 0 };
     }
     if (code === 4404) return { text: 'This run is not available in this workspace.', retryMs: 0 };
@@ -58,12 +62,19 @@
     next.onopen = () => {
       if (socket !== next) return;
       // The saved view's own pager line or notice says what was kept; opening claims nothing more.
-      status.textContent = runId && ended ? 'This run has ended.' : 'Terminal connected';
+      status.textContent = runId && phase === 'settling'
+        ? 'Work is finishing. Showing the latest output.'
+        : runId && ended ? 'This run has ended.' : 'Terminal connected';
       resize(); terminal.focus();
     };
     next.onmessage = event => { if (socket === next) terminal.write(event.data); };
     next.onclose = event => {
       if (socket !== next) return;
+      if (runId && event.code === 4410) {
+        ended = true;
+        savedOutput = true;
+        for (const button of document.querySelectorAll('[data-action]')) button.hidden = true;
+      }
       const closed = closedStatus(event.code, event.reason);
       status.textContent = closed.text;
       if (closed.retryMs) retryTimer = window.setTimeout(connect, closed.retryMs);
@@ -73,7 +84,11 @@
   terminal.onData(data => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
   new ResizeObserver(resize).observe(host);
   document.getElementById('reconnect').addEventListener('click', () => { sessionEndRetries = 0; connect(); });
-  for (const button of document.querySelectorAll('[data-action]')) button.addEventListener('click', async () => {
+  for (const button of document.querySelectorAll('[data-action]')) {
+    // A saved run log is read-only; worker-wide controls remain in the workspace.
+    button.hidden = savedOutput;
+    button.addEventListener('click', async () => {
+    if (savedOutput) return;
     button.disabled = true;
     try {
       const response = await fetch(`/api/worker/${encodeURIComponent(workerId)}/action/${button.dataset.action}`, {
@@ -84,6 +99,7 @@
       if (button.dataset.action === 'resume') connect();
     } catch (error) { status.textContent = error.message; }
     finally { button.disabled = false; }
-  });
+    });
+  }
   connect();
 })();

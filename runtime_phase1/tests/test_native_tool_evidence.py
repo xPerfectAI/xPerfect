@@ -263,8 +263,8 @@ def test_grok_cancelled_terminal_and_pending_are_not_success():
 
 
 def test_grok_uses_existing_bounds_secret_path_redaction_and_utf8_hashes():
-    result = project(invocation(file_path=('/U' + 'sers/synthetic/private.txt'), api_key='sk-testsecretmarker'),
-        event('tool_call_update', status='completed', rawOutput={'type': 'ReadFile', 'FileContent': {'absolute_path': ('/U' + 'sers/synthetic/private.txt'), 'content': 'é' * 16000}}))
+    result = project(invocation(file_path='/Users/synthetic/private.txt', api_key='sk-testsecretmarker'),
+        event('tool_call_update', status='completed', rawOutput={'type': 'ReadFile', 'FileContent': {'absolute_path': '/Users/synthetic/private.txt', 'content': 'é' * 16000}}))
     item = result['results'][0]
     assert '/Users/synthetic' not in json.dumps(item) and 'sk-testsecretmarker' not in json.dumps(item)
     for field in ['arguments', 'output']:

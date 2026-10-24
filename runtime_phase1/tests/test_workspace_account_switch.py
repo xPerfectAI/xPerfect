@@ -95,7 +95,7 @@ def test_workspace_account_switch_is_confirmed_owner_scoped_and_future_only(tmp_
     assert "bootstrap_bundle_json" not in selected
 
 
-def test_workspace_duplicate_reports_personal_account_reapproval_without_copying_selection(tmp_path):
+def test_workspace_duplicate_requires_a_current_account_without_cloning_an_unavailable_selection(tmp_path):
     database = tmp_path / "runtime.db"
     client = TestClient(create_app(db_path=str(database), runtime_backend="stub"))
     workspace = _workspace(client)
@@ -116,61 +116,77 @@ def test_workspace_duplicate_reports_personal_account_reapproval_without_copying
         f"/v1/pending-changes/{pending['change_id']}/confirm",
         json={"confirmation_token": pending["confirmation_token"]},
     ).status_code == 200
+    store.update_provider_account_status(
+        account_id=account["account_id"], tenant_id="local", owner_id="demo-owner",
+        status="disconnected",
+    )
+    with sqlite3.connect(database) as conn:
+        projects_before = conn.execute("SELECT project_id FROM projects ORDER BY project_id").fetchall()
+        workers_before = conn.execute(
+            "SELECT worker_id,bootstrap_bundle_json FROM workers ORDER BY worker_id"
+        ).fetchall()
 
-    copied = client.post(
+    blocked = client.post(
         f"/v1/workspaces/{workspace['worker_id']}/duplicate",
-        json={"idempotency_key": "duplicate-personal-account-1"},
+        json={"idempotency_key": "duplicate-unavailable-account-1"},
     )
-
-    assert copied.status_code == 201
-    report = copied.json()["workspace"]["duplication_report"]
-    assert report["capabilities_requiring_reapproval"] == 1
-    assert report["reapproval_items"] == [{
-        "action_id": "rea_" + hashlib.sha256(
-            f"provider_selection\0{account['account_id']}".encode()
-        ).hexdigest()[:24],
-        "kind": "provider_account",
-        "resolution": "provider_selection",
-        "reference": account["account_id"],
-        "label": "Synthetic private account",
-        "route": "connections",
-        "policy": "personal_required",
-        "scopes": [],
-    }]
-    assert "provider_account" not in copied.json()["workspace"]
-    copied_worker_id = copied.json()["workspace"]["worker_id"]
-    assert client.post(
-        f"/v1/workers/{copied_worker_id}/message",
-        json={"message": "Run before account review"},
-    ).status_code == 409
-    bypass = client.post(
-        "/v1/pending-changes",
-        json={
-            "change_type": "workspace_duplication_reapproval_waiver",
-            "target_id": copied_worker_id,
-            "payload": {"action_id": report["reapproval_items"][0]["action_id"]},
-        },
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == (
+        "This workspace requires a personal AI account that is not ready. "
+        "Reconnect it or choose a current account before duplicating it."
     )
-    assert bypass.status_code == 409
-    assert "choose" in bypass.json()["detail"].lower()
-    copied_pending = client.post(
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT project_id FROM projects ORDER BY project_id").fetchall() == projects_before
+        assert conn.execute(
+            "SELECT worker_id,bootstrap_bundle_json FROM workers ORDER BY worker_id"
+        ).fetchall() == workers_before
+    # The unavailable account cannot be approved again or silently replaced.
+    unavailable = client.post(
         "/v1/pending-changes",
         json={
             "change_type": "workspace_provider_account",
-            "target_id": copied_worker_id,
+            "target_id": workspace["worker_id"],
+            "payload": {"policy": "personal_required", "account_id": account["account_id"]},
+        },
+    )
+    assert unavailable.status_code == 409
+    assert "reconnected" in unavailable.json()["detail"].lower()
+    replacement = _ready_account(store)
+    replacement_pending = client.post(
+        "/v1/pending-changes",
+        json={
+            "change_type": "workspace_provider_account",
+            "target_id": workspace["worker_id"],
             "payload": {
                 "policy": "personal_required",
-                "account_id": account["account_id"],
+                "account_id": replacement["account_id"],
             },
         },
     ).json()
     assert client.post(
-        f"/v1/pending-changes/{copied_pending['change_id']}/confirm",
-        json={"confirmation_token": copied_pending["confirmation_token"]},
+        f"/v1/pending-changes/{replacement_pending['change_id']}/confirm",
+        json={"confirmation_token": replacement_pending["confirmation_token"]},
     ).status_code == 200
+    copied = client.post(
+        f"/v1/workspaces/{workspace['worker_id']}/duplicate",
+        json={"idempotency_key": "duplicate-unavailable-account-1"},
+    )
+    assert copied.status_code == 201
+    copied_workspace = copied.json()["workspace"]
+    assert copied_workspace["provider_account"] == {
+        "policy": "personal_required", "account_id": replacement["account_id"],
+    }
+    assert copied_workspace["duplication_report"]["capabilities_requiring_reapproval"] == 0
+    copied_worker_id = copied_workspace["worker_id"]
+    with sqlite3.connect(database) as conn:
+        copied_bundle = conn.execute(
+            "SELECT bootstrap_bundle_json FROM workers WHERE worker_id=?", (copied_worker_id,),
+        ).fetchone()[0]
+    assert account["account_id"] not in copied_bundle
+    assert "native-home://" not in copied_bundle
     assert client.post(
         f"/v1/workers/{copied_worker_id}/message",
-        json={"message": "Run after account review"},
+        json={"message": "Run after explicit account choice"},
     ).status_code == 202
 
 

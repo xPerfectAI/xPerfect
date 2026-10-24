@@ -11,7 +11,7 @@ import stat
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,7 @@ from .schema_version import (
 from .state_permissions import ensure_state_directory, secure_state_file
 
 
-CONTROL_PLANE_SCHEMA_VERSION = 4
+CONTROL_PLANE_SCHEMA_VERSION = 5
 
 
 PROVIDERS = {"codex", "claude", "openai", "anthropic", "grok", "xai", "custom"}
@@ -422,6 +422,15 @@ class ControlPlaneStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_workspace_templates_owner
                     ON workspace_templates(tenant_id, owner_id, created_at, template_id);
+                CREATE TABLE IF NOT EXISTS workspace_template_imports (
+                    tenant_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    template_id TEXT,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(tenant_id, owner_id, idempotency_key)
+                );
                 CREATE TABLE IF NOT EXISTS workspace_template_instantiations (
                     tenant_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL,
@@ -515,6 +524,9 @@ class ControlPlaneStore:
                     "ALTER TABLE workspace_capability_grants "
                     "ADD COLUMN probe_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            for column in ("restore_bootstrap_bundle_json", "revocation_receipt_json"):
+                if column not in grant_columns:
+                    conn.execute(f"ALTER TABLE workspace_capability_grants ADD COLUMN {column} TEXT")
             library_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(control_plane_library)").fetchall()
@@ -573,6 +585,8 @@ class ControlPlaneStore:
         result.pop("secret_locator", None)
         result.pop("prior_bootstrap_bundle_json", None)
         result.pop("applied_bootstrap_bundle_json", None)
+        result.pop("restore_bootstrap_bundle_json", None)
+        result.pop("revocation_receipt_json", None)
         return result
 
     def create_provider_account(
@@ -1783,6 +1797,11 @@ class ControlPlaneStore:
             "role": str(worker.get("role") or "main"),
             "tags": list(worker.get("tags") or []),
             "library_refs": library_refs,
+            "personal_library_refs": [
+                {"item_id": str(reference["item_id"]), "version_id": str(reference["version_id"])}
+                for reference in (content.get("personal_library_refs") or [])
+                if isinstance(reference, dict) and reference.get("item_id") and reference.get("version_id")
+            ],
             **({"provider_account_ref": dict(provider_account_ref)} if provider_account_ref else {}),
             "content_hash": str(row["content_hash"]),
             "created_at": float(row["created_at"]),
@@ -1797,6 +1816,7 @@ class ControlPlaneStore:
         description: str,
         content: dict[str, Any],
         lineage_id: str | None = None,
+        connection=None,
     ) -> dict[str, Any]:
         clean_name = str(name or "").strip()
         if not clean_name:
@@ -1812,8 +1832,9 @@ class ControlPlaneStore:
         template_id = _id("wst")
         now = time.time()
         requested_lineage = str(lineage_id or "").strip()
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with (nullcontext(connection) if connection is not None else self._connect()) as conn:
+            if connection is None:
+                conn.execute("BEGIN IMMEDIATE")
             count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM workspace_templates WHERE tenant_id = ? AND owner_id = ?",
@@ -2529,16 +2550,6 @@ class ControlPlaneStore:
                             str(current_grant["version"]),
                         ) <= 0:
                             raise ControlPlaneConflict("Library upgrade must select a newer version")
-                        latest = conn.execute(
-                            """
-                            SELECT grant_id FROM workspace_capability_grants
-                            WHERE tenant_id = ? AND owner_id = ? AND worker_id = ? AND revoked_at IS NULL
-                            ORDER BY created_at DESC, rowid DESC LIMIT 1
-                            """,
-                            (tenant_id, owner_id, str(target_id)),
-                        ).fetchone()
-                        if latest is None or str(latest["grant_id"]) != replaces_grant_id:
-                            raise ControlPlaneConflict("Upgrade the newest workspace capability first")
                         existing_scopes = set(_parse_json(current_grant["scopes_json"], []))
                         if not set(pending_payload["scopes"]).issubset(existing_scopes):
                             raise ControlPlaneConflict("A Library upgrade cannot widen workspace scopes")
@@ -2852,24 +2863,8 @@ class ControlPlaneStore:
                         raise ControlPlaneConflict("Current Library grant changed since review")
                     if str(replaced_grant["stable_id"]) != str(library["stable_id"]):
                         raise ControlPlaneConflict("Library upgrade stable_id changed since review")
-                    latest = conn.execute(
-                        """
-                        SELECT grant_id FROM workspace_capability_grants
-                        WHERE tenant_id = ? AND owner_id = ? AND worker_id = ? AND revoked_at IS NULL
-                        ORDER BY created_at DESC, rowid DESC LIMIT 1
-                        """,
-                        (tenant_id, owner_id, str(row["target_id"])),
-                    ).fetchone()
-                    if latest is None or str(latest["grant_id"]) != replaces_grant_id:
-                        raise ControlPlaneConflict("Current Library grant is no longer the newest capability")
-                    old_applied = _parse_json(replaced_grant["applied_bootstrap_bundle_json"], {})
-                    if current_bundle != old_applied:
-                        raise ControlPlaneConflict(
-                            "Workspace configuration changed after the current Library version; upgrade stopped"
-                        )
-                    prior_bundle = _parse_json(replaced_grant["prior_bootstrap_bundle_json"], {})
-                    if not isinstance(prior_bundle, dict):
-                        raise ControlPlaneError("Current Library rollback state is invalid")
+                    current_bundle,upgrade_removal=self._reconcile_grant_removal(conn,replaced_grant,current_bundle,worker["profile"])
+                    prior_bundle=current_bundle
                     existing_scopes = set(_parse_json(replaced_grant["scopes_json"], []))
                     if not set(scopes).issubset(existing_scopes):
                         raise ControlPlaneConflict("A Library upgrade cannot widen workspace scopes")
@@ -2882,7 +2877,6 @@ class ControlPlaneStore:
                         raise ControlPlaneConflict(
                             "A Library upgrade cannot widen dependency or workspace scopes"
                         )
-                    current_bundle = prior_bundle
                 merged_bundle = current_bundle
                 probe_results: list[dict[str, Any]] = []
                 installed_plan: list[dict[str, Any]] = []
@@ -2893,6 +2887,23 @@ class ControlPlaneStore:
                             manifest,
                             str(worker["profile"] or ""),
                         )
+                        if replaced_grant is not None:
+                            protected=set(upgrade_removal["retained_changes"])
+                            def changed_paths(value,prefix=""):
+                                for key,part in value.items():
+                                    path=prefix+key
+                                    if key=="files" and isinstance(part,list):
+                                        yield from ("files/"+entry["path"] for entry in part)
+                                    elif isinstance(part,dict):
+                                        yield from changed_paths(part,path+"/")
+                                    else:yield path
+                            if any(path==kept or path.startswith(kept+"/") or kept.startswith(path+"/") for path in changed_paths(activation_bundle) for kept in protected):
+                                raise ControlPlaneConflict("An upgraded capability path was edited; review that path before replacing it")
+                            from .bootstrap_contributions import active_native_contributions
+                            incoming={entry["path"]:entry for entry in activation_bundle.get("files",[])}
+                            for other in active_native_contributions(conn,tenant_id,owner_id,str(row["target_id"]),worker["profile"],grant_id=replaced_grant["grant_id"]):
+                                if any(entry["path"] in incoming and entry!=incoming[entry["path"]] for entry in other.get("files",[])):
+                                    raise ControlPlaneConflict("Another active capability uses an upgraded file path; review it before replacing it")
                         merged_bundle = _merge_bootstrap(merged_bundle, activation_bundle)
                         probe_result = probe_activation(
                             manifest,
@@ -2924,9 +2935,12 @@ class ControlPlaneStore:
                 )
                 grant_id = _id("grant")
                 if replaced_grant is not None:
+                    upgrade_removal["remaining_native_files"]=[{"path":entry["path"]} for entry in merged_bundle.get("files",[]) if isinstance(entry,dict) and entry.get("path")]
+                    remaining_paths={entry["path"] for entry in upgrade_removal["remaining_native_files"]}
+                    upgrade_removal["removed_native_files"]=[entry for entry in upgrade_removal["removed_native_files"] if entry["path"] not in remaining_paths]
                     conn.execute(
-                        "UPDATE workspace_capability_grants SET revoked_at = ? WHERE grant_id = ? AND revoked_at IS NULL",
-                        (now, str(replaced_grant["grant_id"])),
+                        "UPDATE workspace_capability_grants SET revoked_at = ?,revocation_receipt_json=? WHERE grant_id = ? AND revoked_at IS NULL",
+                        (now,_json(upgrade_removal),str(replaced_grant["grant_id"])),
                     )
                 conn.execute(
                     """
@@ -2952,6 +2966,8 @@ class ControlPlaneStore:
                         now,
                     ),
                 )
+                from .personal_library import sync_library_applications
+                sync_library_applications(conn,tenant_id,owner_id,str(row["target_id"]),only_if_approved_changed=True)
                 grant = conn.execute(
                     "SELECT * FROM workspace_capability_grants WHERE grant_id = ?",
                     (grant_id,),
@@ -2961,6 +2977,7 @@ class ControlPlaneStore:
                     applied["upgrade"] = replaced_grant is not None
                     if replaced_grant is not None:
                         applied["replaced_grant_id"] = str(replaced_grant["grant_id"])
+                        applied.update(upgrade_removal)
             elif change_type == "connection_write":
                 raise ControlPlaneError(
                     "Connection writes must use the connected service's brokered confirmation flow"
@@ -3213,6 +3230,40 @@ class ControlPlaneStore:
             }
         return result
 
+    def _reconcile_grant_removal(self,conn,grant,current_bundle,profile):
+        tenant_id,owner_id,worker_id,grant_id=(grant[key] for key in ("tenant_id","owner_id","worker_id","grant_id"))
+        applied_bundle = _parse_json(grant["applied_bootstrap_bundle_json"], {})
+        prior_bundle = _parse_json(grant["prior_bootstrap_bundle_json"], {})
+        if not isinstance(prior_bundle, dict):
+            raise ControlPlaneError("Workspace capability rollback state is invalid")
+        from .bootstrap_contributions import (subtract_contribution, preserve_required_contribution,
+            rebase_active_contributions, active_native_contributions)
+        # Rebase the restoration against earlier retired contributions without
+        # rewriting immutable original grant snapshots. Removing B must never
+        # resurrect an already removed A that B once overlaid.
+        restore_prior = _parse_json(grant["restore_bootstrap_bundle_json"], prior_bundle)
+        for retired in conn.execute(
+            "SELECT prior_bootstrap_bundle_json,applied_bootstrap_bundle_json FROM workspace_capability_grants "
+            "WHERE tenant_id=? AND owner_id=? AND worker_id=? AND revoked_at IS NOT NULL AND created_at<=? ORDER BY created_at DESC,rowid DESC",
+            (tenant_id, owner_id, worker_id, grant["created_at"]),
+        ):
+            restore_prior, _ = subtract_contribution(restore_prior,
+                _parse_json(retired["prior_bootstrap_bundle_json"], {}),
+                _parse_json(retired["applied_bootstrap_bundle_json"], {}))
+        reconciled, retained_changes = subtract_contribution(current_bundle, prior_bundle,
+            applied_bundle, restore_prior=restore_prior)
+        try:
+            for declared in active_native_contributions(conn,tenant_id,owner_id,worker_id,profile,grant_id=grant_id):
+                reconciled = preserve_required_contribution(current_bundle,reconciled,declared)
+        except ValueError as exc:
+            raise ControlPlaneConflict(str(exc)) from exc
+        rebase_active_contributions(conn,tenant_id,owner_id,worker_id,prior_bundle,applied_bundle,grant_id=grant_id)
+        remaining_paths={entry.get("path") for entry in reconciled.get("files",[]) if isinstance(entry,dict)}
+        receipt={"retained_changes":retained_changes,
+            "remaining_native_files":[{"path":entry["path"]} for entry in reconciled.get("files",[]) if isinstance(entry,dict) and entry.get("path")],
+            "removed_native_files":[{"path":entry["path"],"sha256":hashlib.sha256(entry["content"].encode()).hexdigest()} for entry in current_bundle.get("files",[]) if isinstance(entry,dict) and isinstance(entry.get("content"),str) and entry.get("path") not in remaining_paths]}
+        return reconciled,receipt
+
     def revoke_workspace_grant(
         self,
         *,
@@ -3221,7 +3272,7 @@ class ControlPlaneStore:
         owner_id: str,
         worker_id: str,
     ) -> dict[str, Any]:
-        """Safely undo the latest active capability without overwriting later workspace changes."""
+        """Remove this recorded capability contribution without overwriting later changes."""
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -3232,21 +3283,13 @@ class ControlPlaneStore:
                 """,
                 (grant_id, tenant_id, owner_id, worker_id),
             ).fetchone()
-            if grant is None or grant["revoked_at"] is not None:
+            if grant is None:
                 raise ControlPlaneError("Workspace capability grant not found for this user")
-            latest = conn.execute(
-                """
-                SELECT rowid, grant_id FROM workspace_capability_grants
-                WHERE tenant_id = ? AND owner_id = ? AND worker_id = ? AND revoked_at IS NULL
-                ORDER BY created_at DESC, rowid DESC LIMIT 1
-                """,
-                (tenant_id, owner_id, worker_id),
-            ).fetchone()
-            if latest is None or str(latest["grant_id"]) != grant_id:
-                raise ControlPlaneConflict("Remove newer workspace capabilities first")
+            if grant["revoked_at"] is not None:
+                return {**(self._row(grant) or {}), **_parse_json(grant["revocation_receipt_json"], {}), "replayed": True}
             worker = conn.execute(
                 """
-                SELECT bootstrap_bundle_json FROM workers
+                SELECT bootstrap_bundle_json,profile FROM workers
                 WHERE worker_id = ? AND tenant_id = ? AND owner_id = ?
                 """,
                 (worker_id, tenant_id, owner_id),
@@ -3254,24 +3297,20 @@ class ControlPlaneStore:
             if worker is None:
                 raise ControlPlaneError("Target workspace is no longer available for this user")
             current_bundle = _parse_json(worker["bootstrap_bundle_json"], {})
-            applied_bundle = _parse_json(grant["applied_bootstrap_bundle_json"], {})
-            if current_bundle != applied_bundle:
-                raise ControlPlaneConflict(
-                    "Workspace configuration changed after this capability was enabled; automatic removal was stopped"
-                )
-            prior_bundle = _parse_json(grant["prior_bootstrap_bundle_json"], {})
-            if not isinstance(prior_bundle, dict):
-                raise ControlPlaneError("Workspace capability rollback state is invalid")
+            reconciled,removal_receipt=self._reconcile_grant_removal(conn,grant,current_bundle,worker["profile"])
             conn.execute(
                 "UPDATE workers SET bootstrap_bundle_json = ?, updated_at = ? WHERE worker_id = ?",
-                (_json(prior_bundle), _worker_updated_at(), worker_id),
+                (_json(reconciled), _worker_updated_at(), worker_id),
             )
             conn.execute(
-                "UPDATE workspace_capability_grants SET revoked_at = ? WHERE grant_id = ?",
-                (now, grant_id),
+                "UPDATE workspace_capability_grants SET revoked_at = ?,revocation_receipt_json=? WHERE grant_id = ?",
+                (now, _json(removal_receipt), grant_id),
             )
+            from .personal_library import sync_library_applications
+            sync_library_applications(conn,tenant_id,owner_id,worker_id,only_if_approved_changed=True)
             revoked = conn.execute(
                 "SELECT * FROM workspace_capability_grants WHERE grant_id = ?",
                 (grant_id,),
             ).fetchone()
-        return self._row(revoked) or {}
+        result = self._row(revoked) or {}
+        return {**result,**removal_receipt}

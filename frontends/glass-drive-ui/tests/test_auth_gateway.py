@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import threading
@@ -173,6 +174,67 @@ def test_oidc_return_target_rejects_network_path_and_backslash_confusion(
         ).fetchone()
 
     assert stored == ("/",)
+
+
+@pytest.mark.parametrize("token_case", ["padded", "tampered_payload", "non_alphabet"])
+def test_oidc_accepts_valid_padded_provider_tokens_but_rejects_tampering(tmp_path, monkeypatch, token_case):
+    configure_oidc(tmp_path, monkeypatch)
+    issuer = "https://identity.example.invalid"
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    public_jwk.update({"kid": "provider-key", "alg": "RS256", "use": "sig"})
+
+    class Response:
+        def __init__(self, value):
+            self.value = value
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.value
+
+    def get(url, **kwargs):
+        assert kwargs["follow_redirects"] is False
+        if url.endswith("/jwks"):
+            return Response({"keys": [public_jwk]})
+        return Response({"issuer": issuer, "authorization_endpoint": issuer + "/authorize",
+                         "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks"})
+
+    monkeypatch.setattr(auth_gateway_module.httpx, "get", get)
+    gateway = HumanAuthGateway.from_env()
+    flow = gateway.begin_oidc(return_to="/workspaces")
+    now = int(auth_gateway_module.time.time())
+    token = jwt.encode({"iss": issuer, "aud": gateway.oidc_client_id, "sub": "stable-subject",
+                        "nonce": flow["nonce"], "iat": now, "exp": now + 120},
+                       private_key, algorithm="RS256", headers={"kid": "provider-key"})
+    header, payload, signature = token.split(".")
+    # Providers may retain Base64URL padding; it changes no signed bytes here.
+    padded_signature = signature + "=" * (-len(signature) % 4)
+    assert padded_signature.endswith("=")
+    if token_case == "tampered_payload":
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        claims["sub"] = "untrusted-replacement"
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    if token_case == "non_alphabet":
+        padded_signature += "!!!!"
+    provider_token = ".".join((header, payload, padded_signature))
+
+    def post(url, **kwargs):
+        assert url == issuer + "/token" and kwargs["follow_redirects"] is False
+        return Response({"id_token": provider_token})
+
+    monkeypatch.setattr(auth_gateway_module.httpx, "post", post)
+    if token_case == "padded":
+        completed = gateway.complete_oidc(state=flow["state"], code="synthetic-code")
+        assert completed["principal"]["user_id"] == auth_gateway_module._principal_id(issuer, "stable-subject")
+        assert completed["return_to"] == "/workspaces"
+    else:
+        with pytest.raises(AuthGatewayError) as rejected:
+            gateway.complete_oidc(state=flow["state"], code="synthetic-code")
+        assert rejected.value.code == "token_invalid"
+        assert gateway.find_oidc_principal(issuer=issuer, subject="stable-subject") is None
+        assert gateway.find_oidc_principal(issuer=issuer, subject="untrusted-replacement") is None
 
 
 def test_oidc_authorization_code_pkce_nonce_and_single_use_callback(tmp_path, monkeypatch):

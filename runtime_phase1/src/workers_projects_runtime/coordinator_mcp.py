@@ -23,21 +23,25 @@ def native_coordinator_server(coordinator, peers, endpoint: str):
                          target.hostname or "127.0.0.1", target.port or (443 if target.scheme == "https" else 80)))
     descriptions = coordinator_tool_manifest()["tools"]
 
-    def identity(ctx):
+    def principal(ctx):
         request = ctx.request_context.request
         authorization = request.headers.get("authorization", "") if request else ""
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer":
             raise CoordinatorScopeError("Native authority required")
-        return coordinator.native_identity(peers.native_principal(token))
+        return peers.native_principal(token)
+
+    def identity(ctx):
+        return coordinator.native_identity(principal(ctx))
 
     @server.tool(name="coordinator_accept_goals", description=descriptions["coordinator_accept_goals"])
-    def accept(turn_id: str, goals: list[Goal], ctx: Context):
-        return coordinator.accept_goals(*identity(ctx), turn_id, goals)
+    def accept(goals: list[Goal], ctx: Context):
+        return coordinator.accept_native_goals(principal(ctx), goals)
 
     @server.tool(name="coordinator_dispatch", description=descriptions["coordinator_dispatch"])
-    def dispatch(goal_id: str, route_id: str, instruction: str, ctx: Context):
-        return coordinator.dispatch(*identity(ctx), Dispatch(goal_id=goal_id, route_id=route_id, instruction=instruction))
+    def dispatch(goal_id: str, instruction: str, ctx: Context, route_id: str = "", worker_id: str = ""):
+        return coordinator.dispatch(*identity(ctx), Dispatch(goal_id=goal_id, route_id=route_id,
+                                                            worker_id=worker_id, instruction=instruction))
 
     @server.tool(name="coordinator_status", description=descriptions["coordinator_status"])
     def status(ctx: Context):
@@ -70,7 +74,8 @@ def project_coordinator_bootstrap(worker: dict, bundle: dict) -> dict:
     projection = worker.get("_coordinator_native_projection")
     if not isinstance(projection, dict):
         return bundle
-    if projection.get("worker_id") != worker.get("worker_id") or projection.get("run_id") != worker.get("_active_run_id"):
+    if (projection.get("worker_id") != worker.get("worker_id") or projection.get("run_id") != worker.get("_active_run_id")
+            or not isinstance(projection.get("token"), str) or not projection["token"]):
         raise CoordinatorScopeError("Coordinator native projection mismatch")
     # Reuse the exact O06 token, which the service already minted for this run/attempt.
     result = json.loads(json.dumps(bundle))
@@ -84,6 +89,9 @@ def project_coordinator_bootstrap(worker: dict, bundle: dict) -> dict:
         block = native_transport.codex_stdio_block("xperfect-coordinator", projection["url"], "GLASSHIVE_PEER_TOKEN")
     else:
         block = '[mcp_servers.xperfect-coordinator]\nurl = ' + json.dumps(projection["url"]) + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
+    # This exact server is the authenticated run's own control API. Keep native
+    # approval for every other MCP server and capability unchanged.
+    block += 'default_tools_approval_mode = "approve"\n'
     result["claude_project_mcp"] = {"mcpServers": servers}
     from .bootstrap import _strip_codex_mcp_server_blocks
     append = _strip_codex_mcp_server_blocks(result.get("codex_config_append", ""), {"xperfect-coordinator"}).rstrip()

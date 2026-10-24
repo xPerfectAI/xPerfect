@@ -77,7 +77,7 @@ def test_unreviewed_callback_not_offered(callback):
 
 @pytest.mark.parametrize('before,after',[
     ('auth.openai.com','signin.example.invalid'),('https://','http://'),
-    ('https://auth.openai.com','https://' + 'user@' + 'auth.openai.com'),
+    ('https://auth.openai.com','https://user@auth.openai.com'),
     ('https://auth.openai.com','https://auth.openai.com:444'),('/oauth/authorize?','/unreviewed?'),
     ('state=synthetic-state','state=synthetic-state&state=another'),
     ('code_challenge_method=S256','code_challenge_method=plain'),
@@ -122,3 +122,39 @@ raise SystemExit(2)
         assert store.get_provider_account_record(account_id=account['account_id'],tenant_id='tenant-a',owner_id='user-a')['status']=='ready'
     finally:
         manager.shutdown()
+
+
+@pytest.mark.parametrize('outcome',['cancel','failed'])
+def test_ready_reauthentication_keeps_existing_auth_and_default(tmp_path,monkeypatch,outcome):
+ local_host(monkeypatch);monkeypatch.setenv('GLASSHIVE_ENABLE_CODEX_PERSONAL_ACCOUNTS','true')
+ cli=tmp_path/'synthetic-codex'
+ cli.write_text('''#!/usr/bin/env python3
+import os,sys,time
+from pathlib import Path
+if sys.argv[1:]==['login']:
+ print(__URL__,flush=True)
+ if __OUTCOME__=='cancel': time.sleep(30)
+ raise SystemExit(1)
+if sys.argv[1:]==['login','status']: raise SystemExit(0 if (Path(os.environ['CODEX_HOME'])/'auth.json').exists() else 1)
+raise SystemExit(2)
+'''.replace('__URL__',repr(native_url())).replace('__OUTCOME__',repr(outcome)))
+ cli.chmod(0o700);monkeypatch.setenv('WPR_CODEX_CLI_PATH',str(cli))
+ store=ControlPlaneStore(str(tmp_path/'runtime.db'));a=store.create_provider_account(tenant_id='tenant-a',owner_id='user-a',provider='codex',label='Existing',auth_method='subscription',platform_support='supported',secret_locator='native-home://auto')
+ kw=dict(account_id=a['account_id'],tenant_id='tenant-a',owner_id='user-a');manager=ProviderSetupManager(store=store,home_root=tmp_path/'accounts')
+ home=manager.homes.ensure_home(**kw,provider='codex');auth=home/'codex/auth.json';original=b'{"synthetic":"existing-auth"}';auth.write_bytes(original);auth.chmod(0o600)
+ store.update_provider_account_status(**kw,status='ready',verified=True);default_before=store.get_provider_account_record(**kw)['is_default']
+ try:
+  result=manager.start(**kw)
+  if outcome=='cancel':
+   result=manager.cancel(**kw);assert result['status']=='action_required'
+   assert auth.read_bytes()==original
+   result=manager.status(**kw)
+  else:
+   end=time.monotonic()+5
+   while not result['complete'] and time.monotonic()<end:
+    time.sleep(.02);result=manager.status(**kw)
+  assert result['status']=='ready'
+  assert auth.read_bytes()==original
+  assert store.get_provider_account_record(**kw)['is_default']==default_before
+  assert store.active_provider_lease(a['account_id'],'provider-setup') is None
+ finally:manager.shutdown()

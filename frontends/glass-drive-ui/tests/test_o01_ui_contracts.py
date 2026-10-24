@@ -109,13 +109,16 @@ def test_first_paint_and_floating_surfaces_do_not_depend_on_transparency():
     composer=css.split('.composer-frame {',1)[1].split('}',1)[0]
     assert 'backdrop-filter' not in composer and 'animation:' not in composer
     theme=(STATIC/'theme.css').read_text()
-    assert '--overlay-surface: var(--panel-strong);' in theme
     # Both themes keep floating controls opaque rather than inheriting a glass card.
     import re
-    assert re.search(r'--panel-strong:\s*light-dark\(#[0-9a-f]{6}, #[0-9a-f]{6}\);', theme)
-    for selector in ['.watch-files-panel {','.file-move-dialog {','.file-row-menu-items, .file-row-menu > button {','.result-panel {','.more-menu {']:
+    for token in ('panel-strong', 'overlay-surface'):
+        assert re.search(rf'--{token}:\s*light-dark\(#[0-9a-f]{{6}}, #[0-9a-f]{{6}}\);', theme)
+    for selector in ['.watch-files-panel {','.result-panel {','.more-menu {']:
         assert 'background: var(--overlay-surface)' in css.split(selector,1)[1].split('}',1)[0]
-    assert '.file-row-menu > button { background: var(--overlay-surface); }' in css
+    # Shared file controls now live with the shared shell, including in Chat.
+    for selector in ['.file-move-dialog {', '.file-row-menu-items {', '.action-menu-panel {']:
+        assert 'background: var(--overlay-surface)' in theme.split(selector,1)[1].split('}',1)[0]
+    assert '.file-row-menu > button' not in theme
 
 
 def test_failed_instruction_retains_draft_and_success_only_reports_acceptance():
@@ -143,7 +146,9 @@ def test_failed_instruction_retains_draft_and_success_only_reports_acceptance():
 def test_account_selection_and_policy_events_refresh_the_actual_summary():
     source=(STATIC/'app.js').read_text()
     summary=source[source.index('  const syncAccountSummary ='):source.index('\n  };',source.index('  const syncAccountSummary ='))+5]
-    events=source[source.index("  select.addEventListener('change', () => {",source.index('async function main')):source.index("  workspaceType?.addEventListener('change'",source.index('async function main'))]
+    # Select the account-summary presenter, not the earlier starter-selection listener.
+    event_start=source.index("  select.addEventListener('change', () => {\n    if (!bootstrap) return;", source.index('async function main'))
+    events=source[event_start:source.index("  workspaceType?.addEventListener('change'", event_start)]
     result=node(f"""
       import {{workerAccountSummary}} from {json.dumps((STATIC/'launch-policy.js').as_uri())};
       const control=value=>({{value,dataset:{{}},selectedOptions:[{{textContent:'Selected account'}}],handlers:{{}},addEventListener(type,handler){{this.handlers[type]=handler;}},dispatchEvent(event){{this.handlers[event.type]?.(event);}}}});
@@ -151,7 +156,7 @@ def test_account_selection_and_policy_events_refresh_the_actual_summary():
       const workerAccountSummaryNode={{textContent:''}},providerAccountHelp={{}},connectWorkerAccount=null,button={{}},help={{}};
       const workspaceMode=control('isolated'),workspaceFilePlacementField={{hidden:true}},workspaceFilePlacement=control('common'),workspaceModeHelp={{textContent:''}},workspaceType=control('sandboxed');
       const bootstrap={{new_workspace_options:[{{profile:'test',label:'Assistant'}}],provider_accounts:[{{account_id:'a',label:'First',status:'ready'}},{{account_id:'b',label:'Second',status:'ready'}}]}};
-      const syncWorkspaceUI=()=>{{}}; const renderLaunchProviderAccounts=()=>{{}}; const syncWorkspaceModeUI=()=>{{}}; const syncLaunchChoiceUI=()=>{{}};
+      const syncWorkspaceUI=()=>{{}}; const renderLaunchProviderAccounts=()=>{{}}; const syncWorkspaceModeUI=()=>{{}}; const syncLaunchChoiceUI=()=>{{}}; const syncExpertControls=()=>{{}};
       const onboarding={{render(){{}}}},status={{textContent:''}},windowHandlers={{}};
       const window={{addEventListener(name,handler){{windowHandlers[name]=handler;}}}};
       let identityTransition=false,accountRefreshFlight=null,launchRecoveryTarget=null;

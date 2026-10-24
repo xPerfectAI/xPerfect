@@ -285,7 +285,9 @@ def test_watch_steer_hint_recovers_after_a_transient_outage():
     def fn(name, following):
         start = source.index('function ' + name)
         return source[start:source.index(following, start)]
-    code = fn('syncSteerAvailability(', '\nfunction autoResizeSteerInput') + fn('showWorkspaceUnavailable(', '\nasync function refresh') + r'''
+    code = (fn('syncSteerAvailability(', '\nfunction autoResizeSteerInput')
+            + fn('syncWatchLibrarySnapshot(', '\nfunction syncLibraryAccess')
+            + fn('showWorkspaceUnavailable(', '\nasync function refresh') + r'''
 const node = () => ({textContent: '', hidden: false, disabled: false, placeholder: '', dataset: {}});
 const guidancePrimary = node(), guidanceQueue = node(), steerInput = node(), sendButton = node(), title = node(), subtitle = node(),
   statePill = node(), overlay = node(), overlayTitle = node(), overlayDetail = node(), overlayLabel = node(), stageResultText = node(), runToggleButton = node();
@@ -293,6 +295,8 @@ const stage = {dataset: {}}, signInLink = node(), runTime = node(), menuToggle =
 const filesToggle = {...node(), setAttribute: () => {}};
 const interrupt = node(), menu = {querySelector: () => interrupt};
 const availabilityUpdates = [], syncWatchMenuAvailability = value => availabilityUpdates.push(value);
+let libraryManager = true, libraryOwnerScope = 'a'.repeat(64), librarySnapshot = {can_manage_workspace:true};
+const signedToken = '', syncLibraryAccess = () => {};
 const window = {location: {pathname: '/watch/wrk_one', search: '?project_id=prj_one', hash: ''}};
     let currentDisplayState, currentRunState, currentDesktopAvailable, currentDeliverable, currentSummary, currentFullOutput, currentResultText, actionFailure;
 const clearAttachedView = () => {}, renderOutputContent = () => {}, syncResultActions = () => {}, syncArtifactList = () => {}, syncSendAffordance = () => {};
@@ -300,6 +304,7 @@ const showResult = (text) => { stageResultText.hidden = !text; };
 showWorkspaceUnavailable(502);
 if (guidancePrimary.textContent !== 'Workspace status is unavailable right now.') throw new Error('5xx: ' + guidancePrimary.textContent);
 if (!runTime.hidden || !interrupt.disabled || !filesToggle.disabled || !menuToggle.disabled || !filesPanel.hidden || availabilityUpdates.at(-1) !== null) throw new Error('Unavailable state must remove stale timing and mutation actions');
+if (libraryManager || libraryOwnerScope || librarySnapshot !== null) throw new Error('Unavailable state must remove stale Library access');
 syncSteerAvailability('running');
 if (guidancePrimary.textContent !== 'Send redirects now' || steerInput.disabled) throw new Error('recovered: ' + guidancePrimary.textContent);
 showWorkspaceUnavailable(403);
@@ -312,7 +317,7 @@ if (steerInput.placeholder !== 'Sign in to use this workspace' || !sendButton.di
 if (signInLink.hidden || signInLink.href !== '/login?return_to=%2Fwatch%2Fwrk_one%3Fproject_id%3Dprj_one') throw new Error('401 recovery link');
 syncSteerAvailability('terminated');
 if (!guidancePrimary.textContent.startsWith('This workspace is closed.')) throw new Error('closed: ' + guidancePrimary.textContent);
-'''
+''')
     node = shutil.which('node')
     assert node, 'Node is required for the Watch recovery proof'
     result = subprocess.run([node, '--input-type=module'], input=code, text=True, capture_output=True, timeout=20)

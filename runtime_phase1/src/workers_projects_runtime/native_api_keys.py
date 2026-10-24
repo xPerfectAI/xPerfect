@@ -23,8 +23,8 @@ _PROVIDERS = {
     "openai": ("OPENAI_API_KEY", "https://api.openai.com/v1/models"),
     "claude": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models"),
     "anthropic": ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models"),
-    "grok": ("XAI_API_KEY", "https://api.x.ai/v1/models"),
-    "xai": ("XAI_API_KEY", "https://api.x.ai/v1/models"),
+    "grok": ("XAI_API_KEY", "https://api.x.ai/v1/api-key"),
+    "xai": ("XAI_API_KEY", "https://api.x.ai/v1/api-key"),
 }
 _RUNTIME_PROVIDERS = {"direct-openai": "codex", "direct-anthropic": "claude", "direct-xai": "grok", "codex-cli": "codex", "claude-code": "claude", "grok-build": "grok"}
 
@@ -197,11 +197,21 @@ def check_key(provider: str, value: str) -> tuple[bool, str]:
             if response.status != 200:
                 return False, "Provider did not accept the connection check"
             payload = json.loads(response.read(1_048_577))
-            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            if not isinstance(payload, dict):
+                return False, "Provider returned an invalid connection response"
+            if provider in {"grok", "xai"}:
+                # xAI's authenticated key-info endpoint does not require model-list
+                # permission. Restricted inference keys remain valid connections.
+                flags = ("api_key_blocked", "api_key_disabled", "team_blocked")
+                if any(type(payload.get(flag)) is not bool for flag in flags):
+                    return False, "Provider returned an invalid connection response"
+                if any(payload[flag] for flag in flags):
+                    return False, "Provider reports this key or its team is blocked or disabled"
+            elif not isinstance(payload.get("data"), list):
                 return False, "Provider returned an invalid connection response"
     except HTTPError as exc:
         if exc.code in {401, 403}:
-            return False, "Provider rejected this key or its permission to list models"
+            return False, "Provider rejected this key or its connection-check permission"
         if exc.code == 429:
             return False, "Provider rate limit reached; retry the connection check"
         return False, "Provider connection check failed; retry later"

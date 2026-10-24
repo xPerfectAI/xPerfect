@@ -462,6 +462,29 @@ def native_output_sha256(value: bytes | NativeFileSnapshot) -> str:
     return value.sha256 if isinstance(value, NativeFileSnapshot) else hashlib.sha256(value).hexdigest()
 
 
+def native_output_delivery_names(files) -> dict[tuple[str, str], str]:
+    """Use the same selected names and image extensions in receipts and downloads."""
+    source_names = {(Path(path).name, mime) for path, mime, _data in files}
+    names = {key: key[0] for key in source_names}
+    used_names = {name for name, _mime in source_names}
+    for name, mime in sorted(source_names):
+        suffix = NATIVE_IMAGE_SUFFIXES.get(mime)
+        source_suffix = Path(name).suffix.lower()
+        if (not suffix or source_suffix == suffix
+                or (mime == "image/jpeg" and source_suffix in {".jpeg", ".jpe", ".jfif"})):
+            continue
+        stem = Path(name).stem
+        candidate = stem[:255 - len(suffix)] + suffix
+        index = 2
+        while candidate in used_names:
+            ending = f" ({index}){suffix}"
+            candidate = stem[:255 - len(ending)] + ending
+            index += 1
+        names[(name, mime)] = candidate
+        used_names.add(candidate)
+    return names
+
+
 def _stream_native_file(handle, metadata, destination=None) -> tuple[str, int]:
     digest = hashlib.sha256()
     remaining = metadata.st_size

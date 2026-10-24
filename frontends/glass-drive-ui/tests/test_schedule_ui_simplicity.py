@@ -113,8 +113,40 @@ def test_schedule_surface_starts_with_saved_list_and_compact_editor_controls():
 
 def test_schedule_layout_stacks_at_narrow_width_and_keeps_one_time_date_readable():
     styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
-    assert ".schedule-date-input { grid-template-columns: minmax(180px, 1fr); }" in styles
+    assert "grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));" in styles
+    assert ".schedule-weekly-inputs { grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); }" in styles
     assert ".schedule-layout.schedule-editor-open { grid-template-columns: minmax(0, 1fr); }" in styles
+
+
+def test_dst_control_matches_supported_recurrence_and_preserves_untouched_elapsed_policy():
+    module = (STATIC_DIR / "schedule-policy.js").as_uri()
+    script = f"""
+      import {{ scheduleDstPolicyState, scheduleEditUpdates }} from {json.dumps(module)};
+      for (const kind of ['once', 'interval', 'weekly', 'rfc5545']) {{
+        const state = scheduleDstPolicyState(kind, 'elapsed');
+        if (state.applicable) throw Error(`${{kind}} offered an ignored DST choice`);
+        if (state.value !== 'next_valid_earliest') throw Error(`${{kind}} left a blank select on type switch`);
+        const original = {{ recurrence_type: kind, dst_policy: 'elapsed', instruction: 'Old' }};
+        const initial = {{ type: kind, dstPolicy: state.value, instruction: 'Old' }};
+        const updates = scheduleEditUpdates({{
+          original, initial, current: {{ ...initial, instruction: 'New' }},
+          payload: {{ instruction: 'New', dst_policy: state.value }},
+        }});
+        if (JSON.stringify(updates) !== JSON.stringify({{ instruction: 'New' }}))
+          throw Error(`${{kind}} changed the stored policy on an unrelated edit`);
+      }}
+      for (const kind of ['daily', 'cron']) {{
+        const latest = scheduleDstPolicyState(kind, 'next_valid_latest');
+        if (!latest.applicable || latest.value !== 'next_valid_latest')
+          throw Error(`${{kind}} lost the saved repeated-hour choice`);
+        const switched = scheduleDstPolicyState(kind, 'elapsed');
+        if (!switched.applicable || switched.value !== 'next_valid_earliest')
+          throw Error(`${{kind}} has no valid default after an elapsed type`);
+      }}
+    """
+    result = subprocess.run(["node", "--input-type=module", "--eval", script],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_schedule_policy_keeps_weekly_timezone_and_anchor_semantics():

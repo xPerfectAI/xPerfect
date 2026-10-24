@@ -18,7 +18,7 @@ class Element {
     this.dataset = {};
     this.listeners = {};
     this.hidden = false;
-    this.classList = { toggle() {} };
+    this.classList = { toggle() {}, add() {} };
   }
   set textContent(value) { this.children = []; this._text = String(value); }
   get textContent() { return (this._text || '') + this.children.map((child) => child.textContent || '').join(''); }
@@ -38,15 +38,17 @@ function fixture({ storage = new Map(), owner = 'owner-test' } = {}) {
       setItem: (key, value) => storage.set(key, value),
       removeItem: (key) => storage.delete(key),
     },
-    window: { dispatchEvent() {}, setTimeout: () => 1, clearTimeout() {} },
+    window: { dispatchEvent() {}, addEventListener() {}, setTimeout: () => 1, clearTimeout() {} },
     document: {
       visibilityState: 'visible',
+      addEventListener() {},
       getElementById: (id) => nodes[id] || null,
       querySelector: () => null,
       createElement: (tag) => new Element(tag),
       createTextNode: (value) => { const element = new Element('#text'); element.textContent = value; return element; },
     },
   });
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../src/glass_drive_ui/static/action-menu.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../src/glass_drive_ui/static/schedule-data.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source.replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\n/gm, '').replace(/^export /gm, ''), context);
   context.schedule = { ...schedule };

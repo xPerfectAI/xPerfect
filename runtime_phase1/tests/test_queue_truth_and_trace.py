@@ -174,6 +174,9 @@ def _terminal_generation(run: dict, lease: dict) -> dict[str, str]:
 def test_six_minute_wait_emits_one_transition_and_one_coalesced_refresh(
     tmp_path, monkeypatch
 ):
+    # This checks callback intent, not transport-state history. The current
+    # async transport owner must not deliver to the synthetic invalid endpoint.
+    monkeypatch.setenv("GLASSHIVE_BACKGROUND_CONSUMERS_ENABLED", "false")
     start = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
     clock = [start]
     monkeypatch.setenv("GLASSHIVE_QUEUE_WAIT_TIMEOUT_S", "1800")
@@ -182,9 +185,8 @@ def test_six_minute_wait_emits_one_transition_and_one_coalesced_refresh(
 
     store = Store(str(tmp_path / "six-minute.sqlite3"))
     record, worker = _reserve_callback_delegation(store, suffix="six_minute")
-    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False)
     service._now_datetime = lambda: clock[0]
-    service._deliver_callback_record = lambda *_args, **_kwargs: None
     try:
         run = store.get_run(record["current_run_id"])
         waiting = service._requeue_retryable_run(
@@ -2494,12 +2496,12 @@ def test_recurring_callback_tick_retries_terminal_reconciliation_once(tmp_path, 
         original_scan = store.list_terminal_runs_missing_callback_intent
         scan_calls = 0
 
-        def transient_scan(*, created_before=None, limit=50):
+        def transient_scan(*, created_before=None, limit=50, worker_id=None):
             nonlocal scan_calls
             scan_calls += 1
             if scan_calls == 1:
                 raise sqlite3.OperationalError("synthetic transient scan failure")
-            return original_scan(created_before=created_before, limit=limit)
+            return original_scan(created_before=created_before, limit=limit, worker_id=worker_id)
 
         monkeypatch.setattr(
             store, "list_terminal_runs_missing_callback_intent", transient_scan

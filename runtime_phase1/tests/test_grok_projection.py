@@ -167,18 +167,30 @@ def test_docker_account_acl_is_exact_auth_directory_and_supports_refresh(tmp_pat
         runtime._grant_provider_account_access('fixture',worker)
 
 
-def test_service_persists_grok_native_session_and_child_projection():
-    from types import SimpleNamespace
+def test_service_persists_grok_native_session_and_child_projection(tmp_path):
+    from test_native_team import _invoke_test_run
+    from workers_projects_runtime.store import Store
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
     from workers_projects_runtime.service import WorkersProjectsService
-    updates=[];events=[]
-    service=object.__new__(WorkersProjectsService)
-    service.store=SimpleNamespace(get_run=lambda _: {'run_id':'run','worker_id':'worker'},get_worker=lambda _: {'project_id':'project'},
-        update_run=lambda run,**kw: updates.append(kw),add_event=lambda *args,**kw: events.append((args,kw)))
-    service._observe_native_event({'worker_id':'worker','run_id':'run','provider':'grok',
-        'event':{'event_type':'provider.session.started','payload':{'sessionId':'native'}}})
-    assert updates[0]['native_session_id']=='native'
-    assert json.loads(updates[0]['native_capabilities_json'])['provider']=='grok'
-    assert len(events)==1
+    store = Store(str(tmp_path / 'grok-lifecycle.db'))
+    project = store.create_project('owner', 'Native Grok', 'Project the actual session', 'grok-build')
+    worker = store.create_worker(project['project_id'], 'owner', 'Worker', 'Review',
+                                 'grok-build', 'grok-build', 'grok-build', 'grok-4.7', execution_mode='host')
+    run = store.create_run(worker['worker_id'], project['project_id'], 'Review the work')
+    run = _invoke_test_run(store, worker, run, executor_id='grok-observer-owner')
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    try:
+        service._observe_native_event({'worker_id':worker['worker_id'],'run_id':run['run_id'],
+            'attempt_id':run['active_attempt_id'],'provider':'grok',
+            'event':{'event_type':'provider.session.started','payload':{'sessionId':'native'}}})
+        durable = store.get_run(run['run_id'])
+        assert durable['native_session_id'] == 'native'
+        assert json.loads(durable['native_capabilities_json'])['provider'] == 'grok'
+        events = [e for e in store.list_events(worker['worker_id']) if e['event_type'].startswith('provider.')]
+        assert len(events) == 1
+        assert json.loads(events[0]['payload_json'])['attemptId'] == run['active_attempt_id']
+    finally:
+        service.shutdown(); store.close()
 
 
 def test_fresh_mcp_grok_effort_is_preserved_for_native_validation():
