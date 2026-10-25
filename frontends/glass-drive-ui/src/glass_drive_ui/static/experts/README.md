@@ -1,12 +1,12 @@
 # Expert portrait assets
 
 These five portraits depict fictional AI experts. They were generated with OpenAI image generation
-for xPerfect, then encoded as small 384 × 384 WebP assets. They do not depict employees or imply
+for xPerfect, then encoded as small 320 × 320 WebP assets. They do not depict employees or imply
 professional credentials or endorsement.
 
-These current bundled assets predate the approved Editorial Gouache v1 design direction. Use the
-approved reference in the operator UI contract for future artwork, and verify the complete set
-before replacing its delivered assets.
+The complete bundled set follows the approved Editorial Gouache v1 design direction. Use the
+approved style reference in the operator UI contract for future artwork, keeping each subject
+separate from the shared style. Verify the complete set before replacing its delivered assets.
 
 This directory owns the bundled presentation assets and their factual provenance. The
 [operator UI contract](../../../../../../docs/07_Minimal_Unified_Operator_UI.md#starting-with-a-professional-ai-worker)

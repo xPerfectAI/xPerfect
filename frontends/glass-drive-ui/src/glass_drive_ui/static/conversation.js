@@ -1,4 +1,5 @@
 import { createLibrarySelection } from './personal-library.js?v=20261024polish1';
+import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
 import { renderAccountIdentity } from './account-menu.js?v=20261024polish1';
 import MarkdownIt from './vendor/markdown-it-15.0.3.mjs';
 import { attachNativeControls } from './native-controls.js?v=20261024polish1';
@@ -75,7 +76,7 @@ const endedSetupRequired = new Set(['model_configuration_required', 'provider_au
 function endedMessage(code) {
   if (endedSetupRequired.has(code)) return code === 'model_configuration_required'
     ? 'The selected model is unavailable for this account. Check the account and model in Connections.'
-    : 'Reconnect the selected account in Connections before sending another message.';
+    : 'Reconnect or verify the selected account in Connections before trying again.';
   return code === 'cancelled' ? 'You stopped this reply.'
     : code === 'native_input_expired' ? 'The assistant stopped because a request for your response expired.'
     : 'The assistant could not finish this reply.';
@@ -94,8 +95,7 @@ function assistantMessage(text) {
   return message;
 }
 function csrf() {
-  const cookie = document.cookie.split(';').map((x) => x.trim()).find((x) => x.startsWith('glasshive_csrf='));
-  return cookie ? decodeURIComponent(cookie.slice('glasshive_csrf='.length)) : '';
+  return readAuthCookie('glasshive_csrf');
 }
 async function api(path, method='GET', body) {
   const response = await fetch(path, {method, credentials:'same-origin', headers:{'Content-Type':'application/json','X-GlassHive-CSRF':csrf()}, ...(body === undefined ? {} : {body:JSON.stringify(body)})});
@@ -171,7 +171,15 @@ function render(snapshot) {
       const laterReply=later.some((item)=>Boolean(item.response_json));
       const laterAttempt=later.some((item)=>item.origin==='worker_results' && item.message===turn.message);
       if (!laterReply && !laterAttempt) {
-        const failed=node('div','I could not combine the completed work. The results are saved.','message');
+        const setupRequired=endedSetupRequired.has(turn.blocker);
+        const failed=node('div',setupRequired
+          ? `${endedMessage(turn.blocker)} The results are saved.`
+          : 'I could not combine the completed work. The results are saved.','message');
+        if (setupRequired) {
+          const connection=node('a','Open Connections');
+          connection.href='/#connections';
+          failed.append(connection);
+        }
         failed.append(action('Try combining again',() => api(`${base}/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turn.turn_id)}/retry-result`,'POST')));
         messages.push(failed);
       }

@@ -98,6 +98,13 @@ class RuntimeConfigurationError(RuntimeErrorBase):
     """A user-actionable runtime setting is missing or invalid."""
 
 
+class RuntimeControlNotReadyError(RuntimeErrorBase):
+    """A control cannot run until the exact native process has started."""
+
+    code = "runtime_control_not_ready"
+    retryable = True
+
+
 class ProviderRateLimitError(RuntimeErrorBase):
     """Structured provider throttling with an authoritative bounded retry delay."""
 

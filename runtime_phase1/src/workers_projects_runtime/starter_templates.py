@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from mcp.types import ToolAnnotations
 
 from .personal_library import LibraryError
 from .runtime_requirements import WORKER_EFFORT_ENV_VALUES
@@ -188,7 +189,7 @@ def install_starter_routes(app, service, principal):
 
 
 def register_starter_tools(server, client):
-    @server.tool(name="workspace_starter_list", description="Browse the packaged starting worker templates and their exact included knowledge and abilities. This reads public starting material; it does not create a worker, install tools or grant access.")
+    @server.tool(name="workspace_starter_list", description="Browse the packaged starting worker templates and their exact included knowledge and abilities. This reads public starting material; it does not create a worker, install tools or grant access.", annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
     def listing():
         return client._request("GET", "/v1/workspace-starters", require_write_scope=True)
 

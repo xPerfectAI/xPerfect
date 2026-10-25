@@ -1,4 +1,5 @@
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
+import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
 import { createExpertPicker } from './expert-picker.js?v=20261024polish1';
 import { createLibraryBrowser, createLibrarySelection, libraryWorkerTarget, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
 import { renderAccountIdentity } from './account-menu.js?v=20261024polish1';
@@ -33,9 +34,7 @@ let workspaceInteractionOwnerScope = '';
 const workspaceSteerInFlight = new Map();
 function fileCsrfToken() {
   if (csrfToken) return csrfToken;
-  const cookie = document.cookie.split(';').map((value) => value.trim())
-    .find((value) => value.startsWith('glasshive_csrf='));
-  return cookie ? decodeURIComponent(cookie.slice('glasshive_csrf='.length)) : '';
+  return readAuthCookie('glasshive_csrf');
 }
 let renameWorkspaceContext = null;
 let saveTemplateContext = null;

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from workers_projects_runtime.control_plane import (
+    CONTROL_PLANE_SCHEMA_VERSION,
     ControlPlaneConflict,
     ControlPlaneError,
     ControlPlaneStore,
@@ -1372,8 +1373,8 @@ def test_control_plane_v2_migrates_provider_account_outcome_and_duration_counter
         columns = {row[1] for row in conn.execute("PRAGMA table_info(provider_accounts)")}
         assert {"observed_failures", "observed_duration_seconds"}.issubset(columns)
         assert require_compatible_schema(
-            conn, component="control_plane", target_version=4
-        ) == 4
+            conn, component="control_plane", target_version=CONTROL_PLANE_SCHEMA_VERSION
+        ) == CONTROL_PLANE_SCHEMA_VERSION
 
 
 def test_legacy_credential_cleanup_failure_migrates_to_structured_recovery(tmp_path):
@@ -1769,7 +1770,8 @@ def test_provider_setup_shutdown_terminates_login_process_and_releases_lock(
     assert updated["status"] == "action_required"
 
 
-def test_workspace_capability_revoke_restores_prior_bundle_and_refuses_drift(tmp_path):
+@pytest.mark.parametrize("replace_bundle", [False, True], ids=["additive", "wholesale-replacement"])
+def test_workspace_capability_revoke_restores_prior_bundle_and_preserves_later_changes(tmp_path, replace_bundle):
     database = tmp_path / "runtime.db"
     store = ControlPlaneStore(str(database))
     _create_workspace_record(database)
@@ -1815,14 +1817,27 @@ def test_workspace_capability_revoke_restores_prior_bundle_and_refuses_drift(tmp
 
     drifted_grant = enable()
     with sqlite3.connect(database) as conn:
+        current_bundle = json.loads(conn.execute(
+            "SELECT bootstrap_bundle_json FROM workers WHERE worker_id = 'wrk_public_safe'"
+        ).fetchone()[0])
+        if replace_bundle:
+            current_bundle = {}
+        current_bundle["user_change"] = True
         conn.execute(
             "UPDATE workers SET bootstrap_bundle_json = ? WHERE worker_id = 'wrk_public_safe'",
-            (json.dumps({"user_change": True}),),
+            (json.dumps(current_bundle),),
         )
-    with pytest.raises(ControlPlaneConflict, match="configuration changed"):
-        store.revoke_workspace_grant(
-            grant_id=drifted_grant["grant_id"],
-            tenant_id="tenant-a",
-            owner_id="user-a",
-            worker_id="wrk_public_safe",
-        )
+    revoked = store.revoke_workspace_grant(
+        grant_id=drifted_grant["grant_id"],
+        tenant_id="tenant-a",
+        owner_id="user-a",
+        worker_id="wrk_public_safe",
+    )
+    assert revoked["revoked_at"] is not None
+    assert store.list_workspace_grants(
+        tenant_id="tenant-a", owner_id="user-a", worker_id="wrk_public_safe"
+    ) == []
+    with sqlite3.connect(database) as conn:
+        assert json.loads(conn.execute(
+            "SELECT bootstrap_bundle_json FROM workers WHERE worker_id = 'wrk_public_safe'"
+        ).fetchone()[0]) == {"user_change": True}

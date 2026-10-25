@@ -4,6 +4,13 @@ import json
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
+from mcp.types import ToolAnnotations
+
+
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False,
+)
+
 
 def personal_library_tool_manifest():
     path = Path(__file__).with_name("prompts") / "personal-library-tools.json"
@@ -18,11 +25,11 @@ def register_personal_library_tools(server, client):
         # Owner-private management never uses the attempt-scoped peer reader.
         return client._request(method, path, json_body=payload, require_write_scope=True)
 
-    @server.tool(name="personal_library_list", description=descriptions["personal_library_list"])
+    @server.tool(name="personal_library_list", description=descriptions["personal_library_list"], annotations=READ_ONLY)
     def listing(include_archived: bool = False) -> dict:
         return call("GET", "/v1/personal-library?" + urlencode({"include_archived": str(include_archived).lower()}))
 
-    @server.tool(name="personal_library_read", description=descriptions["personal_library_read"])
+    @server.tool(name="personal_library_read", description=descriptions["personal_library_read"], annotations=READ_ONLY)
     def read(item_id: str, version_id: str | None = None) -> dict:
         path = "/v1/personal-library/" + quote(item_id, safe="")
         if version_id is not None:
@@ -45,7 +52,7 @@ def register_personal_library_tools(server, client):
     def delete(item_id: str, confirm: bool = False) -> dict:
         return call("DELETE", "/v1/personal-library/" + quote(item_id, safe="") + "?" + urlencode({"confirm": str(confirm).lower()}))
 
-    @server.tool(name="personal_library_resolve", description=descriptions["personal_library_resolve"])
+    @server.tool(name="personal_library_resolve", description=descriptions["personal_library_resolve"], annotations=READ_ONLY)
     def resolve(refs: list[dict[str, str]]) -> dict:
         return call("POST", "/v1/personal-library/resolve", {"refs": refs})
 
@@ -53,7 +60,7 @@ def register_personal_library_tools(server, client):
     def capture(worker_id: str, file_id: str, revision: str, name: str, idempotency_key: str) -> dict:
         return call("POST", f"/v1/workspaces/{quote(worker_id, safe='')}/personal-library/capture", {"file_id": file_id, "revision": revision, "name": name, "idempotency_key": idempotency_key})
 
-    @server.tool(name="personal_library_workspace", description=descriptions["personal_library_workspace"])
+    @server.tool(name="personal_library_workspace", description=descriptions["personal_library_workspace"], annotations=READ_ONLY)
     def workspace(worker_id: str) -> dict:
         return call("GET", f"/v1/workspaces/{quote(worker_id, safe='')}/personal-library")
 

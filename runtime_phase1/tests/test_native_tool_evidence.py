@@ -34,7 +34,7 @@ def test_canonical_response_retains_current_run_tool_results():
     calls = []
     provider.service = SimpleNamespace(runtime=SimpleNamespace(provider_activity_log=lambda w, r: (calls.append((w, r)) or ('codex-cli', fixture_log()))))
     provider._conversation_output = lambda *_, **_kwargs: 'The review is ready.'
-    provider._native_usage_snapshot = lambda *_: None
+    provider._native_usage_snapshots = lambda *_: (None, None, '')
     request = {'request_id': 'request', 'session_id': 'session', 'run_id': 'run', 'owner_id': 'owner',
                'message_id': 'answer', 'native_invocation_id': 'invocation'}
     response = provider._build_canonical_response(request, {'run_id': 'run'}, {'model': 'configured', 'prompt_tokens': 10})

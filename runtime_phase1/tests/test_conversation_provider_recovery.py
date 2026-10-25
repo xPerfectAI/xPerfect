@@ -115,11 +115,15 @@ def test_result_lookup_is_read_only_and_owner_scoped(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("state", ["queued", "running", "failed", "cancelled"])
 def test_unsuccessful_or_pending_result_never_contains_answer(tmp_path, monkeypatch, state):
+    # This is a deliberately corrupt receipt snapshot, not a queued-work
+    # recovery test. Keep the periodic recovery owner from repairing it mid-read.
+    monkeypatch.setenv('GLASSHIVE_BACKGROUND_CONSUMERS_ENABLED', 'false')
     client = _client(tmp_path, monkeypatch)
     response, digest = _post_bound(client, _payload(tmp_path))
     assert response.status_code == 200
     # Even a corrupt/legacy unsuccessful row with a stale cached artifact must
     # not expose that artifact as a completed answer.
+    client.app.state.conversation_provider.shutdown()
     store = client.app.state.store
     store.update_provider_request(response.json()["id"], state=state)
     result = _result(client, digest)

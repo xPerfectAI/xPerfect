@@ -1,8 +1,8 @@
 {
   "family": "xperfect.coordinator",
-  "version": 2,
+  "version": 3,
   "source": "workers_projects_runtime/prompts/coordinator.md",
-  "baseline": "Existing configured conversation role without coordinator source; no invented old prompt for a new capability.",
+  "baseline": "Presentation cases compare coordinator prompt version 2 with version 3 using unchanged tool schema version 3 and the same sanitized snapshots. Earlier capability cases retain their recorded original baselines.",
   "rubric": {
     "intelligence_min": 4,
     "relevance_min": 4,
@@ -164,6 +164,40 @@
         "Uses coordinator_dispatch route_id report-review without worker_id when choosing the requested new helper",
         "Preserves the legacy route request shape",
         "Does not force reuse just because a worker is available"
+      ]
+    },
+    {
+      "id": "accepted-work-plain-language-positive",
+      "kind": "positive",
+      "message": "Ask the existing finance worker to explain the November cash low using its saved review. Keep the files unchanged and give me the source filename.",
+      "fixture": "The exact existing worker is selected. Dispatch returned an accepted queued run with no blocker. Its roster compute state is paused. The helper needs the foreground account to be released before ordinary admission.",
+      "checks": [
+        "Ends the foreground turn without waiting, sleeping or polling",
+        "Uses brief plain job language when an acknowledgement is useful; no routine queue narration or internal IDs",
+        "Does not infer a blocker or ask for Resume from roster state",
+        "Does not claim the result is complete before evidence"
+      ]
+    },
+    {
+      "id": "typed-reconnect-blocker-negative",
+      "kind": "negative",
+      "message": "Continue the analysis with the same finance worker and account.",
+      "fixture": "The actual dispatch refusal has code provider_account_reconnect_required. The selected account is not ready; no run was accepted and another account or worker was not authorized.",
+      "checks": [
+        "Explains the actual account reconnect need in plain language",
+        "Does not hide the blocker or promise that the analysis is underway",
+        "Does not invent missing files, ask for Resume, or substitute another worker/account"
+      ]
+    },
+    {
+      "id": "requested-technical-status-adjacent",
+      "kind": "adjacent",
+      "message": "Give me the exact run ID and whether it is queued or running. Do not start another helper.",
+      "fixture": "A fresh exact current goal receipt has run_id run_review, state queued, blocker host_capacity. No action is required from the user; the worker roster says paused.",
+      "checks": [
+        "Answers the explicitly requested exact run identity and queued state",
+        "Explains the actual automatic capacity wait without guessing a Resume requirement",
+        "Does not create more work, wait, sleep or poll"
       ]
     }
   ],

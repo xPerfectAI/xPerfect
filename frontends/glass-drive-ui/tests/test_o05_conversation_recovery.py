@@ -15,6 +15,7 @@ const nativeWidgets=new Map();
 const window={innerHeight:900,scrollY:0};
 globalThis.document ||= {activeElement:null};
 const markdown={render(text){return text;}};
+function readAuthCookie(){return '';}
 function attachNativeControls(){return {refresh(){},destroy(){}};}
 """
 
@@ -97,9 +98,9 @@ if ($('work').hidden) throw new Error('foreground native input is hidden before 
 // A typed account/model prerequisite keeps the text but cannot blindly resend.
 const setupFailures = [
   ['model_configuration_required', 'The selected model is unavailable for this account. Check the account and model in Connections.'],
-  ['provider_auth_missing', 'Reconnect the selected account in Connections before sending another message.'],
-  ['provider_connected_account_reconnect_required', 'Reconnect the selected account in Connections before sending another message.'],
-  ['provider_unauthorized', 'Reconnect the selected account in Connections before sending another message.'],
+  ['provider_auth_missing', 'Reconnect or verify the selected account in Connections before trying again.'],
+  ['provider_connected_account_reconnect_required', 'Reconnect or verify the selected account in Connections before trying again.'],
+  ['provider_unauthorized', 'Reconnect or verify the selected account in Connections before trying again.'],
 ];
 render({turns:setupFailures.map(([code]) => turn(code, code, `request-${code}`)),goals:[]});
 for (const [i, [code, expected]] of setupFailures.entries()) {
@@ -107,6 +108,16 @@ for (const [i, [code, expected]] of setupFailures.entries()) {
   if (!message || message.textContent !== `${expected} Your message is saved.` || message.children.length !== 1 || message.children[0].textContent !== 'Edit') throw new Error(`${code}: missing recovery or unsafe resend`);
   await message.children[0].listeners.click();
   if ($('message').value !== `msg ${code}` || !$('message').focused) throw new Error(`${code}: saved message lost`);
+}
+// Result delivery uses the same typed setup recovery, retains results and does not rerun a helper.
+for (const [code, expected] of setupFailures) {
+  render({turns:[{...internal,turn_id:`setup-${code}`,blocker:code}],goals:[]});
+  const row=$('messages').children[0];
+  if (row.textContent !== `${expected} The results are saved.`) throw new Error(`${code}: generic result error hid setup`);
+  if (row.children[0].textContent !== 'Open Connections' || row.children[0].href !== '/#connections') throw new Error(`${code}: missing setup link`);
+  if (row.children[1].textContent !== 'Try combining again') throw new Error(`${code}: saved result recovery lost`);
+  await row.children[1].listeners.click();
+  if (!posts.at(-1)[0].endsWith(`/turns/setup-${code}/retry-result`)) throw new Error(`${code}: result retry rerouted work`);
 }
 if (!$('stop-response').hidden) throw new Error('ended setup failure kept Stop response');
 globalThis.fetch = async () => ({ok:false,status:409,json:async()=>({detail:'Choose a connected assistant before starting a conversation'})});

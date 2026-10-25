@@ -1499,7 +1499,7 @@ def test_viventium_callback_persists_exact_attempt_identity_and_stable_replay_ti
 
 
 def test_completed_work_detail_matches_strict_core_producer_contract(
-    account_client, tmp_path, monkeypatch
+    background_consumers_disabled, account_client, tmp_path, monkeypatch
 ):
     service = account_client.app.state.service
     service.executor.submit = lambda *_args, **_kwargs: None
@@ -4993,13 +4993,25 @@ def test_provider_progress_stalled_resume_lost_response_replays_same_run_without
             runtime="codex-cli",
             model="gpt-5.6-sol",
         )
-        store.update_run(run_id, native_session_id=native_session_id, **route)
+        store.update_run(run_id, **route)
         invoked = _truthfully_invoke_run(
             store,
             run_id,
             suffix="provider-progress-resume-lost-response",
         )
         attempt_id = str(invoked["active_attempt_id"])
+        observed_session = store.observe_native_event_if_current(
+            worker_id=worker_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            provider="codex",
+            event={
+                "event_type": "provider.session.started",
+                "payload": {"sessionId": native_session_id},
+            },
+        )
+        assert observed_session is not None
+        assert observed_session["native_session_id"] == native_session_id
         observed_at = datetime.now(timezone.utc)
         for source_sequence in range(1, 4):
             transition = store.observe_provider_liveness(

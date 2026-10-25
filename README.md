@@ -1,68 +1,92 @@
 # xPerfect
 
-**Our vision: Turn experts into the perfect AI version of themselves, working 24/7 across your channels and tools.**
+**Build an AI team that knows your work.**
 
-Raw models and harnesses alone can’t take over a full-time expert’s role. xPerfect AI’s harness and control plane aim to capture experts’ tribal knowledge and skills to create their perfect AI counterparts.
+Choose a professional AI Worker, give it a job and the knowledge and tools it needs, and get
+results you can open, inspect and use. xPerfect runs native AI tools such as Codex, Claude Code
+and Grok, keeping each worker's files, progress and results together on your computer or server.
 
-xPerfect runs the AI tools you already use, such as Codex, Claude Code and Grok, and keeps each
-task's files, progress and results together. It works on its own, on your computer or your server.
+[**Start locally**](#start-locally) · [Visual guide](https://www.xperfect.ai/docs/) ·
+[Try a complete example](docs/workshop.md) · [API and MCP](docs/developer.md)
 
-**New here? [Follow the visual user guide](https://www.xperfect.ai/docs/)** — short steps, screenshots,
-light/dark themes, UI and MCP routes. [Guide source](docs/user-guide/README.md).
+Our vision: turn experts' knowledge and skills into reusable AI counterparts that can work
+across your channels and tools. The starting team below is one way to begin; you can create,
+save and adapt your own workers.
 
-**Choose how to start**
-- **On your computer:** `./xperfect start` gives one person a private web app. See below and the
-  [quickstart](docs/quickstart.md).
-- **On a server for several people:** people sign in with your identity provider, and each gets a
-  5 GB file quota. See [hosted setup](docs/deployment-hosted.md) and its current limits.
-- **From another AI app or your own code:** connect over MCP or the API. See the
-  [developer walkthrough](docs/developer.md) or the [LiveKit voice reference](integrations/livekit/README.md).
+## From a job to a result
+
+1. **Choose who does the job.** Start with an expert, create your own, or reuse an existing worker.
+2. **Get them onboarded.** Explain the required outcome. Add background, files and useful
+   knowledge or tools from your Library.
+3. **Run the work.** Follow progress, give more direction, and open or download the results.
+   Return to the same saved work later.
+
+An expert is a reusable worker setup, with its instructions and selected knowledge and abilities.
+Starting from one creates a new worker. Reusing an existing worker continues its own work.
+
+![Choose from five professional AI Workers, with their included knowledge and abilities](docs/assets/screens/expert-team.jpg)
+
+## Meet your starting team
+
+| Professional | Give them a job | Inspect the result |
+| --- | --- | --- |
+| [Clinical Biostatistician](runtime_phase1/src/workers_projects_runtime/starter_packs/clinical-biostatistician/README.md) | Assess a study's response difference and uncertainty. | Counts, effect estimates, assumptions and editable calculations. |
+| [Bioanalytical Scientist](runtime_phase1/src/workers_projects_runtime/starter_packs/bioanalytical-scientist/README.md) | Reconcile assay exports and flag QC exceptions. | A traceable review and an editable results table. |
+| [Regulatory Affairs Specialist](runtime_phase1/src/workers_projects_runtime/starter_packs/regulatory-affairs-specialist/README.md) | Check claims against a technical package. | An evidence map with missing and conflicting support. |
+| [Growth Marketer](runtime_phase1/src/workers_projects_runtime/starter_packs/growth-marketer/README.md) | Prepare a launch from a brand brief and channel evidence. | Campaign and copy drafts with a measurement plan. |
+| [Finance Director](runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/README.md) | Explain financial performance and cash changes. | A board brief and editable budget/cash calculations. |
+
+Each package includes synthetic inputs, a meaningful job and checks you can repeat.
+[Walk through the Finance Director example](docs/workshop.md), including a follow-up and bad input.
+These are starting points, not professional credentials or certification. Their current native
+skill path uses **Claude Code on the host**, with review for the actual worker. Optional tools
+keep their own setup and account requirements; choosing an expert does not authorize them.
+
+![Actual Finance Director delivery in Watch, with an openable PDF and source-linked findings](docs/assets/screens/finance-delivery.jpg)
+
+*Actual native work using the public synthetic Finance example. Open the report and editable
+calculations, then [check them against their sources](docs/workshop.md#inspect-the-result).*
+
+## Keep what works
+
+Save files, onboarding notes, skills and bundles in your **Library**. Reuse exact versions with
+the worker that needs them. Company material stays in your private selection; it does not become
+part of the public starter package.
+
+**Watch** brings progress, controls and delivered files together. Steer the selected worker,
+pause or stop supported work, and return to its recorded status. In **Workspaces**, reopen a
+worker or make a separate copy. **Schedules** can run a saved workspace later or send a webhook
+to your app; the receiving app decides what happens next.
+
+Use the browser, your own code or another AI application:
+
+| Your starting point | Follow this path |
+| --- | --- |
+| Browser | [Quickstart](docs/quickstart.md): connect → run → open a result → return to it |
+| Another AI app | [MCP walkthrough](docs/developer.md#1-connect-a-client): connect once, then discover and control work |
+| Your own code | [HTTP API](docs/developer.md#4-the-same-finance-job-through-http-local): use the same worker, run and result records |
+| A team server | [Hosted setup](docs/deployment-hosted.md): identity, storage, account setup and current limits |
 
 ## Start locally
 
-### With Docker
-
-Get the [public source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip)
-and open a terminal in its folder. With Python 3.11 or newer and Docker running,
-start the reviewed container package:
-
-```sh
-./xperfect start --docker
-```
-
-The launcher downloads its release images automatically and keeps private state
-under `~/xperfect-local`. Open the printed URL and use `ui_password` from the
-private credentials file it prints. Connect your AI account in **Connections**.
-Keep that file private; it also holds the MCP credentials.
-
-The current image release is `linux/arm64`. Actual Windows startup and additional
-CPU architectures remain under construction. [Package details and optional
-settings](docs/deployment.md#packaged-linux).
-
-### With tools installed on your computer
+### Use the AI tools on your computer
 
 Requires macOS or Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/),
-and the command-line tool of one AI provider you use: [Codex](https://developers.openai.com/codex/cli/),
+and an installed AI tool: [Codex](https://developers.openai.com/codex/cli/),
 [Claude Code](https://code.claude.com/docs/en/setup) or [Grok](https://github.com/xai-org/grok-build).
-From the repository:
+The bundled experts currently use Claude Code; the other existing worker choices remain available.
+
+[Download the source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip),
+open a terminal in its folder, then run:
 
 ```sh
 ./xperfect start
 ```
 
-The first start asks you to choose an unlock password (press Enter to have one made; save it in your password manager).
-
-1. Open the printed URL, normally **http://127.0.0.1:8780**, unlock once, and connect your AI account in **Connections**. That browser stays unlocked for 30 days.
-2. In **Run project**, enter a small goal, add any needed files with **Add files**, and select **Run Project**.
-3. Watch the work, then open or download the result from **Files**. Reload: it is still there.
-
-Try: “Write a short note explaining rain and save it as a text file.”
-
-![From a goal to a result you can reopen](docs/assets/first-result.png)
-
-| Run project | The finished result |
-| --- | --- |
-| ![Run project with a goal, an attached changelog and a ready Claude account](docs/assets/screens/run-project.png) | ![Watch showing the finished answer, with Open result for release-notes.md](docs/assets/screens/result.png) |
+The first start asks for an unlock password; choose one or save the generated password. Open the
+printed address, unlock the app, and connect an AI account in **Connections**. Wait for **Ready**,
+then open **Run Project**. The
+[quickstart](docs/quickstart.md) walks through the remaining steps.
 
 ```sh
 ./xperfect doctor
@@ -70,79 +94,71 @@ Try: “Write a short note explaining rain and save it as a text file.”
 ./xperfect restart
 ```
 
-A running app is not yet a connected AI: `doctor` shows which AI tools it found, and Connections
-shows whether your account is ready. This local app is for one person; the AI works with your
-user account's permissions. It is not a public multi-user deployment.
+A running page is not yet a connected AI. `doctor` shows the installed tools; Connections shows
+account readiness. This local app is for one person and works with that user's permissions.
 
-[Quickstart](docs/quickstart.md) · [Account and state setup](docs/host-setup.md) ·
-[Deployment and recovery](docs/deployment.md) · [Changelog](CHANGELOG.md)
+### Use Docker
 
-## Work together or separately
+With Python 3.11 or newer and Docker running, from the source folder:
 
-By default each AI worker gets a separate workspace. A shared workspace lets several workers, even
-different AI tools, work in one place with **Common project files** or **Private files per member**.
-Shared workspaces need xPerfect on a configured Linux host, such as the packaged install; with
-`./xperfect start` on a Mac, use a separate workspace.
-Sign-ins and sessions always stay separate.
+```sh
+./xperfect start --docker
+```
 
-![Workspace modes and file placement](docs/assets/workspaces.png)
+The launcher downloads its release images and keeps private state under `~/xperfect-local`.
+Open the printed URL and use `ui_password` from the private credentials file it prints. Keep that
+file private; it also holds MCP credentials. The current image release is `linux/arm64`;
+Windows startup and other CPU architectures remain under construction. See
+[package details](docs/deployment.md#packaged-linux) for the packaged version and settings.
 
-[Editable SVG](docs/assets/workspaces.svg)
+## Your tools, your setup
 
-Ten goals do not mean ten workers at once. xPerfect keeps every goal; ready accounts, machine
-resources and configured limits decide what starts now, and other work waits or reports what
-blocks it. Sharing files does not automatically share chat history, tools or permissions. See
-[working on several goals](docs/capability-matrix.md#working-on-several-goals).
+xPerfect is a standalone control plane around native AI tools. It manages worker identity,
+workspaces, lifecycle, scheduling, results and access; the native AI tool performs the work.
+Applications can use it through MCP or the API without adopting this front end.
 
-To let workers in your account find or message one another, open **Work together** on a
-workspace card. Discovery and messages are separate choices; you approve the exact current
-workers and can revoke either message direction later. On hosted servers without a secure
-worker connection, the controls explain why native worker-to-worker tools are unavailable.
+Separate workspaces keep workers' files apart. On a configured Linux host, shared workspaces
+also offer **Common project files** or **Private files per member**. Sign-ins and sessions stay
+separate. Sharing files does not by itself share chat history, tools or permissions. See
+[workspace modes](docs/02_Architecture_and_Components.md#workspace-file-placement).
 
-Work is stored on the host you run. Connected AI providers can receive task content and tool
-results needed for their requests; local storage does not mean local-only AI processing.
+Ten goals do not mean ten workers at once. Ready accounts, machine resources and configured
+limits decide what starts now. **Work together** lets you approve discovery and messages between
+exact workers in your account; deployments without the required secure connection explain that
+limit. [Working on several goals](docs/capability-matrix.md#working-on-several-goals).
+
+Self-hosting keeps xPerfect's saved work on the machine or server you run. Connected AI providers
+and integrations can receive the content needed for their requests. Local storage does not mean
+local-only inference. [Security](SECURITY.md) · [Capabilities](docs/capability-matrix.md).
 
 ## Current limits
 
-- **Hosted servers:** sign-in, per-person storage and upgrades are tested. Connecting an AI
-  account and getting a result on a hosted server have not been verified end to end yet.
-- **Drag and drop:** drop areas exist, but dragging files in or out in a real browser has not been
-  verified yet. Use **Add files** and **Download**.
-- **API keys:** the key option exists, but API-key setup has not been verified end to end yet. Use
-  a subscription sign-in.
-- **Duplicate:** copies a workspace's files. A copy whose AI is managed by your organization
-  continues directly. Continuing a copy with a personal account needs an account confirmation that
-  has not been verified end to end yet.
-- **Conversation on your own computer:** with `./xperfect start`, a conversation with a connected
-  account cannot run; it needs a configured Linux host, such as the packaged install. **Assistant on
-  this computer** runs when the AI tool chosen as **Default Worker** (Run project → **More settings**)
-  is installed on this computer; otherwise the page explains the limit before you type and offers
-  **Run project**.
+- **Hosted servers:** sign-in, per-person storage and upgrades have recorded checks. Full AI
+  account connection and result delivery are not verified for every hosted route.
+- **File drag and drop:** a full browser pass remains open. Use **Add files** and **Download**.
+- **API-key accounts:** end-to-end setup remains unverified. Use a supported subscription sign-in.
+- **Personal-account copies:** not every account-confirmation and continuation path is verified.
+  Check the copied worker's selected account before running it.
+- **Shared workspaces:** require a configured Linux host; use a separate workspace on a Mac.
+  This limit is separate from supported local Chat. Chat offers only the routes the actual
+  deployment and installed tools can use. [Current support](docs/capability-matrix.md).
 
-## Use and extend
-
-- **Files:** keep original input bytes, inspect outputs, and download results. A filename alone is not an uploaded file.
-- **Controls:** Watch, steer, interrupt or continue the exact worker. Read its recorded state before retrying.
-- **AI providers:** Codex CLI, Claude Code and Grok Build use their own supported routes. Grok needs one exact model: choose it under **Grok model** in Connections, or run `./xperfect restart --model grok-build=<model>`.
-- **MCP:** connect over stdio or authenticated streamable HTTP; compatibility SSE remains available.
-- **API:** projects, workers, runs, schedules, events, files and lifecycle controls use the existing typed runtime.
-- **Build on it:** the [developer walkthrough](docs/developer.md) shows how to connect, discover tools, start, check and steer work, and add a harness.
-- **Extensions:** add authorized tools, skills and context. See the [technical setup](docs/03_Bootstrap_Auth_and_Identity_Projection.md).
-
-Missing authentication, an unsupported route and exhausted capacity are different states. Use the
-reported next action; do not substitute an account or call incomplete work finished. Provider routes,
-desktop tools and shared execution are configuration-dependent.
+Grok needs an exact supported model: choose it under **Grok model** in Connections, or use
+`./xperfect restart --model grok-build=<model>`. Missing authentication, unsupported setup and
+exhausted capacity have different next steps. Follow the reported state rather than changing
+accounts or calling incomplete work finished.
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md): first task, opened result and coming back to it
-- [Deployment](docs/deployment.md): local versus hosted setup, state and upgrades
-- [Capability guide](docs/capability-matrix.md): execution, accounts, files and storage boundaries
-- [Workshop](docs/workshop.md): build and inspect a result from synthetic input
-- [Developer walkthrough](docs/developer.md): MCP, API and worker harnesses
+- [Visual user guide](https://www.xperfect.ai/docs/) · [Guide source](docs/user-guide/README.md)
+- [Quickstart](docs/quickstart.md) · [Complete examples](docs/workshop.md)
+- [Deployment and recovery](docs/deployment.md) · [Account setup](docs/host-setup.md)
+- [Developer walkthrough](docs/developer.md) · [LiveKit reference](integrations/livekit/README.md)
+- [Capability guide](docs/capability-matrix.md) · [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-Technical contracts:
+<details>
+<summary>Technical contracts</summary>
 
 0. [Key principles](docs/00_Key_Principles.md)
 1. [Vision and terminology](docs/01_Vision_Requirements_and_Terminology.md)
@@ -153,14 +169,16 @@ Technical contracts:
 6. [References](docs/06_References.md)
 7. [Operator UI and design guidelines](docs/07_Minimal_Unified_Operator_UI.md)
 8. [Repository and publication boundaries](docs/08_Repository_Structure_and_Publication_Boundaries.md)
-9. [Application boundary and generic scheduled delivery](docs/09_Application_Boundary_Contract.md) — proposed extension, technical plan and standalone acceptance.
-See [CHANGELOG](CHANGELOG.md) and the [runtime](runtime_phase1/README.md). Existing Python package names, `WPR_`/`GLASSHIVE_` configuration
-and MCP/skill IDs remain compatibility interfaces; the product name is xPerfect.
+9. [Application boundary and generic scheduled delivery](docs/09_Application_Boundary_Contract.md)
+
+See the [runtime](runtime_phase1/README.md). Existing Python package names,
+`WPR_`/`GLASSHIVE_` configuration and MCP/skill IDs remain compatibility interfaces.
+
+</details>
 
 ## Creator
 
 xPerfect is created by [Adrien Beyk](https://www.linkedin.com/in/adrienbeyk/).
-
 [Instagram](https://www.instagram.com/adrienbeyk/)
 
 ## License

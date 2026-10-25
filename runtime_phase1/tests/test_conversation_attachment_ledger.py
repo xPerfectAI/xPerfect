@@ -127,7 +127,7 @@ def test_safe_ledger_does_not_emit_paths_grants_or_body(selected_uploads):
 def test_invalid_id_is_not_promoted_to_selection_authority(monkeypatch):
     projected = [{"file_id": "../invalid", "filename": "safe.txt", "source": "text", "path": "uploads/safe.txt"}]
     monkeypatch.setattr(provider.ConversationProvider, "_projected_request_uploads", staticmethod(lambda payload: projected))
-    context = provider.ConversationProvider._request_attachment_context(SimpleNamespace())
+    context = provider.ConversationProvider._request_attachment_context(_payload(projected))
     assert "../invalid" not in context
     assert "safe.txt" in context
 

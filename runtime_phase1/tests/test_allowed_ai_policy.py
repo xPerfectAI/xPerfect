@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from workers_projects_runtime.api import create_app
@@ -179,9 +181,25 @@ def test_allowed_ai_options_do_not_expose_secret_locators(tmp_path):
         assert response.status_code == 200
         payload = response.json()
         assert "keychain://" not in json.dumps(payload)
-        connections = payload["harnesses"][0]["connections"]
+        connections = next(item for item in payload["harnesses"] if item["profile"] == "codex-cli")["connections"]
         assert connections[0]["label"] == "Team subscription"
         assert connections[0]["kind"] == "subscription"
+
+
+def test_allowed_ai_offers_declared_current_grok_models_without_configuration_fallback(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import workers_projects_runtime.allowed_ai_policy as policy_module
+
+    monkeypatch.setattr(policy_module, "allowed_worker_profiles", lambda: ["grok-build"])
+    monkeypatch.setattr(policy_module, "selected_grok_model", lambda *_: pytest.fail("declared models do not need ACP fallback"))
+    accounts = SimpleNamespace(list_provider_accounts=lambda **_: [], list_connections=lambda **_: [])
+    service = AllowedAiPolicyService(Store(str(tmp_path / "declared-policy.db")), accounts, SimpleNamespace(grok=object()))
+    harness = service.options(scope_id="project", tenant_id="local", owner_id="owner")["harnesses"][0]
+    assert harness["profile"] == "grok-build"
+    assert {"grok-build:grok-4.7", "grok-build:grok-4.7-build-fast"}.issubset(
+        {model["id"] for model in harness["models"]}
+    )
+    assert all(model["status"] == "available" for model in harness["models"])
 
 
 def test_allowed_ai_offers_only_the_configured_exact_acp_model(tmp_path, monkeypatch):
@@ -199,20 +217,24 @@ def test_allowed_ai_offers_only_the_configured_exact_acp_model(tmp_path, monkeyp
         grok = object()
 
     monkeypatch.setattr(policy_module, "allowed_worker_profiles", lambda: ["grok-build"])
-    monkeypatch.setenv("WPR_MODEL_GROK_BUILD", "grok-4.6")
+    monkeypatch.setattr(policy_module, "GLASSHIVE_MODELS", {})
+    monkeypatch.setattr(policy_module, "selected_grok_model", lambda *_: ("grok-4.7", "configured"))
     service = AllowedAiPolicyService(Store(str(tmp_path / "policy.db")), Accounts(), Runtime())
     options = service.options(scope_id="project", tenant_id="local", owner_id="owner")
     assert len(options["harnesses"]) == 1
     grok = options["harnesses"][0]
     assert grok["profile"] == "grok-build"
-    assert grok["models"] == [{"id": "grok-build:grok-4.6", "label": "Grok Build / grok-4.6",
+    assert grok["models"] == [{"id": "grok-build:grok-4.7", "label": "Grok Build / grok-4.7",
                                "status": "available"}]
     assert grok["connections"][0]["kind"] == "subscription"
-    assert service._model_id("grok-build", "grok-4.6") == "grok-build:grok-4.6"
-    assert service._model_id("grok-build", "grok-build:grok-4.6") == "grok-build:grok-4.6"
+    assert service._model_id("grok-build", "grok-4.7") == "grok-build:grok-4.7"
+    assert service._model_id("grok-build", "grok-build:grok-4.7") == "grok-build:grok-4.7"
     assert service._model_id("grok-build", "grok-unconfigured") == ""
-    monkeypatch.delenv("WPR_MODEL_GROK_BUILD")
-    assert service._model_id("grok-build", "grok-4.6") == ""
+    def missing_configuration(*_):
+        raise policy_module.ModelConfigurationRequired("Choose an exact configured model")
+
+    monkeypatch.setattr(policy_module, "selected_grok_model", missing_configuration)
+    assert service._model_id("grok-build", "grok-4.7") == ""
     assert service.options(scope_id="project", tenant_id="local", owner_id="owner")["harnesses"] == []
 
 

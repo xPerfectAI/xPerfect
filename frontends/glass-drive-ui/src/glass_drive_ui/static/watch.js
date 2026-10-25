@@ -1,4 +1,5 @@
 import { createLibraryBrowser, libraryRequest, libraryStatus, libraryRemovalOutcome, reviewLibraryUse, askNativeLibrarySetup } from './personal-library.js?v=20261024polish1';
+import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
 import { watchOutputModel, watchTimingModel } from './delivery-presenter.js?v=20261024polish1';
 import { workspaceLifecycleControl } from './launch-policy.js?v=20261024polish1';
 import { createFileDraft, createWorkspaceFiles } from './files.js?v=20261024polish1';
@@ -221,18 +222,7 @@ function withUiRev(url) {
 }
 
 function currentCsrfToken() {
-  const prefix = 'glasshive_csrf=';
-  const entry = document.cookie
-    .split(';')
-    .map((value) => value.trim())
-    .find((value) => value.startsWith(prefix));
-  if (!entry) return '';
-  const value = entry.slice(prefix.length);
-  try {
-    return decodeURIComponent(value);
-  } catch (_error) {
-    return value;
-  }
+  return readAuthCookie('glasshive_csrf');
 }
 
 function csrfHeaders(headers = {}) {
@@ -1490,7 +1480,9 @@ async function refresh() {
     currentDeliverable = data.deliverable || null;
 
     const profileLabel = { 'codex-cli': 'Codex', 'claude-code': 'Claude Code',
-      'grok-build': 'Grok Build', 'openclaw-general': 'OpenClaw' }[worker.profile] || worker.profile || 'AI worker';
+      'grok-build': 'Grok Build', 'openclaw-general': 'OpenClaw',
+      'direct-openai': 'OpenAI Direct', 'direct-anthropic': 'Anthropic Direct',
+      'direct-xai': 'Grok Direct' }[worker.profile] || worker.profile || 'AI worker';
     const shared = data.execution_workspace_mode === 'shared';
     title.textContent = String(worker.name || currentProjectTitle || 'Worker');
     subtitle.textContent = `${profileLabel} · ${shared ? 'Shared workspace' : 'Separate workspace'}`;

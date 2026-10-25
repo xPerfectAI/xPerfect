@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from test_coordinator_existing_worker import existing, dispatch
+from test_account_api import _truthfully_invoke_run
 from test_native_image_output import fixture as native_fixture, project
 from workers_projects_runtime import api, profile_runtime
 from workers_projects_runtime.conversation_provider import ConversationProvider
@@ -23,18 +24,23 @@ def result_files(existing, tmp_path, monkeypatch, request):
             tenant_id='local', owner_id='owner', idempotency_key='file-helper', request_digest='digest',
             origin_ref='file-helper-origin', title='Selected report', goal='Report', instruction='Report',
             origin_surface='coordinator', worker_name='Helper', worker_role='worker', profile='codex-cli',
-            backend='codex-cli', runtime='codex-cli', model='configured', execution_mode='host', bootstrap_bundle={})
+            backend='codex-cli', runtime='codex-cli', model='configured', execution_mode='host',
+            bootstrap_bundle={'callbacks': {'events_webhook_url': 'https://example.test/worker-events'}})
         worker_id, run_id = receipt['worker_id'], receipt['initial_run_id']
         with store._connect() as conn:
             conn.execute('UPDATE coordinator_goals SET worker_id=?,run_id=?,work_ref=? WHERE conversation_id=?',
                          (worker_id, run_id, receipt['work_ref'], cid))
+        _truthfully_invoke_run(store, run_id, suffix='coordinator-result-helper')
     runtime, _, info, scope, _ = native_fixture(tmp_path/'native')
     worker = store.update_worker(worker_id, workspace_dir=info.workspace_dir)
-    scope.update(worker_id=worker_id, run_id=run_id, owner_id='owner', images=[], file_output_transport='artifact_sha256')
+    attempt_id = str((store.get_run(run_id) or {}).get('active_attempt_id') or '')
+    scope.update(worker_id=worker_id, run_id=run_id, owner_id='owner', images=[],
+                 file_output_transport='artifact_sha256', attempt_id=attempt_id)
     expected = {'report.csv': b'item,value\nExample,17\n', 'report.html': b'<!doctype html><h1>Report</h1>'}
     for name, data in expected.items():
         (Path(info.workspace_dir)/name).write_bytes(data)
-    selected = project(runtime, worker, info, '\n'.join(f'[{name}]({name})' for name in expected), scope, run_id)
+    selected = project(runtime, {**worker, '_run_attempt_id': attempt_id}, info,
+                       '\n'.join(f'[{name}]({name})' for name in expected), scope, run_id)
     source = store.update_run(run_id, state='completed', output_text=selected, ended_at='2026-01-01T00:00:00Z')
     foreground = store.create_worker(worker['project_id'], 'owner', 'Assistant', 'Chat',
                                      'codex-cli', 'codex-cli', 'codex-cli', 'configured')
@@ -59,6 +65,14 @@ def result_files(existing, tmp_path, monkeypatch, request):
     monkeypatch.setenv('GLASSHIVE_LINK_REF_STATE_PATH', str(tmp_path/'links.sqlite3'))
     monkeypatch.setenv('GLASSHIVE_ARTIFACT_BASE_URL', 'http://testserver')
     monkeypatch.setattr(api, 'load_viventium_runtime_env', lambda: None)
+    if request.param == 'helper':
+        # A delegated result's friendly download name needs the same immutable
+        # completion envelope as production; raw completed rows are not authority.
+        callback = service._emit_callback(worker, 'run.completed', run=source,
+                                          submit_delivery=False)
+        assert callback is not None
+        envelope = json.loads(callback['payload_json'])['output_files']
+        assert {item['filename'] for item in envelope['files']} == set(expected)
     yield SimpleNamespace(core=core, cid=cid, store=store, service=service, runtime=runtime,
         source=source, worker=worker, request=provider_request, run=current, selected=selected,
         expected=expected, kind=request.param)
@@ -303,6 +317,26 @@ def test_download_name_falls_back_without_changing_file_authority(result_files, 
             renamed = path.with_name('second-name' + path.suffix if change == 'ambiguous_names' else 'invalid\nname' + path.suffix)
             choices = [(path, mime, snapshot), (renamed, mime, snapshot)] if change == 'ambiguous_names' else [(renamed, mime, snapshot)]
             monkeypatch.setattr(f.runtime, 'provider_native_image_output', lambda *_: ('', choices))
+        if f.kind == 'helper' and change in {'ambiguous_names', 'invalid_name', 'unavailable'}:
+            # Delegated names come from the sealed completion, not a later
+            # mutable native lookup. Corrupt that owning boundary in these cases.
+            original = app.state.store.list_callback_outbox_for_run
+            def changed_callbacks(*args, **kwargs):
+                if change == 'unavailable':
+                    return []
+                records = []
+                for record in original(*args, **kwargs):
+                    payload = json.loads(record['payload_json'])
+                    for item in list(payload.get('output_files', {}).get('files', [])):
+                        if item['sha256'] != selected['sha256']:
+                            continue
+                        if change == 'ambiguous_names':
+                            payload['output_files']['files'].append({**item, 'filename': 'second-name.csv'})
+                        else:
+                            item['filename'] = 'invalid\nname.csv'
+                    records.append({**record, 'payload_json': json.dumps(payload)})
+                return records
+            monkeypatch.setattr(app.state.store, 'list_callback_outbox_for_run', changed_callbacks)
         response = TestClient(app).get(selected['download_url'])
         assert response.status_code == 200
         assert response.content == f.expected[selected['filename']]

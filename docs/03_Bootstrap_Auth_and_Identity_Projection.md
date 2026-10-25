@@ -82,7 +82,9 @@ outbox payloads remain immutable on reload; their existing endpoint and signing 
 available to the finite retry and dead-letter owner. This projection does not rewrite callbacks
 accepted before the repair.
 
-Host-native workers also materialize visible prompt/context files in the host workspace:
+The bootstrap materializer projects these prompt/context files into its admitted worker
+workspace. Host-native adapters use the separate placement described below; they do not
+overwrite an existing project's instruction files:
 
 - `project-definition.md`
 - `work-log.md`
@@ -91,6 +93,16 @@ Host-native workers also materialize visible prompt/context files in the host wo
 - `agents.md` as a compatibility mirror
 - `claude.md` / `CLAUDE.md` as Claude Code compatibility files that import or mirror `AGENTS.md`
 - `codex.md` / `CODEX.md` as legacy compatibility mirrors only
+
+For host-native Codex, Claude Code and Grok **mission** workers, `project-definition.md`,
+`work-log.md` and `harness-prompt.md` remain in the work folder. Generated `AGENTS.md`, its
+compatibility mirrors and scoped native configuration instead live under that worker's private
+home at `.glasshive/native/project`. Native selectors load that private context while the working
+directory remains the selected work folder. Existing user/project `AGENTS.md` is preserved.
+Conversation workers use their own private runtime-context path rather than this mission-file
+materialization. This distinction is exercised by
+`test_host_codex_runtime_materializes_required_workspace_files` and
+`test_host_mission_mode_retains_workspace_and_completion_contract`.
 
 Bootstrap-projected instructions contain one proportional-verification rule. The worker chooses
 verification depth from the user's explicit success criteria, requested rigor, risk, and concrete
@@ -103,8 +115,8 @@ The worker prompt lineage is direct and testable:
 - source: the editable worker-facing constants at the top of
   `runtime_phase1/src/workers_projects_runtime/bootstrap.py`
 - assembled runtime contract: `GLASSHIVE_WORKER_PROJECT_CONTRACT`
-- materialized worker instruction: `AGENTS.md` with `agents.md` as its exact mirror; Claude and Codex
-  compatibility files point back to that canonical instruction
+- materialized worker instruction: `AGENTS.md` with `agents.md` as its exact mirror at the owning
+  placement above; Claude and Codex compatibility files point back to that canonical instruction
 - focused proof: `test_bootstrap_materializes_one_proportional_verification_rule`
 
 The projection contract is sparse by design. The host may advertise MCP/tool capability, broker
@@ -282,6 +294,15 @@ owner credential store independently, and the exact combined environment must pa
 status before launch. This preserves the session UUID, history and working directory when a
 projected access token expires. No credential or session file is copied, and selected personal
 accounts and explicit API/enterprise routes keep their existing authority.
+
+Ambient operating-system logins are available only outside enterprise authentication.
+`GLASSHIVE_SECURITY_MODE=multi_user` and either legacy enterprise flag disable host-login
+copying, current-login discovery and current-account warming. A legacy enterprise flag still
+enforces this credential boundary beside explicit `local` or `legacy_compatibility` mode;
+it does not change those modes' separate isolation compatibility rules. Bootstrap, native
+launch and provider readiness use the same enterprise-authentication decision. A named
+account, scoped broker or explicitly provisioned deployment route keeps its own authority;
+missing authority does not fall back to the server owner's login.
 
 Host-native CLI subprocesses receive a minimal runtime environment. Parent process secrets, provider
 API keys, callback secrets, and LibreChat internals are not inherited by default.

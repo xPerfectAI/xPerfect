@@ -8860,7 +8860,7 @@ def test_assign_run_effort_updates_codex_worker_bootstrap_bundle(tmp_path):
 
     rejected = client.post(
         f"/v1/workers/{worker['worker_id']}/assign",
-        json={"instruction": "Invalid effort should fail.", "effort": "max"},
+        json={"instruction": "Invalid effort should fail.", "effort": "synthetic-unsupported-effort"},
     )
     assert rejected.status_code == 400
     assert "Codex effort" in rejected.json()["detail"]
@@ -9695,6 +9695,7 @@ def test_artifact_surfaces_reject_browser_runtime_scratch_paths(tmp_path, monkey
         json={
             "owner_id": "demo-owner",
             "name": "Scratch Filter Worker",
+            "workspace_kind": "named",
             "role": "writer",
             "profile": "codex-cli",
             "backend": "openclaw",
@@ -13750,6 +13751,7 @@ def test_completed_host_run_does_not_auto_open_real_desktop_browser(tmp_path):
             json={
                 "owner_id": "demo-owner",
                 "name": "Host Page Worker",
+                "workspace_kind": "named",
                 "role": "builder",
                 "profile": "codex-cli",
                 "execution_mode": "host",

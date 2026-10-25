@@ -57,7 +57,7 @@ def native_installed_owner_id() -> str | None:
             or not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o600
-            or multi_user_security_enabled()
+            or enterprise_authentication_enabled()
         ):
             raise ValueError("unsafe native owner authority")
         with path.open(encoding="utf-8") as handle:
@@ -107,6 +107,19 @@ def multi_user_security_enabled() -> bool:
     if security_mode:
         return security_mode == "multi_user"
     return _env_bool("GLASSHIVE_ENTERPRISE_MODE") or _env_bool("WPR_ENTERPRISE_MODE")
+
+
+def enterprise_authentication_enabled() -> bool:
+    """Keep ambient OS credentials outside every active enterprise auth boundary.
+
+    Explicit local/compatibility modes retain their isolation semantics, but do
+    not disable authentication enabled by a legacy enterprise flag.
+    """
+    return (
+        str(os.environ.get("GLASSHIVE_SECURITY_MODE") or "").strip().lower() == "multi_user"
+        or _env_bool("GLASSHIVE_ENTERPRISE_MODE")
+        or _env_bool("WPR_ENTERPRISE_MODE")
+    )
 
 
 def trusted_service_url_allowed(value: str) -> bool:
@@ -538,11 +551,7 @@ class EnterpriseAuthSettings:
         self.security_mode = str(os.environ.get("GLASSHIVE_SECURITY_MODE") or "").strip().lower()
         if self.security_mode not in {"", "local", "legacy_compatibility", "multi_user"}:
             raise RuntimeError("GLASSHIVE_SECURITY_MODE must be local, legacy_compatibility, or multi_user")
-        self.enterprise = (
-            self.security_mode == "multi_user"
-            or _env_bool("GLASSHIVE_ENTERPRISE_MODE")
-            or _env_bool("WPR_ENTERPRISE_MODE")
-        )
+        self.enterprise = enterprise_authentication_enabled()
         configured_auth_mode = str(os.environ.get("GLASSHIVE_AUTH_MODE") or "").strip().lower()
         self.auth_mode = configured_auth_mode or (
             "signed_internal_assertion" if self.security_mode == "multi_user" else DEFAULT_AUTH_MODE

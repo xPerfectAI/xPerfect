@@ -20,7 +20,8 @@ RUN_ID = re.compile(r'run_[A-Za-z0-9_-]{1,64}')
 
 def install_terminal_routes(app, *, static_dir, client_for_request, identity_for_request,
                             restricted_identity, runtime_headers, runtime_base_url,
-                            human_auth, session_for_request, uses_worker_view):
+                            human_auth, session_for_request, uses_worker_view,
+                            csrf_cookie_name="glasshive_csrf", render_html=None):
     def authorize(request, worker_id):
         if uses_worker_view(request, worker_id) or restricted_identity(identity_for_request(request, worker_id)):
             raise HTTPException(403, "An authenticated operator is required for terminal control")
@@ -34,7 +35,8 @@ def install_terminal_routes(app, *, static_dir, client_for_request, identity_for
         except httpx.HTTPStatusError as exc:
             raise HTTPException(404 if exc.response.status_code == 404 else 502, 'Terminal is unavailable') from exc
         nonce = secrets.token_urlsafe(24)
-        html = (static_dir / 'terminal.html').read_text().replace('{{STYLE_NONCE}}', nonce)
+        html = (render_html(static_dir / 'terminal.html') if render_html else (static_dir / 'terminal.html').read_text())
+        html = html.replace('{{STYLE_NONCE}}', nonce)
         return HTMLResponse(html, headers={
             'Cache-Control': 'no-store',
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-" + nonce + "'; "
@@ -60,7 +62,7 @@ def install_terminal_routes(app, *, static_dir, client_for_request, identity_for
             if human_auth.session_enabled:
                 session = session_for_request(websocket)
                 supplied = [value[5:] for value in protocols if value.startswith('csrf.')]
-                cookie = str(websocket.cookies.get('glasshive_csrf') or '')
+                cookie = str(websocket.cookies.get(csrf_cookie_name) or '')
                 if (len(supplied) != 1 or not cookie or not hmac.compare_digest(cookie, supplied[0])
                         or not human_auth.session_csrf_valid(session, supplied[0])):
                     raise HTTPException(403, 'Terminal session verification failed')

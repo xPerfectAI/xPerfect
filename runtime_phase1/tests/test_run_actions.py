@@ -245,7 +245,11 @@ def test_retryable_failed_callback_carries_signed_short_lived_retry_capability(
             failure_structured=1,
         )
 
-        app.state.service._emit_callback(worker, "run.failed", run=failed, message="Retry is available")
+        callback = app.state.service._emit_callback(worker, "run.failed", run=failed, message="Retry is available", submit_delivery=False)
+        assert callback is not None
+        app.state.service._deliver_callback_record(
+            worker, callback, app.state.service._callback_config_for_event(worker, failed)
+        )
         payload = _outbound_callback(outbound, event_type="run.failed", run_id=run["run_id"])
 
         capabilities = payload["actionCapabilities"]

@@ -1,3 +1,5 @@
+import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
+
 const oidcButton = document.querySelector('#oidc-login');
 const localForm = document.querySelector('#local-login');
 const localEmail = document.querySelector('#local-email');
@@ -28,18 +30,12 @@ const errorMessages = {
   token_invalid: 'xPerfect could not verify the organization sign-in response. Retry, or ask an administrator to review the app registration.',
 };
 
-function cookieValue(name) {
-  const prefix = `${encodeURIComponent(name)}=`;
-  const match = document.cookie.split(';').map((item) => item.trim()).find((item) => item.startsWith(prefix));
-  return match ? decodeURIComponent(match.slice(prefix.length)) : '';
-}
-
 localForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   localSubmit.disabled = true;
   status.textContent = 'Signing in…';
   try {
-    const csrfToken = cookieValue('glasshive_login_csrf');
+    const csrfToken = readAuthCookie('glasshive_login_csrf');
     const response = await fetch('/auth/email/login', {
       method: 'POST',
       credentials: 'same-origin',

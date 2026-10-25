@@ -73,9 +73,12 @@ def test_the_reader_runs_with_only_itself_like_the_native_image(tmp_path):
     package = tmp_path / "site" / "workers_projects_runtime"
     package.mkdir(parents=True)
     shutil.copy2(native_key_reader.__file__, package / "native_key_reader.py")
-    usage = subprocess.run([sys.executable, "-I", "-m", "workers_projects_runtime.native_key_reader"],
+    (package / "__init__.py").write_text("")
+    bootstrap = ("import runpy,sys;sys.path.insert(0,sys.argv.pop(1));"
+                 "runpy.run_module('workers_projects_runtime.native_key_reader',run_name='__main__')")
+    usage = subprocess.run([sys.executable, "-I", "-c", bootstrap, str(package.parent)],
                            cwd=tmp_path / "site", capture_output=True, text=True)
     assert usage.returncode == 2 and "ModuleNotFoundError" not in usage.stderr
-    missing = subprocess.run([sys.executable, "-I", "-m", "workers_projects_runtime.native_key_reader",
+    missing = subprocess.run([sys.executable, "-I", "-c", bootstrap, str(package.parent),
                               str(tmp_path / "absent")], cwd=tmp_path / "site", capture_output=True, text=True)
     assert missing.returncode == 1 and missing.stdout == ""

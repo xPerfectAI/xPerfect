@@ -1,4 +1,5 @@
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
+import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
 import { attachLibraryPanel } from './library-panel.js?v=20261024polish1';
 import { createFileDraft, requestFileName, formatBytes } from './files.js?v=20261024polish1';
 
@@ -51,8 +52,7 @@ export function libraryStatus(item) {
   return ({ cleanup_unconfirmed: 'Removed from future starts · Native files still need cleanup', enabled: 'Enabled · Worker load not confirmed', in_files: 'Files ready for the next message', placed: 'Files added · Worker load not confirmed', ready_for_next_start: 'Ready for the next message', needs_review: 'Needs your review', needs_setup: 'Needs native setup', not_available: 'Not available for this worker type', unavailable: 'Not available for this worker type' })[state] || state.replaceAll('_', ' ') || 'Availability not confirmed';
 }
 function csrfToken() {
-  const cookie = document.cookie.split(';').map(value => value.trim()).find(value => value.startsWith('glasshive_csrf='));
-  try { return cookie ? decodeURIComponent(cookie.slice('glasshive_csrf='.length)) : ''; } catch { return ''; }
+  return readAuthCookie('glasshive_csrf');
 }
 export async function libraryRequest(path, { method = 'GET', body, signal } = {}) {
   const csrf = csrfToken();
@@ -284,7 +284,7 @@ export function createLibraryBrowser({ mount, workerId = '', request = libraryRe
       const row = make('article', 'personal-library-item'); const body = make('div', 'personal-library-item-copy'); body.append(make('strong', '', item.manifest?.label || item.manifest?.name || item.stable_id || 'Approved capability'), make('small', '', `Approved · v${item.version}`)); const button = make('button', 'secondary-button', onPick ? 'Select' : 'Review'); button.type = 'button'; const requestKey = `approved.${item.library_id}.${uid()}`;
       button.onclick = async () => { button.disabled = true; try { if (onPick) { const ref = await ensureApproved(item, requestKey); selected.set(ref.item_id, ref); render(); } else { window.dispatchEvent(new CustomEvent('xperfect:approved-library', { detail: { libraryId: item.library_id } })); } } catch (error) { tell(error.message); } finally { button.disabled = false; } }; row.append(body, button); list.append(row);
     }
-    if (!list.children.length) list.append(make('p', 'personal-library-empty', query ? 'No matching items. Try another name.' : 'Nothing saved yet. Add a file, note or native source to reuse it.'));
+    if (!list.children.length) list.append(make('p', 'personal-library-empty', query ? 'No matching items. Try another name.' : 'No items in this view. Add an item or change the filters.'));
     if (focusedItem) {
       const retained = [...list.children].find(row => row.dataset.itemId === focusedItem);
       (retained?.querySelector('summary') || search).focus();

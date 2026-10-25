@@ -5,6 +5,38 @@ Existing protocol, package, skill, and configuration names remain compatible.
 For a runnable walkthrough (connect, list tools, start, check and steer work), see the
 [developer walkthrough](developer.md).
 
+## Optional OpenAI-compatible model API
+
+The management HTTP API, MCP and the OpenAI-compatible model API have separate credentials.
+Starting the app and connecting an AI account enables ordinary worker jobs and app Chat; it does
+not enable an external client's `/v1/chat/completions` or `/v1/responses` connection automatically.
+Those endpoints return `503` with `provider authentication is not configured` until configured.
+
+For a local host, stop it and add these settings to the private state `config.json` `env` object:
+
+```json
+{
+  "GLASSHIVE_PROVIDER_API_KEY": "<new distinct random secret>",
+  "GLASSHIVE_PROVIDER_PRINCIPAL_ID": "<the existing local owner ID>",
+  "GLASSHIVE_PROVIDER_TENANT_ID": "local",
+  "GLASSHIVE_PROVIDER_TRUST_IDENTITY_HEADERS": "false",
+  "GLASSHIVE_PROVIDER_ALLOW_FULL_ACCESS": "false"
+}
+```
+
+Start the same state again. Configure the external client with the runtime API base URL ending
+in `/v1` and this new provider key. Use `/v1/models` with that key to choose an offered model.
+The principal must be the owner of the selected connected AI account. Keep the key distinct from
+`WPR_API_TOKEN`, the MCP credential and the AI provider's own key; xPerfect rejects token reuse.
+Do not put credentials in URLs, examples, screenshots or Git. Local host state is described in
+[host setup](host-setup.md#state-and-settings).
+
+Identity headers cannot change the configured principal while header delegation is off. Native
+access remains explicit: the Chat Completions field `metadata.glasshive_options.access` accepts `read_only`, `workspace` or
+`full`; full access also requires the operator's explicit opt-in. Unsupported native access
+returns a typed refusal instead of silently granting broader permissions. App Chat and MCP keep
+their existing account and authorization paths.
+
 ## MCP Direction
 
 xPerfect should follow the current modern MCP shape:
@@ -155,12 +187,67 @@ current running run with an exact pending native permission or question binding.
 transaction checks the accepted run input, current run and native attempt identity. Existing
 outbox payloads keep their original bytes on retry; an upgrade does not retrofit old callbacks.
 
+### Worker callback receiver response
+
+Before using a signed worker callback, verify `X-GlassHive-Signature` against the **raw request
+bytes**, using a constant-time comparison and the configured freshness policy. Its signing key is
+the UTF-8 hexadecimal HMAC-SHA256 of `<worker_id>:<run_id>` with the configured callback secret;
+the header is `sha256=` plus the hexadecimal HMAC-SHA256 of the raw body with that derived key.
+Do not reserialize JSON before verification.
+
+Persist accepted results monotonically by run and revision; deduplicate retries by the stable
+`callback_id` and exact result identity. For integer `result_revision >= 1`, return HTTP 2xx with
+this JSON **only after durable acceptance**. Replace each placeholder with its incoming value;
+use the actual revision in both revision fields (this example uses 1). The `current_*` fields must
+describe the receiver's stored current result:
+
+```json
+{
+  "callback_status": "accepted",
+  "callback_id": "<callback_id>",
+  "run_id": "<run_id>",
+  "result_revision": 1,
+  "result_digest": "<result_digest>",
+  "current_callback_id": "<callback_id>",
+  "current_result_revision": 1,
+  "current_result_digest": "<result_digest>"
+}
+```
+
+An exact replay returns the same receipt with `callback_status: "idempotent"`. A bare 200, wrong
+identity or incomplete receipt does not acknowledge a versioned terminal result: delivery retries.
+An already stored newer revision uses the existing HTTP 409 `superseded` receipt; a same-revision
+identity disagreement uses HTTP 409 `conflict`. Neither may silently replace stored results.
+Nonterminal and legacy callbacks without a positive integer result revision need only a successful
+2xx response. These worker receipts are distinct from schedule webhooks' Standard Webhooks contract.
+The [receiver validator](../runtime_phase1/src/workers_projects_runtime/service.py) and
+[terminal recovery tests](../runtime_phase1/tests/test_terminal_callback_recovery.py) own the exact fields.
+
 The authenticated `POST /v1/work/{work_ref}/actions/receipt` reads a previously finished action
 receipt. It accepts the original action request and requires the exact owner, tenant, work,
 idempotency key, action and canonical request digest. A completed receipt returns its saved body;
 a failed receipt returns its saved status and detail. Missing, mismatched or unfinished receipts
 return `active_work_idempotency_conflict`. This read never reserves, resumes, recovers or executes
 work. Clients use it only to recover an exact completed operation after a normal action conflict.
+
+Assignment retries also retain their accepted identity. Reuse the original `Idempotency-Key` on
+`POST /v1/workers/{worker_id}/assign`. The existing run reservation stores a digest of the normalized
+instruction, effort, bootstrap and continuation context, plus the accepted effort. Different execution
+inputs return HTTP 409 with `assignment_idempotency_conflict`; the response never reports a retry's
+new effort as the setting of an old run. The digest retains no duplicate bootstrap or secret values.
+The runtime checks the reservation before changing worker configuration, checking provider
+prerequisites or resuming work. Exact input-manifest validation retains its existing transaction.
+
+Older reservations have no request digest. An instruction-only retry can read their saved result;
+a retry that supplies execution settings cannot prove that they match and returns the typed
+conflict instead of guessing from mutable worker configuration. The authenticated
+`GET /v1/workers/{worker_id}/assignments/by-idempotency/{idempotency_key}` remains the read-only
+recovery path after a lost response, including those legacy records. It starts no new job.
+
+Owner Library list, read, resolve and workspace-list tools, and the packaged starter catalog, declare
+their read-only effects through standard MCP annotations. This avoids asking native clients to
+approve an ordinary read as a mutation. Private owner/management-scope checks remain unchanged;
+creation, edits, application, native setup and other writes do not acquire that annotation.
 
 Active-work pages and their overflow counts use the same effective current run. A live
 continuation remains visible even when the delegation's stored run pointer still names an older
@@ -716,6 +803,12 @@ receipts, so a stale snapshot cannot discard newer guidance. Recovery keeps newe
 bindings; equal reservation times preserve the already bound result. The exact effect receipt is durable before native admission wakes. Stop intent fences new admission; visible state follows the actual run until native termination
 proof. Cancelled intent limits the native action mask to available Stop recovery or Dismiss.
 Stop confirms the exact controlled run and cancels only that goal's owned pending effects.
+A native host Pause uses the same exact-run control owner as an explicit run Pause. A queued
+run can be durably paused before launch. If a run is starting and its exact process identity
+is not confirmed yet, the API returns retryable `409 runtime_control_not_ready`: no control
+was applied. Refresh status and retry after startup. The refusal does not invalidate the
+startup processor or claim that work was paused.
+
 A confirmed host-pause generation already has durable termination proof; native Stop reuses it
 after restart. A host run paused before it ever starts needs no termination signal when it has
 no lease history or active worker lease. Historical compute release on a reused worker does
@@ -730,6 +823,13 @@ It exposes `coordinator_accept_goals`, `coordinator_dispatch`, `coordinator_hand
 coordinator authority. Tool descriptions are authored in the packaged
 `workers_projects_runtime/prompts/coordinator-tools.json`, beside `coordinator.md`. Source version,
 prompt hash and tool-description hash are exposed in the conversation manifest for Workbench.
+
+Coordinator prompt version 3 keeps ordinary admission details and internal IDs in controls unless
+the user asks. Conversation replies use plain language about the work and explain only evidenced
+job blockers. A roster worker's paused or idle compute is not proof that its accepted job needs
+the user to Resume. Queued helpers still end the foreground turn without polling, so they can use
+the same account. New conversations capture the current prompt manifest; saved conversations keep
+their approved prompt snapshot. The six tool schemas and their authority are unchanged.
 
 Native coordinator tool schema version 3 lets `coordinator_dispatch` accept exactly one of
 `worker_id` (an existing worker) or `route_id` (a new helper), alongside `goal_id` and `instruction`.

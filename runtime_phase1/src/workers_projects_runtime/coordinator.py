@@ -219,7 +219,7 @@ def prompt_manifest() -> dict[str, Any]:
     source = Path(__file__).with_name("prompts") / "coordinator.md"
     content = source.read_text(encoding="utf-8")
     tools = source.with_name("coordinator-tools.json").read_bytes()
-    return {"id": "xperfect.coordinator", "version": 2,
+    return {"id": "xperfect.coordinator", "version": 3,
             "source": "workers_projects_runtime/prompts/coordinator.md",
             "sha256": hashlib.sha256(content.encode()).hexdigest(),
             "tool_schema_version": json.loads(tools)["version"],

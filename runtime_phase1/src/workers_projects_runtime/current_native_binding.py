@@ -5,6 +5,7 @@ import time
 
 from .control_plane import ControlPlaneError
 from .current_native_account import PREFIX, MARKER, require_local, verify_identity
+from .openclaw_runtime import ProviderAuthenticationMissingError
 
 # An Interrupt or Stop of the same run can still be ending its native generation when the run
 # returns: the host stop waits up to 5 s after SIGTERM and 2 s after SIGKILL for the process group
@@ -53,8 +54,18 @@ def bind_current_account(binder, worker, *, account, selection, runtime_name, ru
     tenant = str(worker.get('tenant_id') or 'local')
     owner = str(worker.get('owner_id') or '')
     worker_id = str(worker.get('worker_id') or '')
-    if not owner or not worker_id or not run_id or account.get('status') != 'ready':
-        raise ControlPlaneError('Selected existing sign-in is not ready; verify it in Connections')
+    if not owner or not worker_id or not run_id:
+        raise ControlPlaneError('Existing Claude sign-in requires an exact owner, worker and run')
+    if account.get('status') != 'ready':
+        raise ProviderAuthenticationMissingError(
+            'Selected existing sign-in is not ready; verify it in Connections',
+            binary='claude', runtime_name=runtime_name, profile='claude-code',
+            execution_mode='host',
+            recovery_hint=(
+                'Open Connections and select Verify for the selected account, then retry '
+                'the requested work. Saved work is retained.'
+            ),
+        )
     identity = account['secret_locator'][len(PREFIX):]
     token = binder._reserve_active_route(worker, runtime_name=runtime_name, run_id=run_id,
         account_id=selection.account_id, route_kind='native')

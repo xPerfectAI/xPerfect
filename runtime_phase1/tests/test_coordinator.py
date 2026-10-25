@@ -1136,6 +1136,41 @@ def test_prompt_source_manifest_is_byte_exact():
     assert hashlib.sha256(source.read_bytes()).hexdigest() == prompt_manifest()['sha256']
 
 
+def test_each_conversation_renders_its_saved_prompt_snapshot(coordinator, monkeypatch):
+    import hashlib
+    from workers_projects_runtime import coordinator as module
+
+    current = prompt_manifest()
+    earlier = {**current, 'version': current['version'] - 1,
+               'content': 'Earlier approved conversation instructions.'}
+    earlier['sha256'] = hashlib.sha256(earlier['content'].encode()).hexdigest()
+    monkeypatch.setattr(module, 'prompt_manifest', lambda: earlier)
+    previous_id = create(coordinator)
+    monkeypatch.setattr(module, 'prompt_manifest', lambda: current)
+    current_id = create(coordinator)
+
+    class CapturingProvider(Provider):
+        def __init__(self):
+            self.payloads = []
+
+        def start(self, payload, **kwargs):
+            self.payloads.append(payload)
+            raise ConnectionError('synthetic provider is unavailable')
+
+    provider = CapturingProvider()
+    coordinator.provider = provider
+    for cid, saved in ((previous_id, earlier), (current_id, current)):
+        coordinator.accept_turn('local', 'owner', cid, 'turn', 'Explain the selected work.')
+        coordinator.start_turn('local', 'owner', cid, 'turn')
+        assert provider.payloads[-1].messages[0].content == saved['content']
+        manifest = coordinator.snapshot('local', 'owner', cid)['prompt']
+        assert manifest['version'] == saved['version']
+        assert manifest['sha256'] == saved['sha256']
+        assert manifest['tool_schema_version'] == current['tool_schema_version']
+    assert coordinator._conversation('local', 'owner', previous_id)['prompt_json'] != \
+        coordinator._conversation('local', 'owner', current_id)['prompt_json']
+
+
 def test_real_store_reservation_replays_after_lost_attachment(tmp_path, monkeypatch):
     from workers_projects_runtime.openclaw_runtime import StubRuntime
     from workers_projects_runtime.service import WorkersProjectsService

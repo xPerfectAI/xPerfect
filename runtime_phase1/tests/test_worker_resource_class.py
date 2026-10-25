@@ -613,7 +613,7 @@ def _run_concurrent_delegations(
     )
 
 
-def test_two_light_delegations_are_atomically_accepted_at_5_62_gib(tmp_path) -> None:
+def test_two_light_delegations_are_atomically_accepted_at_5_62_gib(tmp_path, background_consumers_disabled) -> None:
     database = str(tmp_path / "two-light.sqlite3")
 
     accepted, blocked = _run_concurrent_delegations(
@@ -642,7 +642,7 @@ def test_two_light_delegations_are_atomically_accepted_at_5_62_gib(tmp_path) -> 
 
 
 def test_two_standard_delegations_have_one_capacity_winner_at_5_62_gib(
-    tmp_path,
+    tmp_path, background_consumers_disabled,
 ) -> None:
     database = str(tmp_path / "two-standard.sqlite3")
 
@@ -655,6 +655,45 @@ def test_two_standard_delegations_have_one_capacity_winner_at_5_62_gib(
     assert blocked == []
     store = Store(database)
     assert len(store.list_all_workers()) == 2
+    workers = store.list_all_workers()
+    queued = [store.peek_next_queued_run(worker["worker_id"]) for worker in workers]
+    assert all(run is not None for run in queued)
+    available = {"childProcesses": 64, "threads": 2048, "memoryBytes": AVAILABLE_MEMORY_BYTES,
+                 "diskBytes": 64 * 1024**3}
+    required = {"childProcesses": 1, "threads": 1, "memoryBytes": HEADROOM_MEMORY_BYTES,
+                "diskBytes": 1024**3}
+    reservation = {"childProcesses": 20, "threads": 512, "memoryBytes": STANDARD_MEMORY_BYTES,
+                   "diskBytes": 1024**3}
+
+    def admit(index):
+        worker = workers[index]
+        prior = store.get_active_host_run_lease_for_run(queued[index]["run_id"])
+        executor_id = prior["executor_id"] if prior else f"standard-capacity-{index}"
+        claimed = store.claim_next_queued_run(worker["worker_id"], executor_id=executor_id)
+        assert claimed is not None
+        try:
+            lease = store.get_active_host_run_lease_for_run(claimed["run_id"])
+            lease = lease or store.acquire_host_run_lease(
+                runtime_family="codex", lane="mission", tenant_id=worker["tenant_id"],
+                owner_id=worker["owner_id"], worker_id=worker["worker_id"], run_id=claimed["run_id"],
+                executor_id=executor_id, conversation_limit=2, mission_limit=4,
+                account_mission_limit=4, tenant_mission_limit=12, lease_ttl_s=30,
+                capacity_available=available, capacity_required=required,
+                capacity_reservation=reservation, capacity_observed_lease_ids=[],
+            )
+            admitted = store.admit_claimed_run(
+                claimed["run_id"], lease_id=lease["lease_id"], executor_id=executor_id
+            )
+            assert admitted is not None and admitted["state"] == "admitted"
+            return admitted
+        except HostRunLeaseCapacityError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(admit, range(2)))
+    assert sum(isinstance(result, dict) for result in outcomes) == 1
+    rejected = [result for result in outcomes if isinstance(result, HostRunLeaseCapacityError)]
+    assert len(rejected) == 1 and rejected[0].capacity_class == "resource_pressure"
     with store._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM host_run_leases WHERE status = 'active'").fetchone()[0] == 1
 

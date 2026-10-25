@@ -41,7 +41,7 @@ from threading import Event, Lock, Thread
 from typing import Callable
 
 from .agent_builder_control import conversation_output_schema, normalized_graph_transfer_control
-from .auth import multi_user_security_enabled, native_installed_owner_id, require_native_installed_owner
+from .auth import enterprise_authentication_enabled, multi_user_security_enabled, native_installed_owner_id, require_native_installed_owner
 from .bootstrap import (
     GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS,
     GLASSHIVE_NATIVE_CAPABILITY_INVENTORY,
@@ -12022,6 +12022,8 @@ raise SystemExit(exit_code)
         return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
 
     def _copy_host_codex_auth(self, target_codex_home: Path) -> None:
+        if enterprise_authentication_enabled():
+            return
         if native_installed_owner_id() is not None:
             self._link_native_codex_auth(target_codex_home)
             return
@@ -16193,10 +16195,7 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
         # personality, or developer-instruction bundle was supplied.  Automatic
         # Parallel work is Docker-only and enterprise deployments must project
         # server-owned credentials instead of copying host authority.
-        if not (
-            self._env_flag("GLASSHIVE_ENTERPRISE_MODE", False)
-            or self._env_flag("WPR_ENTERPRISE_MODE", False)
-        ) and native_current_account_allowed(worker):
+        if native_current_account_allowed(worker):
             self._copy_host_codex_auth(self._host_codex_home(worker))
         workspace = Path(str(info.workspace_dir or ""))
         if (
@@ -16714,12 +16713,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                     "host Claude Chrome support only when that locked-down mode is intended."
                 ),
             )
-        enterprise_mode = any(
-            str(os.environ.get(name, "")).strip().lower()
-            in {"1", "true", "yes", "on"}
-            for name in ("GLASSHIVE_ENTERPRISE_MODE", "WPR_ENTERPRISE_MODE")
-        )
-        if not enterprise_mode:
+        if not enterprise_authentication_enabled():
             # Fail before a provider session, worker, or run is reserved. The
             # command builder repeats this check at execution time because
             # credentials can still be revoked after admission.
@@ -17057,11 +17051,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         )
         env.pop("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", None)
         if use_host_auth and not self._bedrock_enabled():
-            enterprise_mode = any(
-                str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
-                for name in ("GLASSHIVE_ENTERPRISE_MODE", "WPR_ENTERPRISE_MODE")
-            )
-            if not enterprise_mode and not (
+            if native_current_account_allowed(worker) and not (
                 use_api_key and str(env.get("ANTHROPIC_API_KEY") or "").strip()
             ):
                 bootstrap_access_token = _usable_claude_oauth_token(

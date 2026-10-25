@@ -85,7 +85,7 @@ def test_catalog_observation_reports_actual_hit_scope_and_ttl_without_private_va
     monkeypatch.setenv('VIVENTIUM_VOICE_LOG_LATENCY', '1')
     now = [0.0]
     monkeypatch.setattr(model_selection.time, 'monotonic', lambda: now[0])
-    caplog.set_level(logging.INFO, logger=model_selection.__name__)
+    caplog.set_level(logging.INFO, logger=model_selection._logger.name)
     model_selection.native_grok_models()
     now[0] = 10.0
     model_selection.native_grok_models()
@@ -120,7 +120,7 @@ def test_catalog_observation_identifies_join_without_a_second_subprocess(scoped_
     import logging
     from concurrent.futures import Future
     monkeypatch.setenv('VIVENTIUM_VOICE_LOG_LATENCY','1')
-    caplog.set_level(logging.INFO, logger=model_selection.__name__)
+    caplog.set_level(logging.INFO, logger=model_selection._logger.name)
     started, joined, release = Event(), Event(), Event()
     class ObservedFuture(Future):
         def result(self, *args, **kwargs):
