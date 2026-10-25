@@ -55,6 +55,19 @@ def display_record(desktop, state):
                                        'VolumeOptions': {'Subpath': desktop._display_subpath(), 'NoCopy': True}}]}}
 
 
+def test_full_browser_budget_is_bounded_and_old_limits_are_not_reused(tmp_path, monkeypatch):
+    assert DISPLAY_MEMORY_BYTES == 512 * 1024**2
+    assert DISPLAY_PIDS_LIMIT == 256
+    desktop = WorkspaceMemberDesktop(member(tmp_path, monkeypatch))
+    state = state_for(desktop)
+    for field, old_value in [('Memory', 256 * 1024**2), ('PidsLimit', 96)]:
+        record = display_record(desktop, state)
+        record['HostConfig'][field] = old_value
+        monkeypatch.setattr(desktop.box, 'docker', lambda *a, **k: subprocess.CompletedProcess([], 0, json.dumps([record]), ''))
+        with pytest.raises(WorkspaceBoxUnavailable, match='isolation'):
+            desktop._record(state)
+
+
 def test_member_description_implements_real_native_runtime_contract(tmp_path, monkeypatch):
     box = member(tmp_path, monkeypatch)
     sandbox = WorkspaceMemberSandbox(box)
@@ -258,6 +271,9 @@ def test_partial_display_start_cleans_its_exact_container_before_graphical_execu
     assert 'home/.xperfect-desktop,' in mount
     assert 'dst=/workspace/desktop,' in mount
     assert calls[0][-2:] == ['sha256:' + 'a' * 64, 'infinity']
+    assert calls[0][calls[0].index('--memory') + 1] == str(512 * 1024**2)
+    assert calls[0][calls[0].index('--memory-swap') + 1] == str(512 * 1024**2)
+    assert calls[0][calls[0].index('--pids-limit') + 1] == '256'
 
 
 def test_new_display_creation_holds_capacity_box_and_display_locks(tmp_path, monkeypatch):

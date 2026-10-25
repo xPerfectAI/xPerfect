@@ -18,7 +18,7 @@ CONTROLLER, PARENT, DISPLAY = 'c' * 64, 'b' * 64, 'd' * 64
 
 def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
                        malformed=False, foreign_process=False, stale=False,
-                       controller=CONTROLLER, foreign_deployment=False):
+                       controller=CONTROLLER, foreign_deployment=False, two_displays=False):
     for key, value in {
         'XPERFECT_CONTROLLER_ID': controller, 'XPERFECT_SHARED_NETWORK': 'native-test',
         'XPERFECT_SHARED_VOLUME_ROOT': str(tmp_path),
@@ -28,11 +28,14 @@ def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
         monkeypatch.setenv(key, value)
     calls = []
     worker = {'worker_id': 'wrk_display', 'member_uid': 20001, 'profile': 'codex-cli'}
+    second = {'worker_id': 'wrk_second', 'member_uid': 20002, 'profile': 'codex-cli'}
+    workers = [worker, second] if two_displays else [worker]
+    second_display = 'a' * 64
 
     class Store:
         @contextmanager
         def _connect(self):
-            yield SimpleNamespace(execute=lambda _query: [] if retired else [worker])
+            yield SimpleNamespace(execute=lambda _query: [] if retired else workers)
 
     box = SimpleNamespace(name='native-box', binding=SimpleNamespace(workspace_id='wsp_test'),
                           memory_bytes=512 * MIB,
@@ -46,20 +49,23 @@ def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
 
     desktop = SimpleNamespace(resource_record=resource_record)
     member = SimpleNamespace(sandbox=SimpleNamespace(box=box, desktop=desktop))
+    second_member = SimpleNamespace(sandbox=SimpleNamespace(box=box, desktop=SimpleNamespace(
+        resource_record=lambda expected: {'Id': second_display, 'State': {'Running': True}})))
     shared = SimpleNamespace(store=Store(), recovery_issues=[],
         binder=SimpleNamespace(homes=SimpleNamespace(native_launcher=SimpleNamespace(inventory=lambda: ()))),
-        for_worker=lambda *_args, **_kwargs: member)
+        for_worker=lambda row, *_args, **_kwargs: second_member if row['worker_id'] == second['worker_id'] else member)
 
     def docker(args, **_kwargs):
         calls.append(args)
         if args[0] == 'info':
-            output = json.dumps({'CgroupVersion': '2', 'MemTotal': 1024 * MIB})
+            output = json.dumps({'CgroupVersion': '2', 'MemTotal': 2048 * MIB})
         elif args[:2] == ['network', 'inspect']:
             output = json.dumps([{'Driver': 'bridge', 'Containers': {controller: {}, PARENT: {}}}])
             if retired:
                 output = json.dumps([{'Driver': 'bridge', 'Containers': {controller: {}}}])
         elif args[0] == 'top':
-            output = ('UID PID LWP\n65534 1 1\n20001 2 2\n20001 2 3\n' if args[1] == PARENT
+            output = ('UID PID LWP\n20002 1 1\n20002 2 2\n' if args[1] == second_display else
+                      'UID PID LWP\n65534 1 1\n20001 2 2\n20001 2 3\n' if args[1] == PARENT
                       else ('UID PID LWP\n20002 1 1\n' if foreign_process
                             else 'UID PID LWP\n20001 1 1\n20001 2 2\n20001 2 3\n'))
         elif args[:2] == ['container', 'ls']:
@@ -70,14 +76,19 @@ def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
             # Model Docker's actual label filter over two deployment records;
             # the other volume is neither adopted nor an orphan in this one.
             records = [(DISPLAY, deployment)]
+            if two_displays:
+                records.append((second_display, deployment))
             if foreign_deployment:
                 records.append(('e' * 64, WorkspaceMemberDesktop.deployment_for_volume('another-data')))
             if orphan:
                 records.append(('f' * 64, deployment))
             output = 'not-an-exact-id' if malformed else '\n'.join(identity for identity, scope in records if scope == deployment)
         elif args[0] == 'stats':
-            output = '\n'.join(json.dumps({'ID': identity, 'MemUsage': usage}) for identity, usage in (
-                (controller, '100MiB / 1GiB'), (PARENT, '4MiB / 512MiB'), (DISPLAY, '1MiB / 256MiB')))
+            records = [(controller, '100MiB / 1GiB'), (PARENT, '4MiB / 512MiB'),
+                       (DISPLAY, f'1MiB / {DISPLAY_MEMORY_BYTES // MIB}MiB')]
+            if two_displays:
+                records.append((second_display, f'1MiB / {DISPLAY_MEMORY_BYTES // MIB}MiB'))
+            output = '\n'.join(json.dumps({'ID': identity, 'MemUsage': usage}) for identity, usage in records)
         else:
             raise AssertionError(args)
         return subprocess.CompletedProcess(args, 0, output, '')
@@ -92,15 +103,24 @@ def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
 def test_display_cgroup_is_reserved_once_and_its_uid_processes_are_attributed(monkeypatch, tmp_path):
     resource, runtime, calls = measured_resources(monkeypatch, tmp_path)
     result = resource._measure(runtime)
-    # Reserve the 512MiB native box and 256MiB optional display, not their
+    # Reserve the 512MiB native box and 512MiB optional display, not their
     # small current resident bytes. Controller memory remains measured once.
-    assert result['available_memory_bytes'] == (1024 - 512 - 256 - 100) * MIB
+    assert result['available_memory_bytes'] == (2048 - 512 - 512 - 100) * MIB
     assert result['running_container_ids'] == [PARENT, DISPLAY]
     assert result['running_worker_containers'] == 1
     assert result['worker_process_counts'] == {'wrk_display': {'child_processes': 3, 'threads': 5}}
     assert result['child_processes'] == 4 and result['threads'] == 6
     assert result['unattributed_child_processes'] == 1
     assert len([args for args in calls if args[:2] == ['top', DISPLAY]]) == 1
+
+
+def test_two_displays_each_reserve_their_full_browser_budget(monkeypatch, tmp_path):
+    resource, runtime, calls = measured_resources(monkeypatch, tmp_path, two_displays=True)
+    result = resource._measure(runtime)
+    assert result['available_memory_bytes'] == (2048 - 512 - 2 * 512 - 100) * MIB
+    assert set(result['running_container_ids']) == {PARENT, DISPLAY, 'a' * 64}
+    assert result['worker_process_counts']['wrk_second'] == {'child_processes': 2, 'threads': 2}
+    assert len([args for args in calls if args[:2] == ['top', 'a' * 64]]) == 1
 
 
 @pytest.mark.parametrize(('scenario', 'message'), [

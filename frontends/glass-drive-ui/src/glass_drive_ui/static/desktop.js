@@ -184,7 +184,7 @@ function installClipboardSync() {
       await pushLocalClipboardToRemote(text);
       setClipboardStatus('Clipboard sync: bi-directional');
     } catch (error) {
-      setClipboardStatus('Clipboard sync: click desktop once to enable');
+      setClipboardStatus('Clipboard access unavailable. Check browser permissions.');
     }
   };
 

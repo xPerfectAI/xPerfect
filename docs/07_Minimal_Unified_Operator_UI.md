@@ -365,7 +365,9 @@ execution, so **Pause** leaves human takeover usable without resuming the AI. A 
 terminal stays paused; **Resume** remains explicit. **Close workspace** removes the display and its
 view route as well as native work. Terminal and Library continue to show the actual worker's work
 and files; the display does not substitute an empty shell or folder. Desktop startup uses the
-existing measured capacity admission and charges its bounded memory and processes. Its dedicated
+existing measured capacity admission and reserves 512 MiB for each open display, with a 256-task
+process/thread limit. Both startup and later admission account for each display; a second display
+needs its own headroom. These bounds cover the browser and display together. Its dedicated
 Chromium sandbox policy is shipped and checked; the AI workspace's sandbox policy is unchanged.
 Missing storage, capacity, display readiness or a supported graphical action is a visible failure,
 not a successful launch. This source contract requires real input, pause, reload and close acceptance

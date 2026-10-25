@@ -78,6 +78,35 @@ def test_existing_owner_proxy_forwards_only_standard_opaque_route_token(monkeypa
     assert 'synthetic' not in captured[0]
 
 
+def test_denied_desktop_clipboard_reports_unavailable_without_promising_a_click_fix():
+    from pathlib import Path
+    import subprocess
+    source = Path(server_module.__file__).parent.joinpath('static/desktop.js').read_text()
+    clipboard = source[source.index('function stopClipboardSync() {'):source.index('\nasync function connectDesktop()')]
+    script = r'''
+const assert = require('node:assert/strict');
+const listeners = new Map(); let status = ''; let clipboardInterval = null;
+let lastLocalClipboard = ''; let lastRemoteClipboard = ''; const pasted = [];
+const rfb = {clipboardPasteFrom:text=>pasted.push(text)};
+const window = {addEventListener:(name,fn)=>listeners.set(name,fn),
+ removeEventListener:name=>listeners.delete(name),clearInterval:()=>{},setInterval:()=>1};
+const navigator = {clipboard:{readText:async()=>{throw new DOMException('Denied','NotAllowedError')}}};
+function setClipboardStatus(value){status=value;}
+''' + clipboard + r'''
+(async()=>{
+ installClipboardSync(); await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(status,'Clipboard access unavailable. Check browser permissions.');
+ await listeners.get('pointerdown')();
+ assert.equal(status,'Clipboard access unavailable. Check browser permissions.');
+ assert(!listeners.has('keydown'));
+ listeners.get('paste')({clipboardData:{getData:()=> 'ordinary paste'}});
+ assert.deepEqual(pasted,['ordinary paste']);
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize('token', ['short', '../foreign', 'https://other.invalid/route', 'a' * 63])
 def test_invalid_upstream_token_is_refused_before_connection(monkeypatch, token):
     monkeypatch.setattr(server_module.websockets, 'connect', lambda *a, **k: pytest.fail('must not forward'))
