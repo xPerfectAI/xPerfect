@@ -2322,11 +2322,11 @@ def test_launcher_workspace_hive_static_controls():
     assert 'id="save-template-dialog"' in index_html
     assert "/api/workspaces/${encodeURIComponent(context.workerId)}/templates" in app_js
     assert "/api/workspace-templates/${encodeURIComponent(templateId)}/instantiate" in app_js
-    assert "fresh paused workspace" in index_html
+    assert "Starts a new worker with this expert’s saved setup. Any new access still needs your review." in index_html
     assert "New workers check account access and tool permissions." in index_html
     assert "Saves this setup and its selected Library versions." in index_html
     assert "Other workspace files, sign-ins, schedules and chat history stay here." in index_html
-    assert "Choose a saved template first." in app_js
+    assert "Choose a saved expert first." in app_js
     assert "rename-workspace-dialog" in index_html
     assert "window.prompt" not in app_js
     assert "Duplicate selected workspace" in app_js

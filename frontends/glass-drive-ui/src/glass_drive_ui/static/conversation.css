@@ -20,6 +20,8 @@
 .conversation-body .message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
 .conversation-body .message.user { align-self: flex-end; max-width: 90%; padding: 16px 20px; border: 1px solid var(--line); border-radius: 16px 16px 4px 16px; background: var(--accent-soft); }
 .conversation-body .message.assistant { padding: 8px 0; white-space: normal; }
+.conversation-body .message > :is(button, a) { margin-inline-start: 8px; }
+.conversation-body .message > a { display: inline-block; padding: 9px 8px; color: var(--accent); text-decoration: underline; }
 .conversation-body .message-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
 .conversation-body #composer { position: sticky; bottom: 20px; margin-top: 20px; padding: 16px; border: 1px solid var(--control-line); border-radius: var(--radius-card); background: var(--panel-strong); box-shadow: var(--shadow-card); }
 .conversation-body:has(#empty:not([hidden])) #composer { position: static; }

@@ -142,3 +142,37 @@ def test_actual_closed_workspace_library_transport_keeps_owner_reads_only(tmp_pa
         assert client.post(path+'/capture',headers=foreign,json={'file_id':file['file_id'],'revision':file['revision'],'idempotency_key':'foreign'}).status_code == 404
         assert client.post(path+'/capture',headers=viewer,json={'file_id':file['file_id'],'revision':file['revision'],'idempotency_key':'viewer'}).status_code == 403
         assert service.store.get_worker(worker['worker_id'])['state'] == 'terminated'
+
+
+def test_only_observational_library_tools_have_read_only_metadata():
+    """Metadata describes effects; it does not replace private owner authorization."""
+    from mcp.types import ToolAnnotations
+    class Server:
+        def __init__(self):
+            self.tools, self.metadata = {}, {}
+        def tool(self, **meta):
+            def register(function):
+                self.tools[meta["name"]] = function
+                self.metadata[meta["name"]] = meta
+                return function
+            return register
+    class Client:
+        def __init__(self):
+            self.calls = []
+        def _request(self, method, path, **kwargs):
+            self.calls.append((method, path, kwargs))
+            return {"items": []}
+    server, client = Server(), Client()
+    register_personal_library_tools(server, client)
+    reads = {"personal_library_list", "personal_library_read", "personal_library_resolve", "personal_library_workspace"}
+    for name, metadata in server.metadata.items():
+        annotations = metadata.get("annotations")
+        assert bool(annotations and annotations.readOnlyHint) == (name in reads)
+        if name in reads:
+            assert isinstance(annotations, ToolAnnotations)
+            assert annotations.destructiveHint is False
+            assert annotations.openWorldHint is False
+    server.tools["personal_library_read"]("item-synthetic")
+    assert client.calls[-1][2]["require_write_scope"] is True
+    server.tools["personal_library_resolve"]([])
+    assert client.calls[-1][2]["require_write_scope"] is True

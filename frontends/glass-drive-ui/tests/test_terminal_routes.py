@@ -9,7 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 from glass_drive_ui.server import create_app
 from glass_drive_ui.signed_links import sign_link_token
 from glass_drive_ui import terminal_routes
-from test_packaged_local_auth import gateway, login, PASSWORD
+from test_packaged_local_auth import gateway, login, PASSWORD, auth_cookie
 
 
 class Runtime:
@@ -42,7 +42,7 @@ def test_terminal_socket_requires_session_origin_csrf_and_preserves_private_hop(
     gateway.provision_local_owner(password=PASSWORD)
     runtime=Runtime(); client=TestClient(create_app(runtime_client=runtime))
     login(client)
-    csrf=client.cookies['glasshive_csrf']
+    csrf=auth_cookie(client, 'glasshive_csrf')
     url='/ws/workers/wrk_fixture/terminal'
     for origin, protocols in [('', ['xperfect-terminal','csrf.'+csrf]),
           ('https://attacker.invalid',['xperfect-terminal','csrf.'+csrf]),
@@ -78,7 +78,7 @@ def test_terminal_socket_forwards_its_exact_run_and_the_runtime_close_reason(gat
     gateway.provision_local_owner(password=PASSWORD)
     runtime=Runtime(); client=TestClient(create_app(runtime_client=runtime))
     login(client)
-    csrf=client.cookies['glasshive_csrf']
+    csrf=auth_cookie(client, 'glasshive_csrf')
     options=dict(headers={'Origin':'http://testserver'},subprotocols=['xperfect-terminal','csrf.'+csrf])
     targets=[]
     class Upstream:

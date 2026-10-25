@@ -88,7 +88,8 @@ def test_start_lock_timings_preserve_exact_start_fence_and_release(state, missin
     provider._start_lock=threading.RLock()
     current={'run_id':'synthetic-run','state':state}
     provider.store=SimpleNamespace(get_provider_request=lambda _:None if missing else current,
-                                   get_run=lambda _:{'worker_id':'synthetic-worker','state':'queued'})
+                                   get_run=lambda _:{'worker_id':'synthetic-worker','state':'queued'},
+                                   get_worker=lambda _:{'worker_id':'synthetic-worker','state':'ready'})
     provider.service=SimpleNamespace(start_assigned_run=Mock())
     provider._deadline_reached=lambda _:False
     if missing:

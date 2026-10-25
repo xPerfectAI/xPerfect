@@ -56,7 +56,7 @@ from .models import (
 )
 
 
-RUNTIME_STORE_SCHEMA_VERSION = 11
+RUNTIME_STORE_SCHEMA_VERSION = 12
 
 
 class SchedulePrincipalAuthorityStoreError(ValueError):
@@ -966,6 +966,12 @@ class ActiveWorkActionConflictError(RuntimeError):
 
 class CallbackIntentGenerationConflictError(ValueError):
     """Raised when callback construction raced with a newer run attempt."""
+
+class AssignmentIdempotencyConflictError(ValueError):
+    """An assignment key already belongs to different accepted work."""
+
+    code = "assignment_idempotency_conflict"
+
 
 class WorkAdmissionError(RuntimeError):
     """Public-safe stable reason a work-producing mutation was fenced."""
@@ -2250,6 +2256,7 @@ class Store:
                     failure_recommended_recovery TEXT NOT NULL DEFAULT '',
                     failure_diagnostic_summary TEXT NOT NULL DEFAULT '',
                     runtime_bundle_json TEXT,
+                    assignment_request_json TEXT NOT NULL DEFAULT '',
                     allowed_ai_admission_json TEXT NOT NULL DEFAULT '{}',
                     allowed_ai_connection_receipt_json TEXT NOT NULL DEFAULT '{}',
                     execution_binding_json TEXT NOT NULL DEFAULT '{}',
@@ -3486,6 +3493,8 @@ class Store:
                 conn.execute("ALTER TABLE runs ADD COLUMN failure_diagnostic_summary TEXT NOT NULL DEFAULT ''")
             if "runtime_bundle_json" not in run_columns:
                 conn.execute("ALTER TABLE runs ADD COLUMN runtime_bundle_json TEXT")
+            if "assignment_request_json" not in run_columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN assignment_request_json TEXT NOT NULL DEFAULT ''")
             if "allowed_ai_admission_json" not in run_columns:
                 conn.execute(
                     "ALTER TABLE runs ADD COLUMN allowed_ai_admission_json TEXT NOT NULL DEFAULT '{}'"
@@ -26627,6 +26636,7 @@ class Store:
         continuation_contract: dict[str, Any] | None = None,
         continuation_context: dict[str, Any] | None = None,
         file_manifest: list[dict[str, Any]] | None = None,
+        assignment_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Return an existing reservation or atomically guard and create it."""
 
@@ -26642,9 +26652,23 @@ class Store:
                     or str(existing["project_id"] or "") != str(project_id)
                     or str(existing["instruction"] or "") != str(instruction)
                 ):
-                    raise ValueError(
+                    raise AssignmentIdempotencyConflictError(
                         "GlassHive idempotency key was reused with a different instruction"
                     )
+                if assignment_request is not None:
+                    saved = json.loads(existing["assignment_request_json"] or "{}")
+                    if saved:
+                        matches = saved.get("sha256") == assignment_request.get("sha256")
+                    else:
+                        # Old reservations did not retain their execution-input digest.
+                        # Only an instruction-only read is unambiguous; the existing GET
+                        # assignment endpoint remains available for richer legacy receipts.
+                        matches = assignment_request.get("legacy_compatible") is True
+                    if not matches:
+                        raise AssignmentIdempotencyConflictError(
+                            "This assignment key belongs to different execution inputs, or its legacy "
+                            "inputs cannot be compared. Read the saved assignment before retrying."
+                        )
                 if file_manifest is not None:
                     worker = self._require_worker_work_admission(conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone(), project_id=project_id)
                     self._accept_run_file_manifest(conn, worker, run_id, file_manifest)
@@ -26696,6 +26720,9 @@ class Store:
                 ),
             }
             self._insert_run_row(conn, data)
+            if assignment_request is not None:
+                conn.execute("UPDATE runs SET assignment_request_json=? WHERE run_id=?",
+                             (json.dumps(assignment_request, sort_keys=True, separators=(",", ":")), run_id))
             self._accept_run_file_manifest(conn, worker, run_id, file_manifest)
             conn.execute(
                 "UPDATE workers SET last_run_id = ?, updated_at = ? WHERE worker_id = ?",
@@ -26745,7 +26772,7 @@ class Store:
                     or str(existing["project_id"] or "") != str(project_id)
                     or str(existing["instruction"] or "") != clean_instruction
                 ):
-                    raise ValueError(
+                    raise AssignmentIdempotencyConflictError(
                         "GlassHive idempotency key was reused with a different instruction"
                     )
                 if file_manifest is not None:

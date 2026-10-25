@@ -13,6 +13,7 @@ from workers_projects_runtime.profile_runtime import HostClaudeCodeRuntime
 def mission(tmp_path, monkeypatch):
     monkeypatch.setenv('WPR_CLAUDE_CODE_ENABLE_CHROME', '1')
     monkeypatch.setenv('WPR_CLAUDE_CODE_EFFORT', 'default')
+    monkeypatch.setenv('GLASSHIVE_SECURITY_MODE', 'local')
     monkeypatch.delenv('GLASSHIVE_ENTERPRISE_MODE', raising=False)
     monkeypatch.delenv('WPR_ENTERPRISE_MODE', raising=False)
     monkeypatch.delenv('CLAUDE_CODE_USE_BEDROCK', raising=False)
@@ -74,10 +75,18 @@ def test_host_mission_personal_required_never_discovers_owner_login(mission, mon
     assert '--strict-mcp-config' in command
 
 
+@pytest.mark.parametrize('mode,flag,value', [
+    ('local', 'GLASSHIVE_ENTERPRISE_MODE', '1'),
+    ('multi_user', None, ''),
+    ('local', 'WPR_ENTERPRISE_MODE', '1'),
+    ('legacy_compatibility', 'GLASSHIVE_ENTERPRISE_MODE', 'enabled'),
+])
 @pytest.mark.parametrize('authority', ['missing', 'access_token', 'api_key'])
-def test_host_mission_enterprise_never_discovers_local_login(mission, monkeypatch, authority):
+def test_host_mission_enterprise_never_discovers_local_login(mission, monkeypatch, authority, mode, flag, value):
     runtime, worker, info, isolated = mission
-    monkeypatch.setenv('GLASSHIVE_ENTERPRISE_MODE', '1')
+    monkeypatch.setenv('GLASSHIVE_SECURITY_MODE', mode)
+    if flag:
+        monkeypatch.setenv(flag, value)
     if authority == 'access_token':
         isolated['CLAUDE_CODE_OAUTH_TOKEN'] = 'synthetic-server-access'
     if authority == 'api_key':
@@ -91,6 +100,21 @@ def test_host_mission_enterprise_never_discovers_local_login(mission, monkeypatc
         _, env = runtime._build_command(worker, 'Prepare a note.', info)
         assert 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN' not in env
         assert env['CLAUDE_CODE_OAUTH_TOKEN' if authority == 'access_token' else 'ANTHROPIC_API_KEY'].startswith('synthetic-server-')
+
+
+@pytest.mark.parametrize('mode,flag', [
+    ('multi_user', None), ('local', 'GLASSHIVE_ENTERPRISE_MODE'),
+    ('legacy_compatibility', 'WPR_ENTERPRISE_MODE'),
+])
+def test_enterprise_preflight_never_probes_operating_system_login(mission, monkeypatch, mode, flag):
+    runtime, _worker, _info, _isolated = mission
+    monkeypatch.setenv('GLASSHIVE_SECURITY_MODE', mode)
+    if flag:
+        monkeypatch.setenv(flag, 'enabled')
+    monkeypatch.setattr(runtime_module.HostNativeCliMixin, 'preflight_worker_profile', lambda *_: None)
+    monkeypatch.setattr(runtime, '_chrome_supported', lambda: True)
+    monkeypatch.setattr(runtime, '_inject_private_subscription_auth', lambda _env: pytest.fail('must not probe OS login'))
+    runtime.preflight_worker_profile('claude-code', 'host')
 
 
 def test_host_mission_explicit_api_key_keeps_selected_route(mission, monkeypatch):

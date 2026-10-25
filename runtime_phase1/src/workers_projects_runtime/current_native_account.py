@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 
 from .control_plane import ControlPlaneError
+from .auth import enterprise_authentication_enabled
 
 PREFIX = 'native-home://current-claude/'
 MARKER = '_glasshive_current_native_account'
@@ -17,8 +18,7 @@ MARKER = '_glasshive_current_native_account'
 def enabled() -> bool:
     return (os.environ.get('GLASSHIVE_SECURITY_MODE', '').lower() in {'', 'local', 'legacy_compatibility'}
             and os.environ.get('WPR_DEFAULT_EXECUTION_MODE', '').lower() == 'host'
-            and not any(os.environ.get(name, '').lower() in {'1','true','yes','on'}
-                        for name in ('GLASSHIVE_ENTERPRISE_MODE', 'WPR_ENTERPRISE_MODE'))
+            and not enterprise_authentication_enabled()
             and not os.environ.get('XPERFECT_STORAGE_ROOT'))
 
 

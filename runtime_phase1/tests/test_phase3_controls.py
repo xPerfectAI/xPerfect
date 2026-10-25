@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase, RuntimeInfo, StubRuntime
+from workers_projects_runtime.openclaw_runtime import RuntimeControlNotReadyError, RuntimeErrorBase, RuntimeInfo, StubRuntime
 from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
 from workers_projects_runtime.service import WorkersProjectsService, callback_run_state
 from workers_projects_runtime.store import (
@@ -569,6 +569,69 @@ class _UnprovenHostControlRuntime(StubRuntime):
     def interrupt_worker(self, worker: dict, run_id: str | None = None) -> RuntimeInfo:
         self.calls += 1
         return super().interrupt_worker(worker, run_id=run_id)
+
+
+@pytest.mark.parametrize("startup_state", ["claimed", "admitted", "running"])
+def test_public_host_pause_before_identity_does_not_invalidate_startup(tmp_path, startup_state):
+    runtime = _UnprovenHostControlRuntime()
+    store, service, worker, run = _worker_with_run(
+        tmp_path, runtime, execution_mode="host", background=False
+    )
+    try:
+        if startup_state != "running":
+            store.update_run(run["run_id"], state=startup_state)
+        before = store.get_worker(worker["worker_id"])
+        generation = dict(service._processor_generations)
+        with pytest.raises(RuntimeControlNotReadyError, match="No control was applied"):
+            service.pause_worker(worker["worker_id"])
+        assert service._processor_generations == generation
+        assert store.get_worker(worker["worker_id"]) == before
+        assert (store.get_run(run["run_id"]) or {})["state"] == "running"
+        assert runtime.calls == 0
+    finally:
+        service.shutdown()
+
+
+def test_public_host_queued_pause_uses_existing_durable_control(tmp_path):
+    runtime = _UnprovenHostControlRuntime()
+    store, service, worker, run = _worker_with_run(
+        tmp_path, runtime, execution_mode="host", run_state="queued", background=False
+    )
+    try:
+        paused = service.pause_worker(worker["worker_id"])
+        assert paused["state"] == "paused"
+        assert (store.get_run(run["run_id"]) or {})["state"] == "paused"
+        assert runtime.calls == 0
+        assert service._processor_generations == {}
+    finally:
+        service.shutdown()
+
+
+def test_public_host_pause_startup_refusal_is_typed_409(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from workers_projects_runtime.api import create_app
+
+    monkeypatch.setenv("GLASSHIVE_BACKGROUND_CONSUMERS_ENABLED", "false")
+    app = create_app(str(tmp_path / "runtime.db"), runtime_backend="stub")
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={
+            "owner_id": "demo-owner", "title": "Startup controls",
+            "goal": "Keep accepted work intact", "default_worker_profile": "codex-cli",
+        }).json()
+        response = client.post(f"/v1/projects/{project['project_id']}/workers", json={
+            "owner_id": "demo-owner", "name": "Startup worker", "role": "operator",
+            "profile": "codex-cli", "start_synchronously": True,
+        })
+        assert response.status_code == 201, response.text
+        def starting(_worker_id):
+            raise RuntimeControlNotReadyError(
+                "The exact host process identity is not confirmed. No control was applied."
+            )
+        monkeypatch.setattr(app.state.service, "pause_worker", starting)
+        result = client.post(f"/v1/workers/{response.json()['worker_id']}/pause")
+        assert result.status_code == 409, result.text
+        assert result.json()["detail"]["code"] == "runtime_control_not_ready"
+        assert result.json()["detail"]["retryable"] is True
 
 
 @pytest.mark.parametrize("control", ["pause", "interrupt"])

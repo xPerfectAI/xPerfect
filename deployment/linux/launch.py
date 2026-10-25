@@ -117,6 +117,9 @@ MODEL_ENVIRONMENTS = {
     'openclaw-claude': 'WPR_MODEL_OPENCLAW_CLAUDE',
     'openclaw-desktop': 'WPR_MODEL_OPENCLAW_DESKTOP',
     'grok-build': 'WPR_MODEL_GROK_BUILD',
+    'direct-openai': 'WPR_MODEL_DIRECT_OPENAI',
+    'direct-anthropic': 'WPR_MODEL_DIRECT_ANTHROPIC',
+    'direct-xai': 'WPR_MODEL_DIRECT_XAI',
 }
 
 

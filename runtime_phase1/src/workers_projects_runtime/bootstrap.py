@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .application_boundary import opaque_application_context
-from .auth import DEFAULT_TENANT_ID, multi_user_security_enabled
+from .auth import DEFAULT_TENANT_ID, enterprise_authentication_enabled, multi_user_security_enabled
 from .codex_plugins import provision_codex_official_marketplace
 
 import errno
@@ -1156,8 +1156,9 @@ def apply_bootstrap(
 
     if (
         profile not in {"clean-room", "none"}
-        and not _enterprise_mode_enabled()
+        and not enterprise_authentication_enabled()
         and not worker.get("_glasshive_provider_account_bound")
+        and not worker.get("_glasshive_inference_broker_bound")
     ):
         if profile in {"host-login", "full-local", "codex-host"} or runtime_name in {"codex-cli", "openclaw"}:
             copy_file(Path.home() / ".codex" / "auth.json", home_dir / ".codex" / "auth.json")

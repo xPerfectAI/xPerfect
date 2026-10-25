@@ -1352,6 +1352,22 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     _validate_enterprise_startup()
     client = runtime_client or RuntimeClient()
     human_auth = HumanAuthGateway.from_env()
+    cookie_suffix = (
+        "_" + sha256(human_auth.local_namespace.encode("utf-8")).hexdigest()[:16]
+        if human_auth.mode == "local_password" else ""
+    )
+    auth_session_cookie = AUTH_SESSION_COOKIE + cookie_suffix
+    auth_csrf_cookie = AUTH_CSRF_COOKIE + cookie_suffix
+    auth_oidc_state_cookie = AUTH_OIDC_STATE_COOKIE + cookie_suffix
+    auth_login_csrf_cookie = AUTH_LOGIN_CSRF_COOKIE + cookie_suffix
+
+    def _auth_page_html(path: Path) -> str:
+        page = path.read_text(encoding="utf-8")
+        metadata = f'<meta name="glasshive-auth-cookie-suffix" content="{cookie_suffix}">'
+        return page.replace("</head>", metadata + "\n</head>", 1)
+
+    def _auth_page_response(path: Path) -> Response:
+        return Response(_auth_page_html(path), media_type="text/html", headers={"Cache-Control": "no-store"})
     if human_auth.mode == "local_password":
         human_auth.validate_local_owner()
     enterprise = _multi_user_security_enabled() or _truthy_env("GLASSHIVE_ENTERPRISE_MODE") or _truthy_env("WPR_ENTERPRISE_MODE")
@@ -1397,7 +1413,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def _session_for_request(request: Request) -> dict[str, Any] | None:
         if not human_auth.session_enabled:
             return None
-        return human_auth.resolve_session(str(request.cookies.get(AUTH_SESSION_COOKIE) or ""))
+        return human_auth.resolve_session(str(request.cookies.get(auth_session_cookie) or ""))
 
     def _session_identity_for_request(request: Request | WebSocket) -> dict[str, str] | None:
         session = _session_for_request(request)
@@ -1473,13 +1489,13 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             f"/login?{urlencode({'auth_error': bounded_code})}",
             status_code=303,
         )
-        response.delete_cookie(AUTH_OIDC_STATE_COOKIE, path="/auth/oidc")
+        response.delete_cookie(auth_oidc_state_cookie, path="/auth/oidc")
         return response
 
     def _set_auth_cookies(response: Response, request: Request, session: dict[str, Any]) -> None:
         max_age = max(1, int(float(session["expires_at"]) - time.time()))
         response.set_cookie(
-            AUTH_SESSION_COOKIE,
+            auth_session_cookie,
             str(session["token"]),
             max_age=max_age,
             httponly=True,
@@ -1488,7 +1504,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             path="/",
         )
         response.set_cookie(
-            AUTH_CSRF_COOKIE,
+            auth_csrf_cookie,
             str(session["csrf_token"]),
             max_age=max_age,
             httponly=False,
@@ -1576,7 +1592,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     supplied = tokens[0]
             except UnicodeDecodeError:
                 pass
-        cookie_value = str(request.cookies.get(AUTH_CSRF_COOKIE) or "").strip()
+        cookie_value = str(request.cookies.get(auth_csrf_cookie) or "").strip()
         session = _session_for_request(request)
         valid = bool(supplied and cookie_value and hmac.compare_digest(supplied, cookie_value))
         if valid and session is not None:
@@ -1621,7 +1637,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     @app.get("/auth/session")
     def auth_session(request: Request) -> JSONResponse:
         session = _session_for_request(request)
-        csrf_cookie = str(request.cookies.get(AUTH_CSRF_COOKIE) or "").strip()
+        csrf_cookie = str(request.cookies.get(auth_csrf_cookie) or "").strip()
         if session is not None and human_auth.session_csrf_valid(session, csrf_cookie):
             payload = {key: value for key, value in session.items() if not key.startswith("_")}
             payload.update({"authenticated": True, "csrf_token": csrf_cookie})
@@ -1634,7 +1650,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         payload: dict[str, str] | None = Body(default=None),
     ) -> JSONResponse:
         requested_scope = str((payload or {}).get("scope") or "local").strip().lower()
-        human_auth.revoke_session(str(request.cookies.get(AUTH_SESSION_COOKIE) or ""))
+        human_auth.revoke_session(str(request.cookies.get(auth_session_cookie) or ""))
         redirect_url = "/login?logged_out=local"
         completed_scope = "local"
         if requested_scope == "provider":
@@ -1654,9 +1670,9 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 "redirect_url": redirect_url,
             }
         )
-        response.delete_cookie(AUTH_SESSION_COOKIE, path="/")
-        response.delete_cookie(AUTH_CSRF_COOKIE, path="/")
-        response.delete_cookie(AUTH_CSRF_COOKIE, path="/auth")
+        response.delete_cookie(auth_session_cookie, path="/")
+        response.delete_cookie(auth_csrf_cookie, path="/")
+        response.delete_cookie(auth_csrf_cookie, path="/auth")
         return response
 
     @app.get("/auth/oidc/start")
@@ -1668,7 +1684,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             return _oidc_error_redirect(request, exc.code)
         response = RedirectResponse(str(flow["authorization_url"]), status_code=303)
         response.set_cookie(
-            AUTH_OIDC_STATE_COOKIE,
+            auth_oidc_state_cookie,
             str(flow["state"]),
             max_age=10 * 60,
             httponly=True,
@@ -1685,7 +1701,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             code = "access_denied" if error == "access_denied" else "cancelled"
             return _oidc_error_redirect(request, code)
         state = str(request.query_params.get("state") or "").strip()
-        cookie_state = str(request.cookies.get(AUTH_OIDC_STATE_COOKIE) or "").strip()
+        cookie_state = str(request.cookies.get(auth_oidc_state_cookie) or "").strip()
         if not state or not cookie_state or not hmac.compare_digest(state, cookie_state):
             return _oidc_error_redirect(request, "state_invalid")
         try:
@@ -1698,7 +1714,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         except AuthGatewayError as exc:
             return _oidc_error_redirect(request, exc.code)
         response = RedirectResponse(str(completed["return_to"]), status_code=303)
-        response.delete_cookie(AUTH_OIDC_STATE_COOKIE, path="/auth/oidc")
+        response.delete_cookie(auth_oidc_state_cookie, path="/auth/oidc")
         _set_auth_cookies(response, request, session)
         return response
 
@@ -1716,7 +1732,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         if not origin or not _request_origin_allowed(request):
             return JSONResponse(status_code=403, content={"detail": "Request origin is not allowed"})
         supplied_csrf = str(request.headers.get("x-glasshive-csrf") or "").strip()
-        cookie_csrf = str(request.cookies.get(AUTH_LOGIN_CSRF_COOKIE) or "").strip()
+        cookie_csrf = str(request.cookies.get(auth_login_csrf_cookie) or "").strip()
         if not supplied_csrf or not cookie_csrf or not hmac.compare_digest(supplied_csrf, cookie_csrf):
             return JSONResponse(status_code=403, content={"detail": "Invalid login request"})
         content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
@@ -1798,19 +1814,19 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             {"authenticated": True, "redirect_url": safe_return_to}
         )
         _set_auth_cookies(response, request, session)
-        response.delete_cookie(AUTH_LOGIN_CSRF_COOKIE, path="/")
+        response.delete_cookie(auth_login_csrf_cookie, path="/")
         return response
 
     @app.get("/login")
-    def login_page(request: Request) -> FileResponse:
+    def login_page(request: Request) -> Response:
         if not human_auth.session_enabled:
             raise HTTPException(status_code=404, detail="Not found")
-        response = FileResponse(STATIC_DIR / "login.html")
+        response = _auth_page_response(STATIC_DIR / "login.html")
         response.headers["Cache-Control"] = "no-store, no-cache, private, max-age=0"
         response.headers["Pragma"] = "no-cache"
         if bool(getattr(human_auth, "local_password_login", False)):
             response.set_cookie(
-                AUTH_LOGIN_CSRF_COOKIE,
+                auth_login_csrf_cookie,
                 secrets.token_urlsafe(32),
                 max_age=10 * 60,
                 httponly=False,
@@ -1937,8 +1953,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             secure=_request_uses_https(request),
         )
 
-    def _file_response_with_signed_cookie(request: Request, worker_id: str, path: Path) -> FileResponse:
-        response = FileResponse(path)
+    def _file_response_with_signed_cookie(request: Request, worker_id: str, path: Path) -> Response:
+        response = _auth_page_response(path)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "same-origin"
         _set_signed_worker_cookie(response, request, worker_id)
@@ -2358,7 +2374,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 raise HTTPException(status_code=403, detail="A signed-in owner session is required")
             session = _session_for_request(request)
             supplied = str(request.headers.get("x-glasshive-csrf") or "").strip()
-            cookie = str(request.cookies.get(AUTH_CSRF_COOKIE) or "").strip()
+            cookie = str(request.cookies.get(auth_csrf_cookie) or "").strip()
             if (
                 session is None or identity.get("auth_source") != "session"
                 or not str(request.headers.get("origin") or "").strip()
@@ -2868,7 +2884,11 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 os.environ.get("GLASSHIVE_COMPONENT_REVISION") or ""
             ).strip(),
         }
-        return {"status": "ok", "release": release, "runtime": client.health()}
+        try:
+            runtime_health = client.health()
+        except httpx.ConnectError as exc:
+            raise HTTPException(status_code=503, detail="The worker service is starting or unavailable. Try again shortly.") from exc
+        return {"status": "ok", "release": release, "runtime": runtime_health}
 
     @app.api_route("/w/{ref_id}", methods=["GET", "HEAD"])
     async def runtime_work_view(ref_id: str, request: Request) -> Response:
@@ -2983,7 +3003,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 ),
             },
             "csrf_token": (
-                str(request.cookies.get(AUTH_CSRF_COOKIE) or "")
+                str(request.cookies.get(auth_csrf_cookie) or "")
                 if _session_for_request(request) is not None
                 else ""
             ),
@@ -4609,7 +4629,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         identity_for_request=_request_identity, restricted_identity=_restricted_identity,
         runtime_headers=_runtime_headers_for_request, runtime_base_url=_runtime_proxy_base_url,
         human_auth=human_auth, session_for_request=_session_for_request,
-        uses_worker_view=_uses_worker_view_credential)
+        uses_worker_view=_uses_worker_view_credential,
+        csrf_cookie_name=auth_csrf_cookie, render_html=_auth_page_html)
     install_peer_ui_routes(app, _client_for_request)
     install_member_ui_routes(app, _client_for_request)
     install_workspace_ui_routes(app, _client_for_request)
@@ -4936,7 +4957,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         if redirect is not None:
             return redirect
         _require_ui_auth(request)
-        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+        return _auth_page_response(STATIC_DIR / "index.html")
 
     @app.get("/conversation")
     def conversation_page(request: Request) -> Response:
@@ -4944,17 +4965,17 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         if redirect is not None:
             return redirect
         _require_ui_auth(request)
-        page = (STATIC_DIR / "conversation.html").read_text(encoding="utf-8")
+        page = _auth_page_html(STATIC_DIR / "conversation.html")
         for asset in ("conversation.css", "conversation.js"):
             page = _fingerprint_static_asset(page, asset)
         return Response(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     @app.get("/confirm-change")
-    def confirm_change_page() -> FileResponse:
+    def confirm_change_page() -> Response:
         # The opaque confirmation token stays in the URL fragment and never reaches
         # access logs. The page itself performs session/OIDC recovery before reading
         # or applying authenticated, owner-scoped change metadata.
-        return FileResponse(STATIC_DIR / "confirm.html")
+        return _auth_page_response(STATIC_DIR / "confirm.html")
 
     @app.get("/watch/{worker_id}")
     def watch(request: Request, worker_id: str) -> Response:

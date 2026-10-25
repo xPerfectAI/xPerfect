@@ -2,6 +2,7 @@
 import io
 import json
 import sqlite3
+from hashlib import sha256
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,11 @@ from glass_drive_ui.auth_admin import main as admin_main
 from glass_drive_ui.server import create_app
 
 PASSWORD = 'fixture-only-Strong-password-1234567890'
+
+
+def auth_cookie(client, name):
+    suffix = '_' + sha256(b'fixture-deployment').hexdigest()[:16]
+    return client.cookies[name + suffix]
 
 
 @pytest.fixture
@@ -31,7 +37,7 @@ def gateway(tmp_path, monkeypatch):
 def login(client, password=PASSWORD):
     assert client.get('/login').status_code == 200
     return client.post('/auth/email/login', json={'password': password, 'return_to': '/'},
-        headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': client.cookies['glasshive_login_csrf']})
+        headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': auth_cookie(client, 'glasshive_login_csrf')})
 
 
 def test_provision_restart_rotation_retains_owner(gateway):
@@ -125,7 +131,7 @@ def test_browser_unlock_csrf_reload_rotation_and_origin(gateway):
     assert client.get('/auth/config').json()['login_methods'] == ['local_password']
     assert client.get('/', headers={'Accept': 'text/html'}, follow_redirects=False).status_code == 303
     client.get('/login')
-    headers={'X-GlassHive-CSRF': client.cookies['glasshive_login_csrf']}
+    headers={'X-GlassHive-CSRF': auth_cookie(client, 'glasshive_login_csrf')}
     assert client.post('/auth/email/login', json={'password': PASSWORD}, headers=headers).status_code == 403
     assert client.post('/auth/email/login', json={'password': PASSWORD},
         headers={**headers,'Origin':'https://attacker.example.invalid'}).status_code == 403
@@ -180,7 +186,7 @@ def test_watch_view_cookie_does_not_block_the_signed_in_owner(gateway):
     owner.cookies.set(name, token)
     launched = owner.post('/api/launch', json={'goal': 'Synthetic follow-up project.'},
                           headers={'Origin': 'http://testserver',
-                                   'X-GlassHive-CSRF': owner.cookies['glasshive_csrf']})
+                                   'X-GlassHive-CSRF': auth_cookie(owner, 'glasshive_csrf')})
     assert 'read-only' not in launched.text
     assert launched.status_code not in {401, 403}, launched.text
 
@@ -201,7 +207,7 @@ def test_the_unlocked_owners_launch_opens_watch_with_owner_authority(gateway, tm
     assert login(owner).status_code == 200
     launched = owner.post('/api/launch', json={'description': 'Write a short note', 'workspace_option': 'new:claude-code',
                                                'launch_surface': 'terminal'},
-                          headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': owner.cookies['glasshive_csrf']})
+                          headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': auth_cookie(owner, 'glasshive_csrf')})
     assert launched.status_code == 200, launched.text
     watch_url = launched.json()['watch_url']
     assert owner.get(watch_url).status_code == 200

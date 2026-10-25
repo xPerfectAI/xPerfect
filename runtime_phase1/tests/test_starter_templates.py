@@ -185,3 +185,19 @@ def test_native_mcp_uses_the_same_owner_routes_and_exact_selection():
             "content_hash": "sha256:exact", "idempotency_key": "native-request-key", "effort": "high",
             "provider_account": {"policy": "personal_required", "account_id": "acct_synthetic"}}}),
     ]
+
+
+def test_starter_catalog_mcp_is_read_only_but_import_is_not():
+    from workers_projects_runtime.starter_templates import register_starter_tools
+    class Server:
+        def __init__(self):
+            self.metadata = {}
+        def tool(self, **metadata):
+            self.metadata[metadata["name"]] = metadata
+            return lambda function: function
+    server = Server()
+    register_starter_tools(server, object())
+    read = server.metadata["workspace_starter_list"]["annotations"]
+    assert read.readOnlyHint is True and read.destructiveHint is False
+    assert read.idempotentHint is True and read.openWorldHint is False
+    assert not server.metadata["workspace_starter_import"].get("annotations")

@@ -9,7 +9,7 @@ import pytest
 
 from workers_projects_runtime import store as store_module
 from workers_projects_runtime import state_permissions as state_permissions_module
-from workers_projects_runtime.control_plane import ControlPlaneStore
+from workers_projects_runtime.control_plane import CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore
 from workers_projects_runtime.schema_version import (
     UnsupportedSchemaVersionError,
     begin_schema_migration,
@@ -91,8 +91,8 @@ def test_schema_migration_lock_serializes_competing_versions(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("component", "factory", "unexpected_table", "newer_version"),
     [
-        ("runtime_store", Store, "projects", 11),
-        ("control_plane", ControlPlaneStore, "provider_accounts", 5),
+        ("runtime_store", Store, "projects", store_module.RUNTIME_STORE_SCHEMA_VERSION + 1),
+        ("control_plane", ControlPlaneStore, "provider_accounts", CONTROL_PLANE_SCHEMA_VERSION + 1),
     ],
 )
 def test_stores_refuse_newer_schema_before_table_mutation(

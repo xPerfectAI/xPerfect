@@ -115,7 +115,7 @@ from .models import (
     WorkerResponse,
 )
 from .native_model_selection import ModelConfigurationRequired, native_grok_models, selected_grok_model, valid_model_id, native_timing_event
-from .openclaw_runtime import RuntimeConfigurationError, RuntimeDependencyMissingError, RuntimeErrorBase, StubRuntime, WorkerRuntime
+from .openclaw_runtime import RuntimeConfigurationError, RuntimeControlNotReadyError, RuntimeDependencyMissingError, RuntimeErrorBase, StubRuntime, WorkerRuntime
 from .profile_runtime import ProfiledWorkerRuntime, _redact_text
 from .peer_api import install_peer_routes
 from .peer_mcp import native_peer_server
@@ -260,6 +260,7 @@ from .signed_links import (
 )
 
 from .store import (
+    AssignmentIdempotencyConflictError,
     ActiveWorkActionConflictError,
     DelegationIdempotencyConflictError,
     Store,
@@ -526,14 +527,25 @@ def create_app(
             detail["used"] = dict(getattr(exc, "used", {}) or {})
         return detail, retry_after
 
+    @app.exception_handler(AssignmentIdempotencyConflictError)
     @app.exception_handler(WorkAdmissionError)
     async def work_admission_handler(
-        request: Request, exc: WorkAdmissionError
+        request: Request, exc: WorkAdmissionError | AssignmentIdempotencyConflictError
     ) -> JSONResponse:
         _ = request
         return JSONResponse(
             status_code=409,
             content={"detail": {"code": exc.code, "message": str(exc)}},
+        )
+
+    @app.exception_handler(RuntimeControlNotReadyError)
+    async def runtime_control_not_ready_handler(
+        request: Request, exc: RuntimeControlNotReadyError
+    ) -> JSONResponse:
+        _ = request
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"code": exc.code, "message": str(exc), "retryable": True}},
         )
 
     @app.exception_handler(HostWorkersDisabledError)
@@ -6221,6 +6233,27 @@ def create_app(
             raise HTTPException(status_code=403, detail="Signed workspace links cannot modify worker bootstrap context")
         worker = require_worker(worker_id, request)
         normalized_effort = str(payload.effort or "").strip().lower()
+        idempotency_key = str(
+            request.headers.get("x-glasshive-idempotency-key")
+            or request.headers.get("idempotency-key") or ""
+        ).strip() or None
+        normalized_request = {
+            "instruction": payload.instruction,
+            "effort": normalized_effort,
+            "bootstrap_bundle": payload.bootstrap_bundle or None,
+            "continuation_context": (
+                payload.continuation_context.model_dump()
+                if payload.continuation_context is not None else None
+            ),
+        }
+        assignment_request = ({
+            "version": 1,
+            "sha256": sha256(json.dumps(normalized_request, sort_keys=True,
+                                        separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
+            "effort": normalized_effort,
+            "legacy_compatible": not any((normalized_effort, payload.bootstrap_bundle,
+                                           payload.continuation_context)),
+        } if idempotency_key else None)
         run = service.assign_run(
             worker_id,
             payload.instruction,
@@ -6228,19 +6261,18 @@ def create_app(
                 _assign_effort_bundle(worker, payload.effort),
                 payload.bootstrap_bundle,
             ),
-            idempotency_key=str(
-                request.headers.get("x-glasshive-idempotency-key")
-                or request.headers.get("idempotency-key")
-                or ""
-            ).strip()
-            or None,
+            idempotency_key=idempotency_key,
+            assignment_request=assignment_request,
             continuation_context=(
                 payload.continuation_context.model_dump()
                 if payload.continuation_context is not None
                 else None
             ),
         )
-        return RunResponse(**run, effort=normalized_effort)
+        accepted = json.loads(str(run.get("assignment_request_json") or "{}"))
+        response_effort = (str(accepted.get("effort") or "") if idempotency_key
+                           else normalized_effort)
+        return RunResponse(**run, effort=response_effort)
 
     @app.post(
         "/internal/scheduling-cortex/workspace-runs",
@@ -6882,7 +6914,7 @@ def create_app(
         )
         selected = [file for file in _mission_result_file_metadata(worker, run, delegation)
                     if file["artifact_path"] == relative] if delegation else []
-        if not selected:
+        if not selected and not delegation:
             # Ordinary Chat workers have no mission callback. Their native capture
             # already owns the exact selected names, run, attempt and file bytes.
             resolver = getattr(service.runtime, "provider_native_image_output", None)

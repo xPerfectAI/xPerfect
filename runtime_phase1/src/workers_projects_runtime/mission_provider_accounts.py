@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import Condition, Event, Lock, Thread
 from typing import Callable, Iterator
 
-from .auth import multi_user_security_enabled
+from .auth import enterprise_authentication_enabled
 from .control_plane import ControlPlaneConflict, ControlPlaneError, ControlPlaneStore, PROFILE_ACCOUNT_PROVIDERS, ProviderProjectionPending, profile_provider_account_issue
 from .openclaw_runtime import HostCapacityError, RuntimeErrorBase
 from .provider_accounts import ProviderAccountHomeManager
@@ -117,7 +117,7 @@ def _usable_provider_value(name: str) -> str:
 def deployment_provider_readiness(profile: str) -> tuple[str, str]:
     """Return the effective deployment-managed route state without exposing credentials."""
 
-    if not multi_user_security_enabled():
+    if not enterprise_authentication_enabled():
         return "deployment_managed", ""
     normalized = str(profile or "").strip().lower()
     if normalized in {"codex-cli", "openclaw-codex"}:
@@ -284,7 +284,9 @@ def mission_provider_account_selection(
 
 
 def native_current_account_allowed(worker: dict) -> bool:
-    """A named required account never imports the current OS user's credentials."""
+    """Only single-user, unbound workers may use ambient OS credentials."""
+    if enterprise_authentication_enabled():
+        return False
     if worker.get("_glasshive_provider_account_bound") or worker.get("_glasshive_inference_broker_bound"):
         return False
     bundle = _bootstrap_bundle(worker)

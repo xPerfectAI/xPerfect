@@ -248,14 +248,15 @@ def test_schedule_requires_exact_file_revision_and_snapshots_it(service):
     stored = service.store.get_schedule(scheduled["schedule_id"])
     assert stored is not None
     assert json.loads(stored["file_manifest_json"])[0]["revision"] == upload["revision"]
-    moved = service.files.move_upload(
-        TENANT,
-        OWNER,
-        upload["upload_id"],
-        relative_path="renamed.txt",
-        revision=upload["revision"],
-    )
-    assert moved["revision"] != upload["revision"]
+    with pytest.raises(FileAdmissionError, match="retained by accepted work") as retained:
+        service.files.move_upload(
+            TENANT,
+            OWNER,
+            upload["upload_id"],
+            relative_path="renamed.txt",
+            revision=upload["revision"],
+        )
+    assert retained.value.code == "file_version_retained"
     replayed = service.store.get_schedule(scheduled["schedule_id"])
     assert replayed is not None
     replayed_manifest = json.loads(replayed["file_manifest_json"])

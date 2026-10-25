@@ -200,6 +200,7 @@ def test_same_owner_dispatch_shares_exact_main_background_only(tmp_path):
                 conversation,
             ),
         )
+    worker = {**worker, "_context_run_id": run["run_id"]}
     sources = authorized_sources(store, None, worker)
     assert {s["text"] for s in sources} == {
         "Exact Main background\nwith whitespace  é",

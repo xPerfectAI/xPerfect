@@ -83,7 +83,7 @@ global.document = {
   getElementById: id => id === 'terminal-status' ? status
     : id === 'terminal' ? {clientWidth: 800, clientHeight: 400}
     : {addEventListener: (_type, handler) => { buttons[id] = handler; }},
-  querySelector: () => ({content: 'nonce'}),
+  querySelector: selector => ({content: selector.includes('auth-cookie-suffix') ? '' : 'nonce'}),
   querySelectorAll: () => [],
   createElement: () => ({}),
   cookie: '',
@@ -124,15 +124,16 @@ console.log(JSON.stringify({urls: sockets.map(socket => socket.url), seen,
 
 @node
 @pytest.mark.parametrize("phase", ["ended", "live", "waiting", "settling"])
-def test_saved_terminal_hides_and_refuses_worker_actions_but_reconnect_stays_read_only(phase):
+@pytest.mark.parametrize("scope", ["", "_0123456789abcdef"])
+def test_saved_terminal_hides_and_refuses_worker_actions_but_reconnect_stays_read_only(phase, scope):
     page = (STATIC / "terminal.js").read_text()
     script = r'''
 const assert=require('node:assert/strict'),calls=[],sockets=[];
 const makeButton=action=>({dataset:{action},hidden:false,disabled:false,handlers:{},addEventListener(type,fn){this.handlers[type]=fn;}});
 const actions=['resume','pause','interrupt'].map(makeButton),reconnect=makeButton('reconnect'),status={textContent:''};
-global.document={cookie:'glasshive_csrf=synthetic-token',
+global.document={cookie:'glasshive_csrf'+SCOPE+'=synthetic-token',
  getElementById:id=>id==='terminal-status'?status:id==='terminal'?{clientWidth:800,clientHeight:400}:reconnect,
- querySelector:()=>({content:'nonce'}),querySelectorAll:()=>actions,createElement:()=>({})};
+ querySelector:selector=>({content:selector.includes('auth-cookie-suffix')?SCOPE:'nonce'}),querySelectorAll:()=>actions,createElement:()=>({})};
 global.location={pathname:'/ui/workers/worker-exact/terminal',search:'?run=run-exact&phase='+PHASE,protocol:'http:',host:'testserver'};
 global.WebSocket=class{constructor(url){this.url=url;sockets.push(this);}send(){}close(){}};WebSocket.OPEN=1;
 global.ResizeObserver=class{observe(){}};global.Terminal=class{open(){}resize(){}focus(){}write(){}onData(){}};
@@ -173,7 +174,7 @@ PAGE
  assert.ok(actions.every(button=>button.hidden));assert.equal(calls.length,beforeSavedClick);
  console.log(JSON.stringify({passed:true}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
-'''.replace("PHASE", json.dumps(phase)).replace("PAGE", page)
+'''.replace("PHASE", json.dumps(phase)).replace("SCOPE", json.dumps(scope)).replace("PAGE", page)
     assert _node(script) == {"passed": True}
 
 
@@ -352,7 +353,7 @@ const status = {textContent: ''};
 global.document = {
   getElementById: id => id === 'terminal-status' ? status
     : id === 'terminal' ? {clientWidth: 800, clientHeight: 400} : {addEventListener: () => {}},
-  querySelector: () => ({content: 'nonce'}), querySelectorAll: () => [], createElement: () => ({}), cookie: '',
+  querySelector: selector => ({content: selector.includes('auth-cookie-suffix') ? '' : 'nonce'}), querySelectorAll: () => [], createElement: () => ({}), cookie: '',
 };
 global.location = {pathname: '/ui/workers/wrk_1/terminal', search: '?run=run_a&attempt=att_1&phase=ended',
                    protocol: 'http:', host: 'testserver'};
@@ -409,7 +410,7 @@ def test_settling_terminal_reports_saved_output_without_claiming_the_job_ended()
     page = (STATIC / "terminal.js").read_text()
     script = r'''
 const status={textContent:''},sockets=[];
-global.document={cookie:'',getElementById:id=>id==='terminal-status'?status:id==='terminal'?{clientWidth:800,clientHeight:400}:{addEventListener(){}},querySelector:()=>({content:'nonce'}),querySelectorAll:()=>[],createElement:()=>({})};
+global.document={cookie:'',getElementById:id=>id==='terminal-status'?status:id==='terminal'?{clientWidth:800,clientHeight:400}:{addEventListener(){}},querySelector:selector=>({content:selector.includes('auth-cookie-suffix')?'':'nonce'}),querySelectorAll:()=>[],createElement:()=>({})};
 global.location={pathname:'/ui/workers/worker/terminal',search:'?run=run_current&phase=settling',protocol:'http:',host:'testserver'};
 global.WebSocket=class{constructor(url){this.url=url;sockets.push(this);}send(){}close(){}};WebSocket.OPEN=1;
 global.ResizeObserver=class{observe(){}};global.Terminal=class{open(){}resize(){}focus(){}write(){}onData(){}};

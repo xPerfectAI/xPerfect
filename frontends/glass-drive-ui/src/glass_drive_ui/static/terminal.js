@@ -27,7 +27,12 @@
   let socket;
   let retryTimer = 0;
   let sessionEndRetries = 0;
-  const csrf = () => decodeURIComponent(document.cookie.split('; ').find(item => item.startsWith('glasshive_csrf='))?.slice(15) || '');
+  const csrf = () => {
+    const suffix = document.querySelector('meta[name="glasshive-auth-cookie-suffix"]')?.content || '';
+    const prefix = `glasshive_csrf${suffix}=`;
+    const entry = document.cookie.split(';').map(value => value.trim()).find(value => value.startsWith(prefix));
+    try { return entry ? decodeURIComponent(entry.slice(prefix.length)) : ''; } catch { return ''; }
+  };
   function resize() {
     const cols = Math.max(20, Math.floor((host.clientWidth - 20) / 8.45));
     const rows = Math.max(4, Math.floor((host.clientHeight - 20) / 17));

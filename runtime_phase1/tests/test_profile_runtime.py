@@ -60,6 +60,12 @@ from workers_projects_runtime.run_evidence import build_constraint_ledger, write
 
 
 @pytest.fixture(autouse=True)
+def isolate_host_codex_home_from_unit_tests(tmp_path, monkeypatch):
+    """Never let fake native preparation borrow the developer's real Codex login."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "synthetic-codex-home"))
+
+
+@pytest.fixture(autouse=True)
 def isolate_host_claude_auth_from_unit_tests(monkeypatch):
     """Never let command-construction tests read or rotate a developer's real Claude login."""
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-test-oauth-token")
@@ -5446,7 +5452,7 @@ def test_host_cli_interrupt_writes_run_evidence(tmp_path, monkeypatch):
     assert "working before interrupt" in recorded_metrics[-1][2]
 
 
-def test_host_codex_runtime_default_prompts_require_final_report(tmp_path, monkeypatch):
+def test_host_codex_runtime_default_prompt_has_one_canonical_owner(tmp_path, monkeypatch):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     runtime.binary = "/bin/echo"
     _patch_host_codex_requirement_probe(monkeypatch)
@@ -5472,20 +5478,17 @@ def test_host_codex_runtime_default_prompts_require_final_report(tmp_path, monke
     info = runtime.ensure_worker_ready(worker)
     workspace_dir = Path(info.workspace_dir)
 
-    for filename in ("harness-prompt.md", "agents.md", "AGENTS.md", "claude.md", "CLAUDE.md", "codex.md", "CODEX.md"):
-        content = (workspace_dir / filename).read_text()
-        assert "FINAL REPORT:" in content
-        assert "inspect" in content.lower()
-        assert "user's request" in content.lower()
-        assert "success criteria" in content.lower()
-        if filename in {"harness-prompt.md", "agents.md", "AGENTS.md"}:
-            assert GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE in content
-            assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in content
-            assert GLASSHIVE_SAFETY_CHECKPOINT_RULE in content
-        else:
-            assert "canonical GlassHive project instruction source" in content
-    assert "canonical project instruction source" in (workspace_dir / "CLAUDE.md").read_text()
-    assert "@AGENTS.md" in (workspace_dir / "CLAUDE.md").read_text()
+    content = (workspace_dir / "harness-prompt.md").read_text()
+    assert "inspect" in content.lower()
+    assert "user's request" in content.lower()
+    assert "success criteria" in content.lower()
+    assert GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE in content
+    assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in content
+    assert GLASSHIVE_SAFETY_CHECKPOINT_RULE in content
+    # Harness-owned instructions have one owner; preparation must not invent
+    # or replace the user's native project policy files.
+    for filename in ("agents.md", "AGENTS.md", "claude.md", "CLAUDE.md", "codex.md", "CODEX.md"):
+        assert not (workspace_dir / filename).exists()
 
 
 def test_host_codex_runtime_copies_auth_without_optional_bootstrap_bundle(tmp_path, monkeypatch):
@@ -5951,7 +5954,7 @@ def test_host_codex_malformed_config_strips_inline_private_mcp_tables(tmp_path, 
     assert "secret" not in config
 
 
-def test_host_runtime_live_description_refreshes_stale_prompt_files(tmp_path, monkeypatch):
+def test_host_runtime_live_description_refreshes_owned_prompt_and_preserves_user_policy(tmp_path, monkeypatch):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     runtime.binary = "/bin/echo"
     _patch_host_codex_requirement_probe(monkeypatch)
@@ -5982,10 +5985,11 @@ def test_host_runtime_live_description_refreshes_stale_prompt_files(tmp_path, mo
     details = runtime.describe_worker(worker)
 
     assert details["prompt_paths"]["harness_prompt"] == str(workspace_dir / "harness-prompt.md")
-    assert "FINAL REPORT:" in (workspace_dir / "harness-prompt.md").read_text()
-    assert "FINAL REPORT:" in (workspace_dir / "AGENTS.md").read_text()
-    assert GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE in (workspace_dir / "harness-prompt.md").read_text()
-    assert GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE in (workspace_dir / "AGENTS.md").read_text()
+    owned_prompt = (workspace_dir / "harness-prompt.md").read_text()
+    assert "old prompt without terminal report contract" not in owned_prompt
+    assert GLASSHIVE_PROPORTIONAL_VERIFICATION_RULE in owned_prompt
+    assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in owned_prompt
+    assert (workspace_dir / "AGENTS.md").read_text() == "old agent instructions"
 
 
 def test_host_codex_runtime_rejects_untrusted_source_paths(tmp_path, monkeypatch):
@@ -10839,6 +10843,7 @@ def _host_attempt_launcher(tmp_path, monkeypatch):
     NativeProcess.__init__ = remember_command
     host.ensure_worker_ready = lambda _worker: host._host_runtime_info(worker)  # type: ignore[method-assign]
     host._build_command = lambda _worker, _instruction, _info: (["claude"], {})  # type: ignore[method-assign]
+    monkeypatch.setattr(host, "_native_context_hooks_supported", lambda: False)
     monkeypatch.setattr(host, "_process_identity_sha256", lambda _pid: "1" * 64)
     monkeypatch.setattr(host, "_process_group_identity", lambda pid: pid)
     monkeypatch.setattr(host, "_process_start_identity", lambda _pid: "ps-lstart:Mon Jan 01 00:00:00 2024")

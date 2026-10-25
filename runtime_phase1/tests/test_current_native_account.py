@@ -45,6 +45,105 @@ def connect(host):
     return account,worker
 
 
+@pytest.mark.parametrize('status', ['action_required', 'disconnected', 'pending'])
+def test_selected_existing_account_not_ready_preserves_typed_recovery(host, monkeypatch, status):
+    from workers_projects_runtime.coordinator import _safe_blocker_code
+    from workers_projects_runtime.failure_classification import classify_runtime_error
+    from workers_projects_runtime.mission_provider_accounts import mission_provider_account_selection
+    from workers_projects_runtime.openclaw_runtime import ProviderAuthenticationMissingError
+
+    account, worker = connect(host)
+    _manager, binder, _payload, _calls = host
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError('An unavailable account must not reserve or start native work')
+    monkeypatch.setattr(binder, '_reserve_active_route', unexpected)
+    with pytest.raises(ProviderAuthenticationMissingError) as failure:
+        with current_native_binding.bind_current_account(
+            binder, worker, account={**account, 'status': status},
+            selection=mission_provider_account_selection(worker), runtime_name='claude-code',
+            run_id='run_synthetic_not_ready', timeout_sec=10, lease_purpose='mission',
+            abort_binding=unexpected,
+        ):
+            pytest.fail('Unavailable account was bound')
+    error = failure.value
+    classified = classify_runtime_error(error, runtime_name='claude-code')
+    assert classified.failure_class == error.code == _safe_blocker_code(error) == 'provider_auth_missing'
+    assert classified.structured and not classified.retryable
+    assert classified.recommended_recovery == (
+        'Open Connections and select Verify for the selected account, then retry '
+        'the requested work. Saved work is retained.'
+    )
+    assert binder.store.active_provider_account_lease(account['account_id']) is None
+
+
+@pytest.mark.parametrize('missing', ['owner_id', 'worker_id', 'run_id'])
+def test_missing_native_binding_identity_is_not_reported_as_account_auth(host, missing):
+    from workers_projects_runtime.mission_provider_accounts import mission_provider_account_selection
+
+    account, worker = connect(host)
+    _manager, binder, _payload, _calls = host
+    run_id = 'run_synthetic_identity'
+    if missing == 'run_id':
+        run_id = ''
+    else:
+        worker = {**worker, missing: ''}
+    with pytest.raises(ControlPlaneError, match='exact owner, worker and run'):
+        with current_native_binding.bind_current_account(
+            binder, worker, account=account,
+            selection=mission_provider_account_selection(worker),
+            runtime_name='claude-code', run_id=run_id, timeout_sec=10,
+            lease_purpose='mission', abort_binding=lambda _worker: None,
+        ):
+            pytest.fail('Incomplete identity was bound')
+
+
+@pytest.mark.parametrize("profile", ["codex-cli", "claude-code", "grok-build"])
+@pytest.mark.parametrize("security_mode,legacy_key,expected", [
+    ("", None, True),
+    ("local", None, True),
+    ("multi_user", None, False),
+    ("", "GLASSHIVE_ENTERPRISE_MODE", False),
+    ("", "WPR_ENTERPRISE_MODE", False),
+    ("local", "WPR_ENTERPRISE_MODE", False),
+    ("legacy_compatibility", "GLASSHIVE_ENTERPRISE_MODE", False),
+])
+def test_ambient_native_account_respects_enterprise_authentication(
+    monkeypatch, profile, security_mode, legacy_key, expected,
+):
+    for key in ("GLASSHIVE_SECURITY_MODE", "GLASSHIVE_ENTERPRISE_MODE", "WPR_ENTERPRISE_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    if security_mode:
+        monkeypatch.setenv("GLASSHIVE_SECURITY_MODE", security_mode)
+    if legacy_key:
+        monkeypatch.setenv(legacy_key, "1")
+    assert native_current_account_allowed({"profile": profile}) is expected
+
+
+@pytest.mark.parametrize("binding", [
+    "_glasshive_provider_account_bound", "_glasshive_inference_broker_bound",
+])
+def test_bound_accounts_never_import_ambient_native_authority(monkeypatch, binding):
+    monkeypatch.setenv("GLASSHIVE_SECURITY_MODE", "local")
+    assert not native_current_account_allowed({binding: True})
+
+
+@pytest.mark.parametrize("profile", ["codex-cli", "grok-build"])
+@pytest.mark.parametrize("setting", [
+    "GLASSHIVE_SECURITY_MODE", "GLASSHIVE_ENTERPRISE_MODE", "WPR_ENTERPRISE_MODE",
+])
+def test_multi_user_native_preparation_stops_before_account_access(monkeypatch, profile, setting):
+    from workers_projects_runtime.codex_native_warm import CodexNativeWarmMixin
+    from workers_projects_runtime.grok_native_warm import GrokNativeWarmMixin
+
+    for key in ("GLASSHIVE_SECURITY_MODE", "GLASSHIVE_ENTERPRISE_MODE", "WPR_ENTERPRISE_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(setting, "multi_user" if setting == "GLASSHIVE_SECURITY_MODE" else "1")
+    runtime_type = CodexNativeWarmMixin if profile == "codex-cli" else GrokNativeWarmMixin
+    runtime = runtime_type.__new__(runtime_type)
+    with pytest.raises(ValueError, match="preparation"):
+        runtime._warm_context({"profile": profile, "execution_mode": "host"})
+
+
 def test_current_sign_in_is_distinct_idempotent_private_and_never_copies_auth(host):
     manager,binder,_,calls=host
     account,_=connect(host)
@@ -105,11 +204,13 @@ def test_current_route_holds_exact_lease_and_does_not_allow_named_fallback(host)
 
 
 def test_changed_native_account_cannot_replace_selected_identity(host):
+    from workers_projects_runtime.openclaw_runtime import ProviderAuthenticationMissingError
+
     account,worker=connect(host);host[2]['email']='different@example.test'
     result=host[0].verify(account_id=account['account_id'],tenant_id='local',owner_id='owner')
     assert result['status']=='action_required'
     with pytest.raises(ControlPlaneConflict):host[0].connect(tenant_id='local',owner_id='owner')
-    with pytest.raises(ControlPlaneError):
+    with pytest.raises(ProviderAuthenticationMissingError):
         with host[1].bind(worker,runtime_name='claude-code',run_id='run',timeout_sec=1,abort_binding=lambda _:None):pass
 
 

@@ -29,16 +29,9 @@ def _isolate_local_qa_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _disable_service_background_loops(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        WorkersProjectsService, "_replay_startup_recovery", lambda _self: None
-    )
-    monkeypatch.setattr(WorkersProjectsService, "_callback_retry_loop", lambda _self: None)
-    monkeypatch.setattr(WorkersProjectsService, "_scheduler_loop", lambda _self: None)
-    monkeypatch.setattr(
-        WorkersProjectsService, "_host_lease_heartbeat_loop", lambda _self: None
-    )
-
+def _disable_service_background_loops(background_consumers_disabled) -> None:
+    """Ack-only fixtures do not start or fake the health of periodic consumers."""
+    _ = background_consumers_disabled
 
 def _write_helper(tmp_path: Path, body: str) -> Path:
     helper = tmp_path / "qa-ack-helper"

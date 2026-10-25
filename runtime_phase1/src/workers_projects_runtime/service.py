@@ -74,6 +74,7 @@ from .mission_provider_accounts import (
 from .openclaw_runtime import (
     HostCapacityError,
     ProviderRateLimitError,
+    RuntimeControlNotReadyError,
     RuntimeErrorBase,
     RuntimeInfo,
     RunStartupRejectedError,
@@ -12002,14 +12003,42 @@ class WorkersProjectsService:
         continuation_contract: dict[str, object] | None = None,
         continuation_context: dict[str, object] | None = None,
         file_manifest: list[dict] | None = None,
+        assignment_request: dict[str, object] | None = None,
     ) -> dict:
         normalized_key = str(idempotency_key or "").strip()
         if file_manifest and (not normalized_key or provider_request_id):
             raise ValueError("active_work_file_reservation_identity_required")
+        def reserve_idempotent_run(worker: dict, run_id: str) -> tuple[dict, bool]:
+            stored_continuation = (
+                {**continuation_contract, "run_id": run_id}
+                if isinstance(continuation_contract, dict)
+                else None
+            )
+            return self.store.create_idempotent_run(
+                run_id=run_id,
+                worker_id=worker_id,
+                project_id=str(worker["project_id"]),
+                instruction=instruction,
+                origin_trace=origin_trace,
+                continuation_contract=stored_continuation,
+                continuation_context=continuation_context,
+                file_manifest=file_manifest,
+                assignment_request=assignment_request,
+            )
+
         while True:
             needs_resume = False
             with self._worker_compute_release_lock(worker_id):
                 worker = self.require_worker(worker_id)
+                if normalized_key and not provider_request_id:
+                    run_id = self._idempotent_run_id(worker_id, normalized_key)
+                    if self.store.get_run(run_id) is not None:
+                        # Recheck the accepted reservation before configuration, provider
+                        # preflight or lifecycle changes. Store retains its transactional
+                        # identity and exact input-manifest validation.
+                        run, created = reserve_idempotent_run(worker, run_id)
+                        staged_bundle = None
+                        break
                 policy_candidate = dict(worker)
                 if runtime_bundle is not None:
                     policy_candidate["bootstrap_bundle_json"] = json.dumps(
@@ -12090,21 +12119,7 @@ class WorkersProjectsService:
                                 instruction=instruction,
                             )
                         elif normalized_key:
-                            stored_continuation = (
-                                {**continuation_contract, "run_id": run_id}
-                                if isinstance(continuation_contract, dict)
-                                else None
-                            )
-                            run, created = self.store.create_idempotent_run(
-                                run_id=run_id,
-                                worker_id=worker_id,
-                                project_id=str(worker["project_id"]),
-                                instruction=instruction,
-                                origin_trace=origin_trace,
-                                continuation_contract=stored_continuation,
-                                continuation_context=continuation_context,
-                                file_manifest=file_manifest,
-                            )
+                            run, created = reserve_idempotent_run(worker, run_id)
                         else:
                             stored_continuation = (
                                 {**continuation_contract, "run_id": run_id}
@@ -12198,6 +12213,7 @@ class WorkersProjectsService:
         continuation_contract: dict[str, object] | None = None,
         continuation_context: dict[str, object] | None = None,
         file_manifest: list[dict] | None = None,
+        assignment_request: dict[str, object] | None = None,
     ) -> dict:
         existing_worker = self.store.get_worker(worker_id)
         existing_bundle = (
@@ -12239,6 +12255,7 @@ class WorkersProjectsService:
                 continuation_contract=continuation_contract,
                 continuation_context=continuation_context,
                 file_manifest=file_manifest,
+                assignment_request=assignment_request,
             )
         worker = self.require_worker(worker_id)
         self._ensure_execution_allowed(worker)
@@ -12981,6 +12998,11 @@ class WorkersProjectsService:
                     self.store.update_worker_state(worker_id, "paused", last_error="")
                     or worker
                 )
+            if active_state in {"claimed", "admitted"}:
+                raise RuntimeControlNotReadyError(
+                    "The worker is starting. No control was applied; refresh the worker "
+                    "status and try again after startup."
+                )
             if not active_run or active_state not in {"queued", "running", "settling"}:
                 raise RuntimeErrorBase("No exact active run is available to pause")
             target_run_id = str(active_run["run_id"])
@@ -13087,7 +13109,12 @@ class WorkersProjectsService:
             if str(run_id or "").strip()
             else self.store.get_active_run(worker_id)
         )
-        if run_id or action_use_id or candidate_run is None:
+        worker = self.require_worker(worker_id)
+        exact_host_control = (
+            str(worker.get("execution_mode") or "docker") == "host"
+            and getattr(self.runtime, "requires_run_start_identity", True) is not False
+        )
+        if run_id or action_use_id or candidate_run is None or exact_host_control:
             return self._pause_worker_parallel(
                 worker_id,
                 run_id=run_id or str((candidate_run or {}).get("run_id") or ""),
@@ -18417,8 +18444,9 @@ class WorkersProjectsService:
             or not str(lease.get("process_start_identity") or "").strip()
             or not str(lease.get("startup_session_id") or "").strip()
         ):
-            raise RuntimeErrorBase(
-                "The exact host process identity is not confirmed; control remains pending"
+            raise RuntimeControlNotReadyError(
+                "The exact host process identity is not confirmed. No control was applied; "
+                "refresh the worker status and try again after startup."
             )
         return {**worker, "_active_run_id": run_id, "_host_run_lease": lease}
 

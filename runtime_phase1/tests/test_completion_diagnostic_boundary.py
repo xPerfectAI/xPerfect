@@ -138,7 +138,8 @@ def test_shared_workspace_document_does_not_fail_native_action(tmp_path, worker_
     )
     assert evidence["evidence_result"]["failure_reasons"] == []
     assert evidence["evidence_result"]["warning_reasons"] == []
-    assert evidence["artifacts"]["items"][0]["document_validation"]["valid"] is False
+    assert evidence["artifacts"]["items"] == []
+    assert evidence["evidence_result"]["status"] == "pass"
     status, warning = _require_successful_run_evidence(
         workspace=tmp_path, evidence_path=path, constraint_ledger_path="glasshive-run/runs/run_correction/constraint-ledger.json", run_id="run_correction",
     )

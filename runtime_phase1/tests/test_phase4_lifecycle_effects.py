@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from threading import Event
 
@@ -1384,7 +1385,11 @@ def test_startup_recovery_is_not_starved_by_mission_executor_survivors(
         assert delivered.wait(2)
         service._startup_recovery_thread.join(timeout=2)
         assert not service._startup_recovery_thread.is_alive()
+        deadline = time.monotonic() + 2
         record = store.get_callback_outbox(callback_id)
+        while record is not None and record["status"] != "http_accepted" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            record = store.get_callback_outbox(callback_id)
         assert record is not None
         assert record["status"] == "http_accepted"
     finally:
