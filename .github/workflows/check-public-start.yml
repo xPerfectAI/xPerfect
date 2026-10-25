@@ -144,8 +144,18 @@ jobs:
               subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', command[0], image, *command[1:]], check=True, timeout=60)
           # Run the native Chromium binary and write/read an actual file. No
           # account, model response or network page is required for CPU proof.
-          subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c',
-              "set -eu; chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/xperfect-browser-check --dump-dom 'data:text/html,<title>Native architecture check</title><p>Ready</p>' > /tmp/result.html; grep -q 'Ready' /tmp/result.html"], check=True, timeout=60, capture_output=True)
+          try:
+              subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c',
+                  "set -eu; chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/xperfect-browser-check --dump-dom 'data:text/html,<title>Native architecture check</title><p>Ready</p>' > /tmp/result.html; grep -q 'Ready' /tmp/result.html"], check=True, timeout=60, capture_output=True)
+          except subprocess.CalledProcessError as error:
+              # This fixture has no network, mounts, credentials or user content.
+              # Retain its bounded native diagnostic without changing acceptance.
+              diagnostic = (error.stderr or b'').decode('utf-8', errors='replace')
+              if len(diagnostic) > 8192:
+                  diagnostic = diagnostic[:4096] + '\n[truncated]\n' + diagnostic[-4096:]
+              print(json.dumps({'fixture': 'native_chromium', 'exit_code': error.returncode,
+                                'stderr': diagnostic}, ensure_ascii=True))
+              raise
           for role in ('mcp', 'ui', 'runtime'):
               subprocess.run(['docker', 'stop', receipt['containers'][role]], check=True, capture_output=True)
           for role in ('runtime', 'ui', 'mcp'):
