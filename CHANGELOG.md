@@ -18,6 +18,8 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Added:** An optional evidence kit for immutable inputs, independent result checks, terminal-evidence export and marker-last delivery. Retained outputs can be delivered again without another model call. It adds no runtime dependency or application-specific queue.
 - **Improved:** Docker startup and upgrade check the daemon's CPU architecture against both images before changing the package. An optional Linux operator policy can verify restrictive rules on one managed worker bridge; ordinary startup changes no firewall rules.
 
+- **Added:** Native Linux arm64 and amd64 package pairs, selected automatically for the Docker daemon. Exact image identity, wrong-CPU refusal, worker isolation and refusal/recovery checks are kept in the existing release workflow. Hosted XFS/OIDC qualification remains separate.
+
 - **Added:** Save a worker as an expert, keep exact versions, and edit, copy, archive, remove or restore it through the UI, API or MCP. Reuse a successful setup for another job without changing existing workers or losing saved work.
 - **Improved:** Run Project keeps the job, outcome, background and files while you choose a new, existing or copied worker. Section icons make the form easier to scan. The sixth expert card, Create, opens the normal new-worker setup without entering the brief again.
 - **Fixed:** An already-open native browser in a configured Linux shared workspace stays usable while AI work is paused. After supported idle maintenance, Resume then Open browser reuses the saved profile without resetting it. Legacy desktop limits remain documented.

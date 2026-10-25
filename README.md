@@ -130,8 +130,9 @@ With Python 3.11 or newer and Docker running, from the source folder:
 
 The launcher downloads its release images and keeps private state under `~/xperfect-local`.
 Open the printed URL and use `ui_password` from the private credentials file it prints. Keep that
-file private; it also holds MCP credentials. The current image release is `linux/arm64`;
-Windows startup and other CPU architectures remain under construction. See
+file private; it also holds MCP credentials. The release has exact `linux/arm64` and
+`linux/amd64` image pairs; startup selects the Docker daemon's CPU. Windows host startup
+remains under construction. See
 [package details](docs/deployment.md#packaged-linux) for the packaged version and settings.
 
 ## Your tools, your setup

@@ -10,7 +10,7 @@ The hosted profile runs the same three containers as the local package — runti
 
 ## What you need
 
-- **Arm64 Linux server** with Python 3.11+ and rootful Docker (cgroup v2). The published images currently support `linux/arm64`; Intel/amd64 and Windows host startup remain deferred. Rootless Docker and user-namespace remapping cannot set project quotas.
+- **Arm64 Linux server** with Python 3.11+ and rootful Docker (cgroup v2) for this retained hosted qualification. Published package pairs also include `linux/amd64`; its native local-package checks do not establish this separate XFS/OIDC hosted journey. Windows host startup remains deferred. Rootless Docker and user-namespace remapping cannot set project quotas.
 - **Files disk:** a dedicated XFS filesystem mounted with `prjquota`, not `pqnoenforce`. Mount it by UUID so it returns after a reboot, for example `UUID=… /srv/xperfect-data xfs prjquota,nosuid,nodev 0 2`. Docker's own storage (control state) must be on a different filesystem.
 - **OIDC provider** that issues:
   - an HTTPS issuer;

@@ -49,9 +49,12 @@ directory. The release records exact supported Codex and Claude model defaults;
 `--model PROFILE=MODEL` overrides a profile without changing other choices. Fully
 explicit image deployments and hosted inputs keep their own model configuration.
 
-The current saved release is `linux/arm64`: Apple silicon Macs and Arm Linux hosts.
-Windows startup and additional CPU image support remain intentionally under
-construction. Docker/WSL is the shared route; it is not evidence of a tested OS.
+The saved release contains exact `linux/arm64` and `linux/amd64` service/native pairs.
+Startup selects the Docker daemon's CPU before creating state; it refuses a mismatched
+image instead of silently using emulation. Both native Linux package paths have startup,
+CLI, file, browser, restart and opt-in worker-policy acceptance checks. These checks do
+not establish every provider account or the separate hosted XFS/OIDC profile on each CPU.
+Windows host startup remains under construction; Docker/WSL is not evidence of a tested OS.
 
 Advanced deployments can still use the explicit launcher:
 
@@ -448,7 +451,11 @@ state. An upgrade that keeps the isolated bridge does not require policy removal
 The optional live acceptance command is `sudo python3 tests/check_worker_network_live.py
 --native-image sha256:<verified-native-image>`. It checks reachable-before/denied-after behavior,
 positive controls, a separate unaffected bridge, stale/generation refusal and removal. It uses
-no provider credentials. See Docker's [iptables contract](https://docs.docker.com/engine/network/firewall-iptables/).
+no provider credentials. Add `--package-receipt` and `--package-policy` to check the
+normal launcher → actual workspace command → stale refusal → reapply recovery path on an
+explicitly disposable `xperfect-qa-*` package. Native CI also checks an exact exception
+cannot bypass Docker's worker isolation. Host reboot and real cloud platform addresses need
+qualification on that deployment; the package smoke test does not claim either. See Docker's [iptables contract](https://docs.docker.com/engine/network/firewall-iptables/).
 
 ### Image architecture
 
