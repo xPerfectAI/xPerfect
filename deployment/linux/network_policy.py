@@ -38,10 +38,16 @@ def require_operator():
 
 
 def rules_for(record, policy):
+    policy = contract.normalize_policy(policy)
     identifier, subnet, bridge = contract.network_identity(record)
     chain = "XPF_" + identifier[:16]
-    rules = [["-d", target["host"] + "/32", "-p", "tcp", "-m", "tcp", "--dport", str(target["port"]),
-              "-j", "REJECT", "--reject-with", "icmp-admin-prohibited"] for target in policy["denied"]]
+    rules = []
+    for target in policy["denied"]:
+        for exception in target["exceptions"]:
+            protocol = exception["protocol"]
+            rules.append(["-d", target["host"] + "/32", "-p", protocol, "-m", protocol,
+                          "--dport", str(exception["port"]), "-j", "ACCEPT"])
+        rules.append(["-d", target["host"] + "/32", "-j", "REJECT", "--reject-with", "icmp-admin-prohibited"])
     rules.append(["-j", "RETURN"])
     return chain, ["-i", bridge, "-s", subnet, "-j", chain], rules
 
@@ -49,6 +55,19 @@ def rules_for(record, policy):
 def verify_rules(record, policy, *, execute=run):
     chain, jump, rules = rules_for(record, policy)
     execute(["iptables", "-w", "5", "-C", "DOCKER-USER", *jump])
+    dispatch = [shlex.split(line) for line in execute(["iptables", "-w", "5", "-S", "DOCKER-USER"]).stdout.splitlines() if line.strip()]
+    dispatch = [line for line in dispatch if line[:2] == ["-A", "DOCKER-USER"]]
+    expected_jump = ["-A", "DOCKER-USER", *jump]
+    if expected_jump not in dispatch:
+        raise RuntimeError("Worker bridge dispatch is missing")
+    bridge = jump[1]
+    for preceding in dispatch[:dispatch.index(expected_jump)]:
+        # Another package may have its own restrictive jump. A positive literal
+        # input-interface match for a different bridge cannot bypass this one.
+        interface = preceding[preceding.index("-i") + 1] if "-i" in preceding else ""
+        if ("!" in preceding or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface)
+                or interface == bridge):
+            raise RuntimeError("Worker bridge rule can be bypassed; no foreign firewall rule was modified")
     output = execute(["iptables", "-w", "5", "-S", chain]).stdout
     lines = [shlex.split(line) for line in output.splitlines() if line.strip()]
     expected = [["-N", chain], *[["-A", chain, *rule] for rule in rules]]
@@ -86,8 +105,13 @@ def apply_rules(record, policy, *, execute=run):
 
 
 def remove_rules(record, policy, *, execute=run):
-    verify_rules(record, policy, execute=execute)
     chain, jump, rules = rules_for(record, policy)
+    if execute(["iptables", "-w", "5", "-S", chain], check=False).returncode:
+        execute(["iptables", "-w", "5", "-S", "DOCKER-USER"])
+        if execute(["iptables", "-w", "5", "-C", "DOCKER-USER", *jump], check=False).returncode == 0:
+            raise RuntimeError("Worker bridge dispatch remains; no unrecognized rule was modified")
+        return  # A prior exact removal succeeded but proof publication may need retry.
+    verify_rules(record, policy, execute=execute)
     execute(["iptables", "-w", "5", "-D", "DOCKER-USER", *jump])
     for rule in reversed(rules):
         execute(["iptables", "-w", "5", "-D", chain, *rule])
@@ -148,13 +172,13 @@ def _write_receipt(path: Path, receipt):
 
 def main():
     parser = argparse.ArgumentParser(description="Apply, verify or remove policy for one managed worker bridge")
-    parser.add_argument("action", choices=("apply", "verify", "refresh", "remove"))
+    parser.add_argument("action", choices=("apply", "verify", "remove"))
     parser.add_argument("--network", required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--image", required=True, help="Exact native image ID")
     parser.add_argument("--receipt", type=Path, required=True, help="Private operator proof file")
     parser.add_argument("--docker-host", default="unix:///var/run/docker.sock")
-    parser.add_argument("--runtime-container", help="Publish the verified proof to this exact package runtime")
+    parser.add_argument("--runtime-container", help="Exact package runtime, required for apply/verify; optional for removing an empty bridge")
     args = parser.parse_args()
     require_operator()
     if not args.docker_host.startswith("unix:///"):
@@ -167,31 +191,45 @@ def main():
         raise ValueError("Select an xPerfect-managed worker bridge")
     contract.network_identity(record)
     if args.action == "remove":
-        if not args.runtime_container:
-            raise ValueError("Name the stopped package runtime before removing its network policy")
-        runtime = json.loads(docker(["inspect", args.runtime_container]))[0]
-        labels = (runtime.get("Config") or {}).get("Labels") or {}
-        if (labels.get("xperfect.package") != (record.get("Labels") or {}).get("xperfect.package")
-                or labels.get("xperfect.role") != "runtime" or runtime.get("State", {}).get("Running")
-                or (record.get("Containers") or {})):
+        runtime = None
+        if args.runtime_container:
+            runtime = json.loads(docker(["inspect", args.runtime_container]))[0]
+            labels = (runtime.get("Config") or {}).get("Labels") or {}
+            if (labels.get("xperfect.package") != (record.get("Labels") or {}).get("xperfect.package")
+                    or labels.get("xperfect.role") != "runtime" or runtime.get("State", {}).get("Running")):
+                raise ValueError("Stop this exact package runtime before removing its network policy")
+        if record.get("Containers") or {}:
             raise ValueError("Stop this package and its worker containers before removing its network policy")
-        invalid = {"version": 1, "enforcement": "removed", "observed_at": 0}
+        invalid = {"version": 1, "enforcement": "removing", "observed_at": 0}
         _write_receipt(args.receipt, invalid)
-        docker(["cp", str(args.receipt), runtime["Id"] + ":/control/" + contract.RECEIPT_NAME])
+        if runtime is not None:
+            docker(["cp", str(args.receipt), runtime["Id"] + ":/control/" + contract.RECEIPT_NAME])
         remove_rules(record, policy)
+        invalid["enforcement"] = "removed"
+        _write_receipt(args.receipt, invalid)
+        if runtime is not None:
+            docker(["cp", str(args.receipt), runtime["Id"] + ":/control/" + contract.RECEIPT_NAME])
         print("Invalidated the proof and removed only the stopped worker bridge policy.")
         return
+    if not args.runtime_container:
+        raise ValueError("Name the existing package runtime to apply or verify its worker network policy")
+    target = json.loads(docker(["inspect", args.runtime_container]))[0]
+    labels = (target.get("Config") or {}).get("Labels") or {}
+    connected = (target.get("NetworkSettings") or {}).get("Networks") or {}
+    expected_package = (record.get("Labels") or {}).get("xperfect.package")
+    if (labels.get("xperfect.package") != expected_package or labels.get("xperfect.role") != "runtime"
+            or connected.get(args.network, {}).get("NetworkID") != record["Id"]):
+        raise ValueError("The runtime does not belong to this exact package bridge")
+    chain, _, _ = rules_for(record, policy)
+    if (args.action == "apply"
+            and run(["iptables", "-w", "5", "-S", chain], check=False).returncode):
+        # Revoke a prior removal acknowledgment before installing any new rule.
+        # Verifying an already installed chain keeps its current proof available.
+        _write_receipt(args.receipt, {"version": 1, "enforcement": "applying", "observed_at": 0})
+        docker(["cp", str(args.receipt), target["Id"] + ":/control/" + contract.RECEIPT_NAME])
     receipt = attest(docker=docker, network=args.network, image=args.image, policy=policy, apply=args.action == "apply")
     _write_receipt(args.receipt, receipt)
-    if args.runtime_container:
-        target = json.loads(docker(["inspect", args.runtime_container]))[0]
-        labels = (target.get("Config") or {}).get("Labels") or {}
-        connected = (target.get("NetworkSettings") or {}).get("Networks") or {}
-        expected_package = (record.get("Labels") or {}).get("xperfect.package")
-        if (labels.get("xperfect.package") != expected_package or labels.get("xperfect.role") != "runtime"
-                or connected.get(args.network, {}).get("NetworkID") != receipt["network_id"]):
-            raise ValueError("The runtime does not belong to this exact package bridge")
-        docker(["cp", str(args.receipt), target["Id"] + ":/control/" + contract.RECEIPT_NAME])
+    docker(["cp", str(args.receipt), target["Id"] + ":/control/" + contract.RECEIPT_NAME])
     print("Worker bridge rules and live positive/denied checks verified.")
 
 

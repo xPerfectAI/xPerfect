@@ -12,6 +12,65 @@ def policy(**overrides):
     return {"version":1,"enabled":True,"currency":"USD","limit_amount":"1.00","unknown_policy":"reserve","reserve_amount":"0.60",**overrides}
 
 
+def admitted_attempt(store, worker, run):
+    store.claim_next_queued_run(worker["worker_id"])
+    lease = store.acquire_host_run_lease(runtime_family="codex",lane="mission",tenant_id="local",owner_id="owner",worker_id=worker["worker_id"],run_id=run["run_id"],executor_id="executor",conversation_limit=2,mission_limit=4,account_mission_limit=4,tenant_mission_limit=4,lease_ttl_s=300)
+    return store.admit_claimed_run(run["run_id"],lease_id=lease["lease_id"],executor_id="executor"), lease
+
+
+@pytest.mark.parametrize("currency", ["USD", "EUR"])
+def test_final_invocation_fences_strengthened_reserve_after_admission(tmp_path,currency):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    admitted, lease = admitted_attempt(store,worker,run)
+    store.put_spend_policy("local","owner",policy(currency=currency,limit_amount="50",reserve_amount="100"),1)
+    with pytest.raises(AdmissionPolicyHold) as raised:
+        store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert raised.value.hold["reason_code"] == "spend_limit"
+    assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+    assert store.list_run_attempts(run["run_id"])[0]["attempt_id"] == admitted["active_attempt_id"]
+
+
+def test_final_gate_values_other_uninvoked_reservations_under_changed_policy(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    _,_,other,other_run=fixture_run(tmp_path,"two",store)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    _,lease=admitted_attempt(store,worker,run)
+    admitted_attempt(store,other,other_run)
+    store.put_spend_policy("local","owner",policy(currency="EUR",limit_amount="50",reserve_amount="30"),1)
+    with pytest.raises(AdmissionPolicyHold) as raised:
+        store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert raised.value.hold["reason_code"] == "spend_limit"
+    assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+
+
+@pytest.mark.parametrize("currency,reserve,limit", [("USD","2","2"),("USD","0.25","0.25"),("EUR","2","2")])
+def test_final_invocation_replaces_uninvoked_reserve_at_current_policy(tmp_path,currency,reserve,limit):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    admitted, lease = admitted_attempt(store,worker,run)
+    store.put_spend_policy("local","owner",policy(currency=currency,limit_amount=limit,reserve_amount=reserve),1)
+    invoked=store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert invoked["runtime_invoked_at"]
+    with store._connect() as conn:
+        saved=conn.execute("SELECT * FROM spend_reservations WHERE attempt_id=?",(admitted["active_attempt_id"],)).fetchone()
+        assert (saved["currency"],saved["amount"],saved["state"]) == (currency,reserve,"open")
+
+
+def test_changed_currency_never_revalues_an_invoked_reserve_or_adds_currencies(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    active,_=invoked_attempt(store,worker,run)
+    store.put_spend_policy("local","owner",policy(currency="EUR",limit_amount="50",reserve_amount="2"),1)
+    _,_,other,_=fixture_run(tmp_path,"two",store)
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    assert store.list_admission_holds("local","owner")[0]["reason_code"] == "usage_unknown"
+    with store._connect() as conn:
+        saved=conn.execute("SELECT * FROM spend_reservations WHERE attempt_id=?",(active["active_attempt_id"],)).fetchone()
+        assert (saved["currency"],saved["amount"],saved["state"]) == ("USD","1","open")
+    assert store.get_run(active["run_id"])["state"] == "running"
+
+
 def test_operator_hold_prevents_parallel_and_schedule_claim_churn_and_survives_restart(tmp_path):
     store, _, worker, run = fixture_run(tmp_path)
     hold = store.place_admission_hold("local", "owner")

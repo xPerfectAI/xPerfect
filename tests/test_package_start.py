@@ -21,6 +21,7 @@ class PackageStartTests(unittest.TestCase):
     def run_start(self, arguments, callback):
         with patch.object(sys, 'argv', ['launch.py', *arguments]), \
              patch.object(launch, 'local_docker_endpoint', return_value='unix:///test.sock'), \
+             patch.object(launch, 'docker', return_value=json.dumps({'OSType': 'linux', 'Architecture': 'arm64'})), \
              patch.object(launch, 'host_route_overlaps', return_value={}), \
              patch.object(launch, 'launch', side_effect=callback), \
              contextlib.redirect_stdout(io.StringIO()):

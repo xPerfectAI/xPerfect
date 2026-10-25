@@ -238,7 +238,8 @@ inspection. No automatic source cleanup occurs.
 An archive segment is **not** a crash-consistent runtime backup. Use the existing
 [G8 capture/restore procedure](../../docs/deployment.md) for authoritative state. Restore with the
 capture’s release, then follow the existing upgrade path. Keep the restored runtime inert. `reconcile`
-compares the exact existing G8 pending identities and hold-set digest with supplied restored rows;
+compares the exact existing G8 pending identities and hold-set digest with supplied restored rows,
+including accepted, blocked and restore-held coordinator work;
 it reports missing/conflicting/held identities and never unholds or dispatches work. Resume only
 through the existing owner-authorized recovery control after reconciliation. File counts and PIDs
 cannot authorize paid work.

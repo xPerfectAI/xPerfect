@@ -57,8 +57,6 @@ def account_launcher_from_environment():
     if (os.environ.get('XPERFECT_WORKER_NETWORK') != 'isolated' or not isinstance(options, dict)
             or options.get('com.docker.network.bridge.enable_icc') != 'false'):
         raise WorkspaceBoxUnavailable('The worker network must refuse traffic between containers')
-    from .worker_egress import require_current_receipt
-    require_current_receipt(network=network, docker=_docker)
     # A fresh challenge checks the live named-volume view. The probe receives
     # only this disposable public nonce subtree, never account or control data.
     name = '.substrate-' + secrets.token_hex(16)

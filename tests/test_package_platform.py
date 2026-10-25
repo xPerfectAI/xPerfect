@@ -45,3 +45,18 @@ def test_multi_platform_index_recovers_native_member_from_other_platform_cache()
 def test_unqualified_release_platform_is_not_called_corrupt_metadata():
     with pytest.raises(launch.PackagePlatformUnavailable, match='not been qualified'):
         launch.published_release(platform='linux/unsupported')
+
+
+def test_per_cpu_release_selects_the_exact_pair_and_refuses_incomplete_pairs():
+    manifest = {'registry': 'ghcr.io/example', 'platforms': ['linux/arm64', 'linux/amd64'], 'images': []}
+    for index, platform in enumerate(manifest['platforms']):
+        for offset, role in enumerate(('xperfect-service', 'xperfect-native')):
+            manifest['images'].append({'platform': platform, 'repository': role, 'digest': 'sha256:' + str(index * 2 + offset + 1) * 64})
+    with patch.object(Path, 'read_text', return_value=json.dumps(manifest)):
+        images, _ = launch.published_release(platform='linux/amd64')
+        assert images['xperfect-service'].endswith('sha256:' + '3' * 64)
+        assert images['xperfect-native'].endswith('sha256:' + '4' * 64)
+    manifest['images'].pop()
+    with patch.object(Path, 'read_text', return_value=json.dumps(manifest)):
+        with pytest.raises(ValueError, match='release metadata'):
+            launch.published_release(platform='linux/arm64')

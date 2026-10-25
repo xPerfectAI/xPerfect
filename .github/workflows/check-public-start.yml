@@ -20,6 +20,8 @@ jobs:
             platform: linux/amd64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
+    env:
+      EXPECTED_PLATFORM: ${{ matrix.platform }}
     steps:
       - name: Obtain the public source without credentials
         env:
@@ -36,10 +38,12 @@ jobs:
           mkdir -m 700 "$DOCKER_CONFIG"
           # No login and no cached candidate images: the command must obtain them.
           python3 - <<'PY'
-          import json, subprocess
+          import json, os, subprocess
           from pathlib import Path
           release = json.loads(Path('deployment/linux/candidate-images.json').read_text())
           for image in release['images']:
+              if image.get('platform', release.get('platform')) != os.environ['EXPECTED_PLATFORM']:
+                  continue
               ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
               result = subprocess.run(['docker', 'image', 'inspect', ref], capture_output=True)
               assert result.returncode != 0, 'The acceptance runner already has a candidate image'
@@ -60,6 +64,8 @@ jobs:
           assert receipt['platform'] == os.environ['EXPECTED_PLATFORM']
           local_ids = {}
           for image in release['images']:
+              if image.get('platform', release.get('platform')) != os.environ['EXPECTED_PLATFORM']:
+                  continue
               ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
               record = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref]))[0]
               assert record['Os'] + '/' + record['Architecture'] == os.environ['EXPECTED_PLATFORM']
@@ -159,8 +165,26 @@ jobs:
       - name: Verify opt-in worker bridge enforcement
         run: |
           cd "$RUNNER_TEMP/public-source"
+          python3 - <<'PY'
+          import json, os, socket, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          current = json.loads((Path.home() / 'xperfect-local/receipt.json').read_text())
+          address = sorted({item[4][0] for item in socket.getaddrinfo('example.com', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
+          policy = root / 'worker-policy.json'
+          policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
+              'positive': [{'host': 'example.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
+          policy.chmod(0o600)
+          with (root / 'policy-start-private.txt').open('wb') as log:
+              subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
+                  '--state-dir', str(root / 'policy-state'), '--ui-port', '18780', '--mcp-port', '18767',
+                  '--service-image', current['service_image'], '--native-image', current['native_image'],
+                  '--worker-egress-policy', str(policy)], check=True, stdout=log, stderr=subprocess.STDOUT)
+          print('Opt-in package launched without operator privileges')
+          PY
           native=$(python3 -c 'import json; from pathlib import Path; print(json.loads((Path.home()/"xperfect-local/receipt.json").read_text())["native_image"])')
-          sudo python3 tests/check_worker_network_live.py --native-image "$native"
+          sudo python3 tests/check_worker_network_live.py --native-image "$native" \
+            --package-receipt "$RUNNER_TEMP/policy-state/receipt.json" --package-policy "$RUNNER_TEMP/worker-policy.json"
       - name: Show a bounded failure without private output
         if: failure()
         run: |

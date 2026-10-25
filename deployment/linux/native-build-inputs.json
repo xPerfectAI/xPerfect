@@ -4,5 +4,10 @@
   "archive_sha256": "b66adde07114cf71573c7e12465324d98885182f825b63611c511a522e215559",
   "archive_ref": "base-amd64",
   "platform": "linux/amd64",
+  "client_versions": {
+    "codex": "codex-cli 0.159.0",
+    "claude": "2.1.280 (Claude Code)",
+    "grok": "grok 1.0.34 (3736acbc8658)"
+  },
   "source": "reviewed native workstation recipe; package wrapper is built on the native runner"
 }

@@ -77,3 +77,17 @@ def test_exact_g8_hold_reconciliation_is_inert_and_detects_missing_ids():
     assert reconcile_pending(expected, rows[:1], hold_set_sha256=hold)["state"] == "blocked"
     with pytest.raises(EvidenceError):
         reconcile_pending(expected[:1], rows, hold_set_sha256=hold)
+
+
+@pytest.mark.parametrize("state", ["accepted", "blocked", "restore_held"])
+def test_reconciles_real_coordinator_pending_states_without_authorizing_resume(state):
+    expected = ["goal:review-alpha", "turn:source-turn"]
+    hold = hashlib.sha256(json.dumps(expected, separators=(",", ":")).encode()).hexdigest()
+    rows = [{"identity": i, "state": state, "restore_hold": 1, "restore_hold_set_hash": hold}
+            for i in expected]
+    result = reconcile_pending(expected, rows, hold_set_sha256=hold)
+    assert result["state"] == "reconciled"
+    assert result["resume_authorized"] is False
+    assert {item["status"] for item in result["items"]} == {"pending_held"}
+    rows[0]["restore_hold"] = 0
+    assert reconcile_pending(expected, rows, hold_set_sha256=hold)["state"] == "blocked"

@@ -832,6 +832,29 @@ class Upgrade:
             options = {}
         return None if not isinstance(options, dict) else options.get(base.ICC_OPTION) == 'false'
 
+    def _require_worker_policy_removed(self, runtime: str, *, environment: dict | None = None) -> None:
+        """An opted-in bridge changes only after explicit operator policy removal."""
+        if environment is None:
+            environment = _read_config(self.endpoint, runtime, 'runtime')['environment']
+        if not str(environment.get('XPERFECT_WORKER_EGRESS_POLICY') or '').strip():
+            return
+        result = _docker(self.endpoint, 'cp', f'{runtime}:/control/worker-egress.json', '-')
+        try:
+            if result.returncode:
+                raise ValueError
+            with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+                member = archive.getmember('worker-egress.json')
+                if not member.isfile() or member.size > 32768:
+                    raise ValueError
+                proof = json.loads(archive.extractfile(member).read())
+            if proof.get('version') != 1 or proof.get('enforcement') != 'removed':
+                raise ValueError
+        except (ValueError, KeyError, AttributeError, tarfile.TarError):
+            raise UpgradeError('This worker bridge has an enabled egress policy. Before changing its isolation, '
+                               'stop the package, disconnect its stopped runtime from the worker bridge, and run '
+                               'network_policy.py remove for that exact bridge and runtime. Retry after operator '
+                               'removal; no worker bridge was changed') from None
+
     def _set_workers_network(self, receipt: dict, name: str, runtime: str, *, isolated: bool) -> None:
         """Recreate the idle workers bridge with or without isolation; resumable.
 
@@ -843,6 +866,7 @@ class Upgrade:
         current = self._workers_isolated(network)
         subnet = None
         if current is not None and current != isolated:
+            self._require_worker_policy_removed(runtime)
             # The recreated bridge keeps its address range: a package launched with --subnet
             # on a crowded Docker host must not need a free default range to upgrade.
             subnet = _ok(endpoint, 'network', 'inspect', '--format', '{{range .IPAM.Config}}{{.Subnet}}{{end}}',
@@ -1102,6 +1126,8 @@ class Upgrade:
                                'cannot serve its workers that way. Choose an image that declares an isolated '
                                'worker network. Nothing was changed')
         isolate = wants_isolated and not isolated
+        if isolate:
+            self._require_worker_policy_removed(shapes['runtime']['id'], environment=environment)
         changes_qa = (any(environment.get(key) != value for key, value in qa_environment.items())
                       if qa_environment is not None
                       else clear_local_qa and bool(LOCAL_QA_AUTHORITY_KEYS & set(environment)))
@@ -1373,6 +1399,10 @@ class Upgrade:
             if _inspect(endpoint, previous[role]) is None:
                 raise UpgradeError(f'The previous {role} container is missing, so there is nothing to return to. '
                                    'Nothing was rolled back; keep the upgraded version or restore from a backup')
+        if (journal.get('isolate_workers_network')
+                and self._workers_isolated(receipt['networks']['workers']) is True):
+            # Refuse before stopping/restoring/removing any current-version state.
+            self._require_worker_policy_removed(previous['runtime'])
         proof, changed = 'resumed after restore', journal.get('changed_since_upgrade', [])
         if phase != 'restored':
             if journal.get('snapshot'):

@@ -62,7 +62,7 @@ to your app; the receiving app decides what happens next.
 
 **Settings → Work pauses and spend** can hold new work for your account or a project,
 then resume the same queued work. Running work keeps going. Watch distinguishes reported
-usage from unknown usage; provider-reported cost is separate from an optional estimate.
+usage from unknown usage. Spending policies use reported money and explicit reserves when cost is unknown.
 These limits control new admissions, not a provider's final bill.
 
 Builders can use the optional [evidence kit](integrations/evidence-kit/README.md) to keep

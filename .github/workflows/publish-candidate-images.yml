@@ -79,13 +79,18 @@ jobs:
           jq -c '.images[]' "$manifest" | while read -r image; do
             destination="ghcr.io/$owner/$(jq -r .repository <<<"$image")"
             digest="$(jq -r .digest <<<"$image")"
+            platform="$(jq -r '.platform // empty' <<<"$image")"
             printf '%s' "$GH_TOKEN" | docker run --rm -i --entrypoint sh -v "$RUNNER_TEMP:/work" "$SKOPEO" -c '
               skopeo login --username "$0" --password-stdin ghcr.io >/dev/null &&
               skopeo copy --quiet --all --preserve-digests --retry-times 3 "oci-archive:/work/$1:$2" "docker://$3:$4" &&
-              skopeo inspect --raw "docker://$3@$5" | sha256sum | cut -d" " -f1 > /work/published.sha' \
+              skopeo inspect --raw "docker://$3@$5" | sha256sum | cut -d" " -f1 > /work/published.sha &&
+              if test -n "$6"; then skopeo inspect --config "docker://$3@$5" > /work/published-config.json; fi' \
               "$GITHUB_ACTOR" "$archive" "$(jq -r .archive_ref <<<"$image")" "$destination" \
-              "$(jq -r .tag <<<"$image")" "$digest"
+              "$(jq -r .tag <<<"$image")" "$digest" "$platform"
             test "sha256:$(cat "$RUNNER_TEMP/published.sha")" = "$digest"
+            if test -n "$platform"; then
+              jq -e --arg platform "$platform" '.os + "/" + .architecture == $platform' "$RUNNER_TEMP/published-config.json" >/dev/null
+            fi
             echo "Published $destination@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
           done
       - name: Report package visibility

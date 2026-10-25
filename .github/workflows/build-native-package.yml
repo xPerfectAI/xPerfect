@@ -9,8 +9,14 @@ on:
       - .github/workflows/build-native-package.yml
       - deployment/linux/native-build-inputs.json
       - deployment/linux/Dockerfile.service
-      - runtime_phase1/**
-      - frontends/glass-drive-ui/**
+      - runtime_phase1/containers/**
+      - runtime_phase1/src/workers_projects_runtime/storage_quota.py
+      - runtime_phase1/src/workers_projects_runtime/storage_quota_guard.py
+      - runtime_phase1/src/workers_projects_runtime/native_credential_exec.py
+      - runtime_phase1/src/workers_projects_runtime/account_native_entry.py
+      - runtime_phase1/src/workers_projects_runtime/grok_acp.py
+      - runtime_phase1/src/workers_projects_runtime/grok_auth.py
+      - runtime_phase1/src/workers_projects_runtime/native_key_reader.py
   workflow_dispatch:
 
 permissions: {}
@@ -49,9 +55,12 @@ jobs:
             -f runtime_phase1/containers/Dockerfile.shared -t xperfect-native:build runtime_phase1
           docker build --platform linux/amd64 --build-arg XPERFECT_NATIVE_IMAGE=xperfect-native:build \
             -f deployment/linux/Dockerfile.service -t xperfect-service:build .
-          docker run --rm --network none --entrypoint codex xperfect-native:build --version
-          docker run --rm --network none --entrypoint claude xperfect-native:build --version
-          docker run --rm --network none --entrypoint grok xperfect-native:build --version
+          for client in codex claude grok; do
+            actual=$(docker run --rm --network none --entrypoint "$client" xperfect-native:build --version)
+            expected=$(jq -r --arg client "$client" '.client_versions[$client]' deployment/linux/native-build-inputs.json)
+            test "$actual" = "$expected"
+            echo "Verified $client version"
+          done
       - name: Export exact images for review and existing publication
         run: |
           cd "$RUNNER_TEMP/source"

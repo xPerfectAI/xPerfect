@@ -392,6 +392,7 @@ class WorkspaceMemberDesktop:
         return None
 
     def _start_locked(self, password):
+        self.box.require_egress_proof()
         box = self.box._inspect()
         if not box or not box['State'].get('Running'):
             raise WorkspaceBoxUnavailable('Workspace compute is unavailable')
@@ -486,6 +487,7 @@ class WorkspaceMemberDesktop:
         return self._view_url(state, password)
 
     def launch_application(self, command):
+        self.box.require_egress_proof()
         state = self._read_state()
         record = self._record(state) if state else None
         box = self.box._inspect()

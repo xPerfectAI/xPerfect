@@ -38,6 +38,19 @@ def reconcile(store, run, usage=None, **kwargs):
                                          invocation_at=run["runtime_invoked_at"], **kwargs)
 
 
+def bound_account(store, worker, run, label="Synthetic"):
+    control=ControlPlaneStore(store.db_path)
+    account=control.create_provider_account(tenant_id="local",owner_id="owner",provider="codex",label=label,auth_method="subscription",platform_support="supported",secret_locator="native-home://synthetic",status="ready")
+    receipt=json.dumps({"run_id":run["run_id"],"connection_id":account["account_id"]})
+    with store._connect() as conn:
+        conn.execute("""INSERT INTO allowed_ai_start_fences
+            (run_id,attempt_id,worker_id,project_id,tenant_id,owner_id,project_revision,workspace_revision,admission_json,receipt_json,created_at)
+            VALUES (?,?,?,?,?,?,0,0,'{}',?,?)""",
+            (run["run_id"],run["active_attempt_id"],worker["worker_id"],worker["project_id"],"local","owner",receipt,run["runtime_invoked_at"]))
+        conn.execute("UPDATE runs SET allowed_ai_connection_receipt_json=? WHERE run_id=?",(receipt,run["run_id"]))
+    return control,account
+
+
 @pytest.mark.parametrize("value,status", [(None,"not_reported"),(0,"reported"),(True,"invalid"),(-1,"invalid"),(1.2,"invalid"),("3","invalid")])
 def test_strict_observation_preserves_missing_invalid_and_zero(value, status):
     assert normalize_observation({"input_tokens": value})["tokens"]["input_tokens"]["status"] == status
@@ -191,18 +204,70 @@ def test_account_projection_once_and_unknown_coverage_survive_reload(tmp_path):
 
 def test_late_run_receipt_updates_account_in_same_transaction_once(tmp_path):
     store, _, worker, run = fixture_run(tmp_path)
-    control = ControlPlaneStore(store.db_path)
-    account = control.create_provider_account(tenant_id="local", owner_id="owner", provider="codex", label="Synthetic", auth_method="subscription", platform_support="supported", secret_locator="native-home://synthetic", status="ready")
     run, _ = invoked_attempt(store, worker, run)
-    with store._connect() as conn:
-        conn.execute("UPDATE runs SET allowed_ai_connection_receipt_json=? WHERE run_id=?",
-                     (json.dumps({"run_id":run["run_id"],"connection_id":account["account_id"]}), run["run_id"]))
+    control,account=bound_account(store,worker,run)
     reconcile(store, run, {"input_tokens":0,"output_tokens":4})
+    pending=control.get_provider_account(account_id=account["account_id"],tenant_id="local",owner_id="owner")
+    assert pending["observed_runs"] == 0 and pending["observed_failures"] == 0
+    store.finalize_run(run["run_id"],"completed")
     reconcile(store, run, {"input_tokens":0,"output_tokens":6}, revision=1)
     reconcile(store, run)
     result = control.get_provider_account(account_id=account["account_id"],tenant_id="local",owner_id="owner")
     assert result["observed_runs"] == 1 and result["observed_output_tokens"] == 6
-    assert result["observed_unknown_runs"] == 0
+    assert result["observed_unknown_runs"] == 0 and result["observed_failures"] == 0
+
+
+@pytest.mark.parametrize("state",["completed","failed"])
+def test_recovered_result_projects_terminal_attempt_outcome_without_wrapper(tmp_path,state):
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    from workers_projects_runtime.service import WorkersProjectsService
+    store,_,worker,run=fixture_run(tmp_path)
+    run,_=invoked_attempt(store,worker,run)
+    control,account=bound_account(store,worker,run)
+    class RecoveredUsage(StubRuntime):
+        def run_usage(self, exact_worker, run_id):
+            assert exact_worker["_run_attempt_id"] == run["active_attempt_id"]
+            return {"input_tokens":0,"output_tokens":4}
+    service=WorkersProjectsService(store,RecoveredUsage(),reconcile_on_startup=False,start_background_consumers=False)
+    try:
+        service._apply_recovered_run(worker,run,{"state":state,"output_text":"Synthetic result","error_text":""})
+        # Reapplying usage after the terminal transition must not count twice.
+        reconcile(store,run)
+        result=control.get_provider_account(account_id=account["account_id"],tenant_id="local",owner_id="owner")
+        assert result["observed_runs"] == 1
+        assert result["observed_failures"] == int(state == "failed")
+        assert result["observed_output_tokens"] == 4 and result["observed_unknown_runs"] == 0
+    finally:
+        service.shutdown()
+
+
+def test_historical_receipt_uses_exact_attempt_binding_and_outcome_after_successful_retry(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    first,lease=invoked_attempt(store,worker,run)
+    control,account_a=bound_account(store,worker,first,"First account")
+    store.requeue_run_for_retry(first["run_id"],retry_after=utc_now(),expected_attempt_id=first["active_attempt_id"],expected_lease_id=lease["lease_id"],expected_executor_id=lease["executor_id"],expected_startup_token=lease["startup_token"],last_retry_class="provider_response_failed")
+    second,_=invoked_attempt(store,worker,store.get_run(run["run_id"]))
+    _,account_b=bound_account(store,worker,second,"Second account")
+    store.finalize_run(second["run_id"],"completed")
+    reconcile(store,first,{"input_tokens":3,"output_tokens":4})
+    reconcile(store,first,{"input_tokens":3,"output_tokens":4})
+    reconcile(store,second,{"input_tokens":5,"output_tokens":6})
+    a=control.get_provider_account(account_id=account_a["account_id"],tenant_id="local",owner_id="owner")
+    b=control.get_provider_account(account_id=account_b["account_id"],tenant_id="local",owner_id="owner")
+    assert (a["observed_runs"],a["observed_failures"],a["observed_input_tokens"],a["observed_output_tokens"]) == (1,1,3,4)
+    assert (b["observed_runs"],b["observed_failures"],b["observed_input_tokens"],b["observed_output_tokens"]) == (1,0,5,6)
+
+
+def test_wrapper_first_and_terminal_projection_count_outcome_and_duration_once(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    run,_=invoked_attempt(store,worker,run)
+    control,account=bound_account(store,worker,run)
+    control.record_provider_account_usage(account_id=account["account_id"],tenant_id="local",owner_id="owner",succeeded=False,duration_seconds=2,input_tokens=0,output_tokens=4,receipt_id=run["active_attempt_id"])
+    reconcile(store,run,{"input_tokens":0,"output_tokens":4})
+    store.finalize_run(run["run_id"],"failed")
+    reconcile(store,run,{"input_tokens":0,"output_tokens":6},revision=1)
+    result=control.get_provider_account(account_id=account["account_id"],tenant_id="local",owner_id="owner")
+    assert (result["observed_runs"],result["observed_failures"],result["observed_duration_seconds"],result["observed_output_tokens"]) == (1,1,2,6)
 
 
 @pytest.mark.parametrize("source", ["http_response", "harness_reported", "adapter_synthesized", "unavailable"])

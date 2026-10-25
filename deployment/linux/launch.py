@@ -377,16 +377,7 @@ def validate_worker_egress(value):
     if value is None:
         return None
     module = worker_egress_module()
-    module.require_operator()
     return module.contract.normalize_policy(value)
-
-
-def attest_worker_egress(endpoint, network, image, policy):
-    if policy is None:
-        return None
-    return worker_egress_module().attest(
-        docker=lambda arguments: docker(endpoint, *arguments), network=network,
-        image=image, policy=policy, apply=True)
 
 
 def network_create_args(*, name: str, role: str, network: str, settings: dict,
@@ -561,7 +552,6 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
         for volume in volumes.values():
             docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
             created.append(('volume', volume))
-        egress_receipt = attest_worker_egress(endpoint, networks['workers'], native_image, worker_egress_policy)
     except (RuntimeError, ValueError):
         for kind, resource in reversed(created):
             try:
@@ -614,9 +604,6 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
         receipt['containers'][role] = identity
         if role == 'runtime':
             environments[role]['XPERFECT_CONTROLLER_ID'] = identity
-            if egress_receipt is not None:
-                docker(endpoint, 'cp', '-', identity + ':' + state_target,
-                       data=_file_archive('worker-egress.json', json.dumps(egress_receipt).encode(), 0o600))
             docker(endpoint, 'cp', '-', identity + ':' + state_target,
                    data=_file_archive('assertion-jwks.json', jwks, 0o644))
         docker(endpoint, 'cp', '-', identity + ':' + state_target,
@@ -701,7 +688,7 @@ def discard_unstarted(endpoint: str, name: str) -> dict:
 HOSTED_ROLES = {'member', 'viewer', 'tenant_admin'}
 HOSTED_REQUIRED = {'public_url', 'mcp_public_url', 'issuer', 'client_id', 'client_secret_file', 'tenant_id',
                    'tls_certificate_file', 'tls_key_file', 'xfs_mount', 'xfs_device'}
-HOSTED_OPTIONAL = {'principal_claim', 'mcp_audiences', 'mcp_scopes', 'mcp_client_ids', 'storage_limit_bytes',
+HOSTED_OPTIONAL = {'principal_claim', 'mcp_audiences', 'mcp_scopes', 'mcp_client_ids', 'storage_limit_bytes', 'worker_egress_policy',
                    'shared_memory_bytes', 'extra_hosts', 'bind_address', 'tls_ca_file', 'models',
                    'role_claim', 'role_map', 'coordinator'}
 # The sign-in gateway's existing identity-provider role settings, given to the UI and MCP only.
@@ -956,7 +943,6 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
             else:
                 docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
             created.append(('volume', volume))
-        egress_receipt = attest_worker_egress(endpoint, networks['workers'], native_image, value['worker_egress_policy'])
     except (RuntimeError, ValueError):
         for kind, resource in reversed(created):
             try:
@@ -1025,9 +1011,6 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
         receipt['containers'][role] = identity
         if role == 'runtime':
             environments[role]['XPERFECT_CONTROLLER_ID'] = identity
-            if egress_receipt is not None:
-                docker(endpoint, 'cp', '-', identity + ':' + state_target,
-                       data=_file_archive('worker-egress.json', json.dumps(egress_receipt).encode(), 0o600))
             docker(endpoint, 'cp', '-', identity + ':' + state_target,
                    data=_file_archive('assertion-jwks.json', jwks, 0o644))
         else:
@@ -1116,11 +1099,24 @@ def published_release(*, platform: str | None = None) -> tuple[dict[str, str], d
             raise ValueError
         if platform is not None and platform not in platforms:
             raise PackagePlatformUnavailable('The published image pair has not been qualified for this Docker host platform. Use a tested matching pair.')
+        selected_platform = platform or release.get('default_platform', platforms[0])
+        if selected_platform not in platforms:
+            raise ValueError
         if not isinstance(registry, str) or not isinstance(images, list):
             raise ValueError
         result = {}
         for role in ('xperfect-service', 'xperfect-native'):
-            selected = [image for image in images if isinstance(image, dict) and image.get('repository') == role]
+            per_platform = any(isinstance(image, dict) and 'platform' in image for image in images)
+            if per_platform:
+                if any(not isinstance(image, dict) or image.get('platform') not in platforms for image in images):
+                    raise ValueError
+                for declared in platforms:
+                    if len([image for image in images if image.get('repository') == role and image.get('platform') == declared]) != 1:
+                        raise ValueError
+            elif len(platforms) != 1:
+                raise ValueError
+            selected = [image for image in images if isinstance(image, dict) and image.get('repository') == role
+                        and (not per_platform or image.get('platform') == selected_platform)]
             if len(selected) != 1:
                 raise ValueError
             reference = registry + '/' + role + '@' + selected[0]['digest']
@@ -1183,7 +1179,7 @@ def main():
     parser.add_argument('--profile', choices=('local-linux', 'hosted-xfs'), default='local-linux')
     parser.add_argument('--hosted-config', type=Path, help='Private hosted input JSON (hosted-xfs only)')
     parser.add_argument('--worker-egress-policy', type=Path,
-                        help='Local profile: explicitly install scoped Linux-host egress rules and checks from this JSON file')
+                        help='Local profile: record an opt-in worker policy; the Linux host administrator applies it separately')
     parser.add_argument('--model', action='append', metavar='PROFILE=MODEL',
                         help='Exact native model for a worker profile, e.g. grok-build=<model>; repeatable')
     parser.add_argument('--coordinator-config', type=Path, metavar='PRIVATE_JSON',
@@ -1197,7 +1193,11 @@ def main():
     release_models = {}
     using_published_images = args.service_image is None or args.native_image is None
     if args.service_image is None or args.native_image is None:
+        # Validate metadata before contacting Docker or creating local state.
         images, release_models = published_release()
+        endpoint = local_docker_endpoint(args.docker_host)
+        native_platform = daemon_platform(json.loads(docker(endpoint, 'info', '--format', '{{json .}}')))
+        images, release_models = published_release(platform=native_platform)
         args.service_image = args.service_image or images['xperfect-service']
         args.native_image = args.native_image or images['xperfect-native']
     models = parse_model_arguments(args.model)

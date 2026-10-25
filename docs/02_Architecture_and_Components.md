@@ -1322,6 +1322,9 @@ compatibility. Money contains provider-reported decimal amounts and explicit cur
 context occupancy and conversation estimates establish no bill. Native retry, child and compaction
 cost is included only where the native receipt proves coverage. Account counters apply receipt
 identity/revision idempotently in the same runtime database and expose unknown-run coverage.
+Recovered receipts wait for the exact attempt's terminal outcome before projecting account
+counters. The immutable attempt start fence owns the account binding; a later retry's run state
+or connection cannot change an earlier attempt's account or outcome.
 Native terminal controls also close the exact attempt and settle its reservation in their existing
 transaction. Interrupted work without a native usage report remains unknown; it is never free.
 Host conversation cleanup uses the same attempt metric writer before publishing its result.
@@ -1340,6 +1343,9 @@ claim filter excludes held scopes before creating an attempt; admission and invo
 recheck races. A policy hold waits without provider retry budget or timer. Explicit generation-checked
 Resume wakes the existing scheduler. Invoked work continues. Delayed receipts, unknown charges and
 calls inside an active native harness can exceed a threshold: this is not a provider billing cap.
+The final invocation gate values uninvoked reservations under the current policy and replaces
+their earlier amount and currency. Invoked reservations retain their original values. Outstanding
+invoked reservations in another currency pause admission as unknown; no conversion is inferred.
 
 Operator holds share that admission owner, with bounded `operator_pause` or `transport_integrity`
 reasons. They require an explicit operator/monitor request; core does not infer shared corruption

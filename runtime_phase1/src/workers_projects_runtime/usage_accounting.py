@@ -292,12 +292,20 @@ def reconcile_conn(conn, *, run_id: str, attempt_id: str, usage: dict[str, Any] 
 
 def project_account_conn(conn, run_id: str, attempt_id: str, summary: dict) -> None:
     """Apply late/recovered receipts to existing account counters in this transaction."""
-    row = conn.execute("SELECT r.*,w.owner_id FROM runs r JOIN workers w ON w.worker_id=r.worker_id WHERE r.run_id=?", (run_id,)).fetchone()
+    attempt = conn.execute("SELECT * FROM run_attempts WHERE run_id=? AND attempt_id=?", (run_id, attempt_id)).fetchone()
+    # A recovered usage file can arrive before terminal lifecycle authority.
+    # Preserve the receipt immediately, but never infer a failure from running
+    # work. The terminal attempt trace reapplies this projection in its txn.
+    if attempt is None or not attempt["runtime_invoked_at"] or attempt["ended_at"] is None:
+        return
+    row = conn.execute("SELECT * FROM allowed_ai_start_fences WHERE run_id=? AND attempt_id=?", (run_id, attempt_id)).fetchone()
+    if row is None:
+        return
     try:
-        binding = json.loads(row["allowed_ai_connection_receipt_json"] or "{}")
+        binding = json.loads(row["receipt_json"] or "{}")
     except (TypeError, ValueError):
         return
-    account_id = binding.get("connection_id")
+    account_id = binding.get("connection_id") if isinstance(binding, dict) else None
     if not account_id or binding.get("run_id") != run_id:
         return
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_accounts'").fetchone():
@@ -305,7 +313,7 @@ def project_account_conn(conn, run_id: str, attempt_id: str, summary: dict) -> N
     account = conn.execute("SELECT 1 FROM provider_accounts WHERE account_id=? AND tenant_id=? AND owner_id=?", (account_id, row["tenant_id"], row["owner_id"])).fetchone()
     if account is None:
         return
-    revision = conn.execute("SELECT usage_revision FROM run_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()[0]
+    revision = attempt["usage_revision"]
     first, input_delta, output_delta, unknown_delta = account_usage_delta(
         conn, receipt_id=attempt_id, revision=revision, account_id=account_id,
         tenant_id=row["tenant_id"], owner_id=row["owner_id"],
@@ -316,5 +324,5 @@ def project_account_conn(conn, run_id: str, attempt_id: str, summary: dict) -> N
         observed_input_tokens=CASE WHEN ? IS NULL THEN observed_input_tokens ELSE COALESCE(observed_input_tokens,0)+? END,
         observed_output_tokens=CASE WHEN ? IS NULL THEN observed_output_tokens ELSE COALESCE(observed_output_tokens,0)+? END
         WHERE account_id=? AND tenant_id=? AND owner_id=?""",
-        (int(first), int(first and row["state"] != "completed"), unknown_delta,
+        (int(first), int(first and attempt["state"] != "completed"), unknown_delta,
          input_delta, input_delta, output_delta, output_delta, account_id, row["tenant_id"], row["owner_id"]))

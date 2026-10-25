@@ -371,52 +371,77 @@ worker bridge and its IPv4 subnet. It does not change the host's default firewal
 networks or the separate clean-room proxy policy. Package worker networks have IPv6 disabled;
 this option does not claim IPv6 or cloud-wide protection.
 
-Use the complete checkout. Save a private JSON policy with the TCP destinations to deny and
-reachable positive controls. For example, an operator can deny its environment's metadata
-address while checking DNS and an approved provider connection:
+Use the complete checkout. Save a private JSON policy with the IPv4 addresses to deny and
+reachable positive TCP controls. Each denied address blocks **all protocols and ports**.
+`probe_port` is only the TCP port used to check the denial. Replace the positive-control
+placeholder with a reachable DNS name approved for this deployment:
 
 ```json
 {
-  "denied": [{"host": "169.254.169.254", "port": 80}],
-  "positive": [{"host": "api.openai.com", "port": 443}],
+  "denied": [{"host": "169.254.169.254", "probe_port": 80}],
+  "positive": [{"host": "approved-service.example", "port": 443}],
   "max_age_seconds": 300,
   "timeout_seconds": 1
 }
 ```
 
-Choose addresses for the actual environment. A failed positive control refuses the policy;
-an unreachable metadata service alone does not prove enforcement. AWS connections should use
-explicit projected credentials when their metadata route is denied.
+Choose addresses for the actual environment. A denied address may declare narrow `exceptions`,
+such as `[{"protocol":"udp","port":53},{"protocol":"tcp","port":53}]` when that same address
+also provides DNS. Only TCP/UDP with an exact port is supported. A TCP exception cannot equal
+the denied `probe_port`. The earlier denied `port` spelling is accepted as a probe-port alias.
+A failed positive control refuses the proof. Timeouts, connection refusal and network-unreachable
+errors do not count as denial proof. The Linux `icmp-admin-prohibited` REJECT must produce
+`EHOSTUNREACH` (113), alongside exact rule readback and reachable positive controls. Linux's
+[ICMP error mapping](https://github.com/torvalds/linux/blob/master/net/ipv4/icmp.c) defines this
+administratively prohibited response. Qualify this
+signature on the actual host kernel; an unreachable service alone proves nothing. AWS connections
+must use explicit projected credentials when their metadata route is denied.
 
 On this Linux host, start a new package with the existing command and the explicit option:
 
 ```sh
-sudo ./xperfect start --docker --worker-egress-policy /etc/xperfect/worker-egress.json
+./xperfect start --docker --worker-egress-policy /etc/xperfect/worker-egress.json
 ```
 
-The launcher reads back the exact rules, runs an unprivileged disposable probe on that network
-without mounting application data, and places a private proof in the runtime control volume.
-Ordinary startup performs no extra probe or firewall operation. With the option enabled, new
-native commands require a current proof for the same network generation and policy. Missing,
-expired or changed proof refuses new execution with a refresh instruction; it does not cancel
-an already-running native process or silently switch models.
+Run the launcher as the normal package owner. It only records the opt-in policy; it does not
+change firewall rules or require administrator privileges. UI/API startup remains available
+without a proof. An administrator then runs `apply` on the Linux host that owns this exact
+bridge. The operator tool reads back the rules, runs an unprivileged disposable probe without
+application mounts, and publishes a private proof to the existing package runtime. With the
+option enabled, every new native command, account launch, desktop start and application launch requires a current proof for the same
+network generation and policy. Missing, expired or changed proof refuses new execution with an
+apply instruction; it does not stop the UI/API, cancel an already-running native process or
+silently switch models. Existing desktop reuse, human interaction, status reads and cleanup remain available.
 
-Refresh from the same Docker host before the configured lifetime expires. Use the network,
+Apply from the same Docker host before the configured lifetime expires. Use the network,
 runtime container and native image recorded in this package's receipt:
 
 ```sh
-sudo python3 deployment/linux/network_policy.py refresh \
+sudo python3 deployment/linux/network_policy.py apply \
   --network xperfect-local-workers --policy /etc/xperfect/worker-egress.json \
   --image sha256:<recorded-native-image> --receipt /etc/xperfect/worker-egress-proof.json \
   --runtime-container xperfect-local-runtime
 ```
 
-`refresh` rechecks rules and live behavior; it does not reinstall missing rules. `apply` installs
-the exact declared rules when absent. Both refuse unknown rules. An operator can run refresh
-from its existing host timer. Keep that timer and policy with the deployment, outside the repo.
-Network replacement requires a fresh apply/proof for the new generation. To remove the rules,
-stop the package and all attached worker containers, then use `remove` with the same arguments;
-it invalidates the old proof before removing only the owned rules.
+`apply` is idempotent: it installs the exact declared rules when absent and verifies them when
+present. `verify` checks an existing installation. Both refuse unknown rules. `refresh` is no
+longer an action. Configure the existing host service/timer to run `apply` after Docker starts
+at boot and before the proof expires. Docker/firewall restart or host reboot may remove rules;
+proof files alone do not restore them. Keep this timer and policy outside the repo. Until apply
+succeeds, UI/API remain available and native work refuses admission.
+
+Public apply/verify requires an existing matching package runtime, so an unstarted launch cannot
+leave policy rules behind. Before replacing or deleting a worker bridge, stop the package and
+remove all attached worker containers and disconnect the stopped runtime from that worker bridge,
+then run `remove` with the same arguments. It invalidates
+the old proof before removing only the exact owned rules. If the runtime container was already
+removed, omit `--runtime-container`; removal still requires the exact empty managed bridge and
+known rules. Remove the policy **before** deleting that bridge. No global firewall cleanup is
+performed. A new bridge generation requires a fresh apply/proof.
+
+Upgrade or rollback refuses an isolation change on an opted-in bridge until this completed
+operator removal is recorded. It checks before changing the bridge or rolling back service
+state. An upgrade that keeps the isolated bridge does not require policy removal.
 
 The optional live acceptance command is `sudo python3 tests/check_worker_network_live.py
 --native-image sha256:<verified-native-image>`. It checks reachable-before/denied-after behavior,
@@ -426,7 +451,7 @@ no provider credentials. See Docker's [iptables contract](https://docs.docker.co
 ### Image architecture
 
 Startup and upgrade use the Docker **daemon's** architecture. Both the service and native image
-must match it; an explicit foreign image is refused before package changes. A multi-platform
-release index selects its native member with `docker pull --platform`; it never enables
-emulation silently. The release manifest records qualified platforms. Cross-building on one
-CPU is useful preparation, not native acceptance on the other CPU.
+must match it; an explicit foreign image is refused before package changes. Saved releases select
+an exact service/native manifest pair for each qualified CPU. Operators may also supply an
+explicit multi-platform index; `docker pull --platform` selects its native member without silent
+emulation. Cross-building on one CPU is useful preparation, not native acceptance on the other CPU.

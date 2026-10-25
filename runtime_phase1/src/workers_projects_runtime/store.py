@@ -18475,6 +18475,10 @@ class Store:
                 and attempt["ended_at"] is not None and attempt["runtime_invoked_at"]):
             usage_accounting.reconcile_conn(conn, run_id=attempt["run_id"], attempt_id=attempt_id,
                 usage=None, invocation_at=attempt["runtime_invoked_at"], observed_at=created_at)
+        elif attempt["ended_at"] is not None and attempt["runtime_invoked_at"]:
+            summary = json.loads(attempt["usage_summary_json"] or "{}")
+            if summary:
+                usage_accounting.project_account_conn(conn, attempt["run_id"], attempt_id, summary)
         scope = self._work_trace_scope_conn(conn, str(attempt["run_id"]))
         if scope is None:
             return

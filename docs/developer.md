@@ -382,8 +382,9 @@ layers from that commit and returns immutable code-only archives to a draft rele
 only on an explicit `codex/build-*` maintainer branch or manual dispatch. It never imports a
 developer's account, application state or environment.
 
-The existing image publisher accepts OCI indexes and optional digest-checked archive parts; it
-preserves all manifests. **Public package start** runs on native Arm and x86 runners. It checks
+The existing image publisher accepts OCI layouts and optional digest-checked archive parts; it
+preserves exact manifests. Saved releases use one explicit manifest pair per CPU, so operators
+do not assemble an index. **Public package start** runs on native Arm and x86 runners. It checks
 anonymous download, exact image/platform identity, protected UI, authenticated MCP, native
 binaries, Chromium/file execution, restart and the opt-in bridge policy. This credential-free
 check does not claim authenticated inference on every provider. Keep the saved release pin on

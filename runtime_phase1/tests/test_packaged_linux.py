@@ -456,8 +456,11 @@ def test_launch_hosted_composes_xfs_oidc_tls_roles(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, 'docker', docker)
     monkeypatch.setattr(module.urllib.request, 'urlopen', urlopen)
+    hosted = _hosted_input(tmp_path)
+    hosted['worker_egress_policy'] = {'denied': [{'host': '169.254.169.254', 'probe_port': 80}],
+                                      'positive': [{'host': 'example.test', 'port': 443}]}
     receipt = module.launch_hosted(endpoint='unix:///var/run/docker.sock', name='xperfect-hosted', image=image,
-                                   native_image=native, ui_port=18443, mcp_port=18444, hosted=_hosted_input(tmp_path))
+                                   native_image=native, ui_port=18443, mcp_port=18444, hosted=hosted)
     assert receipt['profile'] == 'hosted-xfs' and receipt['storage_limit_bytes'] == 5_000_000_000
     assert ('volume', 'create', '--driver', 'local', '--opt', 'type=none', '--opt', 'o=bind',
             '--opt', 'device=/srv/xperfect-data', '--label', 'xperfect.package=xperfect-hosted',
@@ -483,6 +486,8 @@ def test_launch_hosted_composes_xfs_oidc_tls_roles(tmp_path, monkeypatch):
         assert env['GLASSHIVE_ENABLE_CODEX_PERSONAL_ACCOUNTS'] == '1'
         assert env['GLASSHIVE_ENABLE_HOSTED_CLAUDE_CONSUMER_AUTH'] == '1'
     assert 'assertion-jwks.json' in copies[ids['runtime']] and 'tls/key.pem' not in copies[ids['runtime']]
+    assert json.loads(configs[ids['runtime']]['environment']['XPERFECT_WORKER_EGRESS_POLICY'])['denied'][0]['probe_port'] == 80
+    assert not any('worker-egress.json' in names for names in copies.values())
     assert {'tls/cert.pem', 'tls/key.pem'} <= set(copies[ids['ui']]) and {'tls/cert.pem', 'tls/key.pem'} <= set(copies[ids['mcp']])
     kids = receipt['signing_key_ids']
     assert kids['ui'] != kids['mcp']
@@ -1332,6 +1337,44 @@ def test_every_packaged_profile_declares_the_isolated_worker_network():
         'local-linux': 'isolated', 'hosted-xfs': 'isolated'}
 
 
+@pytest.mark.parametrize('proof_state', ['missing', 'stale'])
+def test_packaged_startup_allows_missing_or_stale_policy_proof(tmp_path, monkeypatch, proof_state):
+    from workers_projects_runtime import packaged_linux as substrate
+    from workers_projects_runtime.worker_egress import POLICY_ENV
+    data, control = tmp_path / 'data', tmp_path / 'control'
+    data.mkdir(); control.mkdir()
+    image, controller = 'sha256:' + 'a' * 64, 'b' * 64
+    for key, value in {'XPERFECT_EXECUTION_PROFILE': 'local-linux', 'XPERFECT_SHARED_VOLUME_ROOT': str(data.resolve()),
+                       'XPERFECT_CONTROL_ROOT': str(control.resolve()), 'XPERFECT_SHARED_IMAGE': image,
+                       'XPERFECT_CONTROLLER_ID': controller, 'XPERFECT_SHARED_VOLUME_NAME': 'fixture-data',
+                       'XPERFECT_SHARED_NETWORK': 'fixture-workers', 'XPERFECT_WORKER_NETWORK': 'isolated',
+                       POLICY_ENV: json.dumps({'denied': [{'host': '169.254.169.254', 'probe_port': 80}],
+                                               'positive': [{'host': 'example.test', 'port': 443}]})}.items():
+        monkeypatch.setenv(key, value)
+    if proof_state == 'stale':
+        (control / 'worker-egress.json').write_text('{"observed_at":0}')
+    def docker(arguments):
+        if arguments[:1] == ['info']:
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+        if arguments[:2] == ['image', 'inspect']:
+            return image
+        if arguments == ['inspect', controller]:
+            return json.dumps([{'Id': controller, 'State': {'Running': True},
+                'Mounts': [{'Destination': str(data.resolve()), 'Type': 'volume', 'Name': 'fixture-data'},
+                           {'Destination': str(control.resolve()), 'Type': 'volume', 'Name': 'fixture-control'}],
+                'NetworkSettings': {'Networks': {'fixture-workers': {}}}}])
+        if arguments[:2] == ['network', 'inspect']:
+            return json.dumps({'com.docker.network.bridge.enable_icc': 'false'})
+        if arguments[:1] == ['run']:
+            return json.dumps({'nonce': next(data.glob('.substrate-*/challenge')).read_text(),
+                               'uids': [20001, 60000, 100001, 200000]})
+        raise AssertionError(arguments)
+    monkeypatch.setattr(substrate, '_docker', docker)
+    sentinel = object()
+    monkeypatch.setattr('workers_projects_runtime.account_container.create_packaged_account_launcher', lambda **kw: sentinel)
+    assert substrate.account_launcher_from_environment() is sentinel
+
+
 _COORDINATOR_ROUTE = {'id': 'codex', 'profile': 'codex-cli', 'model': 'codex-cli:gpt-6-sol', 'effort': 'medium',
                       'execution_mode': 'docker'}
 
@@ -1447,6 +1490,27 @@ def _stateful_docker(module, monkeypatch, *, fail_network=None, fail_detail=''):
     monkeypatch.setattr(module, 'docker', docker)
     monkeypatch.setattr(module.urllib.request, 'urlopen', lambda *a, **k: Health())
     return state
+
+
+def test_opted_in_local_launch_only_records_policy_without_operator_or_firewall(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from workers_projects_runtime import worker_egress
+    module = _launch_module()
+    state = _stateful_docker(module, monkeypatch)
+    # The unprivileged launch only needs the schema; no operator/apply API exists here.
+    monkeypatch.setattr(module, 'worker_egress_module', lambda: SimpleNamespace(contract=worker_egress))
+    configs = []
+    original = module.archive_config
+    monkeypatch.setattr(module, 'archive_config', lambda config: configs.append(config) or original(config))
+    policy = {'denied': [{'host': '169.254.169.254', 'probe_port': 80}],
+              'positive': [{'host': 'example.test', 'port': 443}]}
+    with (tmp_path / 'credentials.json').open('w') as credentials:
+        module.launch(endpoint='unix:///var/run/docker.sock', name='xperfect-fixture',
+            image='sha256:' + 'a' * 64, native_image='sha256:' + 'b' * 64,
+            ui_port=18880, mcp_port=18867, credentials=credentials, worker_egress_policy=policy)
+    runtime = next(config['environment'] for config in configs if 'XPERFECT_CONTROLLER_ID' in config['environment'])
+    assert json.loads(runtime['XPERFECT_WORKER_EGRESS_POLICY']) == worker_egress.normalize_policy(policy)
+    assert not any('worker-egress.json' in argument for call in state['calls'] for argument in call)
 
 
 def test_daemon_failures_name_an_action_without_echoing_daemon_text():

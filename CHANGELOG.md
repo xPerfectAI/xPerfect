@@ -12,7 +12,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-10-25 — Reuse expertise, control work and recover safely
 
-- **Added:** Owner and project work pauses with explicit Resume. Optional spending policies use reported costs or labelled estimates and explain unknown coverage. Existing active work is preserved; resuming wakes the existing queue.
+- **Added:** Owner and project work pauses with explicit Resume. Optional spending policies use reported money and explicit reserves when costs are unknown. Existing active work is preserved; resuming wakes the existing queue.
 - **Improved:** Watch, HTTP and MCP retain exact-attempt usage and safe provider failure provenance. Missing usage stays unknown, reported zero stays zero, and repeated receipts do not add the same charge again.
 - **Added:** Claude Code connections can use Amazon Bedrock with their own region, protected credentials and declared model choices. Provider access still requires the owner's AWS permissions; a saved setup is not an authenticated model test.
 - **Added:** An optional evidence kit for immutable inputs, independent result checks, terminal-evidence export and marker-last delivery. Retained outputs can be delivered again without another model call. It adds no runtime dependency or application-specific queue.

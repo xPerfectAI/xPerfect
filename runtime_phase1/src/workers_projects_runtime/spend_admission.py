@@ -139,20 +139,41 @@ def blocker(conn, run, *, now: str, reserve: bool = False) -> dict | None:
                              (attempt["attempt_id"], scope_type, scope_id))
             else:
                 unknown = True
-        reservations = conn.execute("SELECT * FROM spend_reservations WHERE tenant_id=? AND owner_id=? AND scope_type=? AND scope_id=? AND state IN ('open','unknown')",
+        reservations = conn.execute("""SELECT s.*,a.runtime_invoked_at FROM spend_reservations s
+            JOIN run_attempts a ON a.attempt_id=s.attempt_id
+            WHERE s.tenant_id=? AND s.owner_id=? AND s.scope_type=? AND s.scope_id=? AND s.state IN ('open','unknown')""",
                                     (tenant, owner, scope_type, scope_id)).fetchall()
-        spent = add_money((spent, add_money(item["amount"] for item in reservations)))
         attempt_id = str(run["active_attempt_id"] or "")
-        has_reservation = any(item["attempt_id"] == attempt_id for item in reservations)
+        # Admission may precede a policy edit. Reprice only work that has not
+        # invoked, including other admitted reservations in this scope. The
+        # current attempt replaces its previous reserve, rather than adding to
+        # it or inheriting its obsolete currency/amount at the final gate.
+        has_reservation = False
+        currency_unknown = False
+        for item in reservations:
+            if not item["runtime_invoked_at"]:
+                if item["attempt_id"] != attempt_id:
+                    spent = add_money((spent, policy["reserve_amount"]))
+                continue
+            has_reservation = has_reservation or item["attempt_id"] == attempt_id
+            if item["currency"] == policy["currency"]:
+                spent = add_money((spent, item["amount"]))
+            else:
+                # An invoked reservation cannot be converted or discarded by a
+                # later policy edit. Its charge in the new currency is unknown.
+                currency_unknown = True
         proposed = Decimal(0) if has_reservation else Decimal(policy["reserve_amount"])
-        reason = "usage_unknown" if unknown and policy["unknown_policy"] == "pause" else "spend_limit" if add_money((spent, proposed)) > Decimal(policy["limit_amount"]) else ""
+        reason = "usage_unknown" if currency_unknown or (unknown and policy["unknown_policy"] == "pause") else "spend_limit" if add_money((spent, proposed)) > Decimal(policy["limit_amount"]) else ""
         if reason:
             return place_hold(conn, tenant_id=tenant, owner_id=owner, scope_type=scope_type,
                               scope_id=scope_id, kind="spend", reason_code=reason, now=now)
         if reserve and attempt_id:
             conn.execute("""INSERT INTO spend_reservations
                 (attempt_id,tenant_id,owner_id,scope_type,scope_id,currency,amount,state) VALUES (?,?,?,?,?,?,?,'open')
-                ON CONFLICT(attempt_id,scope_type,scope_id) DO NOTHING""",
+                ON CONFLICT(attempt_id,scope_type,scope_id) DO UPDATE SET
+                currency=excluded.currency,amount=excluded.amount,state='open'
+                WHERE EXISTS (SELECT 1 FROM run_attempts a WHERE a.attempt_id=excluded.attempt_id
+                    AND a.runtime_invoked_at IS NULL AND a.ended_at IS NULL)""",
                 (attempt_id, tenant, owner, scope_type, scope_id, policy["currency"], policy["reserve_amount"]))
     return None
 

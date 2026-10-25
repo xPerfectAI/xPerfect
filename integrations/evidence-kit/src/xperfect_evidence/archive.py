@@ -123,7 +123,8 @@ def reconcile_pending(expected_ids, restored_rows, *, hold_set_sha256):
     result = []
     for identity in expected_ids:
         row = rows.get(identity)
-        pending = {"queued", "running", "paused", "needs_input", "claimed", "admitted", "settling"}
+        pending = {"accepted", "blocked", "restore_held", "queued", "running", "paused",
+                   "needs_input", "claimed", "admitted", "settling"}
         status = "missing" if row is None else "conflict" if row["restore_hold"] != 1 or row["restore_hold_set_hash"] != hold_set_sha256 or row["state"] not in TERMINAL | pending else "terminal_held" if row["state"] in TERMINAL else "pending_held"
         result.append({"identity": identity, "status": status})
     unexpected = sorted(set(rows) - set(expected_ids))
