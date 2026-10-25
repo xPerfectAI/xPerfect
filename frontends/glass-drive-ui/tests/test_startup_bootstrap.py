@@ -21,7 +21,7 @@ def test_startup_waits_for_current_bootstrap_and_keeps_real_failures_visible():
 const assert = require('node:assert/strict');
 function harness() {
   let bootstrap = null, bootstrapGeneration = 0, bootstrapFlight = null, identityTransition = false, workerChoiceGeneration = 0;
-  let csrfToken = '';
+  let csrfToken = '', workspaceCatalogState = 'active';
   let workspaceInteractionOwnerScope='',workspaceSteerInFlight=new Map();
   const loads = [], rendered = [], admin = [];
   const loadBootstrap = () => new Promise((resolve, reject) => loads.push({resolve, reject}));

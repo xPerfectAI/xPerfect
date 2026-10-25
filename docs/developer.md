@@ -169,6 +169,52 @@ retrying an unclear mutation; a one-call interface alone does not guarantee repl
 Selected Library references and their actual-target review use the same
 [Library contract](04_MCP_Publication_and_Client_Compatibility.md#private-library-through-http-and-mcp).
 
+### Start with the same professional shown in the app
+
+The five bundled professions are ordinary saved worker setups, available through the existing
+MCP/API catalog. You do not need to recreate their instructions or Library material by hand.
+Their current native Skill route is **Claude Code on the host**; use a Ready compatible account
+and a deployment that offers that route.
+
+| Step | MCP tool | Keep from its result |
+| --- | --- | --- |
+| Choose the profession | `workspace_starter_list` | The desired starter's `id`, `content_hash` and included abilities |
+| Save that exact setup privately | `workspace_starter_import` with `starter_id`, the listed `content_hash`, a stable `idempotency_key` and the user's selected account | `template.template_id` |
+| Create a fresh worker | `workspace_template_instantiate` with that `template_id`, a new stable `idempotency_key` and optional name | The created worker and any required Library review |
+| Give it the real job | Use the normal file upload, actual-target abilities review and `worker_run` path above | The exact worker/run IDs for status, guidance and results |
+
+Importing a starter does not start work or approve an ability. Instantiation creates a paused
+worker; review the returned abilities for that actual worker before running it. Retry a lost
+import/instantiate response with its original key rather than creating another worker.
+
+For the full Finance example, attach the [company material, accounts and plan](workshop.md#prepare-the-example),
+then use its supplied job. A connected native client can do the same work from an ordinary request:
+
+> Show me the packaged Finance Director and its included abilities. Use my selected Ready Claude
+> Code account on this host, create a new worker from that exact setup, and let me review the
+> abilities it needs. Use the Finance example files I attach to prepare the performance and cash
+> review. Return the report and editable calculations. Keep this worker so I can give it a follow-up.
+
+The matching HTTP routes and exact-version rules are in the existing
+[starting-template contract](04_MCP_Publication_and_Client_Compatibility.md#public-starting-templates-private-worker-ownership).
+The smaller arithmetic example above checks the transport; this professional example exercises
+onboarding, methods, traceable analysis and editable delivery.
+
+### Manage the same saved experts and workspaces
+
+Use `workspace_template_list` to find **Available**, **Archived** or **Removed** expert setups,
+and `workspace_template_get` to inspect an exact version or its version history.
+`workspace_template_manage` edits, copies, archives, removes or restores that setup. Edit adds a
+version; it does not rewrite workers already created from it.
+
+`workspace_remove` closes the exact worker before hiding its workspace card. `workspace_restore`
+brings that same card back **Closed**. Files, results and history, including one-off work, remain
+saved; this is recoverable removal, not a storage purge. Use the normal duplicate path for fresh
+work. Read the returned catalog revision before a mutation and follow the tool’s current schema;
+a stale write conflicts instead of overwriting a newer choice. The
+[shared HTTP/MCP lifecycle contract](04_MCP_Publication_and_Client_Compatibility.md#catalog-crud-through-the-same-owner)
+owns the exact fields, confirmations and authorization rules.
+
 ### Serve a reusable expert
 
 Connect your product or AI client to the existing authenticated MCP endpoint. Use `workspace_list`

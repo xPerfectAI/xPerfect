@@ -315,13 +315,31 @@ def install_file_routes(
     async def download(
         worker_id: str, file_id: str, request: Request, revision: str | None = None
     ):
+        return await file_response(worker_id, file_id, request, revision, preview=False)
+
+    @app.get("/api/workspace/{worker_id}/files/{file_id}/preview")
+    async def preview(
+        worker_id: str, file_id: str, request: Request, revision: str = Query(..., min_length=1)
+    ):
+        return await file_response(worker_id, file_id, request, revision, preview=True)
+
+    async def file_response(worker_id, file_id, request, revision, *, preview):
         active = client(request, worker_id)
         headers = (
             {"Range": request.headers["range"]} if "range" in request.headers else {}
         )
-        path = f"/v1/workers/{quote(worker_id, safe='')}/files/{quote(file_id, safe='')}/content"
+        action = "preview" if preview else "content"
+        path = f"/v1/workers/{quote(worker_id, safe='')}/files/{quote(file_id, safe='')}/{action}"
+        if preview:
+            port = request.url.port or (443 if request.url.scheme == "https" else 80)
+            appearance = request.cookies.get(f"xperfect_appearance_{port}", "")
+            headers["x-xperfect-appearance"] = appearance if appearance in {"system", "light", "dark"} else "system"
+            headers["x-xperfect-file-ui"] = "1"
         if revision is not None:
-            path += "?" + urlencode({"revision": revision})
+            query = {"revision": revision}
+            if preview and request.query_params.get("inline") == "1":
+                query["inline"] = "1"
+            path += "?" + urlencode(query)
         context = active.stream_file_download(path, headers)
         try:
             response = await context.__aenter__()
@@ -342,12 +360,16 @@ def install_file_routes(
                 "accept-ranges",
                 "cache-control",
                 "x-content-type-options",
+                "content-security-policy",
+                "referrer-policy",
+                "x-frame-options",
+                "pragma",
             }
         }
         return StreamingResponse(
             response.aiter_bytes(),
             status_code=response.status_code,
-            media_type="application/octet-stream",
+            media_type=response.headers.get("content-type", "application/octet-stream") if preview else "application/octet-stream",
             headers=forwarded,
             background=BackgroundTask(context.__aexit__, None, None, None),
         )

@@ -89,6 +89,24 @@ class StarterImport(BaseModel):
     effort: str | None = Field(default=None, max_length=32)
 
 
+def _active_import(conn, cp, tenant, owner, fingerprint, spec, bundle, account):
+    """Reuse the receipt's exact setup only while its lineage head is active."""
+    rows = conn.execute("""SELECT t.template_id FROM workspace_template_imports i
+        JOIN workspace_templates t ON t.template_id=i.template_id AND t.tenant_id=i.tenant_id AND t.owner_id=i.owner_id
+        JOIN workspace_templates h ON h.lineage_id=t.lineage_id AND h.tenant_id=t.tenant_id AND h.owner_id=t.owner_id
+        WHERE i.tenant_id=? AND i.owner_id=? AND i.request_hash=? AND h.catalog_state='active'
+          AND NOT EXISTS (SELECT 1 FROM workspace_templates n WHERE n.tenant_id=h.tenant_id
+            AND n.owner_id=h.owner_id AND n.lineage_id=h.lineage_id AND n.version>h.version)
+        ORDER BY i.created_at DESC,h.version DESC""", (tenant, owner, fingerprint)).fetchall()
+    for row in rows:
+        result = cp.get_workspace_template(template_id=row['template_id'], tenant_id=tenant, owner_id=owner)
+        worker = result['content'].get('worker', {})
+        if (worker.get('profile') == spec['profile'] and worker.get('execution_mode') == spec['execution_mode']
+                and worker.get('bootstrap_bundle') == bundle and worker.get('provider_account_ref') == account):
+            return {k: v for k, v in result.items() if k != 'content'}
+    return None
+
+
 def import_starter(service, starter_id, tenant, owner, request):
     cp, store = service.control_plane_store, service.store
     if cp is None or Path(cp.db_path).resolve() != Path(store.db_path).resolve():
@@ -144,10 +162,17 @@ def import_starter(service, starter_id, tenant, owner, request):
         if prior and prior["template_id"]:
             result = cp.get_workspace_template(tenant_id=tenant, owner_id=owner, template_id=prior["template_id"])
             return {"template": {k: v for k, v in result.items() if k != "content"}, "idempotent_replay": True}
+        match = _active_import(conn, cp, tenant, owner, fingerprint, spec, bundle, account)
+        if match:
+            conn.execute("INSERT INTO workspace_template_imports VALUES (?,?,?,?,?,?) ON CONFLICT(tenant_id,owner_id,idempotency_key) DO UPDATE SET template_id=excluded.template_id",
+                         (tenant, owner, request.idempotency_key, fingerprint, match['template_id'], time.time()))
+            return {"template": match, "idempotent_replay": False, "reused_saved_expert": True}
         conn.execute("INSERT OR IGNORE INTO workspace_template_imports (tenant_id,owner_id,idempotency_key,request_hash,template_id,created_at) VALUES (?,?,?,?,NULL,?)", (tenant, owner, request.idempotency_key, fingerprint, time.time()))
+        staging_key = conn.execute("SELECT idempotency_key FROM workspace_template_imports WHERE tenant_id=? AND owner_id=? AND request_hash=? AND template_id IS NULL ORDER BY created_at,idempotency_key LIMIT 1",
+                                   (tenant, owner, fingerprint)).fetchone()[0]
     retained, selected = [], []
     for entry in spec["library_items"]:
-        key = "starter-" + hashlib.sha256(_json([request.idempotency_key, fingerprint, entry["key"]]).encode()).hexdigest()
+        key = "starter-" + hashlib.sha256(_json([staging_key, fingerprint, entry["key"]]).encode()).hexdigest()
         saved = service.personal_library.create_item(tenant, owner, entry["item"], key)
         ref = {"item_id": saved["item_id"], "version_id": saved["version_id"]}
         retained.append(ref)
@@ -166,8 +191,10 @@ def import_starter(service, starter_id, tenant, owner, request):
         if prior["template_id"]:
             result = cp.get_workspace_template(tenant_id=tenant, owner_id=owner, template_id=prior["template_id"])
             return {"template": {k: v for k, v in result.items() if k != "content"}, "idempotent_replay": True}
-        result = cp.create_workspace_template(tenant_id=tenant, owner_id=owner, name=spec["name"], description=spec.get("description", ""), content=content, connection=conn)
-        service.personal_library.retain_refs(tenant, owner, selected, "workspace_template", result["template_id"], connection=conn, resolved=resolved)
+        result = _active_import(conn, cp, tenant, owner, fingerprint, spec, bundle, account)
+        if result is None:
+            result = cp.create_workspace_template(tenant_id=tenant, owner_id=owner, name=spec["name"], description=spec.get("description", ""), content=content, connection=conn)
+            service.personal_library.retain_refs(tenant, owner, selected, "workspace_template", result["template_id"], connection=conn, resolved=resolved)
         conn.execute("UPDATE workspace_template_imports SET template_id=? WHERE tenant_id=? AND owner_id=? AND idempotency_key=?", (result["template_id"], tenant, owner, request.idempotency_key))
     return {"template": result, "idempotent_replay": False}
 

@@ -2567,7 +2567,11 @@ screen -ls | awk -v target="$target" '
         max_runtime_seconds: float | None = None,
     ) -> dict[str, object]:
         resolved_worker = worker or {"worker_id": worker_id}
-        sandbox = self.fast_sandbox_from_worker(resolved_worker) or self.ensure_ready(
+        fast = self.fast_sandbox_from_worker(resolved_worker)
+        existing = fast or self.inspect(worker_id)
+        if resolved_worker.get('state') == 'paused' or (existing and existing.state == 'paused'):
+            raise RuntimeError('Resume this paused desktop before opening an application')
+        sandbox = fast or self.ensure_ready(
             resolved_worker,
             runtime_name=runtime_name,
             repair_paths=False,

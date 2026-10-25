@@ -878,3 +878,35 @@ destination configuration and worker-specific recurring schedules. A supplied in
 fails; it cannot fall back to a local operator identity. Browser/standalone clients without that
 assertion keep their existing authentication. Native schedule MCP keeps its separate exact-attempt
 token; an application assertion does not replace native authority.
+
+## Saved expert and workspace catalog lifecycle
+
+Saved experts remain the existing immutable workspace templates. Editing appends a version in the
+same lineage; Copy creates a new lineage from one exact saved version. Name/description can be
+edited directly. Updating knowledge, instructions or setup from an owned worker uses the existing
+sanitized snapshot path. Neither operation changes workers already created, native history, accepted
+runs, exact model/account/effort choices or pinned Library references. No credentials or source files
+are copied into a template. The normal catalog shows current versions; Versions retains exact older
+choices.
+
+Available, Archived and Removed are catalog states. Archive and recoverable Remove preserve all
+versions and their Library holders. Restore makes an expert available again; new use is refused
+until then. The limit is 100 **active lineages**, not 100 lifetime versions. Revision consumes no
+extra slot. Archive or Remove frees a slot; Restore checks capacity atomically. Concurrent edits use
+the current head and catalog revision. Stale writes retain the user's draft and require a reload.
+An already accepted instantiation key replays its original worker even after catalog removal; a new
+key must satisfy current lifecycle and existing account/Library admission.
+
+Workspaces cards are the existing workers, not a second catalog entity. Remove uses native Close
+first and hides the card only after compute shutdown is confirmed. A stale catalog revision fails
+before shutdown. A failed Close stays visible and retryable. Removed cards retain project/member
+identity, files, immutable results, history and Library references, and are excluded from new reuse
+selection and ephemeral garbage collection. Restore shows the same **Closed** worker; it never
+restarts compute, schedules, credentials or leases. Copy creates a fresh worker when new work is
+needed. Removing one shared member does not remove another member, common files or native member
+UID records. Close alone remains distinct from catalog Remove.
+
+Catalog revisions belong to catalog writes; runtime telemetry does not advance them. Runtime-store
+schema 13 and control-plane schema 6 add these fields transactionally. Existing rows start Available
+with their IDs/content hashes unchanged. Older runtimes must not open the upgraded database; use the
+supported upgrade backup/rollback owner. Recoverable removal is not a permanent storage purge.

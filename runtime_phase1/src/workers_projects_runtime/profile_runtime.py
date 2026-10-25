@@ -3306,6 +3306,14 @@ class ProfiledWorkerRuntime:
         return self.terminal_target(worker)
 
     def terminal_target(self, worker: dict) -> TerminalTarget:
+        if str(worker.get('state') or '') == 'paused':
+            return TerminalTarget(
+                command=['/bin/sh', '-c', 'printf "%s\\r\\n" "$1"', 'paused-workspace',
+                         'AI work is paused. Use Resume to continue this terminal.'],
+                cwd='/', env={'PATH': '/usr/bin:/bin', 'TERM': 'xterm-256color', 'ENV': '', 'BASH_ENV': ''},
+                title='Workspace paused', subtitle='AI remains paused', session_bound=True,
+                close_code=_RUN_SESSION_ENDED_CLOSE, close_reason='Workspace paused',
+            )
         runtime = self._runtime_for_worker(worker)
         if hasattr(runtime, "terminal_target"):
             return runtime.terminal_target(worker)
@@ -3498,7 +3506,8 @@ class ProfiledWorkerRuntime:
     ) -> dict[str, object]:
         runtime = self._runtime_for_worker(worker)
         clean_run_id = str(run_id or "").strip()
-        if mission_provider_account_selection(worker) is not None and clean_run_id:
+        if (action in {'codex', 'claude', 'openclaw'}
+                and mission_provider_account_selection(worker) is not None and clean_run_id):
             with self.provider_account_binder.project_active_route(
                 worker,
                 runtime_name=str(
@@ -5913,6 +5922,8 @@ class BaseCliWorkerRuntime:
             "selenium_port": sandbox.get("selenium_port"),
             "openclaw_port": sandbox.get("openclaw_port"),
             "desktop_prime": sandbox.get("desktop_prime"),
+            "desktop_supported": sandbox.get("desktop_supported", bool(sandbox.get("view_url"))),
+            "desktop_actions": sandbox.get("desktop_actions"),
             "pid": sandbox["pid"],
         }
 

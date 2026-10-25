@@ -15,8 +15,8 @@ from glass_drive_ui.server import create_app
 PASSWORD = 'fixture-only-Strong-password-1234567890'
 
 
-def auth_cookie(client, name):
-    suffix = '_' + sha256(b'fixture-deployment').hexdigest()[:16]
+def auth_cookie(client, name, *, namespace='fixture-deployment'):
+    suffix = '_' + sha256(namespace.encode('utf-8')).hexdigest()[:16]
     return client.cookies[name + suffix]
 
 
@@ -34,10 +34,10 @@ def gateway(tmp_path, monkeypatch):
     return HumanAuthGateway.from_env()
 
 
-def login(client, password=PASSWORD):
+def login(client, password=PASSWORD, *, namespace='fixture-deployment'):
     assert client.get('/login').status_code == 200
     return client.post('/auth/email/login', json={'password': password, 'return_to': '/'},
-        headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': auth_cookie(client, 'glasshive_login_csrf')})
+        headers={'Origin': 'http://testserver', 'X-GlassHive-CSRF': auth_cookie(client, 'glasshive_login_csrf', namespace=namespace)})
 
 
 def test_provision_restart_rotation_retains_owner(gateway):

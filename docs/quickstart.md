@@ -83,8 +83,8 @@ but does not guarantee that interrupted execution continues by itself.
 
 | You want to… | Do this |
 | --- | --- |
-| Continue the same work | Open its worker from **Workspaces** and send a follow-up. Its files and native history stay with it. |
-| Reuse its expertise for a new job | Save its setup as an expert, then choose it under **My experts**. This creates a new worker; it does not resume the old one. |
+| Continue the same work | Open its active worker from **Workspaces** and send a follow-up. Its files and native history stay with it. If it is Closed, use **Duplicate** to start fresh work. |
+| Reuse its expertise for a new job | Use **Workspaces → More → Save as expert**, then choose it under **Run Project → My experts**. This creates a new worker; it does not resume the old one. |
 | Make a separate copy | Use **Run Project → New → Copy an existing worker**. Check the copied account and files before running. A copy does not copy browser sign-ins or chat history. |
 | Keep a useful file | In **Library → Files**, use the file menu's **Keep for reuse**. This saves the selected version privately in **My Library**. |
 | Add more material | Use **Library → Files → Add files**, or select saved Library items for the worker. A source link alone does not prove a native tool is installed. |
@@ -92,6 +92,20 @@ but does not guarantee that interrupted execution continues by itself.
 
 Removing a saved Library item does not remove the workspace's copy. See
 [Library behavior](07_Minimal_Unified_Operator_UI.md#one-library-across-the-app).
+
+### Manage experts and workspaces
+
+| You want to… | Do this |
+| --- | --- |
+| Improve a saved expert | In **Run Project → My experts**, open its **Manage → Edit**. Save a new version. Existing workers keep their original setup. **Versions** lets you inspect earlier setups. |
+| Make another expert | Choose **Manage → Copy**. Give the separate expert its own name. |
+| Put an expert aside | Choose **Archive**, or confirm **Remove**. Select **Archived** or **Removed**, then **Restore**, to make it available again. |
+| Remove a workspace from your list | In **Workspaces**, choose its **More → Remove** and read the confirmation. Removal stops current and scheduled work; files, results and history remain saved. |
+| Bring that workspace back | Select **Removed → Restore**. It returns **Closed**. Use **Duplicate** for a fresh worker; Restore does not restart work. |
+
+Removed work, including one-off workspaces, is kept for recovery. Removing its card does not
+permanently delete its files or free that storage. **Close** stops compute but leaves the card in
+your list. [Lifecycle details](03_Bootstrap_Auth_and_Identity_Projection.md#saved-expert-and-workspace-catalog-lifecycle).
 
 ## Other ways to work
 
@@ -134,10 +148,10 @@ the operator to fix it; do not copy credentials or disable approval to bypass it
 
 ## Current support boundaries
 
-File drag-and-drop and API-key sign-in still have open end-to-end acceptance; use **Add files**,
-**Download** and a supported subscription sign-in. Not every hosted or personal-account-copy
-continuation route is verified. Shared workspace acceptance is bounded to the packaged Linux
-route. [Current limits](../README.md#current-limits) · [Capability guide](capability-matrix.md).
+File drag-and-drop and native API-key sign-in still have open end-to-end acceptance; use
+**Add files**, **Download** and a supported subscription sign-in. A copy can retain the same
+owner's Ready, compatible selected account; it does not clone credentials, browser sign-ins or
+native chat history. Hosted identity and shared workspace acceptance remain deployment-specific. [Current limits](../README.md#current-limits) · [Capability guide](capability-matrix.md).
 
 Local workers run with your computer user's permissions; they are not isolated merely because
 they have separate workspaces. Connected AI providers can receive task content. Use the same

@@ -4432,6 +4432,8 @@ def test_enterprise_signed_artifact_open_link_proxies_without_user_assertion(mon
     monkeypatch.setattr(server_module.httpx, "AsyncClient", FakeAsyncClient)
     client = TestClient(create_app(runtime_client=FakeRuntimeClient()))
 
+    client.cookies.set("xperfect_appearance_39880", "light")
+    client.cookies.set("xperfect_appearance_80", "dark")
     response = client.get(f"/v1/signed-links/{token}")
 
     assert response.status_code == 200
@@ -4443,6 +4445,23 @@ def test_enterprise_signed_artifact_open_link_proxies_without_user_assertion(mon
     assert captured["headers"]["X-Viventium-Tenant-Id"] == "tenant-alpha"
     assert captured["headers"]["X-Viventium-User-Id"] == "user-a"
     assert captured["headers"]["X-Viventium-User-Role"] == "viewer"
+    assert captured["headers"]["x-xperfect-appearance"] == "dark"
+
+
+def test_file_preview_browser_errors_preserve_status_json_and_private_boundaries(monkeypatch):
+    set_enterprise_ui_env(monkeypatch)
+    client = TestClient(create_app(runtime_client=FakeRuntimeClient()))
+    path = '/v1/link-refs/ghr_missing_synthetic'
+    browser = client.get(path, headers={'Accept':'text/html'})
+    assert browser.status_code == 401
+    assert browser.headers['content-type'].startswith('text/html')
+    assert 'This file link is unavailable' in browser.text and 'View workspaces' in browser.text
+    assert 'ghr_missing_synthetic' not in browser.text and 'detail' not in browser.text
+    assert 'no-store' in browser.headers['cache-control']
+    assert client.get(path, headers={'Accept':'application/json'}).headers['content-type'].startswith('application/json')
+    assert client.get('/api/workspace/wrk_1/files/fen_1/preview',headers={'Accept':'text/html'}).status_code == 422
+    raw = client.get('/api/workspace/wrk_1/files/fen_1/content?revision=rev', headers={'Accept':'text/html'})
+    assert raw.status_code == 401 and raw.headers['content-type'].startswith('application/json')
 
 
 def test_enterprise_artifact_link_ref_uses_worker_cookie_identity(monkeypatch):
@@ -7186,7 +7205,8 @@ def test_file_routes_require_session_or_scoped_worker_cookie(monkeypatch):
     token = signed_worker_token('ui-signed-link-secret')
     listing = '/api/workspace/wrk_1/files'
     content = '/api/workspace/wrk_1/files/fen_1/content?revision=rev-1'
-    for path in (listing, content):
+    preview = '/api/workspace/wrk_1/files/fen_1/preview?revision=rev-1'
+    for path in (listing, content, preview):
         separator = '&' if '?' in path else '?'
         assert client.get(f'{path}{separator}gh_token={token}').status_code == 401
         assert client.get(path, headers={'Referer': f'http://testserver/watch/wrk_1?gh_token={token}'}).status_code == 401
@@ -7198,6 +7218,9 @@ def test_file_routes_require_session_or_scoped_worker_cookie(monkeypatch):
     downloaded = client.get(content)
     assert downloaded.status_code == 200 and downloaded.content == b'owned bytes'
     assert runtime.file_upload_requests[-1][1].endswith('/fen_1/content?revision=rev-1')
+    assert client.get(preview).status_code == 200
+    assert runtime.file_upload_requests[-1][1].endswith('/fen_1/preview?revision=rev-1')
+    assert client.get('/api/workspace/wrk_2/files/fen_1/preview?revision=rev-1').status_code == 401
     assert client.get('/api/workspace/wrk_1/files/trash').status_code == 403
     assert client.patch('/api/workspace/wrk_1/files/fen_1', json={'path': 'other.txt', 'revision': 'rev-1'}).status_code == 403
     assert client.get('/api/workspace/wrk_2/files').status_code == 401

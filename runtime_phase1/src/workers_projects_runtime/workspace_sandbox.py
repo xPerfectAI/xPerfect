@@ -6,6 +6,7 @@ admitted member UID; this adapter never removes or pauses the shared container.
 from __future__ import annotations
 
 from dataclasses import replace
+from copy import copy
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 import json
@@ -16,6 +17,7 @@ import subprocess
 from .bootstrap import bootstrap_bundle_for
 from .docker_sandbox import DockerSandboxManager, FreshSandboxInspection, SandboxInfo
 from .workspace_box import WorkspaceBox, WorkspaceBoxUnavailable
+from .workspace_desktop import WorkspaceMemberDesktop
 
 
 _member_control = ContextVar("xperfect_member_control", default=False)
@@ -34,6 +36,7 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
         self.image = box.image
         self.term_value = 'xterm-256color'
         self.display_value = ''
+        self.desktop = WorkspaceMemberDesktop(box)
 
     def _member(self, worker_id):
         if worker_id != self.box.binding.worker_id:
@@ -130,7 +133,38 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
         return {'HOME': self.home_mount, 'TERM': self.term_value,
                 'TMPDIR': self.home_mount + '/tmp', 'XDG_CONFIG_HOME': self.home_mount + '/.config',
                 'XDG_CACHE_HOME': self.home_mount + '/.cache',
-                'SCREENDIR': self.home_mount + '/.screen'}
+                'SCREENDIR': self.home_mount + '/.screen',
+                **self.desktop.environment()}
+
+    def desktop_action(self, worker_id, runtime_name, action, *, url=None,
+                       session_name=None, worker=None, on_exit=None, max_runtime_seconds=None):
+        self._member(worker_id)
+        # Credential-bearing interactive provider windows have a separate exact
+        # account lease. They must not be projected into this display-only box.
+        if action not in {'browser', 'focus_browser'}:
+            raise WorkspaceBoxUnavailable('Use the workspace Terminal or Library for its work and files')
+        if not self.desktop.supported:
+            raise WorkspaceBoxUnavailable('This runtime has no configured private desktop gateway')
+        resolved = worker or {'worker_id': worker_id,
+                              'tenant_id': self.box.binding.tenant_id,
+                              'owner_id': self.box.binding.owner_id}
+        present = self.inspect(worker_id)
+        if resolved.get('state') == 'paused':
+            if present is None or present.state not in {'running', 'paused'}:
+                raise WorkspaceBoxUnavailable('Resume the workspace before opening its desktop')
+        elif present is None:
+            self.ensure_ready(resolved, runtime_name, repair_paths=False)
+        credentials = self._desktop_credentials(worker_id, paths=self.box.paths())
+        view_url = self.desktop.start(credentials['vnc_password'])
+        graphical = copy(self)
+        graphical.home_mount = self.desktop.display_mount
+        graphical.workspace_mount = self.desktop.display_mount
+        command = graphical._desktop_action_command(action, url=url or 'about:blank', session_name=session_name)
+        if command is None:
+            raise WorkspaceBoxUnavailable('This graphical action is unavailable')
+        self.desktop.launch_application(command)
+        return {'action': action, 'status': 'launched', 'view_url': view_url,
+                'container_name': self.box.name}
 
     def _docker_exec(self, container_name, command, *, env=None, cwd=None, user=None, **kwargs):
         if user is not None and user != self.user:
@@ -205,21 +239,27 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
         if expected_absent:
             if value:
                 raise WorkspaceBoxUnavailable('Workspace generation changed before member termination')
+            self.desktop.stop()
             return
         if value:
             if expected_id and value.container_id != expected_id:
                 raise WorkspaceBoxUnavailable('Workspace generation changed before member termination')
             container_id = expected_id or value.container_id
+            self.desktop.stop()
             self.box.stop_member(container_id)
             (self.box.supervisor / f'member-{self.box.binding.uid}-paused.json').unlink(missing_ok=True)
             # A separate workspace's box holds its memory reservation until removed.
             self.box.release_if_sole_member(container_id)
+        else:
+            self.desktop.stop()
 
     def pause(self, worker_id, *, expected_container_id=None):
         value = self.inspect(worker_id)
         if value is None:
             raise WorkspaceBoxUnavailable('Member compute is already absent')
         expected = expected_container_id or value.container_id
+        if expected != value.container_id:
+            raise WorkspaceBoxUnavailable('Workspace generation changed before member pause')
         self.box.set_member_paused(expected, True)
         marker = self.box.supervisor / f'member-{self.box.binding.uid}-paused.json'
         if not marker.exists():
@@ -302,5 +342,18 @@ class WorkspaceMemberSandbox(DockerSandboxManager):
 
     def describe(self, worker_id):
         value = self.inspect(worker_id)
-        return {'container_id': value.container_id if value else '', 'state': value.state if value else 'absent',
-                'view_available': False, 'workspace_id': self.box.binding.workspace_id}
+        paths = self.box.paths()
+        view_url = None
+        if value and value.state in {'running', 'paused'} and self.desktop.state_path.is_file():
+            credentials = self._desktop_credentials(worker_id, paths=paths)
+            view_url = self.desktop.view(value.container_id, credentials['vnc_password'])
+        return {'driver': 'docker', 'image': value.image if value else self.image,
+                'container_name': self.box.name, 'container_id': value.container_id if value else '',
+                'state': value.state if value else 'absent', 'pid': value.pid if value else None,
+                'workspace_dir': str(paths['workspace_dir']), 'home_dir': str(paths['home_dir']),
+                'view_url': view_url, 'view_available': bool(view_url),
+                'view_health': {'healthy': bool(view_url),
+                                'reason': 'ok' if view_url else 'desktop_not_started'},
+                'desktop_supported': self.desktop.supported,
+                'desktop_actions': ['browser', 'focus_browser'],
+                'workspace_id': self.box.binding.workspace_id}

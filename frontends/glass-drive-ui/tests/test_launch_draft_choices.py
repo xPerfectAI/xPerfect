@@ -70,6 +70,7 @@ const select=elements['workspace-option'],providerAccount=elements['provider-acc
 const defaultWorker=elements['default-worker-profile'],codexEffort=elements['codex-effort'],claudeEffort=elements['claude-effort'],openclawEffort=elements['openclaw-effort'];
 const workspaceType=elements['workspace-type'],workspaceMode=elements['workspace-mode'],workspaceFilePlacement=elements['workspace-file-placement'];
 const workspaceModeHelp=elements['workspace-mode-help'],workspaceFilePlacementField={},providerAccountHelp={},templateStartStatus={},workspaceCatalogStatus={},status={dataset:{}},button={},help={};
+let workspaceCatalogState='active';
 const catalogState={generation:0},workspaceKindFilter={value:'named,ephemeral,legacy'},workspaceSearch={value:''},workspaceTagFilter={value:''};
 const fileDraft={setOwnerScope(){},blocked:()=>false},onboarding={render(){}};
 const launchLibrary={setOwnerScope(){},refs:()=>[]},mainLibrary={setAccess(){}},signedToken='';

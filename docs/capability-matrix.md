@@ -42,14 +42,14 @@ built-in tools stay available; these settings choose connections, not the harnes
 | Native profiles | Use Codex CLI, Claude Code or Grok Build. | Models, authentication, tools and controls depend on the selected route. An adapter is not universal provider compatibility. An OpenClaw profile exists in the source but has not been verified with a real result. |
 | Accounts | Connect through an offered subscription or API-key method. | Platform, deployment, account grants and provider capacity govern availability. No silent fallback to a different account. API-key setup and hosted account connection have not been verified end to end yet. |
 | Isolated workspaces | Keep worker execution and working files separate. | Local host execution still has the trusted OS user's permissions. |
-| Workspace catalog | Name and favorite private workspaces for reuse. | Catalog visibility remains user-scoped. |
+| Workspace catalog | Edit, copy, remove and restore owned worker cards. Name, tags and favorites keep work easy to find. | Remove confirms native Close and retains files/results. Restore shows the same Closed worker; Copy starts fresh work. |
 | Shared workspaces | Let authorized workers, including different AI tools, use one execution workspace. | Needs xPerfect on a configured Linux host with the required permissions and capacity; not available with `./xperfect start` on a Mac. |
 | Common project files | Workers use a shared working area. | This does not share sign-ins or sessions. |
 | Private files per member | Each worker has its own working area within a shared workspace. | Its access to the common file area is read-only. |
 | Files | Attach input, inspect output and download original bytes. | A file reference must be authorized and attached; a name in a prompt is not an upload. Shared workspaces and legacy host folders do not infer a new run result from pre-existing files; use Files for explicit access. Dragging files into or out of the browser has not been verified yet, and drag-out is off by default. |
 | Duplicate workspace | Copy a workspace's files into a new workspace. | Copies eligible files byte-for-byte, with no default size cap. The owner's storage limit and a 30-second default copy time apply. A refused copy keeps none of its bytes and names its cause, such as storage or host capacity. Retry the same request after freeing storage or restoring the limit. A copy keeps the selected personal account reference when the account belongs to the same owner, is Ready and supports the worker type. It does not copy credentials, browser sign-ins or native conversation history. An unavailable, unready, mismatched or foreign account is not silently retained or replaced; the existing account-selection, review or refusal rules still apply. |
 | Watch and controls | Inspect, steer, interrupt or continue the selected worker. | Controls are provider-dependent and target one worker, not its siblings. |
-| Desktop and terminal | View a workstation through noVNC or take over its terminal through the WebSocket bridge. | These surfaces require a configured workstation profile and authorized access. |
+| Desktop and terminal | View a workstation through noVNC or take over its terminal through the WebSocket bridge. | These surfaces require a configured workstation profile and authorized access. Use Watch / Steer for task controls. Managed shared-workspace displays stay usable while their worker is Paused; legacy DockerSandbox Pause freezes its desktop too. Anything opened or signed in on a desktop is shared with that worker. The [runtime security boundaries](../SECURITY.md#desktop-runtime-boundaries) differ. |
 | Conversation and peers | Keep conversation context and request authorized worker collaboration. | Discovery and control need explicit scope; common ownership alone does not grant access. |
 | Schedules | Run configured work later or repeatedly. | Each run still needs valid account, input and execution authority. Files attached when you schedule from **Run project → More settings → Schedule** are used at that exact version, even if the workspace copy changes later. A scheduled run that asks for approval stops if no one answers. |
 | MCP and API | Integrate typed projects, workers, events, files and controls. | Stdio and authenticated HTTP are distinct paths. Compatibility SSE remains available. |
@@ -118,3 +118,12 @@ Loaded isolated rooms passed synthetic input, transcription, native replies, TTS
 Partial native text arrived before completion; speech interruption, the correct next answer and
 same-conversation recall passed with echo-free input settings. In-flight native cancellation,
 reconnect and background callback parity remain separate acceptance gates. See the integration guide for exact limits.
+
+### Saved expert CRUD
+
+My experts, HTTP and MCP share immutable template versions and one owner-scoped lifecycle. Edit
+appends a version; Copy creates an independent lineage. Archive/Remove hide a choice recoverably
+without changing accepted workers or retained Library references. Versions preserves exact earlier
+choices. The 100-active-expert limit counts lineages; revision does not consume a slot, and Archive
+or Remove frees one. Restore checks capacity. See the [runtime contract](03_Bootstrap_Auth_and_Identity_Projection.md#saved-expert-and-workspace-catalog-lifecycle)
+and [API/MCP contract](04_MCP_Publication_and_Client_Compatibility.md#catalog-crud-through-the-same-owner).

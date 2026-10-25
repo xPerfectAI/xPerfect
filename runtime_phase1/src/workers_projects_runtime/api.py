@@ -4,7 +4,6 @@ import base64
 import asyncio
 import json
 import logging
-import mimetypes
 import os
 import hmac
 import ipaddress
@@ -30,7 +29,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from starlette.background import BackgroundTask
 
 from .runtime_requirements import CLAUDE_CODE_EFFORT_LEVELS
+from .operator_urls import build_watch_url
 from .workspace_file_api import install_workspace_file_routes
+from .artifact_preview import (
+    INLINE_MEDIA_TYPES, INLINE_SECURITY_HEADERS, PREVIEW_SECURITY_HEADERS, install_preview_error_handlers, is_text_preview, preview_appearance,
+    preview_media_type, preview_text_limit, render_artifact_page,
+)
 from .workspace_files import FileAdmissionError
 from .workspace_api import install_execution_workspace_routes
 
@@ -57,6 +61,8 @@ from .capability_broker import CapabilityBrokerError, GlassHiveCapabilityBroker
 from .conversation_provider import install_conversation_provider_routes
 from .control_plane import ControlPlaneConflict, ControlPlaneError, ControlPlaneStore
 from .control_plane_models import (
+    CatalogLifecycleRequest,
+    ReviseWorkspaceTemplateRequest,
     ConfirmPendingChangeRequest,
     CreateLibraryProposalRequest,
     CreatePendingChangeRequest,
@@ -292,45 +298,10 @@ def _account_read_stage(stage: str):
                            errorClass=error_class)
 
 
-TEXT_ARTIFACT_PREVIEW_EXTENSIONS = {
-    ".css",
-    ".csv",
-    ".htm",
-    ".html",
-    ".ini",
-    ".js",
-    ".json",
-    ".log",
-    ".md",
-    ".markdown",
-    ".py",
-    ".sh",
-    ".sql",
-    ".toml",
-    ".ts",
-    ".tsv",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
-
-
 def _env_enabled(name: str, default: bool = False) -> bool:
     raw = str(os.environ.get(name) or ("true" if default else "false")).strip().lower()
     return raw in {"1", "true", "yes", "on"}
-ARTIFACT_OPEN_SECURITY_HEADERS = {
-    "Cache-Control": "no-store, no-cache, private, max-age=0",
-    "Content-Security-Policy": (
-        "default-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'; "
-        "form-action 'none'; img-src data:; style-src 'unsafe-inline'; frame-src 'self'; "
-        "base-uri 'none'; frame-ancestors 'self'"
-    ),
-    "Pragma": "no-cache",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "SAMEORIGIN",
-}
+ARTIFACT_OPEN_SECURITY_HEADERS = PREVIEW_SECURITY_HEADERS
 ARTIFACT_DOWNLOAD_SECURITY_HEADERS = {
     "Cache-Control": "no-store, no-cache, private, max-age=0",
     "Pragma": "no-cache",
@@ -1364,7 +1335,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Project not found")
         return project
 
-    def require_worker(worker_id: str, request: Request | None = None, *, heal: bool = True) -> dict:
+    def require_worker(worker_id: str, request: Request | None = None, *, heal: bool = True,
+                       allow_closed_owner: bool = False) -> dict:
         ctx = _auth_context(request)
         try:
             worker = service.require_worker(worker_id)
@@ -1383,7 +1355,8 @@ def create_app(
         # headers (the local UI's sessionless link fallback).
         viewer = ctx.role.strip().lower() == "viewer"
         if ctx.auth_mode == "signed_link" or viewer or not heal:
-            if str(worker.get("state") or "") == "terminated":
+            if str(worker.get("state") or "") == "terminated" and (
+                    not allow_closed_owner or ctx.auth_mode == "signed_link" or viewer):
                 raise HTTPException(status_code=404, detail="Worker not found")
             return worker
         service.heal_worker(worker_id)
@@ -1857,7 +1830,7 @@ def create_app(
             if current_fd >= 0:
                 os.close(current_fd)
 
-    def _artifact_download_response(worker: dict, relative_path: str, request: Request) -> Response:
+    def _artifact_download_response(worker: dict, relative_path: str, request: Request, *, inline: bool = False) -> Response:
         from .workspace_file_exports import CHUNK_BYTES, _identity
         display_name = _artifact_display_name(worker, relative_path)
         name, parent_fd, file_fd, metadata = _open_artifact_descriptor(worker, relative_path)
@@ -1876,9 +1849,14 @@ def create_app(
             except OSError:
                 raise HTTPException(status_code=409, detail="Artifact changed during download; retry") from None
         headers = dict(ARTIFACT_DOWNLOAD_SECURITY_HEADERS)
+        if inline and _artifact_mime_type(name) not in INLINE_MEDIA_TYPES:
+            close()
+            raise HTTPException(status_code=415, detail="This file type cannot be opened as native media")
+        if inline:
+            headers.update(INLINE_SECURITY_HEADERS)
         ascii_name = "".join(character if 32 <= ord(character) < 127 and character not in {'"', '\\'} else "_" for character in display_name)
         headers["Content-Disposition"] = (
-            f"attachment; filename=\"{ascii_name or 'artifact'}\"; filename*=UTF-8''{quote(display_name)}"
+            f"{'inline' if inline else 'attachment'}; filename=\"{ascii_name or 'artifact'}\"; filename*=UTF-8''{quote(display_name)}"
         )
         headers["Accept-Ranges"] = "bytes"
         size = metadata.st_size
@@ -1983,15 +1961,7 @@ def create_app(
                 },
             )
         if kind == "artifact_open":
-            store.add_event(
-                worker["project_id"],
-                str(worker["worker_id"]),
-                None,
-                "worker.artifact_opened",
-                target.name,
-            )
-            target, content = _artifact_snapshot(worker, relative_path)
-            return _artifact_open_page(worker, target, content, relative_path, request)
+            return _artifact_open_response(worker, relative_path, request)
         store.add_event(
             worker["project_id"],
             str(worker["worker_id"]),
@@ -2123,141 +2093,53 @@ def create_app(
         return items
 
     def _artifact_mime_type(target: Path) -> str:
-        guessed, _ = mimetypes.guess_type(target.name)
-        if guessed:
-            return guessed
-        if target.suffix.lower() in TEXT_ARTIFACT_PREVIEW_EXTENSIONS:
-            return "text/plain"
-        return "application/octet-stream"
+        return preview_media_type(target.name)
 
     def _is_text_preview_artifact(target: Path, media_type: str) -> bool:
-        suffix = target.suffix.lower()
-        return (
-            suffix in TEXT_ARTIFACT_PREVIEW_EXTENSIONS
-            or media_type.startswith("text/")
-            or media_type in {"application/json", "application/xml", "application/x-yaml"}
-        )
+        return is_text_preview(target.name, media_type)
 
-    def _read_artifact_text_preview(content: bytes) -> tuple[str, bool]:
-        max_bytes = int(os.environ.get("GLASSHIVE_ARTIFACT_PREVIEW_MAX_BYTES", str(512 * 1024)))
-        max_bytes = max(4096, min(max_bytes, 5 * 1024 * 1024))
-        visible = content[:max_bytes]
-        truncated = len(content) > max_bytes
-        return visible.decode("utf-8", errors="replace"), truncated
+    def _artifact_open_response(worker: dict, relative_path: str, request: Request) -> Response:
+        target, parent_fd, file_fd, metadata = _open_artifact_descriptor(worker, relative_path)
+        try:
+            media_type = _artifact_mime_type(target)
+            # Native viewers stream the existing exact file/range transport.
+            # Only a bounded text prefix is ever read to paint a reader.
+            content = b""
+            if request.query_params.get("inline") != "1" and _is_text_preview_artifact(target, media_type):
+                from .workspace_file_exports import _identity
+                preview_bytes = preview_text_limit()
+                content = os.read(file_fd, preview_bytes + 1)
+                if _identity(metadata) != _identity(os.fstat(file_fd)):
+                    raise HTTPException(status_code=409, detail="Artifact changed while it was read; retry")
+        finally:
+            os.close(file_fd)
+            os.close(parent_fd)
+        if request.query_params.get("inline") == "1":
+            return _artifact_download_response(worker, relative_path, request, inline=True)
+        response = _artifact_open_page(worker, target, content, relative_path, request, size=metadata.st_size)
+        if request.method == "GET" and not request.headers.get("range"):
+            store.add_event(worker["project_id"], str(worker["worker_id"]), None, "worker.artifact_opened", target.name)
+        return response
 
     def _artifact_open_page(
-        worker: dict,
-        target: Path,
-        content: bytes,
-        relative_path: str,
-        request: Request,
+        worker: dict, target: Path, content: bytes, relative_path: str, request: Request,
+        *, size: int | None = None,
     ) -> HTMLResponse:
         display_name = _artifact_display_name(worker, relative_path)
         download_url = _signed_artifact_action_url(
-            worker,
-            relative_path,
-            kind="artifact_download",
-            fallback_action="download",
+            worker, relative_path, kind="artifact_download", fallback_action="download",
         )
-        workspace_url = _signed_watch_action_url(worker)
-        media_type = _artifact_mime_type(target)
-        size = len(content)
-        preview = ""
-        if target.suffix.lower() in {".htm", ".html"} and media_type == "text/html":
-            text, truncated = _read_artifact_text_preview(content)
-            if truncated:
-                preview = (
-                    "<div class=\"no-preview\">"
-                    "<h2>Page is ready</h2>"
-                    "<p>This page is too large for a safe preview. Download it to open the complete artifact.</p>"
-                    "</div>"
-                )
-            else:
-                preview = (
-                    '<iframe class="html-preview" sandbox credentialless referrerpolicy="no-referrer" '
-                    f'title="Rendered preview of {escape(display_name, quote=True)}" '
-                    f'srcdoc="{escape(text, quote=True)}"></iframe>'
-                )
-        elif _is_text_preview_artifact(target, media_type):
-            text, truncated = _read_artifact_text_preview(content)
-            truncated_note = (
-                "<p class=\"notice\">Preview is truncated. Use Download file for the complete artifact.</p>"
-                if truncated
-                else ""
-            )
-            if target.suffix.lower() in {".htm", ".html"} and not truncated:
-                preview = f"""
-                  <section class="rendered-preview">
-                    <div class="preview-heading">
-                      <h2>Rendered preview</h2>
-                      <span>Scripts, forms, downloads, pop-ups, and network access are blocked.</span>
-                    </div>
-                    <iframe
-                      class="html-preview"
-                      title="Rendered HTML artifact preview"
-                      sandbox
-                      referrerpolicy="no-referrer"
-                      srcdoc="{escape(text, quote=True)}"
-                    ></iframe>
-                  </section>
-                  <details class="source-preview">
-                    <summary>View source</summary>
-                    <pre class="artifact-preview">{escape(text)}</pre>
-                  </details>
-                """
-            else:
-                preview = f"""
-                  {truncated_note}
-                  <pre class="artifact-preview">{escape(text)}</pre>
-                """
-        elif media_type.startswith("image/") and media_type != "image/svg+xml" and size <= 2 * 1024 * 1024:
-            encoded = base64.b64encode(content).decode("ascii")
-            preview = f'<img class="image-preview" src="data:{escape(media_type, quote=True)};base64,{encoded}" alt="{escape(display_name, quote=True)}" />'
-        else:
-            preview = (
-                "<div class=\"no-preview\">"
-                "<h2>File is ready</h2>"
-                "<p>This artifact type is best opened by downloading it with the button above.</p>"
-                "</div>"
-            )
-        html = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>xPerfect file - {escape(display_name)}</title>
-  <style>
-    :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    body {{ margin: 0; background: #07090d; color: #eef2f7; }}
-    .shell {{ min-height: 100vh; padding: 32px; box-sizing: border-box; }}
-    .topbar {{ display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 24px; }}
-    .brand {{ border: 1px solid rgba(255,255,255,0.18); border-radius: 999px; padding: 8px 14px; letter-spacing: 0.16em; font-size: 12px; text-transform: uppercase; }}
-    .actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
-    a.button {{ color: #0b0d11; background: #f5f7fb; text-decoration: none; border-radius: 999px; padding: 10px 14px; font-weight: 700; }}
-    a.secondary {{ color: #eef2f7; background: #171b22; border: 1px solid rgba(255,255,255,0.16); }}
-    h1 {{ margin: 0 0 8px; font-size: clamp(28px, 5vw, 56px); line-height: 1; overflow-wrap: anywhere; }}
-    .meta {{ color: #a9b2c0; margin-bottom: 24px; }}
-    .artifact-preview {{ margin: 0; padding: 24px; border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; background: #10141b; color: #eef2f7; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; font-size: 14px; }}
-    .html-preview {{ display: block; width: 100%; min-height: min(72vh, 760px); border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; background: #fff; }}
-    .notice, .no-preview {{ border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; background: #10141b; padding: 18px; color: #cbd3df; }}
-    .image-preview {{ max-width: 100%; border-radius: 14px; border: 1px solid rgba(255,255,255,0.14); background: #10141b; }}
-  </style>
-</head>
-<body>
-  <main class="shell">
-    <div class="topbar">
-      <div class="brand">xPerfect</div>
-      <div class="actions">
-        <a class="button" download href="{escape(download_url, quote=True)}">Download file</a>
-        <a class="button secondary" href="{escape(workspace_url, quote=True)}" target="_top" rel="noopener noreferrer">View workspace</a>
-      </div>
-    </div>
-    <h1>{escape(display_name)}</h1>
-    <div class="meta">{escape(media_type)} &middot; {size:,} bytes</div>
-    {preview}
-  </main>
-</body>
-</html>"""
+        open_url = _signed_artifact_action_url(
+            worker, relative_path, kind="artifact_open", fallback_action="open",
+        )
+        inline_url = open_url + ("&" if "?" in open_url else "?") + "inline=1"
+        text_limit = preview_text_limit()
+        html = render_artifact_page(
+            display_name=display_name, suffix=target.suffix, media_type=_artifact_mime_type(target),
+            content=content, size=len(content) if size is None else size,
+            download_url=download_url, workspace_url=_signed_watch_action_url(worker),
+            inline_url=inline_url, text_limit=text_limit, appearance=preview_appearance(request),
+        )
         return HTMLResponse(html, headers=ARTIFACT_OPEN_SECURITY_HEADERS)
 
     def _sanitize_worker(worker: dict) -> dict[str, object]:
@@ -2272,6 +2154,10 @@ def create_app(
         safe.pop("gateway_token", None)
         safe.pop("bootstrap_bundle_json", None)
         return safe
+
+    def _require_desktop_member(ctx: AuthContext) -> None:
+        if ctx.auth_mode == "signed_link" or ctx.role.strip().lower() == "viewer":
+            raise HTTPException(status_code=403, detail="Interactive desktop access requires a workspace member")
 
     def _can_show_internal_details(ctx: AuthContext) -> bool:
         # A workspace link's viewer assertion never sees gateway credentials or
@@ -2302,6 +2188,7 @@ def create_app(
         """Project only rediscovery metadata; never return runtime credentials or host paths."""
 
         allowed = {
+            "catalog_state", "catalog_revision",
             "worker_id",
             "workspace_id",
             "project_id",
@@ -4840,6 +4727,7 @@ def create_app(
         favorite: bool | None = None,
         cursor: str | None = None,
         limit: int = 25,
+        catalog_state: str = "active",
     ) -> WorkspaceCatalogResponse:
         _, tenant_id, owner_id = _current_principal(request)
         workspace_kinds = {value.strip() for value in kind.split(",") if value.strip()} if kind else set()
@@ -4854,6 +4742,7 @@ def create_app(
                 favorite=favorite,
                 cursor=cursor,
                 limit=limit,
+                catalog_state=catalog_state,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4886,10 +4775,27 @@ def create_app(
                 favorite=payload.favorite,
                 tags=payload.tags,
                 workspace_kind=payload.workspace_kind,
+                expected_catalog_revision=payload.expected_catalog_revision,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _workspace_catalog_item(worker)
+
+    @app.delete("/v1/workspaces/{worker_id}")
+    @app.delete("/v1/workers/{worker_id}")
+    def remove_workspace(worker_id: str, payload: CatalogLifecycleRequest, request: Request):
+        require_worker(worker_id, request, heal=False, allow_closed_owner=True)
+        if not payload.confirm:
+            raise HTTPException(status_code=422, detail="Confirm removal. This closes the worker; saved results remain")
+        return _workspace_catalog_item(service.remove_workspace(worker_id,
+            expected_catalog_revision=payload.expected_catalog_revision))
+
+    @app.post("/v1/workspaces/{worker_id}/restore")
+    @app.post("/v1/workers/{worker_id}/restore")
+    def restore_workspace(worker_id: str, payload: CatalogLifecycleRequest, request: Request):
+        require_worker(worker_id, request, heal=False, allow_closed_owner=True)
+        return _workspace_catalog_item(service.restore_workspace(worker_id,
+            expected_catalog_revision=payload.expected_catalog_revision))
 
     @app.post("/v1/workspaces/{worker_id}/duplicate", status_code=201)
     def duplicate_workspace(
@@ -5133,14 +5039,56 @@ def create_app(
             ) from exc
 
     @app.get("/v1/workspace-templates")
-    def list_workspace_templates(request: Request) -> dict[str, object]:
+    def list_workspace_templates(request: Request, state: str = "active") -> dict[str, object]:
         _, tenant_id, owner_id = _current_principal(request)
         return {
             "items": service.list_workspace_templates(
                 tenant_id=tenant_id,
                 owner_id=owner_id,
+                state=state,
             )
         }
+
+    def _owned_template(template_id, request):
+        _, tenant_id, owner_id = _current_principal(request)
+        template = control_plane.get_workspace_template(template_id=template_id, tenant_id=tenant_id, owner_id=owner_id)
+        if template is None:
+            raise HTTPException(status_code=404, detail="Expert not found")
+        return tenant_id, owner_id, template
+
+    @app.get("/v1/workspace-templates/{template_id}")
+    def get_workspace_template(template_id: str, request: Request):
+        _, _, template = _owned_template(template_id, request)
+        return {k: v for k, v in template.items() if k != "content"}
+
+    @app.get("/v1/workspace-templates/{template_id}/versions")
+    def workspace_template_versions(template_id: str, request: Request):
+        tenant_id, owner_id, template = _owned_template(template_id, request)
+        return {"items": service.list_workspace_templates(tenant_id=tenant_id, owner_id=owner_id,
+            state="all", lineage_id=template["lineage_id"])}
+
+    @app.patch("/v1/workspace-templates/{template_id}")
+    def revise_workspace_template(template_id: str, payload: ReviseWorkspaceTemplateRequest, request: Request):
+        tenant_id, owner_id, _ = _owned_template(template_id, request)
+        return service.revise_workspace_template(template_id, tenant_id=tenant_id, owner_id=owner_id,
+            **payload.model_dump())
+
+    @app.post("/v1/workspace-templates/{template_id}/duplicate", status_code=201)
+    def duplicate_workspace_template(template_id: str, payload: DuplicateWorkspaceRequest, request: Request):
+        tenant_id, owner_id, template = _owned_template(template_id, request)
+        return service.duplicate_workspace_template(template_id, tenant_id=tenant_id, owner_id=owner_id,
+            name=payload.name or f"{template['name']} copy", idempotency_key=payload.idempotency_key)
+
+    @app.post("/v1/workspace-templates/{template_id}/state")
+    @app.delete("/v1/workspace-templates/{template_id}")
+    def workspace_template_lifecycle(template_id: str, payload: CatalogLifecycleRequest, request: Request):
+        tenant_id, owner_id, _ = _owned_template(template_id, request)
+        state = "deleted" if request.method == "DELETE" else payload.state
+        if state == "deleted" and not payload.confirm:
+            raise HTTPException(status_code=422, detail="Confirm removal. Saved versions and existing workers remain")
+        saved = control_plane.set_workspace_template_state(template_id=template_id, tenant_id=tenant_id,
+            owner_id=owner_id, state=state, expected_catalog_revision=payload.expected_catalog_revision)
+        return {k: v for k, v in saved.items() if k != "content"}
 
     @app.post("/v1/workspaces/{worker_id}/templates", status_code=201)
     def save_workspace_template(
@@ -5157,6 +5105,8 @@ def create_app(
             name=payload.name,
             description=payload.description,
             lineage_id=payload.lineage_id,
+            expected_template_id=payload.expected_template_id,
+            expected_catalog_revision=payload.expected_catalog_revision,
         )
 
     @app.post("/v1/workspace-templates/{template_id}/instantiate", status_code=201)
@@ -5947,7 +5897,8 @@ def create_app(
     ) -> WorkerResponse:
         require_worker(worker_id, request)
         try:
-            worker = service.update_worker_metadata(worker_id, favorite=payload.favorite, name=payload.name)
+            worker = service.update_worker_metadata(worker_id, favorite=payload.favorite, name=payload.name,
+                expected_catalog_revision=payload.expected_catalog_revision)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return WorkerResponse(**worker)
@@ -6711,10 +6662,7 @@ def create_app(
             # verified against an earlier live snapshot cannot outlive it.
             worker = _require_authoritative_signed_link_worker(worker_id)
             path = str(payload.get("path") or "").strip().lstrip("/")
-            if kind == "artifact_open":
-                target, content = _artifact_snapshot(worker, path)
-            else:
-                target = _artifact_path(worker, path)
+            target = _artifact_path(worker, path)
             expired = service.local_qa_artifact_fault(
                 worker,
                 target,
@@ -6731,8 +6679,7 @@ def create_app(
                 )
             _require_artifact_available_for_local_qa(worker, target)
             if kind == "artifact_open":
-                store.add_event(worker["project_id"], worker_id, None, "worker.artifact_opened", target.name)
-                return _artifact_open_page(worker, target, content, path, request)
+                return _artifact_open_response(worker, path, request)
             store.add_event(worker["project_id"], worker_id, None, "worker.artifact_downloaded", target.name)
             return _artifact_download_response(worker, path, request)
         raise HTTPException(status_code=400, detail="Signed link kind is not supported")
@@ -7218,58 +7165,13 @@ def create_app(
 
     @app.get("/w/{ref_id}/desktop", response_class=HTMLResponse)
     def open_ref_workspace_desktop(ref_id: str, request: Request) -> Response:
-        payload, worker = _require_worker_view_ref(ref_id, request)
-        if _is_account_active_work_worker(worker):
-            raise HTTPException(
-                status_code=403,
-                detail="Read-only view links cannot open an interactive desktop",
-            )
-        worker_id = str(worker.get("worker_id") or "")
-        runtime_details = _runtime_details(worker)
-        external_view_url = str(runtime_details.get("view_url") or "").strip()
-        if not external_view_url:
-            raise HTTPException(status_code=404, detail="GlassHive desktop view is not available")
-        ref_route = f"/w/{escape(ref_id, quote=True)}"
-        desktop_frame_route = f"{ref_route}/desktop-frame"
-        response = HTMLResponse(
-            f"""
-            <html>
-              <head>
-                <title>{escape(worker['name'])} desktop</title>
-                <style>
-                  body {{ margin: 0; background: #020617; color: #e5e7eb; font-family: system-ui, sans-serif; }}
-                  header {{ padding: .75rem 1rem; border-bottom: 1px solid rgba(255,255,255,.12); display: flex; justify-content: space-between; align-items: center; gap: 1rem; }}
-                  a {{ color: #93c5fd; }}
-                  iframe {{ width: 100%; height: calc(100vh - 54px); border: 0; background: #020617; }}
-                </style>
-              </head>
-              <body>
-                <header>
-                  <strong>{escape(worker['name'])}</strong>
-                  <a href="{ref_route}" target="_top">Back to workspace controls</a>
-                </header>
-                <iframe src="{desktop_frame_route}" loading="eager"></iframe>
-              </body>
-            </html>
-            """
-        )
-        return _response_with_worker_view_cookie(response, request, payload=payload, worker_id=worker_id)
+        _require_worker_view_ref(ref_id, request)
+        raise HTTPException(status_code=403, detail="A view link cannot open an interactive desktop")
 
     @app.get("/w/{ref_id}/desktop-frame")
     def open_ref_workspace_desktop_frame(ref_id: str, request: Request) -> Response:
-        payload, worker = _require_worker_view_ref(ref_id, request)
-        if _is_account_active_work_worker(worker):
-            raise HTTPException(
-                status_code=403,
-                detail="Read-only view links cannot open an interactive desktop",
-            )
-        worker_id = str(worker.get("worker_id") or "")
-        runtime_details = _runtime_details(worker)
-        external_view_url = str(runtime_details.get("view_url") or "").strip()
-        if not external_view_url:
-            raise HTTPException(status_code=404, detail="GlassHive desktop view is not available")
-        response = RedirectResponse(external_view_url, status_code=307)
-        return _response_with_worker_view_cookie(response, request, payload=payload, worker_id=worker_id)
+        _require_worker_view_ref(ref_id, request)
+        raise HTTPException(status_code=403, detail="A view link cannot open an interactive desktop")
 
     @app.post("/w/{ref_id}/actions/{action_name}", status_code=202)
     def ref_workspace_action(ref_id: str, action_name: str, request: Request) -> dict[str, object]:
@@ -7297,27 +7199,8 @@ def create_app(
 
     @app.post("/w/{ref_id}/desktop-action", response_model=DesktopActionResponse, status_code=202)
     def ref_workspace_desktop_action(ref_id: str, payload: DesktopActionRequest, request: Request) -> DesktopActionResponse:
-        _ref_payload, worker = _require_worker_view_ref(ref_id, request)
-        if _is_account_active_work_worker(worker):
-            raise HTTPException(
-                status_code=403,
-                detail="Read-only view links cannot control work",
-            )
-        worker_id = str(worker.get("worker_id") or "")
-        try:
-            launched = service.desktop_action(worker_id, payload.action, url=payload.url, run_id=payload.run_id)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        resolved_url = str(launched.get("url") or launched.get("view_url") or f"/w/{quote(ref_id, safe='')}/desktop")
-        notes = str(launched.get("notes") or "")
-        return DesktopActionResponse(
-            action=str(launched.get("action") or payload.action),
-            status=str(launched.get("status") or "launched"),
-            mode=str(launched.get("mode") or "workstation-desktop"),
-            url=resolved_url,
-            view_url=str(launched.get("view_url") or resolved_url),
-            notes=notes or None,
-        )
+        _require_worker_view_ref(ref_id, request)
+        raise HTTPException(status_code=403, detail="A view link cannot control an interactive desktop")
 
     install_workspace_file_routes(app, service.files, _auth_context, require_worker)
     from .starter_templates import install_starter_routes
@@ -7397,10 +7280,9 @@ def create_app(
     @app.get("/v1/workers/{worker_id}/artifacts/open")
     def open_worker_artifact(worker_id: str, path: str, request: Request) -> HTMLResponse:
         worker = require_worker(worker_id, request)
-        target, content = _artifact_snapshot(worker, path)
+        target = _artifact_path(worker, path)
         _require_artifact_available_for_local_qa(worker, target)
-        store.add_event(worker["project_id"], worker_id, None, "worker.artifact_opened", target.name)
-        return _artifact_open_page(worker, target, content, path, request)
+        return _artifact_open_response(worker, path, request)
 
     @app.get("/v1/workers/{worker_id}/artifacts/download")
     def download_worker_artifact(worker_id: str, path: str, request: Request) -> Response:
@@ -7530,7 +7412,8 @@ def create_app(
         selected_runs = store.list_runs_for_worker(selected_worker["worker_id"], limit=10, tenant_id=_tenant_filter(ctx)) if selected_worker else []
         project_runs = store.list_runs_for_project(project_id, limit=12, tenant_id=_tenant_filter(ctx))
         selected_events = store.list_events(selected_worker["worker_id"], _tenant_filter(ctx)) if selected_worker else []
-        selected_runtime_details = _runtime_details(selected_worker) if selected_worker else {}
+        read_only_viewer = ctx.auth_mode == "signed_link" or ctx.role.strip().lower() == "viewer"
+        selected_runtime_details = _runtime_details(selected_worker) if selected_worker and not read_only_viewer else {}
         selected_view_url = str(selected_runtime_details.get("view_url") or "").strip()
         selected_is_host = str((selected_worker or {}).get("execution_mode") or "docker") == "host"
         project_default_profile = (
@@ -7547,7 +7430,7 @@ def create_app(
         selected_takeover_url = (
             f"/watch/{escape(selected_worker_id)}?project_id={escape(project_id, quote=True)}&surface=desktop"
             if selected_worker and ctx.enterprise and not show_internal
-            else f"/ui/workers/{escape(selected_worker_id)}/view"
+            else build_watch_url(selected_worker_id, project_id)
             if selected_worker
             else ""
         )
@@ -7597,10 +7480,11 @@ def create_app(
                     live_view_card = f"""
                     <div class="card">
                       <h2>Live View</h2>
-                      <p><strong>Best takeover flow:</strong> use the managed GlassHive takeover page, then pause or resume the worker from the controls.</p>
-                      <p><a href="{selected_takeover_url}">Open full workspace</a></p>
+                      <p>Use Watch / Steer to view the desktop and control the task.</p>
+                      <p>This desktop is shared with this worker, including anything you open or sign in to.</p>
+                      <p><a href="{escape(selected_takeover_url, quote=True)}">Open full workspace</a></p>
                       <div class="actions">
-                        <button onclick="pauseAndOpenDesktop('{escape(selected_desktop_url, quote=True)}')">Pause + Open Desktop</button>
+                        <a href="{escape(selected_takeover_url, quote=True)}">Open Watch / Steer</a>
                         <button onclick="window.open('{escape(selected_desktop_url, quote=True)}', '_blank', 'noopener')">Open Desktop In New Tab</button>
                       </div>
                       <iframe src="{escape(selected_desktop_url, quote=True)}" style="width:100%;height:520px;border:1px solid #d1d5db;border-radius:12px;background:#0f172a;" loading="eager"></iframe>
@@ -7610,10 +7494,10 @@ def create_app(
                     live_view_card = f"""
                     <div class="card">
                       <h2>Live View</h2>
-                      <p><strong>Best takeover flow:</strong> press <code>Pause</code>, then open the desktop directly and click inside it to control the worker yourself. Use <code>Resume</code> when you want the worker to continue.</p>
-                      <p><a href="/ui/workers/{escape(selected_worker['worker_id'])}/view">Open takeover page</a> · <a href="{escape(selected_view_url, quote=True)}" target="_blank" rel="noreferrer">Open desktop directly</a> · <a href="/ui/workers/{escape(selected_worker['worker_id'])}/terminal">Take over terminal</a></p>
+                      <p>Use Watch / Steer to view the desktop and control the task.</p>
+                      <p>This desktop is shared with this worker, including anything you open or sign in to.</p>
+                      <p><a href="{escape(selected_takeover_url, quote=True)}">Open Watch / Steer</a> · <a href="{escape(selected_view_url, quote=True)}" target="_blank" rel="noreferrer">Open desktop directly</a> · <a href="/ui/workers/{escape(selected_worker['worker_id'])}/terminal">Take over terminal</a></p>
                       <div class="actions">
-                        <button onclick="pauseAndOpenDesktop('{escape(selected_view_url, quote=True)}')">Pause + Open Desktop</button>
                         <button onclick="window.open('{escape(selected_view_url, quote=True)}', '_blank', 'noopener')">Open Desktop In New Tab</button>
                       </div>
                       <iframe src="{escape(selected_view_url, quote=True)}" style="width:100%;height:520px;border:1px solid #d1d5db;border-radius:12px;background:#0f172a;" loading="eager"></iframe>
@@ -7659,10 +7543,10 @@ def create_app(
                 """
             worker_links = (
                 f'<a href="/ui/workers/{escape(selected_worker["worker_id"])}">Open worker console</a> · '
-                f'<a href="{selected_takeover_url}">Open takeover page</a> · '
+                f'<a href="{escape(selected_takeover_url, quote=True)}">Open Watch / Steer</a> · '
                 f'<a href="/ui/workers/{escape(selected_worker["worker_id"])}/terminal">Take over terminal</a>'
                 if show_internal
-                else f'<a href="{selected_takeover_url}">Open full workspace</a>'
+                else f'<a href="{escape(selected_takeover_url, quote=True)}">Open full workspace</a>'
             )
             lifecycle_buttons = (
                 """
@@ -7750,7 +7634,7 @@ def create_app(
                 <div class="card">
                   <h2>Project Workspace</h2>
                   <p class="muted">This fallback page is read-only for signed workspace links. Use the main GlassHive workspace to steer or resume work.</p>
-                  {f'<p><a href="{selected_takeover_url}">Open full workspace</a></p>' if selected_takeover_url else ''}
+                  {f'<p><a href="{escape(selected_takeover_url, quote=True)}">Open full workspace</a></p>' if selected_takeover_url else ''}
                 </div>
             """
 
@@ -7888,17 +7772,6 @@ def create_app(
                 window.location.reload();
               }}
 
-              async function pauseAndOpenDesktop(url) {{
-                if (!currentWorkerId) return;
-                const res = await fetch(`/v1/workers/${{currentWorkerId}}/pause`, {{ method: 'POST' }});
-                if (!res.ok) {{
-                  alert(await res.text());
-                  return;
-                }}
-                window.open(url, '_blank', 'noopener');
-                window.location.reload();
-              }}
-
               async function desktopAction(action, url='') {{
                 if (!currentWorkerId) return;
                 const res = await fetch(`/v1/workers/${{currentWorkerId}}/desktop-action`, {{
@@ -7983,6 +7856,7 @@ def create_app(
         console = live["console"]
         workspace = live["workspace"]
         runtime_details = live["runtime_details"]
+        watch_url = build_watch_url(worker_id, project["project_id"]) or ""
         show_internal = _can_show_internal_details(ctx)
         show_raw_paths = show_internal and str(request.query_params.get("diagnostics") or "").strip().lower() in {
             "1",
@@ -8119,7 +7993,7 @@ def create_app(
                 <p><strong>State:</strong> <span id="worker-state">{escape(worker['state'])}</span></p>
                 {diagnostic_rows}
                 <p><strong>Last Error:</strong> <span id="worker-last-error">{last_error or 'None'}</span></p>
-                <p><a href="/ui/workers/{escape(worker_id)}/view{signed_query_suffix}">Open takeover page</a> · <a href="/ui/workers/{escape(worker_id)}/terminal{signed_query_suffix}">Take over terminal</a></p>
+                <p><a href="{escape(watch_url, quote=True)}">Open Watch / Steer</a> · <a href="/ui/workers/{escape(worker_id)}/terminal{signed_query_suffix}">Take over terminal</a></p>
                 <div class="actions">
                   <button onclick="action('resume')">Resume</button>
                   <button onclick="action('pause')">Pause</button>
@@ -8167,8 +8041,9 @@ def create_app(
               <div class="card">
                 <h2>Live View</h2>
                 {(
-                    f'<p><strong>Best takeover flow:</strong> press <code>Pause</code>, then <a href="{escape(str(runtime_details.get("view_url") or ""), quote=True)}" target="_blank" rel="noreferrer">open desktop directly</a> and click inside the desktop to take control. Use <code>Resume</code> to hand control back.</p>'
-                    f'<p><a href="/ui/workers/{escape(worker_id)}/view">Open takeover page</a> · <a href="{escape(str(runtime_details.get("view_url") or ""), quote=True)}" target="_blank" rel="noreferrer">Open desktop directly</a></p>'
+                    f'<p>Use Watch / Steer to view the desktop and control the task.</p>'
+                    f'<p>This desktop is shared with this worker, including anything you open or sign in to.</p>'
+                    f'<p><a href="{escape(watch_url, quote=True)}">Open Watch / Steer</a> · <a href="{escape(str(runtime_details.get("view_url") or ""), quote=True)}" target="_blank" rel="noreferrer">Open desktop directly</a></p>'
                     f'<iframe src="{escape(str(runtime_details.get("view_url") or ""), quote=True)}" style="width:100%;height:520px;border:1px solid #d1d5db;border-radius:12px;background:#0f172a;" loading="eager"></iframe>'
                 ) if runtime_details.get("view_url") else '<p>No desktop view is available for this worker. Terminal takeover is still available.</p>'}
               </div>
@@ -8320,8 +8195,10 @@ def create_app(
     def ui_worker_view(worker_id: str, request: Request) -> str:
         ctx = _auth_context(request)
         worker = require_worker(worker_id, request)
+        _require_desktop_member(ctx)
         project = require_project(worker["project_id"], request)
         runtime_details = _runtime_details(worker)
+        watch_url = build_watch_url(worker_id, project["project_id"]) or ""
         show_internal = _can_show_internal_details(ctx)
         external_view_url = str(runtime_details.get("view_url") or "").strip()
         subtitle = escape(str(runtime_details.get("mode") or worker.get("runtime") or "worker view"))
@@ -8386,7 +8263,7 @@ def create_app(
                 <button onclick="action('pause')">Pause</button>
                 <button onclick="action('interrupt')">Interrupt</button>
                 <button onclick="action('terminate')">Terminate</button>
-                <button onclick="pauseAndOpenDirect()">Pause + Open Desktop</button>
+                <a href="{escape(watch_url, quote=True)}" target="_top">Open Watch / Steer</a>
                 <button onclick="desktopAction('terminal')">Shell</button>
                 <button onclick="desktopAction('files')">Files</button>
                 <button onclick="desktopAction('browser')">Browser</button>
@@ -8396,7 +8273,8 @@ def create_app(
               </div>
             </header>
             <div class="notice">
-              <strong>How to take over:</strong> press <code>Pause</code> to freeze the worker, then click inside the embedded desktop below or open <a href="{escape(external_view_url, quote=True)}" target="_blank" rel="noreferrer">Desktop directly</a> in its own tab. Use <code>Resume</code> to hand control back to the worker. Use <code>Interrupt</code> to stop the current task instead of freezing it.
+              <a href="{escape(watch_url, quote=True)}" target="_top">Open Watch / Steer</a> to view the desktop and control the task.
+              This desktop is shared with this worker, including anything you open or sign in to.
             </div>
             <iframe src="{escape(external_view_url, quote=True)}" loading="eager"></iframe>
             <script>
@@ -8409,10 +8287,6 @@ def create_app(
               }}
               async function action(name) {{
                 await fetch(withSignedQuery(`/v1/workers/${{workerId}}/${{name}}`), {{ method: 'POST' }});
-              }}
-              async function pauseAndOpenDirect() {{
-                await action('pause');
-                window.open(directDesktopUrl, '_blank', 'noopener');
               }}
               async function desktopAction(name, url='') {{
                 const res = await fetch(withSignedQuery(`/v1/workers/${{workerId}}/desktop-action`), {{
@@ -8670,4 +8544,5 @@ def create_app(
             ) in {"terminating", "termination_failed", "terminated"},
         )
 
+    install_preview_error_handlers(app)
     return app

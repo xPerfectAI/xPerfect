@@ -3649,12 +3649,14 @@ class WorkersProjectsApiClient:
         favorite: bool | None = None,
         cursor: str | None = None,
         limit: int = 25,
+        catalog_state: str = "active",
     ) -> dict[str, Any]:
         query: dict[str, str] = {
             "kind": kind,
             "search": search,
             "tags": ",".join(tags or []),
             "limit": str(max(1, min(int(limit), 100))),
+            "catalog_state": catalog_state,
         }
         if favorite is not None:
             query["favorite"] = "true" if favorite else "false"
@@ -3737,8 +3739,8 @@ class WorkersProjectsApiClient:
             json_body=payload,
         )
 
-    def workspace_templates(self) -> list[dict[str, Any]]:
-        return self._request("GET", "/v1/workspace-templates").get("items", [])
+    def workspace_templates(self, state: str = "active") -> list[dict[str, Any]]:
+        return self._request("GET", f"/v1/workspace-templates?{httpx.QueryParams({'state': state})}").get("items", [])
 
     def save_workspace_template(
         self,
@@ -4715,6 +4717,7 @@ def create_mcp_server(
         favorite: bool | None = None,
         cursor: str | None = None,
         limit: int = 25,
+        catalog_state: Literal["active", "deleted", "all"] = "active",
     ) -> dict[str, Any]:
         return client.workspace_catalog(
             search=search,
@@ -4723,6 +4726,7 @@ def create_mcp_server(
             favorite=favorite,
             cursor=cursor,
             limit=max(1, min(int(limit), 100)),
+            catalog_state=catalog_state,
         )
 
     @server.tool(
@@ -4842,8 +4846,53 @@ def create_mcp_server(
         structured_output=True,
         annotations=READ_ONLY_TOOL_ANNOTATIONS,
     )
-    def workspace_template_list() -> list[dict[str, Any]]:
-        return client.workspace_templates()
+    def workspace_template_list(state: Literal["active", "archived", "deleted", "all"] = "active") -> list[dict[str, Any]]:
+        return client.workspace_templates() if state == "active" else client.workspace_templates(state)
+
+    @server.tool(name="workspace_template_get", title="Inspect Saved Expert", structured_output=True,
+                 annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def workspace_template_get(template_id: str, versions: bool = False) -> dict[str, Any]:
+        """Read one owned saved expert, or its immutable version history."""
+        path = client._path_id(template_id, "template_id")
+        return client._request("GET", f"/v1/workspace-templates/{path}" + ("/versions" if versions else ""))
+
+    @server.tool(name="workspace_template_manage", title="Manage Saved Expert", structured_output=True)
+    def workspace_template_manage(template_id: str,
+            action: Literal["edit", "duplicate", "archive", "remove", "restore"],
+            expected_catalog_revision: Annotated[int, Field(ge=1)], name: str = "",
+            description: str | None = None, idempotency_key: str = "", confirm: bool = False,
+            source_worker_id: str = "") -> dict[str, Any]:
+        """Edit appends an immutable version. Remove is recoverable and retains workers and Library references.
+
+        Read the current catalog revision first. Duplicate needs a stable request key; Remove needs confirm=true.
+        """
+        path = "/v1/workspace-templates/" + client._path_id(template_id, "template_id")
+        if action == "duplicate":
+            return client._request("POST", path + "/duplicate", json_body={"name": name or None, "idempotency_key": idempotency_key}, require_write_scope=True)
+        if action == "edit":
+            if source_worker_id:
+                current = client._request("GET", path)
+                return client._request("POST", "/v1/workspaces/" + client._path_id(source_worker_id, "worker_id") + "/templates",
+                    json_body={"name": name, "description": current["description"] if description is None else description, "lineage_id": current["lineage_id"],
+                        "expected_template_id": template_id, "expected_catalog_revision": expected_catalog_revision}, require_write_scope=True)
+            return client._request("PATCH", path, json_body={"name": name, **({"description": description} if description is not None else {}),
+                "expected_catalog_revision": expected_catalog_revision}, require_write_scope=True)
+        return client._request("DELETE" if action == "remove" else "POST", path if action == "remove" else path + "/state",
+            json_body={"state": "archived" if action == "archive" else "active", "confirm": confirm,
+                       "expected_catalog_revision": expected_catalog_revision}, require_write_scope=True)
+
+    @server.tool(name="workspace_remove", title="Remove Workspace", structured_output=True)
+    def workspace_remove(worker_id: str, expected_catalog_revision: Annotated[int, Field(ge=1)],
+                         confirm: bool = False) -> dict[str, Any]:
+        """Close exact worker compute and remove its card recoverably. Saved files/results remain. Confirm explicitly."""
+        return client._request("DELETE", "/v1/workspaces/" + client._path_id(worker_id, "worker_id"),
+            json_body={"expected_catalog_revision": expected_catalog_revision, "confirm": confirm}, require_write_scope=True)
+
+    @server.tool(name="workspace_restore", title="Restore Workspace Card", structured_output=True)
+    def workspace_restore(worker_id: str, expected_catalog_revision: Annotated[int, Field(ge=1)]) -> dict[str, Any]:
+        """Restore a removed card, still Closed. Does not restart compute or schedules; Copy starts fresh work."""
+        return client._request("POST", "/v1/workspaces/" + client._path_id(worker_id, "worker_id") + "/restore",
+            json_body={"expected_catalog_revision": expected_catalog_revision}, require_write_scope=True)
 
     @server.tool(
         name="workspace_template_save",

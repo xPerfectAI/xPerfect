@@ -1,7 +1,7 @@
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
 import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
 import { createExpertPicker } from './expert-picker.js?v=20261024polish1';
-import { createLibraryBrowser, createLibrarySelection, libraryWorkerTarget, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
+import { createLibraryBrowser, createLibrarySelection, libraryModal, libraryRequest, libraryWorkerTarget, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
 import { renderAccountIdentity } from './account-menu.js?v=20261024polish1';
 import { mountWorkerOnboarding, workerChoiceLabel, hostAccountLabel, workerTypeOption } from './worker-onboarding.js?v=20261024polish1';
 import { createLaunchDraft } from './launch-draft.js?v=20261024polish1';
@@ -583,13 +583,14 @@ function syncTileSteerAvailability(tile, state) {
   const normalized = String(state || '').trim().toLowerCase();
   tile.dataset.displayState = normalized;
   const closed = ['terminating', 'termination_failed', 'terminated'].includes(normalized);
+  const checking = !normalized || normalized === 'unknown';
   const input = tile.querySelector('.workspace-steer textarea');
   const button = tile.querySelector('.workspace-steer button[type="submit"]');
   if (input) {
-    input.disabled = closed;
-    input.placeholder = closed ? 'This workspace is closed' : 'Steer this workspace';
+    input.disabled = closed || checking;
+    input.placeholder = closed ? 'This workspace is closed' : checking ? 'Checking workspace status…' : 'Steer this workspace';
   }
-  if (button) button.disabled = closed || Boolean(pendingWorkspaceSteer(tile.dataset.workerId, tile.dataset.ownerScope));
+  if (button) button.disabled = closed || checking || Boolean(pendingWorkspaceSteer(tile.dataset.workerId, tile.dataset.ownerScope));
 }
 
 function bindWorkspaceInteractionOwner(scope) {
@@ -652,6 +653,7 @@ async function submitWorkspaceSteer(workspace, tile, input, refreshBootstrap) {
   const workerId = String(workspace?.worker_id || '');
   const ownerScope = String(tile.dataset.ownerScope || '');
   if (ownerScope !== workspaceInteractionOwnerScope || pendingWorkspaceSteer(workerId, ownerScope)) return;
+  if (['unknown', 'terminating', 'termination_failed', 'terminated'].includes(tile.dataset.displayState || 'unknown')) return;
   const message = input.value.trim();
   const output = () => currentWorkspaceTile(workerId, ownerScope)?.querySelector('[data-worker-output]');
   if (!message) {
@@ -1413,8 +1415,31 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   }
 
   const rename = createButton('Rename');
+  rename.disabled = workspace.catalog_state === 'deleted';
   rename.addEventListener('click', () => openRenameWorkspace(workspace, refreshBootstrap));
   moreActions.appendChild(rename);
+
+  const removed = workspace.catalog_state === 'deleted';
+  const catalogAction = createButton(removed ? 'Restore' : 'Remove');
+  catalogAction.addEventListener('click', () => {
+    const ownerScope = workspaceInteractionOwnerScope;
+    const dialog = libraryModal(removed ? 'Restore workspace' : 'Remove workspace', {
+      action: removed ? 'Restore' : 'Close and remove',
+      onSave: async ({ signal }) => {
+        if (ownerScope !== workspaceInteractionOwnerScope) throw new Error('Your account changed. Open this workspace again.');
+        await waitForWorkspaceSteers(ownerScope);
+        await libraryRequest(`/api/workspaces/${encodeURIComponent(workerId)}${removed ? '/restore' : ''}`, {
+          method: removed ? 'POST' : 'DELETE', signal,
+          body: { expected_catalog_revision: workspace.catalog_revision, confirm: !removed },
+        });
+        if (ownerScope === workspaceInteractionOwnerScope) await refreshBootstrap();
+      },
+    });
+    dialog.body.appendChild(document.createTextNode(removed
+      ? 'Show this workspace again, still Closed. Saved files and results remain. Use Copy to start new work.'
+      : 'Close this worker and remove it from your list? Current and scheduled work will stop. Files and history are kept, including one-off workspaces. Restore returns it Closed; it does not restart work. Find it under Removed.'));
+  });
+  moreActions.appendChild(catalogAction);
 
   const toggle = createButton(lifecycleControl.label, 'workspace-run-toggle');
   toggle.dataset.workerActionToggle = 'true';
@@ -2026,6 +2051,16 @@ async function main() {
   const workspaceSearch = document.getElementById('workspace-search');
   const workspaceKindFilter = document.getElementById('workspace-kind-filter');
   const workspaceTagFilter = document.getElementById('workspace-tag-filter');
+  let workspaceCatalogState = 'active';
+  const lifecycleFilters = document.createElement('div'); lifecycleFilters.className = 'expert-tabs';
+  lifecycleFilters.setAttribute('role', 'group'); lifecycleFilters.setAttribute('aria-label', 'Workspace collection');
+  for (const [value, label] of [['active', 'Workspaces'], ['deleted', 'Removed']]) {
+    const choice = createButton(label); choice.type = 'button'; choice.setAttribute('aria-pressed', String(value === workspaceCatalogState));
+    choice.addEventListener('click', () => { workspaceCatalogState = value;
+      for (const item of lifecycleFilters.children) item.setAttribute('aria-pressed', String(item === choice));
+      void refreshWorkspaceCatalog(); }); lifecycleFilters.append(choice);
+  }
+  document.getElementById('workspace-catalog-status')?.before(lifecycleFilters);
   const workspaceLoadMore = document.getElementById('workspace-load-more');
   const workspaceCatalogStatus = document.getElementById('workspace-catalog-status');
   const renameDialog = document.getElementById('rename-workspace-dialog');
@@ -2082,7 +2117,7 @@ async function main() {
   let catalogSearchTimer = 0;
   const catalogState = { items: [], nextCursor: null, loading: false, generation: 0 };
   const hivePrefs = () => ({
-    showInactive: Boolean(inactiveToggle?.checked),
+    showInactive: workspaceCatalogState === 'deleted' || Boolean(inactiveToggle?.checked),
     showWatch: watchToggle ? Boolean(watchToggle.checked) : true,
     showStatus: statusToggle ? Boolean(statusToggle.checked) : true,
     search: String(workspaceSearch?.value || ''),
@@ -2096,8 +2131,9 @@ async function main() {
     workspace_catalog_status: bootstrap?.bootstrap_sections?.workspace_catalog || 'ready',
   });
 
-  const fetchCatalogPage = async ({ kind, search = '', tags = '', cursor = '' }) => {
+  const fetchCatalogPage = async ({ kind, search = '', tags = '', cursor = '', state = 'active' }) => {
     const query = new URLSearchParams({ kind, search, tags, limit: '25' });
+    query.set('catalog_state', state);
     if (cursor) query.set('cursor', cursor);
     return getJson(`/api/workspaces?${query.toString()}`, 'xPerfect could not load workspaces.');
   };
@@ -2111,6 +2147,7 @@ async function main() {
     try {
       const payload = await fetchCatalogPage({
         kind: String(workspaceKindFilter?.value || 'named,ephemeral,legacy'),
+        state: workspaceCatalogState,
         search: String(workspaceSearch?.value || '').trim(),
         tags: String(workspaceTagFilter?.value || '').trim(),
         cursor: append ? String(catalogState.nextCursor || '') : '',
@@ -2360,7 +2397,7 @@ async function main() {
     );
     syncAccountSummary();
     if (
-      String(workspaceKindFilter?.value || 'named,ephemeral,legacy') === 'named,ephemeral,legacy'
+      workspaceCatalogState === 'active' && String(workspaceKindFilter?.value || 'named,ephemeral,legacy') === 'named,ephemeral,legacy'
       && !String(workspaceSearch?.value || '').trim()
       && !String(workspaceTagFilter?.value || '').trim()
     ) {
@@ -3014,6 +3051,7 @@ async function main() {
       const data = await response.json();
       if (identityTransition || bootstrap?.draft_owner_scope !== launchOwnerScope) return;
       launchDraftState.confirmRequest(originalPayload, launchOwnerScope);
+      expertPicker.accepted();
       delete button.dataset.launchIdempotencyKey;
       fileDraft.reset();
       launchLibrary.clear();

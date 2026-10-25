@@ -931,6 +931,7 @@ class CoordinatorService:
                 or worker.get("project_id") != scope["project_id"]
                 or (scope.get("workspace_id") and worker.get("workspace_id") != scope["workspace_id"])
                 or worker.get("workspace_kind") == "ephemeral"
+                or worker.get("catalog_state", "active") != "active"
                 or worker.get("trusted_run_lane") == "conversation"
                 or self.store.get_provider_session_by_worker(worker_id)):
             raise CoordinatorScopeError("Worker outside this conversation's available project scope")
@@ -1012,6 +1013,7 @@ class CoordinatorService:
                 "SELECT w.worker_id,w.name,w.role,w.profile,w.model,w.state FROM workers w "
                 "WHERE w.project_id=? AND w.tenant_id=? AND w.owner_id=? "
                 "AND w.state NOT IN ('terminating','termination_failed','terminated') "
+                "AND w.catalog_state='active' "
                 "AND w.trusted_run_lane<>'conversation' AND w.workspace_kind<>'ephemeral' "
                 "AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.worker_id=w.worker_id) "
                 "AND (?='' OR w.workspace_id=?) "

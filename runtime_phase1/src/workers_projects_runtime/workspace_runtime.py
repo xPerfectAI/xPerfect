@@ -21,6 +21,10 @@ class SharedWorkspaceRuntimes:
         self.resources = WorkspaceResources(self)
 
     def recover_pending(self, profiled_runtime):
+        # Recreated member runtimes recover display generations from the same
+        # private metadata; resource admission must use this runtime's Docker
+        # authority after restart, never a stale process-local snapshot.
+        self._profiled_runtime = profiled_runtime
         if self.binder is None or self.binder.store is None:
             return
         from .workspace_projection import recovery_projection
@@ -281,6 +285,8 @@ class SharedWorkspaceRuntimes:
                                    memory_bytes=int(config['XPERFECT_SHARED_MEMORY_BYTES']),
                                    pids_limit=int(config['XPERFECT_SHARED_PIDS_LIMIT']),
                                    file_placement=workspace['file_placement'])
+                box.desktop_capacity = lambda: self.resources.desktop_capacity(self._profiled_runtime)
+                box.desktop_changed = self.resources.invalidate_capacity_snapshot
                 runtime = type(template)(base_dir=str(template.base_dir), create_directories=False)
                 runtime.sandbox = WorkspaceMemberSandbox(box)
                 if self.binder is not None and self.binder.store is not None:

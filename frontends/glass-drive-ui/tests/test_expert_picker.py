@@ -9,7 +9,7 @@ SOURCE = Path(__file__).parents[1] / "src/glass_drive_ui/static/expert-picker.js
 
 def test_expert_picker_preserves_exact_owner_keys_review_and_worker_identity():
     source = SOURCE.read_text()
-    source = re.sub(r"^import .*;$", "", source, flags=re.M).replace("export ", "")
+    source = re.sub(r"^import .*;$", "", source, flags=re.M).replace("export ", "") + "\nconst attachActionMenu = () => {};\n"
     harness = r'''
 const assert = require('node:assert/strict');
 const { webcrypto } = require('node:crypto'); global.crypto = webcrypto;
@@ -22,7 +22,7 @@ class Element {
   dataset = {};
 }
 global.document = { createElement: tag => new Element(tag) };
-const memory = new Map(); global.sessionStorage = { getItem: key => memory.get(key), setItem: (key, value) => memory.set(key, value) };
+const memory = new Map(); global.sessionStorage = { getItem: key => memory.get(key), setItem: (key, value) => memory.set(key, value), removeItem: key => memory.delete(key) };
 let consent = false; const reviewLibraryUse = async () => consent;
 function walk(e) { return [e, ...e.children.flatMap(walk)]; }
 '''
@@ -31,14 +31,14 @@ function walk(e) { return [e, ...e.children.flatMap(walk)]; }
   assert.equal(await expertRequestKey(['owner-a', 'source-v1']), await expertRequestKey(['owner-a', 'source-v1']));
   assert.notEqual(await expertRequestKey(['owner-a', 'source-v1']), await expertRequestKey(['owner-b', 'source-v1']));
   assert.notEqual(await expertRequestKey(['owner-a', 'source-v1']), await expertRequestKey(['owner-a', 'source-v2']));
-  const form = new Element('form'); const calls = []; let pendingImport = null;
+  const form = new Element('form'); const calls = []; let pendingImport = null; let closedWorker = false;
   const pack = { id: 'synthetic-expert', name: 'Maya · Research Analyst', role: 'Research Analyst', profile: 'claude-code', content_hash: 'sha256:exact', abilities: [] };
   const refs = [{ item_id: 'pli_exact_skill', version_id: 'plv_exact_skill' }];
   const request = async (path, options = {}) => {
     calls.push([path, options]);
     if (path === '/api/workspace-starters') return { items: [pack] };
     if (path.endsWith('/import')) { if (pendingImport) return await pendingImport; return { template: { template_id: 'wst_exact', personal_library_refs: refs } }; }
-    if (path.endsWith('/instantiate')) return { workspace: { worker_id: 'wrk_exact', name: 'Maya', profile: 'claude-code' }, approvals_required: [{}] };
+    if (path.endsWith('/instantiate')) return { workspace: { worker_id: 'wrk_exact', name: 'Maya', profile: 'claude-code', state: closedWorker ? 'terminated' : 'paused' }, approvals_required: [{}] };
     if (path === '/api/workspace/wrk_exact/library' && options.method === 'POST') return { pending: [] };
     if (path === '/api/workspace/wrk_exact/library') return { items: [{ ...refs[0], kind: 'skill', name: 'Exact analysis method', active: true }] };
     if (path === '/api/workspaces/wrk_exact') return { worker_id: 'wrk_exact', name: 'Maya', profile: 'claude-code' };
@@ -68,10 +68,22 @@ function walk(e) { return [e, ...e.children.flatMap(walk)]; }
   assert.equal(imports[1][1].body.idempotency_key, firstImport.idempotency_key);
   assert.equal(instances[1][1].body.idempotency_key, firstInstance.idempotency_key);
   assert.deepEqual(calls.find(([path, o]) => path.endsWith('/library') && o.method === 'POST')[1].body.refs, refs);
-  const before = instances.length;
+  picker.accepted();
+  await picker.prepare(settings);
+  const freshInstance = calls.filter(([path]) => path.endsWith('/instantiate')).at(-1)[1].body;
+  assert.notEqual(freshInstance.idempotency_key, firstInstance.idempotency_key, 'A new accepted job gets a new worker attempt');
+  assert.notEqual(calls.filter(([path]) => path.endsWith('/import')).at(-1)[1].body.idempotency_key, firstImport.idempotency_key, 'A distinct job owns a new receipt; the server deduplicates its active saved expert');
+  picker.accepted(); closedWorker = true;
+  await assert.rejects(picker.prepare(settings), /earlier worker was closed/);
+  const reset = walk(form).find(e => e.textContent === 'Start a new worker');
+  assert.equal(reset.hidden, false); reset.onclick(); closedWorker = false;
+  await picker.prepare(settings);
+  assert.equal(reset.hidden, true);
+  const before = calls.filter(([path]) => path.endsWith('/instantiate')).length;
+  const importsBeforeFlight = calls.filter(([path]) => path.endsWith('/import')).length;
   let finish; pendingImport = new Promise(resolve => { finish = resolve; });
   const flight = picker.prepare(settings);
-  while (!finish || calls.filter(([path]) => path.endsWith('/import')).length < 3) await new Promise(resolve => setImmediate(resolve));
+  while (!finish || calls.filter(([path]) => path.endsWith('/import')).length <= importsBeforeFlight) await new Promise(resolve => setImmediate(resolve));
   await picker.update({ draft_owner_scope: 'owner-b', workspace_templates: [] });
   finish({ template: { template_id: 'wst_stale', personal_library_refs: refs } });
   await assert.rejects(flight, /account or expert choice changed/);
@@ -145,7 +157,7 @@ def test_claude_effort_choices_match_the_runtime_owner_without_losing_high():
 
 
 def test_catalog_retry_is_explicit_single_flight_and_fenced_to_current_owner():
-    source = re.sub(r"^import .*;$", "", SOURCE.read_text(), flags=re.M).replace("export ", "")
+    source = re.sub(r"^import .*;$", "", SOURCE.read_text(), flags=re.M).replace("export ", "") + "\nconst attachActionMenu = () => {};\n"
     script = r'''
 const assert=require('node:assert/strict');
 class Element {
@@ -190,7 +202,7 @@ function walk(e){return [e,...e.children.flatMap(walk)];}
 
 
 def test_function_first_cards_use_stable_artwork_and_preserve_custom_expert_identity():
-    source = re.sub(r"^import .*;$", "", SOURCE.read_text(), flags=re.M).replace("export ", "")
+    source = re.sub(r"^import .*;$", "", SOURCE.read_text(), flags=re.M).replace("export ", "") + "\nconst attachActionMenu = () => {};\n"
     script = r'''
 const assert=require('node:assert/strict');
 class Element{
@@ -213,7 +225,7 @@ const walk=e=>[e,...e.children.flatMap(walk)];
  let cards=walk(form).filter(e=>e.className==='expert-card');
  assert.equal(walk(cards[0]).find(e=>e.tag==='h3').textContent,known.role);
  assert.equal(walk(cards[0]).find(e=>e.className==='expert-name').textContent,known.name);
- const image=walk(cards[0]).find(e=>e.tag==='img');assert.equal(image.src,'/static/experts/bioanalytical-scientist.webp?v=20261024gouache1');
+ const image=walk(cards[0]).find(e=>e.tag==='img');assert.equal(image.src,'/static/experts/bioanalytical-scientist.webp?v=20261025gouache2');
  assert.equal(image.width,88);assert.equal(image.height,88);assert.equal(image.alt,'');image.onerror();assert.equal(image.hidden,true);
  assert(walk(cards[0]).some(e=>e.className==='expert-avatar-fallback'&&e.innerHTML.includes('<svg')));
  assert.equal(walk(cards[1]).filter(e=>e.tag==='img').length,0,'a matching name or role must not assign another expert portrait');
@@ -300,3 +312,119 @@ assert.equal(select.value,'saved-one');assert(meta.textContent.includes('1 Libra
 '''
     result = subprocess.run(['node','-e',script],text=True,capture_output=True,timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_exact_old_version_restores_without_latest_substitution_and_owner_switch_discards_late_catalog():
+    source = re.sub(r'^import .*;$', '', SOURCE.read_text(), flags=re.M).replace('export ', '')
+    script = r'''
+const assert=require('node:assert/strict');
+class Element {
+ constructor(tag){this.tag=tag;this.children=[];this.attrs={};this.dataset={};this.textContent='';this.classList={toggle(){}};}
+ append(...values){this.children.push(...values);}prepend(...values){this.children.unshift(...values);}
+ replaceChildren(...values){this.children=values;}setAttribute(key,value){this.attrs[key]=String(value);}
+}
+const attachActionMenu=()=>{},libraryModal=()=>{throw new Error('No dialog expected');};
+const memory=new Map();global.sessionStorage={getItem:key=>memory.get(key)||null,setItem:(key,value)=>memory.set(key,value),removeItem:key=>memory.delete(key)};
+global.document={createElement:tag=>new Element(tag)};
+const walk=e=>[e,...e.children.flatMap(walk)],flush=()=>new Promise(resolve=>setImmediate(resolve));
+''' + source + r'''
+(async()=>{
+ const first={template_id:'wst_v1',lineage_id:'lineage-a',version:1,name:'Owner A exact old setup',profile:'claude-code',catalog_state:'active',catalog_revision:2};
+ const head={...first,template_id:'wst_v2',version:2,name:'Owner A latest setup'};
+ const current={...first,template_id:'wst_b',name:'Owner B setup'};
+ let exactStatus='active',finish,lateSignal,requests=[];
+ const request=async(path,options={})=>{
+  requests.push(path);
+  if(path==='/api/workspace-starters')return {items:[]};
+  if(path==='/api/workspace-templates/wst_v1'){
+   if(exactStatus==='missing')throw Object.assign(new Error('Not found'),{status:404});
+   return {...first,catalog_state:exactStatus};
+  }
+  if(path.includes('?state=archived')||path.includes('?state=deleted')){lateSignal=options.signal;return await new Promise(resolve=>finish=resolve);}
+  if(path.includes('?state=active'))return {items:[]};
+  throw new Error('Unexpected '+path);
+ };
+ memory.set('xperfect.expert-selection:owner-a',JSON.stringify({id:first.template_id,kind:'template'}));
+ const form=new Element('form'),chosen=[];
+ const picker=createExpertPicker({form,request,onChoose:item=>chosen.push(item)});
+ await picker.update({draft_owner_scope:'owner-a',workspace_templates:[head]});
+ assert.equal(picker.selection().template_id,'wst_v1');
+ assert.equal(picker.selection().version,1);assert(requests.includes('/api/workspace-templates/wst_v1'));
+ assert(walk(form).some(e=>e.textContent==='Version 1'));
+ assert.equal(JSON.parse(memory.get('xperfect.expert-selection:owner-a')).id,'wst_v1');
+ // Same-owner refresh must also retain the exact old selection.
+ await picker.update({draft_owner_scope:'owner-a',workspace_templates:[head]});assert.equal(picker.selection().template_id,'wst_v1');
+ walk(form).find(e=>e.dataset.catalogState==='archived').onclick();await flush();
+ const archivedFinish=finish;assert(archivedFinish);
+ await picker.update({draft_owner_scope:'owner-b',workspace_templates:[current]});
+ assert.equal(lateSignal.aborted,true);archivedFinish({items:[{...first,name:'Late private A archived'}]});await flush();
+ assert.equal(picker.owner(),'owner-b');assert.equal(picker.selection(),null);
+ assert(!walk(form).some(e=>String(e.textContent).includes('Owner A')||String(e.textContent).includes('Late private A')));
+ walk(form).find(e=>e.textContent==='My experts').onclick();await flush();
+ walk(form).find(e=>e.dataset.catalogState==='deleted').onclick();await flush();
+ const deletedFinish=finish;await picker.update(null);assert.equal(lateSignal.aborted,true);
+ deletedFinish({items:[{...current,name:'Late private B removed'}]});await flush();
+ assert.equal(picker.owner(),'');assert.equal(picker.selection(),null);
+ assert.equal(walk(form).find(e=>e.attrs['aria-label']==='Choose an expert').hidden,true);
+ assert(!walk(form).some(e=>String(e.textContent).includes('Late private B')));
+ // An owned old version that is no longer available is refused, never replaced with v2.
+ for(const state of ['archived','deleted','missing']){
+  exactStatus=state;memory.set('xperfect.expert-selection:owner-a',JSON.stringify({id:first.template_id,kind:'template'}));
+  await picker.update({draft_owner_scope:'owner-a',workspace_templates:[head]});
+  assert.equal(picker.selection(),null);assert.equal(JSON.parse(memory.get('xperfect.expert-selection:owner-a')),null);
+  assert(walk(form).some(e=>e.textContent.includes(state==='missing'?'exact expert version':'archived or removed')));
+  await picker.update(null);
+ }
+})().catch(error=>{console.error(error);process.exit(1);});
+'''
+    result = subprocess.run(['node','-e',script],text=True,capture_output=True,timeout=15)
+    assert result.returncode == 0,result.stdout+result.stderr
+
+
+def test_managing_latest_revision_clears_selected_older_lineage_but_copy_keeps_it():
+    source = re.sub(r'^import .*;$', '', SOURCE.read_text(), flags=re.M).replace('export ', '')
+    script = r'''
+const assert=require('node:assert/strict'),{webcrypto}=require('node:crypto');global.crypto=webcrypto;
+class Element{
+ constructor(tag){this.tag=tag;this.children=[];this.attrs={};this.dataset={};this.textContent='';this.classList={toggle(){}};}
+ append(...nodes){this.children.push(...nodes);}prepend(...nodes){this.children.unshift(...nodes);}
+ replaceChildren(...nodes){this.children=nodes;}setAttribute(k,v){this.attrs[k]=String(v);}
+}
+const attachActionMenu=()=>{},walk=e=>[e,...e.children.flatMap(walk)];
+const memory=new Map();global.sessionStorage={getItem:k=>memory.get(k)||null,setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)};
+global.document={createElement:tag=>new Element(tag)};
+let save;const libraryModal=(title,options)=>{save=options.onSave;return {body:new Element('div')};};
+''' + source + r'''
+(async()=>{
+ const old={template_id:'wst_old',lineage_id:'same-lineage',version:1,name:'Earlier setup',profile:'claude-code',catalog_state:'active',catalog_revision:2};
+ const head={...old,template_id:'wst_current',name:'Current setup',version:2};
+ for(const action of ['Copy','Archive','Remove','Edit']){
+  memory.set('xperfect.expert-selection:owner-a',JSON.stringify({id:old.template_id,kind:'template'}));
+  const form=new Element('form'),chosen=[];let managed=false;
+  const request=async(path,options={})=>{
+   if(path==='/api/workspace-starters')return {items:[]};
+   if(path==='/api/workspace-templates/wst_old')return old;
+   if(path.includes('?state=active'))return {items:managed?[]:[head]};
+   if(options.method){managed=true;return head;}
+   throw new Error(path);
+  };
+  const picker=createExpertPicker({form,request,onChoose:item=>chosen.push(item)});
+  await picker.update({draft_owner_scope:'owner-a',workspace_templates:[head]});
+  assert.equal(picker.selection().template_id,old.template_id);
+  const currentCard=walk(form).find(e=>e.tag==='article'&&walk(e).some(x=>x.tag==='h3'&&x.textContent===head.name));
+  walk(currentCard).find(e=>e.tag==='button'&&e.textContent===action).onclick();
+  await save({signal:new AbortController().signal});
+  if(action==='Copy'){
+   assert.equal(picker.selection().template_id,old.template_id);
+   assert.equal(JSON.parse(memory.get('xperfect.expert-selection:owner-a')).id,old.template_id);
+  }else{
+   assert.equal(picker.selection(),null,action+' must invalidate an older selection in this lineage');
+   assert.equal(JSON.parse(memory.get('xperfect.expert-selection:owner-a')),null);
+   assert.equal(chosen.at(-1),null);
+   assert(!walk(form).some(e=>e.attrs['aria-label']==='Selected expert: Earlier setup'));
+  }
+ }
+})().catch(error=>{console.error(error);process.exit(1);});
+'''
+    result = subprocess.run(['node','-e',script],text=True,capture_output=True,timeout=15)
+    assert result.returncode == 0,result.stdout+result.stderr

@@ -201,3 +201,169 @@ def test_starter_catalog_mcp_is_read_only_but_import_is_not():
     assert read.readOnlyHint is True and read.destructiveHint is False
     assert read.idempotentHint is True and read.openWorldHint is False
     assert not server.metadata["workspace_starter_import"].get("annotations")
+
+
+@pytest.mark.parametrize('removed_state',['archived','deleted'])
+def test_distinct_starter_jobs_reuse_active_expert_but_not_removed_catalog_choice(environment,removed_state):
+    _,client,service=environment
+    pack=catalog()['items'][0]
+    route=f"/v1/workspace-starters/{pack['id']}/import"
+    payload={'content_hash':pack['content_hash'],'effort':'high'}
+    first=client.post(route,json={**payload,'idempotency_key':'first-explicit-starter-job'}).json()['template']
+    with service.store._connect() as conn:
+        library_count=conn.execute('SELECT COUNT(*) FROM personal_library_items').fetchone()[0]
+    second=client.post(route,json={**payload,'idempotency_key':'second-explicit-starter-job'})
+    assert second.status_code==201,second.text
+    assert second.json()['template']['template_id']==first['template_id']
+    workers=[]
+    for n,template in enumerate((first,second.json()['template'])):
+        response=client.post(f"/v1/workspace-templates/{template['template_id']}/instantiate",json={'idempotency_key':f'explicit-starter-worker-{n}'})
+        assert response.status_code==201,response.text
+        workers.append(response.json()['workspace']['worker_id'])
+    assert len(set(workers))==2
+    with service.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM personal_library_items').fetchone()[0]==library_count
+        assert conn.execute('SELECT COUNT(*) FROM workspace_templates').fetchone()[0]==1
+    removed = service.control_plane_store.set_workspace_template_state(template_id=first['template_id'],tenant_id='local',owner_id='demo-owner',state=removed_state,expected_catalog_revision=1)
+    fresh=client.post(route,json={**payload,'idempotency_key':'new-job-after-expert-removal'})
+    assert fresh.status_code==201,fresh.text
+    assert fresh.json()['template']['template_id']!=first['template_id']
+    assert fresh.json()['template']['catalog_state']=='active'
+    replay=client.post(route,json={**payload,'idempotency_key':'first-explicit-starter-job'})
+    assert replay.json()['template']['template_id']==first['template_id']
+    restored = client.post(f"/v1/workspace-templates/{first['template_id']}/state", json={
+        'state':'active', 'expected_catalog_revision':removed['catalog_revision']})
+    assert restored.status_code==200,restored.text
+    after_restore = client.post(route,json={**payload,'idempotency_key':'new-job-after-expert-restore'})
+    assert after_restore.status_code==201,after_restore.text
+    assert after_restore.json()['template']['template_id']==fresh.json()['template']['template_id']
+    assert client.post(route,json={**payload,'idempotency_key':'first-explicit-starter-job'}).json()['template']['template_id']==first['template_id']
+    with service.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM personal_library_items').fetchone()[0]==library_count*2
+
+
+def test_concurrent_starter_imports_share_one_staged_library_set(environment,monkeypatch):
+    import threading
+    from workers_projects_runtime.workspace_files import FileAdmissionError
+    _,_,service=environment
+    pack=catalog()['items'][0]
+    barrier=threading.Barrier(2)
+    local=threading.local()
+    original=service.personal_library.create_item
+    def synchronized(*args,**kwargs):
+        if not getattr(local,'entered',False):
+            local.entered=True;barrier.wait(timeout=5)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(service.personal_library,'create_item',synchronized)
+    def create(n):
+        request=StarterImport(content_hash=pack['content_hash'],idempotency_key=f'concurrent-starter-job-{n}')
+        try:
+            return import_starter(service,pack['id'],'local','demo-owner',request)
+        except FileAdmissionError as exc:
+            assert exc.status_code==409
+            return request
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results=list(executor.map(create,[1,2]))
+    # A Files identity refusal is fail-closed, not a second import or a 500.
+    # The normal same-key retry must recover through the same durable receipt.
+    results=[import_starter(service,pack['id'],'local','demo-owner',item)
+             if isinstance(item,StarterImport) else item for item in results]
+    assert results[0]['template']['template_id']==results[1]['template']['template_id']
+    with service.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM personal_library_items').fetchone()[0]==len(pack['abilities'])
+        assert conn.execute('SELECT COUNT(*) FROM workspace_templates').fetchone()[0]==1
+
+
+def test_starter_pending_import_recovers_same_key_after_typed_file_refusal(environment,monkeypatch):
+    from workers_projects_runtime.workspace_files import FileAdmissionError
+    _,client,service=environment
+    pack=catalog()['items'][0]
+    route=f"/v1/workspace-starters/{pack['id']}/import"
+    payload={'content_hash':pack['content_hash'],'idempotency_key':'retry-owned-file-refusal'}
+    original=service.personal_library.create_item
+    def refused(*args,**kwargs):
+        raise FileAdmissionError('Synthetic file identity changed; retry safely',409)
+    monkeypatch.setattr(service.personal_library,'create_item',refused)
+    refused_response=client.post(route,json=payload)
+    assert refused_response.status_code==409,refused_response.text
+    monkeypatch.setattr(service.personal_library,'create_item',original)
+    recovered=client.post(route,json=payload)
+    assert recovered.status_code==201,recovered.text
+    replay=client.post(route,json=payload)
+    assert replay.json()['template']['template_id']==recovered.json()['template']['template_id']
+    with service.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM personal_library_items').fetchone()[0]==len(pack['abilities'])
+        assert conn.execute('SELECT COUNT(*) FROM workspace_templates').fetchone()[0]==1
+
+
+@pytest.mark.parametrize("custom_library_refs", [False, True])
+def test_fresh_starter_import_keeps_original_setup_after_saved_expert_customization(environment, custom_library_refs):
+    """Ready-made selection must not silently adopt the user's My experts revision."""
+    from copy import deepcopy
+
+    _, client, service = environment
+    pack = catalog()["items"][0]
+    route = f"/v1/workspace-starters/{pack['id']}/import"
+    choices = {"content_hash": pack["content_hash"], "effort": "high"}
+    original = client.post(route, json={**choices, "idempotency_key": "original-ready-made-setup"})
+    assert original.status_code == 201, original.text
+    first = original.json()["template"]
+    # A distinct untouched job reuses one exact expert and one Library set.
+    untouched = client.post(route, json={**choices, "idempotency_key": "second-ready-made-setup"})
+    assert untouched.status_code == 201, untouched.text
+    assert untouched.json()["template"]["template_id"] == first["template_id"]
+    with service.store._connect() as conn:
+        library_count = conn.execute("SELECT count(*) FROM personal_library_items").fetchone()[0]
+
+    changed = client.patch("/v1/workspace-templates/" + first["template_id"], json={
+        "name": "Company-specific expert", "description": "Only the company's customized onboarding goal",
+        "expected_catalog_revision": first["catalog_revision"],
+    })
+    assert changed.status_code == 200, changed.text
+    customized = changed.json()
+    assert customized["version"] == 2
+    cp = service.control_plane_store
+    private_customized = cp.get_workspace_template(
+        tenant_id="local", owner_id="demo-owner", template_id=customized["template_id"])
+    assert private_customized["content"]["project"]["goal"] == customized["description"]
+    if custom_library_refs:
+        # The existing immutable-version owner can retain an independently
+        # customized Library selection without changing its native/account setup.
+        content = deepcopy(private_customized["content"])
+        assert len(content["personal_library_refs"]) > 1
+        content["personal_library_refs"] = content["personal_library_refs"][1:]
+        customized = cp.create_workspace_template(
+            tenant_id="local", owner_id="demo-owner", name=customized["name"],
+            description=customized["description"], content=content,
+            lineage_id=customized["lineage_id"], expected_template_id=customized["template_id"],
+            expected_catalog_revision=customized["catalog_revision"])
+        service.personal_library.retain_refs("local", "demo-owner", content["personal_library_refs"],
+                                             "workspace_template", customized["template_id"])
+    custom_hash = customized["content_hash"]
+
+    fresh = client.post(route, json={**choices, "idempotency_key": "fresh-ready-made-after-customization"})
+    assert fresh.status_code == 201, fresh.text
+    selected = fresh.json()["template"]
+    assert selected["template_id"] == first["template_id"]
+    assert selected["name"] == first["name"] and selected["description"] == first["description"]
+    assert selected["content_hash"] == first["content_hash"]
+    assert selected["personal_library_refs"] == first["personal_library_refs"]
+    replay = client.post(route, json={**choices, "idempotency_key": "fresh-ready-made-after-customization"})
+    assert replay.json()["idempotent_replay"] is True
+    assert replay.json()["template"]["template_id"] == first["template_id"]
+
+    # Exact My experts selection keeps the user's newer version, not the starter.
+    still_custom = client.get("/v1/workspace-templates/" + customized["template_id"])
+    assert still_custom.status_code == 200
+    assert still_custom.json()["content_hash"] == custom_hash
+    assert still_custom.json()["name"] == "Company-specific expert"
+    assert client.get("/v1/workspace-templates").json()["items"][0]["template_id"] == customized["template_id"]
+    selected_custom = client.post(f"/v1/workspace-templates/{customized['template_id']}/instantiate",
+                                 json={"idempotency_key": "explicit-my-experts-customized-version"})
+    assert selected_custom.status_code == 201, selected_custom.text
+    assert selected_custom.json()["template"]["template_id"] == customized["template_id"]
+    assert selected_custom.json()["project"]["goal"] == "Only the company's customized onboarding goal"
+    assert selected_custom.json()["workspace"]["state"] == "paused"
+    with service.store._connect() as conn:
+        assert conn.execute("SELECT count(*) FROM personal_library_items").fetchone()[0] == library_count
+        assert conn.execute("SELECT count(*) FROM workspace_templates").fetchone()[0] == (3 if custom_library_refs else 2)

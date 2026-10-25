@@ -238,9 +238,11 @@ class WorkspaceBox:
             return self.paths()
 
     @staticmethod
-    def _private_acl(path: Path, uid: int):
+    def _private_acl(path: Path, uid: int, *, descriptor: int | None = None):
         """Grant one native identity; refuse inherited foreign grants before use."""
-        result = subprocess.run(['getfacl', '-cEpn', str(path)], capture_output=True, text=True, timeout=5)
+        target = str(path) if descriptor is None else f'/proc/self/fd/{descriptor}'
+        inherited = {} if descriptor is None else {'pass_fds': (descriptor,)}
+        result = subprocess.run(['getfacl', '-cEpn', target], capture_output=True, text=True, timeout=5, **inherited)
         if result.returncode:
             raise WorkspaceBoxUnavailable('Workspace ACL inspection is unavailable')
         lines = {line.strip() for line in result.stdout.splitlines() if line.strip()}
@@ -254,8 +256,8 @@ class WorkspaceBox:
             raise WorkspaceBoxUnavailable('Workspace member ACL contains an unexpected grant')
         if not (access | defaults) <= lines:
             acl = ','.join(sorted(access | defaults))
-            result = subprocess.run(['setfacl', '--set', acl, str(path)],
-                                    capture_output=True, text=True, timeout=5)
+            result = subprocess.run(['setfacl', '--set', acl, target],
+                                    capture_output=True, text=True, timeout=5, **inherited)
             if result.returncode:
                 raise WorkspaceBoxUnavailable('Workspace filesystem does not support private member ACLs')
 
@@ -564,6 +566,11 @@ while True:
             if inspected is None:
                 return False
             container_id = str(inspected['Id'])
+            from .workspace_desktop import WorkspaceMemberDesktop
+            if WorkspaceMemberDesktop.has_live_desktops(self, container_id, identities):
+                # Human GUI activity owns a separate display cgroup even when
+                # no native task is currently running in the parent box.
+                return False
             state = inspected.get('State') or {}
             if state.get('Running') is True:
                 from .workspace_resources import process_counts
@@ -579,6 +586,8 @@ while True:
             observed = self._inspect()
             if observed is None or observed['Id'] != container_id:
                 raise WorkspaceBoxUnavailable('Workspace generation changed before idle release')
+            if WorkspaceMemberDesktop.has_live_desktops(self, container_id, identities):
+                return False
             self.docker(['rm', '-f', container_id])
             if self._inspect() is not None:
                 raise WorkspaceBoxUnavailable('Workspace box release is unconfirmed')

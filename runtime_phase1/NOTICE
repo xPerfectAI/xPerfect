@@ -6,3 +6,23 @@ Copyright 2026 Project Viventium Contributors
 xPerfect is distributed under the Apache License, Version 2.0.
 Third-party components retain their respective licenses and attribution notices.
 This notice does not change those licenses or imply endorsement by their authors.
+
+Dedicated browser/display sidecar seccomp profile
+
+The packaged desktop_chromium_seccomp.json derives from Moby's default seccomp
+profile, licensed under Apache-2.0:
+https://github.com/moby/profiles/blob/4b8214fc4971e06172938a1f1554ccff6647ee80/seccomp/default.json
+Upstream file SHA256: 6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6
+
+Modification: prepend the clone/setns/unshare namespace allowance documented by
+Microsoft Playwright (Apache-2.0), and a chroot syscall allowance required by
+Chromium's user-namespace filesystem sandbox when all container capabilities
+are dropped. All other Moby rules remain unchanged. These four allowances
+have no argument filters. This modified profile is specific to the dedicated
+display sidecar; it does not change the native AI workspace container policy.
+https://github.com/microsoft/playwright/blob/91a765d1681cb3eeb0d0fb89fefec3cf0d21bd9b/utils/docker/seccomp_profile.json
+https://playwright.dev/docs/docker
+https://chromium.googlesource.com/chromium/src/+/refs/heads/main/sandbox/linux/services/credentials.cc
+
+The Apache-2.0 license text is included in LICENSE. These references do not
+imply endorsement of the modified profile by Moby, Microsoft or Chromium.

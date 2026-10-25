@@ -49,6 +49,7 @@ class UpdateWorkspaceRequest(BaseModel):
     favorite: bool | None = None
     tags: list[str] | None = None
     workspace_kind: Literal["named", "ephemeral", "legacy"] | None = None
+    expected_catalog_revision: int | None = Field(default=None, ge=1)
 
 
 class DuplicateWorkspaceRequest(BaseModel):
@@ -60,6 +61,20 @@ class SaveWorkspaceTemplateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=1000)
     lineage_id: str | None = Field(default=None, min_length=1, max_length=80)
+    expected_template_id: str | None = Field(default=None, min_length=1, max_length=80)
+    expected_catalog_revision: int | None = Field(default=None, ge=1)
+
+
+class ReviseWorkspaceTemplateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=1000)
+    expected_catalog_revision: int = Field(ge=1)
+
+
+class CatalogLifecycleRequest(BaseModel):
+    expected_catalog_revision: int = Field(ge=1)
+    confirm: bool = False
+    state: Literal["active", "archived"] = "active"
 
 
 class InstantiateWorkspaceTemplateRequest(BaseModel):

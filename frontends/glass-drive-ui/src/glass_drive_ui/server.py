@@ -38,6 +38,7 @@ from .prompt_template import (
 )
 from .runtime_client import RuntimeClient
 from .file_routes import install_file_routes
+from .file_preview_errors import install_file_preview_errors
 from .terminal_routes import install_terminal_routes
 from .peer_routes import install_peer_ui_routes
 from .member_routes import install_member_ui_routes
@@ -437,6 +438,7 @@ class MetadataRequest(BaseModel):
     name: str | None = None
     tags: list[str] | None = None
     workspace_kind: Literal["named", "ephemeral", "legacy"] | None = None
+    expected_catalog_revision: int | None = Field(default=None, ge=1)
 
 
 class DuplicateWorkspaceRequest(BaseModel):
@@ -448,6 +450,20 @@ class SaveWorkspaceTemplateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=1000)
     lineage_id: str | None = Field(default=None, min_length=1, max_length=80)
+    expected_template_id: str | None = Field(default=None, min_length=1, max_length=80)
+    expected_catalog_revision: int | None = Field(default=None, ge=1)
+
+
+class ExpertRevisionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=1000)
+    expected_catalog_revision: int = Field(ge=1)
+
+
+class CatalogLifecycleRequest(BaseModel):
+    expected_catalog_revision: int = Field(ge=1)
+    confirm: bool = False
+    state: Literal["active", "archived"] = "active"
 
 
 class InstantiateWorkspaceTemplateRequest(BaseModel):
@@ -2564,7 +2580,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         view_available = bool(runtime.get("view_available")) if "view_available" in runtime else bool(runtime.get("view_url"))
         safe["runtime_details"] = {
             key: runtime.get(key)
-            for key in ("mode", "runtime", "sandbox_state", "view_health")
+            for key in ("mode", "runtime", "sandbox_state", "view_health", "desktop_supported", "desktop_actions")
             if runtime.get(key) not in (None, "", [])
         }
         safe["runtime_details"]["view_available"] = view_available
@@ -2766,6 +2782,9 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             if key.lower() in {"accept", "content-type", "range"}
         }
         upstream_headers.update(auth_headers)
+        appearance_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+        appearance = request.cookies.get(f"xperfect_appearance_{appearance_port}", "")
+        upstream_headers["x-xperfect-appearance"] = appearance if appearance in {"system", "light", "dark"} else "system"
         target = f"{_runtime_proxy_base_url()}/{prefix}/{path}"
         upstream_query = _upstream_safe_query(str(request.url.query or ""))
         if upstream_query:
@@ -3566,6 +3585,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         favorite: bool | None = None,
         cursor: str | None = None,
         limit: int = 25,
+        catalog_state: str = "active",
     ) -> dict[str, Any]:
         return _client_for_request(request).list_workspace_catalog(
             kind=kind,
@@ -3574,6 +3594,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             favorite=favorite,
             cursor=cursor,
             limit=limit,
+            catalog_state=catalog_state,
         )
 
     @app.get("/api/workspaces/{worker_id}")
@@ -3591,7 +3612,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             }
             result.update({key: worker[key] for key in (
                 "name", "profile", "model", "state", "close_state", "project_id", "workspace_id",
-                "workspace_kind", "execution_mode",
+                "workspace_kind", "execution_mode", "catalog_state", "catalog_revision",
             ) if key in worker})
             if worker.get("project_id"):
                 result["workspace_name"] = _project_title_for_worker(active_client, str(worker["project_id"]))
@@ -3648,8 +3669,45 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail="GlassHive workspace duplication failed") from exc
 
     @app.get("/api/workspace-templates")
-    def list_workspace_templates(request: Request) -> dict[str, Any]:
-        return {"items": _client_for_request(request).list_workspace_templates()}
+    def list_workspace_templates(request: Request, state: str = "active") -> dict[str, Any]:
+        client = _client_for_request(request)
+        return {"items": client.list_workspace_templates() if state == "active" else client.list_workspace_templates(state)}
+
+    def _catalog_forward(request, method, path, payload=None, worker_id=None):
+        try:
+            return _client_for_request(request, worker_id)._request(method, path,
+                **({"json_body": payload.model_dump(exclude_none=True)} if payload is not None else {}))
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code,
+                detail=_runtime_status_detail(exc, "Could not update this saved item. Your changes are kept.")) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Could not confirm the change. Your changes are kept; retry safely.") from exc
+
+    @app.get("/api/workspace-templates/{template_id}")
+    @app.get("/api/workspace-templates/{template_id}/versions")
+    def expert_detail(request: Request, template_id: str):
+        path = "/v1/workspace-templates/" + _recurring_path_id(template_id, "expert id")
+        return _catalog_forward(request, "GET", path + ("/versions" if request.url.path.endswith("/versions") else ""))
+
+    @app.patch("/api/workspace-templates/{template_id}")
+    def expert_revise(request: Request, template_id: str, payload: ExpertRevisionRequest):
+        return _catalog_forward(request, "PATCH", "/v1/workspace-templates/" + _recurring_path_id(template_id, "expert id"), payload)
+
+    @app.post("/api/workspace-templates/{template_id}/duplicate", status_code=201)
+    def expert_duplicate(request: Request, template_id: str, payload: DuplicateWorkspaceRequest):
+        return _catalog_forward(request, "POST", "/v1/workspace-templates/" + _recurring_path_id(template_id, "expert id") + "/duplicate", payload)
+
+    @app.post("/api/workspace-templates/{template_id}/state")
+    @app.delete("/api/workspace-templates/{template_id}")
+    def expert_lifecycle(request: Request, template_id: str, payload: CatalogLifecycleRequest):
+        path = "/v1/workspace-templates/" + _recurring_path_id(template_id, "expert id")
+        return _catalog_forward(request, request.method, path + ("/state" if request.method == "POST" else ""), payload)
+
+    @app.delete("/api/workspaces/{worker_id}")
+    @app.post("/api/workspaces/{worker_id}/restore")
+    def workspace_lifecycle(request: Request, worker_id: str, payload: CatalogLifecycleRequest):
+        path = "/v1/workspaces/" + _recurring_path_id(worker_id, "worker id")
+        return _catalog_forward(request, request.method, path + ("/restore" if request.method == "POST" else ""), payload, worker_id)
 
     @app.post("/api/workspaces/{worker_id}/templates", status_code=201)
     def save_workspace_template(
@@ -4782,6 +4840,11 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             ws_path = _validated_novnc_ws_path((query.get("path") or ["websockify"])[0])
             ws_scheme = "wss" if parsed.scheme == "https" else "ws"
             upstream_url = f"{ws_scheme}://{parsed.netloc}/{ws_path}"
+            gateway_tokens = query.get("token") or []
+            if gateway_tokens:
+                if len(gateway_tokens) != 1 or not re.fullmatch(r"[a-f0-9]{64}", gateway_tokens[0]):
+                    raise HTTPException(status_code=502, detail="Live desktop route is invalid")
+                upstream_url += "?" + urlencode({"token": gateway_tokens[0]})
             session_timeout = _watch_session_timeout_seconds(websocket, worker_id)
         except HTTPException:
             await websocket.close(code=1008)
@@ -4993,6 +5056,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         _require_interactive_access(request, worker_id)
         return _file_response_with_signed_cookie(request, worker_id, STATIC_DIR / "desktop.html")
 
+    install_file_preview_errors(app)
     return app
 
 

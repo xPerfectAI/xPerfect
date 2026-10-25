@@ -344,7 +344,7 @@ class PersonalLibrary:
             elif kind=="application":
                 row=conn.execute("SELECT w.name FROM personal_library_applications a JOIN workers w ON w.worker_id=a.worker_id WHERE a.application_id=? AND a.tenant_id=? AND a.owner_id=?",(key,tenant,owner)).fetchone()
                 label=("Worker: "+row[0]) if row else None
-            elif kind=="template" and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_templates'").fetchone():
+            elif kind in {"template", "workspace_template"} and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_templates'").fetchone():
                 row=conn.execute("SELECT name FROM workspace_templates WHERE template_id=? AND tenant_id=? AND owner_id=?",(key,tenant,owner)).fetchone()
                 label=("Template: "+row[0]) if row else None
             holder["label"]=label or {"coordinator_turn":"Accepted conversation turn","removal_undo":"Library Undo (24 hours)"}.get(kind,kind.replace("_"," ").capitalize())

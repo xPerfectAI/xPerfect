@@ -9,6 +9,8 @@
   </head>
   <body>
     <main id="desktop-shell">
+      <p id="desktop-notice">This desktop is shared with this worker, including anything you open or sign in to.</p>
+      <section id="desktop-screen" aria-label="Shared worker desktop">
       <div id="desktop-stage"></div>
       <div id="desktop-overlay">
         <div class="overlay-copy">
@@ -19,6 +21,7 @@
         </div>
       </div>
       <div id="clipboard-status">Clipboard sync: starting…</div>
+      </section>
     </main>
     <script src="/static/desktop.js?v=20261024polish1" type="module"></script>
   </body>

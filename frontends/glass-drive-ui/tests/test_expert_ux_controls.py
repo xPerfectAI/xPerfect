@@ -145,3 +145,18 @@ api.postJson=async path=>{calls.push(path);return {status:'connecting',setup_flo
 await reconnectProviderAccount(account,button);assert.equal(activeSetupAccount,account.account_id);assert.equal(shown.status,'connecting');assert.equal(stopped,1);assert.equal(setupPollTimer,19);
 assert.deepEqual(calls,['/api/provider-accounts/account%2Fa/setup','/api/provider-accounts/account%2Fa/setup']);
 """)
+
+
+def test_workspace_steer_waits_for_truthful_live_state_and_keeps_the_draft():
+    source = (STATIC / 'app.js').read_text()
+    run_node("import assert from 'node:assert/strict';\n" + function('syncTileSteerAvailability', source) + """
+const input={value:'Keep this work request',disabled:false},send={disabled:false};
+const tile={dataset:{workerId:'worker-a',ownerScope:'owner-a'},querySelector:s=>s.includes('textarea')?input:send};
+const pendingWorkspaceSteer=()=>null;
+syncTileSteerAvailability(tile,'unknown');assert.equal(input.disabled,true);assert.equal(send.disabled,true);
+assert.equal(input.placeholder,'Checking workspace status…');assert.equal(input.value,'Keep this work request');
+syncTileSteerAvailability(tile,'terminated');assert.equal(input.disabled,true);assert.equal(send.disabled,true);
+assert.equal(input.placeholder,'This workspace is closed');
+syncTileSteerAvailability(tile,'ready');assert.equal(input.disabled,false);assert.equal(send.disabled,false);
+assert.equal(input.value,'Keep this work request');
+""")

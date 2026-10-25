@@ -34,7 +34,7 @@ from .schema_version import (
 from .state_permissions import ensure_state_directory, secure_state_file
 
 
-CONTROL_PLANE_SCHEMA_VERSION = 5
+CONTROL_PLANE_SCHEMA_VERSION = 6
 
 
 PROVIDERS = {"codex", "claude", "openai", "anthropic", "grok", "xai", "custom"}
@@ -543,6 +543,14 @@ class ControlPlaneStore:
                 conn.execute(
                     "ALTER TABLE control_plane_library ADD COLUMN status_updated_at REAL"
                 )
+            template_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(workspace_templates)")}
+            for name, declaration in (
+                ("catalog_state", "TEXT NOT NULL DEFAULT 'active'"),
+                ("catalog_revision", "INTEGER NOT NULL DEFAULT 1"),
+                ("catalog_updated_at", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if name not in template_columns:
+                    conn.execute(f"ALTER TABLE workspace_templates ADD COLUMN {name} {declaration}")
             record_schema_version(
                 conn,
                 component="control_plane",
@@ -1805,6 +1813,8 @@ class ControlPlaneStore:
             **({"provider_account_ref": dict(provider_account_ref)} if provider_account_ref else {}),
             "content_hash": str(row["content_hash"]),
             "created_at": float(row["created_at"]),
+            "catalog_state": str(row["catalog_state"]),
+            "catalog_revision": int(row["catalog_revision"]),
         }
 
     def create_workspace_template(
@@ -1816,6 +1826,8 @@ class ControlPlaneStore:
         description: str,
         content: dict[str, Any],
         lineage_id: str | None = None,
+        expected_template_id: str | None = None,
+        expected_catalog_revision: int | None = None,
         connection=None,
     ) -> dict[str, Any]:
         clean_name = str(name or "").strip()
@@ -1835,20 +1847,14 @@ class ControlPlaneStore:
         with (nullcontext(connection) if connection is not None else self._connect()) as conn:
             if connection is None:
                 conn.execute("BEGIN IMMEDIATE")
-            count = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM workspace_templates WHERE tenant_id = ? AND owner_id = ?",
-                    (tenant_id, owner_id),
-                ).fetchone()[0]
-            )
-            if count >= 100:
-                raise ControlPlaneConflict("Workspace template limit reached for this user")
             parent_template_id: str | None = None
             version = 1
+            catalog_state = "active"
+            catalog_revision = 1
             if requested_lineage:
                 previous = conn.execute(
                     """
-                    SELECT template_id, version FROM workspace_templates
+                    SELECT * FROM workspace_templates
                     WHERE tenant_id = ? AND owner_id = ? AND lineage_id = ?
                     ORDER BY version DESC LIMIT 1
                     """,
@@ -1856,16 +1862,31 @@ class ControlPlaneStore:
                 ).fetchone()
                 if previous is None:
                     raise ControlPlaneError("Template lineage not found for this user")
+                if (expected_template_id is not None and previous["template_id"] != expected_template_id
+                        or expected_catalog_revision is not None and int(previous["catalog_revision"]) != expected_catalog_revision):
+                    if (previous["parent_template_id"] == expected_template_id
+                            and expected_catalog_revision is not None
+                            and int(previous["catalog_revision"]) == expected_catalog_revision + 1
+                            and hmac.compare_digest(str(previous["content_hash"]), _content_hash(content))
+                            and previous["name"] == clean_name[:160] and previous["description"] == str(description or "").strip()[:1000]):
+                        return self._workspace_template_summary(previous, content)
+                    raise ControlPlaneConflict("This expert changed; reload before saving")
+                if previous["catalog_state"] == "deleted":
+                    raise ControlPlaneConflict("Restore this expert before editing it")
                 parent_template_id = str(previous["template_id"])
                 version = int(previous["version"]) + 1
+                catalog_state = str(previous["catalog_state"])
+                catalog_revision = int(previous["catalog_revision"]) + 1
             else:
+                self._require_template_capacity(conn, tenant_id, owner_id)
                 requested_lineage = _id("wsl")
             conn.execute(
                 """
                 INSERT INTO workspace_templates
                     (template_id, lineage_id, version, parent_template_id, tenant_id, owner_id,
-                     name, description, profile, execution_mode, content_json, content_hash, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     name, description, profile, execution_mode, content_json, content_hash, created_at,
+                     catalog_state, catalog_revision, catalog_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     template_id,
@@ -1881,6 +1902,7 @@ class ControlPlaneStore:
                     encoded,
                     _content_hash(content),
                     now,
+                    catalog_state, catalog_revision, now,
                 ),
             )
             row = conn.execute(
@@ -1890,15 +1912,33 @@ class ControlPlaneStore:
         assert row is not None
         return self._workspace_template_summary(row, content)
 
-    def list_workspace_templates(self, *, tenant_id: str, owner_id: str) -> list[dict[str, Any]]:
+    @staticmethod
+    def _require_template_capacity(conn, tenant_id, owner_id):
+        count = conn.execute("""SELECT COUNT(*) FROM workspace_templates t
+            WHERE t.tenant_id=? AND t.owner_id=? AND t.catalog_state='active'
+              AND NOT EXISTS (SELECT 1 FROM workspace_templates n WHERE n.tenant_id=t.tenant_id
+                AND n.owner_id=t.owner_id AND n.lineage_id=t.lineage_id AND n.version>t.version)""",
+            (tenant_id, owner_id)).fetchone()[0]
+        if count >= 100:
+            raise ControlPlaneConflict("You have 100 active experts. Archive or remove one, then try again")
+
+    def list_workspace_templates(self, *, tenant_id: str, owner_id: str, state: str = "active",
+                                 lineage_id: str | None = None) -> list[dict[str, Any]]:
+        if state not in {"active", "archived", "deleted", "all"}:
+            raise ControlPlaneError("Choose active, archived, deleted or all experts")
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM workspace_templates
-                WHERE tenant_id = ? AND owner_id = ?
-                ORDER BY created_at DESC, template_id DESC LIMIT 100
+                SELECT t.* FROM workspace_templates t
+                WHERE t.tenant_id = ? AND t.owner_id = ?
+                  AND (? IS NULL OR t.lineage_id=?)
+                  AND (? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM workspace_templates n
+                    WHERE n.tenant_id=t.tenant_id AND n.owner_id=t.owner_id
+                      AND n.lineage_id=t.lineage_id AND n.version>t.version))
+                  AND (?='all' OR t.catalog_state=?)
+                ORDER BY t.created_at DESC, t.template_id DESC
                 """,
-                (tenant_id, owner_id),
+                (tenant_id, owner_id, lineage_id, lineage_id, lineage_id, state, state),
             ).fetchall()
         results: list[dict[str, Any]] = []
         for row in rows:
@@ -1908,7 +1948,37 @@ class ControlPlaneStore:
             ):
                 raise ControlPlaneConflict("Workspace template content integrity check failed")
             results.append(self._workspace_template_summary(row, content))
+        if lineage_id and results:
+            head = max(results, key=lambda item: item["version"])
+            for item in results:
+                item.update(catalog_state=head["catalog_state"], catalog_revision=head["catalog_revision"],
+                            head_template_id=head["template_id"])
         return results
+
+    def set_workspace_template_state(self, *, template_id: str, tenant_id: str, owner_id: str,
+                                     state: str, expected_catalog_revision: int) -> dict[str, Any]:
+        if state not in {"active", "archived", "deleted"}:
+            raise ControlPlaneError("Expert state is invalid")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM workspace_templates WHERE template_id=? AND tenant_id=? AND owner_id=?",
+                               (template_id, tenant_id, owner_id)).fetchone()
+            if row is None:
+                raise KeyError("Expert not found")
+            head = conn.execute("SELECT * FROM workspace_templates WHERE lineage_id=? AND tenant_id=? AND owner_id=? ORDER BY version DESC LIMIT 1",
+                                (row["lineage_id"], tenant_id, owner_id)).fetchone()
+            if (head["template_id"] == template_id and head["catalog_state"] == state
+                    and int(head["catalog_revision"]) == expected_catalog_revision + 1):
+                return {**self._workspace_template_summary(head, json.loads(head["content_json"])),
+                        "head_template_id": template_id}
+            if head["template_id"] != template_id or int(head["catalog_revision"]) != expected_catalog_revision:
+                raise ControlPlaneConflict("This expert changed; reload before changing it")
+            if state == "active" and head["catalog_state"] != "active":
+                self._require_template_capacity(conn, tenant_id, owner_id)
+            if head["catalog_state"] != state:
+                conn.execute("UPDATE workspace_templates SET catalog_state=?,catalog_revision=catalog_revision+1,catalog_updated_at=? WHERE template_id=?",
+                             (state, time.time(), template_id))
+        return self.get_workspace_template(template_id=template_id, tenant_id=tenant_id, owner_id=owner_id)
 
     def get_workspace_template(
         self,
@@ -1932,7 +2002,12 @@ class ControlPlaneStore:
             str(row["content_hash"]), _content_hash(content)
         ):
             raise ControlPlaneConflict("Workspace template content integrity check failed")
-        return {**self._workspace_template_summary(row, content), "content": content}
+        with self._connect() as conn:
+            head = conn.execute("SELECT * FROM workspace_templates WHERE tenant_id=? AND owner_id=? AND lineage_id=? ORDER BY version DESC LIMIT 1",
+                                (tenant_id, owner_id, row["lineage_id"])).fetchone()
+        return {**self._workspace_template_summary(row, content),
+                "catalog_state": str(head["catalog_state"]), "catalog_revision": int(head["catalog_revision"]),
+                "head_template_id": str(head["template_id"]), "content": content}
 
     def workspace_template_library_refs(
         self,
@@ -2064,6 +2139,7 @@ class ControlPlaneStore:
                 if not hmac.compare_digest(str(existing["request_hash"]), request_hash):
                     raise ControlPlaneConflict("Idempotency key was already used for a different template request")
                 if str(existing["status"]) == "failed" and not existing["project_id"] and not existing["worker_id"]:
+                    self._require_active_template(conn, template_id, tenant_id, owner_id)
                     conn.execute(
                         """
                         UPDATE workspace_template_instantiations
@@ -2081,6 +2157,7 @@ class ControlPlaneStore:
                 if str(existing["status"]) != "completed":
                     raise ControlPlaneConflict("Template instantiation with this key is already in progress")
                 return {**dict(existing), "idempotent_replay": True}
+            self._require_active_template(conn, template_id, tenant_id, owner_id)
             conn.execute(
                 """
                 INSERT INTO workspace_template_instantiations
@@ -2095,6 +2172,18 @@ class ControlPlaneStore:
             "idempotent_replay": False,
             "safe_retry": False,
         }
+
+    @staticmethod
+    def _require_active_template(conn, template_id, tenant_id, owner_id):
+        head = conn.execute("""SELECT h.catalog_state FROM workspace_templates t
+            JOIN workspace_templates h ON h.tenant_id=t.tenant_id AND h.owner_id=t.owner_id
+              AND h.lineage_id=t.lineage_id
+            WHERE t.template_id=? AND t.tenant_id=? AND t.owner_id=?
+            ORDER BY h.version DESC LIMIT 1""", (template_id, tenant_id, owner_id)).fetchone()
+        if head is None:
+            raise ControlPlaneError("Expert not found")
+        if head["catalog_state"] != "active":
+            raise ControlPlaneConflict("Restore this expert before starting new work")
 
     def complete_workspace_template_instantiation(
         self,

@@ -33,7 +33,7 @@ const context = vm.createContext({
   launchLibrary: {setOwnerScope: value => libraryScopes.push(value)},
   mainLibrary: {setAccess: (allowed, owner) => libraryAccess.push([allowed, owner])}, signedToken: '',
   expertPicker: {update: data => expertOwners.push(data?.draft_owner_scope || null), selection: () => null},
-  select: {value:''}, catalogState: {generation:0,loading:false,items:[]},
+  workspaceCatalogState:'active', select: {value:''}, catalogState: {generation:0,loading:false,items:[]},
   workspaceKindFilter: {value:'named'},workspaceSearch: {value:''},workspaceTagFilter: {value:''},
   providerAccount:{},providerAccountPolicy:{},providerAccountHelp:{},workerAccountSummaryNode:null,defaultWorker:{},
   workspaceMode:{},workspaceFilePlacementField:{},workspaceFilePlacement:{},workspaceModeHelp:{},workspaceType:{},

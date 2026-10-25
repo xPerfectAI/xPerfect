@@ -42,3 +42,11 @@
 @media(max-width:850px){.expert-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:540px){.expert-grid{grid-template-columns:1fr}.expert-heading{flex-direction:column;gap:12px}.expert-picker{padding-top:30px}.expert-outcome{min-height:0}.expert-card{padding:18px}.expert-avatar{width:80px;height:80px;flex-basis:80px}.expert-card-top{gap:12px}}
 @media(prefers-reduced-motion:reduce){.expert-card{transition:none}.expert-card:hover{transform:none}}
+
+.expert-actions{display:flex;flex-direction:column;gap:4px;min-width:160px}.expert-actions button{text-align:left}.expert-card>.expert-details:last-child{grid-column:1/-1;justify-self:end}.expert-tabs[hidden]{display:none}
+
+/* Version history is a reading list, not the two-column picker card. */
+.expert-version{display:grid;gap:12px;min-width:0;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel-strong)}
+.expert-version strong{font-size:1rem;line-height:1.4;overflow-wrap:anywhere}
+.expert-version p{margin:0;font-size:.86rem;line-height:1.6;overflow-wrap:anywhere}
+.expert-version .expert-choose{grid-column:auto;justify-self:start}

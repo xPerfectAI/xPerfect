@@ -111,8 +111,10 @@ def test_large_sparse_artifact_streams_above_old_limit_with_bounded_memory(artif
     assert observed["digest"].digest() == expected.digest()
     assert set(root.iterdir()) == before
     preview = client.get(base + "/open", params={"path": target.name})
-    assert preview.status_code == 413
-    assert "Download" in preview.json()["detail"]
+    assert preview.status_code == 200
+    assert "Your file is ready" in preview.text
+    assert "Download file" in preview.text
+    assert f"{size + 3:,} bytes" in preview.text
 
 
 def test_download_ranges_and_explicit_optional_limit(artifacts, monkeypatch):
