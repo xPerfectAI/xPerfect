@@ -157,8 +157,10 @@ def test_launch_mounts_one_narrow_link_store_into_every_service_role(tmp_path, m
         if args[:1] == ('run',) and 'keygen' in args:
             return json.dumps({'kty': 'RSA', 'n': 'synthetic', 'e': 'AQAB', 'kid': args[-1]})
         if args[:1] == ('info',):
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'})
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args:
+                return json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': 'arm64'})
             return args[-1]
         if args[1:2] == ('ls',):
             return ''
@@ -429,8 +431,10 @@ def test_launch_hosted_composes_xfs_oidc_tls_roles(tmp_path, monkeypatch):
                 if 'config.json' in names:
                     configs[args[-1].split(':', 1)[0]] = json.loads(archive.extractfile('config.json').read())
         if args[:1] == ('info',):
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'SecurityOptions': ['name=seccomp']})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64', 'SecurityOptions': ['name=seccomp']})
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args:
+                return json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': 'arm64'})
             return args[-1]
         if args[1:2] == ('ls',):
             return ''
@@ -511,8 +515,10 @@ def test_launch_hosted_trusts_a_private_issuer_ca_only_where_needed(tmp_path, mo
                 if 'config.json' in archive.getnames():
                     configs[target] = json.loads(archive.extractfile('config.json').read())
         if args[:1] == ('info',):
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'})
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args:
+                return json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': 'arm64'})
             return args[-1]
         if args[:1] == ('run',):
             return json.dumps({'kty': 'RSA', 'n': 'x', 'e': 'AQAB', 'kid': args[args.index('--kid') + 1]})
@@ -545,8 +551,10 @@ def _hosted_fake_docker(calls, configs):
                 if 'config.json' in archive.getnames():
                     configs[args[-1].split(':', 1)[0]] = json.loads(archive.extractfile('config.json').read())
         if args[:1] == ('info',):
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'})
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args:
+                return json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': 'arm64'})
             return args[-1]
         if args[:1] == ('run',):
             return json.dumps({'kty': 'RSA', 'n': 'x', 'e': 'AQAB', 'kid': args[args.index('--kid') + 1]})
@@ -927,8 +935,10 @@ def _local_launch(tmp_path, monkeypatch):
                     target.chmod(member.mode)
             return ''
         if args[:1] == ('info',):
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'})
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args:
+                return json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': 'arm64'})
             return args[-1]
         if args[1:2] == ('ls',):
             return ''
@@ -1293,7 +1303,7 @@ def test_native_launch_needs_a_workers_bridge_that_isolates_containers(tmp_path,
 
     def docker(arguments):
         if arguments[:1] == ['info']:
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'})
         if arguments[:2] == ['image', 'inspect']:
             return image + '\n'
         if arguments == ['inspect', controller]:
@@ -1398,8 +1408,10 @@ def _stateful_docker(module, monkeypatch, *, fail_network=None, fail_detail=''):
     def docker(endpoint, *args, data=None):
         state['calls'].append(args)
         if args[:1] == ('info',):
-            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2'})
+            return json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'})
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args:
+                return json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': 'arm64'})
             return args[-1]
         if args[1:2] == ('ls',):
             kind = {'volume': 'volume', 'network': 'network', 'ps': 'container'}.get(args[0], args[0])

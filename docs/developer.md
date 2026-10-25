@@ -360,5 +360,34 @@ model table) and, in `runtime_phase1/tests/`, `test_grok_runtime.py`,
 `test_reconciled_runtime_fixes.py` (unknown profiles), `test_control_plane.py` (platform support)
 and `test_api.py` (`/v1/worker-profiles`). See [Contributing](../CONTRIBUTING.md).
 
+## Build a matched Docker package
+
+Use a clean public checkout on the target CPU. Keep provider credentials and runtime state outside
+the build context. The native workstation recipe is owned by `DockerSandboxManager.prepare_image`;
+it pins the operating-system base, clients and dependencies. Its image is only the **base**.
+Always build `runtime_phase1/containers/Dockerfile.shared` next: it adds immutable member IDs,
+the credential entry point and the storage guard required by the packaged runtime.
+
+```sh
+docker build --build-arg XPERFECT_BASE_IMAGE=<reviewed-workstation-image> \
+  -f runtime_phase1/containers/Dockerfile.shared -t xperfect-native:local runtime_phase1
+docker build --build-arg XPERFECT_NATIVE_IMAGE=xperfect-native:local \
+  -f deployment/linux/Dockerfile.service -t xperfect-service:local .
+```
+
+Do not remove or skip the build-time storage-guard check to cross-build. Its thread-synchronized
+seccomp filter needs the target's native Linux execution. The optional **Build native amd64
+package** workflow runs on an actual x86 runner, verifies the staged base's digest, builds both
+layers from that commit and returns immutable code-only archives to a draft release. It starts
+only on an explicit `codex/build-*` maintainer branch or manual dispatch. It never imports a
+developer's account, application state or environment.
+
+The existing image publisher accepts OCI indexes and optional digest-checked archive parts; it
+preserves all manifests. **Public package start** runs on native Arm and x86 runners. It checks
+anonymous download, exact image/platform identity, protected UI, authenticated MCP, native
+binaries, Chromium/file execution, restart and the opt-in bridge policy. This credential-free
+check does not claim authenticated inference on every provider. Keep the saved release pin on
+its accepted platforms until those checks pass. See [deployment](deployment.md#image-architecture).
+
 [Quickstart](quickstart.md) · [Deployment](deployment.md) · [Hosted](deployment-hosted.md) ·
 [Capabilities](capability-matrix.md)

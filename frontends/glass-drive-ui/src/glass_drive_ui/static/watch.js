@@ -5,6 +5,8 @@ import { workspaceLifecycleControl } from './launch-policy.js?v=20261024polish1'
 import { createFileDraft, createWorkspaceFiles } from './files.js?v=20261024polish1';
 import { attachNativeControls, canGuideNativeTurn } from './native-controls.js?v=20261024polish1';
 import { createResultMarkdown } from './result-markdown.js?v=20261025filelinks1';
+import { usageSummaryText, failureSupportText } from './usage-presenter.js?v=20261025parity1';
+import { renderAdmissionHolds } from './spend-controls.js?v=20261025parity1';
 
 // The same safe rendering as conversation replies: raw HTML is escaped and unsafe link
 // schemes are refused. Links open beside the workspace instead of replacing it.
@@ -40,6 +42,25 @@ const overlayTitle = document.getElementById('overlay-title');
 const overlayDetail = document.getElementById('overlay-detail');
 const signInLink = document.getElementById('watch-sign-in');
 const stageResultText = document.getElementById('stage-result-text');
+let pauseReadAt = 0;
+async function pauseRequest(url, method = 'GET', body) {
+  const response = await fetch(withAuth(url), { method, credentials: 'same-origin',
+    headers: method === 'GET' ? { 'Content-Type': 'application/json' } : csrfHeaders({ 'Content-Type': 'application/json' }),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  if (!response.ok) throw new Error('Settings changed or are unavailable. Reload before resuming.');
+  return response.json();
+}
+async function refreshWorkPauses(data, force = false) {
+  const container = document.getElementById('watch-work-pauses');
+  if (!container || data.can_manage_workspace !== true || signedToken) return;
+  if (!force && Date.now() - pauseReadAt < 10000) return;
+  pauseReadAt = Date.now();
+  try {
+    const result = await pauseRequest('/api/admission-holds');
+    renderAdmissionHolds(container, (result.items || []).filter(item => item.scope_type === 'owner'
+      || (item.scope_type === 'project' && item.scope_id === data.worker?.project_id)), pauseRequest, () => refreshWorkPauses(data, true));
+  } catch { container.textContent = 'Work pause status is unavailable. Open workspace settings to reload.'; }
+}
 
 // A shown result is read from the top of the stage, not centred under empty space.
 function showResult(text) {
@@ -1494,6 +1515,11 @@ async function refresh() {
     const data = await response.json();
     if (signInLink) signInLink.hidden = true;
     const worker = data.worker;
+    const usage = document.getElementById('watch-usage');
+    if (usage) { usage.hidden = !data.latest_run; usage.textContent = usageSummaryText(data.latest_run?.usage); }
+    const support = document.getElementById('watch-provider-support');
+    if (support) { support.textContent = failureSupportText(data.latest_run); support.hidden = !support.textContent || data.can_manage_workspace !== true; }
+    refreshWorkPauses(data);
     syncAskChat(data);
     filesToggle.disabled = false; menuToggle.disabled = false;
     currentWorkerState = String(worker.state || '').trim().toLowerCase();

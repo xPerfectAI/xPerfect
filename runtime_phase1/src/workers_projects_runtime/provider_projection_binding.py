@@ -112,8 +112,14 @@ def bind_projected_account(binder, worker: dict, *, runtime_name: str, run_id: s
     account = store.get_provider_account_record(account_id=selection.account_id, tenant_id=tenant, owner_id=owner)
     if account is None or account["provider"] not in _PROFILE_PROVIDERS.get(runtime_name, set()) or account["status"] != "ready":
         raise RuntimeErrorBase("Selected native provider account is unavailable or needs verification")
-    if account["auth_method"] not in {"subscription", "api_key"}:
+    if account["auth_method"] not in {"subscription", "api_key", "bedrock"}:
         raise RuntimeErrorBase("This provider account requires its configured enterprise route")
+    if account["auth_method"] == "bedrock":
+        from .bedrock_connections import account_config, selected_model
+        config = account_config(account)
+        if runtime_name != "claude-code" or config["credential_mode"] != "protected_file":
+            raise RuntimeErrorBase("Bedrock containers require a protected Claude credential connection; host workload identity is separate")
+        worker = {**worker, "model": selected_model(worker, config), "_xperfect_bedrock_config": config}
     from .native_api_keys import native_key_account
     if account["auth_method"] == "api_key" and not native_key_account(account):
         raise RuntimeErrorBase("This API-key account requires its configured broker route")

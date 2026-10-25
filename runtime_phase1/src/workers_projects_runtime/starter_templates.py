@@ -164,7 +164,7 @@ def import_starter(service, starter_id, tenant, owner, request):
             return {"template": {k: v for k, v in result.items() if k != "content"}, "idempotent_replay": True}
         match = _active_import(conn, cp, tenant, owner, fingerprint, spec, bundle, account)
         if match:
-            conn.execute("INSERT INTO workspace_template_imports VALUES (?,?,?,?,?,?) ON CONFLICT(tenant_id,owner_id,idempotency_key) DO UPDATE SET template_id=excluded.template_id",
+            conn.execute("INSERT INTO workspace_template_imports (tenant_id,owner_id,idempotency_key,request_hash,template_id,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(tenant_id,owner_id,idempotency_key) DO UPDATE SET template_id=excluded.template_id",
                          (tenant, owner, request.idempotency_key, fingerprint, match['template_id'], time.time()))
             return {"template": match, "idempotent_replay": False, "reused_saved_expert": True}
         conn.execute("INSERT OR IGNORE INTO workspace_template_imports (tenant_id,owner_id,idempotency_key,request_hash,template_id,created_at) VALUES (?,?,?,?,NULL,?)", (tenant, owner, request.idempotency_key, fingerprint, time.time()))

@@ -8,10 +8,11 @@ from pydantic import BaseModel, Field, SecretStr
 class CreateProviderAccountRequest(BaseModel):
     provider: Literal["codex", "claude", "openai", "anthropic", "grok", "xai", "custom"]
     label: str = Field(min_length=1, max_length=160)
-    auth_method: Literal["subscription", "api_key", "enterprise_route"]
+    auth_method: Literal["subscription", "api_key", "enterprise_route", "bedrock"]
     platform_support: str = Field(min_length=1, max_length=80)
     secret_locator: str = Field(default="native-home://auto", min_length=1, max_length=512)
     make_default: bool = False
+    connection_config: dict[str, Any] | None = None
 
 
 class ProviderApiKeyRequest(BaseModel):

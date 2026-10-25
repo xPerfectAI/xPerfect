@@ -50,7 +50,7 @@ const elements={};
 const document={createElement:tag=>new Element(tag),getElementById:id=>elements[id],querySelectorAll:()=>[]};
 const option=value=>{const item=new Element('option');item.value=value;return item;};
 for(const id of ['description','success_criteria','context','schedule-text','worker-name','grok-effort','worker-choice','workspace-choice'])elements[id]=new Element();
-for(const id of ['workspace-option','provider-account-selection','provider-account-policy','execution-workspace','workspace-mode','workspace-file-placement','workspace-type','launch-surface','codex-effort','claude-effort','openclaw-effort','direct-effort','default-worker-profile'])elements[id]=new Element('select');
+for(const id of ['workspace-option','provider-account-selection','provider-account-policy','provider-model-selection','execution-workspace','workspace-mode','workspace-file-placement','workspace-type','launch-surface','codex-effort','claude-effort','openclaw-effort','direct-effort','default-worker-profile'])elements[id]=new Element('select');
 const fill=(id,values)=>elements[id].replaceChildren(...values.map(option));
 fill('provider-account-policy',['personal_required','personal_preferred','legacy']);
 fill('workspace-mode',['isolated','shared']);fill('workspace-file-placement',['common','member_private']);

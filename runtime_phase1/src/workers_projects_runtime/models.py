@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .recurrence import canonical_recurrence_owner
 from .runtime_identity import derive_legacy_backend_label
+from .usage_accounting import unknown_summary
 
 ProjectStatus = Literal["active", "paused", "completed", "archived", "failed"]
 WorkerState = Literal[
@@ -794,6 +795,10 @@ class RunResponse(BaseModel):
     failure_user_message: str = ""
     failure_recommended_recovery: str = ""
     failure_diagnostic_summary: str = ""
+    upstream_request_id: str = ""
+    failure_status_source: Literal["http_response", "harness_reported", "adapter_synthesized", "unavailable"] = "unavailable"
+    failure_status_code: int | None = None
+    usage: dict[str, Any] = Field(default_factory=unknown_summary)
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
@@ -1056,6 +1061,7 @@ class DesktopActionResponse(BaseModel):
 
 
 class MetricsSummary(BaseModel):
+    usage: dict[str, Any] = Field(default_factory=unknown_summary)
     projects: int
     workers: int
     runs: int

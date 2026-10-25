@@ -1375,3 +1375,16 @@ reuse it. An accepted job clears that attempt; the next explicit creation with t
 gets a fresh worker. An earlier pending worker found Closed is never announced Ready: the user can
 choose Start a new worker while keeping the job and selected expert. Do not derive a permanent
 creation key only from owner, expert and name.
+
+Usage detail reads the run's authoritative accounting object. Show reported zero as zero, absent
+usage as Unknown and mixed coverage as Partial. Show provider-reported money by currency and keep
+it separate from tokens and conversation estimates. Retry, failure and cancellation can cost money.
+Account totals show unknown-run coverage; a known subtotal must not appear to be a complete bill.
+
+Spending settings use the existing owner settings location, with optional project scope. They are
+off by default. The owner selects currency, lifetime threshold and explicit unknown-usage handling;
+a reserve is a policy amount, not a price estimate. State clearly that active native work and delayed
+usage can exceed the threshold. A spending or operator pause leaves saved work queued and active
+invocations running. Explain the bounded reason and provide generation-checked Resume. The same
+queue episode and native Pause/Stop/Steer controls keep their existing meanings. A policy edit
+does not silently clear a hold or reset spending.

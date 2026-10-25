@@ -1,0 +1,1 @@
+{"event_id":"event-1","inputs":[{"logical_id":"input-1","package_path":"original.txt","relative_path":"original.txt","sha256":"237d8ccb122ab3a5b94e8122afaf5dff5556285ca690455ab0e9e480026aae93","size_bytes":37,"source_id":"physical-1"}],"owner_scope":"example-owner","revision":"revision-1","schema_version":1,"source_scope":"example-source"}

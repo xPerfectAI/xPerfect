@@ -64,6 +64,7 @@ def run_state_tool(program: str, argv: list[str], placed: dict[str, dict[str, by
 class FakeDocker:
     def __init__(self):
         self.images = {OLD, NEW, NATIVE}
+        self.image_architectures = {}
         self.volumes: dict[str, dict[str, bytes]] = {}
         self.networks: dict[str, dict] = {}
         self.containers: dict[str, dict] = {}
@@ -288,8 +289,10 @@ class FakeDocker:
         if args[:1] == ('info',):
             if '{{.OperatingSystem}}' in args:
                 return ok(self.operating_system)
-            return ok(json.dumps({'OSType': 'linux', 'CgroupVersion': '2'}))
+            return ok(json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'}))
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args and args[-1] in self.images:
+                return ok(json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': self.image_architectures.get(args[-1], 'arm64')}))
             return ok(args[-1]) if args[-1] in self.images else fail()
         if args[1:2] == ('ls',):
             return ok()

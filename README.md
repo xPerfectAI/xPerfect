@@ -60,6 +60,15 @@ pause or stop supported work, and return to its recorded status. In **Workspaces
 worker or make a separate copy. **Schedules** can run a saved workspace later or send a webhook
 to your app; the receiving app decides what happens next.
 
+**Settings → Work pauses and spend** can hold new work for your account or a project,
+then resume the same queued work. Running work keeps going. Watch distinguishes reported
+usage from unknown usage; provider-reported cost is separate from an optional estimate.
+These limits control new admissions, not a provider's final bill.
+
+Builders can use the optional [evidence kit](integrations/evidence-kit/README.md) to keep
+original inputs, check exact output bytes and retry delivery without running the AI again.
+It uses the same public APIs and run records; client rules stay outside xPerfect.
+
 ### Manage your experts and saved work
 
 - **Workspaces → More → Save as expert** keeps a worker’s setup for another job. In

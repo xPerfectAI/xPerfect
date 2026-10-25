@@ -34,6 +34,7 @@ const PROVIDER_METHOD_LABELS = {
   subscription: 'My subscription',
   api_key: 'Connected API key',
   enterprise_route: 'Enterprise route',
+  bedrock: 'Amazon Bedrock',
 };
 const CAPABILITY_REVIEW_KEY = 'glasshive.capability-review';
 
@@ -184,9 +185,9 @@ function providerAccountDetails(account) {
   const provider = ['grok', 'xai'].includes(providerId)
     ? 'Grok · SpaceXSI'
     : (PROVIDER_LABELS[providerId] || String(providerId || 'AI').replaceAll('_', ' '));
-  const method = { subscription: 'Subscription', api_key: 'API key', enterprise_route: 'Managed connection' }[account.auth_method]
+  const method = { subscription: 'Subscription', api_key: 'API key', enterprise_route: 'Managed connection', bedrock: 'Amazon Bedrock' }[account.auth_method]
     || String(account.auth_method || 'account').replaceAll('_', ' ');
-  return `${provider} · ${method}`;
+  return `${provider} · ${method}${account.auth_method === 'bedrock' ? ` · ${account.connection_config?.region || ''}` : ''}`;
 }
 
 function retainProviderAccountFocus(account, button) {
@@ -226,10 +227,17 @@ function providerAccountUsage(account, technical = false) {
       : `Observed here: ${observedRuns} run${observedRuns === 1 ? '' : 's'} · ${observedFailures} failed`);
   }
   const hasReportedTokens = account.observed_input_tokens != null || account.observed_output_tokens != null;
+  if (technical && !hasReportedTokens) details.push('Usage: Unknown');
+  const unknownRuns = Number(account.observed_unknown_runs || 0);
+  if (technical && unknownRuns > 0) details.push(`${unknownRuns.toLocaleString()} ${unknownRuns === 1 ? 'run has' : 'runs have'} unknown usage`);
   if (hasReportedTokens && technical) {
-    const inputTokens = Math.max(0, Number(account.observed_input_tokens || 0));
-    const outputTokens = Math.max(0, Number(account.observed_output_tokens || 0));
-    details.push(`Tokens reported by worker: ${inputTokens.toLocaleString()} input · ${outputTokens.toLocaleString()} output. Cached input may be counted separately.`);
+    if (!['complete', 'partial'].includes(account.observed_usage_coverage)) details.push('Usage: Unknown · Earlier counters have no receipt coverage.');
+    else {
+      const inputTokens = account.observed_input_tokens == null ? 'Unknown' : Number(account.observed_input_tokens).toLocaleString();
+      const outputTokens = account.observed_output_tokens == null ? 'Unknown' : Number(account.observed_output_tokens).toLocaleString();
+      const coverage = account.observed_usage_coverage === 'complete' ? 'Reported' : 'Partial';
+      details.push(`Usage: ${coverage} · ${inputTokens} input · ${outputTokens} output. Cached input may be counted separately.`);
+    }
   }
   return details.filter(Boolean).join(' · ');
 }
@@ -292,12 +300,14 @@ function setProviderStatus(message = '') {
 }
 
 async function reconnectProviderAccount(account, button) {
-  if (account.auth_method === 'api_key' && account.credential_route === 'native') {
+  if ((account.auth_method === 'api_key' && account.credential_route === 'native')
+      || (account.auth_method === 'bedrock' && account.connection_config?.credential_mode === 'protected_file')) {
     const form = document.createElement('form');
     const input = document.createElement('input');
     input.type = 'password'; input.autocomplete = 'off'; input.required = true;
-    input.maxLength = 8192; input.placeholder = 'Replacement API key';
-    input.setAttribute('aria-label', 'Replacement API key');
+    const bedrock = account.auth_method === 'bedrock';
+    input.maxLength = 8192; input.placeholder = bedrock ? 'AWS credentials as JSON' : 'Replacement API key';
+    input.setAttribute('aria-label', input.placeholder);
     const submit = node('button', 'quiet-button', 'Connect key'); submit.type = 'submit';
     const cancel = node('button', 'quiet-button', 'Cancel'); cancel.type = 'button';
     cancel.addEventListener('click', () => { input.value = ''; form.remove(); button.hidden = false; });
@@ -461,7 +471,8 @@ function renderProviderAccounts() {
     const actions = node('div', 'connection-actions connection-actions-primary');
     const brokerBacked = account.credential_route === 'broker' || (account.auth_method === 'enterprise_route');
     actions.append(statusChip(
-      brokerBacked && account.status === 'ready'
+      account.auth_method === 'bedrock' && account.status === 'ready' ? 'Configured · provider access not yet tested'
+        : brokerBacked && account.status === 'ready'
         ? 'linked · verifies on run'
         : (account.status || account.platform_support),
     ));
@@ -2624,12 +2635,19 @@ function renderSupportHint() {
   const keyField = document.getElementById('provider-api-key-field');
   const keyInput = document.getElementById('provider-api-key');
   const needsKey = method === 'api_key' && option?.native_api_key_support === 'supported';
+  const bedrockFields = document.getElementById('provider-bedrock-fields');
+  if (bedrockFields) {
+    bedrockFields.hidden = method !== 'bedrock';
+    for (const field of bedrockFields.querySelectorAll('input,textarea')) field.disabled = method !== 'bedrock';
+    for (const id of ['bedrock-region', 'bedrock-models']) document.getElementById(id).required = method === 'bedrock';
+  }
   if (keyField) keyField.hidden = !needsKey;
   if (keyInput) { keyInput.required = needsKey; if (!needsKey) keyInput.value = ''; }
   const support = document.getElementById('provider-support-note');
   if (support) {
     support.textContent = supported
       ? (method === 'subscription' ? 'Sign in securely with your existing subscription.'
+        : method === 'bedrock' ? 'Connect a private AWS route for the native Claude Code worker.'
         : method === 'api_key' ? 'Paste a provider API key. It stays in this account’s private storage.'
           : 'Use your organization’s configured connection.')
       : providerUnavailableReason(option);
@@ -3147,8 +3165,29 @@ async function submitProviderAccount(event) {
       label: document.getElementById('provider-account-label').value.trim(),
       make_default: document.getElementById('provider-account-default').checked,
     };
+    let bedrockCredentials = null;
+    if (method === 'bedrock') {
+      const models = document.getElementById('bedrock-models').value.split('\n').map(value => value.trim()).filter(Boolean);
+      payload.connection_config = { region: document.getElementById('bedrock-region').value.trim(), model_ids: models,
+        default_model: document.getElementById('bedrock-default-model').value.trim() || models[0], credential_mode: 'protected_file', model_provider: 'anthropic' };
+      const contracts = document.getElementById('bedrock-model-contracts').value.trim();
+      if (contracts) payload.connection_config.model_contracts = JSON.parse(contracts);
+      bedrockCredentials = {};
+      for (const [id, name] of [['bedrock-bearer', 'AWS_BEARER_TOKEN_BEDROCK'], ['bedrock-access-key', 'AWS_ACCESS_KEY_ID'], ['bedrock-secret-key', 'AWS_SECRET_ACCESS_KEY'], ['bedrock-session-token', 'AWS_SESSION_TOKEN']]) {
+        const input = document.getElementById(id);
+        if (input.value) bedrockCredentials[name] = input.value;
+        input.value = '';
+      }
+      const bearer = Boolean(bedrockCredentials.AWS_BEARER_TOKEN_BEDROCK);
+      const pair = Boolean(bedrockCredentials.AWS_ACCESS_KEY_ID && bedrockCredentials.AWS_SECRET_ACCESS_KEY);
+      if (bearer === pair || (bearer && Object.keys(bedrockCredentials).length !== 1)) throw new Error('Enter a bearer token or an AWS access key pair, with a session token if required.');
+    }
     const created = await api.postJson('/api/provider-accounts', payload);
     let keyResult = null;
+    if (method === 'bedrock') {
+      keyResult = await api.postJson(`/api/provider-accounts/${encodeURIComponent(created.account_id)}/credentials`, { value: JSON.stringify(bedrockCredentials) });
+      bedrockCredentials = null;
+    }
     if (method === 'api_key' && option?.native_api_key_support === 'supported') {
       const keyInput = document.getElementById('provider-api-key');
       const value = keyInput.value;

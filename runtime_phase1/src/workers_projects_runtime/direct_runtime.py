@@ -404,7 +404,10 @@ class DirectModelRuntime(DirectNativeWarmMixin, HostNativeCliMixin, GrokBuildRun
         return FailureClassification(failure_class=kind, retryable=retryable, user_message=message,
             recommended_recovery=recovery,
             diagnostic_summary="Direct SDK " + str(error.get("error_type") or "failure")[:80] + "; stage " + str(stage) + "; HTTP " + str(status),
-            structured=True), evidence
+            structured=True,
+            upstream_request_id=str(error.get("provider_request_id") or ""),
+            failure_status_source="adapter_synthesized" if stream_rate_limited else "http_response" if type(status) is int else "unavailable",
+            failure_status_code=status if type(status) is int else None), evidence
 
     def _record_direct_stop(self, worker, run_id):
         if not run_id:

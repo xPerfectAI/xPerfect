@@ -981,7 +981,8 @@ async def execute(request):
                 break
         emit({"type": "grok.result", "session_id": session_id, "stop_reason": "end_turn",
               "output": final_output, "usage": {"input_tokens": usage.get("input_tokens", 0),
-              "output_tokens": usage.get("output_tokens", 0), "cached_input_tokens": usage.get("cache_read_tokens", 0)},
+              "output_tokens": usage.get("output_tokens", 0), "cached_input_tokens": usage.get("cache_read_tokens", 0),
+              "cache_write_input_tokens": usage.get("cache_write_tokens", 0)},
               "context_usage": context_usage,
               "executor": "direct", "provider": provider,
               **({"deliveryDispositionRanges": ranges} if ranges else {})})

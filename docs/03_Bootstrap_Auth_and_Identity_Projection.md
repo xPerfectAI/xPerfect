@@ -910,3 +910,27 @@ Catalog revisions belong to catalog writes; runtime telemetry does not advance t
 schema 13 and control-plane schema 6 add these fields transactionally. Existing rows start Available
 with their IDs/content hashes unchanged. Older runtimes must not open the upgraded database; use the
 supported upgrade backup/rollback owner. Recoverable removal is not a permanent storage purge.
+
+### Reported usage and provider failure provenance
+
+Runtime-store schema 14 and control-plane schema 7 retain exact-attempt usage receipts and account
+coverage. Claude without terminal usage reports unknown, including crashes. Valid zero and native
+cache buckets remain measurements. Account totals count each receipt once; mixed measured and
+unreported runs show partial coverage. A subscription token count implies no per-request charge.
+
+Failure records add `upstream_request_id`, `failure_status_code` and `failure_status_source`.
+Sources are `http_response`, `harness_reported`, `adapter_synthesized` or `unavailable`. A CLI status
+is harness-reported evidence. Direct's synthesized rate-limit status is labelled as synthesized.
+Only bounded IDs from approved adapter fields survive; response bodies, URLs, credentials and
+policy text do not enter general telemetry. Existing auth/access/rate recovery still owns action.
+
+Claude Bedrock connections declare a region, allowed model/inference-profile IDs, optional default
+model and `model_provider=anthropic`. Credentials use an owner-protected file or explicitly enabled
+host workload identity. Selection precedence is worker choice, connection default, then the legacy
+environment default. An invalid declared choice refuses without model fallback. Legacy environment
+configuration remains supported. Configuration-only verification proves no cloud model access.
+Optional `model_contracts` map an exact declared ID to `context_window`, `effort_choices` and
+`recommended_effort` supplied by the operator. Only these descriptors enter the owner's model
+catalog and bind the same connection; bare IDs remain available to workers. No context/capability
+values are invented. Workload identity requires `XPERFECT_BEDROCK_WORKLOAD_IDENTITY_ENABLED` and
+host execution; Docker uses an owner-protected credential file.

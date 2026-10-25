@@ -258,6 +258,10 @@ class AllowedAiPolicyService:
                 and descriptor.native_model == clean_model
             ):
                 return descriptor.id
+        if clean_profile == "claude-code":
+            for account in self.control_plane.list_provider_accounts(tenant_id=tenant_id, owner_id=owner_id):
+                if account.get("auth_method") == "bedrock" and clean_model in (account.get("connection_config") or {}).get("model_ids", []):
+                    return clean_model
         # ACP harnesses have a deployment-selected exact model rather than a
         # Conversation API registry row. Only recognize the configured route.
         native = next((item for item in PROFILES if item.profile == clean_profile), None)
@@ -841,6 +845,18 @@ class AllowedAiPolicyService:
                 ).model_dump(mode="json", exclude_none=True)
                 for model in models
             ]
+            if descriptor.profile == "claude-code":
+                known_ids = {item["id"] for item in model_options}
+                for account in account_rows:
+                    if account.get("auth_method") != "bedrock":
+                        continue
+                    for model_id in (account.get("connection_config") or {}).get("model_ids", []):
+                        if model_id in known_ids:
+                            continue
+                        known_ids.add(model_id)
+                        model_options.append(AllowedAiOption(id=model_id, label=model_id,
+                            status="available" if adapter_modes and account.get("status") == "ready" else "unavailable",
+                            reason="Declared Bedrock choice; AWS model access is checked when work starts.").model_dump(mode="json", exclude_none=True))
             if not model_options and descriptor.native_transport == "acp":
                 try:
                     configured, _ = selected_grok_model(self.store, tenant_id, owner_id)

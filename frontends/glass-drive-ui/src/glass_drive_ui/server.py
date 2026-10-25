@@ -396,6 +396,7 @@ class LaunchRequest(BaseModel):
     effort: str | None = None
     provider_account_policy: Literal["legacy", "personal_preferred", "personal_required"] | None = None
     provider_account_id: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=512)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
     files: list[UploadedFileRequest] = Field(default_factory=list)
     file_upload_ids: list[str] = Field(default_factory=list)
@@ -476,6 +477,7 @@ class ProviderAccountRequest(BaseModel):
     label: str = Field(min_length=1, max_length=160)
     auth_method: str = Field(min_length=1, max_length=40)
     make_default: bool = False
+    connection_config: dict[str, Any] | None = None
 
 
 class ProviderApiKeyRequest(BaseModel):
@@ -3244,7 +3246,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                 {
                     "provider": "claude",
                     "label": "Claude Code",
-                    "methods": (["subscription"] if claude_subscription_support == "supported" else []) + (["api_key"] if native_key_support.get("claude") == "supported" else []),
+                    "methods": (["subscription"] if claude_subscription_support == "supported" else []) + (["api_key"] if native_key_support.get("claude") == "supported" else []) + (["bedrock"] if runtime_health.get("bedrock_support") == "supported" else []),
                     "native_api_key_support": native_key_support.get("claude", "unavailable"),
                     "subscription_support": claude_subscription_support,
                     "inference_broker_support": "unsupported",
@@ -3970,10 +3972,10 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         auth_method = payload.auth_method.strip().lower()
         if provider not in {"codex", "claude", "grok"}:
             raise HTTPException(status_code=400, detail="Choose Codex, Claude Code or Grok")
-        if auth_method not in {"subscription", "api_key", "enterprise_route"}:
+        if auth_method not in {"subscription", "api_key", "enterprise_route", "bedrock"}:
             raise HTTPException(status_code=400, detail="Unsupported account connection method")
         native_key = auth_method == "api_key" and ((_client_for_request(request).health() or {}).get("native_api_key_support") or {}).get(provider) == "supported"
-        if auth_method != "subscription" and provider != "codex" and not native_key:
+        if auth_method not in {"subscription", "bedrock"} and provider != "codex" and not native_key:
             raise HTTPException(status_code=409, detail="This provider key route is unavailable on this host")
         if auth_method == "subscription" and not _personal_account_isolation_ready():
             raise HTTPException(
@@ -4008,6 +4010,7 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     "platform_support": platform_support,
                     "secret_locator": locator,
                     "make_default": payload.make_default,
+                    **({"connection_config": payload.connection_config} if payload.connection_config is not None else {}),
                 }
             )
         except httpx.HTTPStatusError as exc:
@@ -4374,6 +4377,15 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     requested_account_id=payload.provider_account_id,
                 )
 
+        if payload.model is not None:
+            selected_account = next((account for account in provider_accounts
+                if account.get("account_id") == (provider_account_selection or {}).get("account_id")), None) if new_workspace and (provider_account_selection or {}).get("account_id") else None
+            if (not selected_account or selected_account.get("auth_method") != "bedrock"
+                    or requested_profile != "claude-code"
+                    or payload.model not in (selected_account.get("connection_config") or {}).get("model_ids", [])):
+                raise HTTPException(status_code=422, detail="Choose a model declared by the selected Bedrock connection")
+            bootstrap_bundle = {"provider_model": payload.model}
+
         if workspace_option.startswith("duplicate:") and not payload.idempotency_key:
             raise HTTPException(
                 status_code=422,
@@ -4498,6 +4510,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
                     }
                     if effort:
                         member_payload["effort"] = effort
+                    if payload.model is not None:
+                        member_payload["model"] = payload.model
                     if provider_account_selection:
                         member_payload["provider_account_policy"] = selected_policy
                         if selected_account_id:
@@ -4694,6 +4708,8 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     install_workspace_ui_routes(app, _client_for_request)
     install_worker_configuration_ui_routes(app, _client_for_request)
     install_allowed_ai_policy_ui_routes(app, _client_for_request)
+    from .spend_control_routes import install_spend_control_ui_routes
+    install_spend_control_ui_routes(app, _client_for_request)
 
     install_file_routes(app, _client_for_request, _request_identity, _restricted_identity, _runtime_http_exception)
     from .personal_library_routes import install_personal_library_routes

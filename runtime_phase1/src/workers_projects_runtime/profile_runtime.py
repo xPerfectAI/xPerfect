@@ -842,8 +842,14 @@ def _private_cli_failure_classification(
 ) -> FailureClassification:
     """Preserve typed failure metadata without carrying the worker transcript."""
 
+    from .failure_classification import _structured_failure_records, _safe_http_status
+    records = _structured_failure_records(stdout) or _structured_failure_records(stderr)
+    statuses = [status for record in records for key in ("error_status", "api_error_status")
+                if (status := _safe_http_status(record.get(key))) is not None]
     return replace(
         classification,
+        failure_status_source="harness_reported" if statuses else classification.failure_status_source,
+        failure_status_code=statuses[-1] if statuses else classification.failure_status_code,
         diagnostic_summary=compact_provider_failure_diagnostic(
             stdout=stdout, stderr=stderr,
             classification=classification, exit_code=exit_code,
@@ -2444,6 +2450,7 @@ class ProfiledWorkerRuntime:
                         duration_seconds=max(0.0, time.monotonic() - started_at),
                         input_tokens=reported_token("input_tokens"),
                         output_tokens=reported_token("output_tokens"),
+                        receipt_id=str(worker.get("_run_attempt_id") or run_id),
                     )
                 except Exception:
                     # Usage accounting must not replace the worker's result or original failure.
@@ -2962,6 +2969,11 @@ class ProfiledWorkerRuntime:
         runtime = self._runtime_for_worker(worker)
         reader = getattr(runtime, "run_usage", None)
         return dict(reader(worker, run_id)) if callable(reader) else {}
+
+    def run_usage_observation(self, worker: dict, run_id: str) -> dict[str, object]:
+        runtime = self._runtime_for_worker(worker)
+        reader = getattr(runtime, "run_usage_observation", None)
+        return dict(reader(worker, run_id)) if callable(reader) else self.run_usage(worker, run_id)
 
     def run_telemetry(self, worker: dict, run_id: str) -> dict[str, object]:
         runtime = self._runtime_for_worker(worker)
@@ -4492,17 +4504,38 @@ class BaseCliWorkerRuntime:
         _ = stdout
         return {}
 
-    def _record_run_usage(self, worker_id: str, run_id: str, stdout: str) -> dict[str, int]:
+    def _record_run_usage(self, worker_id: str, run_id: str, stdout: str, attempt_id: str = "") -> dict[str, int]:
         usage = self._usage_from_output(stdout)
+        observation = self._usage_observation_from_output(stdout)
+        root = self._attempt_run_root(worker_id, run_id, attempt_id)
+        root.mkdir(parents=True, exist_ok=True)
+        from .usage_accounting import normalize_observation, merge_observation, observation_input
+        try:
+            previous = observation_input(json.loads((root / "usage-observation.json").read_text()))
+        except (OSError, ValueError):
+            previous = {}
+        revision = previous.get("_receipt_revision", 0)
+        if previous:
+            prior = normalize_observation(previous, total_cost_usd=previous.get("_reported_cost_usd"))
+            observation = merge_observation(prior, observation)
+            revision += int(prior != observation)
+        observation["revision"] = revision
+        _write_private_json(root / "usage-observation.json", observation)
         if usage:
-            path = self._run_root(worker_id, run_id) / "usage.json"
+            path = self._attempt_run_root(worker_id, run_id, attempt_id) / "usage.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
             _write_private_json(path, usage)
         return usage
 
-    def _record_run_telemetry(self, worker_id: str, run_id: str, stdout: str) -> dict[str, object]:
+    def _usage_observation_from_output(self, stdout: str) -> dict[str, object]:
+        from .usage_accounting import normalize_observation
+        return normalize_observation(self._usage_from_output(stdout))
+
+    def _record_run_telemetry(self, worker_id: str, run_id: str, stdout: str, attempt_id: str = "") -> dict[str, object]:
         telemetry = _safe_run_telemetry(self._telemetry_from_output(stdout), run_id=run_id)
         if telemetry:
-            path = self._run_root(worker_id, run_id) / "telemetry.json"
+            path = self._attempt_run_root(worker_id, run_id, attempt_id) / "telemetry.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
             if not _write_private_json(path, telemetry):
                 logger.warning(
                     "Failed to persist GlassHive run telemetry",
@@ -4515,24 +4548,35 @@ class BaseCliWorkerRuntime:
         worker_id: str,
         run_id: str,
         stdout: str,
+        attempt_id: str = "",
     ) -> tuple[dict[str, int], dict[str, object]]:
         return (
-            self._record_run_usage(worker_id, run_id, stdout),
-            self._record_run_telemetry(worker_id, run_id, stdout),
+            self._record_run_usage(worker_id, run_id, stdout, attempt_id),
+            self._record_run_telemetry(worker_id, run_id, stdout, attempt_id),
         )
 
     def run_usage(self, worker: dict, run_id: str) -> dict[str, int]:
-        path = self._run_root(str(worker["worker_id"]), str(run_id)) / "usage.json"
+        path = self._attempt_run_root(str(worker["worker_id"]), str(run_id), str(worker.get("_run_attempt_id") or "")) / "usage.json"
         if not path.is_file():
             return {}
         try:
             value = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return {}
-        return {str(key): int(token_count) for key, token_count in value.items()} if isinstance(value, dict) else {}
+        return {str(key): token_count for key, token_count in value.items()
+                if type(token_count) is int and token_count >= 0} if isinstance(value, dict) else {}
+
+    def run_usage_observation(self, worker: dict, run_id: str) -> dict[str, object]:
+        path = self._attempt_run_root(str(worker["worker_id"]), str(run_id), str(worker.get("_run_attempt_id") or "")) / "usage-observation.json"
+        try:
+            observation = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return self.run_usage(worker, run_id)
+        from .usage_accounting import observation_input
+        return observation_input(observation)
 
     def run_telemetry(self, worker: dict, run_id: str) -> dict[str, object]:
-        path = self._run_root(str(worker["worker_id"]), str(run_id)) / "telemetry.json"
+        path = self._attempt_run_root(str(worker["worker_id"]), str(run_id), str(worker.get("_run_attempt_id") or "")) / "telemetry.json"
         if not path.is_file():
             return {}
         try:
@@ -6020,7 +6064,7 @@ class BaseCliWorkerRuntime:
         stdout = stdout_path.read_text() if stdout_path.exists() else ""
         stderr = stderr_path.read_text() if stderr_path.exists() else ""
         effective_run_id = str(run_id or active_session.get("run_id") or "").strip()
-        usage, telemetry = self._record_run_metrics(worker["worker_id"], effective_run_id, stdout)
+        usage, telemetry = self._record_run_metrics(worker["worker_id"], effective_run_id, stdout, **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}))
         if exit_code != 0:
             effective_run_id = str(
                 run_id or active_session.get("run_id") or ""
@@ -6609,7 +6653,7 @@ class BaseCliWorkerRuntime:
                 raise
             stdout = host_stdout.read_text() if host_stdout.exists() else ""
             stderr = host_stderr.read_text() if host_stderr.exists() else ""
-            self._record_run_metrics(worker_for_run["worker_id"], effective_run_id, stdout)
+            self._record_run_metrics(worker_for_run["worker_id"], effective_run_id, stdout, **({"attempt_id": str(worker_for_run["_run_attempt_id"])} if worker_for_run.get("_run_attempt_id") else {}))
             stop_reason = "timeout" if "timed out" in str(exc).lower() else "error"
             evidence_path = _write_evidence_for_run(
                 worker=worker_for_run,
@@ -6699,7 +6743,7 @@ class BaseCliWorkerRuntime:
             if transcript_path.exists():
                 transcript_path.chmod(0o600)
 
-        self._record_run_metrics(worker_for_run["worker_id"], effective_run_id, stdout)
+        self._record_run_metrics(worker_for_run["worker_id"], effective_run_id, stdout, **({"attempt_id": str(worker_for_run["_run_attempt_id"])} if worker_for_run.get("_run_attempt_id") else {}))
         try:
             self._finalize_stop_reason(worker_for_run["worker_id"], run_id=effective_run_id)
         except RuntimeErrorBase as exc:
@@ -9453,12 +9497,14 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
         return os.environ.get("WPR_MODEL_CLAUDE_CODE", "opus")
 
     def _provider_model_for_worker(self, worker: dict) -> str:
+        bedrock = worker.get("_xperfect_bedrock_config")
+        if isinstance(bedrock, dict):
+            from .bedrock_connections import selected_model
+            return selected_model(worker, bedrock)
         logical_model = worker.get("model") or self.resolve_model(
             worker.get("profile", "claude-code")
         )
-        return os.environ.get("WPR_CLAUDE_CODE_PROVIDER_MODEL", "").strip() or str(
-            logical_model
-        )
+        return os.environ.get("WPR_CLAUDE_CODE_PROVIDER_MODEL", "").strip() or str(logical_model)
 
     @staticmethod
     def _bedrock_enabled() -> bool:
@@ -9470,7 +9516,7 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
         }
 
     def _remove_conflicting_anthropic_credentials(self, env: dict[str, str]) -> None:
-        if self._bedrock_enabled():
+        if self._bedrock_enabled() or str(env.get("CLAUDE_CODE_USE_BEDROCK") or "").lower() in {"1", "true", "yes", "on"}:
             env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
             env.pop("ANTHROPIC_API_KEY", None)
 
@@ -9749,10 +9795,10 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
         return session_key, self._select_native_agent_output(worker, info, [result])
 
     @staticmethod
-    def _terminal_result_payload(stdout: str) -> dict:
+    def _terminal_result_payload(stdout: str, *, exact_decimal: bool = False) -> dict:
         for line in reversed(stdout.splitlines()):
             try:
-                event = json.loads(line)
+                event = json.loads(line, parse_float=str if exact_decimal else float)
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict) and (event.get("type") == "result" or ("type" not in event and ("result" in event or "usage" in event))):
@@ -9761,24 +9807,19 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
 
     def _usage_from_output(self, stdout: str) -> dict[str, int]:
         payload = self._terminal_result_payload(stdout)
-        source = payload.get("usage") if isinstance(payload, dict) else {}
-        usage = source if isinstance(source, dict) else {}
-        normalized: dict[str, int] = {}
-        for key in (
-            "input_tokens",
-            "output_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-        ):
-            value = usage.get(key, 0)
-            if isinstance(value, bool):
-                value = 0
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError, OverflowError):
-                parsed = 0
-            normalized[key] = max(0, parsed)
-        return normalized
+        source = payload.get("usage") if isinstance(payload, dict) else None
+        if not isinstance(source, dict):
+            return {}
+        return {key: value for key in (
+            "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"
+        ) if type(value := source.get(key)) is int and value >= 0}
+
+    def _usage_observation_from_output(self, stdout: str) -> dict[str, object]:
+        from .usage_accounting import normalize_observation
+        payload = self._terminal_result_payload(stdout, exact_decimal=True)
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        return normalize_observation(usage if isinstance(usage, dict) else None,
+                                     total_cost_usd=payload.get("total_cost_usd") if isinstance(payload, dict) else None)
 
     @staticmethod
     def _nonnegative_telemetry_int(value: object) -> int:
@@ -13055,7 +13096,7 @@ raise SystemExit(exit_code)
         exit_path = Path(raw_exit_path) if raw_exit_path else None
         stdout = stdout_path.read_text() if stdout_path and stdout_path.is_file() else ""
         stderr = stderr_path.read_text() if stderr_path and stderr_path.is_file() else ""
-        self._record_run_metrics(worker["worker_id"], run_id, stdout)
+        self._record_run_metrics(worker["worker_id"], run_id, stdout, **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}))
         exit_code: int | None = None
         if exit_path and exit_path.is_file():
             try:
@@ -14709,6 +14750,15 @@ raise SystemExit(exit_code)
             ):
                 raise RuntimeErrorBase("Host conversation ownership changed during cleanup")
             try:
+                self._record_run_metrics(
+                    worker["worker_id"], effective_run_id,
+                    raw_stdout.read_text() if raw_stdout.exists() else "",
+                    **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}),
+                )
+            except (OSError, ValueError):
+                logger.warning("Native conversation usage could not be persisted",
+                               extra={"error_code": "usage_reconciliation_failed"})
+            try:
                 self._cleanup_conversation_workspace_side_effects(
                     workspace,
                     workspace_side_effect_state,
@@ -15013,7 +15063,7 @@ raise SystemExit(exit_code)
                         pass
                     timeout_stdout = raw_stdout.read_text() if raw_stdout.exists() else ""
                     timeout_stderr = raw_stderr.read_text() if raw_stderr.exists() else ""
-                    self._record_run_metrics(worker["worker_id"], effective_run_id, timeout_stdout)
+                    self._record_run_metrics(worker["worker_id"], effective_run_id, timeout_stdout, **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}))
                     evidence_path = _write_evidence_for_run(
                         worker=worker,
                         run_id=effective_run_id,
@@ -15071,7 +15121,7 @@ raise SystemExit(exit_code)
         exit_code = self._final_host_exit_code(exit_path, exit_code)
         stdout = raw_stdout.read_text() if raw_stdout.exists() else ""
         stderr = raw_stderr.read_text() if raw_stderr.exists() else ""
-        self._record_run_metrics(worker["worker_id"], effective_run_id, stdout)
+        self._record_run_metrics(worker["worker_id"], effective_run_id, stdout, **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}))
         try:
             self._finalize_stop_reason(worker["worker_id"], run_id=effective_run_id,
                                        attempt_id=str((owned_session or {}).get("attempt_id") or ""))

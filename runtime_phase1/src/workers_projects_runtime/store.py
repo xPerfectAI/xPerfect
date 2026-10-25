@@ -35,6 +35,9 @@ from .schema_version import (
 )
 from .state_permissions import ensure_state_directory, secure_state_file
 from . import schedule_targets
+from . import usage_accounting
+from . import spend_admission
+from .spend_admission import AdmissionPolicyHold, SpendPolicyRevisionConflict
 from .application_boundary import (
     canonical_schedule_access,
     launch_authority_for,
@@ -56,7 +59,7 @@ from .models import (
 )
 
 
-RUNTIME_STORE_SCHEMA_VERSION = 13
+RUNTIME_STORE_SCHEMA_VERSION = 14
 
 
 class SchedulePrincipalAuthorityStoreError(ValueError):
@@ -170,6 +173,9 @@ _FAILURE_FIELD_NAMES = {
     "failure_user_message",
     "failure_recommended_recovery",
     "failure_diagnostic_summary",
+    "upstream_request_id",
+    "failure_status_source",
+    "failure_status_code",
 }
 
 _TOKEN_USAGE_FIELD_NAMES = (
@@ -1614,6 +1620,12 @@ def _normalized_failure_fields(fields: dict[str, Any]) -> dict[str, Any]:
             # Structured provider evidence is a durable run fact: the conversation-lane
             # fallback and the quota failover both read it from the run row.
             normalized[key] = 1 if bool(value) else 0
+        elif key == "upstream_request_id":
+            normalized[key] = usage_accounting.safe_upstream_request_id(value)
+        elif key == "failure_status_source":
+            normalized[key] = value if isinstance(value, str) and value in {"http_response", "harness_reported", "adapter_synthesized", "unavailable"} else "unavailable"
+        elif key == "failure_status_code":
+            normalized[key] = value if type(value) is int and 100 <= value <= 599 else None
         else:
             normalized[key] = str(value or "")
     return normalized
@@ -1622,14 +1634,9 @@ def _normalized_failure_fields(fields: dict[str, Any]) -> dict[str, Any]:
 def _normalized_token_usage(usage: dict[str, Any] | None) -> dict[str, int]:
     normalized: dict[str, int] = {}
     for key in _TOKEN_USAGE_FIELD_NAMES:
-        value = (usage or {}).get(key, 0)
-        if isinstance(value, bool):
-            value = 0
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError, OverflowError):
-            parsed = 0
-        normalized[key] = max(0, parsed)
+        value = (usage or {}).get(key)
+        if type(value) is int and value >= 0:
+            normalized[key] = value
     return normalized
 
 
@@ -1637,9 +1644,8 @@ def _terminal_failure_fields(state: str, fields: dict[str, Any]) -> dict[str, An
     if state not in {"completed", "cancelled"}:
         return _normalized_failure_fields(fields)
     return {
-        key: value
-        for key, value in CANCELLATION_CLEAR_FIELDS.items()
-        if key in _FAILURE_FIELD_NAMES
+        "upstream_request_id": "", "failure_status_source": "unavailable", "failure_status_code": None,
+        **{key: value for key, value in CANCELLATION_CLEAR_FIELDS.items() if key in _FAILURE_FIELD_NAMES},
     }
 
 
@@ -1832,6 +1838,9 @@ def settle_closed_worker_work_conn(
             f"WHERE run_id IN ({marks})",
             (settled_at, reason, *runs),
         )
+        for attempt in conn.execute(f"SELECT * FROM run_attempts WHERE run_id IN ({marks}) AND runtime_invoked_at IS NOT NULL AND usage_accounting_state='pending'", runs).fetchall():
+            usage_accounting.reconcile_conn(conn, run_id=attempt["run_id"], attempt_id=attempt["attempt_id"],
+                usage=None, invocation_at=attempt["runtime_invoked_at"], observed_at=settled_at)
     if leases:
         marks = ",".join("?" for _ in leases)
         conn.execute(
@@ -4562,6 +4571,8 @@ class Store:
             schedule_targets.ensure_target_columns(conn)
             ensure_parallel_orchestration_schema(conn)
             ensure_workspace_file_schema(conn)
+            usage_accounting.ensure_schema(conn)
+            spend_admission.ensure_schema(conn)
 
             violation = conn.execute("PRAGMA foreign_key_check").fetchone()
             if violation is not None:
@@ -5725,6 +5736,8 @@ class Store:
         if value is None:
             return None
         data = dict(value)
+        if "usage_summary_json" in data:
+            data["usage"] = json.loads(data.pop("usage_summary_json") or "{}") or usage_accounting.unknown_summary()
         if "workspace_tags_json" in data:
             try:
                 parsed_tags = json.loads(str(data.get("workspace_tags_json") or "[]"))
@@ -5767,6 +5780,61 @@ class Store:
                 (tenant_id or "local", owner_id),
             ).fetchone()
         return self._row(row)
+
+    def get_spend_policy(self, tenant_id: str, owner_id: str, scope_type: str = "owner", scope_id: str = "") -> dict:
+        with self._connect() as conn:
+            spend_admission.require_scope(conn, tenant_id, owner_id, scope_type, scope_id)
+            row = conn.execute("SELECT * FROM spend_policies WHERE tenant_id=? AND owner_id=? AND scope_type=? AND scope_id=?",
+                               (tenant_id, owner_id, scope_type, scope_id)).fetchone()
+        if row is None:
+            return {"scope_type": scope_type, "scope_id": scope_id, "revision": 0, "policy": None}
+        result = dict(row)
+        result["policy"] = json.loads(result.pop("policy_json"))
+        return result
+
+    def put_spend_policy(self, tenant_id: str, owner_id: str, policy: dict, expected_revision: int,
+                         scope_type: str = "owner", scope_id: str = "") -> dict:
+        policy = spend_admission.validate_policy(policy)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            spend_admission.require_scope(conn, tenant_id, owner_id, scope_type, scope_id)
+            row = conn.execute("SELECT revision FROM spend_policies WHERE tenant_id=? AND owner_id=? AND scope_type=? AND scope_id=?",
+                               (tenant_id, owner_id, scope_type, scope_id)).fetchone()
+            revision = int(row[0]) if row else 0
+            if type(expected_revision) is not int or expected_revision != revision:
+                raise SpendPolicyRevisionConflict(revision)
+            now = utc_now()
+            conn.execute("""INSERT INTO spend_policies
+                (tenant_id,owner_id,scope_type,scope_id,revision,policy_json,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,owner_id,scope_type,scope_id)
+                DO UPDATE SET revision=excluded.revision,policy_json=excluded.policy_json,updated_at=excluded.updated_at""",
+                (tenant_id, owner_id, scope_type, scope_id, revision+1, json.dumps(policy, sort_keys=True), now, now))
+        return self.get_spend_policy(tenant_id, owner_id, scope_type, scope_id)
+
+    def list_admission_holds(self, tenant_id: str, owner_id: str) -> list[dict]:
+        with self._connect() as conn:
+            return [spend_admission.hold_row(row) for row in conn.execute(
+                "SELECT * FROM admission_holds WHERE tenant_id=? AND owner_id=? ORDER BY created_at,hold_id", (tenant_id, owner_id))]
+
+    def place_admission_hold(self, tenant_id: str, owner_id: str, scope_type: str = "owner", scope_id: str = "",
+                             reason_code: str = "operator_pause") -> dict:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return spend_admission.place_hold(conn, tenant_id=tenant_id, owner_id=owner_id, scope_type=scope_type,
+                                              scope_id=scope_id, kind="operator", reason_code=reason_code, now=utc_now())
+
+    def resume_admission_hold(self, hold_id: str, tenant_id: str, owner_id: str, expected_generation: int) -> dict:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM admission_holds WHERE hold_id=? AND tenant_id=? AND owner_id=?",
+                               (hold_id, tenant_id, owner_id)).fetchone()
+            if row is None:
+                raise ValueError("Admission hold not found")
+            if type(expected_generation) is not int or row["generation"] != expected_generation:
+                raise SpendPolicyRevisionConflict(int(row["generation"]))
+            conn.execute("UPDATE admission_holds SET active=0,resumed_at=? WHERE hold_id=?", (utc_now(), hold_id))
+            spend_admission.resume_queue_clock(conn, tenant_id, owner_id, utc_now())
+            return spend_admission.hold_row(conn.execute("SELECT * FROM admission_holds WHERE hold_id=?", (hold_id,)).fetchone())
 
     def upsert_user_preferences(
         self,
@@ -9671,6 +9739,9 @@ class Store:
                 """,
                 (worker_id, now_iso),
             ).fetchone()
+            if row is not None and spend_admission.blocker(conn, row, now=now_iso):
+                conn.execute("UPDATE runs SET queue_blocker_class='admission_policy_hold' WHERE run_id=?", (row["run_id"],))
+                return None
         return self._row(row)
 
     def coordinator_run_admission_ready(self, run_id: str) -> bool:
@@ -9783,7 +9854,14 @@ class Store:
             "AND (retry_after IS NULL OR retry_after='' OR retry_after<=?) "
             "ORDER BY queued_at ASC LIMIT 256", (worker_id, now_iso),
         ).fetchall()
-        return next((row for row in rows if coordinator_run_ready(conn, str(row["run_id"]))), None)
+        for row in rows:
+            if not coordinator_run_ready(conn, str(row["run_id"])):
+                continue
+            if spend_admission.blocker(conn, row, now=now_iso):
+                conn.execute("UPDATE runs SET queue_blocker_class='admission_policy_hold' WHERE run_id=?", (row["run_id"],))
+                continue
+            return row
+        return None
 
     def _claim_next_queued_run_parallel(
         self,
@@ -12062,7 +12140,26 @@ class Store:
         }
         fields.update(_normalized_token_usage(usage))
         fields.update(_normalized_failure_fields(failure_fields))
-        return self.update_run(run_id, **fields)
+        updated = self.update_run(run_id, **fields)
+        if updated and updated.get("active_attempt_id") and updated.get("runtime_invoked_at"):
+            self.reconcile_attempt_usage(run_id, str(updated["active_attempt_id"]), usage,
+                                         invocation_at=str(updated["runtime_invoked_at"]))
+            return self.get_run(run_id)
+        return updated
+
+    def reconcile_attempt_usage(self, run_id: str, attempt_id: str,
+                                usage: dict[str, Any] | None, *, invocation_at: str,
+                                total_cost_usd: object = None, receipt_key: str = "attempt",
+                                revision: int = 0, measurement_kind: str = "snapshot") -> dict[str, Any]:
+        """Reconcile historical usage without granting lifecycle authority."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            result = usage_accounting.reconcile_conn(
+                conn, run_id=run_id, attempt_id=attempt_id, usage=usage,
+                invocation_at=invocation_at, total_cost_usd=total_cost_usd,
+                receipt_key=receipt_key, revision=revision,
+                measurement_kind=measurement_kind, observed_at=utc_now())
+            return result
 
     @staticmethod
     def _finalize_linked_schedule_for_terminal_run_conn(
@@ -12250,6 +12347,16 @@ class Store:
                     str(run_id),
                     message=str(cancellation_claim.get("message") or error_text),
                 )
+            if cur.rowcount and attempt_id and str(run["runtime_invoked_at"] or ""):
+                usage_accounting.reconcile_conn(
+                    conn, run_id=run_id, attempt_id=attempt_id, usage=usage,
+                    invocation_at=str(run["runtime_invoked_at"]), observed_at=utc_now())
+            if cur.rowcount and attempt_id:
+                provenance = {key: value for key, value in normalized_failure_fields.items()
+                              if key in {"upstream_request_id", "failure_status_source", "failure_status_code"}}
+                if provenance:
+                    conn.execute("UPDATE run_attempts SET " + ",".join(f"{key}=?" for key in provenance) + " WHERE attempt_id=?",
+                                 (*provenance.values(), attempt_id))
             if cur.rowcount and state in TERMINAL_RUN_STATES:
                 self._finalize_linked_schedule_for_terminal_run_conn(
                     conn,
@@ -15389,7 +15496,7 @@ class Store:
             conn.execute("COMMIT")
         return cur.rowcount
 
-    def metrics(self, tenant_id: str | None = None, owner_id: str | None = None) -> dict[str, int]:
+    def metrics(self, tenant_id: str | None = None, owner_id: str | None = None) -> dict[str, Any]:
         project_clause = ""
         worker_clause = ""
         project_params: list[Any] = []
@@ -15440,6 +15547,7 @@ class Store:
             event_clause = " WHERE " + " AND ".join(event_filters)
             callback_clause = " WHERE " + " AND ".join(callback_filters)
         with self._connect() as conn:
+            usage_rows = conn.execute(f"SELECT runs.run_id, runs.usage_summary_json FROM runs{run_join}{run_clause}", run_params).fetchall()
             projects = conn.execute(f"SELECT COUNT(*) FROM projects{project_clause}", project_params).fetchone()[0]
             workers = conn.execute(f"SELECT COUNT(*) FROM workers{worker_clause}", worker_params).fetchone()[0]
             runs = conn.execute(f"SELECT COUNT(*) FROM runs{run_join}{run_clause}", run_params).fetchone()[0]
@@ -15500,7 +15608,13 @@ class Store:
                 )
             except ValueError:
                 callback_oldest_pending_age_seconds = 0
+        summaries = [{"receipt_id": row["run_id"], "usage": json.loads(row["usage_summary_json"] or "{}") or usage_accounting.unknown_summary()} for row in usage_rows]
+        usage_summary = usage_accounting.summarize(summaries,
+            attempts=sum(item["usage"].get("attempts", 0) for item in summaries),
+            unknown_attempts=sum(item["usage"].get("unknown_attempts", 0) or int(item["usage"].get("coverage") == "unknown") for item in summaries))
+        usage_summary["receipt_ids"] = []
         return {
+            "usage": usage_summary,
             "projects": projects,
             "workers": workers,
             "runs": runs,
@@ -17691,6 +17805,10 @@ class Store:
                 "SELECT * FROM host_run_leases WHERE lease_id = ?",
                 (lease_id,),
             ).fetchone()
+            if row is not None and str(row["attempt_id"] or ""):
+                conn.execute("""UPDATE spend_reservations SET state='released' WHERE attempt_id=?
+                    AND EXISTS(SELECT 1 FROM run_attempts WHERE attempt_id=? AND runtime_invoked_at IS NULL)""",
+                    (row["attempt_id"], row["attempt_id"]))
         return self._row(row)
 
     def reconcile_dead_host_run_lease(
@@ -18353,6 +18471,10 @@ class Store:
         ).fetchone()
         if attempt is None:
             return
+        if ("usage_accounting_state" in attempt.keys() and attempt["usage_accounting_state"] == "pending"
+                and attempt["ended_at"] is not None and attempt["runtime_invoked_at"]):
+            usage_accounting.reconcile_conn(conn, run_id=attempt["run_id"], attempt_id=attempt_id,
+                usage=None, invocation_at=attempt["runtime_invoked_at"], observed_at=created_at)
         scope = self._work_trace_scope_conn(conn, str(attempt["run_id"]))
         if scope is None:
             return
@@ -18665,6 +18787,20 @@ class Store:
         ).fetchone()
         if run is None or str(run["state"] or "") not in TERMINAL_RUN_STATES:
             return None
+        attempt_id = str(run["active_attempt_id"] or "")
+        if attempt_id:
+            # A native control can own terminal run truth without passing the
+            # provider-result finalizer. Settle that same attempt in its txn.
+            changed = conn.execute("""UPDATE run_attempts SET state=?,ended_at=?,terminal_reason=?
+                WHERE attempt_id=? AND run_id=? AND ended_at IS NULL""",
+                (run["state"], run["ended_at"] or observed_at,
+                 run["failure_class"] or run["state"], attempt_id, run_id))
+            if changed.rowcount:
+                self._append_attempt_trace_conn(conn, attempt_id=attempt_id, created_at=str(run["ended_at"] or observed_at))
+            if str(run["runtime_invoked_at"] or ""):
+                spend_admission.settle_reservations(conn, attempt_id)
+            else:
+                conn.execute("UPDATE spend_reservations SET state='released' WHERE attempt_id=? AND state='open'", (attempt_id,))
         worker = conn.execute(
             "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
         ).fetchone()
@@ -25336,6 +25472,7 @@ class Store:
             updated_worker = conn.execute(
                 "SELECT * FROM workers WHERE worker_id = ?", (worker_id,)
             ).fetchone()
+            self._record_terminal_artifact_trace_conn(conn, run_id=clean_target, observed_at=now)
             updated_target = conn.execute(
                 "SELECT * FROM runs WHERE run_id = ?", (clean_target,)
             ).fetchone()
@@ -27079,6 +27216,7 @@ class Store:
                 """,
                 (str(now), str(now), max(1, min(int(limit), 1000))),
             ).fetchall()
+            rows = [row for row in rows if not spend_admission.blocker(conn, row, now=str(now))]
         return self._rows(rows)
 
     def list_due_queue_timeouts(
@@ -27101,6 +27239,7 @@ class Store:
                 """,
                 (str(now), max(1, min(int(limit), 1000))),
             ).fetchall()
+            rows = [row for row in rows if not spend_admission.blocker(conn, row, now=str(now))]
         return self._rows(rows)
 
     def next_queue_maintenance_at(self, *, now: str | None = None) -> str | None:
@@ -27114,6 +27253,7 @@ class Store:
                     FROM runs
                     WHERE state IN ('queued', 'claimed', 'admitted', 'running')
                       AND queue_wait_open = 1
+                      AND admission_hold_started_at IS NULL
                       AND queue_deadline_at IS NOT NULL
                       AND queue_deadline_at != ''
                     UNION ALL
@@ -27121,6 +27261,7 @@ class Store:
                     FROM runs
                     WHERE state IN ('queued', 'claimed', 'admitted', 'running')
                       AND queue_wait_open = 1
+                      AND admission_hold_started_at IS NULL
                       AND queue_next_status_at IS NOT NULL
                       AND queue_next_status_at != ''
                 )
@@ -27608,6 +27749,10 @@ class Store:
     ) -> dict[str, Any] | None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            held_run = conn.execute("SELECT * FROM runs WHERE run_id=?", (str(run_id),)).fetchone()
+            if held_run is not None and spend_admission.blocker(conn, held_run, now=str(now)):
+                conn.execute("COMMIT")
+                return None
             current = conn.execute(
                 "SELECT queue_status_sequence FROM runs WHERE run_id = ?",
                 (str(run_id),),
@@ -27744,6 +27889,9 @@ class Store:
                 != str(expected_callback_id)
                 or str(expected_deadline) > str(now)
             ):
+                conn.execute("COMMIT")
+                return None
+            if spend_admission.blocker(conn, run, now=str(now)):
                 conn.execute("COMMIT")
                 return None
             wait_duration = max(
@@ -28434,6 +28582,10 @@ class Store:
             if not exact:
                 conn.execute("COMMIT")
                 return None
+            hold = spend_admission.blocker(conn, run, now=admitted_at, reserve=True)
+            if hold:
+                conn.execute("COMMIT")
+                raise AdmissionPolicyHold(hold)
             conn.execute(
                 """
                 UPDATE runs
@@ -28536,6 +28688,10 @@ class Store:
             if not exact:
                 conn.execute("COMMIT")
                 return None
+            hold = spend_admission.blocker(conn, run, now=invoked_at, reserve=True)
+            if hold:
+                conn.execute("COMMIT")
+                raise AdmissionPolicyHold(hold)
             # The queued Allowed AI snapshot is an immutable admission ceiling.
             # Re-read both scoped revisions inside this same write transaction
             # that turns the run into ``running``. A concurrent policy PUT
@@ -28723,7 +28879,7 @@ class Store:
             attempt_cursor = conn.execute(
                 """
                 UPDATE run_attempts
-                SET state = 'running', runtime_invoked_at = ?
+                SET state = 'running', runtime_invoked_at = ?, usage_accounting_state='pending'
                 WHERE attempt_id = ? AND run_id = ? AND state = 'admitted'
                   AND lease_id = ? AND runtime_invoked_at IS NULL
                   AND ended_at IS NULL

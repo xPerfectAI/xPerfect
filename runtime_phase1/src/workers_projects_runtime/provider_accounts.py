@@ -220,6 +220,8 @@ def provider_platform_support(
     normalized_provider = str(provider or "").strip().lower()
     normalized_method = str(auth_method or "").strip().lower()
     current_platform = str(platform_name or sys.platform).strip().lower()
+    if normalized_method == "bedrock":
+        return "supported" if normalized_provider in {"claude", "anthropic"} else "unavailable"
     if normalized_method == "api_key":
         from .native_api_keys import enabled, support
         if enabled() or str(os.environ.get("GLASSHIVE_SECURITY_MODE") or "").strip().lower() == "multi_user":
@@ -1508,7 +1510,7 @@ class ProviderSetupManager:
             )
             self._reconcile_if_isolated(account_home)
             from .native_api_keys import native_key_account
-            if account_home.exists() and not account_home.is_symlink() and not native_key_account(account):
+            if account_home.exists() and not account_home.is_symlink() and not native_key_account(account) and account.get("auth_method") != "bedrock":
                 environment = self._environment(provider=provider, account_home=account_home)
                 binary_name = "codex" if provider in {"codex", "openai"} else "claude"
                 binary_env = (

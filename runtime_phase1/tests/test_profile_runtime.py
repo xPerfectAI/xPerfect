@@ -5134,6 +5134,9 @@ def test_host_cli_run_fails_when_evidence_contract_fails(tmp_path, monkeypatch):
 
 
 def test_host_cli_timeout_writes_truthful_evidence(tmp_path, monkeypatch):
+    # Load SDK annotations before replacing the real subprocess.Popen class.
+    from workers_projects_runtime.coordinator_mcp import project_coordinator_bootstrap
+
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     runtime.set_run_start_observer(lambda _payload: None)
     runtime.binary = "/bin/echo"
@@ -6540,12 +6543,8 @@ def test_claude_usage_parser_rejects_negative_boolean_and_malformed_values(tmp_p
         }
     )
 
-    assert runtime._usage_from_output(stdout) == {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_read_input_tokens": 120,
-        "cache_creation_input_tokens": 0,
-    }
+    # Invalid or missing native values cannot establish an observed zero.
+    assert runtime._usage_from_output(stdout) == {}
 
 
 def test_claude_stream_telemetry_is_compact_and_content_free(tmp_path):
@@ -10994,6 +10993,23 @@ def test_provider_activity_log_keeps_each_host_attempt_to_its_own_launch(tmp_pat
         return current
     monkeypatch.setattr(host, "_attempt_transcript", claimed_mid_read)
     assert read("att-second") == ""
+
+
+def test_host_conversation_persists_usage_for_exact_attempt_without_retry_inheritance(tmp_path, monkeypatch):
+    _, host, run_id, launch, _, _ = _host_attempt_launcher(tmp_path, monkeypatch)
+    from workers_projects_runtime.usage_accounting import normalize_observation
+    counts={"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+    monkeypatch.setattr(host,"_usage_from_output",lambda _stdout: counts)
+    monkeypatch.setattr(host,"_usage_observation_from_output",lambda _stdout: normalize_observation(counts))
+    launch("att-first","First answer")
+    first={"worker_id":"wrk_host_attempts","_run_attempt_id":"att-first"}
+    assert host.run_usage(first,run_id)["input_tokens"] == 7
+    assert host.run_usage_observation(first,run_id)["input_tokens"] == 7
+    monkeypatch.setattr(host,"_usage_from_output",lambda _stdout: {})
+    monkeypatch.setattr(host,"_usage_observation_from_output",lambda _stdout: normalize_observation(None))
+    launch("att-second","Second answer")
+    assert host.run_usage({**first,"_run_attempt_id":"att-second"},run_id) == {}
+    assert host.run_usage(first,run_id)["input_tokens"] == 7
 
 
 def test_a_host_launch_claims_only_its_fresh_transcript(tmp_path, monkeypatch):

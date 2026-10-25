@@ -73,6 +73,7 @@ Optional fields:
 | `models` | none | Exact model per worker type, e.g. `{"grok-build": "<ID from grok models>"}`. Grok needs one; nothing is guessed |
 | `role_map` | none | Map your identity provider's role values to xPerfect roles, e.g. `{"xperfect-admins": "tenant_admin", "xperfect-users": "member"}`. See [Roles from your identity provider](#roles-from-your-identity-provider) |
 | `role_claim` | `roles` | The top-level token claim that carries those values, e.g. `groups`. Only used with `role_map` |
+| `worker_egress_policy` | off | Optional Linux operator bridge policy with denied TCP targets and positive controls. See [worker bridge policy](deployment.md#optional-worker-bridge-policy). It requires current exact-network enforcement proof. |
 
 Hosted `models` is explicit operator configuration; it does not inherit the local release defaults.
 For a repeatable exact Codex run, set `{"codex-cli":"<model ID available to your account>"}`.

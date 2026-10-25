@@ -362,3 +362,71 @@ post-restore checks and commit finish.
 
 `GLASSHIVE_*`, `WPR_*`, Python package names and existing MCP/skill IDs remain compatibility
 interfaces. See [runtime documentation](../runtime_phase1/README.md) for detailed contracts.
+
+## Optional worker bridge policy
+
+This advanced option belongs to the administrator of a rootful **Linux Docker host with the
+iptables backend**. It is off by default. It adds restrictive rules only for the exact managed
+worker bridge and its IPv4 subnet. It does not change the host's default firewall, unrelated
+networks or the separate clean-room proxy policy. Package worker networks have IPv6 disabled;
+this option does not claim IPv6 or cloud-wide protection.
+
+Use the complete checkout. Save a private JSON policy with the TCP destinations to deny and
+reachable positive controls. For example, an operator can deny its environment's metadata
+address while checking DNS and an approved provider connection:
+
+```json
+{
+  "denied": [{"host": "169.254.169.254", "port": 80}],
+  "positive": [{"host": "api.openai.com", "port": 443}],
+  "max_age_seconds": 300,
+  "timeout_seconds": 1
+}
+```
+
+Choose addresses for the actual environment. A failed positive control refuses the policy;
+an unreachable metadata service alone does not prove enforcement. AWS connections should use
+explicit projected credentials when their metadata route is denied.
+
+On this Linux host, start a new package with the existing command and the explicit option:
+
+```sh
+sudo ./xperfect start --docker --worker-egress-policy /etc/xperfect/worker-egress.json
+```
+
+The launcher reads back the exact rules, runs an unprivileged disposable probe on that network
+without mounting application data, and places a private proof in the runtime control volume.
+Ordinary startup performs no extra probe or firewall operation. With the option enabled, new
+native commands require a current proof for the same network generation and policy. Missing,
+expired or changed proof refuses new execution with a refresh instruction; it does not cancel
+an already-running native process or silently switch models.
+
+Refresh from the same Docker host before the configured lifetime expires. Use the network,
+runtime container and native image recorded in this package's receipt:
+
+```sh
+sudo python3 deployment/linux/network_policy.py refresh \
+  --network xperfect-local-workers --policy /etc/xperfect/worker-egress.json \
+  --image sha256:<recorded-native-image> --receipt /etc/xperfect/worker-egress-proof.json \
+  --runtime-container xperfect-local-runtime
+```
+
+`refresh` rechecks rules and live behavior; it does not reinstall missing rules. `apply` installs
+the exact declared rules when absent. Both refuse unknown rules. An operator can run refresh
+from its existing host timer. Keep that timer and policy with the deployment, outside the repo.
+Network replacement requires a fresh apply/proof for the new generation. To remove the rules,
+stop the package and all attached worker containers, then use `remove` with the same arguments;
+it invalidates the old proof before removing only the owned rules.
+
+The optional live acceptance command is `sudo python3 tests/check_worker_network_live.py
+--native-image sha256:<verified-native-image>`. It checks reachable-before/denied-after behavior,
+positive controls, a separate unaffected bridge, stale/generation refusal and removal. It uses
+no provider credentials. See Docker's [iptables contract](https://docs.docker.com/engine/network/firewall-iptables/).
+
+### Image architecture
+
+Startup and upgrade use the Docker **daemon's** architecture. Both the service and native image
+must match it; an explicit foreign image is refused before package changes. A multi-platform
+release index selects its native member with `docker pull --platform`; it never enables
+emulation silently. The release manifest records qualified platforms. Cross-building on one
+CPU is useful preparation, not native acceptance on the other CPU.

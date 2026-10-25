@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from .spend_admission import AdmissionPolicyHold
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -4473,6 +4474,21 @@ class WorkersProjectsService:
         ).hexdigest()
         return clean_profile, canonical_bundle, fingerprint
 
+    def _connection_model_for_worker(self, worker: dict, requested_model: str = "") -> str | None:
+        from .mission_provider_accounts import mission_provider_account_selection
+        selection = mission_provider_account_selection(worker)
+        control = getattr(self, "control_plane_store", None)
+        if selection is None or control is None:
+            return None
+        account = control.get_provider_account(account_id=selection.account_id,
+            tenant_id=str(worker.get("tenant_id") or "local"), owner_id=str(worker.get("owner_id") or ""))
+        if account is None or account.get("auth_method") != "bedrock":
+            return None
+        from .bedrock_connections import account_config, selected_model
+        if worker.get("profile") != "claude-code":
+            raise RuntimeErrorBase("Bedrock connections require the native Claude Code profile")
+        return selected_model({"model": requested_model}, account_config(account))
+
     def _refresh_worker_model_for_profile(self, worker: dict) -> dict:
         profile = str(worker.get("profile") or "").strip()
         worker_id = str(worker.get("worker_id") or "").strip()
@@ -4480,6 +4496,11 @@ class WorkersProjectsService:
             return worker
         bootstrap_bundle = self._bootstrap_bundle_for(worker) or {}
         provider_model = str(bootstrap_bundle.get("provider_model") or "").strip()
+        connection_model = self._connection_model_for_worker(worker, provider_model or str(worker.get("model") or ""))
+        if connection_model is not None:
+            if connection_model != worker.get("model"):
+                return self.store.update_worker(worker_id, model=connection_model) or worker
+            return worker
         try:
             resolved_model = provider_model or self._resolve_worker_model(
                 profile, str(worker.get("execution_mode") or "docker"),
@@ -7191,6 +7212,28 @@ class WorkersProjectsService:
             self._scheduler_wake_event.set()
         return updated
 
+    def _wait_for_admission_hold(self, worker: dict, run: dict, hold: AdmissionPolicyHold) -> dict | None:
+        """Keep the accepted queue episode without a retry budget or timer."""
+        run_id = str(run["run_id"])
+        generation = self.store.get_run_retry_generation(run_id)
+        if generation is None or str(generation.get("expected_attempt_id") or "") != str(run.get("active_attempt_id") or ""):
+            return None
+        updated = self.store.requeue_run_for_retry(
+            run_id, retry_after="", **generation, error_text=str(hold),
+            last_retry_class=hold.code, consume_retry_budget=False,
+            failure_class=hold.code, failure_retryable=0, failure_structured=1,
+            failure_user_message=str(hold), failure_recommended_recovery="Review the admission pause, then resume.",
+            failure_diagnostic_summary="Owner-scoped admission policy paused new invocation.")
+        if updated:
+            self.store.update_run(run_id, queue_blocker_class=hold.code, retry_after=None)
+            self.store.update_worker_state(str(worker["worker_id"]), "ready", last_error="")
+        return updated
+
+    def resume_admission_hold(self, hold_id: str, tenant_id: str, owner_id: str, expected_generation: int) -> dict:
+        result = self.store.resume_admission_hold(hold_id, tenant_id, owner_id, expected_generation)
+        self._scheduler_wake_event.set()
+        return result
+
     def _record_unavailable_provider_fallback(
         self,
         worker: dict,
@@ -7771,11 +7814,17 @@ class WorkersProjectsService:
                 from .conversation_provider import GLASSHIVE_MODELS, _configured_grok_conversation_model
                 configured_grok = _configured_grok_conversation_model(model) if profile == "grok-build" else None
                 catalog = dict(GLASSHIVE_MODELS)
+                from .bedrock_connections import declared_conversation_models
+                catalog.update({item.id: item for item in declared_conversation_models(
+                    getattr(self, "control_plane_store", None), tenant_id, owner_id)})
                 if configured_grok is not None:
                     catalog[configured_grok.id] = configured_grok
                 selected = [item for item in catalog.values()
                             if item.harness_profile == profile
                             and item.native_model == trusted_coordinator_model]
+                bound_connection = str((bootstrap_bundle or {}).get("connection_id") or "")
+                if any(item.connection_id for item in selected):
+                    selected = [item for item in selected if item.connection_id == bound_connection]
                 allowed_placement = (packaged_linux() and execution_mode == "docker") or (
                     standalone_coordinator_host_enabled() and execution_mode == "host")
                 owned_host_route = True
@@ -9421,7 +9470,9 @@ class WorkersProjectsService:
             if isinstance(bootstrap_bundle, dict)
             else ""
         )
-        model = bundle_model or self._resolve_worker_model(profile, execution_mode, tenant_id=tenant_id, owner_id=owner_id)
+        connection_model = self._connection_model_for_worker({"profile": profile, "tenant_id": tenant_id,
+            "owner_id": owner_id, "bootstrap_bundle_json": bootstrap_bundle or {}}, bundle_model)
+        model = connection_model if connection_model is not None else (bundle_model or self._resolve_worker_model(profile, execution_mode, tenant_id=tenant_id, owner_id=owner_id))
         if start_synchronously:
             prospective = {
                 "project_id": project_id,
@@ -11832,7 +11883,7 @@ class WorkersProjectsService:
             if refs:
                 self.personal_library.retain_refs(tenant_id, owner_id, refs, "workspace_template",
                     created["template_id"], connection=conn, resolved=resolved)
-            conn.execute("INSERT INTO workspace_template_imports VALUES (?,?,?,?,?,?)",
+            conn.execute("INSERT INTO workspace_template_imports (tenant_id,owner_id,idempotency_key,request_hash,template_id,created_at) VALUES (?,?,?,?,?,?)",
                          (tenant_id, owner_id, idempotency_key, fingerprint, created["template_id"], time.time()))
         return created
 
@@ -13499,6 +13550,15 @@ class WorkersProjectsService:
             if str(run_id or "").strip()
             else self.store.get_active_run(worker_id)
         )
+        unstarted = active_run
+        if unstarted is None and not str(run_id or "").strip():
+            unstarted = self.store.get_controllable_run(worker_id)
+        if (unstarted is not None and str(unstarted.get("state") or "") == "queued"
+                and not str(unstarted.get("runtime_invoked_at") or "")):
+            # Saved, uninvoked work has no native process/account to interrupt.
+            # The existing exact cancellation owner fences a concurrent start.
+            stopped = self.stop_run(worker_id, str(unstarted["run_id"]))
+            return dict(stopped.get("worker") or self.require_worker(worker_id))
         if active_run is not None and str(active_run.get("active_attempt_id") or ""):
             return self._interrupt_worker_parallel(worker_id, run_id=run_id)
         worker = self.require_worker(worker_id)
@@ -14724,11 +14784,35 @@ class WorkersProjectsService:
         reader = getattr(self.runtime, "run_usage", None)
         if not callable(reader):
             return {}
+        if not worker.get("_run_attempt_id"):
+            run = self.store.get_run(str(run_id)) or {}
+            worker = {**worker, "_run_attempt_id": str(run.get("active_attempt_id") or "")}
         try:
             value = reader(worker, run_id)
         except (OSError, TypeError, ValueError):
             return {}
         return dict(value) if isinstance(value, dict) else {}
+
+    def _reconcile_attempt_usage(self, worker: dict, run: dict) -> None:
+        """Usage survives failure or a lost terminal CAS; it grants no result authority."""
+        attempt_id = str(run.get("active_attempt_id") or "")
+        invoked_at = str(run.get("runtime_invoked_at") or "")
+        if not attempt_id or not invoked_at:
+            return
+        exact_worker = {**worker, "_run_attempt_id": attempt_id}
+        try:
+            usage = self._run_usage(exact_worker, str(run["run_id"]))
+            observation_reader = getattr(self.runtime, "run_usage_observation", None)
+            if callable(observation_reader):
+                usage = observation_reader(exact_worker, str(run["run_id"]))
+            reader = getattr(self.runtime, "run_telemetry", None)
+            telemetry = reader(exact_worker, str(run["run_id"])) if callable(reader) else {}
+            self.store.reconcile_attempt_usage(
+                str(run["run_id"]), attempt_id, usage, invocation_at=invoked_at,
+                revision=usage.get("_receipt_revision", 0),
+                total_cost_usd=usage.get("_reported_cost_usd", (telemetry or {}).get("total_cost_usd")))
+        except Exception:
+            logger.error("Attempt usage remains unreconciled", extra={"error_code": "usage_reconciliation_failed"})
 
     def _fresh_user_artifact_deliverable(self, worker: dict, run: dict, deliverable: dict[str, object] | None) -> bool:
         if not deliverable:
@@ -14817,6 +14901,7 @@ class WorkersProjectsService:
         return bool(lease) and str(lease.get("status") or "") == "active"
 
     def _apply_recovered_run(self, worker: dict, run: dict, recovered: dict[str, object]) -> dict | None:
+        self._reconcile_attempt_usage(worker, run)
         worker_id = worker["worker_id"]
         terminal_generation = recovered.get("_terminal_generation")
         if not isinstance(terminal_generation, dict):
@@ -14839,6 +14924,7 @@ class WorkersProjectsService:
                 "failure_user_message",
                 "failure_recommended_recovery",
                 "failure_diagnostic_summary",
+                "upstream_request_id", "failure_status_source", "failure_status_code",
             )
             if key in recovered
         }
@@ -15632,6 +15718,9 @@ class WorkersProjectsService:
                             else "admitted_wait_generation_lost",
                         )
                         return
+                except AdmissionPolicyHold as exc:
+                    self._wait_for_admission_hold(worker, run, exc)
+                    return
                 except (HostCapacityError, WorkAdmissionError) as exc:
                     if isinstance(exc, WorkAdmissionError) and exc.code != "coordinator_run_scope_changed":
                         raise
@@ -15919,6 +16008,7 @@ class WorkersProjectsService:
                             )
                         raise
                     finally:
+                        self._reconcile_attempt_usage(run_worker, run)
                         durable_run = self.store.get_run(str(run["run_id"]))
                         if durable_run:
                             run = {**run, **durable_run}
@@ -15960,6 +16050,9 @@ class WorkersProjectsService:
                             self._release_host_run_lease(
                                 str(run["run_id"]), reason="runtime_returned"
                             )
+                except AdmissionPolicyHold as exc:
+                    self._wait_for_admission_hold(worker, run, exc)
+                    return
                 except RunStartupRejectedError as exc:
                     if not exc.termination_confirmed:
                         return
@@ -22143,6 +22236,9 @@ class WorkersProjectsService:
             grok_native = ""
         configured_grok = _configured_grok_conversation_model(grok_native)
         catalog = {**GLASSHIVE_MODELS}
+        from .bedrock_connections import declared_conversation_models
+        catalog.update({item.id: item for item in declared_conversation_models(
+            getattr(self, "control_plane_store", None), tenant_id, owner_id)})
         if configured_grok is not None:
             catalog[configured_grok.id] = configured_grok
         selected = None
@@ -22151,6 +22247,14 @@ class WorkersProjectsService:
             if selected is None or selected.harness_profile != profile:
                 raise BackgroundWorkerConfigurationError("Configured background model is unknown or incompatible with its worker profile.")
             model = selected.native_model
+            if selected.connection_id:
+                from .mission_provider_accounts import mission_provider_account_selection
+                account = mission_provider_account_selection({"bootstrap_bundle": result})
+                configured_connection = str(result.get("connection_id") or "")
+                if (configured_connection and configured_connection != selected.connection_id) or (account and account.account_id != selected.connection_id):
+                    raise BackgroundWorkerConfigurationError("Configured background model belongs to a different connection.")
+                result["connection_id"] = selected.connection_id
+                result["provider_account"] = {"policy": "personal_required", "account_id": selected.connection_id}
         else:
             model = self._resolve_worker_model(profile, execution_mode, tenant_id=tenant_id, owner_id=owner_id)
         if effort is not None:

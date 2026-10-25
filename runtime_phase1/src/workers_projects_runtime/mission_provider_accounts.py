@@ -365,6 +365,16 @@ def apply_bound_provider_account_environment(
     env.pop("GLASSHIVE_NATIVE_API_KEY_FILE", None)
     env.pop("GLASSHIVE_NATIVE_API_KEY_PROVIDER", None)
     env.update({str(key): str(value) for key, value in raw_environment.items()})
+    bedrock = worker.get("_xperfect_bedrock_config")
+    if isinstance(bedrock, dict):
+        from .bedrock_connections import AWS_ROUTE_KEYS, CREDENTIAL_FILE, read_credentials, route_environment
+        for key in AWS_ROUTE_KEYS | {"ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"}:
+            env.pop(key, None)
+        env.update(route_environment(bedrock))
+        if bedrock["credential_mode"] == "protected_file" and worker.get("execution_mode") == "host":
+            env.update(read_credentials(Path(str(worker["_xperfect_bedrock_credential_home"])) / CREDENTIAL_FILE))
+        if bedrock["credential_mode"] == "protected_file":
+            env["AWS_EC2_METADATA_DISABLED"] = "true"
     from .native_api_keys import project_key
     project_key(worker, env, runtime_name)
     return env
@@ -1001,6 +1011,14 @@ class MissionProviderAccountBinder:
                 yield self._preferred_fallback(worker, runtime_name)
                 return
             raise RuntimeErrorBase("Selected provider account is not available for this user")
+        if account.get("auth_method") == "bedrock":
+            from .bedrock_connections import account_config, selected_model, workload_identity_enabled
+            config = account_config(account)
+            if execution_mode != "host":
+                raise RuntimeErrorBase("Bedrock containers require the fenced native credential projection")
+            if config["credential_mode"] == "workload_identity" and not workload_identity_enabled():
+                raise RuntimeErrorBase("Bedrock workload identity is not enabled on this host")
+            worker = {**worker, "model": selected_model(worker, config), "_xperfect_bedrock_config": config}
         provider = str(account.get("provider") or "").strip().lower()
         issue = profile_provider_account_issue(runtime_name, account)
         if issue:
@@ -1151,6 +1169,8 @@ class MissionProviderAccountBinder:
         }
         if native_key:
             bound_worker["_glasshive_provider_api_key_file"] = str(account_home / "api-key.json")
+        if account.get("auth_method") == "bedrock":
+            bound_worker["_xperfect_bedrock_credential_home"] = str(account_home)
         if execution_mode == "docker":
             bound_worker.update(
                 {

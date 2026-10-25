@@ -32,10 +32,45 @@ jobs:
           jq -e '.images | length > 0' "$RUNNER_TEMP/candidate-images.json"
       - name: Download and verify the staged archive
         run: |
-          manifest="$RUNNER_TEMP/candidate-images.json"
-          gh release download "$(jq -r .staging_release "$manifest")" --repo "$GITHUB_REPOSITORY" \
-            --pattern "$(jq -r .archive "$manifest")" --dir "$RUNNER_TEMP"
-          echo "$(jq -r .archive_sha256 "$manifest")  $RUNNER_TEMP/$(jq -r .archive "$manifest")" | sha256sum --check --strict
+          python3 - <<'PY'
+          import hashlib, json, os, re, shutil, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          manifest = json.loads((root / 'candidate-images.json').read_text())
+          def safe_name(value):
+              if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', value):
+                  raise ValueError('Invalid archive asset name')
+              return value
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          def download(name):
+              subprocess.run(['gh', 'release', 'download', manifest['staging_release'],
+                  '--repo', os.environ['GITHUB_REPOSITORY'], '--pattern', safe_name(name),
+                  '--dir', str(root)], check=True)
+          archive = root / safe_name(manifest['archive'])
+          parts = manifest.get('archive_parts')
+          if parts is None:
+              download(archive.name)
+          else:
+              if not isinstance(parts, list) or not 1 <= len(parts) <= 16:
+                  raise ValueError('Invalid archive part count')
+              names = [safe_name(part['name']) for part in parts]
+              if len(set(names)) != len(names) or archive.name in names:
+                  raise ValueError('Archive parts must have distinct names')
+              with archive.open('xb') as output:
+                  for part in parts:
+                      download(part['name'])
+                      path = root / part['name']
+                      if digest(path) != part['sha256']:
+                          raise ValueError('Archive part digest mismatch')
+                      with path.open('rb') as stream:
+                          shutil.copyfileobj(stream, output)
+                      path.unlink()
+          if digest(archive) != manifest['archive_sha256']:
+              raise ValueError('Staged archive digest mismatch')
+          print('Verified complete OCI archive')
+          PY
       - name: Copy each image by exact digest and verify it
         run: |
           manifest="$RUNNER_TEMP/candidate-images.json"

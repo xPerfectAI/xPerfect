@@ -1333,6 +1333,22 @@ def test_launch_personal_required_without_ready_default_fails_before_project_cre
     assert runtime.create_worker_requests == []
 
 
+def test_launch_bedrock_model_selection_is_exact_and_refuses_before_creating_work():
+    runtime = FakeRuntimeClient()
+    runtime.list_provider_accounts = lambda: [{"account_id": "bedrock-a", "provider": "claude",
+        "label": "Cloud account", "status": "ready", "auth_method": "bedrock", "is_default": True,
+        "connection_config": {"model_ids": ["native-a", "native-b"], "default_model": "native-a"}}]
+    client = TestClient(create_app(runtime_client=runtime))
+    request = {"description": "Use my declared model", "workspace_option": "new:claude-code",
+        "provider_account_policy": "personal_required", "provider_account_id": "bedrock-a", "model": "not-declared"}
+    refused = client.post("/api/launch", json=request)
+    assert refused.status_code == 422
+    assert runtime.create_project_requests == [] and runtime.create_worker_requests == []
+    accepted = client.post("/api/launch", json={**request, "model": "native-b"})
+    assert accepted.status_code == 200, accepted.text
+    assert runtime.create_worker_requests[-1]["bootstrap_bundle"]["provider_model"] == "native-b"
+
+
 def test_launch_personal_preferred_without_ready_default_keeps_explicit_fallback_policy():
     runtime = FakeRuntimeClient()
     runtime.list_provider_accounts = lambda: []
@@ -6006,7 +6022,9 @@ def test_control_plane_ui_exposes_safe_disconnect_and_capability_remove_paths():
     assert "observed_duration_seconds" in script
     assert "Observed here:" in script
     assert "Usage details" in script
-    assert "Tokens reported by worker" in script
+    assert "observed_usage_coverage" in script
+    assert "Earlier counters have no receipt coverage" in script
+    assert "Configured · provider access not yet tested" in script
     assert "/verify" in script
     assert "Activity is temporarily unavailable" in script
     assert "Reconnect the affected account, then try again." in script

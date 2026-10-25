@@ -971,3 +971,22 @@ and Restore. Edit optionally captures `source_worker_id` through the same saniti
 annotated read-only; mutations never self-approve Library/native permissions. Owner/tenant and
 signed-viewer restrictions apply equally to HTTP, MCP and UI. Foreign IDs are not found; stale
 revisions conflict before destructive control.
+
+### Usage and admission pause compatibility
+
+Run responses add authoritative `usage` with per-token nullable values/status, reported decimal
+money by currency, receipt IDs and complete/partial/unknown coverage. Existing integer token fields
+remain compatible subtotals. General metrics include scoped usage coverage; owner support detail
+may show bounded `upstream_request_id` and typed HTTP-status provenance. Raw provider content is
+never part of this extension.
+
+OpenAI-compatible Chat/Responses retain their integer `usage` shape and `glasshive.usage_source`.
+The same `glasshive` extension adds `usage_receipt_ids` and `usage_coverage`; character estimates
+never become accounting receipts or spend inputs. Existing client parsing and native control
+contracts remain intact. UI, API and MCP use the same owner/project spend-policy and hold methods,
+revision/generation checks and existing mutation authority. Resume never clears recorded spending.
+
+An owned Bedrock connection can publish exact declared model contracts in the existing account
+picker. `POST /v1/coordinator/conversations` accepts `model_id` only with that selected connection
+and matching declared metadata. Readiness adds `models: [{id, native_model}]` for that account.
+An explicit configured model remains authoritative; conflicting selection refuses.

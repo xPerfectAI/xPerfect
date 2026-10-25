@@ -248,6 +248,8 @@ class DockerAccountContainerBackend:
         return ACCOUNT_MOUNT+'/'+payload.name
 
     def start(self, request, generation, **options):
+        from .worker_egress import require_current_receipt
+        require_current_receipt(network=self.network, docker=lambda args: self.docker(args).stdout)
         if os.geteuid() != 0:
             raise ControlPlaneError('Packaged account containment requires the trusted Linux service')
         subpath = self._subpath(generation)

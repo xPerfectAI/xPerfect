@@ -247,6 +247,10 @@ function renderWorkspaceTypeOptions(select, help, data) {
 
 function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, workspaceValue) {
   if (!accountSelect || !policySelect) return;
+  const modelField = document.getElementById?.('provider-model-field');
+  const modelSelect = document.getElementById?.('provider-model-selection');
+  if (modelField) modelField.hidden = true;
+  if (modelSelect) modelSelect.disabled = true;
   const isNewWorkspace = String(workspaceValue || '').startsWith('new:');
   const profile = isNewWorkspace ? String(workspaceValue).split(':', 2)[1] || '' : '';
   const supportedProviders = new Set(data?.profile_account_providers?.[profile] || []);
@@ -330,6 +334,7 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
     supportedProviders.has(String(account.provider || '').toLowerCase())
     && Boolean(account.account_id)
     && (!allowedMethods.size || allowedMethods.has(account.auth_method))
+    && (account.auth_method !== 'bedrock' || profile === 'claude-code')
   ));
   const readyAccounts = providerAccounts.filter((account) => (
     String(account.status || '').toLowerCase() === 'ready'
@@ -379,6 +384,18 @@ function renderLaunchProviderAccounts(accountSelect, policySelect, help, data, w
     : catalogUnavailable ? 'catalog_unavailable'
       : preferredAccountId ? 'needs_attention'
         : readyAccounts.length ? 'choose' : 'none';
+  if (modelField && modelSelect && selectedReady && selectedAccount.auth_method === 'bedrock') {
+    const prior = modelSelect.dataset.accountId === selectedAccount.account_id ? modelSelect.value : '';
+    const choices = selectedAccount.connection_config?.model_ids || [];
+    modelSelect.replaceChildren(new Option(`Connection default${selectedAccount.connection_config?.default_model ? ` · ${selectedAccount.connection_config.default_model}` : ''}`, ''));
+    for (const id of choices) modelSelect.append(new Option(id, id));
+    if (prior && !choices.includes(prior)) {
+      const unavailable = new Option('Selected model unavailable — choose another', prior); unavailable.disabled = true; modelSelect.append(unavailable);
+    }
+    modelSelect.value = prior;
+    modelSelect.dataset.accountId = selectedAccount.account_id;
+    modelField.hidden = false; modelSelect.disabled = false;
+  }
   if (!help) return;
   if (catalogUnavailable) {
     help.textContent = 'Account status is unavailable. Check Connections, then try again.';
@@ -1354,7 +1371,8 @@ function renderWorkspaceTile(workspace, refreshBootstrap, draftMessage = '', vie
   deploymentOption.textContent = 'Account · deployment-managed';
   const supportedProviders = new Set(bootstrap.profile_account_providers?.[workspace.profile] || []);
   const accountOptions = (bootstrap.provider_accounts || [])
-    .filter((account) => supportedProviders.has(String(account.provider || '').toLowerCase()) && account.status === 'ready')
+    .filter((account) => supportedProviders.has(String(account.provider || '').toLowerCase()) && account.status === 'ready'
+      && (account.auth_method !== 'bedrock' || workspace.profile === 'claude-code'))
     .flatMap((account) => {
       const label = String(account.label || account.provider || 'my account');
       const preferred = document.createElement('option');
@@ -1962,9 +1980,9 @@ async function main() {
   );
   const form = document.getElementById('launch-form');
   launchDraftState = createLaunchDraft({ fields: Object.fromEntries(
-    ['description', 'success_criteria', 'context', 'schedule-text', 'workspace-option', 'provider-account-selection', 'provider-account-policy', 'worker-name', 'worker-choice', 'workspace-choice', 'execution-workspace', 'workspace-mode', 'workspace-file-placement', 'workspace-type', 'launch-surface', 'codex-effort', 'claude-effort', 'grok-effort', 'openclaw-effort', 'direct-effort']
+    ['description', 'success_criteria', 'context', 'schedule-text', 'workspace-option', 'provider-account-selection', 'provider-account-policy', 'provider-model-selection', 'worker-name', 'worker-choice', 'workspace-choice', 'execution-workspace', 'workspace-mode', 'workspace-file-placement', 'workspace-type', 'launch-surface', 'codex-effort', 'claude-effort', 'grok-effort', 'openclaw-effort', 'direct-effort']
       .map(id => [id, document.getElementById(id)]),
-  ), exactSelects: ['workspace-type', 'codex-effort', 'claude-effort', 'openclaw-effort', 'direct-effort'] });
+  ), exactSelects: ['workspace-type', 'codex-effort', 'claude-effort', 'openclaw-effort', 'direct-effort', 'provider-model-selection'] });
   const select = document.getElementById('workspace-option');
   const help = document.getElementById('workspace-help');
   const launchSurface = document.getElementById('launch-surface');
@@ -2649,6 +2667,7 @@ async function main() {
     providerAccount.dataset.explicitAccountId = providerAccount.value;
     providerAccount.dataset.explicitAccountLabel = providerAccount.selectedOptions?.[0]?.textContent || 'Selected account';
     providerAccount.dataset.accountState = providerAccount.value ? 'ready' : 'choose';
+    if (bootstrap) renderLaunchProviderAccounts(providerAccount, providerAccountPolicy, providerAccountHelp, bootstrap, select.value);
     syncAccountSummary();
   });
   connectWorkerAccount?.addEventListener('click', () => {
@@ -3014,6 +3033,8 @@ async function main() {
       provider_account_id: select.value.startsWith('new:') && providerAccountPolicy?.value !== 'legacy'
         ? providerAccount?.value || null
         : null,
+      model: select.value.startsWith('new:') && !document.getElementById('provider-model-selection')?.disabled
+        ? document.getElementById('provider-model-selection')?.value || null : null,
       file_upload_ids: fileRefs.map(({ upload_id }) => upload_id),
       file_upload_revisions: fileRefs.map(({ revision }) => revision),
       ...(selectedLibraryRefs.length ? { library_refs: selectedLibraryRefs, confirm_library: confirmLibrary } : {}),

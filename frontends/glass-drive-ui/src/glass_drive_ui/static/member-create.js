@@ -13,6 +13,7 @@ function renderAccountOptions(select, policy, profile, providerAccounts, profile
   const accounts = providerAccounts.filter(account => (
     providers.has(String(account.provider || '').toLowerCase())
     && String(account.status || '').toLowerCase() === 'ready'
+    && (account.auth_method !== 'bedrock' || profile === 'claude-code')
   ));
   const placeholder = document.createElement('option');
   placeholder.value = '';
@@ -51,6 +52,15 @@ export function renderAddMember(container, workspace, { request, providerAccount
   const profile = form.elements.profile;
   const policy = form.elements.provider_account_policy;
   const account = form.elements.provider_account_id;
+  const modelLabel = document.createElement('label'); modelLabel.textContent = 'Bedrock model or inference profile'; modelLabel.hidden = true;
+  const model = document.createElement('select'); model.name = 'model'; modelLabel.append(model); account.closest('label').after(modelLabel);
+  function renderModels() {
+    const selected = providerAccounts.find(item => item.account_id === account.value);
+    modelLabel.hidden = policy.value === 'legacy' || selected?.auth_method !== 'bedrock';
+    model.replaceChildren(new Option('Connection default', ''));
+    if (!modelLabel.hidden) for (const id of selected.connection_config?.model_ids || []) model.append(new Option(id, id));
+  }
+  account.addEventListener('change', renderModels);
   const effort = form.elements.effort;
   let submitted = false;
   container.querySelector('[data-cancel]').addEventListener('click', onCancel);
@@ -69,6 +79,7 @@ export function renderAddMember(container, workspace, { request, providerAccount
     renderAccountOptions(account, policy, profile.value, providerAccounts, profileAccountProviders);
   });
   policy.addEventListener('change', () => renderAccountOptions(account, policy, profile.value, providerAccounts, profileAccountProviders));
+  policy.addEventListener('change', renderModels); profile.addEventListener('change', renderModels);
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (submitted) return;
@@ -81,6 +92,7 @@ export function renderAddMember(container, workspace, { request, providerAccount
     if (effort.value) payload.effort = effort.value;
     if (policy.value) payload.provider_account_policy = policy.value;
     if (account.value && policy.value !== 'legacy') payload.provider_account_id = account.value;
+    if (!modelLabel.hidden && model.value) payload.model = model.value;
     try {
       const member = await request(`/api/execution-workspaces/${encodeURIComponent(workspace.workspace_id)}/members`, 'POST', payload);
       if (!member.worker_id) throw new Error('The runtime did not return a worker identity.');

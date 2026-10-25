@@ -417,6 +417,9 @@ class WorkspaceBox:
                 'GIT_CONFIG_VALUE_0': self.native_workspace}
 
     def command(self, argv: list[str], *, env: dict[str, str] | None = None) -> list[str]:
+        from .worker_egress import require_current_receipt
+        if self.network is not None:
+            require_current_receipt(network=self.network, docker=lambda args: self.docker(args).stdout)
         if not argv or any(not isinstance(value, str) or '\x00' in value for value in argv):
             raise ValueError('A native argument vector is required')
         container_id = self.ensure_box()

@@ -34,11 +34,11 @@ from .schema_version import (
 from .state_permissions import ensure_state_directory, secure_state_file
 
 
-CONTROL_PLANE_SCHEMA_VERSION = 6
+CONTROL_PLANE_SCHEMA_VERSION = 7
 
 
 PROVIDERS = {"codex", "claude", "openai", "anthropic", "grok", "xai", "custom"}
-AUTH_METHODS = {"subscription", "api_key", "enterprise_route"}
+AUTH_METHODS = {"subscription", "api_key", "enterprise_route", "bedrock"}
 ACCOUNT_STATUSES = {"disconnected", "connecting", "ready", "action_required", "unavailable", "error"}
 PROVIDER_ACCOUNT_RECOVERY_CODES = {"", "credential_cleanup_failed"}
 LEGACY_CREDENTIAL_CLEANUP_REASON = (
@@ -57,6 +57,8 @@ def profile_provider_account_issue(profile: str, account) -> str:
     """Use the registered executor's authentication contract at every binding boundary."""
     if str(account["provider"] or "").strip().lower() not in PROFILE_ACCOUNT_PROVIDERS.get(profile, set()):
         return "Provider account does not match this workspace profile"
+    if str(account["auth_method"] or "") == "bedrock" and profile != "claude-code":
+        return "Bedrock connections require the native Claude Code profile"
     from .profile_registry import require_worker_profile
     if require_worker_profile(profile).native_transport == "api" and str(account["auth_method"] or "") != "api_key":
         return "Direct API profiles require an API-key account; CLI subscription sign-in is separate"
@@ -266,6 +268,7 @@ class ControlPlaneStore:
                     reconnect_reason TEXT NOT NULL DEFAULT '',
                     recovery_code TEXT NOT NULL DEFAULT '',
                     secret_locator TEXT NOT NULL,
+                    connection_config_json TEXT NOT NULL DEFAULT '{}',
                     observed_runs INTEGER NOT NULL DEFAULT 0,
                     observed_failures INTEGER NOT NULL DEFAULT 0,
                     observed_duration_seconds REAL NOT NULL DEFAULT 0,
@@ -468,6 +471,15 @@ class ControlPlaneStore:
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(provider_accounts)").fetchall()
             }
+            from .usage_accounting import ensure_account_schema
+            ensure_account_schema(conn)
+            if "observed_unknown_runs" not in provider_account_columns:
+                conn.execute("ALTER TABLE provider_accounts ADD COLUMN observed_unknown_runs INTEGER NOT NULL DEFAULT 0")
+            if "observed_legacy_runs" not in provider_account_columns:
+                conn.execute("ALTER TABLE provider_accounts ADD COLUMN observed_legacy_runs INTEGER NOT NULL DEFAULT 0")
+                conn.execute("UPDATE provider_accounts SET observed_legacy_runs=observed_runs")
+            if "connection_config_json" not in provider_account_columns:
+                conn.execute("ALTER TABLE provider_accounts ADD COLUMN connection_config_json TEXT NOT NULL DEFAULT '{}'")
             if "observed_failures" not in provider_account_columns:
                 conn.execute(
                     "ALTER TABLE provider_accounts "
@@ -561,6 +573,11 @@ class ControlPlaneStore:
         if row is None:
             return None
         result = dict(row)
+        if "observed_unknown_runs" in result:
+            incomplete = result["observed_unknown_runs"] or result.get("observed_legacy_runs", 0)
+            result["observed_usage_coverage"] = ("partial" if incomplete and
+                (result.get("observed_input_tokens") is not None or result.get("observed_output_tokens") is not None)
+                else "unknown" if incomplete or not result.get("observed_runs") else "complete")
         for source, target in (
             ("scopes_json", "scopes"),
             ("supported_profiles_json", "supported_profiles"),
@@ -590,6 +607,10 @@ class ControlPlaneStore:
             result["connection_action"] = "verify"
         if "secret_locator" in result:
             result["credential_route"] = "native" if result.get("auth_method") == "subscription" or result["secret_locator"] == "native-home://api-key" else "broker"
+            if result.get("auth_method") == "bedrock":
+                result["credential_route"] = "native"
+        if "connection_config_json" in result:
+            result["connection_config"] = _parse_json(result.pop("connection_config_json"), {})
         result.pop("secret_locator", None)
         result.pop("prior_bootstrap_bundle_json", None)
         result.pop("applied_bootstrap_bundle_json", None)
@@ -609,6 +630,7 @@ class ControlPlaneStore:
         secret_locator: str,
         make_default: bool = False,
         status: str = "disconnected",
+        connection_config: dict | None = None,
     ) -> dict[str, Any]:
         provider = str(provider).strip().lower()
         auth_method = str(auth_method).strip().lower()
@@ -619,11 +641,21 @@ class ControlPlaneStore:
             raise ControlPlaneError("Unsupported provider authentication method")
         if status not in ACCOUNT_STATUSES:
             raise ControlPlaneError("Unsupported provider account status")
+        config = {}
+        if auth_method == "bedrock":
+            if provider not in {"claude", "anthropic"}:
+                raise ControlPlaneError("Bedrock connections require Claude Code")
+            from .bedrock_connections import connection_config as validate_bedrock
+            config = validate_bedrock(connection_config)
+        elif connection_config:
+            raise ControlPlaneError("Connection configuration is unsupported for this authentication method")
         account_id = _id("acct")
         requested_locator = str(secret_locator or "").strip()
         if requested_locator in {"native-home://auto", "secret-store://auto"}:
             requested_locator = requested_locator.removesuffix("auto") + account_id
         locator = _validate_locator(requested_locator)
+        if auth_method == "bedrock":
+            locator = "native-home://bedrock/" + account_id
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -669,8 +701,8 @@ class ControlPlaneStore:
                 """
                 INSERT INTO provider_accounts
                     (account_id, tenant_id, owner_id, provider, label, auth_method, platform_support,
-                     is_default, status, secret_locator, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_default, status, secret_locator, created_at, updated_at, connection_config_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
@@ -685,6 +717,7 @@ class ControlPlaneStore:
                     locator,
                     now,
                     now,
+                    _json(config),
                 ),
             )
             row = conn.execute("SELECT * FROM provider_accounts WHERE account_id = ?", (account_id,)).fetchone()
@@ -837,6 +870,8 @@ class ControlPlaneStore:
             ).fetchone()
             if active_lease is not None:
                 raise ControlPlaneConflict("Provider account is still in use")
+            conn.execute("DELETE FROM account_usage_receipts WHERE account_id=? AND tenant_id=? AND owner_id=?",
+                         (account_id, tenant_id, owner_id))
             conn.execute(
                 """
                 DELETE FROM workspace_capability_grants
@@ -1095,6 +1130,8 @@ class ControlPlaneStore:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         now: float | None = None,
+        receipt_id: str = "",
+        revision: int = 0,
     ) -> dict[str, Any]:
         """Atomically add usage that GlassHive directly observed for one account-backed run.
 
@@ -1128,13 +1165,23 @@ class ControlPlaneStore:
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            first = True
+            unknown_delta = int(input_count is None or output_count is None)
+            if receipt_id:
+                from .usage_accounting import account_usage_delta
+                if type(revision) is not int or revision < 0:
+                    raise ControlPlaneError("Usage receipt revision is invalid")
+                first, input_count, output_count, unknown_delta = account_usage_delta(
+                    conn, receipt_id=receipt_id, revision=revision, account_id=account_id,
+                    tenant_id=tenant_id, owner_id=owner_id, input_tokens=input_count, output_tokens=output_count)
             cursor = conn.execute(
                 """
                 UPDATE provider_accounts
                 SET last_used_at = ?,
-                    observed_runs = observed_runs + 1,
+                    observed_runs = observed_runs + ?,
                     observed_failures = observed_failures + ?,
                     observed_duration_seconds = observed_duration_seconds + ?,
+                    observed_unknown_runs = observed_unknown_runs + ?,
                     observed_input_tokens = CASE
                         WHEN ? IS NULL THEN observed_input_tokens
                         ELSE COALESCE(observed_input_tokens, 0) + ?
@@ -1148,8 +1195,10 @@ class ControlPlaneStore:
                 """,
                 (
                     timestamp,
-                    0 if succeeded else 1,
-                    duration,
+                    int(first),
+                    int(first and not succeeded),
+                    duration if first else 0,
+                    unknown_delta,
                     input_count,
                     input_count,
                     output_count,

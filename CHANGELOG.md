@@ -12,6 +12,12 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-10-25 — Reuse expertise, control work and recover safely
 
+- **Added:** Owner and project work pauses with explicit Resume. Optional spending policies use reported costs or labelled estimates and explain unknown coverage. Existing active work is preserved; resuming wakes the existing queue.
+- **Improved:** Watch, HTTP and MCP retain exact-attempt usage and safe provider failure provenance. Missing usage stays unknown, reported zero stays zero, and repeated receipts do not add the same charge again.
+- **Added:** Claude Code connections can use Amazon Bedrock with their own region, protected credentials and declared model choices. Provider access still requires the owner's AWS permissions; a saved setup is not an authenticated model test.
+- **Added:** An optional evidence kit for immutable inputs, independent result checks, terminal-evidence export and marker-last delivery. Retained outputs can be delivered again without another model call. It adds no runtime dependency or application-specific queue.
+- **Improved:** Docker startup and upgrade check the daemon's CPU architecture against both images before changing the package. An optional Linux operator policy can verify restrictive rules on one managed worker bridge; ordinary startup changes no firewall rules.
+
 - **Added:** Save a worker as an expert, keep exact versions, and edit, copy, archive, remove or restore it through the UI, API or MCP. Reuse a successful setup for another job without changing existing workers or losing saved work.
 - **Improved:** Run Project keeps the job, outcome, background and files while you choose a new, existing or copied worker. Section icons make the form easier to scan. The sixth expert card, Create, opens the normal new-worker setup without entering the brief again.
 - **Fixed:** An already-open native browser in a configured Linux shared workspace stays usable while AI work is paused. After supported idle maintenance, Resume then Open browser reuses the saved profile without resetting it. Legacy desktop limits remain documented.

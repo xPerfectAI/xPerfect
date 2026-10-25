@@ -1,7 +1,7 @@
 name: Public package start
 
 # A manual, critical-path acceptance check; retain valid proof between changes.
-# No build, provider sign-in, full release bank, or extra platform matrix.
+# No build, provider sign-in or full release bank. Each declared CPU runs natively.
 on:
   workflow_dispatch:
 
@@ -10,8 +10,16 @@ permissions:
 
 jobs:
   public-start:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     steps:
       - name: Obtain the public source without credentials
         env:
@@ -38,19 +46,23 @@ jobs:
           PY
           ./xperfect start --docker > "$RUNNER_TEMP/start-output.txt" 2>&1
       - name: Verify the images, app and authenticated MCP
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
           cd "$RUNNER_TEMP/public-source"
           python3 - <<'PY'
-          import json, subprocess, urllib.error, urllib.parse, urllib.request
+          import json, os, subprocess, urllib.error, urllib.parse, urllib.request
           from pathlib import Path
           state = Path.home() / 'xperfect-local'
           receipt = json.loads((state / 'receipt.json').read_text())
           private = json.loads((state / 'credentials.json').read_text())
           release = json.loads(Path('deployment/linux/candidate-images.json').read_text())
+          assert receipt['platform'] == os.environ['EXPECTED_PLATFORM']
           local_ids = {}
           for image in release['images']:
               ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
               record = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref]))[0]
+              assert record['Os'] + '/' + record['Architecture'] == os.environ['EXPECTED_PLATFORM']
               assert ref in record['RepoDigests'], 'Downloaded image is not the pinned release'
               local_ids[image['repository']] = record['Id']
           assert receipt['service_image'] == local_ids['xperfect-service']
@@ -114,6 +126,41 @@ jobs:
               assert 'result' in result and not result['result'].get('isError'), 'Workspace discovery failed'
           print('PASS: anonymous source/image download, exact release, app and authenticated MCP')
           PY
+      - name: Check native tools, desktop binary and restart
+        run: |
+          cd "$RUNNER_TEMP/public-source"
+          python3 - <<'PY'
+          import json, subprocess, urllib.request
+          from pathlib import Path
+          receipt = json.loads((Path.home() / 'xperfect-local/receipt.json').read_text())
+          image = receipt['native_image']
+          for command in (['codex', '--version'], ['claude', '--version'], ['grok', '--version']):
+              subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', command[0], image, *command[1:]], check=True, timeout=60)
+          # Run the native Chromium binary and write/read an actual file. No
+          # account, model response or network page is required for CPU proof.
+          subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c',
+              "set -eu; chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/xperfect-browser-check --dump-dom 'data:text/html,<title>Native architecture check</title><p>Ready</p>' > /tmp/result.html; grep -q 'Ready' /tmp/result.html"], check=True, timeout=60, capture_output=True)
+          for role in ('mcp', 'ui', 'runtime'):
+              subprocess.run(['docker', 'stop', receipt['containers'][role]], check=True, capture_output=True)
+          for role in ('runtime', 'ui', 'mcp'):
+              subprocess.run(['docker', 'start', receipt['containers'][role]], check=True, capture_output=True)
+          import time
+          deadline = time.monotonic() + 60
+          while True:
+              try:
+                  with urllib.request.urlopen(receipt['ui_url'] + '/health', timeout=5) as response:
+                      assert response.status == 200
+                  break
+              except Exception:
+                  if time.monotonic() >= deadline: raise
+                  time.sleep(.5)
+          print('PASS: native CLI binaries, Chromium, exact file, supported service restart')
+          PY
+      - name: Verify opt-in worker bridge enforcement
+        run: |
+          cd "$RUNNER_TEMP/public-source"
+          native=$(python3 -c 'import json; from pathlib import Path; print(json.loads((Path.home()/"xperfect-local/receipt.json").read_text())["native_image"])')
+          sudo python3 tests/check_worker_network_live.py --native-image "$native"
       - name: Show a bounded failure without private output
         if: failure()
         run: |

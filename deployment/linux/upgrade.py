@@ -991,6 +991,12 @@ class Upgrade:
         for image in [service_image] + ([native_image] if native_image else []):
             if not self._image_present(image):
                 raise UpgradeError(f'Image identity could not be verified: load {image} on this Docker host first')
+        try:
+            host_platform = base.daemon_platform(json.loads(_ok(self.endpoint, 'info', '--format', '{{json .}}')))
+            for image in [service_image] + ([native_image] if native_image else []):
+                base.verify_image_platform(self.endpoint, image, host_platform)
+        except (ValueError, RuntimeError) as error:
+            raise UpgradeError(f'{error}. Nothing was changed') from None
         shapes, desktop = {}, self._docker_desktop()
         for role in ROLES:
             record = _inspect(self.endpoint, f'{name}-{role}')
@@ -1080,6 +1086,10 @@ class Upgrade:
         if not native_image and not (SHA.fullmatch(current_native) and self._image_present(current_native)):
             raise UpgradeError('The configured workspace image is not loaded on this Docker host; load it or '
                                'choose one with --native-image')
+        try:
+            base.verify_image_platform(self.endpoint, wanted_native, host_platform)
+        except (ValueError, RuntimeError) as error:
+            raise UpgradeError(f'{error}. Nothing was changed') from None
         changes_models = any(environment.get(base.MODEL_ENVIRONMENTS[p]) != m for p, m in models.items())
         # An image that serves native tools through per-box sockets runs on a workers
         # bridge that refuses traffic between containers; an earlier one needs that traffic.

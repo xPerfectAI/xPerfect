@@ -1,0 +1,8 @@
+{
+  "staging_release": "candidate-build-runtime-parity-20261025",
+  "archive": "base-amd64.tar",
+  "archive_sha256": "b66adde07114cf71573c7e12465324d98885182f825b63611c511a522e215559",
+  "archive_ref": "base-amd64",
+  "platform": "linux/amd64",
+  "source": "reviewed native workstation recipe; package wrapper is built on the native runner"
+}

@@ -1,0 +1,1 @@
+Read the admitted original.txt input. Copy its exact bytes to result.txt and return a link to result.txt.
