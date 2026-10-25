@@ -44,6 +44,10 @@ keys, permission failures, rate limits, or network failure. An accepted key does
 a particular model or available credit. Codex uses its native stdin login and private file credential
 store; Claude must confirm that it selected the API-key authentication method.
 
+A provider access denial asks you to review the account's project permissions and model access.
+It does not by itself mean the key is missing or invalid. An explicit model-unavailable error
+keeps its model-specific guidance; xPerfect does not choose a replacement account or model.
+
 **Current limit:** the full API-key path, from entering a key to a finished result, has not been
 verified end to end yet. Until it is, prefer a subscription sign-in.
 

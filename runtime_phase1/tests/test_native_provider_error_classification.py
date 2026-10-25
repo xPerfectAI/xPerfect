@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from workers_projects_runtime.failure_classification import classify_cli_failure
 
 
@@ -235,3 +237,104 @@ def test_malformed_or_non_provider_native_message_is_not_decoded_as_model_error(
                                               stderr="", runtime_name="codex-cli", exit_code=1)
         assert classification.failure_class != "model_configuration_required"
         assert classification.structured is False
+
+
+def _native_http_failure(status, *, code=None, message="Opaque provider refusal"):
+    error = {"message": message,
+             "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": status}},
+             "additionalDetails": None}
+    if code is not None:
+        error["code"] = code
+    return _codex_stream({"type": "turn.failed", "error": error, "native_status": "failed"})
+
+
+def test_native_forbidden_without_auth_code_reports_access_denial_not_missing_credentials():
+    for message in ("Opaque provider refusal", "The selected model is unavailable", "Invalid API key"):
+        for stdout in (_native_http_failure(403, message=message),
+                       _result_line(api_error_status=403, result=message)):
+            failure = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+            assert failure.failure_class == "provider_request_rejected"
+            assert failure.structured and not failure.retryable
+            assert not failure.personal_account_reconnect
+            assert "denied access" in failure.user_message
+            assert "project permissions" in failure.recommended_recovery
+            assert "model access" in failure.recommended_recovery
+            assert "workspace" in failure.recommended_recovery
+            assert "Fix the provider key" not in failure.recommended_recovery
+
+
+def test_explicit_model_code_wins_over_generic_forbidden_status():
+    for stdout in (_native_http_failure(403, code="model_not_found"),
+                   _encoded_native_turn(403, "model_not_found"),
+                   _result_line(api_error_status=403, error="model_not_found")):
+        failure = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+        assert failure.failure_class == "model_configuration_required"
+        assert failure.structured and not failure.retryable
+        assert "not available for this account" in failure.user_message
+
+
+def test_unauthorized_and_explicit_auth_codes_keep_authentication_recovery():
+    for status, code in ((401, None), (401, "model_not_found"),
+                         (403, "invalid_api_key"), (403, "authentication_error"),
+                         (403, "permission_denied")):
+        for stdout in (_native_http_failure(status, code=code),
+                       _result_line(api_error_status=status, **({"error": code} if code else {}))):
+            failure = classify_cli_failure(stdout=stdout, stderr="", runtime_name="codex-cli", exit_code=1)
+            assert failure.failure_class == "provider_auth_missing"
+            assert failure.structured and not failure.retryable
+            assert "credentials" in failure.user_message
+
+
+def test_quoted_native_forbidden_payload_is_not_provider_authority():
+    quoted = _native_http_failure(403)
+    for event in (
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": quoted}]}},
+        {"type": "user", "message": quoted},
+        {"type": "tool_result", "content": quoted},
+        {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": quoted}},
+    ):
+        failure = classify_cli_failure(stdout=_codex_stream(event), stderr="", runtime_name="codex-cli", exit_code=1)
+        assert failure.failure_class not in {"provider_request_rejected", "model_configuration_required"}
+        assert not failure.structured
+
+
+@pytest.mark.parametrize("status,code,expected", (
+        (401, None, "provider_auth_missing"),
+        (401, "model_not_found", "provider_auth_missing"),
+        (403, None, "provider_request_rejected"),
+        (403, "model_not_found", "model_configuration_required"),
+        (403, "invalid_api_key", "provider_auth_missing"),
+        (400, None, "provider_request_rejected"),
+        (429, None, "provider_rate_limited"),
+))
+def test_terminal_status_aliases_preserve_auth_and_model_code_precedence(status, code, expected):
+    failures = []
+    for field in ("api_error_status", "error_status"):
+        fields = {"api_error_status": None, field: status}
+        if code:
+            fields["error"] = code
+        failure = classify_cli_failure(
+            stdout=_result_line(**fields), stderr="", runtime_name="codex-cli", exit_code=1
+        )
+        assert failure.failure_class == expected
+        assert failure.structured
+        assert failure.retryable is (status == 429)
+        failures.append(failure)
+    assert failures[0].user_message == failures[1].user_message
+    assert failures[0].recommended_recovery == failures[1].recommended_recovery
+    assert failures[0].personal_account_reconnect == failures[1].personal_account_reconnect
+    assert failures[0].provider_event_source == failures[1].provider_event_source
+
+
+def test_quoted_terminal_status_alias_is_not_provider_authority():
+    quoted = _result_line(api_error_status=None, error_status=403)
+    for event in (
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": quoted}]}},
+        {"type": "user", "message": quoted},
+        {"type": "tool_result", "content": quoted},
+        {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": quoted}},
+    ):
+        failure = classify_cli_failure(stdout=_codex_stream(event), stderr="",
+                                       runtime_name="codex-cli", exit_code=1)
+        assert failure.failure_class not in {"provider_request_rejected", "model_configuration_required"}
+        assert not failure.structured
