@@ -105,6 +105,17 @@ class RuntimeControlNotReadyError(RuntimeErrorBase):
     retryable = True
 
 
+class RuntimeGenerationChangedError(RuntimeErrorBase):
+    """A control lost its exact durable work generation before taking effect."""
+
+    code = "active_work_generation_changed"
+    retryable = True
+    public_message = "Current work changed. Check its status and try again."
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
 class ProviderRateLimitError(RuntimeErrorBase):
     """Structured provider throttling with an authoritative bounded retry delay."""
 

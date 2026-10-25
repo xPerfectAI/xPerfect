@@ -134,7 +134,7 @@ def test_interrupt_retries_one_benign_snapshot_change_on_the_same_run(tmp_path, 
         service.shutdown()
 
 
-def test_interrupt_never_retargets_after_run_changes_before_claim(tmp_path, monkeypatch):
+def test_interrupt_completion_before_claim_never_retargets_or_interrupts(tmp_path, monkeypatch):
     store, service, worker, run = _worker_with_run(tmp_path, StubRuntime())
     original_claim = store.try_claim_worker_compute_release
     attempts = 0
@@ -150,9 +150,10 @@ def test_interrupt_never_retargets_after_run_changes_before_claim(tmp_path, monk
         return original_claim(*args, **kwargs)
 
     monkeypatch.setattr(store, "try_claim_worker_compute_release", finish_before_first_claim)
+    monkeypatch.setattr(service.runtime, "interrupt_worker", lambda *_args, **_kwargs: pytest.fail("completed work must not be interrupted"))
     try:
-        with pytest.raises(RuntimeErrorBase, match="active_work_generation_changed"):
-            service.interrupt_worker(worker["worker_id"], run_id=run["run_id"])
+        result = service.interrupt_worker(worker["worker_id"], run_id=run["run_id"])
+        assert result["worker_id"] == worker["worker_id"]
         assert attempts == 1
         assert store.get_run(run["run_id"])["state"] == "completed"
         assert not store.get_worker(worker["worker_id"])["compute_release_token"]

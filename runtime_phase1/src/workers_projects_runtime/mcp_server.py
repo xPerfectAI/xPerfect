@@ -540,17 +540,16 @@ def _worker_capability_summary() -> str:
     default_profile = _configured_default_worker_profile()
     default_mode = _default_execution_mode()
     parts = [
-        f"Configured default execution_mode is `{default_mode}`.",
-        f"Configured default worker profile is `{default_profile}`.",
+        f"Defaults: execution_mode=`{default_mode}`, profile=`{default_profile}`.",
     ]
     if _host_workers_enabled():
         states = []
         for profile in ("codex-cli", "claude-code", "grok-build", "openclaw-general", "direct-openai", "direct-anthropic", "direct-xai"):
             if profile not in allowed:
                 continue
-            states.append(f"{profile} host={'available' if _host_profile_available(profile) else 'unavailable'}")
+            states.append(f"{profile}={'available' if _host_profile_available(profile) else 'unavailable'}")
         if states:
-            parts.append("Host profile availability: " + ", ".join(states) + ".")
+            parts.append("Host profiles: " + ", ".join(states) + ".")
     else:
         parts.append("Host-native workers are disabled; use docker/workstation execution.")
     return " ".join(parts)
@@ -947,8 +946,8 @@ def glasshive_workers_server_instructions() -> str:
     return (
         "Use the one GlassHive tool whose action matches the user's request. Make one call when one "
         "call can complete it; never enumerate or summarize the tool catalog unless the user asks. "
-        "For fresh work, use workspace_launch; for an exact saved workspace name, "
-        "launch it directly without listing first. "
+        "For a fresh delegated task, use workspace_launch. When the user gives an exact saved workspace "
+        "name, launch it directly without listing first; workspace_launch resolves the human name. "
         "Check or wait only when the user asks. "
         "Preserve the user's goal, constraints, files, and context without inventing plans, success "
         "criteria, tool results, or extra workflow. Use the exact callable tool id shown by the host. "

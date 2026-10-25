@@ -20,6 +20,9 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Improved:** Chat describes the user's work without routine routing narration or internal IDs. Account setup failures preserve completed results and point to Connections for recovery.
 - **Fixed:** Library read tools declare their read-only behavior to native MCP clients. Mission result names still require the owning completion evidence.
 
+- **Fixed:** File links in shared-worker replies open the authorized project file instead of a missing browser page. Other members' private files remain out of scope.
+- **Fixed:** Read-only links omit host details while keeping permitted file actions. Steering as a job finishes preserves the follow-up; conflicting newer work returns a clear refresh response.
+
 ## 2026-09-29 — Start, reuse and schedule an expert
 
 - **Added:** One `./xperfect start --docker` command obtains the published package, starts the local app and reports its address and private setup files.

@@ -12,7 +12,7 @@ import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnW
 import { workspaceDeliveryModel } from './delivery-presenter.js?v=20261024polish1';
 import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20261024polish1';
 import { createFileDraft } from './files.js?v=20261024polish1';
-import { createResultMarkdown } from './result-markdown.js?v=20261024polish1';
+import { createResultMarkdown } from './result-markdown.js?v=20261025filelinks1';
 import { showLaunchedWorkspace, watchHref } from './launch-result.js?v=20261024polish1';
 import { initializeStorageAdmin } from './storage-admin.js?v=20261024polish1';
 
@@ -718,8 +718,8 @@ function workerApiUrl(workerId, path = '') {
 // unsafe link schemes are refused. Links open beside this page.
 const inlineMarkdown = createResultMarkdown();
 
-function setInlineResult(element, text) {
-  element.innerHTML = inlineMarkdown.renderInline(String(text || ''));
+function setInlineResult(element, text, resultArtifacts = []) {
+  element.innerHTML = inlineMarkdown.renderInline(String(text || ''), { resultArtifacts });
 }
 
 function summarizeLive(data) {
@@ -885,7 +885,7 @@ function renderWorkspaceDelivery(tile, data) {
 
   const summary = document.createElement('p');
   summary.className = 'workspace-delivery-summary';
-  setInlineResult(summary, model.summary || 'No run output yet.');
+  setInlineResult(summary, model.summary || 'No run output yet.', data.artifacts?.items || []);
   panel.appendChild(summary);
   if (!model.available) return;
 
@@ -1005,7 +1005,7 @@ async function refreshWorkspaceTile(workerId, refreshBootstrap) {
       favorite.title = isFavorite ? 'Remove favorite' : 'Mark favorite';
       favorite.setAttribute('aria-label', favorite.title);
     }
-    if (output) setInlineResult(output, summarizeLive(data));
+    if (output) setInlineResult(output, summarizeLive(data), data.artifacts?.items || []);
   } catch (error) {
     markNextRefresh(ACTIVE_TILE_REFRESH_MS);
     if (output) output.textContent = error.message;

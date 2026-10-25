@@ -75,6 +75,7 @@ from .openclaw_runtime import (
     HostCapacityError,
     ProviderRateLimitError,
     RuntimeControlNotReadyError,
+    RuntimeGenerationChangedError,
     RuntimeErrorBase,
     RuntimeInfo,
     RunStartupRejectedError,
@@ -13228,14 +13229,29 @@ class WorkersProjectsService:
                 claim = self._claim_exact_run_control(
                     worker, active_run, kind="interrupt_run"
                 )
-            except RuntimeErrorBase as exc:
-                if str(exc) != "active_work_generation_changed":
-                    raise
+            except RuntimeGenerationChangedError:
                 # A concurrent status write can stale the worker snapshot after
                 # the exact run was read. Retry only that same active run; a
                 # newer run or competing control must remain a conflict.
                 worker = self.require_worker(worker_id)
                 current_run = self.store.get_active_run(worker_id)
+                finished_run = self.store.get_run(target_run_id)
+                if (
+                    not current_run
+                    and finished_run
+                    and str(finished_run.get("worker_id") or "") == worker_id
+                    and str(finished_run.get("state") or "") in TERMINAL_RUN_STATES
+                    and str(finished_run.get("started_at") or "")
+                    == str(active_run.get("started_at") or "")
+                    and str(worker.get("last_run_id") or "") == target_run_id
+                    and not self.store.list_nonterminal_runs_for_worker(worker_id)
+                    and not worker.get("compute_release_token")
+                    and not self.store.has_active_operator_pause(worker_id)
+                ):
+                    # Completion won before the control claim. There is no
+                    # process left to interrupt; a following Steer can use the
+                    # normal assignment path without losing the saved result.
+                    return worker
                 if (
                     not current_run
                     or str(current_run.get("run_id") or "") != target_run_id
@@ -13790,9 +13806,7 @@ class WorkersProjectsService:
                     kind="resume_run",
                     action_use_id=action_use_id,
                 )
-            except RuntimeErrorBase as exc:
-                if str(exc) != "active_work_generation_changed":
-                    raise
+            except RuntimeGenerationChangedError:
                 # Queue/account status can touch a paused worker between the
                 # first read and the exact lifecycle claim. Retry once with
                 # fresh durable generations; the store still fences any real
@@ -18479,7 +18493,7 @@ class WorkersProjectsService:
             action_executor_id=self._executor_id if action_use_id else "",
         )
         if claim is None:
-            raise RuntimeErrorBase("active_work_generation_changed")
+            raise RuntimeGenerationChangedError()
         return claim
 
     def _worker_for_provider_liveness_release(self, worker: dict, run_id: str) -> dict:
