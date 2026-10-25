@@ -23,6 +23,7 @@ class AddWorkspaceMember(BaseModel):
     effort: str | None = Field(default=None, max_length=64)
     provider_account_policy: Literal['legacy', 'personal_preferred', 'personal_required'] | None = None
     provider_account_id: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 def _effort_bundle(profile: str, effort: str | None) -> dict[str, object] | None:
@@ -129,6 +130,12 @@ def install_execution_workspace_routes(app, service, current_principal, require_
         bootstrap_bundle: dict[str, object] = {
             'provider_account': provider_selection,
         }
+        if payload.model is not None:
+            account = service.control_plane_store.get_provider_account_record(account_id=provider_selection.get("account_id", ""),
+                tenant_id=tenant_id, owner_id=owner_id)
+            if profile != "claude-code" or not account or account.get("auth_method") != "bedrock":
+                raise HTTPException(status_code=422, detail="Choose an exact model from the selected Bedrock connection")
+            bootstrap_bundle["provider_model"] = payload.model
         effort_bundle = _effort_bundle(profile, payload.effort)
         if effort_bundle:
             bootstrap_bundle.update(effort_bundle)

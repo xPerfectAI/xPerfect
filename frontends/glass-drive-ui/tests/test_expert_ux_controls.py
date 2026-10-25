@@ -38,7 +38,7 @@ def test_usage_summary_is_readable_and_token_details_are_explicit():
              + function('providerTimestamp', source) + function('observedDuration', source)
              + function('providerAccountUsage', source) + """
 const account={last_verified_at:1792800000,observed_runs:33,observed_failures:2,
- observed_duration_seconds:600,observed_input_tokens:0,observed_output_tokens:27000};
+ observed_duration_seconds:600,observed_input_tokens:0,observed_output_tokens:27000,observed_usage_coverage:'complete'};
 const summary=providerAccountUsage(account);
 assert(summary.includes('33 runs · 2 failed'));
 assert(!summary.includes('Tokens'));assert(!summary.includes('worker time'));
@@ -47,6 +47,10 @@ const details=providerAccountUsage(account,true);
 assert(details.includes('27,000 output'));assert(details.includes('0 input'));assert(details.includes('worker time'));
 assert(!details.includes('Verified'));assert(!details.includes('33 runs'));
 assert(details.includes('Cached input may be counted separately'));
+const historical=providerAccountUsage({...account,observed_usage_coverage:'unknown'},true);
+assert(historical.includes('Usage: Unknown'));assert(!historical.includes('27,000 output'));
+const partial=providerAccountUsage({...account,observed_usage_coverage:'partial',observed_unknown_runs:1},true);
+assert(partial.includes('Usage: Partial'));assert(partial.includes('1 run has unknown usage'));
 assert.equal(providerAccountUsage({}), '');
 """)
 

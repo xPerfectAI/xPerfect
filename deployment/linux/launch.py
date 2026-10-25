@@ -85,23 +85,51 @@ def local_docker_endpoint(value: str | None) -> str:
     return endpoint
 
 
-def resolve_image(endpoint: str, reference: str) -> str:
+def daemon_platform(info: dict) -> str:
+    architecture = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(info.get('Architecture'), info.get('Architecture'))
+    if info.get('OSType') != 'linux' or architecture not in {'arm64', 'amd64'}:
+        raise ValueError('A supported Linux Docker platform (arm64 or amd64) is required')
+    return 'linux/' + architecture
+
+
+def verify_image_platform(endpoint: str, identity: str, platform: str) -> None:
+    record = json.loads(docker(endpoint, 'image', 'inspect', '--format', '{{json .}}', identity))
+    if record.get('Id') != identity or record.get('Os', '') + '/' + record.get('Architecture', '') != platform:
+        raise ValueError('An image does not match the Docker host platform. Use the matching tested image pair; emulation is not selected automatically.')
+
+
+class PackagePlatformUnavailable(ValueError):
+    """The public image release has no tested pair for this native platform."""
+
+
+def resolve_image(endpoint: str, reference: str, *, platform: str | None = None) -> str:
     """The exact local image identity for an identity or a digest-pinned published reference.
 
     `sha256:<id>` must already be on this computer. `<repository>@sha256:<digest>` is pulled when
     missing; the digest pins the exact published bytes, and the local identity is returned.
     """
     if re.fullmatch(r'sha256:[a-f0-9]{64}', reference):
+        if platform:
+            verify_image_platform(endpoint, reference, platform)
         return reference
     if not re.fullmatch(r'[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[a-f0-9]{64}', reference):
         raise ValueError('Exact locally verified image identities are required')
     try:
         identity = docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', reference)
     except RuntimeError:
-        docker(endpoint, 'pull', reference)
+        docker(endpoint, 'pull', *(['--platform', platform] if platform else []), reference)
         identity = docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', reference)
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', identity):
         raise ValueError('Image identity could not be verified')
+    if platform:
+        try:
+            verify_image_platform(endpoint, identity, platform)
+        except ValueError:
+            # The same immutable multi-platform index may be cached for another
+            # architecture. Pull its native member; never run it under emulation.
+            docker(endpoint, 'pull', '--platform', platform, reference)
+            identity = docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', reference)
+            verify_image_platform(endpoint, identity, platform)
     return identity
 
 
@@ -334,6 +362,24 @@ def role_create_args(*, profile: str, name: str, role: str, volumes: dict, netwo
 ICC_OPTION = 'com.docker.network.bridge.enable_icc'
 
 
+def worker_egress_module():
+    import importlib.util
+    source = Path(__file__).with_name('network_policy.py')
+    if not source.is_file():
+        raise ValueError('Worker egress policy needs the complete public checkout, including deployment/linux/network_policy.py')
+    spec = importlib.util.spec_from_file_location('xperfect_network_policy', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_worker_egress(value):
+    if value is None:
+        return None
+    module = worker_egress_module()
+    return module.contract.normalize_policy(value)
+
+
 def network_create_args(*, name: str, role: str, network: str, settings: dict,
                         subnet: str | None = None) -> list[str]:
     """The package networks. An image that serves native tools through per-box
@@ -454,9 +500,11 @@ def _wait_until_runnable(endpoint: str, containers: dict[str, str], ui_port: int
 def launch(*, endpoint: str, name: str, image: str, native_image: str,
            ui_port: int, mcp_port: int, credentials, owner_id: str = "local-owner",
            models: dict[str, str] | None = None, coordinator: dict | None = None,
-           subnets: dict[str, str] | None = None) -> dict:
+           subnets: dict[str, str] | None = None, worker_egress_policy: dict | None = None,
+           require_published_platform: bool = False) -> dict:
     models = validate_models(models)
     subnets = subnets or {}
+    worker_egress_policy = validate_worker_egress(worker_egress_policy)
     coordinator_environment = ({} if coordinator is None
                                else {COORDINATOR_CONFIG_KEY: validate_coordinator_config(coordinator)})
     if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', name):
@@ -474,10 +522,11 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
     info = json.loads(docker(endpoint, 'info', '--format', '{{json .}}'))
     if info.get('OSType') != 'linux' or str(info.get('CgroupVersion')) != '2':
         raise ValueError('Linux Docker with cgroup v2 is required')
-    image, native_image = resolve_image(endpoint, image), resolve_image(endpoint, native_image)
-    for identity in (image, native_image):
-        if docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', identity) != identity:
-            raise ValueError('Image identity could not be verified')
+    platform = daemon_platform(info)
+    if require_published_platform:
+        published_release(platform=platform)
+    source_images = {'service': image, 'native': native_image}
+    image, native_image = resolve_image(endpoint, image, platform=platform), resolve_image(endpoint, native_image, platform=platform)
     # 'links' holds only the signed short-link store that every role mints into and
     # the UI resolves; private auth, control and data state stay on their own volumes.
     volumes = {role: name + '-' + role for role in ('data', 'control', 'ui-state', 'mcp-state', 'links')}
@@ -525,6 +574,8 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
                'XPERFECT_SHARED_IMAGE': native_image, 'WPR_BOOTSTRAP_SOURCE_ROOTS': '/data/managed-files', 'XPERFECT_SHARED_NETWORK': networks['workers'],
                'XPERFECT_SHARED_MEMORY_BYTES': str(6 * 1024**3), 'XPERFECT_SHARED_PIDS_LIMIT': '512',
                **model_environment(models), **coordinator_environment}
+    if worker_egress_policy is not None:
+        runtime['XPERFECT_WORKER_EGRESS_POLICY'] = json.dumps(worker_egress_policy, sort_keys=True)
     environments = {'runtime': runtime,
                     'ui': {**common, 'GLASSHIVE_HUMAN_AUTH_MODE': 'local_password',
                            'XPERFECT_LOCAL_MCP_URL': f'http://127.0.0.1:{mcp_port}/mcp',
@@ -566,6 +617,9 @@ def launch(*, endpoint: str, name: str, image: str, native_image: str,
         if role == 'runtime':
             docker(endpoint, 'network', 'connect', '--alias', 'runtime', networks['workers'], identity)
         docker(endpoint, 'start', identity)
+    receipt['platform'] = platform
+    receipt['image_references'] = source_images
+    receipt['platform_image_ids'] = {'service': image, 'native': native_image}
     receipt['ui_url'] = f'http://127.0.0.1:{ui_port}'
     receipt['mcp_url'] = f'http://127.0.0.1:{mcp_port}/mcp'
     _wait_until_runnable(endpoint, containers, ui_port)
@@ -634,7 +688,7 @@ def discard_unstarted(endpoint: str, name: str) -> dict:
 HOSTED_ROLES = {'member', 'viewer', 'tenant_admin'}
 HOSTED_REQUIRED = {'public_url', 'mcp_public_url', 'issuer', 'client_id', 'client_secret_file', 'tenant_id',
                    'tls_certificate_file', 'tls_key_file', 'xfs_mount', 'xfs_device'}
-HOSTED_OPTIONAL = {'principal_claim', 'mcp_audiences', 'mcp_scopes', 'mcp_client_ids', 'storage_limit_bytes',
+HOSTED_OPTIONAL = {'principal_claim', 'mcp_audiences', 'mcp_scopes', 'mcp_client_ids', 'storage_limit_bytes', 'worker_egress_policy',
                    'shared_memory_bytes', 'extra_hosts', 'bind_address', 'tls_ca_file', 'models',
                    'role_claim', 'role_map', 'coordinator'}
 # The sign-in gateway's existing identity-provider role settings, given to the UI and MCP only.
@@ -800,6 +854,7 @@ def validate_hosted(source: dict) -> dict:
     if value['bind_address'] not in {'127.0.0.1', '0.0.0.0'}:
         raise ValueError('bind_address must be 127.0.0.1 or 0.0.0.0')
     value['models'] = validate_models(value.get('models'))
+    value['worker_egress_policy'] = validate_worker_egress(value.get('worker_egress_policy'))
     if value.get('coordinator') is not None:
         validate_coordinator_config(value['coordinator'])
     value['role_mapping'] = validate_role_mapping(value.pop('role_claim', None), value.pop('role_map', None))
@@ -832,14 +887,16 @@ def _file_archive(name: str, payload: bytes, mode: int = 0o600) -> bytes:
 
 
 def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
-                  ui_port: int, mcp_port: int, hosted: dict, ready_timeout_s: float = 45.0) -> dict:
+                  ui_port: int, mcp_port: int, hosted: dict, ready_timeout_s: float = 45.0,
+                  require_published_platform: bool = False) -> dict:
     """Compose the hosted OIDC/TLS/XFS profile from the same three roles."""
     if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', name):
         raise ValueError('Package name must start with xperfect-')
     if not endpoint.startswith('unix:///'):
         raise ValueError('Select an explicit local Unix Docker endpoint')
     for identity in (image, native_image):
-        if not re.fullmatch(r'sha256:[a-f0-9]{64}', identity):
+        if not (re.fullmatch(r'sha256:[a-f0-9]{64}', identity)
+                or re.fullmatch(r'[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[a-f0-9]{64}', identity)):
             raise ValueError('Exact locally verified image identities are required')
     if not (1 <= ui_port <= 65535 and 1 <= mcp_port <= 65535 and ui_port != mcp_port):
         raise ValueError('Two distinct ports are required')
@@ -855,9 +912,11 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
         raise ValueError('Linux Docker with cgroup v2 is required')
     if any('rootless' in str(option) or 'userns' in str(option) for option in info.get('SecurityOptions') or []):
         raise ValueError('Hosted XFS quotas require rootful Docker without user-namespace remapping')
-    for identity in (image, native_image):
-        if docker(endpoint, 'image', 'inspect', '--format', '{{.Id}}', identity) != identity:
-            raise ValueError('Image identity could not be verified')
+    platform = daemon_platform(info)
+    if require_published_platform:
+        published_release(platform=platform)
+    source_images = {'service': image, 'native': native_image}
+    image, native_image = resolve_image(endpoint, image, platform=platform), resolve_image(endpoint, native_image, platform=platform)
     volumes = {role: name + '-' + role for role in ('data', 'control', 'ui-state', 'mcp-state', 'links', 'auth')}
     networks = {role: name + '-' + role for role in ('frontend', 'workers')}
     containers = {role: name + '-' + role for role in ('runtime', 'ui', 'mcp')}
@@ -869,17 +928,28 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
     if not client_secret:
         raise ValueError('client_secret_file is empty')
     tls = _tls_archive(Path(value['tls_certificate_file']).read_bytes(), Path(value['tls_key_file']).read_bytes())
-    for role, volume in volumes.items():
-        if role == 'data':
-            # The quota-owning XFS mount root itself backs Files/workspaces; a
-            # subdirectory would not match the mount the runtime verifies.
-            docker(endpoint, 'volume', 'create', '--driver', 'local', '--opt', 'type=none', '--opt', 'o=bind',
-                   '--opt', 'device=' + value['xfs_mount'], '--label', 'xperfect.package=' + name, volume)
-        else:
-            docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
-    for role, network in networks.items():
-        docker(endpoint, *network_create_args(name=name, role=role, network=network,
-                                              settings=PROFILE_SETTINGS['hosted-xfs']))
+    created: list[tuple[str, str]] = []
+    try:
+        for role, network in networks.items():
+            identity = docker(endpoint, *network_create_args(name=name, role=role, network=network,
+                                                  settings=PROFILE_SETTINGS['hosted-xfs']))
+            created.append(('network', identity if re.fullmatch(r'[a-f0-9]{64}', identity) else network))
+        for role, volume in volumes.items():
+            if role == 'data':
+                # Removing an unstarted bind-volume definition never removes its
+                # XFS directory or retained files.
+                docker(endpoint, 'volume', 'create', '--driver', 'local', '--opt', 'type=none', '--opt', 'o=bind',
+                       '--opt', 'device=' + value['xfs_mount'], '--label', 'xperfect.package=' + name, volume)
+            else:
+                docker(endpoint, 'volume', 'create', '--label', 'xperfect.package=' + name, volume)
+            created.append(('volume', volume))
+    except (RuntimeError, ValueError):
+        for kind, resource in reversed(created):
+            try:
+                docker(endpoint, kind, 'rm', resource)
+            except RuntimeError:
+                pass
+        raise
     signers = {}
     for role in ('ui', 'mcp'):
         signers[role] = generate_signer(endpoint, image, volumes[role + '-state'], '/' + role + '-state',
@@ -900,6 +970,8 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
                **model_environment(value['models']),
                **({COORDINATOR_CONFIG_KEY: validate_coordinator_config(value['coordinator'])}
                   if value.get('coordinator') is not None else {})}
+    if value['worker_egress_policy'] is not None:
+        runtime['XPERFECT_WORKER_EGRESS_POLICY'] = json.dumps(value['worker_egress_policy'], sort_keys=True)
     environments = {
         'runtime': runtime,
         'ui': {**common, 'GLASSHIVE_HUMAN_AUTH_MODE': 'oidc', 'GLASSHIVE_OIDC_CLIENT_ID': value['client_id'],
@@ -957,6 +1029,9 @@ def launch_hosted(*, endpoint: str, name: str, image: str, native_image: str,
     context = ssl.create_default_context(cafile=value.get('tls_ca_file') or None)
     _wait_until_hosted_ready(endpoint, containers, origin, mcp_url, context, timeout_s=ready_timeout_s)
     receipt['ui_url'], receipt['mcp_url'] = origin, mcp_url
+    receipt['platform'] = platform
+    receipt['image_references'] = source_images
+    receipt['platform_image_ids'] = {'service': image, 'native': native_image}
     return receipt
 
 
@@ -1012,17 +1087,36 @@ def preapprove(*, endpoint: str, name: str, identity: bytes) -> str:
                   'ui', '--config', '/ui-state/config.json', '--admin', 'preapprove-oidc', data=identity)
 
 
-def published_release() -> tuple[dict[str, str], dict[str, str]]:
+def published_release(*, platform: str | None = None) -> tuple[dict[str, str], dict[str, str]]:
     """Resolve the reviewed images and exact local model configuration."""
     try:
         release = json.loads(Path(__file__).with_name('candidate-images.json').read_text())
         registry = release['registry']
         images = release['images']
+        platforms = release.get('platforms', [release.get('platform')])
+        if (not isinstance(platforms, list) or not platforms or len(set(platforms)) != len(platforms)
+                or any(item not in {'linux/arm64', 'linux/amd64'} for item in platforms)):
+            raise ValueError
+        if platform is not None and platform not in platforms:
+            raise PackagePlatformUnavailable('The published image pair has not been qualified for this Docker host platform. Use a tested matching pair.')
+        selected_platform = platform or release.get('default_platform', platforms[0])
+        if selected_platform not in platforms:
+            raise ValueError
         if not isinstance(registry, str) or not isinstance(images, list):
             raise ValueError
         result = {}
         for role in ('xperfect-service', 'xperfect-native'):
-            selected = [image for image in images if isinstance(image, dict) and image.get('repository') == role]
+            per_platform = any(isinstance(image, dict) and 'platform' in image for image in images)
+            if per_platform:
+                if any(not isinstance(image, dict) or image.get('platform') not in platforms for image in images):
+                    raise ValueError
+                for declared in platforms:
+                    if len([image for image in images if image.get('repository') == role and image.get('platform') == declared]) != 1:
+                        raise ValueError
+            elif len(platforms) != 1:
+                raise ValueError
+            selected = [image for image in images if isinstance(image, dict) and image.get('repository') == role
+                        and (not per_platform or image.get('platform') == selected_platform)]
             if len(selected) != 1:
                 raise ValueError
             reference = registry + '/' + role + '@' + selected[0]['digest']
@@ -1030,6 +1124,8 @@ def published_release() -> tuple[dict[str, str], dict[str, str]]:
                 raise ValueError
             result[role] = reference
         return result, validate_models(release.get('models'))
+    except PackagePlatformUnavailable:
+        raise
     except (OSError, ValueError, KeyError, TypeError):
         raise ValueError('Reviewed package release metadata is missing or invalid. '
                          'Use a complete release or explicit --service-image and --native-image.') from None
@@ -1082,6 +1178,8 @@ def main():
     parser.add_argument('--owner-id', default='local-owner')
     parser.add_argument('--profile', choices=('local-linux', 'hosted-xfs'), default='local-linux')
     parser.add_argument('--hosted-config', type=Path, help='Private hosted input JSON (hosted-xfs only)')
+    parser.add_argument('--worker-egress-policy', type=Path,
+                        help='Local profile: record an opt-in worker policy; the Linux host administrator applies it separately')
     parser.add_argument('--model', action='append', metavar='PROFILE=MODEL',
                         help='Exact native model for a worker profile, e.g. grok-build=<model>; repeatable')
     parser.add_argument('--coordinator-config', type=Path, metavar='PRIVATE_JSON',
@@ -1093,11 +1191,20 @@ def main():
     if not re.fullmatch(r'xperfect-[a-z0-9][a-z0-9-]{0,40}', args.name):
         raise ValueError('Package name must start with xperfect-')
     release_models = {}
+    using_published_images = args.service_image is None or args.native_image is None
     if args.service_image is None or args.native_image is None:
+        # Validate metadata before contacting Docker or creating local state.
         images, release_models = published_release()
+        endpoint = local_docker_endpoint(args.docker_host)
+        native_platform = daemon_platform(json.loads(docker(endpoint, 'info', '--format', '{{json .}}')))
+        images, release_models = published_release(platform=native_platform)
         args.service_image = args.service_image or images['xperfect-service']
         args.native_image = args.native_image or images['xperfect-native']
     models = parse_model_arguments(args.model)
+    if args.worker_egress_policy and args.profile != 'local-linux':
+        raise ValueError('Set worker_egress_policy in the hosted input for hosted-xfs')
+    egress_policy = (validate_worker_egress(json.loads(args.worker_egress_policy.read_text()))
+                     if args.worker_egress_policy else None)
     if args.profile == 'local-linux':
         # The release owns current supported defaults; explicit profile choices win.
         # Hosted inputs and fully explicit image deployments keep their own choices.
@@ -1138,7 +1245,7 @@ def main():
                 args.receipt.chmod(0o600)
                 receipt = launch_hosted(endpoint=local_docker_endpoint(args.docker_host), name=args.name, image=args.service_image,
                                         native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
-                                        hosted=hosted)
+                                        hosted=hosted, require_published_platform=using_published_images)
                 json.dump(receipt, output, indent=2)
         except BaseException:
             remove_own_empty_outputs(created)
@@ -1157,7 +1264,9 @@ def main():
                 receipt = launch(endpoint=local_docker_endpoint(args.docker_host), name=args.name, image=args.service_image,
                                  native_image=args.native_image, ui_port=args.ui_port, mcp_port=args.mcp_port,
                                  credentials=credentials, owner_id=args.owner_id, models=models,
-                                 coordinator=coordinator, subnets=subnets)
+                                 coordinator=coordinator, subnets=subnets,
+                                 require_published_platform=using_published_images,
+                                 **({'worker_egress_policy': egress_policy} if egress_policy is not None else {}))
                 json.dump(receipt, output, indent=2)
     except BaseException:
         # A launch that rolled back leaves the same command ready to run again; credentials it

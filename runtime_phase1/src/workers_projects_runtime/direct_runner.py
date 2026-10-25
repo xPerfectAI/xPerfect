@@ -18,6 +18,7 @@ STARTED_AT = time.monotonic()
 CURRENT_STAGE = "sdk_dependency"
 CURRENT_OUTPUT_MODE = "plain"
 LAST_RESPONSE_SHAPE = {}
+LAST_RESPONSE_REQUEST_ID = {}
 OUTPUT_TOOL_NAME = "xperfect_conversation_result"
 
 
@@ -570,8 +571,9 @@ def core_archive_history_record(result, request, archive, state=None):
 
 
 async def execute(request):
-    global CURRENT_STAGE, CURRENT_OUTPUT_MODE, LAST_RESPONSE_SHAPE
+    global CURRENT_STAGE, CURRENT_OUTPUT_MODE, LAST_RESPONSE_SHAPE, LAST_RESPONSE_REQUEST_ID
     CURRENT_OUTPUT_MODE, LAST_RESPONSE_SHAPE = "plain", {}
+    LAST_RESPONSE_REQUEST_ID = {}
     CURRENT_STAGE = "sdk_dependency"
     # Imported once per supervised executor, never in the service's ordinary CLI path.
     from pydantic_ai import Agent, PartStartEvent, PartDeltaEvent, PartEndEvent, TextPart, TextPartDelta
@@ -638,12 +640,15 @@ async def execute(request):
                 and all(c in "0123456789abcdef" for c in cache_key)):
             settings["openai_prompt_cache_key"] = cache_key
     async def on_request(_request):
-        global CURRENT_STAGE
+        global CURRENT_STAGE, LAST_RESPONSE_REQUEST_ID
         CURRENT_STAGE = "provider_request"
+        LAST_RESPONSE_REQUEST_ID = {}
         emit({"type": "direct.stage", "stage": "provider_request_sent"})
     async def on_response(response):
+        global LAST_RESPONSE_REQUEST_ID
+        LAST_RESPONSE_REQUEST_ID = safe_response_request_id(response.headers)
         emit({"type": "direct.stage", "stage": "provider_headers_received", "status_code": response.status_code,
-              **safe_response_request_id(response.headers)})
+              **LAST_RESPONSE_REQUEST_ID})
     CURRENT_STAGE = "provider_configuration"
     # The official providers can use different HTTPX generations. Their native
     # client class owns that compatibility; a client from another SDK is invalid.
@@ -981,7 +986,8 @@ async def execute(request):
                 break
         emit({"type": "grok.result", "session_id": session_id, "stop_reason": "end_turn",
               "output": final_output, "usage": {"input_tokens": usage.get("input_tokens", 0),
-              "output_tokens": usage.get("output_tokens", 0), "cached_input_tokens": usage.get("cache_read_tokens", 0)},
+              "output_tokens": usage.get("output_tokens", 0), "cached_input_tokens": usage.get("cache_read_tokens", 0),
+              "cache_write_input_tokens": usage.get("cache_write_tokens", 0)},
               "context_usage": context_usage,
               "executor": "direct", "provider": provider,
               **({"deliveryDispositionRanges": ranges} if ranges else {})})
@@ -1022,6 +1028,8 @@ def safe_failure_shape(exc):
 
 
 def main():
+    global LAST_RESPONSE_REQUEST_ID
+    LAST_RESPONSE_REQUEST_ID = {}
     try:
         request = json.loads(sys.stdin.read())
         asyncio.run(execute(request))
@@ -1030,6 +1038,7 @@ def main():
         # diagnostic structured and bounded; the exact exception type is sufficient.
         emit({"type": "direct.error", "error_type": type(exc).__name__,
               "status_code": getattr(exc, "status_code", None), "stage": CURRENT_STAGE,
+              **LAST_RESPONSE_REQUEST_ID,
               **safe_failure_shape(exc),
               "message": "Direct execution could not finish; see its typed stage and recovery"})
         raise SystemExit(1)

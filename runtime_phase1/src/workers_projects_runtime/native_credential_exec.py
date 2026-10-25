@@ -7,7 +7,7 @@ import sys
 
 
 def credential_environment(selectors: dict[str, str]) -> dict[str, str]:
-    if not isinstance(selectors, dict) or set(selectors) - {'ANTHROPIC_API_KEY', 'XAI_API_KEY'}:
+    if not isinstance(selectors, dict) or set(selectors) - {'ANTHROPIC_API_KEY', 'XAI_API_KEY', 'XPERFECT_BEDROCK_CREDENTIALS'}:
         raise ValueError('Unsupported native credential selector')
     values = {}
     for key, raw in selectors.items():
@@ -15,6 +15,14 @@ def credential_environment(selectors: dict[str, str]) -> dict[str, str]:
         home = Path(os.environ['HOME'])
         if not path.is_absolute() or '..' in path.parts or home not in path.parents:
             raise ValueError('Credential is outside the private native home')
+        if key == 'XPERFECT_BEDROCK_CREDENTIALS':
+            from .bedrock_connections import read_credentials
+            from .control_plane import ControlPlaneError
+            try:
+                values.update(read_credentials(path, member=True))
+            except ControlPlaneError:
+                raise ValueError('Bedrock credential projection is unavailable') from None
+            continue
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, 'r') as stream:
             metadata = os.fstat(stream.fileno())

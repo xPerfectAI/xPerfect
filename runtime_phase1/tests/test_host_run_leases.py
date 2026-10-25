@@ -8514,10 +8514,11 @@ def test_superseded_processor_lost_claim_keeps_the_live_generation_lease(
     def superseded_before_claim(claim_worker_id, **kwargs):
         if not reservations:
             reservations.append(dict(store.get_active_host_run_lease_for_run(run_id) or {}))
-            # An operator interrupt supersedes this processor after its reservation;
-            # the scheduler's retry phase dispatches the next generation, which adopts
-            # the reservation, claims the run and starts it.
-            service.interrupt_worker(claim_worker_id)
+            # Supersede the synthetic processor after its reservation, without
+            # issuing human Stop (which correctly cancels queued work). The
+            # scheduler must dispatch the next generation, which adopts the
+            # reservation, claims the run and starts it.
+            service._invalidate_worker_processor(claim_worker_id)
             superseded.extend(service.process_due_worker_retries_once())
             superseded.append(started.wait(timeout=10))
         return original_claim(claim_worker_id, **kwargs)
@@ -8680,9 +8681,11 @@ class _SupersededClaimHold:
     def supersede(self, service, worker_id: str) -> None:
         service.start_assigned_run(worker_id)  # P1 registers, then holds at its claim
         assert self.at_claim.wait(timeout=10)
-        # An operator interrupt supersedes P1; the scheduler's retry phase
-        # dispatches P2, which adopts P1's reservation and claims the turn.
-        service.interrupt_worker(worker_id)
+        # Supersede this synthetic processor generation before its claim. A
+        # human Stop now cancels queued work; it is not a retry/supersession
+        # action. The existing scheduler must still actually dispatch P2,
+        # which adopts P1's reservation and claims the turn.
+        service._invalidate_worker_processor(worker_id)
         assert service.process_due_worker_retries_once() == [worker_id]
 
 

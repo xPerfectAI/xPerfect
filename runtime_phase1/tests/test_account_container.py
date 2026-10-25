@@ -80,6 +80,38 @@ def test_foreign_mount_stops_before_any_native_exec(backend,monkeypatch):
     assert not transports
 
 
+def test_account_native_start_rechecks_policy_proof_before_any_container_or_payload(backend, tmp_path, monkeypatch):
+    from workers_projects_runtime import worker_egress
+    value, docker, generation, transports = backend
+    policy = {'denied': [{'host': '169.254.169.254', 'probe_port': 80}],
+              'positive': [{'host': 'example.test', 'port': 443}]}
+    monkeypatch.setenv(worker_egress.POLICY_ENV, json.dumps(policy))
+    monkeypatch.setenv('XPERFECT_CONTROL_ROOT', str(tmp_path))
+    receipt = {'version': 1, 'enforcement': 'iptables_readback', 'network_id': 'd' * 64,
+               'rules_sha256': 'e' * 64, 'policy_sha256': worker_egress.policy_digest(policy), 'observed_at': 0}
+    monkeypatch.setattr(worker_egress, '_read_receipt', lambda path: receipt)
+    monkeypatch.setattr(worker_egress.time, 'time', lambda: 100)
+    monkeypatch.setattr(os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(value, '_ownership', lambda *_: None)
+    def observed(arguments, **kwargs):
+        if arguments[:2] == ['network', 'inspect']:
+            return subprocess.CompletedProcess(arguments, 0, json.dumps([{
+                'Id': 'd' * 64, 'Driver': 'bridge', 'EnableIPv6': False,
+                'Options': {'com.docker.network.bridge.enable_icc': 'false'},
+                'IPAM': {'Config': [{'Subnet': '10.44.0.0/24'}]}}]), '')
+        return docker(arguments, **kwargs)
+    value.docker = observed
+    request = NativeAccountLaunch(generation.account_home, ('/usr/local/bin/claude', 'auth', 'status'), {}, 'verify', generation.lease_id)
+    # A stale proof blocks even a native authentication check before preparation.
+    receipt['observed_at'] = -1000
+    with pytest.raises(worker_egress.WorkerEgressUnavailable):
+        value.start(request, generation)
+    assert not docker.calls and not transports and not list(generation.account_home.glob('.xperfect-launch-*'))
+    receipt['observed_at'] = 100
+    assert value.start(request, generation)[0] == 'transport'
+    assert len(transports) == 1
+
+
 def test_failed_inventory_is_not_absence_or_reclaim(backend,monkeypatch):
     value,docker,generation,_=backend
     docker.fail_inventory=True

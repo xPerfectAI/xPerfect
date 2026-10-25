@@ -1,7 +1,7 @@
 name: Public package start
 
 # A manual, critical-path acceptance check; retain valid proof between changes.
-# No build, provider sign-in, full release bank, or extra platform matrix.
+# No build, provider sign-in or full release bank. Each declared CPU runs natively.
 on:
   workflow_dispatch:
 
@@ -10,8 +10,18 @@ permissions:
 
 jobs:
   public-start:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      EXPECTED_PLATFORM: ${{ matrix.platform }}
     steps:
       - name: Obtain the public source without credentials
         env:
@@ -28,29 +38,37 @@ jobs:
           mkdir -m 700 "$DOCKER_CONFIG"
           # No login and no cached candidate images: the command must obtain them.
           python3 - <<'PY'
-          import json, subprocess
+          import json, os, subprocess
           from pathlib import Path
           release = json.loads(Path('deployment/linux/candidate-images.json').read_text())
           for image in release['images']:
+              if image.get('platform', release.get('platform')) != os.environ['EXPECTED_PLATFORM']:
+                  continue
               ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
               result = subprocess.run(['docker', 'image', 'inspect', ref], capture_output=True)
               assert result.returncode != 0, 'The acceptance runner already has a candidate image'
           PY
           ./xperfect start --docker > "$RUNNER_TEMP/start-output.txt" 2>&1
       - name: Verify the images, app and authenticated MCP
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
           cd "$RUNNER_TEMP/public-source"
           python3 - <<'PY'
-          import json, subprocess, urllib.error, urllib.parse, urllib.request
+          import json, os, subprocess, urllib.error, urllib.parse, urllib.request
           from pathlib import Path
           state = Path.home() / 'xperfect-local'
           receipt = json.loads((state / 'receipt.json').read_text())
           private = json.loads((state / 'credentials.json').read_text())
           release = json.loads(Path('deployment/linux/candidate-images.json').read_text())
+          assert receipt['platform'] == os.environ['EXPECTED_PLATFORM']
           local_ids = {}
           for image in release['images']:
+              if image.get('platform', release.get('platform')) != os.environ['EXPECTED_PLATFORM']:
+                  continue
               ref = release['registry'] + '/' + image['repository'] + '@' + image['digest']
               record = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref]))[0]
+              assert record['Os'] + '/' + record['Architecture'] == os.environ['EXPECTED_PLATFORM']
               assert ref in record['RepoDigests'], 'Downloaded image is not the pinned release'
               local_ids[image['repository']] = record['Id']
           assert receipt['service_image'] == local_ids['xperfect-service']
@@ -114,6 +132,72 @@ jobs:
               assert 'result' in result and not result['result'].get('isError'), 'Workspace discovery failed'
           print('PASS: anonymous source/image download, exact release, app and authenticated MCP')
           PY
+      - name: Check native tools, desktop binary and restart
+        run: |
+          cd "$RUNNER_TEMP/public-source"
+          python3 - <<'PY'
+          import json, subprocess, urllib.request
+          from pathlib import Path
+          receipt = json.loads((Path.home() / 'xperfect-local/receipt.json').read_text())
+          image = receipt['native_image']
+          for command in (['codex', '--version'], ['claude', '--version'], ['grok', '--version']):
+              subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', command[0], image, *command[1:]], check=True, timeout=60)
+          # Run the native Chromium binary and write/read an actual file. No
+          # account, model response or network page is required for CPU proof.
+          # Like the product desktop, give this unprivileged process a writable
+          # HOME; user-data-dir alone does not supply Crashpad's config directory.
+          try:
+              subprocess.run(['docker', 'run', '--rm', '--network', 'none',
+                  '--env', 'HOME=/tmp/xperfect-browser-home', '--entrypoint', 'sh', image, '-c',
+                  "set -eu; mkdir -p \"$HOME\"; chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/xperfect-browser-check --dump-dom 'data:text/html,<title>Native architecture check</title><p>Ready</p>' > /tmp/result.html; grep -q 'Ready' /tmp/result.html"], check=True, timeout=60, capture_output=True)
+          except subprocess.CalledProcessError as error:
+              # This fixture has no network, mounts, credentials or user content.
+              # Retain its bounded native diagnostic without changing acceptance.
+              diagnostic = (error.stderr or b'').decode('utf-8', errors='replace')
+              if len(diagnostic) > 8192:
+                  diagnostic = diagnostic[:4096] + '\n[truncated]\n' + diagnostic[-4096:]
+              print(json.dumps({'fixture': 'native_chromium', 'exit_code': error.returncode,
+                                'stderr': diagnostic}, ensure_ascii=True))
+              raise
+          for role in ('mcp', 'ui', 'runtime'):
+              subprocess.run(['docker', 'stop', receipt['containers'][role]], check=True, capture_output=True)
+          for role in ('runtime', 'ui', 'mcp'):
+              subprocess.run(['docker', 'start', receipt['containers'][role]], check=True, capture_output=True)
+          import time
+          deadline = time.monotonic() + 60
+          while True:
+              try:
+                  with urllib.request.urlopen(receipt['ui_url'] + '/health', timeout=5) as response:
+                      assert response.status == 200
+                  break
+              except Exception:
+                  if time.monotonic() >= deadline: raise
+                  time.sleep(.5)
+          print('PASS: native CLI binaries, Chromium, exact file, supported service restart')
+          PY
+      - name: Verify opt-in worker bridge enforcement
+        run: |
+          cd "$RUNNER_TEMP/public-source"
+          python3 - <<'PY'
+          import json, os, socket, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          current = json.loads((Path.home() / 'xperfect-local/receipt.json').read_text())
+          address = sorted({item[4][0] for item in socket.getaddrinfo('www.python.org', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
+          policy = root / 'worker-policy.json'
+          policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
+              'positive': [{'host': 'www.wikipedia.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
+          policy.chmod(0o600)
+          with (root / 'policy-start-private.txt').open('wb') as log:
+              subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
+                  '--state-dir', str(root / 'policy-state'), '--ui-port', '18780', '--mcp-port', '18767',
+                  '--service-image', current['service_image'], '--native-image', current['native_image'],
+                  '--worker-egress-policy', str(policy)], check=True, stdout=log, stderr=subprocess.STDOUT)
+          print('Opt-in package launched without operator privileges')
+          PY
+          native=$(python3 -c 'import json; from pathlib import Path; print(json.loads((Path.home()/"xperfect-local/receipt.json").read_text())["native_image"])')
+          sudo python3 tests/check_worker_network_live.py --native-image "$native" \
+            --package-receipt "$RUNNER_TEMP/policy-state/receipt.json" --package-policy "$RUNNER_TEMP/worker-policy.json"
       - name: Show a bounded failure without private output
         if: failure()
         run: |

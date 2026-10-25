@@ -330,12 +330,16 @@ async function loadAssistants() {
     const accounts=(connectedHere ? bootstrap.provider_accounts || [] : []).filter((account) =>
       account.status === 'ready' && account.account_id && names[String(account.provider || '').toLowerCase()]
       && (!Array.isArray(supportedIds) || supportedIds.includes(account.account_id)));
-    const options=accounts.map((account) => {
+    const options=accounts.flatMap((account) => {
       const supported=supportedAccounts.find(item=>item.account_id===account.account_id);
       const assistant=profiles[supported?.profile] || names[String(account.provider).toLowerCase()];
-      const auth=supported?.auth_method === 'api_key' ? ' · API key' : '';
+      const auth=supported?.auth_method === 'api_key' ? ' · API key' : supported?.auth_method === 'bedrock' ? ' · Bedrock' : '';
+      if (supported?.auth_method === 'bedrock' && supported.models?.length) return supported.models.map(model => {
+        const option=node('option',`${assistant} · ${account.label || 'Connected account'} · Bedrock · ${model.native_model}`);
+        option.value=model.id; option._accountId=account.account_id; option._modelId=model.id; return option;
+      });
       const option=node('option',`${assistant} · ${account.label || 'Connected account'}${auth}`);
-      option.value=account.account_id; return option;
+      option.value=account.account_id; return [option];
     });
     if (defaultHere && (bootstrap.workspace_type_options || []).some((item) => item.value === 'host' && !item.disabled)) {
       const option=node('option','Assistant on this computer'); option.value=''; options.push(option);
@@ -343,7 +347,7 @@ async function loadAssistants() {
     select.replaceChildren(...options);
     const preferred=String(bootstrap.user_preferences?.default_worker_profile || '');
     const matched=accounts.find((account) => ({codex:'codex-cli',openai:'codex-cli',claude:'claude-code',anthropic:'claude-code',grok:'grok-build',xai:'grok-build'})[String(account.provider).toLowerCase()] === preferred);
-    select.value=matched?.account_id || accounts[0]?.account_id || '';
+    select.value=options.find(option => (option._accountId || option.value) === (matched?.account_id || accounts[0]?.account_id))?.value || '';
     const available=options.length > 0;
     // Nothing here can start a conversation: ask for no input it could not use.
     $('send').disabled=!available;
@@ -363,10 +367,13 @@ $('composer').addEventListener('submit',async(event)=>{
   try {
     if (!conversationId) {
       const projectId=$('conversation-project').value;
-      const accountId=$('conversation-assistant').value;
+      const assistant=$('conversation-assistant').selectedOptions?.[0];
+      const accountId=assistant?._accountId || $('conversation-assistant').value;
+      const modelId=assistant?._modelId || '';
       const created=await api(base,'POST',{
         ...(projectId ? {scope:{project_id:projectId}} : {}),
         ...(accountId ? {account_id:accountId} : {}),
+        ...(modelId ? {model_id:modelId} : {}),
       });
       conversationId=created.conversation_id;
       chatLibrary.setScope(`chat.${conversationId}`);

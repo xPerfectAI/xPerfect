@@ -3522,6 +3522,13 @@ def create_app(
                 "summary": _active_work_status(record, state),
             }
         if detail:
+            run_detail = store.get_run(str(record.get("run_id") or "")) or {}
+            payload["usage"] = run_detail.get("usage")
+            payload["failureProvenance"] = {
+                "statusCode": run_detail.get("failure_status_code"),
+                "statusSource": run_detail.get("failure_status_source") or "unavailable",
+                "upstreamRequestId": run_detail.get("upstream_request_id") or None,
+            }
             payload["runRef"] = "run_sha256:" + sha256(
                 str(record.get("run_id") or "").encode("utf-8")
             ).hexdigest()
@@ -4354,6 +4361,7 @@ def create_app(
             "default_worker_profile": default_profile,
             "allowed_worker_profiles": allowed_worker_profiles(),
             "native_api_key_support": {provider: provider_platform_support(provider=provider, auth_method="api_key", native_homes=provider_setup.homes) if native_api_keys_enabled() else "unavailable" for provider in ("codex", "claude", "grok")},
+            "bedrock_support": "supported",
             "provider_setup_support": {
                 "codex": provider_platform_support(
                     provider="codex", auth_method="subscription"
@@ -4379,6 +4387,9 @@ def create_app(
         allowed = allowed_worker_profiles()
         items = []
         from .conversation_provider import GLASSHIVE_MODELS
+        _, catalog_tenant, catalog_owner = _current_principal(request)
+        bedrock_accounts = [account for account in control_plane.list_provider_accounts(tenant_id=catalog_tenant, owner_id=catalog_owner)
+                            if account.get("auth_method") == "bedrock"]
         shared_profile_support = getattr(
             service.runtime, "shared_workspace_profile_support", None
         )
@@ -4411,7 +4422,13 @@ def create_app(
                             "effort_choices": list(model.effort_choices),
                             "recommended_effort": model.recommended_effort}
                            for model in GLASSHIVE_MODELS.values()
-                           if model.harness_profile == descriptor.profile],
+                           if model.harness_profile == descriptor.profile] + ([{
+                               "id": model_id, "native_model": model_id, "connection_id": account["account_id"],
+                               "effort_choices": (account["connection_config"].get("model_contracts", {}).get(model_id) or {}).get("effort_choices"),
+                               "recommended_effort": (account["connection_config"].get("model_contracts", {}).get(model_id) or {}).get("recommended_effort"),
+                               "metadata_source": "connection_declared",
+                           } for account in bedrock_accounts for model_id in account["connection_config"]["model_ids"]]
+                           if descriptor.profile == "claude-code" else []),
             })
         # Adapter registration and host binary presence are separate; neither proves account/provider readiness.
         return {"items": items}
@@ -4679,6 +4696,8 @@ def create_app(
     app.mount("/v1/native/coordinator", coordinator_mcp.streamable_http_app())
 
     install_peer_routes(app, service.peers, _current_principal, _require_human_confirmation_scope)
+    from .spend_control_api import install_spend_control_routes
+    install_spend_control_routes(app, store, service, _current_principal, _allowed_ai_scope)
     app.mount("/v1/native/peers", peer_mcp.streamable_http_app())
 
     install_execution_workspace_routes(app, service, _current_principal, require_project, _profile_for_project)
@@ -5191,6 +5210,18 @@ def create_app(
     def create_provider_account(payload: CreateProviderAccountRequest, request: Request) -> dict[str, object]:
         _, tenant_id, owner_id = _current_principal(request)
         requested_broker = payload.secret_locator.startswith("broker://")
+        if payload.auth_method == "bedrock":
+            from .bedrock_connections import connection_config, connect as connect_bedrock
+            config = connection_config(payload.connection_config)
+            if config["credential_mode"] == "workload_identity" and str(os.environ.get("WPR_DEFAULT_EXECUTION_MODE") or "docker") != "host":
+                raise HTTPException(status_code=409, detail="Workload identity requires an explicitly enabled native host; containers use protected credentials")
+            account = control_plane.create_provider_account(tenant_id=tenant_id, owner_id=owner_id,
+                provider=payload.provider, label=payload.label, auth_method="bedrock",
+                platform_support=provider_platform_support(provider=payload.provider, auth_method="bedrock"),
+                secret_locator="native-home://auto", connection_config=config, make_default=payload.make_default)
+            if config["credential_mode"] == "workload_identity":
+                return connect_bedrock(control_plane, provider_setup.homes, account_id=account["account_id"], tenant_id=tenant_id, owner_id=owner_id)
+            return account
         if (
             payload.auth_method == "api_key"
             and requested_broker
@@ -5262,6 +5293,11 @@ def create_app(
     @app.post("/v1/provider-accounts/{account_id}/credentials")
     def connect_provider_api_key(account_id: str, payload: ProviderApiKeyRequest, request: Request) -> dict[str, object]:
         _, tenant_id, owner_id = _current_principal(request)
+        account = control_plane.get_provider_account_record(account_id=account_id, tenant_id=tenant_id, owner_id=owner_id)
+        if account and account.get("auth_method") == "bedrock":
+            from .bedrock_connections import connect as connect_bedrock
+            return connect_bedrock(control_plane, provider_setup.homes, account_id=account_id,
+                tenant_id=tenant_id, owner_id=owner_id, value=payload.value.get_secret_value())
         return NativeApiKeyManager(control_plane, provider_setup.homes).connect(
             account_id=account_id, tenant_id=tenant_id, owner_id=owner_id, value=payload.value.get_secret_value()
         )
@@ -5301,6 +5337,10 @@ def create_app(
         )
         if account is None:
             raise ControlPlaneError("Provider account not found for this user")
+        if account.get("auth_method") == "bedrock":
+            from .bedrock_connections import connect as connect_bedrock
+            return connect_bedrock(control_plane, provider_setup.homes, account_id=account_id,
+                tenant_id=tenant_id, owner_id=owner_id)
         recover = getattr(runtime_impl, "recover_quarantined_provider_projections", None)
         if callable(recover):
             # An abrupt close can quarantine a credential projection; settle it

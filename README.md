@@ -60,6 +60,15 @@ pause or stop supported work, and return to its recorded status. In **Workspaces
 worker or make a separate copy. **Schedules** can run a saved workspace later or send a webhook
 to your app; the receiving app decides what happens next.
 
+**Settings → Work pauses and spend** can hold new work for your account or a project,
+then resume the same queued work. Running work keeps going. Watch distinguishes reported
+usage from unknown usage. Spending policies use reported money and explicit reserves when cost is unknown.
+These limits control new admissions, not a provider's final bill.
+
+Builders can use the optional [evidence kit](integrations/evidence-kit/README.md) to keep
+original inputs, check exact output bytes and retry delivery without running the AI again.
+It uses the same public APIs and run records; client rules stay outside xPerfect.
+
 ### Manage your experts and saved work
 
 - **Workspaces → More → Save as expert** keeps a worker’s setup for another job. In
@@ -121,8 +130,9 @@ With Python 3.11 or newer and Docker running, from the source folder:
 
 The launcher downloads its release images and keeps private state under `~/xperfect-local`.
 Open the printed URL and use `ui_password` from the private credentials file it prints. Keep that
-file private; it also holds MCP credentials. The current image release is `linux/arm64`;
-Windows startup and other CPU architectures remain under construction. See
+file private; it also holds MCP credentials. The release has exact `linux/arm64` and
+`linux/amd64` image pairs; startup selects the Docker daemon's CPU. Windows host startup
+remains under construction. See
 [package details](docs/deployment.md#packaged-linux) for the packaged version and settings.
 
 ## Your tools, your setup

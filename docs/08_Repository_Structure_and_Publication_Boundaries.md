@@ -25,6 +25,9 @@ The repository is organized as follows:
   - current standalone runtime implementation
 - `frontends/`
   - separate frontend/operator surfaces
+- `integrations/evidence-kit/`
+  - optional, standard-library examples for immutable intake, evaluation, evidence
+    export and verified delivery; not imported by the runtime
 
 ## Boundary Rules
 

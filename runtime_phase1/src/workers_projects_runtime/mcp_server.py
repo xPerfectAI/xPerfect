@@ -3702,6 +3702,7 @@ class WorkersProjectsApiClient:
             "legacy", "personal_preferred", "personal_required"
         ] | None = None,
         provider_account_id: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         workspace_path_id = self._path_id(workspace_id, "workspace_id")
         payload: dict[str, Any] = {
@@ -3714,6 +3715,8 @@ class WorkersProjectsApiClient:
             payload["profile"] = profile
         if effort is not None:
             payload["effort"] = effort
+        if model is not None:
+            payload["model"] = model
         if provider_account_policy is not None:
             payload["provider_account_policy"] = provider_account_policy
         if provider_account_id is not None:
@@ -3791,6 +3794,7 @@ class WorkersProjectsApiClient:
         label: str,
         auth_method: str,
         make_default: bool = False,
+        connection_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -3806,6 +3810,7 @@ class WorkersProjectsApiClient:
                     else "broker://librechat-openai"
                 ),
                 "make_default": bool(make_default),
+                **({"connection_config": connection_config} if connection_config is not None else {}),
             },
         )
 
@@ -3885,6 +3890,24 @@ class WorkersProjectsApiClient:
         path_id = self._path_id(scope_id, f"{scope}_id")
         collection = "projects" if scope == "project" else "workspaces"
         return self._request("GET", f"/v1/{collection}/{path_id}/execution-policy")
+
+    def spend_policy(self, project_id: str = "") -> dict[str, Any]:
+        path = f"/v1/projects/{self._path_id(project_id, 'project_id')}/spend-policy" if project_id else "/v1/spend-policy"
+        return self._request("GET", path)
+
+    def update_spend_policy(self, *, expected_revision: int, policy: dict[str, Any], project_id: str = "") -> dict[str, Any]:
+        path = f"/v1/projects/{self._path_id(project_id, 'project_id')}/spend-policy" if project_id else "/v1/spend-policy"
+        return self._request("PUT", path, json_body={"expected_revision": expected_revision, "policy": policy})
+
+    def admission_holds(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/v1/admission-holds").get("items", [])
+
+    def place_admission_hold(self, *, scope_type: str = "owner", scope_id: str = "", reason_code: str = "operator_pause") -> dict[str, Any]:
+        return self._request("POST", "/v1/admission-holds", json_body={"scope_type": scope_type, "scope_id": scope_id, "reason_code": reason_code})
+
+    def resume_admission_hold(self, hold_id: str, *, expected_generation: int) -> dict[str, Any]:
+        path_id = self._path_id(hold_id, "hold_id")
+        return self._request("POST", f"/v1/admission-holds/{path_id}/resume", json_body={"expected_generation": expected_generation})
 
     def allowed_ai_options(self, scope: Literal["project", "workspace"], scope_id: str) -> dict[str, Any]:
         path_id = self._path_id(scope_id, f"{scope}_id")
@@ -4646,6 +4669,33 @@ def create_mcp_server(
             "workspace", workspace_id, expected_revision=expected_revision, policy=policy
         )
 
+    @server.tool(name="spend_policy_get", title="Read Spend Pause Settings", structured_output=True,
+                 annotations=READ_ONLY_TOOL_ANNOTATIONS,
+                 description="Read optional owner or project spend admission settings. These settings pause new invocations and are not a hard billing cap.")
+    def spend_policy_get(project_id: str = "") -> dict[str, Any]:
+        return client.spend_policy(project_id)
+
+    @server.tool(name="spend_policy_set", title="Save Spend Pause Settings", structured_output=True,
+                 description="Save an explicitly requested owner or project spend policy with its expected revision. This uses the existing owner authority: owner-authenticated AI clients can also change or disable it. Unknown cost stays unknown; pause keeps new work held until cost is reported or the policy changes. Use reserve for providers without cost reports. This is not a billing cap.")
+    def spend_policy_set(expected_revision: int, policy: dict[str, Any], project_id: str = "") -> dict[str, Any]:
+        return client.update_spend_policy(expected_revision=expected_revision, policy=policy, project_id=project_id)
+
+    @server.tool(name="admission_holds_list", title="Read Work Pauses", structured_output=True,
+                 annotations=READ_ONLY_TOOL_ANNOTATIONS,
+                 description="List durable owner-scoped work admission pauses and their current generations.")
+    def admission_holds_list() -> list[dict[str, Any]]:
+        return client.admission_holds()
+
+    @server.tool(name="admission_hold", title="Pause New Work", structured_output=True,
+                 description="Place an explicitly requested owner or project pause. Already active work continues. Use operator_pause or transport_integrity as the bounded reason.")
+    def admission_hold(scope_type: Literal["owner", "project"] = "owner", scope_id: str = "", reason_code: Literal["operator_pause", "transport_integrity"] = "operator_pause") -> dict[str, Any]:
+        return client.place_admission_hold(scope_type=scope_type, scope_id=scope_id, reason_code=reason_code)
+
+    @server.tool(name="admission_hold_resume", title="Resume New Work", structured_output=True,
+                 description="Resume an explicitly requested saved pause using its exact generation and existing owner authority. Owner-authenticated AI clients can resume it. Spend settings still apply: resume does not erase spending or approve unknown cost; unknown=pause holds again while cost remains unknown.")
+    def admission_hold_resume(hold_id: str, expected_generation: int) -> dict[str, Any]:
+        return client.resume_admission_hold(hold_id, expected_generation=expected_generation)
+
     @server.tool(
         name="workspace_preferences_get",
         title="Get GlassHive Preferences",
@@ -4776,6 +4826,7 @@ def create_mcp_server(
             "legacy", "personal_preferred", "personal_required"
         ] | None = None,
         provider_account_id: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         return client.add_execution_workspace_member(
             workspace_id,
@@ -4785,6 +4836,7 @@ def create_mcp_server(
             effort=effort,
             provider_account_policy=provider_account_policy,
             provider_account_id=provider_account_id,
+            model=model,
         )
 
     @server.tool(
@@ -4969,14 +5021,16 @@ def create_mcp_server(
     def worker_account_connect(
         provider: Literal["codex", "claude"],
         label: Annotated[str, Field(min_length=1, max_length=160)],
-        auth_method: Literal["subscription", "api_key", "enterprise_route"] = "subscription",
+        auth_method: Literal["subscription", "api_key", "enterprise_route", "bedrock"] = "subscription",
         make_default: bool = False,
+        connection_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return client.create_provider_account(
             provider=provider,
             label=label,
             auth_method=auth_method,
             make_default=make_default,
+            connection_config=connection_config,
         )
 
     @server.tool(
@@ -6861,6 +6915,7 @@ def create_mcp_server(
         title="Interrupt Worker",
         description=(
             "Interrupt the active task while keeping the worker available. Use when the user changes direction, cancels the current step, or requests immediate steering without destroying the worker. "
+            "When Interrupt targets saved queued work that never started, it cancels that worker's unfinished work, including queued follow-ups and pending scheduled runs; cancelled work never starts. Other workers are unaffected. "
             "Do not terminate persistent context unless the user asks. Returns lifecycle state and runtime blocker details when available."
         ),
         structured_output=True,

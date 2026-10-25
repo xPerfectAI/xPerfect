@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 
@@ -15,6 +15,14 @@ class MemberRequest(BaseModel):
     effort: str | None = Field(default=None, max_length=64)
     provider_account_policy: str | None = Field(default=None, max_length=32)
     provider_account_id: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def exact_connection_model(self):
+        if self.model is not None and (self.profile != "claude-code" or not self.provider_account_id
+                or self.provider_account_policy not in {"personal_preferred", "personal_required"}):
+            raise ValueError("An exact Bedrock model requires its selected Claude connection")
+        return self
 
 
 def _safe_runtime_detail(error: httpx.HTTPStatusError):

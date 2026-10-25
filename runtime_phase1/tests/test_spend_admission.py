@@ -1,0 +1,296 @@
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from workers_projects_runtime.spend_admission import AdmissionPolicyHold, SpendPolicyRevisionConflict
+from workers_projects_runtime.store import Store
+from test_usage_accounting import fixture_run, invoked_attempt, reconcile
+
+
+def policy(**overrides):
+    return {"version":1,"enabled":True,"currency":"USD","limit_amount":"1.00","unknown_policy":"reserve","reserve_amount":"0.60",**overrides}
+
+
+def admitted_attempt(store, worker, run):
+    store.claim_next_queued_run(worker["worker_id"])
+    lease = store.acquire_host_run_lease(runtime_family="codex",lane="mission",tenant_id="local",owner_id="owner",worker_id=worker["worker_id"],run_id=run["run_id"],executor_id="executor",conversation_limit=2,mission_limit=4,account_mission_limit=4,tenant_mission_limit=4,lease_ttl_s=300)
+    return store.admit_claimed_run(run["run_id"],lease_id=lease["lease_id"],executor_id="executor"), lease
+
+
+@pytest.mark.parametrize("currency", ["USD", "EUR"])
+def test_final_invocation_fences_strengthened_reserve_after_admission(tmp_path,currency):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    admitted, lease = admitted_attempt(store,worker,run)
+    store.put_spend_policy("local","owner",policy(currency=currency,limit_amount="50",reserve_amount="100"),1)
+    with pytest.raises(AdmissionPolicyHold) as raised:
+        store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert raised.value.hold["reason_code"] == "spend_limit"
+    assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+    assert store.list_run_attempts(run["run_id"])[0]["attempt_id"] == admitted["active_attempt_id"]
+
+
+def test_final_gate_values_other_uninvoked_reservations_under_changed_policy(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    _,_,other,other_run=fixture_run(tmp_path,"two",store)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    _,lease=admitted_attempt(store,worker,run)
+    admitted_attempt(store,other,other_run)
+    store.put_spend_policy("local","owner",policy(currency="EUR",limit_amount="50",reserve_amount="30"),1)
+    with pytest.raises(AdmissionPolicyHold) as raised:
+        store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert raised.value.hold["reason_code"] == "spend_limit"
+    assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+
+
+@pytest.mark.parametrize("currency,reserve,limit", [("USD","2","2"),("USD","0.25","0.25"),("EUR","2","2")])
+def test_final_invocation_replaces_uninvoked_reserve_at_current_policy(tmp_path,currency,reserve,limit):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    admitted, lease = admitted_attempt(store,worker,run)
+    store.put_spend_policy("local","owner",policy(currency=currency,limit_amount=limit,reserve_amount=reserve),1)
+    invoked=store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert invoked["runtime_invoked_at"]
+    with store._connect() as conn:
+        saved=conn.execute("SELECT * FROM spend_reservations WHERE attempt_id=?",(admitted["active_attempt_id"],)).fetchone()
+        assert (saved["currency"],saved["amount"],saved["state"]) == (currency,reserve,"open")
+
+
+def test_changed_currency_never_revalues_an_invoked_reserve_or_adds_currencies(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="50",reserve_amount="1"),0)
+    active,_=invoked_attempt(store,worker,run)
+    store.put_spend_policy("local","owner",policy(currency="EUR",limit_amount="50",reserve_amount="2"),1)
+    _,_,other,_=fixture_run(tmp_path,"two",store)
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    assert store.list_admission_holds("local","owner")[0]["reason_code"] == "usage_unknown"
+    with store._connect() as conn:
+        saved=conn.execute("SELECT * FROM spend_reservations WHERE attempt_id=?",(active["active_attempt_id"],)).fetchone()
+        assert (saved["currency"],saved["amount"],saved["state"]) == ("USD","1","open")
+    assert store.get_run(active["run_id"])["state"] == "running"
+
+
+def test_operator_hold_prevents_parallel_and_schedule_claim_churn_and_survives_restart(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    hold = store.place_admission_hold("local", "owner")
+    for _ in range(6):
+        assert store.peek_next_queued_run(worker["worker_id"]) is None
+        assert store.claim_next_queued_run(worker["worker_id"]) is None
+        assert store.claim_next_queued_run(worker["worker_id"], require_schedule_principal_authority=True) is None
+    assert store.list_run_attempts(run["run_id"]) == []
+    assert store.get_run(run["run_id"])["state"] == "queued"
+    reopened = Store(store.db_path)
+    with pytest.raises(SpendPolicyRevisionConflict):
+        reopened.resume_admission_hold(hold["hold_id"], "local", "owner", 99)
+    reopened.resume_admission_hold(hold["hold_id"], "local", "owner", hold["generation"])
+    assert reopened.claim_next_queued_run(worker["worker_id"]) is not None
+
+
+def test_scopes_do_not_pause_another_project_or_owner(tmp_path):
+    store, project, worker, run = fixture_run(tmp_path)
+    _, other, other_worker, other_run = fixture_run(tmp_path, "two", store)
+    store.place_admission_hold("local", "owner", "project", project["project_id"])
+    assert store.claim_next_queued_run(worker["worker_id"]) is None
+    assert store.claim_next_queued_run(other_worker["worker_id"]) is not None
+    with pytest.raises(ValueError):
+        store.place_admission_hold("local", "foreign", "project", project["project_id"])
+
+
+def test_hold_freezes_queue_clock_and_resumes_same_episode(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    now = datetime.now(timezone.utc)
+    hold = store.place_admission_hold("local", "owner", reason_code="transport_integrity")
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET admission_hold_started_at=?,queue_deadline_at=? WHERE run_id=?",
+                     ((now-timedelta(seconds=60)).isoformat(), (now-timedelta(seconds=1)).isoformat(),run["run_id"]))
+    assert store.list_due_queue_timeouts(now=now.isoformat()) == []
+    assert store.list_due_queue_status(now=(now+timedelta(hours=1)).isoformat()) == []
+    assert store.next_queue_maintenance_at(now=now.isoformat()) is None
+    before = store.get_run(run["run_id"])
+    store.resume_admission_hold(hold["hold_id"],"local","owner",hold["generation"])
+    after = store.get_run(run["run_id"])
+    assert after["queue_wait_episode"] == before["queue_wait_episode"]
+    assert after["queue_wait_generation"] == before["queue_wait_generation"]
+    assert datetime.fromisoformat(after["queue_deadline_at"]) > now
+    assert not after["admission_hold_started_at"]
+    assert store.claim_next_queued_run(worker["worker_id"]) is not None
+
+
+def test_final_invocation_hold_is_typed_and_leaves_active_work_unchanged(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    claimed = store.claim_next_queued_run(worker["worker_id"])
+    lease = store.acquire_host_run_lease(runtime_family="codex",lane="mission",tenant_id="local",owner_id="owner",worker_id=worker["worker_id"],run_id=run["run_id"],executor_id="executor",conversation_limit=2,mission_limit=4,account_mission_limit=4,tenant_mission_limit=4,lease_ttl_s=300)
+    store.admit_claimed_run(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    hold = store.place_admission_hold("local", "owner")
+    with pytest.raises(AdmissionPolicyHold):
+        store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    assert not store.get_run(run["run_id"])["runtime_invoked_at"]
+    store.resume_admission_hold(hold["hold_id"],"local","owner",hold["generation"])
+    active = store.mark_run_runtime_invoked(run["run_id"],lease_id=lease["lease_id"],executor_id="executor")
+    store.place_admission_hold("local","owner")
+    assert store.get_run(run["run_id"])["state"] == "running"
+    assert store.get_run(run["run_id"])["runtime_invoked_at"] == active["runtime_invoked_at"]
+
+
+def test_changed_operator_reason_fences_stale_resume(tmp_path):
+    store, _, _, _ = fixture_run(tmp_path)
+    old = store.place_admission_hold("local", "owner")
+    changed = store.place_admission_hold("local", "owner", reason_code="transport_integrity")
+    assert changed["generation"] == old["generation"] + 1
+    with pytest.raises(SpendPolicyRevisionConflict):
+        store.resume_admission_hold(old["hold_id"],"local","owner",old["generation"])
+
+
+def test_interrupt_terminal_artifact_owner_closes_attempt_and_unknown_reserve(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="10"),0)
+    run, _ = invoked_attempt(store,worker,run)
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET state='interrupted',ended_at=? WHERE run_id=?", (run["runtime_invoked_at"],run["run_id"]))
+        store._record_terminal_artifact_trace_conn(conn,run_id=run["run_id"],observed_at=run["runtime_invoked_at"])
+    attempt=store.list_run_attempts(run["run_id"])[0]
+    assert attempt["state"] == "interrupted" and attempt["ended_at"]
+    assert attempt["usage"]["coverage"] == "unknown" and len(attempt["usage"]["receipt_ids"]) == 1
+    with store._connect() as conn:
+        assert conn.execute("SELECT state FROM spend_reservations WHERE attempt_id=?",(attempt["attempt_id"],)).fetchone()[0] == "unknown"
+
+
+def test_interrupt_held_uninvoked_work_uses_cancellation_without_native_binding(tmp_path):
+    from workers_projects_runtime.openclaw_runtime import StubRuntime
+    from workers_projects_runtime.service import WorkersProjectsService
+    store, _, worker, run = fixture_run(tmp_path)
+    followup=store.create_run(worker["worker_id"],worker["project_id"],"Saved follow-up")
+    _,_,other,other_run=fixture_run(tmp_path,"other",store)
+    store.place_admission_hold("local","owner")
+    class NoNativeInterrupt(StubRuntime):
+        def interrupt_worker(self, *args, **kwargs):
+            raise AssertionError("Uninvoked queued work must not reach native interruption")
+    service = WorkersProjectsService(store, NoNativeInterrupt(), reconcile_on_startup=False, start_background_consumers=False)
+    try:
+        result=service.interrupt_worker(worker["worker_id"])
+        assert result["worker_id"] == worker["worker_id"]
+        assert store.get_run(run["run_id"])["state"] == "cancelled"
+        assert store.get_run(followup["run_id"])["state"] == "cancelled"
+        assert store.get_run(other_run["run_id"])["state"] == "queued"
+        assert store.list_run_attempts(run["run_id"]) == []
+        assert store.list_run_attempts(followup["run_id"]) == []
+        assert store.list_admission_holds("local","owner")[0]["active"]
+    finally:
+        service.shutdown()
+
+
+def test_concurrent_reservations_admit_only_one_then_unknown_retains_reserve(tmp_path):
+    store, _, worker1, run1 = fixture_run(tmp_path)
+    _, _, worker2, run2 = fixture_run(tmp_path, "two", store)
+    configured = store.put_spend_policy("local","owner",policy(),0)
+    assert configured["revision"] == 1
+    claims = [store.claim_next_queued_run(w["worker_id"]) for w in (worker1,worker2)]
+    leases = [store.acquire_host_run_lease(runtime_family="codex",lane="mission",tenant_id="local",owner_id="owner",worker_id=w["worker_id"],run_id=r["run_id"],executor_id="executor",conversation_limit=2,mission_limit=4,account_mission_limit=4,tenant_mission_limit=4,lease_ttl_s=300) for w,r in ((worker1,run1),(worker2,run2))]
+    def admit(index):
+        try:
+            return store.admit_claimed_run(claims[index]["run_id"],lease_id=leases[index]["lease_id"],executor_id="executor") is not None
+        except AdmissionPolicyHold:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(admit, (0,1))) == [False,True]
+    assert len([item for item in store.list_admission_holds("local","owner") if item["active"]]) == 1
+
+
+def test_late_money_and_unknown_policy_pause_new_work_without_cancelling_active(tmp_path):
+    store, _, worker, run = fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="10", unknown_policy="pause"),0)
+    run,_ = invoked_attempt(store,worker,run)
+    reconcile(store,run)
+    _,_,other,other_run = fixture_run(tmp_path,"two",store)
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    assert store.get_run(run["run_id"])["state"] == "running"
+    hold = store.list_admission_holds("local","owner")[0]
+    reconcile(store,run,total_cost_usd="0.50",revision=1)
+    store.finalize_run(run["run_id"], "completed")
+    store.resume_admission_hold(hold["hold_id"],"local","owner",hold["generation"])
+    assert store.claim_next_queued_run(other["worker_id"]) is not None
+
+
+def test_resume_does_not_approve_permanently_unknown_cost_under_pause_policy(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="10",unknown_policy="pause"),0)
+    run,_=invoked_attempt(store,worker,run)
+    store.finalize_run(run["run_id"],"completed")
+    _,_,other,_=fixture_run(tmp_path,"two",store)
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    hold=store.list_admission_holds("local","owner")[0]
+    store.resume_admission_hold(hold["hold_id"],"local","owner",hold["generation"])
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    renewed=store.list_admission_holds("local","owner")[0]
+    assert renewed["active"] and renewed["generation"]==hold["generation"]+1
+
+
+def test_spend_history_queries_are_bounded_per_scope_for_large_due_batch(tmp_path,monkeypatch):
+    import json
+    from contextlib import contextmanager
+    from workers_projects_runtime.store import utc_now
+    store,_,worker,run=fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="100000",reserve_amount="0.1"),0)
+    invoked,_=invoked_attempt(store,worker,run)
+    reconcile(store,invoked,total_cost_usd="0.000000000000000000001")
+    store.finalize_run(run["run_id"],"completed")
+    queued=store.create_run(worker["worker_id"],worker["project_id"],"Saved synthetic batch")
+    with store._connect() as conn:
+        for table,identity,count,source_id in (("run_attempts","attempt_id",3000,invoked["active_attempt_id"]),("usage_receipts","receipt_id",3000,None),("runs","run_id",300,queued["run_id"])):
+            if table=="usage_receipts":
+                original=dict(conn.execute("SELECT * FROM usage_receipts WHERE attempt_id=?",(invoked["active_attempt_id"],)).fetchone())
+            else:
+                original=dict(conn.execute(f"SELECT * FROM {table} WHERE {identity}=?",(source_id,)).fetchone())
+            columns=list(original)
+            copies=[]
+            for index in range(count):
+                row={**original,identity:f"scale_{table}_{index}"}
+                if table=="run_attempts":row["attempt_number"]=index+2
+                elif table=="usage_receipts":row["attempt_id"]=f"scale_run_attempts_{index}"
+                else:row["queue_next_status_at"]=row["queued_at"]
+                copies.append(tuple(row[key] for key in columns))
+            conn.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",copies)
+    queries=[]
+    original_connect=store._connect
+    @contextmanager
+    def traced():
+        with original_connect() as conn:
+            conn.set_trace_callback(queries.append)
+            try:yield conn
+            finally:conn.set_trace_callback(None)
+    monkeypatch.setattr(store,"_connect",traced)
+    assert len(store.list_due_queue_status(now=utc_now(),limit=1000))==300
+    assert sum(query.startswith("WITH spend_attempt_cost AS") for query in queries)==2
+    assert not any("SELECT usage_json FROM usage_receipts WHERE attempt_id=" in query for query in queries)
+
+
+@pytest.mark.parametrize("operation",["status","timeout","peek"])
+def test_spend_batch_snapshot_fences_a_concurrent_policy_writer(tmp_path,monkeypatch,operation):
+    import sqlite3
+    from workers_projects_runtime import spend_admission
+    from workers_projects_runtime.store import utc_now
+    store,_,worker,run=fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="10"),0)
+    now=utc_now()
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET queue_next_status_at=?,queue_deadline_at=? WHERE run_id=?",
+            (now,now if operation=="timeout" else (datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(),run["run_id"]))
+    original=spend_admission._scope_exposure
+    blocked=[]
+    def exposure(conn,*args):
+        assert conn.in_transaction
+        writer=sqlite3.connect(store.db_path,timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError,match="locked"):
+                writer.execute("BEGIN IMMEDIATE")
+            blocked.append(True)
+        finally:writer.close()
+        return original(conn,*args)
+    monkeypatch.setattr(spend_admission,"_scope_exposure",exposure)
+    if operation=="peek":store.peek_next_queued_run(worker["worker_id"],now_iso=now)
+    elif operation=="status":store.list_due_queue_status(now=now)
+    else:store.list_due_queue_timeouts(now=now)
+    assert blocked==[True]
+    with sqlite3.connect(store.db_path,timeout=0) as writer:
+        writer.execute("BEGIN IMMEDIATE")

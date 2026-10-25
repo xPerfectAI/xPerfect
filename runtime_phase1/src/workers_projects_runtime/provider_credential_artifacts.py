@@ -17,6 +17,8 @@ class CredentialArtifact:
 
 
 def credential_artifacts(provider: str, auth_method: str) -> tuple[CredentialArtifact, ...]:
+    if auth_method == "bedrock" and provider in {"claude", "anthropic"}:
+        return (CredentialArtifact("bedrock-credentials.json", ".xperfect/credentials/bedrock.json", False, "XPERFECT_BEDROCK_CREDENTIALS", 32_768),)
     if auth_method not in {"subscription", "api_key"}:
         raise ValueError("Only native subscription/API-key accounts have projected artifacts")
     if provider in {"codex", "openai"}:

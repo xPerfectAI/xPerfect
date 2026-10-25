@@ -207,6 +207,31 @@ assert(!account.options.some(item=>item.value==='foreign-provider-key'));assert.
 ''')
 
 
+def test_bedrock_worker_model_choices_stay_connection_scoped_and_never_remap_a_removed_choice():
+    app = (STATIC / 'app.js').read_text()
+    a = app.index('function renderLaunchProviderAccounts(')
+    b = app.index('\nfunction renderDefaultWorkerOptions', a)
+    policy = json.dumps((STATIC / 'launch-policy.js').as_uri())
+    onboarding('import {credentialPolicyTransition,preferredProviderAccountId} from ' + policy + ';\n' + app[a:b] + r'''
+globalThis.document=root;
+Element.prototype.append=function(...items){for(const item of items)this.appendChild(item);};
+globalThis.Option=function(text,value){return option(value,text);};
+const account=put('provider-account-selection','select'),policy=new Element('input','personal_required'),help=new Element('div');
+const field=put('provider-model-field','div'),model=put('provider-model-selection','select');
+const first={account_id:'cloud-a',provider:'claude',auth_method:'bedrock',label:'Cloud A',status:'ready',is_default:true,connection_config:{model_ids:['native-a','native-b'],default_model:'native-a'}};
+const second={account_id:'cloud-b',provider:'claude',auth_method:'bedrock',label:'Cloud B',status:'ready',connection_config:{model_ids:['native-c','native-d'],default_model:'native-c'}};
+const catalog={bootstrap_sections:{provider_accounts:'ready'},profile_account_providers:{'claude-code':['claude']},provider_accounts:[first,second]};
+renderLaunchProviderAccounts(account,policy,help,catalog,'new:claude-code');
+assert.deepEqual(model.options.map(item=>item.value),['','native-a','native-b']);assert.equal(field.hidden,false);assert.equal(model.disabled,false);
+model.value='native-b';renderLaunchProviderAccounts(account,policy,help,catalog,'new:claude-code');assert.equal(model.value,'native-b');
+first.connection_config.model_ids=['native-a'];renderLaunchProviderAccounts(account,policy,help,catalog,'new:claude-code');
+assert.equal(model.value,'native-b');assert.equal(model.options.find(item=>item.value==='native-b').disabled,true);
+account.dataset.explicitChoice='true';account.dataset.explicitProfile='claude-code';account.dataset.explicitAccountId='cloud-b';
+renderLaunchProviderAccounts(account,policy,help,catalog,'new:claude-code');
+assert.equal(model.value,'');assert.deepEqual(model.options.map(item=>item.value),['','native-c','native-d']);
+''')
+
+
 def test_account_menu_uses_typed_auth_state_and_clears_stale_identity_without_fetching():
     module = json.dumps((STATIC / 'account-menu.js').as_uri())
     node('import assert from "node:assert/strict"; import {renderAccountIdentity} from ' + module + r''';

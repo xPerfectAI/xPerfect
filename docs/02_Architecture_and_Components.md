@@ -1307,3 +1307,54 @@ unused full replay; a permitted rotation still validates its complete replay bef
 
 Wing and listen-only are call modes admitted on the existing `voice` surface, not separate worker
 surfaces. Their participant-role and explicit silence instructions still apply to the final choice.
+
+### Exact-attempt accounting and optional admission pauses
+
+`usage_accounting` owns normalized native usage receipts in runtime-store schema 14. A receipt
+belongs to an invoked run attempt, with a stable key and revision. Duplicate snapshots replace
+their own observation; distinct request deltas add once. An attempt total cannot mix with its
+included deltas. Missing and invalid values remain distinct from a reported zero. Late usage can
+reconcile a historical attempt but grants no lifecycle or output authority. Attempt-scoped files
+prevent a retry that reports nothing from inheriting its predecessor's usage.
+
+The additive run `usage` object is authoritative. Legacy integer fields remain known subtotals for
+compatibility. Money contains provider-reported decimal amounts and explicit currencies; tokens,
+context occupancy and conversation estimates establish no bill. Native retry, child and compaction
+cost is included only where the native receipt proves coverage. Account counters apply receipt
+identity/revision idempotently in the same runtime database and expose unknown-run coverage.
+Recovered receipts wait for the exact attempt's terminal outcome before projecting account
+counters. The immutable attempt start fence owns the account binding; a later retry's run state
+or connection cannot change an earlier attempt's account or outcome.
+Measured wrapper duration has its own once-only receipt slot, independent of whether a recovered
+usage projection counted the run first. Admission aggregates exact decimal exposure once per
+scope in each unchanged transaction batch. General metrics aggregate existing summaries in SQL;
+neither path materializes and reparses every historical receipt per queued row.
+Native terminal controls also close the exact attempt and settle its reservation in their existing
+transaction. Interrupted work without a native usage report remains unknown; it is never free.
+Host conversation cleanup uses the same attempt metric writer before publishing its result.
+Interrupting saved queued work uses the existing cancellation owner before any native account or
+process binding, so an admission hold does not prevent the owner from cancelling that work.
+`native_totals` retain aggregate input/output measurements separately from disjoint token buckets.
+Grok's latest-response total has partial invocation coverage. Direct SDK aggregates also have
+partial coverage: the SDK zero-fills missing upstream usage and exposes no presence flag. Positive
+measurements remain visible; zero-only Direct observations stay unknown. This does not change the
+OpenAI-compatible conversation usage shape or claim an invoice charge.
+
+Optional `spend_admission` policies use owner or project IDs, revision CAS and lifetime accounting
+from their original creation. An explicit unknown policy pauses or retains a configured reserve.
+No model prices, estimated charges, automatic allowance reset or new queue exist. The existing
+claim filter excludes held scopes before creating an attempt; admission and invocation transactions
+recheck races. A policy hold waits without provider retry budget or timer. Explicit generation-checked
+Resume wakes the existing scheduler. Invoked work continues. Delayed receipts, unknown charges and
+calls inside an active native harness can exceed a threshold: this is not a provider billing cap.
+The final invocation gate values uninvoked reservations under the current policy and replaces
+their earlier amount and currency. Invoked reservations retain their original values. Outstanding
+invoked reservations in another currency pause admission as unknown; no conversion is inferred.
+
+Operator holds share that admission owner, with bounded `operator_pause` or `transport_integrity`
+reasons. They require an explicit operator/monitor request; core does not infer shared corruption
+from model arguments. Provider quota/rate cooldowns retain their own expiring health owner.
+
+Continuity checks refuse open reservations and pending usage reconciliation. Explicit holds survive
+restore; dead-lease reservations lose execution authority. Captures are release-bound: restore an
+older capture with its own image, then upgrade. Exact schema/version checks and rollback remain.

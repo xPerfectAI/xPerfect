@@ -1,0 +1,111 @@
+name: Build native amd64 package
+
+# Explicit maintainer build branches. A native runner keeps the storage guard
+# intact; QEMU cannot qualify its thread-synchronized seccomp filter.
+on:
+  push:
+    branches: ['codex/build-*']
+    paths:
+      - .github/workflows/build-native-package.yml
+      - deployment/linux/native-build-inputs.json
+      - deployment/linux/Dockerfile.service
+      - runtime_phase1/containers/**
+      - runtime_phase1/src/workers_projects_runtime/storage_quota.py
+      - runtime_phase1/src/workers_projects_runtime/storage_quota_guard.py
+      - runtime_phase1/src/workers_projects_runtime/native_credential_exec.py
+      - runtime_phase1/src/workers_projects_runtime/account_native_entry.py
+      - runtime_phase1/src/workers_projects_runtime/grok_acp.py
+      - runtime_phase1/src/workers_projects_runtime/grok_auth.py
+      - runtime_phase1/src/workers_projects_runtime/native_key_reader.py
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write  # read and append only public-code images to a draft release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SKOPEO: quay.io/skopeo/stable@sha256:24940638e4abb0edfedc78a680554f316069d0212a00159276759421a059e611
+    steps:
+      - name: Obtain this exact public source
+        run: |
+          mkdir "$RUNNER_TEMP/source"
+          curl --fail --silent --show-error --location \
+            "https://github.com/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz" \
+            | tar -xz --strip-components=1 -C "$RUNNER_TEMP/source"
+          test "$(docker info --format '{{.Architecture}}')" = x86_64
+      - name: Verify and load the reviewed workstation base
+        run: |
+          cd "$RUNNER_TEMP/source"
+          manifest=deployment/linux/native-build-inputs.json
+          gh release download "$(jq -r .staging_release "$manifest")" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$(jq -r .archive "$manifest")" --dir "$RUNNER_TEMP"
+          echo "$(jq -r .archive_sha256 "$manifest")  $RUNNER_TEMP/$(jq -r .archive "$manifest")" | sha256sum --check --strict
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/work" "$SKOPEO" copy \
+            --override-arch amd64 "oci-archive:/work/$(jq -r .archive "$manifest"):$(jq -r .archive_ref "$manifest")" \
+            docker-daemon:xperfect-native-base:build
+      - name: Build the matched package with its real kernel guard
+        run: |
+          cd "$RUNNER_TEMP/source"
+          docker build --platform linux/amd64 --build-arg XPERFECT_BASE_IMAGE=xperfect-native-base:build \
+            -f runtime_phase1/containers/Dockerfile.shared -t xperfect-native:build runtime_phase1
+          docker build --platform linux/amd64 --build-arg XPERFECT_NATIVE_IMAGE=xperfect-native:build \
+            -f deployment/linux/Dockerfile.service -t xperfect-service:build .
+          for client in codex claude grok; do
+            actual=$(docker run --rm --network none --entrypoint "$client" xperfect-native:build --version)
+            expected=$(jq -r --arg client "$client" '.client_versions[$client]' deployment/linux/native-build-inputs.json)
+            test "$actual" = "$expected"
+            echo "Verified $client version"
+          done
+      - name: Qualify the native worker policy through the package entry point
+        run: |
+          cd "$RUNNER_TEMP/source"
+          python3 - <<'PY_POLICY'
+          import json, os, socket, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          address = sorted({item[4][0] for item in socket.getaddrinfo('www.python.org', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
+          policy = root / 'worker-policy.json'
+          policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
+              'positive': [{'host': 'www.wikipedia.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
+          policy.chmod(0o600)
+          images = {role: subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}',
+              'xperfect-' + role + ':build'], text=True).strip() for role in ('service', 'native')}
+          with (root / 'policy-start-private.txt').open('wb') as output:
+              result = subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
+                  '--state-dir', str(root / 'policy-state'), '--ui-port', '18780', '--mcp-port', '18767',
+                  '--service-image', images['service'], '--native-image', images['native'],
+                  '--worker-egress-policy', str(policy)], stdout=output, stderr=subprocess.STDOUT)
+          if result.returncode:
+              lines = (root / 'policy-start-private.txt').read_text().splitlines()
+              for line in lines:
+                  if line.startswith('xPerfect:'):
+                      print(line.replace(str(root), '<private-state>')[:500])
+              raise SystemExit(result.returncode)
+          print('Opt-in package started without operator privileges')
+          PY_POLICY
+          native=$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"])/"policy-state/receipt.json").read_text())["native_image"])')
+          sudo python3 tests/check_worker_network_live.py --native-image "$native" \
+            --package-receipt "$RUNNER_TEMP/policy-state/receipt.json" --package-policy "$RUNNER_TEMP/worker-policy.json"
+      - name: Export exact images for review and existing publication
+        run: |
+          cd "$RUNNER_TEMP/source"
+          mkdir "$RUNNER_TEMP/package"
+          for role in native service; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/package:/work" "$SKOPEO" copy \
+              "docker-daemon:xperfect-$role:build" "oci:/work/layout:$role-amd64"
+          done
+          tar -C "$RUNNER_TEMP/package/layout" -cf "$RUNNER_TEMP/package-amd64.tar" .
+          cd "$RUNNER_TEMP"
+          mv package-amd64.tar "package-amd64-$GITHUB_SHA.tar"
+          sha256sum "package-amd64-$GITHUB_SHA.tar" > "package-amd64-$GITHUB_SHA.sha256"
+          printf '%s\n' "$GITHUB_SHA" > "package-amd64-$GITHUB_SHA.source"
+          release=$(jq -r .staging_release source/deployment/linux/native-build-inputs.json)
+          # Each build owns new names. Never overwrite a previously reviewed asset.
+          gh release upload "$release" --repo "$GITHUB_REPOSITORY" \
+            "package-amd64-$GITHUB_SHA.tar" "package-amd64-$GITHUB_SHA.sha256" "package-amd64-$GITHUB_SHA.source"
+          echo 'Native amd64 package built with the storage guard unchanged. Provider authentication and full package acceptance remain separate.' >> "$GITHUB_STEP_SUMMARY"

@@ -362,6 +362,7 @@ class HarnessModel:
     effort_choices: tuple[str, ...]
     recommended_effort: str
     context_window: int
+    connection_id: str = ""
 
     def api_payload(self, *, readiness: dict[str, Any] | None = None) -> dict[str, Any]:
         # Preserve the established public ordering and append the native CLI
@@ -378,6 +379,7 @@ class HarnessModel:
             "display_name": self.display_name,
             "harness_profile": self.harness_profile,
             "native_model": self.native_model,
+            **({"connection_id": self.connection_id} if self.connection_id else {}),
             **({"service_tier_choices": ["default", "priority", "ultrafast"]}
                if self.id == "direct-openai:gpt-6.1-sol" else
                {"service_tier_choices": ["default", "priority"]}
@@ -3928,6 +3930,7 @@ class ConversationProvider:
     ) -> dict[str, Any]:
         configured_grok = self._selected_grok_model(tenant_id, owner_id)
         models = list(GLASSHIVE_MODELS.values())
+        models.extend(self._bedrock_models(tenant_id, owner_id))
         if configured_grok is not None and configured_grok.id not in GLASSHIVE_MODELS:
             models.append(configured_grok)
         # Discovery describes model contracts, not live account authentication. Starting every
@@ -3947,12 +3950,20 @@ class ConversationProvider:
             for model in models
         ]}
 
+    def _bedrock_models(self, tenant_id: str, owner_id: str) -> list[HarnessModel]:
+        control = getattr(getattr(self, "service", None), "control_plane_store", None)
+        from .bedrock_connections import declared_conversation_models
+        return declared_conversation_models(control, tenant_id, owner_id)
+
     def _model(self, model_id: str, *, tenant_id: str = "local", owner_id: str = "",
                trusted_history: bool = False) -> HarnessModel:
         clean_id = str(model_id or "").strip()
         model = GLASSHIVE_MODELS.get(clean_id)
         if model is not None:
             return model
+        declared_bedrock = next((item for item in self._bedrock_models(tenant_id, owner_id) if item.id == clean_id), None)
+        if declared_bedrock is not None:
+            return declared_bedrock
         configured_grok = self._selected_grok_model(tenant_id, owner_id)
         if trusted_history and clean_id.startswith("grok-build:"):
             historical = _configured_grok_conversation_model(clean_id.removeprefix("grok-build:"))
@@ -4156,7 +4167,7 @@ class ConversationProvider:
             if isinstance(existing, dict) else ""
         )
         configured_connection = str(bundle.get("connection_id") or "").strip()
-        selected_ids = {value for value in (origin_connection, explicit_account, configured_connection) if value}
+        selected_ids = {value for value in (origin_connection, explicit_account, configured_connection, model.connection_id) if value}
         if len(selected_ids) > 1:
             raise HTTPException(
                 status_code=409,
@@ -7044,6 +7055,8 @@ class ConversationProvider:
                 "request_id": request_record["request_id"],
                 "activity_url": f"/v1/requests/{request_record['request_id']}/activity",
                 "usage_source": usage_source,
+                "usage_receipt_ids": (run.get("usage") or {}).get("receipt_ids", []),
+                "usage_coverage": (run.get("usage") or {}).get("coverage", "unknown"),
             },
         }
         if contract.get("requested_model"):
@@ -9354,6 +9367,9 @@ def _responses_from_chat(
     response["glasshive"]["usage_source"] = (
         (chat_response.get("glasshive") or {}).get("usage_source") or "estimated"
     )
+    for key in ("usage_receipt_ids", "usage_coverage"):
+        if key in (chat_response.get("glasshive") or {}):
+            response["glasshive"][key] = chat_response["glasshive"][key]
     response["model"] = str(chat_response.get("model") or payload.model)
     if (chat_response.get("glasshive") or {}).get("requested_model"):
         response["glasshive"]["requested_model"] = chat_response["glasshive"]["requested_model"]

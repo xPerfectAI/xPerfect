@@ -1373,7 +1373,8 @@ def test_declared_content_policy_rejection_precedes_http_access_fallback(tmp_pat
     (403, None, "provider_access_denied"),
     (403, "misalignment_policy_violation", "provider_request_rejected"),
 ])
-def test_official_sdk_error_transport_retains_declared_recovery_class(tmp_path, monkeypatch, status, code, expected):
+@pytest.mark.parametrize('request_id', ['req-synthetic-error', 'private payload with spaces', None])
+def test_official_sdk_error_transport_retains_declared_recovery_class(tmp_path, monkeypatch, status, code, expected, request_id):
     import importlib
     import io
     import openai
@@ -1383,18 +1384,22 @@ def test_official_sdk_error_transport_retains_declared_recovery_class(tmp_path, 
     events, sent = [], []
     def handler(request):
         sent.append(request.url.path)
+        headers = {'authorization': 'synthetic-private-header', 'set-cookie': 'synthetic-private-cookie'}
+        if request_id is not None:
+            headers['x-request-id'] = request_id
         if status == 200:
             event = {"type": "error", "code": code, "message": "private synthetic request detail", "param": None, "sequence_number": 0}
             return httpx.Response(200, text="event: error\ndata: " + json.dumps(event) + "\n\n",
-                headers={"content-type": "text/event-stream", "x-request-id": "req-synthetic-error"})
+                headers={**headers, "content-type": "text/event-stream"})
         return httpx.Response(status, json={"error": {"message": "private synthetic request detail", "type": "access_error", "code": code}},
-            headers={"x-request-id": "req-synthetic-error"})
+            headers=headers)
     class MockClient(original):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **{**kwargs, "transport": httpx.MockTransport(handler)})
     monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", MockClient)
     monkeypatch.setenv("XAI_API_KEY", "synthetic-not-used")
     monkeypatch.setattr(direct_runner, "emit", events.append)
+    monkeypatch.setattr(direct_runner, 'LAST_RESPONSE_REQUEST_ID', {'provider_request_id': 'req-previous-attempt'})
     request = {"provider": "xai", "model": "grok-4.7", "effort": "low", "instructions": "Synthetic test.",
         "instruction": "Reply.", "history_enabled": False, "history_path": str(tmp_path / "history.json"),
         "history_scope": {"worker": "fixture"}, "session_id": "direct:fixture", "run_id": "sdk-error", "mcp_servers": []}
@@ -1404,8 +1409,14 @@ def test_official_sdk_error_transport_retains_declared_recovery_class(tmp_path, 
     assert result.value.code == 1 and len(sent) == 1, events
     error = events[-1]
     assert error["type"] == "direct.error"
+    safe_id = request_id if request_id == 'req-synthetic-error' else ''
+    assert error.get('provider_request_id', '') == safe_id
     assert "private synthetic request detail" not in json.dumps(error)
+    assert 'synthetic-private' not in json.dumps(events)
+    assert 'private payload with spaces' not in json.dumps(events)
+    assert 'req-previous-attempt' not in json.dumps(events)
     runtime = DirectModelRuntime("direct-xai", base_dir=str(tmp_path / "state"))
     failure, _ = runtime._provider_failure_for_process(worker=worker(tmp_path), run_id="sdk-error",
         stdout="\n".join(json.dumps(event) for event in events), stderr="", exit_code=1)
     assert failure.failure_class == expected
+    assert failure.upstream_request_id == safe_id

@@ -10,7 +10,7 @@ The hosted profile runs the same three containers as the local package — runti
 
 ## What you need
 
-- **Arm64 Linux server** with Python 3.11+ and rootful Docker (cgroup v2). The published images currently support `linux/arm64`; Intel/amd64 and Windows host startup remain deferred. Rootless Docker and user-namespace remapping cannot set project quotas.
+- **Arm64 Linux server** with Python 3.11+ and rootful Docker (cgroup v2) for this retained hosted qualification. Published package pairs also include `linux/amd64`; its native local-package checks do not establish this separate XFS/OIDC hosted journey. Windows host startup remains deferred. Rootless Docker and user-namespace remapping cannot set project quotas.
 - **Files disk:** a dedicated XFS filesystem mounted with `prjquota`, not `pqnoenforce`. Mount it by UUID so it returns after a reboot, for example `UUID=… /srv/xperfect-data xfs prjquota,nosuid,nodev 0 2`. Docker's own storage (control state) must be on a different filesystem.
 - **OIDC provider** that issues:
   - an HTTPS issuer;
@@ -73,6 +73,7 @@ Optional fields:
 | `models` | none | Exact model per worker type, e.g. `{"grok-build": "<ID from grok models>"}`. Grok needs one; nothing is guessed |
 | `role_map` | none | Map your identity provider's role values to xPerfect roles, e.g. `{"xperfect-admins": "tenant_admin", "xperfect-users": "member"}`. See [Roles from your identity provider](#roles-from-your-identity-provider) |
 | `role_claim` | `roles` | The top-level token claim that carries those values, e.g. `groups`. Only used with `role_map` |
+| `worker_egress_policy` | off | Optional Linux operator bridge policy with denied IPv4 addresses, probe ports, narrow TCP/UDP exceptions and positive TCP controls. Startup records it without changing the firewall. The host administrator applies it separately; each native use needs current exact-network proof. See [worker bridge policy](deployment.md#optional-worker-bridge-policy). |
 
 Hosted `models` is explicit operator configuration; it does not inherit the local release defaults.
 For a repeatable exact Codex run, set `{"codex-cli":"<model ID available to your account>"}`.
@@ -85,20 +86,13 @@ and token `scp` can differ; this launcher currently uses `mcp_scopes` for both. 
 Entra client recipe therefore needs that supported scope mapping before it can be claimed ready.
 See [Microsoft's claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference).
 
-Pull the reviewed release pair and resolve its local image IDs. Run this from the public checkout
-on the prepared Docker host; it reads the existing release manifest rather than private machine IDs:
+Run from the public checkout on the prepared Docker host. The launcher selects the reviewed pair
+for that Docker daemon's CPU and downloads it when missing; no image IDs are needed:
 
 ```sh
-XP_SERVICE_REF=$(python3 -c 'import json; from pathlib import Path; d=json.loads(Path("deployment/linux/candidate-images.json").read_text()); i=next(i for i in d["images"] if i["repository"]=="xperfect-service"); print(d["registry"]+"/xperfect-service@"+i["digest"])')
-XP_NATIVE_REF=$(python3 -c 'import json; from pathlib import Path; d=json.loads(Path("deployment/linux/candidate-images.json").read_text()); i=next(i for i in d["images"] if i["repository"]=="xperfect-native"); print(d["registry"]+"/xperfect-native@"+i["digest"])')
-docker pull "$XP_SERVICE_REF"
-docker pull "$XP_NATIVE_REF"
-XP_SERVICE_IMAGE=$(docker image inspect --format '{{.Id}}' "$XP_SERVICE_REF")
-XP_NATIVE_IMAGE=$(docker image inspect --format '{{.Id}}' "$XP_NATIVE_REF")
 python3 deployment/linux/launch.py \
   --profile hosted-xfs --hosted-config /etc/xperfect/hosted.json \
   --docker-host unix:///var/run/docker.sock --name xperfect-hosted \
-  --service-image "$XP_SERVICE_IMAGE" --native-image "$XP_NATIVE_IMAGE" \
   --ui-port 443 --mcp-port 8443 --receipt /etc/xperfect/receipt.json
 ```
 

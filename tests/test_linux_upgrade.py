@@ -64,6 +64,7 @@ def run_state_tool(program: str, argv: list[str], placed: dict[str, dict[str, by
 class FakeDocker:
     def __init__(self):
         self.images = {OLD, NEW, NATIVE}
+        self.image_architectures = {}
         self.volumes: dict[str, dict[str, bytes]] = {}
         self.networks: dict[str, dict] = {}
         self.containers: dict[str, dict] = {}
@@ -288,8 +289,10 @@ class FakeDocker:
         if args[:1] == ('info',):
             if '{{.OperatingSystem}}' in args:
                 return ok(self.operating_system)
-            return ok(json.dumps({'OSType': 'linux', 'CgroupVersion': '2'}))
+            return ok(json.dumps({'OSType': 'linux', 'CgroupVersion': '2', 'Architecture': 'aarch64'}))
         if args[:2] == ('image', 'inspect'):
+            if '{{json .}}' in args and args[-1] in self.images:
+                return ok(json.dumps({'Id': args[-1], 'Os': 'linux', 'Architecture': self.image_architectures.get(args[-1], 'arm64')}))
             return ok(args[-1]) if args[-1] in self.images else fail()
         if args[1:2] == ('ls',):
             return ok()
@@ -1886,6 +1889,60 @@ def test_a_committed_isolation_needs_no_second_migration(package):
     runner.upgrade(service_image=OLD)
     assert not [call for call in fake.calls if call[:2] in {('network', 'rm'), ('network', 'create')}]
     assert fake.networks[f'{NAME}-workers']['Options'] == ISOLATED
+
+
+def _egress_policy(fake, enforcement=None):
+    control = fake.volumes[f'{NAME}-control']
+    config = json.loads(control['config.json'])
+    config['environment']['XPERFECT_WORKER_EGRESS_POLICY'] = json.dumps({
+        'denied': [{'host': '169.254.169.254', 'probe_port': 80}],
+        'positive': [{'host': 'example.test', 'port': 443}]})
+    control['config.json'] = json.dumps(config).encode()
+    if enforcement is None:
+        control.pop('worker-egress.json', None)
+    else:
+        control['worker-egress.json'] = json.dumps({'version': 1, 'enforcement': enforcement, 'observed_at': 0}).encode()
+
+
+@pytest.mark.parametrize('enforcement', [None, 'iptables_readback'])
+def test_enabled_egress_requires_operator_removal_before_upgrade_bridge_mutation(package, enforcement):
+    fake, path, receipt = package
+    _older_launcher(fake)
+    _egress_policy(fake, enforcement)
+    fake.calls.clear()
+    with pytest.raises(linux_upgrade.UpgradeError, match='network_policy.py remove.*no worker bridge was changed'):
+        _runner(path).upgrade(service_image=NEW)
+    assert _mutations(fake) == [] and not linux_upgrade.journal_path(path).exists()
+    assert fake.networks[f'{NAME}-workers']['Options'] == {}
+
+
+def test_operator_removal_allows_upgrade_and_is_required_before_rollback_mutation(package):
+    fake, path, receipt = package
+    _older_launcher(fake)
+    _egress_policy(fake, 'removed')
+    runner = _runner(path)
+    runner.upgrade(service_image=NEW)
+    assert fake.networks[f'{NAME}-workers']['Options'] == ISOLATED
+    _egress_policy(fake, 'iptables_readback')
+    fake.calls.clear()
+    with pytest.raises(linux_upgrade.UpgradeError, match='network_policy.py remove'):
+        runner.rollback()
+    assert _mutations(fake) == []
+    assert fake.networks[f'{NAME}-workers']['Options'] == ISOLATED
+    _egress_policy(fake, 'removed')
+    runner.rollback()
+    assert fake.networks[f'{NAME}-workers']['Options'] == {}
+    assert all(fake.find(identity)['State']['Running'] for identity in receipt['containers'].values())
+
+
+def test_enabled_egress_never_requires_removal_when_worker_isolation_does_not_change(package):
+    fake, path, receipt = package
+    _egress_policy(fake, 'iptables_readback')
+    runner = _runner(path)
+    fake.calls.clear()
+    runner.upgrade(service_image=NEW)
+    runner.rollback()
+    assert not [call for call in fake.calls if call[:2] in {('network', 'rm'), ('network', 'create'), ('network', 'disconnect')}]
 
 
 def test_an_image_that_needs_container_traffic_is_refused_on_an_isolated_package(package):

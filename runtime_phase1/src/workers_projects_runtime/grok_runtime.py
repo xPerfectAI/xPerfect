@@ -112,6 +112,44 @@ def grok_native_authority_instructions(worker, bundle, servers, output_schema):
 
 
 class GrokBuildRuntime(BaseCliWorkerRuntime):
+    def _usage_observation_from_output(self, stdout: str) -> dict:
+        """Keep native totals without claiming unobserved cache buckets or scope."""
+        from .usage_accounting import normalize_observation
+        latest = {}
+        for line in reversed(stdout.splitlines()):
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(event, dict) and event.get("type") == "grok.result":
+                latest = event
+                break
+        usage = latest.get("usage") if isinstance(latest.get("usage"), dict) else {}
+        direct = isinstance(getattr(self, "direct", None), dict) or latest.get("executor") == "direct"
+        def count(key):
+            value = usage.get(key)
+            # The Direct SDK zero-fills absent upstream usage and exposes no
+            # presence flag. A zero there cannot establish a reported zero.
+            return value if type(value) is int and value >= (1 if direct else 0) else None
+        raw = {"_measurement_coverage": "partial",
+               "_measurement_scope": "sdk_aggregate_unproven" if direct else "native_latest_response"}
+        input_count = count("input_tokens" if direct else "prompt_tokens")
+        output_count = count("output_tokens" if direct else "completion_tokens")
+        raw["_native_totals"] = {"input_tokens": input_count, "output_tokens": output_count}
+        raw["output_tokens"] = output_count
+        if direct:
+            cached = count("cached_input_tokens")
+            created = count("cache_write_input_tokens")
+            raw["cache_read_input_tokens"] = cached
+            raw["cache_creation_input_tokens"] = created
+            if input_count is not None and cached is not None and created is not None and cached + created <= input_count:
+                raw["input_tokens"] = input_count - cached - created
+        return normalize_observation(raw)
+
+    def _usage_from_output(self, stdout: str) -> dict[str, int]:
+        return {key: field["value"] for key, field in self._usage_observation_from_output(stdout)["tokens"].items()
+                if field["status"] == "reported"}
+
     runtime_name = 'grok-build'
     worker_root_name = 'grok_build_runtime'
     binary_env_var = 'WPR_GROK_BIN'

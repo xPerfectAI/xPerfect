@@ -202,6 +202,11 @@
                   <select id="direct-effort" aria-label="Direct model effort" disabled></select>
                   <small>Options come from the selected model's xPerfect catalog.</small>
                 </label>
+                <label id="provider-model-field" class="advanced-field" hidden>
+                  <span>Bedrock model or inference profile</span>
+                  <select id="provider-model-selection" name="model" disabled></select>
+                  <small>Exact choices declared by this connection.</small>
+                </label>
                 <label class="advanced-field" data-effort-profile="codex-cli">
                   <span>Codex Effort</span>
                   <select id="codex-effort" name="codex_reasoning_effort">
@@ -412,6 +417,24 @@
                     <input id="provider-api-key" type="password" autocomplete="off" spellcheck="false" maxlength="8192" />
                     <span>Stored privately on this host. Sent only to the selected provider.</span>
                   </label>
+                  <fieldset id="provider-bedrock-fields" hidden>
+                    <legend>Amazon Bedrock</legend>
+                    <label>Region<input id="bedrock-region" autocomplete="off" maxlength="64" /></label>
+                    <label>Claude model or inference-profile IDs, one per line<textarea id="bedrock-models" rows="3" spellcheck="false"></textarea></label>
+                    <label>Default model or inference profile<input id="bedrock-default-model" autocomplete="off" maxlength="512" /></label>
+                    <p class="field-help">Use exact Anthropic model choices allowed by your AWS account. Each worker can select a declared choice.</p>
+                    <details><summary>Conversation model details</summary>
+                      <label>Model contracts (JSON)<textarea id="bedrock-model-contracts" rows="4" spellcheck="false" placeholder="{}"></textarea></label>
+                      <p class="field-help">Optional. For each exact ID, declare context_window, effort_choices and recommended_effort. These choices then appear in Chat. Use the model's supported values.</p>
+                    </details>
+                    <label>Bedrock bearer token<input id="bedrock-bearer" type="password" autocomplete="off" /></label>
+                    <details><summary>Use AWS access credentials</summary>
+                      <label>Access key ID<input id="bedrock-access-key" type="password" autocomplete="off" /></label>
+                      <label>Secret access key<input id="bedrock-secret-key" type="password" autocomplete="off" /></label>
+                      <label>Session token, if required<input id="bedrock-session-token" type="password" autocomplete="off" /></label>
+                    </details>
+                    <p class="field-help">Credentials stay in this account's private storage. AWS access is checked when work starts.</p>
+                  </fieldset>
                   <label class="default-account-toggle">
                     <input id="provider-account-default" name="make_default" type="checkbox" />
                     <span>Use by default</span>

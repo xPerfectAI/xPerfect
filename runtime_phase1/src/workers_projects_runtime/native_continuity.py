@@ -1132,6 +1132,10 @@ def _require_quiescent(connection: sqlite3.Connection, database: Path) -> None:
         raise ValueError("GlassHive worker compute must be quiesced before continuity")
     if connection.execute("SELECT 1 FROM host_run_leases WHERE status IN ('active','reserved') LIMIT 1").fetchone():
         raise ValueError("GlassHive live worker leases must be quiesced before continuity")
+    if connection.execute("SELECT 1 FROM spend_reservations WHERE state='open' LIMIT 1").fetchone():
+        raise ValueError("Spend reservations must settle before continuity")
+    if connection.execute("SELECT 1 FROM run_attempts WHERE usage_accounting_state='pending' LIMIT 1").fetchone():
+        raise ValueError("Attempt usage must reconcile before continuity")
     if connection.execute("SELECT 1 FROM workspace_gc_tombstones WHERE phase!='completed' LIMIT 1").fetchone():
         raise ValueError("GlassHive workspace cleanup must settle before continuity")
     if connection.execute(
@@ -1370,6 +1374,7 @@ def _restore_hold_digest(items: list[str]) -> str:
 
 def _reset_restore_authority(connection: sqlite3.Connection) -> None:
     """Make restored native work inert while retaining all history and user intent."""
+    connection.execute("UPDATE spend_reservations SET state='released' WHERE state='open'")
 
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_native_sessions'"
@@ -1743,6 +1748,7 @@ def _reset_authority(store: Store) -> None:
         connection.execute("UPDATE schedule_principal_authority SET enabled=0, authority_epoch=authority_epoch+1")
         connection.execute("UPDATE host_run_leases SET status='released', pid=NULL, process_group=NULL, process_start_identity='', startup_token='', startup_state='aborted', released_at=COALESCE(released_at, ?), release_reason='restore_reauthentication_required'", (now,))
         connection.execute("UPDATE preflight_capacity_reservations SET status='released', released_at=COALESCE(released_at, ?), release_reason='restore_reauthentication_required'", (now,))
+        connection.execute("UPDATE spend_reservations SET state='released' WHERE state='open'")
         connection.execute("DELETE FROM internal_assertion_replay_cache")
         connection.execute("DELETE FROM service_assertion_nonces")
         for row in connection.execute("SELECT run_id, runtime_bundle_json FROM runs WHERE runtime_bundle_json IS NOT NULL").fetchall():

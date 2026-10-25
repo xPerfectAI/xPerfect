@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+from .usage_accounting import safe_upstream_request_id
 
 USER_RESUMABLE_FAILURE_CLASSES = frozenset(
     {
@@ -63,6 +64,9 @@ class FailureClassification:
     structured: bool = False
     retry_after_s: float | None = None
     provider_event_source: str = ""
+    upstream_request_id: str = ""
+    failure_status_source: str = "unavailable"
+    failure_status_code: int | None = None
 
     def as_store_fields(self) -> dict[str, Any]:
         return {
@@ -72,6 +76,10 @@ class FailureClassification:
             "failure_user_message": self.user_message,
             "failure_recommended_recovery": self.recommended_recovery,
             "failure_diagnostic_summary": self.diagnostic_summary,
+            "upstream_request_id": safe_upstream_request_id(self.upstream_request_id),
+            "failure_status_source": self.failure_status_source if isinstance(self.failure_status_source, str) and self.failure_status_source in {
+                "http_response", "harness_reported", "adapter_synthesized", "unavailable"} else "unavailable",
+            "failure_status_code": self.failure_status_code if type(self.failure_status_code) is int and 100 <= self.failure_status_code <= 599 else None,
         }
 
 
@@ -197,7 +205,7 @@ def _is_provider_failure_record(record: dict[str, Any]) -> bool:
 
 
 def _safe_http_status(value: Any) -> int | None:
-    if isinstance(value, bool):
+    if type(value) is not int and not (isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value)):
         return None
     try:
         status = int(value)
@@ -617,6 +625,13 @@ def classify_runtime_error(
     runtime_name: str,
 ) -> FailureClassification:
     """Classify runtime/control-plane failures without inspecting the user's task text."""
+    from .worker_egress import WorkerEgressUnavailable
+    if isinstance(exc, WorkerEgressUnavailable):
+        return FailureClassification(
+            failure_class="worker_network_policy_unavailable", retryable=False,
+            user_message="The worker network proof is missing, stale or changed. Ask the operator to refresh it, then continue.",
+            recommended_recovery="Ask the operator to refresh the worker network proof, then continue.",
+            diagnostic_summary="Worker network proof is unavailable.", structured=True)
     embedded = getattr(exc, "failure_classification", None)
     if isinstance(embedded, FailureClassification):
         return embedded

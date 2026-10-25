@@ -1,4 +1,5 @@
 import { mountPeerControls } from './peer-controls.js?v=20261024polish1';
+import { mountSpendControls } from './spend-controls.js?v=20261025parity1';
 import { renderMemberActions } from './member-actions.js?v=20261024polish1';
 import { renderAddMember } from './member-create.js?v=20261024polish1';
 import { mountWorkerConfiguration } from './worker-configuration.js?v=20261024polish1';
@@ -37,6 +38,7 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
   let peersCleanup = () => {};
   let configurationCleanup = () => {};
   let allowedAiCleanup = () => {};
+  let spendCleanup = () => {};
   let disposed = false;
   let loading = false;
   let writing = false;
@@ -63,12 +65,13 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
     } finally { if (method !== 'GET') writing = false; }
   }
   function select(member) {
-    selectedId = member.worker_id; peersCleanup(); configurationCleanup(); allowedAiCleanup();
+    selectedId = member.worker_id; peersCleanup(); configurationCleanup(); allowedAiCleanup(); spendCleanup();
     for (const button of dialog.querySelectorAll('[data-member-id]')) button.setAttribute('aria-current', String(button.dataset.memberId === selectedId));
     const detail = dialog.querySelector('[data-detail]'); detail.replaceChildren();
     detail.append(element('h3','member-title',member.name || 'Member'),element('p','member-subtitle',String(member.state || 'Unknown').replaceAll('_',' ')));
     renderMemberActions(detail, member, { request, refresh, status });
     const settings = element('section','member-settings'); detail.append(settings);
+    spendCleanup = mountSpendControls(settings, { projectId: member.project_id || workspace?.project_id || initialMember.project_id || '', request });
     const config = element('details','member-configuration');
     config.append(element('summary','','Advanced settings'));
     const nativeState = [member.profile,member.model].filter(Boolean).join(' · ');
@@ -123,7 +126,7 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
         button.addEventListener('click',() => select(member)); item.append(button); list.append(item);
       }
       const selected = members.find(member => member.worker_id === selectedId) || members[0];
-      if (selected) select(selected); else { peersCleanup(); configurationCleanup(); allowedAiCleanup(); dialog.querySelector('[data-detail]').replaceChildren(element('p','member-note','This workspace has no retained members.')); }
+      if (selected) select(selected); else { peersCleanup(); configurationCleanup(); allowedAiCleanup(); spendCleanup(); dialog.querySelector('[data-detail]').replaceChildren(element('p','member-note','This workspace has no retained members.')); }
       status('Settings are current.'); onChanged();
       if (initialAdd) {
         initialAdd = false;
@@ -134,14 +137,14 @@ export function openWorkspaceMembers(initialMember, { requestHeaders = headers =
   }
   function showAdd() {
     if (writing || workspace?.mode !== 'shared' || workspace.runtime_readiness?.available !== true) return;
-    peersCleanup(); configurationCleanup(); allowedAiCleanup();
+    peersCleanup(); configurationCleanup(); allowedAiCleanup(); spendCleanup();
     renderAddMember(dialog.querySelector('[data-detail]'), workspace, { request, providerAccounts, profileAccountProviders, status, onCreated: async member => { selectedId = member.worker_id; await refresh(); dialog.querySelector('[aria-current="true"]')?.focus(); }, onCancel: refresh, onUncertain: () => { workspace.runtime_readiness.available = false; dialog.querySelector('[data-add]').hidden = true; } });
   }
   dialog.querySelector('[data-add]').hidden = true;
   dialog.querySelector('[data-add]').addEventListener('click', showAdd);
   dialog.querySelector('[data-refresh]').addEventListener('click',refresh);
   dialog.querySelector('[data-close]').addEventListener('click',() => dialog.close());
-  dialog.addEventListener('close',() => { disposed=true; peersCleanup(); configurationCleanup(); allowedAiCleanup(); dialog.remove(); if(activePanel===dialog) activePanel=null; previousFocus?.focus(); });
+  dialog.addEventListener('close',() => { disposed=true; peersCleanup(); configurationCleanup(); allowedAiCleanup(); spendCleanup(); dialog.remove(); if(activePanel===dialog) activePanel=null; previousFocus?.focus(); });
   dialog.showModal(); dialog.querySelector('[data-close]').focus(); refresh();
   return { close:() => dialog.close(), refresh };
 }

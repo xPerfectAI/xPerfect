@@ -26,6 +26,7 @@ class TurnInput(StrictModel):
 class ConversationCreateInput(StrictModel):
     scope: CoordinatorScope | None = None
     account_id: str = Field(default="", max_length=512)
+    model_id: str = Field(default="", max_length=1024)
 
 
 class GoalInput(StrictModel):
@@ -66,7 +67,7 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                 "message": "Current work changed. Check its status and try again.",
             }) from exc
 
-    def connected_config(tenant: str, owner: str, account_id: str):
+    def connected_config(tenant: str, owner: str, account_id: str, model_id: str = ""):
         account = coordinator.service.control_plane_store.get_provider_account(
             account_id=account_id, tenant_id=tenant, owner_id=owner,
         )
@@ -79,6 +80,10 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             raise HTTPException(409, "Choose a connected assistant before starting a conversation")
         from .coordinator_config import explicit_coordinator_config, connected_account_execution_mode
         explicit = invoke(explicit_coordinator_config)
+        if model_id and account.get("auth_method") != "bedrock":
+            raise HTTPException(409, "Model selection is unavailable for this connection")
+        if explicit is not None and model_id and model_id != explicit.model:
+            raise HTTPException(409, "The selected model differs from the configured conversation model")
         if explicit is not None:
             # A configured conversation model and effort are exact choices: the
             # chosen account must be for that AI; they are never swapped silently.
@@ -99,9 +104,23 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                 profile = model.harness_profile
             if model.harness_profile != profile:
                 raise HTTPException(409, "The chosen account is not for the configured conversation model")
+            if getattr(model, "connection_id", "") and model.connection_id != account_id:
+                raise HTTPException(409, "The configured model belongs to a different connection")
+            if account.get("auth_method") == "bedrock" and getattr(model, "connection_id", "") != account_id:
+                raise HTTPException(409, "Choose a declared conversation model for this Bedrock connection")
             if explicit.effort not in tuple(model.effort_choices):
                 raise HTTPException(409, "The configured conversation effort is unavailable for its model")
             effort = explicit.effort
+        elif account.get("auth_method") == "bedrock":
+            from .bedrock_connections import account_config, conversation_model_id, selected_model
+            native_model = selected_model({}, account_config(account)) if not model_id else ""
+            try:
+                model = coordinator.provider._model(model_id or conversation_model_id(account_id, native_model), tenant_id=tenant, owner_id=owner)
+            except HTTPException as exc:
+                raise HTTPException(409, "Declare this Bedrock model's context and effort details in Connections before using Chat") from exc
+            if model.connection_id != account_id:
+                raise HTTPException(409, "The selected model belongs to a different connection")
+            effort = model.recommended_effort
         else:
             native_model = coordinator.service._resolve_worker_model(profile, connected_account_execution_mode(profile), tenant_id=tenant, owner_id=owner)
             try:
@@ -111,7 +130,10 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
             if model.harness_profile != profile or model.native_model != native_model:
                 raise HTTPException(409, "The selected assistant model is unavailable for conversations")
             effort = model.recommended_effort
-        config = invoke(default_config, tenant, owner, profile)
+        config = (CoordinatorConfig(model=model.id, effort=effort,
+                    scope=CoordinatorScope(execution_mode=connected_account_execution_mode(profile)))
+                  if account.get("auth_method") == "bedrock" and explicit is None
+                  else invoke(default_config, tenant, owner, profile))
         if config is None:
             raise HTTPException(409, {"code": "coordinator_not_configured", "message": "Connect an assistant in Connections to start a conversation."})
         selected = CoordinatorConfig.model_validate(config)
@@ -137,8 +159,10 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
     def create(request: Request, payload: ConversationCreateInput | None = None):
         tenant, owner = principal(request)
         if payload is not None and payload.account_id:
-            selected, _, _ = connected_config(tenant, owner, payload.account_id)
+            selected, _, _ = connected_config(tenant, owner, payload.account_id, payload.model_id)
         else:
+            if payload is not None and payload.model_id:
+                raise HTTPException(422, "Select the model's owned connection")
             config = invoke(default_config, tenant, owner)
             if config is None:
                 raise HTTPException(409, {"code": "coordinator_not_configured", "message": "Connect an assistant in Connections to start a conversation."})
@@ -171,7 +195,12 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                      else coordinator.service.shared_workspace_deployment_readiness(
                          {"mode": "shared", "execution_mode": "docker"}))
         default = {"available": True, "code": "ready"}
-        config = invoke(default_config, tenant, owner)
+        try:
+            config = invoke(default_config, tenant, owner)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            config = None
         if config is None:
             default = {"available": False, "code": "coordinator_not_configured"}
         else:
@@ -196,14 +225,23 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
                 if account.get("status") != "ready":
                     continue
                 try:
-                    selected, account, profile = connected_config(tenant, owner, account["account_id"])
+                    declared_models = []
+                    if account.get("auth_method") == "bedrock":
+                        from .bedrock_connections import conversation_models
+                        declared_models = conversation_models(account)
+                        from .coordinator_config import explicit_coordinator_config
+                        configured = explicit_coordinator_config()
+                        if configured is not None:
+                            declared_models = [item for item in declared_models if item.id == configured.model]
+                    selected, account, profile = connected_config(tenant, owner, account["account_id"], declared_models[0].id if declared_models else "")
                 except (HTTPException, CoordinatorConflict, ValueError):
                     continue
                 if (selected.scope.execution_mode == "host" and profile not in {"direct-openai", "direct-anthropic", "direct-xai"}
                         and callable(installed) and installed(profile) is False):
                     continue
                 supported.append({"account_id": account["account_id"], "profile": profile,
-                                  "auth_method": str(account.get("auth_method") or "")})
+                                  "auth_method": str(account.get("auth_method") or ""),
+                                  **({"models": [{"id": item.id, "native_model": item.native_model} for item in declared_models]} if declared_models else {})})
             connected["supported_account_ids"] = [item["account_id"] for item in supported]
             connected["supported_accounts"] = supported
         return {"connected_account": connected, "default": default}

@@ -1,9 +1,32 @@
 {
-  "note": "Exact tested linux/arm64 image pair. Service built from reviewed source commit 86b503ab701dec7117e04603fdba5b2ca5abd585; all 781 tracked frozen source files match that commit byte-for-byte. Public main 6cba7b2ec9f4b3369e5f68b3a972c8288733997a has the same tree. Native wrapper inputs and client pins are unchanged. No runtime state, private prompts or provider credentials are included.",
-  "staging_release": "candidate-images-activation-20261025-o",
-  "archive": "pair.tar",
-  "archive_sha256": "ca2fe14fc95c586398142057d066c19754d83824c1ea91c51edb38cc31a9b4a5",
-  "platform": "linux/arm64",
+  "note": "Matched single-platform service/native pairs. Reviewed public code only; no runtime state, private prompts or provider credentials. Service code source is recorded below; source-only release metadata may follow. Native binaries and wrapper retain their reviewed recipe.",
+  "code_source_commit": "fa825abf727d5abf6fc31d9170131554778defe8",
+  "staging_release": "candidate-build-runtime-parity-20261025",
+  "archive": "runtime-pair.tar",
+  "archive_sha256": "49200a4a08b49d408039abef35948d34f58ae560b62a37af34a40612d1fac601",
+  "archive_parts": [
+    {
+      "name": "runtime-fa825abf727d.part00",
+      "sha256": "9bc402dfedee43dbca66b8dedeeea4d2851697e48e735260744a1c866103ef2f"
+    },
+    {
+      "name": "runtime-fa825abf727d.part01",
+      "sha256": "5738b8d63da6312da51c42df10a6ea4fbc8b5ec3094562bf67e0a12f3a80b9ff"
+    },
+    {
+      "name": "runtime-fa825abf727d.part02",
+      "sha256": "af7369a38562d0ef09a16f25382041b9b735b17962667710b53879b489b0877f"
+    },
+    {
+      "name": "runtime-fa825abf727d.part03",
+      "sha256": "471a69ec5d70919239a7aef382b7dc89c1f0233752d1eae4b682fe689361b7a8"
+    }
+  ],
+  "platforms": [
+    "linux/arm64",
+    "linux/amd64"
+  ],
+  "default_platform": "linux/arm64",
   "registry": "ghcr.io/xperfectai",
   "models": {
     "codex-cli": "gpt-6.1-sol",
@@ -11,16 +34,32 @@
   },
   "images": [
     {
+      "repository": "xperfect-native",
+      "tag": "runtime-parity-fa825abf727d-arm64",
+      "archive_ref": "native-arm64",
+      "digest": "sha256:11f82cac53ef022d1c7c356b43a87a6a51f77e7319f6f2ea89da6736b7c2fdf3",
+      "platform": "linux/arm64"
+    },
+    {
       "repository": "xperfect-service",
-      "tag": "candidate-activation-20261025-o",
-      "archive_ref": "activation-o",
-      "digest": "sha256:49942f331b634f0ecc8b848d5222727a6e9b5ea2459927608ba9d4e6354c4cb5"
+      "tag": "runtime-parity-fa825abf727d-arm64",
+      "archive_ref": "service-arm64",
+      "digest": "sha256:970852c3cae185c649aba9cab71376d3dea3f8cebd522a5d43e783082221e5ca",
+      "platform": "linux/arm64"
     },
     {
       "repository": "xperfect-native",
-      "tag": "candidate-activation-20261025-o",
-      "archive_ref": "activation-b",
-      "digest": "sha256:9f14069e3d6452f3c39fe8d5e44a1d5c0caec1725cc3a8444fc7c56d73726e06"
+      "tag": "runtime-parity-fa825abf727d-amd64",
+      "archive_ref": "native-amd64",
+      "digest": "sha256:81f34944dc0e26c50710ebf29c5de0382b44c7a852467b53ecdd6e482600e334",
+      "platform": "linux/amd64"
+    },
+    {
+      "repository": "xperfect-service",
+      "tag": "runtime-parity-fa825abf727d-amd64",
+      "archive_ref": "service-amd64",
+      "digest": "sha256:3aba3d0bacfd2a8e8618957fbd4c084f285629cbc9a60b76186bfc89ceaf3658",
+      "platform": "linux/amd64"
     }
   ],
   "codex_client_version": "0.159.0"

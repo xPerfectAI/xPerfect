@@ -404,9 +404,42 @@ def test_new_display_creation_holds_capacity_box_and_display_locks(tmp_path, mon
     assert held == set()
 
 
+@pytest.mark.parametrize('operation', ['_start_locked', 'launch_application'])
+def test_new_desktop_native_use_requires_fresh_proof(tmp_path, monkeypatch, operation):
+    from workers_projects_runtime import worker_egress
+    desktop = WorkspaceMemberDesktop(member(tmp_path, monkeypatch))
+    desktop.box.network = 'fixture-workers'
+    policy = {'denied': [{'host': '169.254.169.254', 'probe_port': 80}],
+              'positive': [{'host': 'example.test', 'port': 443}]}
+    monkeypatch.setenv(worker_egress.POLICY_ENV, json.dumps(policy))
+    monkeypatch.setenv('XPERFECT_CONTROL_ROOT', str(tmp_path))
+    receipt = {'version': 1, 'enforcement': 'iptables_readback', 'network_id': 'a' * 64,
+               'rules_sha256': 'b' * 64, 'policy_sha256': worker_egress.policy_digest(policy), 'observed_at': 0}
+    monkeypatch.setattr(worker_egress, '_read_receipt', lambda path: receipt)
+    monkeypatch.setattr(worker_egress.time, 'time', lambda: 500)
+    monkeypatch.setattr(desktop.box, 'docker', lambda args: subprocess.CompletedProcess(args, 0, json.dumps([{
+        'Id': 'a' * 64, 'Driver': 'bridge', 'EnableIPv6': False,
+        'Options': {'com.docker.network.bridge.enable_icc': 'false'},
+        'IPAM': {'Config': [{'Subnet': '10.44.0.0/24'}]}}]), ''))
+    class Admitted(Exception):
+        pass
+    def inspect():
+        raise Admitted
+    monkeypatch.setattr(desktop.box, '_inspect', inspect)
+    monkeypatch.setattr(desktop, '_read_state', lambda: None)
+    action = getattr(desktop, operation)
+    value = 'synthetic' if operation == '_start_locked' else ['/usr/bin/true']
+    with pytest.raises(worker_egress.WorkerEgressUnavailable):
+        action(value)
+    receipt['observed_at'] = 500
+    with pytest.raises(Admitted):
+        action(value)
+
+
 def test_reusing_live_display_does_not_reserve_capacity_again(tmp_path, monkeypatch):
     from contextlib import nullcontext
     desktop = WorkspaceMemberDesktop(member(tmp_path, monkeypatch))
+    monkeypatch.setattr(desktop.box, 'require_egress_proof', lambda: pytest.fail('Existing display reuse needs no new native admission'))
     desktop.controller = 'd' * 64
     monkeypatch.setenv('GLASSHIVE_PEER_RUNTIME_BASE_URL', 'http://runtime:8766')
     monkeypatch.setattr(desktop.box, 'locked', nullcontext)
