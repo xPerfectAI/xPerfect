@@ -1,8 +1,8 @@
 {
-  "note": "The exact tested package pair. Service built with deployment/linux/Dockerfile.service from source tree c61ae133f786fcec72c7f4b94a8312f98ccd8f7a; packaged source inputs match public commit 40a60cd8d51319a411dc93580c1d654481746e77 byte-for-byte. Native retains the preceding image plus the official Codex 0.159.0 client layer.",
-  "staging_release": "candidate-images-2a11a03",
+  "note": "Exact tested linux/arm64 image pair. Service built from reviewed source commit 9caaaa4b4c046db0bc6d477a643bb384d9147a46; all 762 tracked frozen source files match that commit byte-for-byte. Native wrapper inputs and client pins are unchanged. No runtime state, private prompts or provider credentials are included.",
+  "staging_release": "candidate-images-activation-20261025-k",
   "archive": "pair.tar",
-  "archive_sha256": "969f01d70139e587b20a8fc8f29184921dd8c98d5105d0b748cedad3102a9727",
+  "archive_sha256": "931eaa29f23efc6d7fc034d24b353139970af42d14dc18e6e414d82c2b03a106",
   "platform": "linux/arm64",
   "registry": "ghcr.io/xperfectai",
   "models": {
@@ -12,15 +12,15 @@
   "images": [
     {
       "repository": "xperfect-service",
-      "tag": "candidate-2a11a03",
-      "archive_ref": "final-2a11a03",
-      "digest": "sha256:2f688d0fcd6c59951daa503878f0d282067cd8d7cf0cd3ec230f0eecd499171f"
+      "tag": "candidate-activation-20261025-k",
+      "archive_ref": "activation-k",
+      "digest": "sha256:3763f5b51ce5d9fd4954c224d150063cdb654bcf7c8482f9fd9eda331b2b500f"
     },
     {
       "repository": "xperfect-native",
-      "tag": "candidate-2a11a03",
-      "archive_ref": "codex0159-candidate",
-      "digest": "sha256:f23706028997dc40696941506a5aa73a1217cbc4cdfe763f521a4e5b52adc764"
+      "tag": "candidate-activation-20261025-k",
+      "archive_ref": "activation-b",
+      "digest": "sha256:9f14069e3d6452f3c39fe8d5e44a1d5c0caec1725cc3a8444fc7c56d73726e06"
     }
   ],
   "codex_client_version": "0.159.0"
