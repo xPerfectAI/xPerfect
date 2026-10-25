@@ -170,10 +170,10 @@ jobs:
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
           current = json.loads((Path.home() / 'xperfect-local/receipt.json').read_text())
-          address = sorted({item[4][0] for item in socket.getaddrinfo('example.com', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
+          address = sorted({item[4][0] for item in socket.getaddrinfo('www.python.org', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
           policy = root / 'worker-policy.json'
           policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
-              'positive': [{'host': 'example.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
+              'positive': [{'host': 'www.wikipedia.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
           policy.chmod(0o600)
           with (root / 'policy-start-private.txt').open('wb') as log:
               subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',

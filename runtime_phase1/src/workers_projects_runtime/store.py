@@ -9728,6 +9728,7 @@ class Store:
     def peek_next_queued_run(self, worker_id: str, now_iso: str | None = None) -> dict[str, Any] | None:
         now_iso = now_iso or utc_now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT * FROM runs
@@ -15548,6 +15549,7 @@ class Store:
             event_clause = " WHERE " + " AND ".join(event_filters)
             callback_clause = " WHERE " + " AND ".join(callback_filters)
         with self._connect() as conn:
+            conn.execute("BEGIN")
             usage_summary = usage_accounting.aggregate_metrics_conn(conn, run_join, run_clause, run_params)
             projects = conn.execute(f"SELECT COUNT(*) FROM projects{project_clause}", project_params).fetchone()[0]
             workers = conn.execute(f"SELECT COUNT(*) FROM workers{worker_clause}", worker_params).fetchone()[0]
@@ -27202,6 +27204,7 @@ class Store:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
                 SELECT * FROM runs
@@ -27227,6 +27230,7 @@ class Store:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
                 SELECT * FROM runs

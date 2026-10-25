@@ -68,16 +68,22 @@ jobs:
           import json, os, socket, subprocess
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
-          address = sorted({item[4][0] for item in socket.getaddrinfo('example.com', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
+          address = sorted({item[4][0] for item in socket.getaddrinfo('www.python.org', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
           policy = root / 'worker-policy.json'
           policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
-              'positive': [{'host': 'example.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
+              'positive': [{'host': 'www.wikipedia.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
           policy.chmod(0o600)
           with (root / 'policy-start-private.txt').open('wb') as output:
-              subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
+              result = subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
                   '--state-dir', str(root / 'policy-state'), '--ui-port', '18780', '--mcp-port', '18767',
                   '--service-image', 'xperfect-service:build', '--native-image', 'xperfect-native:build',
-                  '--worker-egress-policy', str(policy)], check=True, stdout=output, stderr=subprocess.STDOUT)
+                  '--worker-egress-policy', str(policy)], stdout=output, stderr=subprocess.STDOUT)
+          if result.returncode:
+              lines = (root / 'policy-start-private.txt').read_text().splitlines()
+              for line in lines:
+                  if line.startswith('xPerfect:'):
+                      print(line.replace(str(root), '<private-state>')[:500])
+              raise SystemExit(result.returncode)
           print('Opt-in package started without operator privileges')
           PY_POLICY
           native=$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"])/"policy-state/receipt.json").read_text())["native_image"])')

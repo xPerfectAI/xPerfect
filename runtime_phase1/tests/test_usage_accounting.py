@@ -311,6 +311,38 @@ def test_sql_metrics_match_existing_summary_semantics_and_scope_without_python_h
     assert actual["runs"]==3 and actual["usage"]==expected
 
 
+def test_metrics_tokens_and_money_share_one_read_snapshot_during_reconciliation(tmp_path,monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+    from workers_projects_runtime.usage_accounting import summarize
+    store,_,_,run=fixture_run(tmp_path)
+    def summary(output,cost):
+        return summarize([{"receipt_id":"receipt","usage":normalize_observation({"input_tokens":0,"output_tokens":output,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},total_cost_usd=cost)}],attempts=1,unknown_attempts=0)
+    old,new=summary(4,"0.1"),summary(8,"0.9")
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET usage_summary_json=? WHERE run_id=?",(json.dumps(old),run["run_id"]))
+    original_connect=store._connect
+    writes=[]
+    @contextmanager
+    def interleaved():
+        with original_connect() as conn:
+            def trace(query):
+                if "GROUP BY currency ORDER BY currency" in query and not writes:
+                    assert conn.in_transaction
+                    with sqlite3.connect(store.db_path) as writer:
+                        writer.execute("UPDATE runs SET usage_summary_json=? WHERE run_id=?",(json.dumps(new),run["run_id"]))
+                    writes.append(True)
+            conn.set_trace_callback(trace)
+            try:yield conn
+            finally:conn.set_trace_callback(None)
+    monkeypatch.setattr(store,"_connect",interleaved)
+    actual=store.metrics()["usage"]
+    assert writes==[True]
+    assert actual["tokens"]["output_tokens"]["value"]==4 and actual["money"][0]["amount"]=="0.1"
+    after=store.metrics()["usage"]
+    assert after["tokens"]["output_tokens"]["value"]==8 and after["money"][0]["amount"]=="0.9"
+
+
 @pytest.mark.parametrize("source", ["http_response", "harness_reported", "adapter_synthesized", "unavailable"])
 def test_failure_provenance_is_typed_and_identifier_bounded(source):
     fields = FailureClassification("provider_access_denied",False,"Access refused","Check access","class=provider_access_denied",

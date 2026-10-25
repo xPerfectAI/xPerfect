@@ -204,10 +204,10 @@ def main():
 
     # Both targets must be reachable first. A failed public endpoint is a failed
     # prerequisite, never evidence that a firewall blocked it.
-    denied = sorted({item[4][0] for item in socket.getaddrinfo("example.com", 443, socket.AF_INET, socket.SOCK_STREAM)})[0]
+    denied = sorted({item[4][0] for item in socket.getaddrinfo("www.python.org", 443, socket.AF_INET, socket.SOCK_STREAM)})[0]
     policy = guard.contract.normalize_policy({
         "denied": [{"host": denied, "probe_port": 80}],
-        "positive": [{"host": "example.org", "port": 443}],
+        "positive": [{"host": "www.wikipedia.org", "port": 443}],
         "timeout_seconds": 2, "max_age_seconds": 60,
     })
     network = "xperfect-check-" + os.urandom(6).hex()
@@ -272,7 +272,7 @@ def main():
         guard.remove_rules(record, policy)
         applied = False
         check_peer_exception_isolation(docker, network=network + "-peer", image=args.native_image,
-                                       positive=[{"host": "example.org", "port": 443}])
+                                       positive=[{"host": "www.wikipedia.org", "port": 443}])
         print(json.dumps({"result": "PASS", "enforcement": receipt["enforcement"],
             "native_image": args.native_image,
             "network_generation_sha256": hashlib.sha256(receipt["network_id"].encode()).hexdigest(),

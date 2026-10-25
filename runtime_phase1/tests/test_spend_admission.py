@@ -263,3 +263,34 @@ def test_spend_history_queries_are_bounded_per_scope_for_large_due_batch(tmp_pat
     assert len(store.list_due_queue_status(now=utc_now(),limit=1000))==300
     assert sum(query.startswith("WITH spend_attempt_cost AS") for query in queries)==2
     assert not any("SELECT usage_json FROM usage_receipts WHERE attempt_id=" in query for query in queries)
+
+
+@pytest.mark.parametrize("operation",["status","timeout","peek"])
+def test_spend_batch_snapshot_fences_a_concurrent_policy_writer(tmp_path,monkeypatch,operation):
+    import sqlite3
+    from workers_projects_runtime import spend_admission
+    from workers_projects_runtime.store import utc_now
+    store,_,worker,run=fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="10"),0)
+    now=utc_now()
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET queue_next_status_at=?,queue_deadline_at=? WHERE run_id=?",
+            (now,now if operation=="timeout" else (datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(),run["run_id"]))
+    original=spend_admission._scope_exposure
+    blocked=[]
+    def exposure(conn,*args):
+        assert conn.in_transaction
+        writer=sqlite3.connect(store.db_path,timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError,match="locked"):
+                writer.execute("BEGIN IMMEDIATE")
+            blocked.append(True)
+        finally:writer.close()
+        return original(conn,*args)
+    monkeypatch.setattr(spend_admission,"_scope_exposure",exposure)
+    if operation=="peek":store.peek_next_queued_run(worker["worker_id"],now_iso=now)
+    elif operation=="status":store.list_due_queue_status(now=now)
+    else:store.list_due_queue_timeouts(now=now)
+    assert blocked==[True]
+    with sqlite3.connect(store.db_path,timeout=0) as writer:
+        writer.execute("BEGIN IMMEDIATE")
