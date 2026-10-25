@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import serialization
 import workers_projects_runtime.mcp_oauth as oauth_module
 import workers_projects_runtime.mcp_server as mcp_server_module
 from workers_projects_runtime.mcp_oauth import (
+    McpOAuthAdmissionRequired,
     McpOAuthConfigurationError,
     OidcJwtTokenVerifier,
     oauth_from_env,
@@ -509,7 +510,8 @@ def test_mcp_registration_disabled_rejects_unseen_but_allows_existing_principal(
     )
     access_token = token(private_key)
 
-    assert asyncio.run(verifier.verify_token(access_token)) is None
+    with pytest.raises(McpOAuthAdmissionRequired):
+        asyncio.run(verifier.verify_token(access_token))
     with sqlite3.connect(state_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM auth_principals").fetchone()[0] == 0
         now = time.time()
@@ -532,6 +534,87 @@ def test_mcp_registration_disabled_rejects_unseen_but_allows_existing_principal(
 
     assert existing_access is not None
     assert existing_access.subject == principal_id(ISSUER, "stable-subject")
+
+
+def test_valid_unadmitted_mcp_principal_gets_approval_refusal_without_oauth_loop(
+    tmp_path, monkeypatch, signing_material
+):
+    import httpx
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.server.auth.settings import AuthSettings
+    from mcp.shared.auth import OAuthClientMetadata, OAuthToken
+
+    private_key, public_jwk = signing_material
+    state = tmp_path / "auth.sqlite3"
+    create_auth_state(state)
+    with sqlite3.connect(state) as connection:
+        for subject in ("admitted-one", "admitted-two"):
+            connection.execute(
+                "INSERT INTO auth_principals VALUES (?, ?, ?, '', '', 'member', NULL, ?, ?)",
+                (principal_id(ISSUER, subject), ISSUER, subject, time.time(), time.time()),
+            )
+    verifier = OidcJwtTokenVerifier(
+        issuer=ISSUER, audience=TOKEN_AUDIENCE, resource=RESOURCE,
+        token_scopes=(TOKEN_SCOPE,), allowed_client_ids=("mcp-public-client",),
+        auth_state_path=str(state), require_auth_state=True, allow_registration=False,
+    )
+    monkeypatch.setattr(verifier, "_key", lambda _kid: jwt.PyJWK.from_dict(public_jwk).key)
+    monkeypatch.setattr(mcp_server_module, "oauth_from_env", lambda: (
+        verifier, AuthSettings(issuer_url=ISSUER, resource_server_url=RESOURCE,
+                               required_scopes=[TOKEN_SCOPE])))
+    server = create_mcp_server(api_client=object())
+    invoked = []
+
+    @server.tool()
+    def admission_sentinel() -> str:
+        invoked.append(True)
+        return "must not run for an unadmitted principal"
+
+    app = server.streamable_http_app()
+    request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-03-26", "capabilities": {},
+        "clientInfo": {"name": "admission-test", "version": "1"}}}
+    headers = {"Accept": "application/json, text/event-stream"}
+    unseen = token(private_key, sub="unadmitted")
+    expected = "This account is not registered for xPerfect. Ask an administrator to approve it, then retry."
+    with TestClient(app) as client:
+        for subject in ("admitted-one", "admitted-two"):
+            accepted = client.post("/mcp", json=request, headers={
+                **headers, "Authorization": "Bearer " + token(private_key, sub=subject)})
+            assert accepted.status_code == 200
+        for payload in (request, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                  "params": {"name": "admission_sentinel", "arguments": {}}}):
+            denied = client.post("/mcp", json=payload, headers={**headers, "Authorization": "Bearer " + unseen})
+            assert denied.status_code == 403
+            assert denied.json() == {"error": "access_denied", "error_description": expected}
+            assert "insufficient_scope" not in denied.headers.get("www-authenticate", "")
+        invalid = client.post("/mcp", json=request, headers={**headers, "Authorization": "Bearer invalid"})
+        assert invalid.status_code == 401
+    assert not invoked
+    with sqlite3.connect(state) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM auth_principals").fetchone()[0] == 2
+
+    class ExistingTokenStorage:
+        async def get_tokens(self):
+            return OAuthToken(access_token=unseen, token_type="Bearer", expires_in=300)
+        async def get_client_info(self):
+            return None
+        async def set_tokens(self, _tokens):
+            pytest.fail("admission denial must not refresh or replace the valid token")
+
+    async def no_redirect(_url):
+        pytest.fail("admission denial must not start OAuth again")
+
+    async def check_native_oauth_client():
+        oauth = OAuthClientProvider(RESOURCE, OAuthClientMetadata(
+            redirect_uris=["http://localhost/callback"], scope=TOKEN_SCOPE),
+            ExistingTokenStorage(), redirect_handler=no_redirect)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=RESOURCE, auth=oauth) as client:
+            response = await client.post("/mcp", json=request, headers=headers)
+        assert response.status_code == 403
+        assert response.json()["error_description"] == expected
+
+    asyncio.run(check_native_oauth_client())
 
 
 def test_multi_user_mcp_oauth_requires_auth_state_and_allowed_clients(tmp_path, monkeypatch):
@@ -643,12 +726,10 @@ def test_mcp_canonical_closed_enrollment_rejects_unknown_subject(
     monkeypatch.setenv("GLASSHIVE_ALLOW_EMAIL_REGISTRATION", "true")
 
     verifier, _settings = oauth_from_env()
-    access = asyncio.run(
-        verifier.verify_token(token(private_key, roles=["GlassHive.Member"]))
-    )
+    with pytest.raises(McpOAuthAdmissionRequired):
+        asyncio.run(verifier.verify_token(token(private_key, roles=["GlassHive.Member"])))
 
     assert verifier.allow_registration is False
-    assert access is None
     with sqlite3.connect(state_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM auth_principals").fetchone()[0] == 0
 

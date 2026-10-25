@@ -68,6 +68,111 @@ def test_full_browser_budget_is_bounded_and_old_limits_are_not_reused(tmp_path, 
             desktop._record(state)
 
 
+def retained_budget_desktop(tmp_path, monkeypatch, memory, pids):
+    from contextlib import contextmanager, nullcontext
+    desktop = WorkspaceMemberDesktop(member(tmp_path, monkeypatch))
+    state = state_for(desktop)
+    folder = tmp_path / 'display-files'
+    folder.mkdir()
+    info = folder.stat()
+    state.update(directory_device=info.st_dev, directory_inode=info.st_ino)
+    private_json(desktop.state_path, state)
+    record = display_record(desktop, state)
+    record['HostConfig'].update(Memory=memory, MemorySwap=memory, PidsLimit=pids)
+    live, calls = [True], []
+    def docker(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'inspect':
+            return subprocess.CompletedProcess(args, 0 if live[0] else 1,
+                                               json.dumps([record]) if live[0] else '', '')
+        if args[:2] == ['container', 'ls']:
+            return subprocess.CompletedProcess(args, 0, record['Id'] if live[0] else '', '')
+        if args[:2] == ['rm', '-f']:
+            assert args[2] == state['container_id']
+            live[0] = False
+            return subprocess.CompletedProcess(args, 0, '', '')
+        raise AssertionError(args)
+    @contextmanager
+    def pinned(**kwargs):
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        try: yield fd
+        finally: os.close(fd)
+    monkeypatch.setattr(desktop.box, 'docker', docker)
+    monkeypatch.setattr(desktop.box, '_inspect', lambda: {'Id': state['box_id'], 'State': {'Running': True}})
+    monkeypatch.setattr(desktop.box, 'locked', nullcontext)
+    monkeypatch.setattr(desktop, '_locked', nullcontext)
+    monkeypatch.setattr(desktop, '_display_directory', pinned)
+    return desktop, state, record, live, calls
+
+
+@pytest.mark.parametrize(('current_memory', 'current_pids', 'retained_memory', 'retained_pids'), [
+    (512 * 1024**2, 256, 256 * 1024**2, 96),
+    (256 * 1024**2, 96, 512 * 1024**2, 256),
+])
+def test_budget_change_keeps_owned_display_accountable_retirable_and_reopenable(
+        tmp_path, monkeypatch, current_memory, current_pids, retained_memory, retained_pids):
+    from contextlib import contextmanager
+    import workers_projects_runtime.workspace_desktop as module
+    from workers_projects_runtime.workspace_resources import WorkspaceResources
+    monkeypatch.setattr(module, 'DISPLAY_MEMORY_BYTES', current_memory)
+    monkeypatch.setattr(module, 'DISPLAY_PIDS_LIMIT', current_pids)
+    desktop, state, record, live, calls = retained_budget_desktop(
+        tmp_path, monkeypatch, retained_memory, retained_pids)
+    monkeypatch.setattr(WorkspaceMemberDesktop, 'supported', property(lambda _: True))
+    assert desktop.resource_record(state['box_id'])['HostConfig']['Memory'] == retained_memory
+    assert desktop.view(state['box_id'], 'synthetic') is None
+    with pytest.raises(WorkspaceBoxUnavailable, match='isolation'):
+        desktop._record(state)
+    resources = WorkspaceResources(object())
+    monkeypatch.setattr(resources, '_proof_matches_configuration', lambda **_: True)
+    monkeypatch.setattr(resources, '_measure_settled', lambda _: {
+        'process_probe_ok': True, 'memory_probe_ok': True, 'disk_probe_ok': True,
+        'available_memory_bytes': current_memory if not live[0] else 0})
+    desktop.box.desktop_capacity = lambda: resources.desktop_capacity(object())
+    opened = []
+    def start(_):
+        assert not live[0] and not desktop.state_path.exists()
+        opened.append((module.DISPLAY_MEMORY_BYTES, module.DISPLAY_PIDS_LIMIT))
+        return 'new-current-budget-view'
+    monkeypatch.setattr(desktop, '_start_locked', start)
+    assert desktop.start('synthetic') == 'new-current-budget-view'
+    assert opened == [(current_memory, current_pids)]
+    assert [row for row in calls if row[:2] == ['rm', '-f']] == [['rm', '-f', state['container_id']]]
+    assert resources.cached is None
+
+
+@pytest.mark.parametrize('mutation', ['owner', 'network', 'mount', 'policy'])
+def test_budget_retirement_never_removes_foreign_or_weakened_desktop(tmp_path, monkeypatch, mutation):
+    desktop, state, record, live, calls = retained_budget_desktop(tmp_path, monkeypatch, 256 * 1024**2, 96)
+    if mutation == 'owner': record['Config']['Labels']['xperfect.desktop.owner'] = 'foreign'
+    elif mutation == 'network': record['HostConfig']['NetworkMode'] = 'host'
+    elif mutation == 'mount': record['HostConfig']['Mounts'][0]['Source'] = 'foreign-volume'
+    else: record['HostConfig']['SecurityOpt'][1] = 'seccomp=unconfined'
+    with pytest.raises(WorkspaceBoxUnavailable, match='isolation'):
+        desktop.stop()
+    assert live[0] and desktop.state_path.exists()
+    assert not any(row[0] == 'rm' for row in calls)
+
+
+def test_unbounded_owned_display_is_retirable_but_never_accounted_as_free(tmp_path, monkeypatch):
+    desktop, state, record, live, calls = retained_budget_desktop(tmp_path, monkeypatch, 0, 0)
+    with pytest.raises(WorkspaceBoxUnavailable, match='resource bounds'):
+        desktop.resource_record(state['box_id'])
+    desktop.stop()
+    assert not live[0] and not desktop.state_path.exists()
+
+
+def test_explicit_maintenance_desktop_retirement_never_starts_native_compute(monkeypatch):
+    from workers_projects_runtime.profile_runtime import ProfiledWorkerRuntime
+    runtime = ProfiledWorkerRuntime.__new__(ProfiledWorkerRuntime)
+    stopped = []
+    worker = {'worker_id': 'wrk_test', 'state': 'paused'}
+    scoped = SimpleNamespace(sandbox=SimpleNamespace(desktop=SimpleNamespace(stop=lambda: stopped.append(worker))))
+    monkeypatch.setattr(runtime, '_runtime_for_worker', lambda current: scoped if current is worker else pytest.fail('wrong worker'))
+    runtime.retire_idle_desktop_for_upgrade(worker)
+    assert stopped == [worker]
+
+
 def test_member_description_implements_real_native_runtime_contract(tmp_path, monkeypatch):
     box = member(tmp_path, monkeypatch)
     sandbox = WorkspaceMemberSandbox(box)

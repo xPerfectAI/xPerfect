@@ -114,7 +114,14 @@ class WorkspaceMemberDesktop:
         self.box._private_json(temporary, value)
         os.replace(temporary, self.state_path)
 
-    def _record(self, state):
+    @staticmethod
+    def _current_budget(record):
+        host = record['HostConfig']
+        return (host.get('Memory') == DISPLAY_MEMORY_BYTES
+                and host.get('MemorySwap') == DISPLAY_MEMORY_BYTES
+                and host.get('PidsLimit') == DISPLAY_PIDS_LIMIT)
+
+    def _record(self, state, *, allow_budget_drift=False):
         result = self.box.docker(["inspect", state["container_id"]], check=False)
         if result.returncode:
             listing = self.box.docker(["container", "ls", "-a", "--no-trunc", "--format", "{{.ID}}"])
@@ -147,9 +154,7 @@ class WorkspaceMemberDesktop:
                     or host.get("Binds") or host.get("Devices") or host.get("PortBindings")
                     or host.get("PidMode") not in {"", None} or host.get("IpcMode") != "none"
                     or host.get("DeviceRequests")
-                    or host.get("Memory") != DISPLAY_MEMORY_BYTES
-                    or host.get("MemorySwap") != DISPLAY_MEMORY_BYTES
-                    or host.get("PidsLimit") != DISPLAY_PIDS_LIMIT
+                    or (not allow_budget_drift and not self._current_budget(record))
                     or len(mount) != 1 or mount[0].get("Type") != "volume"
                     or mount[0].get("Source") != self.box.volume_name
                     or mount[0].get("Target") != self.display_mount
@@ -302,12 +307,13 @@ class WorkspaceMemberDesktop:
         state = self._read_state()
         if state is None:
             return None
-        record = self._record(state)
+        record = self._record(state, allow_budget_drift=True)
         if record and record['State'].get('Running') and state.get('ready'):
             if state['box_id'] != box['Id']:
                 raise WorkspaceBoxUnavailable('Desktop belongs to another workspace generation')
-            self._publish(state)
-            return self._view_url(state, password)
+            if self._current_budget(record):
+                self._publish(state)
+                return self._view_url(state, password)
         self._stop_locked(state)
         return None
 
@@ -398,8 +404,10 @@ class WorkspaceMemberDesktop:
             pinned = os.fstat(directory)
             if [pinned.st_dev, pinned.st_ino] != [state['directory_device'], state['directory_inode']]:
                 raise WorkspaceBoxUnavailable('Desktop directory identity changed')
-        record = self._record(state)
+        record = self._record(state, allow_budget_drift=True)
         if record is None or not record["State"].get("Running"):
+            return None
+        if not self._current_budget(record):
             return None
         return self._view_url(state, password)
 
@@ -445,9 +453,14 @@ code=p.poll();print(json.dumps({'exit_code':code,'accepted':code in (None,0)}))
         state = self._read_state()
         if state is None:
             return None
-        record = self._record(state)
+        record = self._record(state, allow_budget_drift=True)
         if record is None or not record['State'].get('Running'):
             return None
+        host = record['HostConfig']
+        if (type(host.get('Memory')) is not int or host['Memory'] <= 0
+                or host.get('MemorySwap') != host['Memory']
+                or type(host.get('PidsLimit')) is not int or host['PidsLimit'] <= 0):
+            raise WorkspaceBoxUnavailable('Desktop resource bounds cannot be accounted')
         if not expected_box_id or state['box_id'] != expected_box_id:
             raise WorkspaceBoxUnavailable('Live desktop has another workspace generation')
         with self._display_directory() as directory:
@@ -658,7 +671,7 @@ raise SystemExit('Desktop gateway is not ready')
             changed()
 
     def _stop_locked(self, state):
-        record = self._record(state)
+        record = self._record(state, allow_budget_drift=True)
         if record is not None:
             self.box.docker(["rm", "-f", state["container_id"]])
         with self._gateway_lock():

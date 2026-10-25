@@ -30,6 +30,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -44,7 +45,7 @@ from .bootstrap import (
 )
 from .deliverables import is_user_deliverable_relative_path
 from .operator_urls import operator_base_url, surface_aware_watch_url, surface_can_open_operator_url
-from .mcp_oauth import McpOAuthConfigurationError, oauth_from_env
+from .mcp_oauth import McpOAuthConfigurationError, oauth_authentication_error, oauth_from_env
 from .mcp_internal_assertions import McpInternalAssertionError, signed_runtime_assertion
 from .models import CreateTargetScheduleRequest, CreateWebhookDestinationRequest, UpdateWebhookDestinationRequest
 from .application_boundary import launch_authority_for
@@ -1618,6 +1619,9 @@ class GlassHiveFastMCP(FastMCP):
 
     def streamable_http_app(self):
         app = super().streamable_http_app()
+        for middleware in app.user_middleware:
+            if middleware.cls is AuthenticationMiddleware:
+                middleware.kwargs["on_error"] = oauth_authentication_error
         auth = self.settings.auth
         if auth and auth.required_scopes:
             app.add_middleware(

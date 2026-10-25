@@ -738,6 +738,9 @@ ID outside the allowlist remains `action_required` and produces no copyable comm
 is enabled, a first fully verified MCP login enrolls the same hashed
 issuer/subject principal used by Glass Drive, while a locally disabled principal is rejected on the
 next request. Access tokens and provider credentials are never forwarded into a worker.
+When enrollment is disabled, an otherwise valid but unregistered MCP account receives HTTP 403
+with an administrator-approval message. It receives no tools or runtime identity; signing in again
+or granting more OAuth scopes does not approve the account.
 
 `enterprise.tenant_id` is the deployment's xPerfect ownership namespace; it is not assumed to be
 the upstream token's `tid`. Set optional `mcp_oauth.token_tenant_id` only when the authorization

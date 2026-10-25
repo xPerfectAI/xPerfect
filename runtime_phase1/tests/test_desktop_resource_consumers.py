@@ -18,7 +18,8 @@ CONTROLLER, PARENT, DISPLAY = 'c' * 64, 'b' * 64, 'd' * 64
 
 def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
                        malformed=False, foreign_process=False, stale=False,
-                       controller=CONTROLLER, foreign_deployment=False, two_displays=False):
+                       controller=CONTROLLER, foreign_deployment=False, two_displays=False,
+                       retained_memory=DISPLAY_MEMORY_BYTES):
     for key, value in {
         'XPERFECT_CONTROLLER_ID': controller, 'XPERFECT_SHARED_NETWORK': 'native-test',
         'XPERFECT_SHARED_VOLUME_ROOT': str(tmp_path),
@@ -45,12 +46,13 @@ def measured_resources(monkeypatch, tmp_path, *, orphan=False, retired=False,
         assert expected == PARENT
         if stale:
             raise WorkspaceBoxUnavailable('Desktop belongs to another workspace generation')
-        return {'Id': DISPLAY, 'State': {'Running': True}}
+        return {'Id': DISPLAY, 'State': {'Running': True}, 'HostConfig': {'Memory': retained_memory}}
 
     desktop = SimpleNamespace(resource_record=resource_record)
     member = SimpleNamespace(sandbox=SimpleNamespace(box=box, desktop=desktop))
     second_member = SimpleNamespace(sandbox=SimpleNamespace(box=box, desktop=SimpleNamespace(
-        resource_record=lambda expected: {'Id': second_display, 'State': {'Running': True}})))
+        resource_record=lambda expected: {'Id': second_display, 'State': {'Running': True},
+                                         'HostConfig': {'Memory': DISPLAY_MEMORY_BYTES}})))
     shared = SimpleNamespace(store=Store(), recovery_issues=[],
         binder=SimpleNamespace(homes=SimpleNamespace(native_launcher=SimpleNamespace(inventory=lambda: ()))),
         for_worker=lambda row, *_args, **_kwargs: second_member if row['worker_id'] == second['worker_id'] else member)
@@ -121,6 +123,13 @@ def test_two_displays_each_reserve_their_full_browser_budget(monkeypatch, tmp_pa
     assert set(result['running_container_ids']) == {PARENT, DISPLAY, 'a' * 64}
     assert result['worker_process_counts']['wrk_second'] == {'child_processes': 2, 'threads': 2}
     assert len([args for args in calls if args[:2] == ['top', 'a' * 64]]) == 1
+
+
+@pytest.mark.parametrize('retained_memory', [256 * MIB, 768 * MIB])
+def test_retained_display_is_charged_at_actual_bounded_memory(monkeypatch, tmp_path, retained_memory):
+    resource, runtime, _ = measured_resources(monkeypatch, tmp_path, retained_memory=retained_memory)
+    result = resource._measure(runtime)
+    assert result['available_memory_bytes'] == (2048 - 512 - 100) * MIB - retained_memory
 
 
 @pytest.mark.parametrize(('scenario', 'message'), [

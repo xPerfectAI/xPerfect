@@ -3225,6 +3225,13 @@ class ProfiledWorkerRuntime:
             shared.resources.invalidate_capacity_snapshot()
         return released
 
+    def retire_idle_desktop_for_upgrade(self, worker: dict) -> None:
+        """Explicit package maintenance only; never the periodic idle reaper."""
+        member = self._runtime_for_worker(worker)
+        desktop = getattr(getattr(member, 'sandbox', None), 'desktop', None)
+        if desktop is not None:
+            desktop.stop()
+
     def isolated_resource_usage(
         self, *, cached_only: bool = False
     ) -> dict[str, object]:

@@ -369,6 +369,10 @@ existing measured capacity admission and reserves 512 MiB for each open display,
 process/thread limit. Both startup and later admission account for each display; a second display
 needs its own headroom. These bounds cover the browser and display together. Its dedicated
 Chromium sandbox policy is shipped and checked; the AI workspace's sandbox policy is unchanged.
+A retained display from another resource budget still counts at its actual enforced limit and
+can be closed only after its exact identity and isolation are checked. Reopening replaces that
+owned display with the current budget. Explicit package maintenance retires eligible idle displays
+before switching or rolling back code; normal idle reaping keeps human takeover open.
 Missing storage, capacity, display readiness or a supported graphical action is a visible failure,
 not a successful launch. This source contract requires real input, pause, reload and close acceptance
 on the built packaged runtime; unit tests and a VNC handshake alone do not establish that result.
@@ -1142,7 +1146,7 @@ Watch ZIP downloads submit selected file IDs in a native POST form, so selection
 
 The old operator `/api/launch` inline-base64 `files` transport is retired. Non-empty legacy payloads receive 422 with `legacy_upload_transport` before any workspace change. Clients must create streamed draft receipts and send `file_upload_ids`; the browser already uses this contract. Runtime bootstrap compatibility is separate and remains subject to the native storage policy.
 
-Files downloads bind the selected revision and abort if the open file changes during transfer. Same-name uploads retain both versions, including names at the filesystem UTF-8 byte limit. Native quota or disk-full errors leave a visible retry state, release the failed transfer reservation after cleanup, and preserve the same upload ID for retry.
+Files downloads bind the selected revision and abort if the open file changes during transfer. Same-name uploads retain both versions, including names at the filesystem UTF-8 byte limit. Native quota or disk-full errors leave a visible retry state, release the failed transfer reservation after cleanup, and preserve the same upload ID for retry. The error tells the user to remove unneeded files or ask an administrator to check their limit and disk space, then retry. A kernel allocation refusal can occur before the usage meter reaches its limit; do not call that an invalid file or claim the failed file's bytes were saved.
 
 Unlimited logical-storage admission does not scan retained work for an unused total. Upload reservation, transfer checks, and accepted-input copy reservation still validate the storage adapter and owner policy. Finite logical limits and native hard quotas retain their existing accounting and guards. The storage display always computes actual usage; canonical root ancestry prevents double counting without comparing every prior workspace.
 

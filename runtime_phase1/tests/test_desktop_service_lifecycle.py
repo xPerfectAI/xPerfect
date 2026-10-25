@@ -63,6 +63,40 @@ def desktop_service(tmp_path):
         service.shutdown()
 
 
+@pytest.mark.parametrize('state', ['ready', 'paused'])
+def test_explicit_upgrade_retires_only_idle_desktop_without_changing_ai_state(desktop_service, monkeypatch, state):
+    service, store, runtime, worker = desktop_service
+    store.update_worker(worker['worker_id'], state=state, execution_mode='docker')
+    before = store.get_worker(worker['worker_id'])
+    retired = []
+    monkeypatch.setattr(runtime, 'retire_idle_desktop_for_upgrade', lambda current: retired.append(dict(current)), raising=False)
+    monkeypatch.setattr(service, '_release_idle_workers', lambda _: [])
+    assert service.release_idle_compute_for_upgrade() == {'released': []}
+    assert [row['worker_id'] for row in retired] == [worker['worker_id']]
+    assert store.get_worker(worker['worker_id']) == before
+    assert runtime.ensure_calls == runtime.reconcile_calls == runtime.terminate_calls == 0
+
+
+@pytest.mark.parametrize('condition', ['host', 'running', 'starting', 'queued', 'paused_run', 'release_claim'])
+def test_upgrade_desktop_retirement_preserves_active_work_and_control_fences(desktop_service, monkeypatch, condition):
+    service, store, runtime, worker = desktop_service
+    worker_id = worker['worker_id']
+    if condition == 'host': store.update_worker(worker_id, execution_mode='host')
+    elif condition in {'running', 'starting'}: store.update_worker(worker_id, state=condition)
+    elif condition == 'release_claim': store.update_worker(worker_id, compute_release_token='synthetic-control-claim')
+    else:
+        queued = store.create_run(worker_id, worker['project_id'], 'Retain accepted native work')
+        if condition == 'paused_run':
+            run = truthfully_invoke_test_run(store, store.get_worker(worker_id), queued, suffix='maintenance-paused')
+            service.pause_worker(worker_id, run_id=run['run_id'])
+    before = store.get_worker(worker_id)
+    monkeypatch.setattr(runtime, 'retire_idle_desktop_for_upgrade', lambda _: pytest.fail('active or unscoped display must remain'), raising=False)
+    monkeypatch.setattr(service, '_release_idle_workers', lambda _: [])
+    assert service.release_idle_compute_for_upgrade() == {'released': []}
+    assert store.get_worker(worker_id) == before
+    assert runtime.ensure_calls == runtime.reconcile_calls == runtime.terminate_calls == 0
+
+
 def thread_call(function):
     result, errors = [], []
     def call():

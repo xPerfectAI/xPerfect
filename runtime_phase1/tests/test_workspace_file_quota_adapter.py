@@ -267,11 +267,11 @@ def test_owner_exhaustion_and_host_exhaustion_are_distinct(injected, monkeypatch
     files, backend, _, _ = injected
     backend.extra_used = 16384
     exhausted = files.storage_adapter.failure(TENANT, OWNER, OSError(errno.ENOSPC, "full"))
-    assert exhausted.status_code == 413 and "Owner storage quota" in str(exhausted)
+    assert exhausted.status_code == 413 and "Your storage limit is full" in str(exhausted)
     backend.extra_used = 0
     monkeypatch.setattr(os, "statvfs", lambda *_: SimpleNamespace(f_bavail=0, f_frsize=4096))
     host = files.storage_adapter.failure(TENANT, OWNER, OSError(errno.ENOSPC, "full"))
-    assert host.status_code == 507 and "filesystem is full" in str(host)
+    assert host.status_code == 507 and "The disk is full" in str(host)
 
 
 def test_receive_failure_cleans_partial_and_unused_reservation(injected, monkeypatch):
@@ -287,6 +287,29 @@ def test_receive_failure_cleans_partial_and_unused_reservation(injected, monkeyp
     backend.extra_used = 0
     assert files.storage(TENANT, OWNER)["reserved_allocated_bytes"] == 0
     assert not list(files._owner_root(TENANT, OWNER).glob("*.part"))
+
+
+@pytest.mark.parametrize("error_number,expected_code", [
+    (errno.ENOSPC, "storage_allocation_failed"),
+    (errno.EDQUOT, "storage_quota_blocked"),
+])
+def test_native_storage_refusal_explains_recovery_without_claiming_bytes_are_kept(
+    injected, monkeypatch, error_number, expected_code
+):
+    files, _, _, _ = injected
+    monkeypatch.setattr(os, "statvfs", lambda *_: SimpleNamespace(f_bavail=1024, f_frsize=4096))
+    failure = files.storage_adapter.failure(TENANT, OWNER, OSError(error_number, "synthetic refusal"))
+    assert failure.status_code == 507
+    assert failure.code == expected_code
+    message = str(failure)
+    assert "administrator" in message
+    assert "limit" in message
+    assert "try again" in message
+    assert "operator" not in message
+    assert "kept" not in message
+    if error_number == errno.ENOSPC:
+        assert "disk space" in message
+        assert "is full" not in message
 
 
 def test_full_native_claim_requires_independent_coverage_callback(injected):

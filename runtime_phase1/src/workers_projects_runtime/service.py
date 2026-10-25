@@ -5686,6 +5686,26 @@ class WorkersProjectsService:
         instruction starts compute again. Running, queued, paused or waiting work is left for
         the upgrade's idle proof to refuse.
         """
+        # Only this explicit package operation retires human displays. Normal
+        # idle reaping keeps them usable. The ordinary lifecycle flock fences
+        # desktop actions, native starts and controls while eligibility is read.
+        retire_desktop = getattr(self.runtime, 'retire_idle_desktop_for_upgrade', None)
+        if callable(retire_desktop):
+            for candidate in self.store.list_all_workers():
+                worker_id = str(candidate.get('worker_id') or '')
+                if not worker_id:
+                    continue
+                with self._worker_compute_release_lock(worker_id):
+                    current = self.store.get_worker(worker_id)
+                    if (not current or current.get('state') not in {'ready', 'paused'}
+                            or current.get('execution_mode') != 'docker'
+                            or current.get('compute_release_token')
+                            or self.store.get_active_run(worker_id)
+                            or self.store.has_queued_runs(worker_id)
+                            or self.store.list_nonterminal_runs_for_worker(worker_id)
+                            or self.store.has_unconfirmed_host_run_start(worker_id)):
+                        continue
+                    retire_desktop(current)
         released = {str(item.get("worker_id") or "") for item in self._release_idle_workers(0.0)}
         # A member whose compute is already recorded as released can still share a box
         # that stayed up. The box closes only through its own durable idle rule, lock

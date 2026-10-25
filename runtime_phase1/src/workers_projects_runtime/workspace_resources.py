@@ -599,7 +599,7 @@ class WorkspaceResources:
         # cgroup. It does not appear as another bridge member and must not be
         # charged merely at its current small resident-memory observation.
         desktop_ids = set()
-        from .workspace_desktop import DISPLAY_MEMORY_BYTES, WorkspaceMemberDesktop
+        from .workspace_desktop import WorkspaceMemberDesktop
         for desktop, parent, uid, worker_id in desktops:
             parent_id = parent['Id'] if parent and parent.get('State', {}).get('Running') else None
             record = desktop.resource_record(parent_id)
@@ -608,7 +608,7 @@ class WorkspaceResources:
             identity = str(record['Id'])
             if identity in limits:
                 raise WorkspaceBoxUnavailable('Duplicate container reservation')
-            limits[identity] = DISPLAY_MEMORY_BYTES
+            limits[identity] = record['HostConfig']['Memory']
             desktop_ids.add(identity)
             measured = process_counts(read(['top', identity, '-eLo', 'uid,pid,lwp'], identity))
             if set(measured) != {uid}:

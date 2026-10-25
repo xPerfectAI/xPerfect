@@ -352,12 +352,12 @@ def test_upload_disk_exhaustion_releases_reservation_and_can_retry(
         raise OSError(error_number, "synthetic quota boundary")
 
     monkeypatch.setattr(os, "fsync", full)
-    with pytest.raises(FileAdmissionError, match="Storage allocation failed") as caught:
+    with pytest.raises(FileAdmissionError, match="Your file could not be stored") as caught:
         asyncio.run(files.receive(TENANT, OWNER, upload["upload_id"], chunks(b"data")))
     assert caught.value.status_code == 507
     stored = files.list_uploads(TENANT, OWNER, "d")["items"][0]
     assert stored["state"] == "failed"
-    assert "Storage allocation failed" in stored["error"]
+    assert "Your file could not be stored" in stored["error"]
     assert files.storage(TENANT, OWNER)["reserved_bytes"] == 0
     assert not list(files._owner_root(TENANT, OWNER).glob("*.part"))
     monkeypatch.setattr(os, "fsync", sync)
