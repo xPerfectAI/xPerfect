@@ -1,8 +1,8 @@
 {
-  "note": "Exact tested linux/arm64 image pair. Service built from reviewed source commit 9caaaa4b4c046db0bc6d477a643bb384d9147a46; all 762 tracked frozen source files match that commit byte-for-byte. Native wrapper inputs and client pins are unchanged. No runtime state, private prompts or provider credentials are included.",
-  "staging_release": "candidate-images-activation-20261025-k",
+  "note": "Exact tested linux/arm64 image pair. Service built from reviewed source commit 86b503ab701dec7117e04603fdba5b2ca5abd585; all 781 tracked frozen source files match that commit byte-for-byte. Public main 6cba7b2ec9f4b3369e5f68b3a972c8288733997a has the same tree. Native wrapper inputs and client pins are unchanged. No runtime state, private prompts or provider credentials are included.",
+  "staging_release": "candidate-images-activation-20261025-o",
   "archive": "pair.tar",
-  "archive_sha256": "931eaa29f23efc6d7fc034d24b353139970af42d14dc18e6e414d82c2b03a106",
+  "archive_sha256": "ca2fe14fc95c586398142057d066c19754d83824c1ea91c51edb38cc31a9b4a5",
   "platform": "linux/arm64",
   "registry": "ghcr.io/xperfectai",
   "models": {
@@ -12,13 +12,13 @@
   "images": [
     {
       "repository": "xperfect-service",
-      "tag": "candidate-activation-20261025-k",
-      "archive_ref": "activation-k",
-      "digest": "sha256:3763f5b51ce5d9fd4954c224d150063cdb654bcf7c8482f9fd9eda331b2b500f"
+      "tag": "candidate-activation-20261025-o",
+      "archive_ref": "activation-o",
+      "digest": "sha256:49942f331b634f0ecc8b848d5222727a6e9b5ea2459927608ba9d4e6354c4cb5"
     },
     {
       "repository": "xperfect-native",
-      "tag": "candidate-activation-20261025-k",
+      "tag": "candidate-activation-20261025-o",
       "archive_ref": "activation-b",
       "digest": "sha256:9f14069e3d6452f3c39fe8d5e44a1d5c0caec1725cc3a8444fc7c56d73726e06"
     }
