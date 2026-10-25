@@ -187,6 +187,42 @@ current running run with an exact pending native permission or question binding.
 transaction checks the accepted run input, current run and native attempt identity. Existing
 outbox payloads keep their original bytes on retry; an upgrade does not retrofit old callbacks.
 
+### Worker callback receiver response
+
+Before using a signed worker callback, verify `X-GlassHive-Signature` against the **raw request
+bytes**, using a constant-time comparison and the configured freshness policy. Its signing key is
+the UTF-8 hexadecimal HMAC-SHA256 of `<worker_id>:<run_id>` with the configured callback secret;
+the header is `sha256=` plus the hexadecimal HMAC-SHA256 of the raw body with that derived key.
+Do not reserialize JSON before verification.
+
+Persist accepted results monotonically by run and revision; deduplicate retries by the stable
+`callback_id` and exact result identity. For integer `result_revision >= 1`, return HTTP 2xx with
+this JSON **only after durable acceptance**. Replace each placeholder with its incoming value;
+use the actual revision in both revision fields (this example uses 1). The `current_*` fields must
+describe the receiver's stored current result:
+
+```json
+{
+  "callback_status": "accepted",
+  "callback_id": "<callback_id>",
+  "run_id": "<run_id>",
+  "result_revision": 1,
+  "result_digest": "<result_digest>",
+  "current_callback_id": "<callback_id>",
+  "current_result_revision": 1,
+  "current_result_digest": "<result_digest>"
+}
+```
+
+An exact replay returns the same receipt with `callback_status: "idempotent"`. A bare 200, wrong
+identity or incomplete receipt does not acknowledge a versioned terminal result: delivery retries.
+An already stored newer revision uses the existing HTTP 409 `superseded` receipt; a same-revision
+identity disagreement uses HTTP 409 `conflict`. Neither may silently replace stored results.
+Nonterminal and legacy callbacks without a positive integer result revision need only a successful
+2xx response. These worker receipts are distinct from schedule webhooks' Standard Webhooks contract.
+The [receiver validator](../runtime_phase1/src/workers_projects_runtime/service.py) and
+[terminal recovery tests](../runtime_phase1/tests/test_terminal_callback_recovery.py) own the exact fields.
+
 The authenticated `POST /v1/work/{work_ref}/actions/receipt` reads a previously finished action
 receipt. It accepts the original action request and requires the exact owner, tenant, work,
 idempotency key, action and canonical request digest. A completed receipt returns its saved body;
