@@ -1,5 +1,5 @@
 /* Function first; color and portraits support scanning, not another layout system. */
-.expert-picker{display:grid;gap:22px;margin:0 0 32px;padding:44px 0 30px;border-bottom:1px solid var(--line);min-width:0}
+.expert-picker{display:grid;gap:22px;margin:0;padding:32px 0 28px;border-bottom:1px solid var(--line);min-width:0}
 .expert-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
 .expert-heading h2{font-size:1.6rem;line-height:1.2;letter-spacing:-.035em;margin:0 0 8px}
 .expert-heading p{font-size:.9rem;color:var(--muted);margin:0;max-width:60ch}
@@ -42,3 +42,19 @@
 @media(max-width:850px){.expert-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:540px){.expert-grid{grid-template-columns:1fr}.expert-heading{flex-direction:column;gap:12px}.expert-picker{padding-top:30px}.expert-outcome{min-height:0}.expert-card{padding:18px}.expert-avatar{width:80px;height:80px;flex-basis:80px}.expert-card-top{gap:12px}}
 @media(prefers-reduced-motion:reduce){.expert-card{transition:none}.expert-card:hover{transform:none}}
+
+.expert-actions{display:flex;flex-direction:column;gap:4px;min-width:160px}.expert-actions button{text-align:left}.expert-card>.expert-details:last-child{grid-column:1/-1;justify-self:end}.expert-tabs[hidden]{display:none}
+
+/* Version history is a reading list, not the two-column picker card. */
+.expert-version{display:grid;gap:12px;min-width:0;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel-strong)}
+.expert-version strong{font-size:1rem;line-height:1.4;overflow-wrap:anywhere}
+.expert-version p{margin:0;font-size:.86rem;line-height:1.6;overflow-wrap:anywhere}
+.expert-version .expert-choose{grid-column:auto;justify-self:start}
+
+/* Creation is a peer of the five ready-made experts and uses the same setup. */
+.expert-create{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;min-width:0;min-height:220px;padding:24px;border:1px dashed var(--line-strong);border-radius:18px;background:color-mix(in srgb,var(--accent) 3%,var(--panel));color:var(--muted);font:inherit;cursor:pointer;transition:border-color .16s ease,background .16s ease}
+.expert-create svg{width:52px;height:52px;padding:12px;border:1px solid var(--line);border-radius:50%;background:var(--control-bg);color:var(--text)}
+.composer-form .expert-create span{font-size:1rem;font-weight:600}
+.expert-create:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.expert-create:focus-visible{outline:2px solid var(--focus);outline-offset:4px}
+@media(prefers-reduced-motion:reduce){.expert-create{transition:none}}

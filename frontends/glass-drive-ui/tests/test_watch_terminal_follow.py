@@ -389,7 +389,7 @@ def test_a_completed_result_renders_its_markdown_safely_and_reads_from_the_top()
         "(async () => {"
         f"const {{createResultMarkdown}} = await import({json.dumps(markdown)});"
         + setup
-        + "const overlay = {dataset: {}}; const stageResultText = {hidden: true, innerHTML: ''};\n"
+        + "let currentResultArtifacts = []; const overlay = {dataset: {}}; const stageResultText = {hidden: true, innerHTML: ''};\n"
         + _function(source, "showResult")
         + r"""
 showResult('- **Quantity:** 6 books\n\n<img src=x onerror=alert(1)> [terms](https://example.test/terms)');

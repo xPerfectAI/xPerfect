@@ -34,7 +34,7 @@
 <div class="sidebar-foot">
 <button class="theme" aria-label="Change appearance">
 </button>
-<div>One workspace.<br>Your AI. Your way.</div>
+<div>Your work.<br>Your AI team. Your way.</div>
 </div>
 </aside>
 <div class="mobile-header">
@@ -93,59 +93,25 @@
 </span>
 </div>
 <div class="note">
-<b>Start with one command.</b> The shared Docker package is verified on Apple Silicon Mac and Arm Linux. Windows and other CPU architectures remain under construction. Screenshots show synthetic tasks; dated verification and limits appear below.</div>
+<b>Choose a professional, then inspect useful work.</b> The recommended example uses the supported Claude Code host route. Docker is available for its declared worker routes. Screenshots show actual synthetic tasks; dated scope and limits appear below.</div>
 </section>
 <section id="install">
 <div class="section-label">01 / RUN XPERFECT</div>
-<h2>A private home for your experts.</h2>
-<p>A <b>workspace</b> keeps the files. A <b>worker</b> is the AI that uses them. xPerfect lets you keep and reuse both.</p>
+<h2>Start with the AI tools you already use.</h2>
+<p>A <b>workspace</b> keeps the files. A named <b>AI Worker</b> keeps its own work and native history. For the five professional starters in this guide, use Claude Code on your computer—their current supported Skill route.</p>
 <div class="platforms">
-<article>
-<span class="tag good">VERIFIED</span>
-<h3>Apple Silicon Mac</h3>
-<p>Use Python 3.11+ and Docker Desktop. The package produced a real expert result and kept files and account access after restart.</p>
-</article>
-<article>
-<span class="tag good">VERIFIED / ARM64</span>
-<h3>Linux</h3>
-<p>Use Python 3.11+ and Docker on an Arm Linux host. The same package route produced a real native expert result. Hosted access needs its separate secure setup.</p>
-</article>
-<article>
-<span class="tag warn">UNDER CONSTRUCTION</span>
-<h3>Windows · Intel / x86-64</h3>
-<p>These platforms are deferred. Docker/WSL is the shared design, but the published images currently support <code>linux/arm64</code> only.</p>
-</article>
+<article><span class="tag good">PROFESSIONAL STARTERS</span><h3>On your computer</h3><p>macOS or Linux, Python 3.11+, uv and an installed Claude Code client. Your AI account connects through its own sign-in.</p></article>
+<article><span class="tag good">PACKAGE / ARM64</span><h3>Docker alternative</h3><p>The public Linux Arm package starts without building images. Use the worker routes it actually offers; host-only starters are not automatically available inside it.</p></article>
+<article><span class="tag warn">SEPARATE SETUP</span><h3>A team server</h3><p>Hosted use needs trusted TLS, admitted users and configured storage. Windows and Intel/x86 images remain outside the supported package route.</p></article>
 </div>
 <ol class="steps">
-<li>
-<b>Download and unzip xPerfect.</b>
-<p><a class="quiet" href="https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip">Download the public source ↓</a>. Open Terminal in the extracted folder. You do not need a GitHub account.</p>
-<p>First install <a href="https://www.python.org/downloads/">Python 3.11 or newer</a> and <a href="https://docs.docker.com/get-started/get-docker/">Docker</a>. Keep Docker running.</p>
-</li>
-<li>
-<b>Run one command.</b>
-<pre><code>./xperfect start --docker</code></pre>
-<p>xPerfect downloads its saved release images and starts the app. You do not need to find image names or IDs.</p>
-</li>
-<li>
-<b>Open the app and unlock it.</b>
-<p>Use the app address printed in Terminal, normally <code>http://127.0.0.1:8780</code>. Open the private credentials file it names, normally <code>~/xperfect-local/credentials.json</code>. Enter its <code>ui_password</code> and select <b>Unlock</b>. Save that file privately; it also holds your MCP key.</p>
-</li>
+<li><b>Download and unzip xPerfect.</b><p><a class="quiet" href="https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip">Download the public source ↓</a>. Open Terminal in that folder. Install <a href="https://www.python.org/downloads/">Python 3.11+</a>, <a href="https://docs.astral.sh/uv/getting-started/installation/">uv</a> and <a href="https://code.claude.com/docs/en/setup">Claude Code</a>.</p></li>
+<li><b>Start the app.</b><pre><code>./xperfect start</code></pre><p>Choose an unlock password when asked, or save the generated one. Your saved work lives outside the source folder.</p></li>
+<li><b>Open and unlock it.</b><p>Use the address printed in Terminal, normally <code>http://127.0.0.1:8780</code>. Enter the app password, then connect an AI account. A running page alone is not a connected AI.</p></li>
 </ol>
-<details>
-<summary>Already running something on these ports?</summary>
-<pre><code>./xperfect start --docker --name xperfect-demo \
-  --state-dir ~/xperfect-demo --ui-port 18780 --mcp-port 18767</code></pre>
-<p>Use the addresses and credentials file printed for that instance. Its MCP address is separate from its app address. Never start two instances against the same state.</p>
-</details>
-<details>
-<summary>Optional: native host launcher</summary>
-<p>For macOS or Linux development, install <a href="https://docs.astral.sh/uv/getting-started/installation/">uv</a> and your chosen <a href="https://code.claude.com/docs/en/setup">Claude Code</a> or <a href="https://developers.openai.com/codex/cli/">Codex</a> client, then use <code>./xperfect start</code>. This host route has its own state and MCP setup; do not use its stdio recipe for a Docker instance.</p>
-</details>
-<details>
-<summary>Optional: deploy on a server</summary>
-<p>The shared Linux package is verified. A remote, multi-user service still needs TLS, human sign-in, tenant isolation and persistent storage. Follow the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/deployment-hosted.md">hosted deployment guide</a>; opening a local port to the Internet is not a hosted setup.</p>
-</details>
+<details><summary>Use the public Docker package instead</summary><p>With Python 3.11+ and <a href="https://docs.docker.com/get-started/get-docker/">Docker</a> running:</p><pre><code>./xperfect start --docker</code></pre><p>Use the printed app address and <code>ui_password</code> in its named private credentials file. Keep that file private; it also holds MCP credentials. Native worker choices, account setup and available abilities follow the package's actual configuration.</p><pre><code>./xperfect start --docker --name xperfect-demo \
+  --state-dir ~/xperfect-demo --ui-port 18780 --mcp-port 18767</code></pre><p>Use those printed addresses for that instance. Never start two instances against the same state. The current published images are <code>linux/arm64</code>.</p></details>
+<details><summary>Deploy on a server</summary><p>Follow the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/deployment-hosted.md">hosted deployment guide</a>. Opening a local port to the Internet is not a hosted setup; do not bypass its identity, TLS or filesystem requirements.</p></details>
 </section>
 <section id="connect">
 <div class="section-label">02 / CONNECT YOUR AI</div>
@@ -173,19 +139,9 @@
 </details>
 </section>
 <section id="create">
-<div class="section-label">03 / CREATE YOUR EXPERT</div>
-<h2>Describe the job. Keep the workspace.</h2>
-<p>Use the interface directly, or connect your own Codex / Claude Code client once. Both control the same saved workspaces.</p>
-<details>
-<summary>Connect a client to the Docker package</summary>
-<ol class="steps">
-<li><b>Install your chosen client.</b> Use the official <a href="https://developers.openai.com/codex/cli/">Codex</a> or <a href="https://code.claude.com/docs/en/setup">Claude Code</a> instructions.</li>
-<li><b>Load your private MCP key into this Terminal session.</b>
-<pre><code>export XPERFECT_MCP_TOKEN=&quot;$(python3 -c &#x27;import json,pathlib; print(json.loads((pathlib.Path.home()/&quot;xperfect-local/credentials.json&quot;).read_text())[&quot;mcp_api_key&quot;])&#x27;)&quot;</code></pre>
-<p>This reads your key without printing it or putting its value in shell history. Use your instance's actual credentials path if different. Do not paste the key into chat, a URL or a repository.</p></li>
-<li><b>Choose the Codex or Claude Code tab below.</b> Add its MCP connection once and start that client in this same Terminal session. Use <code>mcp_url</code> from the credentials file if you changed ports. Repeat the key-loading step when you open a new Terminal session.</li>
-</ol>
-</details>
+<div class="section-label">03 / CHOOSE WHO DOES THE JOB</div>
+<h2>A professional. A clear job. A usable result.</h2>
+<p>Start with a packaged profession, create your own worker, or continue an existing one. A saved expert setup creates a new worker; reusing a worker continues its own files and history.</p>
 <div class="tabs" role="tablist" aria-label="How you use xPerfect">
 <button class="active" data-route="ui" role="tab" aria-selected="true">Interface</button>
 <button data-route="codex" role="tab" aria-selected="false">Codex</button>
@@ -193,89 +149,33 @@
 </div>
 <div data-panel="ui">
 <ol class="steps">
-<li>
-<b>Open Run project.</b> Write a small, clear goal.</li>
-<li>
-<b>Choose Worker and Account.</b> Keep <b>Separate workspace</b> for the easiest start.</li>
-<li>
-<b>Select Run Project.</b> Watch the work, then open its result.</li>
-<li>
-<b>Keep it.</b> In Workspaces, choose <b>More → Keep as workspace</b> so it appears with your saved experts.</li>
+<li><b>Open Run Project → Experts.</b> Choose Finance Director. <b>What's included</b> shows its starting knowledge and abilities; the other four professions use the same ordinary worker pattern.</li>
+<li><b>Explain What's the Job?</b> Add a required outcome if useful. For this example, use the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md#prepare-the-example">supplied company brief, accounts, plan and job</a>.</li>
+<li><b>Onboard the worker.</b> In <b>Required Knowledge → Background Context</b>, add those files or choose your own saved Library material. Naming a file in a message does not upload it.</li>
+<li><b>Check who's doing it and where.</b> Use a Ready Claude Code account on this host and a new <b>My own workspace</b>. Select <b>Run Project</b>; review included native abilities when asked.</li>
+<li><b>Open the actual report and editable calculations.</b> Watch shows progress, guidance and file actions. Inspect the result, then reload the same worker rather than starting over.</li>
 </ol>
-<div class="prompt">
-<span>TRY THIS</span>
-<p>Create a reusable Stock expert. Use the files and skill I attach. Save your result as expert-proof.txt.</p>
+<figure><img src="assets/expert-team.jpg" alt="Actual five-profession expert picker with included knowledge and abilities" loading="lazy"><figcaption>Actual professional starter gallery, recorded 24 October 2026. It illustrates that selection flow; portrait artwork may differ after later revisions. The starter Skill route is Claude Code on the host.</figcaption></figure>
+<div class="prompt"><span>USEFUL WORK, NOT A CONNECTIVITY TRICK</span><p>The Finance example asks for a board review, editable calculations, a variance bridge and a cash scenario. Its source includes an unexplained cash difference; a useful result must keep that uncertainty visible.</p></div>
+<figure><img src="assets/finance-delivery.jpg" alt="Actual Finance Director report and downloadable files in Watch" loading="lazy"><figcaption>Real native work with the public synthetic inputs, recorded 24 October. <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md#inspect-the-result">Inspect the sources and expected figures</a>.</figcaption></figure>
 </div>
-<figure>
-<img src="assets/run-project.png" alt="Actual Run project form with a Claude worker and selected account" loading="lazy">
-<figcaption>A goal, a worker and an account. Background and success criteria are optional.</figcaption>
-</figure>
-</div>
-<div data-panel="codex" hidden>
-<p>For the Docker package, first load the private key as shown above. Then:</p>
-<pre><code>codex mcp add xperfect --url http://127.0.0.1:8767/mcp \
-  --bearer-token-env-var XPERFECT_MCP_TOKEN
-codex</code></pre>
-<p>If xPerfect is already configured, reuse that connection. Ask your client:</p>
-<div class="prompt">
-<span>PASTE INTO CODEX</span>
-<p>Use xPerfect to list my workspaces. Create a reusable Stock expert with my selected connected account. Add my files and skill inside its native harness. Run it and return the saved result, workspace ID and View link so I can use it again.</p>
-</div>
-</div>
-<div data-panel="claude" hidden>
-<p>For the Docker package, first load the private key as shown above. Then:</p>
-<pre><code>claude mcp add-json --scope user xperfect &#x27;{&quot;type&quot;:&quot;http&quot;,&quot;url&quot;:&quot;http://127.0.0.1:8767/mcp&quot;,&quot;headers&quot;:{&quot;Authorization&quot;:&quot;Bearer ${XPERFECT_MCP_TOKEN}&quot;}}&#x27;
-claude</code></pre>
-<p>The configuration keeps the variable name, not the key value. If xPerfect is already configured, reuse that connection. Ask your client:</p>
-<div class="prompt">
-<span>PASTE INTO CLAUDE</span>
-<p>Use xPerfect to list my workspaces. Create a reusable Stock expert with my selected connected account. Add my files and skill inside its native harness. Run it and return the saved result, workspace ID and View link so I can use it again.</p>
-</div>
-</div>
-<details>
-<summary>Optional: connect to the native host launcher</summary>
-<p>On <code>./xperfect start</code>, open <b>Connections → Use xPerfect from another AI app</b> and use the command for your client and state directory. The local stdio commands are:</p>
-<pre><code>codex mcp add xperfect -- /absolute/path/to/xPerfect/xperfect mcp
-claude mcp add xperfect -- /absolute/path/to/xPerfect/xperfect mcp</code></pre>
-<p>Run only your chosen client's command. For custom host state, append <code>--state-dir /absolute/path/to/state</code> after <code>mcp</code>. Use a distinct connection name if you keep both host and container instances.</p>
-</details>
-<details>
-<summary>Automatic setup and client permissions</summary>
-<p>The Docker package's Automatic setup card is currently unconfigured. Use the supported private bearer recipe above; the Manual panel now shows the correct separate MCP address. The host launcher's local setup was verified separately.</p>
-<p>Account sign-in authorizes the provider account. Your controlling AI client can still ask to trust an MCP server or approve a tool under its own settings. Keep those real security boundaries; ordinary expert copies and schedules retain the ready account.</p>
-</details>
+<div data-panel="codex" hidden><p>In <b>Connections → Use xPerfect from another AI app</b>, choose Codex and copy the generated setup. Use Automatic when offered; otherwise follow that instance's Manual instructions. Keep any private key out of chat, URLs and Git.</p><div class="prompt"><span>ASK YOUR CONNECTED CLIENT</span><p>Show me the packaged Finance Director and its included abilities. Use my selected Ready Claude Code account on this host, create a new worker from that exact setup, and let me review the abilities it needs. Use the Finance example files I attach to prepare the performance and cash review. Return the report and editable calculations. Keep the worker for my follow-up.</p></div><p>The controlling client can be Codex while the selected worker is Claude Code. These are separate roles. <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/developer.md">Exact client and API walkthrough</a>.</p></div>
+<div data-panel="claude" hidden><p>In <b>Connections → Use xPerfect from another AI app</b>, choose Claude Code and copy the generated setup. Follow the normal client trust/permission steps; they do not grant new provider or workspace access by themselves.</p><div class="prompt"><span>ASK YOUR CONNECTED CLIENT</span><p>Show me the packaged Finance Director and its included abilities. Use my selected Ready Claude Code account on this host, create a new worker from that exact setup, and let me review the abilities it needs. Use the Finance example files I attach to prepare the performance and cash review. Return the report and editable calculations. Keep the worker for my follow-up.</p></div><p>Use the returned worker and run IDs for status, guidance and files. Do not create a second worker merely to ask whether the first finished.</p></div>
+<details><summary>Manual local connection and Docker differences</summary><p>The app's generated command is the source of your actual state directory and endpoint. The host stdio route is <code>./xperfect mcp</code>; local Docker uses its separately printed HTTP MCP address and private bearer key. Do not apply a host stdio recipe to a Docker instance. <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/developer.md#1-connect-a-client">Follow the matching connection recipe</a>.</p></details>
+<details><summary>What is retained when I copy or reuse?</summary><p>An existing worker keeps its own native history and files. A new template worker is a separate identity. A same-owner copy may keep a Ready compatible selected account reference, but never copies provider credentials, browser sign-ins or native conversation history. An unavailable or mismatched account needs a new selection.</p></details>
 </section>
 <section id="teach">
-<div class="section-label">04 / ADD FILES & SKILLS</div>
-<h2>Teach with files. No extra machinery.</h2>
+<div class="section-label">04 / BACKGROUND, KNOWLEDGE &amp; ABILITIES</div>
+<h2>Get the worker fully onboarded.</h2>
 <ol class="steps">
-<li>
-<b>Add files.</b> Use the button on Run project, or Files in an existing workspace.</li>
-<li>
-<b>Add an ordinary SKILL.md file or skill ZIP.</b> It contains a <code>SKILL.md</code> with a name, description and instructions.</li>
-<li>
-<b>Ask the worker to install it normally.</b>
-<p>“Install this skill into your harness's normal skill folder. Keep these inputs and use the skill for future requests.”</p>
-</li>
-<li>
-<b>Ask for a real result.</b> Open the output file. Send a second request to check reuse.</li>
+<li><b>Give it the relevant material.</b> Use Background Context for text/files when starting; an existing worker's <b>Library → Files</b> retains its ordinary workspace files.</li>
+<li><b>Reuse what already works.</b> Choose exact saved knowledge, Skills or bundles from <b>My Library</b>. <b>Added here</b> shows the selected material for this worker.</li>
+<li><b>Review native abilities for this worker.</b> A source link or saved Skill is not proof a plugin is installed. Use the native setup and actual-target review when asked; optional services retain their own accounts and permissions.</li>
+<li><b>Inspect the delivered work.</b> Open/download the report and editable files. Use <b>Keep for reuse</b> on an exact captured result; use the separate current-file action when only present workspace bytes are available.</li>
 </ol>
-<div class="split">
-<article class="soft">
-<h3>A tiny test kit</h3>
-<p>One skill and one CSV. The skill contains a hidden test phrase and asks for a stock total. The request itself does not reveal the phrase.</p>
-<a class="quiet" href="assets/SKILL.md" download>Download plain skill ↓</a>
-<br>
-<a class="quiet" href="assets/onboarding-proof.zip" download>Download ZIP version ↓</a>
-<br>
-<a class="quiet" href="assets/stock.csv" download>Download sample data ↓</a>
-</article>
-<article class="soft">
-<h3>Keep it native</h3>
-<p>Claude uses <code>.claude/skills/</code>; Codex uses <code>.agents/skills/</code>. Let the worker use its harness. Do not add a custom router, plugin service or phrase-matching code.</p>
-</article>
-</div>
-<div class="note">Verified: direct browser upload, authenticated API binary upload and downloaded output bytes. Native Claude and Codex skills ran without a separate skill router. Local storage has no default cap; hosted storage defaults to 5 GB per owner, with no default file-size, file-count or batch cap.</div>
+<p>Company onboarding material stays in your private selection; it does not become part of a public starter. A Library bundle is reusable material, not another type of worker or a new orchestration framework.</p>
+<details><summary>A small connectivity check before the professional example</summary><p>The earlier stock fixture checks native Skill loading and file transport. It is not the flagship professional demonstration.</p><p><a href="assets/SKILL.md" download>Download Skill</a> · <a href="assets/onboarding-proof.zip" download>ZIP</a> · <a href="assets/stock.csv" download>Data</a></p><p>Ask the worker to install the Skill through its harness's normal supported setup and use the supplied data. Confirm the actual output and reuse it; do not replace native tool behavior with a custom phrase router.</p></details>
+<div class="note">The five <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md">professional examples</a> include public synthetic inputs and acceptance checks. Actual native runs, report/workbook downloads and retained same-worker work are recorded; they are not professional certification or a guarantee that every model answer is correct.</div>
 </section>
 <section id="schedule">
 <div class="section-label">05 / RUN IT LATER</div>
@@ -304,20 +204,30 @@ claude mcp add xperfect -- /absolute/path/to/xPerfect/xperfect mcp</code></pre>
 <div class="split">
 <article class="soft">
 <h3>In the app</h3>
-<p>Open <b>Workspaces</b>, find your expert, and open it. Use <b>Steer</b> for the next request. Reopen Files to check the saved result.</p>
+<p>Open <b>Workspaces</b>, find your active worker, and open it. Use <b>Steer</b> for the next request. Reopen Files to check the saved result. If it is Closed, use <b>Duplicate</b> for fresh work.</p>
 <p>Use <b>More → Duplicate</b> to copy ordinary files and installed native skills. The copy keeps the same ready personal AI account; credentials, private harness sessions and run history are not copied. If that account is no longer ready, choose an account again.</p>
 </article>
 <article class="soft">
 <h3>In Codex or Claude</h3>
-<p>“Find my Stock expert in xPerfect. Ask it to summarize this new file. Keep using the same workspace.”</p>
+<p>“Find my Finance Director in xPerfect. Ask the same worker to explain this revised cash assumption. Preserve its original report and make the change clear.”</p>
 <p>The client discovers the actual tools. Save the worker/workspace ID rather than inventing a new endpoint for each expert.</p>
 </article>
 </div>
 <details>
+<summary>Manage experts and workspaces</summary>
+<ol class="steps">
+<li><b>Save and improve an expert.</b> In <b>Workspaces → More → Save as expert</b>, keep a worker’s setup. Open <b>Run Project → My experts → Manage</b> to <b>Edit</b> a new version, <b>Copy</b> a separate expert, or inspect <b>Versions</b>. Existing workers keep their original setup.</li>
+<li><b>Put an expert aside.</b> Choose <b>Archive</b> or confirm <b>Remove</b>. Use the <b>Archived</b> or <b>Removed</b> filter and choose <b>Restore</b> to make it available again.</li>
+<li><b>Clear a workspace card from your list.</b> Choose <b>Workspaces → More → Remove</b> and read the confirmation. Its current and scheduled work stops, but its files, results and history stay saved. In <b>Removed</b>, <b>Restore</b> brings the same card back <b>Closed</b>; it does not restart work. <b>Duplicate</b> creates a fresh worker.</li>
+</ol>
+<figure><img src="assets/expert-versions.png" alt="Actual saved expert Versions dialog with two separate revisions and Use this version controls" loading="lazy"><figcaption>Choose the exact setup you need. Existing workers keep their own setup and history.</figcaption></figure>
+<p>Removed one-off workspaces are kept too. Removal is recoverable; it does not permanently erase files or free that saved storage. <b>Close</b> stops compute without removing the card.</p>
+</details>
+<details>
 <summary>Optional skill: “xPerfect this…”</summary>
 <p>The repository already includes <code>skills/connect-glasshive/SKILL.md</code>. Its name stays for compatibility. It is guidance for the native client, not another service.</p>
 <p>
-Install this existing skill in your controlling client’s normal skill folder: <code>.agents/skills/connect-glasshive/SKILL.md</code> for Codex or <code>.claude/skills/connect-glasshive/SKILL.md</code> for Claude Code. Use the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/skills/connect-glasshive/SKILL.md">published skill</a>. Connect MCP once using the appropriate recipe, then say “xPerfect this: create a reusable Stock expert with these files and this skill.” The native client chooses the tools; no extra service is needed.</p>
+Install this existing skill in your controlling client’s normal skill folder: <code>.agents/skills/connect-glasshive/SKILL.md</code> for Codex or <code>.claude/skills/connect-glasshive/SKILL.md</code> for Claude Code. Use the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/skills/connect-glasshive/SKILL.md">published skill</a>. Connect MCP once using the appropriate recipe, then ask it to use the selected professional or existing worker for your real job. The native client chooses the tools; no extra service is needed.</p>
 </details>
 <details>
 <summary>Build it into a product: MCP / API</summary>
@@ -339,33 +249,21 @@ A saved expert launch (<code>favorite=true</code>) works from a plain connected 
 </section>
 <section id="proof">
 <div class="section-label">CURRENT EVIDENCE</div>
-<h2>Verified paths. Honest limits.</h2>
-<p>Updated 29 September 2026 against published package <a href="https://github.com/xPerfectAI/xPerfect/tree/91f3120583df7cb549e7f81924a4f751089c1c31"><code>91f3120</code></a>. The <a href="https://github.com/xPerfectAI/xPerfect/blob/91f3120583df7cb549e7f81924a4f751089c1c31/deployment/linux/candidate-images.json">release manifest</a> records the exact images. Earlier valid user-path proof is retained; a package startup is not a new test of every model.</p>
-<div id="results">
-<table>
-<thead><tr><th>User path</th><th>Verified result / limit</th></tr></thead>
-<tbody>
-<tr><td>Download and start</td><td>Public source and images downloaded without GitHub sign-in. One <code>./xperfect start --docker</code> command passed on a fresh Arm runner; actual startup took 76 seconds in that recorded environment, not a timing promise.</td></tr>
-<tr><td>Mac and Linux</td><td>Mac package and real Arm Linux/hosted native results passed, with saved files and account continuity after restart. The final package's app unlock, reload and authenticated MCP passed. Windows and x86-64 remain deferred.</td></tr>
-<tr><td>Connect and run</td><td>Selected Claude Opus 5.5 and Codex subscription routes produced native results. Final native image uses official Codex client 0.159.0; its explicit <code>gpt-6.1-sol</code> route passed on the same authorized account. Earlier Mac proof used <code>gpt-6-sol</code>. No universal account-entitlement claim.</td></tr>
-<tr><td>Keep, copy and reuse</td><td>UI and isolated Codex/Claude clients created, found, copied and reused saved experts. Copies retained native skills and ordinary files, with the same ready account. Results survived reload and fresh client reconnect.</td></tr>
-<tr><td>Files and skills</td><td>Direct browser upload and authenticated API transfer supplied real binary files. Native workers read them and saved useful output; downloaded input/output bytes matched. Both Claude and Codex used their ordinary native skill folders.</td></tr>
-<tr><td>Schedule</td><td>UI, Claude MCP and Codex MCP one-time schedules ran at their actual due times. Name/alias scheduling retained the saved expert and account. Recurring schedules are supported but not a separate recurring-cycle proof here.</td></tr>
-<tr><td>MCP and API</td><td>Separate real clients performed expert lifecycles. Authenticated API invocation returned a persisted result from the same expert. Docker Manual MCP now shows its separate port; Automatic container setup remains unconfigured, so use the private bearer recipe.</td></tr>
-<tr><td>Model coverage</td><td><code>claude-opus-5-5</code> and explicit <code>gpt-6.1-sol</code> have actual native result evidence. <code>grok-4.7</code> was verified as a model ID, without a new run. Choose an account and model your provider supports; no silent substitution.</td></tr>
-</tbody>
-</table>
-<figure>
-<img src="assets/skill-result.png" alt="Installed skill produced the hidden phrase and correct stock total, then ran again" loading="lazy">
-<figcaption>Earlier actual skill demonstration: ordinary file → native Skill tool → saved result → reuse. Later copy and account repairs passed separately.</figcaption>
-</figure>
-<figure>
-<img src="assets/schedule-result.png" alt="Actual scheduled worker completed and saved a downloadable result" loading="lazy">
-<figcaption>Retained real one-time schedule and saved output. It ran at its due time without Run now.</figcaption>
-</figure>
-<p><b>Use the verified routes above.</b> Additional platforms and automatic container client setup remain explicit limits. The final shared native image is the same tested binary; the earlier hosted expert was preserved on its diagnostic service rather than overwritten. Hosted setup still requires its own identity and TLS configuration.</p>
-</div>
-<div class="note">Screenshots use synthetic tasks and sample files. The test phrase in the sample skill is demonstration text, not a credential.</div>
+<h2>What was actually checked.</h2>
+<p>Updated 25 October 2026 for published release <a href="https://github.com/xPerfectAI/xPerfect/tree/a6e0825b267d9fa4d88244bc0427d16bb7ab6638"><code>a6e0825</code></a>. Its <a href="https://github.com/xPerfectAI/xPerfect/blob/a6e0825b267d9fa4d88244bc0427d16bb7ab6638/deployment/linux/candidate-images.json">default manifest</a> selects the audited image pair. A successful startup is not a new test of every provider or professional claim.</p>
+<div id="results"><table><thead><tr><th>User path</th><th>Recorded result / boundary</th></tr></thead><tbody>
+<tr><td>Download and start</td><td>The exact public Linux Arm image pair was anonymously downloaded and started in a fresh environment. Local host and Docker routes keep distinct state and connection recipes. Windows/x86 remain deferred.</td></tr>
+<tr><td>Choose a professional</td><td>Five ordinary starters include public synthetic work, knowledge and abilities. Native Claude host demonstrations produced readable reports and editable calculations; their declared compatibility is not all-harness certification.</td></tr>
+<tr><td>Reuse a saved expert</td><td>The Queen reused the exact saved Finance worker beside a new worker. Native session, account, history and old reports stayed intact; both new files downloaded and remained after reload.</td></tr>
+<tr><td>Do parallel work</td><td>The configured Direct Queen accepted four jobs, replied early and combined four completed results. Two native children overlapped within real account/capacity limits. Manual host jobs still use their shared safety lock.</td></tr>
+<tr><td>Open results</td><td>Watch and Chat delivered exact authorized files. A saved native Queen reply reopened its current workspace file after upgrade without rerunning the model. Current workspace bytes and captured immutable results remain distinct.</td></tr>
+<tr><td>API and MCP</td><td>Fresh Codex/Claude clients executed their actual copied setup, discovered work and used the same records. HTTP/MCP create, copy, status, guidance, Library, results and refusal paths have scoped proof; native account sign-in is a separate connection.</td></tr>
+<tr><td>Native models</td><td>Actual Codex GPT6.1 Sol, Claude Opus5.5 and Grok4.7 native work is recorded, including real permission recovery and file delivery. Exact supported selections remain explicit. A native result does not establish Direct Grok API Chat or every API-key route.</td></tr>
+<tr><td>Schedules and recovery</td><td>Real due work and signed webhook delivery retain separate evidence. Repeated held-run retries now wait without executing the held child; unrelated work can continue. Stop/Close and restart preserve their exact recorded state rather than claiming unfinished work succeeded.</td></tr>
+</tbody></table>
+<figure><img src="assets/finance-report.png" alt="First page of the actual synthetic Finance report, including its unresolved cash difference" loading="lazy"><figcaption>Actual downloaded report from the public synthetic Finance inputs, recorded 24 October. Review the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md#inspect-the-result">expected figures and source material</a>, not merely the filename.</figcaption></figure>
+<p><b>Still separate:</b> hosted trusted TLS/XFS/OIDC with a second member, native OpenAI-key onboarding with a matching key, and other platforms. See the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md">capability guide</a>.</p></div>
+<div class="note">Illustrations use synthetic material. Earlier screenshots or fixtures remain dated examples; no raw prompts, personal account data, customer material or runtime volumes are published.</div>
 </section>
 <section id="help">
 <div class="section-label">WHEN SOMETHING STOPS</div>

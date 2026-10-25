@@ -92,6 +92,7 @@ function modal(title, { action = '', cancelLabel = '', onSave, onClose, signal: 
   document.body.append(dialog); dialog.showModal(); if (ownerSignal?.aborted) dialog.close();
   return { dialog, body, form, error, save, signal: controller.signal, showError(message) { error.textContent = message; error.hidden = false; }, close: closeDialog };
 }
+export { modal as libraryModal };
 function field(label, { value = '', textarea = false, required = true, placeholder = '' } = {}) {
   const wrapper = make('label', 'personal-library-field'); const title = make('span', '', label); const input = make(textarea ? 'textarea' : 'input');
   if (!textarea) input.type = 'text'; else input.rows = 5;

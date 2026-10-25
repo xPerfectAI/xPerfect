@@ -16,12 +16,32 @@ import jwt
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
+from starlette.authentication import AuthenticationError
+from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.requests import HTTPConnection
+from starlette.responses import JSONResponse, Response
 
 from .auth import trusted_service_url_allowed
 
 
 class McpOAuthConfigurationError(RuntimeError):
     pass
+
+
+class McpOAuthAdmissionRequired(AuthenticationError):
+    """The token is valid, but this principal has not been approved locally."""
+
+
+def oauth_authentication_error(connection: HTTPConnection, error: AuthenticationError) -> Response:
+    if isinstance(error, McpOAuthAdmissionRequired):
+        # This needs administrator approval, not another OAuth scope grant.
+        return JSONResponse({
+            "error": "access_denied",
+            "error_description": (
+                "This account is not registered for xPerfect. Ask an administrator to approve it, then retry."
+            ),
+        }, status_code=403)
+    return AuthenticationMiddleware.default_on_error(connection, error)
 
 
 HUMAN_ROLES = {"member", "viewer", "tenant_admin", "service"}
@@ -150,7 +170,7 @@ def _enroll_principal_and_check_enabled(
         ).fetchone()
         if existing is None and not allow_registration:
             connection.rollback()
-            return None
+            raise McpOAuthAdmissionRequired()
         connection.execute(
             """
             INSERT INTO auth_principals

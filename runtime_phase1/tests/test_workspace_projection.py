@@ -126,6 +126,10 @@ def test_member_session_reads_skip_the_launch_guard_while_a_run_holds_the_accoun
     sandbox.box = box
     sandbox.user = '20001:20000'
     sandbox.home_mount = '/workspace/data/members/20001/home'
+    # The real constructor always supplies this constant-only environment owner;
+    # this isolated session-read fixture deliberately skips that constructor.
+    sandbox.desktop = SimpleNamespace(environment=lambda: {
+        'DISPLAY': ':20001', 'XAUTHORITY': sandbox.home_mount + '/.xperfect-desktop/Xauthority'})
     sandbox.workspace_mount = '/workspace/worktree'
     sandbox.term_value = 'xterm-256color'
     sandbox.assert_native_launch = lambda: assert_native_launch(box, store)

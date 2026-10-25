@@ -6,10 +6,10 @@
     <title>xPerfect</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261024polish1" />
     <script src="/static/theme.js?v=20261024polish1"></script>
-    <link rel="stylesheet" href="/static/theme.css?v=20261024polish1" />
+    <link rel="stylesheet" href="/static/theme.css?v=20261025visual1" />
     <link rel="stylesheet" href="/static/styles.css?v=20261024polish1" />
       <link rel="stylesheet" href="/static/personal-library.css?v=20261024polish1">
-      <link rel="stylesheet" href="/static/expert-picker.css?v=20261024polish1">
+      <link rel="stylesheet" href="/static/expert-picker.css?v=20261025visual1">
 </head>
   <body class="launch-body">
     <main class="launch-shell">
@@ -50,7 +50,7 @@
         <section id="project-view" class="project-view" aria-labelledby="project-tab">
           <form id="launch-form" class="composer-form">
             <div class="composer-copy">
-              <h1>What's the Job?</h1>
+              <h1 class="onboarding-title"><svg class="onboarding-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="7" width="18" height="14" rx="3"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12a22 22 0 0 0 18 0M12 11v3"/></svg><span>What's the Job?</span></h1>
               <p>Explain the work/project for this specialized AI Worker.</p>
             </div>
             <label class="project-field project-field-main">
@@ -58,12 +58,12 @@
               <textarea id="description" name="description" rows="4" placeholder="Tell me what you want to get done…" required></textarea>
             </label>
             <label class="project-field outcome-field">
-              <span>What's the required outcome? <small>(optional)</small></span>
+              <span class="onboarding-title outcome-title"><svg class="onboarding-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg><span>What's the required outcome? <small>(optional)</small></span></span>
               <small class="field-help">Success criteria: how will you know the job is done well?</small>
               <textarea id="success_criteria" name="success_criteria" rows="2" placeholder="For example: a one-page summary with sources and next steps."></textarea>
             </label>
             <section class="composer-files knowledge-card" aria-labelledby="composer-files-title">
-              <h2 id="composer-files-title">Required Knowledge</h2>
+              <h2 id="composer-files-title" class="onboarding-title"><svg class="onboarding-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 6a7 7 0 0 0-9-2v15a7 7 0 0 1 9 2 7 7 0 0 1 9-2V4a7 7 0 0 0-9 2v15M6 8h3M15 8h3M6 12h3M15 12h3"/></svg><span>Required Knowledge</span></h2>
               <label class="project-field background-context"><span>Background Context <small>(optional)</small></span>
                 <small class="field-help">What background context, files, material does this AI Worker need to get itself fully onboarded?</small>
                 <textarea id="context" name="context" rows="3" placeholder="Add notes, links, constraints, or useful background…"></textarea>
@@ -73,7 +73,7 @@
                   <span>Files <small>(optional)</small></span>
                 </div>
                 <div class="file-choose-actions">
-                  <button class="file-choose" id="project-add-files" type="button">Add files</button>
+                  <button class="file-choose" id="project-add-files" type="button"><svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m9 15 6-6a3 3 0 0 0-4-4l-7 7a5 5 0 0 0 7 7l8-8a7 7 0 0 0-10-10"/></svg><span>Add files</span></button>
                   <button class="file-choose file-clear-all" id="project-clear-all-files" type="button" hidden>Clear all files</button>
                   <details class="file-row-menu" id="project-file-options">
                     <summary aria-label="More file options">⋯</summary>
@@ -84,7 +84,7 @@
                 </div>
               </div>
               <div id="project-file-drop" class="file-drop" tabindex="0" role="button" aria-label="Choose files or drop them here">
-                <span>Drop files here</span>
+                <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg><span>Drop files here</span>
                 <small id="file-help" aria-live="polite"></small>
               </div>
               <input id="project-files" name="files" type="file" multiple hidden />
@@ -95,7 +95,7 @@
                 <button id="project-file-export" class="file-choose" type="button">Download ZIP</button>
                 <button id="project-file-clear" class="file-choose" type="button">Clear selection</button>
               </div>
-              <div class="personal-library-selection"><button id="project-choose-library" type="button" class="secondary-button" hidden>Add knowledge &amp; abilities</button><ul id="project-library-selection" aria-label="Selected Library items"></ul></div>
+              <div class="personal-library-selection"><button id="project-choose-library" type="button" class="secondary-button" hidden><svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 6a7 7 0 0 0-9-2v15a7 7 0 0 1 9 2 7 7 0 0 1 9-2V4a7 7 0 0 0-9 2v15M6 8h3M15 8h3M6 12h3M15 12h3"/></svg><span>Add knowledge &amp; abilities</span></button><ul id="project-library-selection" aria-label="Selected Library items"></ul></div>
               <ul id="project-file-list" class="project-file-list" aria-label="Selected files"></ul>
               <p id="project-file-status" class="file-status" role="status" aria-live="polite" hidden></p>
               <p id="project-file-budget" class="file-budget" role="status"></p>
@@ -113,7 +113,7 @@
               </dialog>
             </section>
             <section class="project-details worker-onboarding" aria-labelledby="worker-choice-title">
-              <div class="section-heading"><h2 id="worker-choice-title" tabindex="-1">Who's Doing The Job?</h2>
+              <div class="section-heading"><h2 id="worker-choice-title" class="onboarding-title" tabindex="-1"><svg class="onboarding-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 21v-2a7.5 7.5 0 0 1 15 0v2"/></svg><span>Who's Doing The Job?</span></h2>
                 <fieldset class="choice-toggle"><legend class="sr-only">Select the AI Worker</legend>
                   <label><input type="radio" name="worker-choice-radio" value="new" checked><span>New</span></label>
                   <label><input type="radio" name="worker-choice-radio" value="existing"><span>Existing</span></label>
@@ -147,7 +147,7 @@
               <small id="worker-account-summary" class="worker-account-summary" aria-live="polite"></small>
             </section>
             <section class="project-details location-onboarding" aria-labelledby="work-location-title">
-              <div class="section-heading"><h2 id="work-location-title">Where should I work?</h2>
+              <div class="section-heading"><h2 id="work-location-title" class="onboarding-title"><svg class="onboarding-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 8h18M9 8v13M6 5.5h.01M9 5.5h.01"/></svg><span>Where should I work?</span></h2>
                 <fieldset id="workspace-location-choices" class="choice-toggle"><legend class="sr-only">Workspace</legend>
                   <label><input type="radio" name="workspace-choice-radio" value="new" checked><span>New</span></label>
                   <label><input type="radio" name="workspace-choice-radio" value="existing"><span>Existing</span></label>
@@ -166,7 +166,7 @@
             </section>
             <div class="launch-footer">
               <div class="launch-actions">
-                <button id="launch-button" type="submit" class="primary-button" value="launch">Run Project</button>
+                <button id="launch-button" type="submit" class="primary-button" value="launch"><svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m8 4 13 8-13 8V4Z"/></svg><span data-launch-label>Run Project</span></button>
               </div>
             </div>
             <p id="launch-status" class="launch-status" aria-live="polite"></p>
@@ -809,6 +809,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/static/app.js?v=20261024polish1" type="module"></script>
+    <script src="/static/app.js?v=20261025visual1" type="module"></script>
   </body>
 </html>

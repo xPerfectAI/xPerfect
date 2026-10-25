@@ -3225,6 +3225,13 @@ class ProfiledWorkerRuntime:
             shared.resources.invalidate_capacity_snapshot()
         return released
 
+    def retire_idle_desktop_for_upgrade(self, worker: dict) -> None:
+        """Explicit package maintenance only; never the periodic idle reaper."""
+        member = self._runtime_for_worker(worker)
+        desktop = getattr(getattr(member, 'sandbox', None), 'desktop', None)
+        if desktop is not None:
+            desktop.stop()
+
     def isolated_resource_usage(
         self, *, cached_only: bool = False
     ) -> dict[str, object]:
@@ -3306,6 +3313,14 @@ class ProfiledWorkerRuntime:
         return self.terminal_target(worker)
 
     def terminal_target(self, worker: dict) -> TerminalTarget:
+        if str(worker.get('state') or '') == 'paused':
+            return TerminalTarget(
+                command=['/bin/sh', '-c', 'printf "%s\\r\\n" "$1"', 'paused-workspace',
+                         'AI work is paused. Use Resume to continue this terminal.'],
+                cwd='/', env={'PATH': '/usr/bin:/bin', 'TERM': 'xterm-256color', 'ENV': '', 'BASH_ENV': ''},
+                title='Workspace paused', subtitle='AI remains paused', session_bound=True,
+                close_code=_RUN_SESSION_ENDED_CLOSE, close_reason='Workspace paused',
+            )
         runtime = self._runtime_for_worker(worker)
         if hasattr(runtime, "terminal_target"):
             return runtime.terminal_target(worker)
@@ -3498,7 +3513,8 @@ class ProfiledWorkerRuntime:
     ) -> dict[str, object]:
         runtime = self._runtime_for_worker(worker)
         clean_run_id = str(run_id or "").strip()
-        if mission_provider_account_selection(worker) is not None and clean_run_id:
+        if (action in {'codex', 'claude', 'openclaw'}
+                and mission_provider_account_selection(worker) is not None and clean_run_id):
             with self.provider_account_binder.project_active_route(
                 worker,
                 runtime_name=str(
@@ -5913,6 +5929,8 @@ class BaseCliWorkerRuntime:
             "selenium_port": sandbox.get("selenium_port"),
             "openclaw_port": sandbox.get("openclaw_port"),
             "desktop_prime": sandbox.get("desktop_prime"),
+            "desktop_supported": sandbox.get("desktop_supported", bool(sandbox.get("view_url"))),
+            "desktop_actions": sandbox.get("desktop_actions"),
             "pid": sandbox["pid"],
         }
 
@@ -16162,7 +16180,39 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
                             next(iter(self._provider_control_cache))
                         )
         if control is None:
-            return None
+            # The native stream can report a typed stop when the app-server's
+            # rate-limit state is unavailable.
+            # Authored turns still require the exact app-server verdict above.
+            if authored:
+                return None
+            terminal = json.loads(next(line for line in reversed(stdout.splitlines()) if line.strip()))
+            error = terminal.get("error")
+            if not isinstance(error, dict) or error.get("codexErrorInfo") != "usageLimitExceeded":
+                return None
+            classification = FailureClassification(
+                failure_class="provider_quota_exhausted",
+                retryable=False,
+                user_message="The selected model provider quota was exhausted before the worker could finish.",
+                recommended_recovery=(
+                    "Review the selected account's usage limits and billing. Restore quota or wait "
+                    "for the provider reset, then send a new instruction in the same workspace; "
+                    "its files are kept."
+                ),
+                diagnostic_summary="Codex reported a typed usage-limit stop before model or tool output.",
+                structured=True,
+                provider_event_source="provider_native",
+            )
+            return classification, {
+                "version": 1,
+                "failure_class": classification.failure_class,
+                "failure_structured": True,
+                "retry_at": "",
+                "retry_after_s": None,
+                "evidence_kind": classification.provider_event_source,
+                "evidence_id": hashlib.sha256(
+                    (thread_id + ":usageLimitExceeded").encode("utf-8")
+                ).hexdigest(),
+            }
         return _codex_typed_provider_failure(
             thread_id=thread_id,
             thread_result=control[0],

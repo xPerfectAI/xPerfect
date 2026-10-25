@@ -5686,6 +5686,26 @@ class WorkersProjectsService:
         instruction starts compute again. Running, queued, paused or waiting work is left for
         the upgrade's idle proof to refuse.
         """
+        # Only this explicit package operation retires human displays. Normal
+        # idle reaping keeps them usable. The ordinary lifecycle flock fences
+        # desktop actions, native starts and controls while eligibility is read.
+        retire_desktop = getattr(self.runtime, 'retire_idle_desktop_for_upgrade', None)
+        if callable(retire_desktop):
+            for candidate in self.store.list_all_workers():
+                worker_id = str(candidate.get('worker_id') or '')
+                if not worker_id:
+                    continue
+                with self._worker_compute_release_lock(worker_id):
+                    current = self.store.get_worker(worker_id)
+                    if (not current or current.get('state') not in {'ready', 'paused'}
+                            or current.get('execution_mode') != 'docker'
+                            or current.get('compute_release_token')
+                            or self.store.get_active_run(worker_id)
+                            or self.store.has_queued_runs(worker_id)
+                            or self.store.list_nonterminal_runs_for_worker(worker_id)
+                            or self.store.has_unconfirmed_host_run_start(worker_id)):
+                        continue
+                    retire_desktop(current)
         released = {str(item.get("worker_id") or "") for item in self._release_idle_workers(0.0)}
         # A member whose compute is already recorded as released can still share a box
         # that stayed up. The box closes only through its own durable idle rule, lock
@@ -9993,6 +10013,7 @@ class WorkersProjectsService:
         name: str | None = None,
         workspace_kind: WorkspaceKind | str | None = None,
         tags: list[str] | None = None,
+        expected_catalog_revision: int | None = None,
     ) -> dict:
         worker = self.require_worker(worker_id)
         updates: dict[str, object] = {}
@@ -10017,9 +10038,11 @@ class WorkersProjectsService:
             )
         if not updates:
             return worker
-        updated = self.store.update_worker_unless_gc_claimed(worker_id, **updates)
-        if updated is None:
-            raise RuntimeErrorBase("Workspace is being garbage-collected")
+        try:
+            updated = self.store.update_worker_catalog(worker_id,
+                expected_catalog_revision=expected_catalog_revision, **updates)
+        except WorkerClosedStoreError as exc:
+            raise ControlPlaneConflict(str(exc)) from exc
         self.store.add_event(worker["project_id"], worker_id, None, "worker.metadata_updated", "Worker metadata updated")
         return updated
 
@@ -10034,6 +10057,7 @@ class WorkersProjectsService:
         favorite: bool | None = None,
         cursor: str | None = None,
         limit: int = 25,
+        catalog_state: str = "active",
     ) -> dict[str, object]:
         page_size = max(1, min(int(limit), 100))
         normalized_kinds = {normalize_workspace_kind(value) for value in workspace_kinds or set()}
@@ -10049,6 +10073,7 @@ class WorkersProjectsService:
             cursor_activity_at=cursor_activity_at,
             cursor_worker_id=cursor_worker_id,
             limit=page_size + 1,
+            catalog_state=catalog_state,
         )
         items = rows[:page_size]
         worker_ids = [str(item.get("worker_id") or "") for item in items]
@@ -11622,6 +11647,8 @@ class WorkersProjectsService:
         name: str,
         description: str = "",
         lineage_id: str | None = None,
+        expected_template_id: str | None = None,
+        expected_catalog_revision: int | None = None,
     ) -> dict[str, object]:
         if self.control_plane_store is None:
             raise RuntimeError("Workspace templates require the user control plane")
@@ -11701,6 +11728,8 @@ class WorkersProjectsService:
                 template = self.control_plane_store.create_workspace_template(
                     tenant_id=tenant_id, owner_id=owner_id, name=name,
                     description=description, content=content, lineage_id=lineage_id,
+                    expected_template_id=expected_template_id,
+                    expected_catalog_revision=expected_catalog_revision,
                     connection=conn)
                 self.personal_library.retain_refs(tenant_id, owner_id, personal_refs,
                     "workspace_template", str(template["template_id"]),
@@ -11708,14 +11737,18 @@ class WorkersProjectsService:
                 return template
         return self.control_plane_store.create_workspace_template(
             tenant_id=tenant_id, owner_id=owner_id, name=name,
-            description=description, content=content, lineage_id=lineage_id)
+            description=description, content=content, lineage_id=lineage_id,
+            expected_template_id=expected_template_id,
+            expected_catalog_revision=expected_catalog_revision)
 
-    def list_workspace_templates(self, *, tenant_id: str, owner_id: str) -> list[dict[str, object]]:
+    def list_workspace_templates(self, *, tenant_id: str, owner_id: str, state: str = "active",
+                                 lineage_id: str | None = None) -> list[dict[str, object]]:
         if self.control_plane_store is None:
             return []
         templates = self.control_plane_store.list_workspace_templates(
             tenant_id=tenant_id,
             owner_id=owner_id,
+            state=state, lineage_id=lineage_id,
         )
         references = {str(ref["version_id"]) for template in templates
                       for ref in template.get("personal_library_refs", [])}
@@ -11741,6 +11774,68 @@ class WorkersProjectsService:
                                          if (ref["item_id"], ref["version_id"]) in labels]
         return templates
 
+    def revise_workspace_template(self, template_id, *, tenant_id, owner_id, name, description,
+                                  expected_catalog_revision):
+        cp = self.control_plane_store
+        template = cp.get_workspace_template(template_id=template_id, tenant_id=tenant_id, owner_id=owner_id)
+        if template is None:
+            raise KeyError("Expert not found")
+        content = json.loads(json.dumps(template["content"]))
+        content["project"] = {**content.get("project", {}), "title": name,
+                              **({"goal": description} if description is not None else {})}
+        content["worker"] = {**content.get("worker", {}), "name": name}
+        return self._write_workspace_template_copy(template, content, tenant_id, owner_id,
+            name, template["description"] if description is None else description,
+            lineage_id=template["lineage_id"], expected_template_id=template_id,
+            expected_catalog_revision=expected_catalog_revision)
+
+    def _write_workspace_template_copy(self, template, content, tenant_id, owner_id, name, description, **revision):
+        cp = self.control_plane_store
+        refs = content.get("personal_library_refs") or []
+        resolved = self.personal_library.resolve_retained_refs(tenant_id, owner_id, refs,
+            "workspace_template", template["template_id"]) if refs else None
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            created = cp.create_workspace_template(tenant_id=tenant_id, owner_id=owner_id,
+                name=name, description=description, content=content, connection=conn, **revision)
+            if refs:
+                self.personal_library.retain_refs(tenant_id, owner_id, refs, "workspace_template",
+                    created["template_id"], connection=conn, resolved=resolved)
+        return created
+
+    def duplicate_workspace_template(self, template_id, *, tenant_id, owner_id, name, idempotency_key):
+        cp = self.control_plane_store
+        fingerprint = hashlib.sha256(json.dumps(["template_duplicate", template_id, name],
+            separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            prior = conn.execute("SELECT request_hash,template_id FROM workspace_template_imports WHERE tenant_id=? AND owner_id=? AND idempotency_key=?",
+                                 (tenant_id, owner_id, idempotency_key)).fetchone()
+            if prior:
+                if prior["request_hash"] != fingerprint:
+                    raise ControlPlaneConflict("This request key already used different expert choices")
+                saved = cp.get_workspace_template(template_id=prior["template_id"], tenant_id=tenant_id, owner_id=owner_id)
+                return {**{k: v for k, v in saved.items() if k != "content"}, "idempotent_replay": True}
+            template = cp.get_workspace_template(template_id=template_id, tenant_id=tenant_id, owner_id=owner_id)
+            if template is None:
+                raise KeyError("Expert not found")
+            if template["catalog_state"] == "deleted":
+                raise ControlPlaneConflict("Restore this expert before copying it")
+            content = json.loads(json.dumps(template["content"]))
+            content["worker"] = {**content.get("worker", {}), "name": name}
+            content["project"] = {**content.get("project", {}), "title": name}
+            refs = content.get("personal_library_refs") or []
+            resolved = self.personal_library.resolve_retained_refs(tenant_id, owner_id, refs,
+                "workspace_template", template_id) if refs else None
+            created = cp.create_workspace_template(tenant_id=tenant_id, owner_id=owner_id,
+                name=name, description=template["description"], content=content, connection=conn)
+            if refs:
+                self.personal_library.retain_refs(tenant_id, owner_id, refs, "workspace_template",
+                    created["template_id"], connection=conn, resolved=resolved)
+            conn.execute("INSERT INTO workspace_template_imports VALUES (?,?,?,?,?,?)",
+                         (tenant_id, owner_id, idempotency_key, fingerprint, created["template_id"], time.time()))
+        return created
+
     def instantiate_workspace_template(
         self,
         template_id: str,
@@ -11760,6 +11855,24 @@ class WorkersProjectsService:
         )
         if template is None:
             return None
+        requested_name = str(name or template["content"].get("worker", {}).get("name") or template.get("name") or "Workspace").strip()[:160]
+        # An accepted use owns its exact original worker even after catalog removal.
+        with self.store._connect() as conn:
+            prior = conn.execute("SELECT * FROM workspace_template_instantiations WHERE tenant_id=? AND owner_id=? AND idempotency_key=?",
+                                 (tenant_id, owner_id, idempotency_key)).fetchone()
+        if prior is not None and prior["status"] == "completed":
+            reservation = self.control_plane_store.reserve_workspace_template_instantiation(
+                template_id=template_id, tenant_id=tenant_id, owner_id=owner_id,
+                idempotency_key=idempotency_key, request_payload={"template_id": template_id, "name": requested_name})
+            project = self.store.get_project(str(reservation["project_id"]), tenant_id=tenant_id, owner_id=owner_id)
+            worker = self.store.get_worker(str(reservation["worker_id"]), tenant_id=tenant_id, owner_id=owner_id)
+            if not project or not worker:
+                raise ControlPlaneConflict("The accepted expert use is unavailable; no new worker was created")
+            return {"template": {k: v for k, v in template.items() if k != "content"},
+                    "project": project, "workspace": worker,
+                    "approvals_required": self._unresolved_duplication_reapprovals(worker), "idempotent_replay": True}
+        if template["catalog_state"] != "active":
+            raise ControlPlaneConflict("Restore this expert before starting new work")
         content = template.get("content")
         if not isinstance(content, dict) or int(content.get("schema_version") or 0) != 1:
             raise ValueError("Workspace template schema is unsupported")
@@ -12963,44 +13076,54 @@ class WorkersProjectsService:
         url: str | None = None,
         run_id: str | None = None,
     ) -> dict[str, object]:
-        worker = self.require_worker(worker_id)
-        self._ensure_execution_allowed(worker)
         if not hasattr(self.runtime, "desktop_action"):
             raise RuntimeErrorBase("Desktop actions are not supported by the configured runtime")
-        active_run = self.store.get_active_run(worker_id)
-        effective_run_id = str(run_id or (active_run or {}).get("run_id") or "").strip() or None
-        if worker.get("state") != "running":
-            self.store.update_worker_state(worker_id, "starting", last_error="")
-        try:
-            launched = self.runtime.desktop_action(
-                worker,
-                action,
-                url=url,
-                run_id=effective_run_id,
-            )
-        except TypeError as exc:
-            if "run_id" not in str(exc):
+        # Opening a human surface is not Resume. Serialize with exact compute
+        # controls, then read their current state; never reconcile or publish an
+        # AI lifecycle state from a desktop action's stale worker/run snapshot.
+        with self._worker_compute_release_lock(worker_id):
+            worker = self.require_worker(worker_id)
+            self._ensure_execution_allowed(worker)
+            active_run = self.store.get_active_run(worker_id)
+            effective_run_id = str(run_id or (active_run or {}).get("run_id") or "").strip() or None
+            try:
+                try:
+                    launched = self.runtime.desktop_action(
+                        worker,
+                        action,
+                        url=url,
+                        run_id=effective_run_id,
+                    )
+                except TypeError as exc:
+                    if "run_id" not in str(exc):
+                        raise
+                    launched = self.runtime.desktop_action(worker, action, url=url)
+            except Exception:
+                with self._runtime_start_lock(worker_id):
+                    self._reject_closed_after_runtime_activity(
+                        worker_id, fallback_worker=worker,
+                        active_run_id=str((active_run or {}).get("run_id") or ""),
+                        context="a failed desktop action",
+                    )
                 raise
-            launched = self.runtime.desktop_action(worker, action, url=url)
-        except Exception as exc:
-            self.store.update_worker(worker_id, state=str(worker.get("state") or "failed"), last_error=str(exc))
-            raise
-        self._reject_closed_after_runtime_activity(
-            worker_id,
-            fallback_worker=worker,
-            active_run_id=str((active_run or {}).get("run_id") or ""),
-            context="a desktop action",
-        )
-        target_state = "running" if active_run else "ready"
-        self._refresh_runtime_info(worker_id, state=target_state, last_error="")
-        self.store.add_event(
-            worker["project_id"],
-            worker_id,
-            active_run["run_id"] if active_run else None,
-            "worker.desktop_action",
-            f"{action}: {launched.get('notes') or launched.get('status') or 'launched'}",
-        )
-        return launched
+            with self._runtime_start_lock(worker_id):
+                self._reject_closed_after_runtime_activity(
+                    worker_id,
+                    fallback_worker=worker,
+                    active_run_id=str((active_run or {}).get("run_id") or ""),
+                    context="a desktop action",
+                )
+                # Keep the existing operator-activity/idle-reaper contract while
+                # preserving Pause, a newer run, errors and runtime generation.
+                self.store.update_worker(worker_id, updated_at=utc_now(), touch_updated_at=False)
+                self.store.add_event(
+                    worker["project_id"],
+                    worker_id,
+                    active_run["run_id"] if active_run else None,
+                    "worker.desktop_action",
+                    f"{action}: {launched.get('notes') or launched.get('status') or 'launched'}",
+                )
+            return launched
 
     def _pause_worker_parallel(
         self,
@@ -13995,6 +14118,30 @@ class WorkersProjectsService:
             self._ensure_worker_processor(worker_id)
         return updated
 
+    def remove_workspace(self, worker_id: str, *, expected_catalog_revision: int) -> dict:
+        """Remove a card only through the native Close owner; preserve retained work."""
+        with self._runtime_start_lock(worker_id):
+            observed = self.require_worker(worker_id)
+            if (observed.get("catalog_state") == "deleted" and int(observed.get("catalog_revision") or 1)
+                    in {expected_catalog_revision, expected_catalog_revision + 1}):
+                return observed
+            try:
+                worker = self._terminate_worker_with_start_fence(worker_id, reclaim_existing=False,
+                    expected_catalog_revision=expected_catalog_revision, remove_from_catalog=True)
+                if worker.get("catalog_state") != "deleted":
+                    worker = self.store.update_worker_catalog(worker_id, catalog_state="deleted",
+                        expected_catalog_revision=expected_catalog_revision)
+                return worker
+            except WorkerClosedStoreError as exc:
+                raise ControlPlaneConflict(str(exc)) from exc
+
+    def restore_workspace(self, worker_id: str, *, expected_catalog_revision: int) -> dict:
+        try:
+            return self.store.update_worker_catalog(worker_id, catalog_state="active",
+                expected_catalog_revision=expected_catalog_revision)
+        except WorkerClosedStoreError as exc:
+            raise ControlPlaneConflict(str(exc)) from exc
+
     def terminate_worker(self, worker_id: str, *, _reclaim_existing: bool = False) -> dict:
         self._invalidate_worker_processor(worker_id)
         observed = self.require_worker(worker_id)
@@ -14018,14 +14165,19 @@ class WorkersProjectsService:
         worker_id: str,
         *,
         reclaim_existing: bool,
+        expected_catalog_revision: int | None = None,
+        remove_from_catalog: bool = False,
     ) -> dict:
         worker = self.require_worker(worker_id)
-        claimed_worker, owns_termination = self.store.begin_worker_termination(worker_id)
+        claimed_worker, owns_termination = self.store.begin_worker_termination(worker_id,
+            **({"expected_catalog_revision": expected_catalog_revision} if expected_catalog_revision is not None else {}))
         worker = claimed_worker or worker
         if not owns_termination and not (
             reclaim_existing and str(worker.get("state") or "") == "terminating"
         ):
             return worker
+        if remove_from_catalog:
+            self._invalidate_worker_processor(worker_id)
         active_run = self.store.get_active_run(worker_id)
         active_run_id = str((active_run or {}).get("run_id") or "")
         runtime_worker = {
@@ -14097,6 +14249,8 @@ class WorkersProjectsService:
             takeover_url=f"/ui/workers/{worker_id}",
             control_url=f"/ui/workers/{worker_id}",
             compute_released_at=utc_now(),
+            **({"catalog_state": "deleted", "catalog_revision": expected_catalog_revision + 1}
+               if remove_from_catalog else {}),
         )
         if updated and str(updated.get("state") or "") == "termination_failed":
             raise RuntimeErrorBase("Workspace close needs attention before cleanup can complete")

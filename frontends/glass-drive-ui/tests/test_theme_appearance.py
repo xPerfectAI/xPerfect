@@ -12,13 +12,13 @@ def test_system_manual_and_cross_tab_appearance_recover_without_storage():
       const assert = require('node:assert/strict');
       const source = fs.readFileSync(process.argv[1], 'utf8');
       const key = 'xperfect.appearance';
-      function page({saved, dark=false, blocked=false, missing=false}={}) {
+      function page({saved, dark=false, blocked=false, missing=false, port='39980'}={}) {
         const values = new Map(saved === undefined ? [] : [[key,saved]]);
         const events = {}, documentEvents = {}, mediaEvents = {}, writes = [];
         const pickers = [0,1].flatMap(group=>['light','system','dark'].map(value=>({group,value,checked:false,events:{},addEventListener(type,fn){this.events[type]=fn;}})));
         const media = {matches:dark,addEventListener(type,fn){mediaEvents[type]=fn;}};
         const root = {dataset:{}};
-        const context = {Set,window:{matchMedia:()=>media,addEventListener(type,fn){events[type]=fn;}},
+        const context = {Set,window:{location:{port,protocol:'http:'},matchMedia:()=>media,addEventListener(type,fn){events[type]=fn;}},
           document:{documentElement:root,getElementById:()=>null,querySelectorAll:()=>pickers,addEventListener(type,fn){documentEvents[type]=fn;}}};
         if(!missing) context.localStorage = {
           getItem(name){if(blocked) throw Error('Storage blocked');return values.get(name)??null;},
@@ -27,7 +27,7 @@ def test_system_manual_and_cross_tab_appearance_recover_without_storage():
         vm.runInNewContext(source,context);
         const initial = root.dataset.theme;
         documentEvents.DOMContentLoaded();
-        return {root,pickers,values,writes,initial,
+        return {root,pickers,values,writes,initial, cookie:()=>context.document.cookie,
           choose(value){const picker=pickers.find(p=>p.group===0&&p.value===value);pickers.filter(p=>p.group===0).forEach(p=>p.checked=false);picker.checked=true;picker.events.change();},
           uncheckEvent(value){pickers.find(p=>p.group===0&&p.value===value).events.change();},
           os(dark){media.matches=dark;mediaEvents.change();},
@@ -41,6 +41,8 @@ def test_system_manual_and_cross_tab_appearance_recover_without_storage():
       assert.equal(system.writes.length,0,'OS follow must not create a manual override');
 
       system.choose('dark');assert.equal(system.root.dataset.theme,'dark');
+      assert.equal(system.cookie(),'xperfect_appearance_39980=dark; Path=/; SameSite=Strict');
+      assert.equal(page({saved:'light',port:'39880'}).cookie(),'xperfect_appearance_39880=light; Path=/; SameSite=Strict','QA ports must not project into another app origin');
       assert.equal(system.values.get(key),'dark');
       assert(system.pickers.every(p=>p.checked===(p.value==='dark')),'same-page appearance controls stay in sync');
       system.uncheckEvent('light');assert.equal(system.values.get(key),'dark','unselected radio changes cannot overwrite the chosen appearance');

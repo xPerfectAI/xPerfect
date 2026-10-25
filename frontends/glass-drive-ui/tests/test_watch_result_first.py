@@ -99,7 +99,11 @@ def test_watch_uses_native_collapsible_log_and_same_human_result_renderer():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node required")
-def test_failed_watch_and_workspace_card_share_safe_typed_reason_not_raw_json():
+@pytest.mark.parametrize("message", [
+    "The selected model is not available for this account. Check the account and model before trying again.",
+    "The selected model provider quota was exhausted before the worker could finish.",
+])
+def test_failed_watch_and_workspace_card_share_safe_typed_reason_not_raw_json(message):
     app = (STATIC / "app.js").read_text()
     summarize = function(app, "summarizeLive")
     script = f"""
@@ -107,7 +111,7 @@ import assert from 'node:assert/strict';
 import {{workspaceDeliveryModel,watchOutputModel}} from {json.dumps((STATIC/'delivery-presenter.js').as_uri())};
 {summarize}
 const raw=JSON.stringify({{type:'turn.failed',error:{{message:'private provider diagnostic'}}}});
-const message='The selected model is not available for this account. Check the account and model before trying again.';
+const message={json.dumps(message)};
 const failed={{latest_run:{{state:'failed',failure_structured:1,failure_user_message:message}},latest_output:raw,
  worker:{{state:'ready'}},deliverable:{{open_url:'/old'}}}};
 assert.equal(workspaceDeliveryModel(failed).summary,message);

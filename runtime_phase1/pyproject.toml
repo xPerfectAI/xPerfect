@@ -15,6 +15,7 @@ dependencies = [
   "standardwebhooks>=1.1,<2.0",
   "mcp>=1.26,<2.0",
   "jsonschema>=4.26,<5.0",
+  "markdown-it-py>=4.2,<5.0",
   "rfc3339-validator>=0.1.4,<1.0",
   "rfc3986-validator>=0.1.1,<1.0",
   "openpyxl>=3.1,<4.0",
@@ -42,4 +43,4 @@ pythonpath = ["src"]
 addopts = "-q"
 
 [tool.setuptools.package-data]
-workers_projects_runtime = ["prompts/*.md", "prompts/*.json", "starter_packs/**/*"]
+workers_projects_runtime = ["prompts/*.md", "prompts/*.json", "starter_packs/**/*", "desktop_chromium_seccomp.json"]

@@ -1039,7 +1039,7 @@ def test_a_signed_in_owner_confirmation_reaches_the_runtime_guard_only_through_t
     from glass_drive_ui.auth_gateway import HumanAuthGateway
     from glass_drive_ui.runtime_client import RuntimeClient
     from glass_drive_ui.server import create_app as ui_app
-    from test_packaged_local_auth import login
+    from test_packaged_local_auth import auth_cookie, login
 
     _, roots, environments, _, credentials = _local_launch(tmp_path, monkeypatch)
     sent = []
@@ -1061,11 +1061,11 @@ def test_a_signed_in_owner_confirmation_reaches_the_runtime_guard_only_through_t
         except RuntimeError:
             gateway.provision_local_owner(password=credentials['ui_password'])
         client = TestClient(ui_app())
-        assert login(client, password=credentials['ui_password']).status_code == 200
+        assert login(client, password=credentials['ui_password'], namespace=gateway.local_namespace).status_code == 200
         sent.clear()
         response = client.post('/api/pending-changes/chg_fixture/confirm', json={'confirmation_token': 'fixture-confirmation-token'},
                                headers={'Origin': 'http://testserver',
-                                        'X-GlassHive-CSRF': client.cookies['glasshive_csrf']})
+                                        'X-GlassHive-CSRF': auth_cookie(client, 'glasshive_csrf', namespace=gateway.local_namespace)})
         assert response.status_code == 200, response.text
         (method, path, body, headers), = sent
         assert (method, path) == ('POST', '/v1/pending-changes/chg_fixture/confirm')
@@ -1142,7 +1142,7 @@ def test_a_signed_in_owners_workspace_link_passes_the_runtime_view_gate(tmp_path
     _use_environment(monkeypatch, environments['ui'], roots)
     monkeypatch.setenv('VIVENTIUM_ENV_FILE', '')
     browser = TestClient(ui_app())
-    assert login(browser, password=credentials['ui_password']).status_code == 200
+    assert login(browser, password=credentials['ui_password'], namespace=gateway.local_namespace).status_code == 200
     token = sign_link_token(kind='worker_view', worker_id=worker['worker_id'], tenant_id=tenant, owner_id=owner)
     ref = create_signed_link_ref(
         token=token, target_url=f"/watch/{worker['worker_id']}?project_id={project['project_id']}&surface=terminal")
@@ -1249,7 +1249,7 @@ def test_local_link_viewer_polls_never_heal_while_the_owner_still_does(tmp_path,
     assert viewer_poll.get('X-Viventium-User-Role') == 'viewer'
     assert 'X-GlassHive-User-Assertion' not in viewer_poll
     signed_in = TestClient(ui_app())
-    assert login(signed_in, password=credentials['ui_password']).status_code == 200
+    assert login(signed_in, password=credentials['ui_password'], namespace=gateway.local_namespace).status_code == 200
     owner_poll = ui_poll(signed_in)
     assert 'X-GlassHive-User-Assertion' in owner_poll
 

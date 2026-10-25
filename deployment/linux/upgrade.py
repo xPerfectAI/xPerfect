@@ -1358,7 +1358,7 @@ class Upgrade:
         endpoint, name, profile = self.endpoint, journal['name'], journal['profile']
         receipt = journal['previous_receipt']
         previous = journal['previous_containers']
-        # Nothing changes until every precondition holds.
+        # The previous version stays untouched until every precondition holds.
         for role in ROLES:
             if _inspect(endpoint, previous[role]) is None:
                 raise UpgradeError(f'The previous {role} container is missing, so there is nothing to return to. '
@@ -1369,6 +1369,10 @@ class Upgrade:
                 self._require_backup(journal)
                 self._state_tool(journal, 'verify')  # read-only: refuse while the new version still serves
             new = self._new_identities(journal)
+            # Retire idle compute through the current image before returning to
+            # an older runtime; its own idle and no-orphan proofs still decide.
+            for runtime in new['runtime']:
+                self._release_idle_compute(runtime=runtime, running=self._running(runtime))
             proof, stopped = self._stop_new_version(journal, new)
             if phase != 'rolling_back':
                 journal['rollback_from'] = phase

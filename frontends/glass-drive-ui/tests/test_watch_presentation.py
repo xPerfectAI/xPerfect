@@ -276,7 +276,7 @@ assert.equal(surfaceTerminalButton.hidden,false);assert.equal(openTerminalLink.h
 """)
 
 
-def test_read_only_or_closed_workspace_keeps_views_but_hides_mutation_actions():
+def test_read_only_or_closed_workspace_keeps_terminal_but_hides_desktop_and_mutation_actions():
     menu_availability_checks("""
 for(const data of [
  {...owner,can_manage_workspace:false},
@@ -284,7 +284,8 @@ for(const data of [
  {...owner,worker:{...owner.worker,state:'terminated'}}
 ]){
  syncWatchMenuAvailability({...data,runtime_details:{view_available:true}});
- assert.equal(surfaceDesktopButton.hidden,false,'Declared view remains readable without mutation authority');
+ assert.equal(surfaceDesktopButton.hidden,true,'Interactive desktop requires an owner and an open workspace');
+ assert.equal(surfaceTerminalButton.hidden,false,'Live activity stays readable without desktop control');
  assert.equal(appActions.hidden,true);assert.equal(buttons.interrupt.hidden,true);assert.equal(buttons.terminate.hidden,true);
  for(const name of ['codex','claude','openclaw'])assert.equal(buttons[name].hidden,true);
  assert.equal(workspaceGroup.hidden,true);

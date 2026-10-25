@@ -738,6 +738,9 @@ ID outside the allowlist remains `action_required` and produces no copyable comm
 is enabled, a first fully verified MCP login enrolls the same hashed
 issuer/subject principal used by Glass Drive, while a locally disabled principal is rejected on the
 next request. Access tokens and provider credentials are never forwarded into a worker.
+When enrollment is disabled, an otherwise valid but unregistered MCP account receives HTTP 403
+with an administrator-approval message. It receives no tools or runtime identity; signing in again
+or granting more OAuth scopes does not approve the account.
 
 `enterprise.tenant_id` is the deployment's xPerfect ownership namespace; it is not assumed to be
 the upstream token's `tid`. Set optional `mcp_oauth.token_tenant_id` only when the authorization
@@ -935,3 +938,36 @@ material. Retry a partial import with that same request; do not generate a new k
 response was lost. A completed replay returns the original template even if the packaged
 catalog changed. Reusing a key for different choices is a conflict. Account references are
 revalidated before use, and a native skill still requires approval on the actual new worker.
+
+A fresh packaged starter choice reuses the exact original immutable imported version while its
+lineage head remains active. A user-edited revision stays selectable through My experts and is
+not silently substituted into a new packaged starter choice.
+
+## Catalog CRUD through the same owner
+
+`GET /v1/workspace-templates?state=active|archived|deleted|all` lists current expert heads.
+`GET /v1/workspace-templates/{template_id}` inspects one exact version; `/versions` lists its lineage.
+`PATCH` appends a name/description revision with `expected_catalog_revision`. The existing
+`POST /v1/workspaces/{worker_id}/templates` can update a lineage from an owned worker with
+`expected_template_id` and `expected_catalog_revision`. `POST /duplicate` copies one exact template
+using the existing import receipt and an 8–128 character idempotency key. Same-key retries preserve
+the first result; changed choices conflict. No worker or model call is needed to copy an expert.
+
+`POST /v1/workspace-templates/{template_id}/state` takes `state: archived|active` plus the current
+catalog revision. `DELETE /v1/workspace-templates/{template_id}` requires that revision and
+`confirm: true`; it removes the catalog choice recoverably. Restore uses state `active`. Exact old
+versions, accepted uses and retained Library references survive.
+
+`DELETE /v1/workspaces/{worker_id}` (also `/v1/workers/{worker_id}`) requires
+`expected_catalog_revision` and `confirm: true`. It closes exact native compute before hiding the
+card. `POST /restore` restores visibility, still Closed. `GET /v1/workspaces?catalog_state=deleted`
+finds removed cards; the default is active. It does not purge projects, shared workspaces or results.
+Existing worker metadata PATCH, safe Duplicate and native Close keep their owners.
+
+MCP parity uses `workspace_template_list` with the same state filter, `workspace_template_get`
+(with optional `versions`), and `workspace_template_manage` actions Edit, Duplicate, Archive, Remove
+and Restore. Edit optionally captures `source_worker_id` through the same sanitized snapshot owner.
+`workspace_remove` and `workspace_restore` use the same worker lifecycle endpoints. Only reads are
+annotated read-only; mutations never self-approve Library/native permissions. Owner/tenant and
+signed-viewer restrictions apply equally to HTTP, MCP and UI. Foreign IDs are not found; stale
+revisions conflict before destructive control.

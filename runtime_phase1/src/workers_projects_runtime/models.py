@@ -234,6 +234,8 @@ class WorkerResponse(BaseModel):
     workspace_root: str | None = None
     favorite: bool = False
     workspace_kind: WorkspaceKind = "legacy"
+    catalog_state: Literal["active", "deleted"] = "active"
+    catalog_revision: int = 1
     tags: list[str] = Field(default_factory=list)
     last_activity_at: str = ""
     duplication_report: WorkspaceDuplicateReport | None = None
@@ -723,6 +725,7 @@ class SchedulePrincipalAuthorityRequest(BaseModel):
 class UpdateWorkerMetadataRequest(BaseModel):
     favorite: bool | None = None
     name: str | None = None
+    expected_catalog_revision: int | None = Field(default=None, ge=1)
 
 
 class UserPreferencesResponse(BaseModel):

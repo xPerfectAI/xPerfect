@@ -7,6 +7,12 @@
   try { const saved = localStorage.getItem(key); if (allowed.has(saved)) preference = saved; } catch { /* Browser storage is optional. */ }
   function apply() {
     document.documentElement.dataset.theme = preference === 'system' ? (media.matches ? 'dark' : 'light') : preference;
+    // Read-only file pages have no script. Mirror only this harmless enum,
+    // scoped by port because cookies, unlike localStorage, span origins' ports.
+    try {
+      const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+      document.cookie = `xperfect_appearance_${port}=${preference}; Path=/; SameSite=Strict${window.location.protocol === 'https:' ? '; Secure' : ''}`;
+    } catch { /* The app still works when cookies are blocked. */ }
     document.querySelectorAll('[data-theme-picker]').forEach((picker) => { picker.checked = picker.value === preference; });
   }
   apply();

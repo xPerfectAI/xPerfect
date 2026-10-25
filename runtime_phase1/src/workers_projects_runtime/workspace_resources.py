@@ -10,6 +10,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from threading import Lock
 
 from .docker_sandbox import _docker_size_bytes
@@ -54,6 +55,10 @@ _SAFE_PROBE_ERRORS = {
     "Container memory observation is unavailable": "container_memory_observation_unavailable",
     "Container disappeared during measurement": "container_disappeared_during_measurement",
     "Duplicate container reservation": "duplicate_container_reservation",
+    "Desktop inventory is malformed": "desktop_inventory_malformed",
+    "Unregistered desktop generation is still alive": "desktop_generation_unregistered",
+    "Desktop process identity changed": "desktop_process_identity_changed",
+    "Desktop resource headroom is unavailable": "desktop_capacity_unavailable",
 }
 
 
@@ -150,6 +155,34 @@ class WorkspaceResources:
         """Re-measure after a confirmed box change, retaining substrate proof."""
         with self._probe_lock:
             self.cached = None
+
+    @contextmanager
+    def desktop_capacity(self, runtime):
+        """Bound optional display creation with the existing measured capacity owner.
+
+        Hold the same probe lock until the exact display generation is recorded.
+        Native admission then waits for the refreshed snapshot instead of racing
+        another optional display against an uncharged cgroup. PID limits remain
+        enforced per display; live process/thread counts use the same accountant.
+        """
+        from .workspace_desktop import DISPLAY_MEMORY_BYTES
+
+        with self._probe_lock:
+            controller = str(os.environ.get("XPERFECT_CONTROLLER_ID") or "").strip()
+            network = str(os.environ.get("XPERFECT_SHARED_NETWORK") or "").strip()
+            if not self._proof_matches_configuration(controller=controller, network=network):
+                raise WorkspaceBoxUnavailable("Shared substrate proof is unavailable")
+            try:
+                usage = self._measure_settled(runtime)
+                if (not all(usage.get(name) is True for name in
+                            ("process_probe_ok", "memory_probe_ok", "disk_probe_ok"))
+                        or int(usage.get("available_memory_bytes") or 0) < DISPLAY_MEMORY_BYTES):
+                    raise WorkspaceBoxUnavailable("Desktop resource headroom is unavailable")
+                yield
+            finally:
+                # Success and failed/partial starts both need fresh identity,
+                # process and memory observations before further admission.
+                self.cached = None
 
     def usage(self, runtime, *, cached_only=False):
         # Admission must never wait behind the controlled Docker/ACL probe.
@@ -529,7 +562,7 @@ class WorkspaceResources:
               AND w.tenant_id=i.tenant_id AND w.owner_id=i.owner_id
               WHERE w.execution_mode='docker'
             ''')]
-        boxes, workspace_ids = {}, set()
+        boxes, workspace_ids, desktops = {}, set(), []
         for worker in members:
             template = runtime._runtime_for_profile(worker['profile'], 'docker')
             member = shared.for_worker(worker, template, identity={'member_uid': worker['member_uid']})
@@ -538,6 +571,9 @@ class WorkspaceResources:
                 record = box._inspect()
                 boxes[box.name] = [box, record, {}]
             boxes[box.name][2][worker['member_uid']] = worker['worker_id']
+            desktop = getattr(member.sandbox, 'desktop', None)
+            if desktop is not None:
+                desktops.append((desktop, boxes[box.name][1], worker['member_uid'], worker['worker_id']))
         limits, counts, background_processes, background_threads = {}, {}, 0, 0
         verified = {controller}
         for box, record, identities in boxes.values():
@@ -559,6 +595,39 @@ class WorkspaceResources:
                     background_threads += threads
                 else:
                     counts[worker_id] = {'child_processes': processes, 'threads': threads}
+        # A display shares its parent's network namespace, but owns a separate
+        # cgroup. It does not appear as another bridge member and must not be
+        # charged merely at its current small resident-memory observation.
+        desktop_ids = set()
+        from .workspace_desktop import WorkspaceMemberDesktop
+        for desktop, parent, uid, worker_id in desktops:
+            parent_id = parent['Id'] if parent and parent.get('State', {}).get('Running') else None
+            record = desktop.resource_record(parent_id)
+            if record is None:
+                continue
+            identity = str(record['Id'])
+            if identity in limits:
+                raise WorkspaceBoxUnavailable('Duplicate container reservation')
+            limits[identity] = record['HostConfig']['Memory']
+            desktop_ids.add(identity)
+            measured = process_counts(read(['top', identity, '-eLo', 'uid,pid,lwp'], identity))
+            if set(measured) != {uid}:
+                raise WorkspaceBoxUnavailable('Desktop process identity changed')
+            count = counts.setdefault(worker_id, {'child_processes': 0, 'threads': 0})
+            count['child_processes'] += measured[uid][0]
+            count['threads'] += measured[uid][1]
+        deployment_id = WorkspaceMemberDesktop.deployment_for_volume(
+            str(os.environ.get('XPERFECT_SHARED_VOLUME_NAME') or ''))
+        observed_desktops = call(['container', 'ls', '--filter', 'label=xperfect.desktop.worker',
+                                  '--filter', 'label=xperfect.desktop.deployment=' + deployment_id,
+                                  '--no-trunc', '--format', '{{.ID}}']).splitlines()
+        if (len(observed_desktops) != len(set(observed_desktops))
+                or any(not re.fullmatch(r'[a-f0-9]{64}', value) for value in observed_desktops)):
+            raise WorkspaceBoxUnavailable('Desktop inventory is malformed')
+        if set(observed_desktops) != desktop_ids:
+            # Covers orphaned/retired members after restart as well as an
+            # unrecorded generation. No foreign container is adopted or stopped.
+            raise WorkspaceBoxUnavailable('Unregistered desktop generation is still alive')
         pending_account_memory = 0
         for account in launcher.inventory():
             if account.memory_bytes <= 0 or account.pids_limit <= 0:

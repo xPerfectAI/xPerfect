@@ -12,7 +12,7 @@ const stateLabel = (state) => ({ pending: 'Waiting', checking: 'Preparing', rece
 const key = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 // Use the same native modal surface as file moves; naming changes no file authority.
-export function requestFileName({ title, value = '', action = 'Save', folder = false,
+export function requestFileName({ title, value = '', action = 'Save', folder = false, pathComponent = folder,
   returnFocus = document.activeElement, signal } = {}) {
   if (signal?.aborted) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
@@ -26,10 +26,13 @@ export function requestFileName({ title, value = '', action = 'Save', folder = f
     const caption = document.createElement('span'); caption.textContent = folder ? 'Folder name' : 'Name';
     const input = document.createElement('input'); input.id = id; input.type = 'text'; input.value = value;
     input.required = true; input.autocomplete = 'off'; input.spellcheck = false;
+    const problem = document.createElement('p'); problem.id = `${id}-error`; problem.hidden = true;
+    problem.setAttribute('role', 'alert'); input.setAttribute('aria-describedby', problem.id);
+    input.addEventListener('input', () => { problem.hidden = true; input.removeAttribute('aria-invalid'); });
     const actions = document.createElement('div'); actions.className = 'file-move-actions';
     const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel';
     const save = document.createElement('button'); save.type = 'submit'; save.className = 'primary-button compact-button'; save.textContent = action;
-    label.append(caption, input); actions.append(cancel, save); form.append(label, actions); dialog.append(heading, form);
+    label.append(caption, input); actions.append(cancel, save); form.append(label, problem, actions); dialog.append(heading, form);
     let result = null;
     let settled = false;
     const finish = () => {
@@ -47,6 +50,11 @@ export function requestFileName({ title, value = '', action = 'Save', folder = f
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       if (!input.reportValidity()) return;
+      const clean = input.value.trim();
+      if (!clean || (pathComponent && (clean === '.' || clean === '..' || clean.includes('/') || clean.includes('\\')))) {
+        problem.textContent = clean ? 'Choose a name without slashes or parent-folder shortcuts.' : 'Enter a name.';
+        problem.hidden = false; input.setAttribute('aria-invalid', 'true'); input.focus(); return;
+      }
       result = input.value;
       dialog.close();
     });
@@ -398,7 +406,7 @@ export function createFileDraft({ input, folderInput, drop, list, help, budget, 
           menu.open = false;
           const epoch = ownerEpoch;
           const revision = item.revision;
-          const name = await requestFileName({ title: 'Rename file', value: item.name,
+          const name = await requestFileName({ title: 'Rename file', value: item.name, pathComponent: true,
             returnFocus: summary, signal: ownerController.signal }).catch(error => { showHelp(error.message); return null; });
           if (epoch !== ownerEpoch || !items.includes(item) || revision !== item.revision) return;
           if (name === null || name === item.name) return;
@@ -1173,8 +1181,10 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
         });
         row.addEventListener('drop', (event) => void internalDrop(event, entry.path));
       } else {
-        label.href = url(`/files/${encodeURIComponent(entry.file_id)}/content?${new URLSearchParams({ revision: entry.revision })}`);
-        label.download = entry.name;
+        label.href = url(`/files/${encodeURIComponent(entry.file_id)}/preview?${new URLSearchParams({ revision: entry.revision })}`);
+        label.target = '_blank';
+        label.rel = 'noopener noreferrer';
+        label.setAttribute('aria-label', `Preview ${visibleName}`);
         label.draggable = dragOut;
         if (dragOut) {
           label.title = 'Drag a copy to your computer';
@@ -1182,7 +1192,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
             event.stopPropagation();
             event.dataTransfer.effectAllowed = 'copy';
             const safeName = entry.name.replace(/[:\r\n]/g, '_');
-            event.dataTransfer.setData('DownloadURL', `application/octet-stream:${safeName}:${label.href}`);
+            event.dataTransfer.setData('DownloadURL', `application/octet-stream:${safeName}:${label.href.replace('/preview?', '/content?')}`);
           });
         }
       }
@@ -1191,7 +1201,8 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
       row.append(choose, nameWrap);
       if (!entry.is_dir) {
         const download = document.createElement('a'); download.className = 'file-choose';
-        download.href = label.href; download.download = entry.name; download.draggable = false;
+        download.href = url(`/files/${encodeURIComponent(entry.file_id)}/content?${new URLSearchParams({ revision: entry.revision })}`);
+        download.download = entry.name; download.draggable = false;
         download.textContent = 'Download';
         download.setAttribute('aria-label', `Download ${entry.name}`);
         row.append(download);
@@ -1205,7 +1216,7 @@ export function createWorkspaceFiles({ workerId, list, status, directoryLabel, m
         rename.addEventListener('click', async () => {
           menu.open = false;
           const currentDirectory = directory;
-          const next = await requestFileName({ title: entry.is_dir ? 'Rename folder' : 'Rename file', value: entry.name,
+          const next = await requestFileName({ title: entry.is_dir ? 'Rename folder' : 'Rename file', value: entry.name, pathComponent: true,
             returnFocus: summary }).catch(error => { setStatus(error.message); return null; });
           if (!canWrite || !canUpload() || currentDirectory !== directory
               || !entries.some(item => item.file_id === entry.file_id && item.revision === entry.revision && item.path === entry.path)) return;

@@ -2222,6 +2222,116 @@ def test_docker_codex_unavailable_malformed_oversized_timed_out_or_forged_contro
     )
 
 
+@pytest.mark.parametrize("control_available", [True, False])
+@pytest.mark.parametrize("authored", [True, False])
+@pytest.mark.parametrize("message", ["Quota exceeded. Check your plan and billing details.", "Opaque refusal"])
+def test_host_codex_typed_stream_quota_preserves_exact_thread_enrichment(
+    tmp_path, monkeypatch, control_available, authored, message
+):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "runtime"))
+    worker = {"worker_id": "wrk_native_quota", "profile": "codex-cli",
+              "runtime": "codex-cli", "execution_mode": "host"}
+    thread_id = "01900000-0000-7000-8000-000000000001"
+    reset_at = int((datetime.now(timezone.utc) + timedelta(days=5)).timestamp())
+    error_envelope = {"message": message,
+                      "codexErrorInfo": "usageLimitExceeded",
+                      "additionalDetails": None, "misalignment": None}
+    stdout = "\n".join(json.dumps(event) for event in [
+        {"type": "thread.started", "thread_id": thread_id},
+        {"type": "turn.started"},
+        *([{"type": "item.completed", "item": {"type": "agent_message", "text": "A partial answer"}}]
+          if authored else []),
+        {"type": "turn.failed", "error": error_envelope, "native_status": "failed"},
+    ])
+    calls = []
+
+    def control(_worker, observed_thread_id):
+        calls.append(observed_thread_id)
+        if not control_available:
+            return None
+        return ({"thread": {"id": observed_thread_id, "modelProvider": "openai", "turns": [{
+            "id": "turn_native_quota", "status": "failed", "error": error_envelope,
+            "items": [{"type": "userMessage"}, *([{"type": "agentMessage"}] if authored else [])],
+        }]}}, {"rateLimits": {"rateLimitReachedType": "workspace_member_usage_limit_reached",
+                              "primary": {"usedPercent": 100, "resetsAt": reset_at}}})
+
+    monkeypatch.setattr(runtime, "_query_codex_provider_control", control)
+    source = runtime._provider_process_exit_error_for_run(
+        worker=worker, run_id="run_native_quota", exit_code=1,
+        stdout=stdout, stderr="", message="codex-cli exited with code 1")
+    failure = classify_runtime_error(source, runtime_name="codex-cli")
+    evidence = runtime.consume_provider_route_failure_evidence(
+        worker, {"run_id": "run_native_quota"}, source)
+    assert calls == [thread_id]
+    if control_available:
+        assert failure.failure_class == "provider_quota_exhausted"
+        assert failure.structured
+        assert failure.retryable is not authored
+        assert evidence is not None
+        assert evidence["evidence_kind"] == "codex_app_server"
+        assert evidence["retry_at"] == datetime.fromtimestamp(reset_at, tz=timezone.utc).isoformat()
+    elif authored:
+        assert failure.failure_class != "provider_quota_exhausted"
+        assert not failure.structured
+        assert evidence is None
+    else:
+        assert failure.failure_class == "provider_quota_exhausted"
+        assert failure.structured and not failure.retryable
+        assert "billing" in failure.recommended_recovery
+        assert "same workspace" in failure.recommended_recovery
+        assert evidence is not None
+        assert evidence["retry_at"] == ""
+        assert evidence["retry_after_s"] is None
+        assert failure.retry_after_s is None
+
+
+@pytest.mark.parametrize("forged", [
+    {"message": "Quota exceeded. Check your plan and billing details."},
+    {"message": "usageLimitExceeded"},
+    {"codexErrorInfo": "usage_limit_exceeded"},
+    {"codexErrorInfo": {"usageLimitExceeded": True}},
+])
+def test_host_codex_unavailable_control_rejects_untyped_quota_prose(tmp_path, monkeypatch, forged):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "runtime"))
+    worker = {"worker_id": "wrk_untyped_quota", "profile": "codex-cli",
+              "runtime": "codex-cli", "execution_mode": "host"}
+    monkeypatch.setattr(runtime, "_query_codex_provider_control", lambda *_: None)
+    stdout = "\n".join(json.dumps(event) for event in [
+        {"type": "thread.started", "thread_id": "synthetic-thread"},
+        {"type": "turn.started"},
+        {"type": "turn.failed", "error": forged},
+    ])
+    source = runtime._provider_process_exit_error_for_run(
+        worker=worker, run_id="run_untyped_quota", exit_code=1,
+        stdout=stdout, stderr="", message="codex-cli exited with code 1")
+    failure = classify_runtime_error(source, runtime_name="codex-cli")
+    assert failure.failure_class != "provider_quota_exhausted"
+    assert not failure.structured
+    assert runtime.consume_provider_route_failure_evidence(
+        worker, {"run_id": "run_untyped_quota"}, source) is None
+
+
+@pytest.mark.parametrize("item_type", ["agent_message", "command_execution"])
+def test_host_codex_quoted_native_quota_envelope_is_not_authority(tmp_path, monkeypatch, item_type):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "runtime"))
+    worker = {"worker_id": "wrk_quoted_quota", "profile": "codex-cli",
+              "runtime": "codex-cli", "execution_mode": "host"}
+    monkeypatch.setattr(runtime, "_query_codex_provider_control", lambda *_: None)
+    quoted = json.dumps({"type": "turn.failed", "error": {"codexErrorInfo": "usageLimitExceeded"}})
+    stdout = "\n".join(json.dumps(event) for event in [
+        {"type": "thread.started", "thread_id": "synthetic-thread"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": item_type, "text": quoted, "aggregated_output": quoted}},
+        {"type": "turn.failed", "error": {}},
+    ])
+    source = runtime._provider_process_exit_error_for_run(
+        worker=worker, run_id="run_quoted_quota", exit_code=1,
+        stdout=stdout, stderr="", message="codex-cli exited with code 1")
+    assert classify_runtime_error(source, runtime_name="codex-cli").failure_class != "provider_quota_exhausted"
+    assert runtime.consume_provider_route_failure_evidence(
+        worker, {"run_id": "run_quoted_quota"}, source) is None
+
+
 def test_host_codex_uses_typed_app_server_quota_and_exact_reset_for_the_failed_thread(
     tmp_path, monkeypatch
 ):

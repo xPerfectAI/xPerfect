@@ -14,6 +14,14 @@ The native desktop and terminal retain their own appearance.
 
 ### UI design principles
 
+Run Project pairs concise, visible labels with one consistent outlined icon family. Icons help users
+find the job, outcome, background material, worker and workspace; they do not replace accessible
+names, required guidance, account readiness or recovery. Keep the shared gradient, neutral working
+surfaces and official identity assets. Avoid duplicate helper paragraphs and decorative icon clutter.
+The five ready-made experts are followed by a sixth **＋ Create** card. That card uses the existing
+custom-worker setup, keeps the job and background draft, and starts no work by itself. Do not add a
+second creation wizard or duplicate the action above the gallery. Preserve saved-expert management.
+
 Use the visual roles below as the design baseline. Extend the current layout and palette when a
 clear user need requires a change; keep the shared shell and control behavior consistent.
 
@@ -64,14 +72,20 @@ Keep these properties consistent across subjects:
   visibly illustrated at small sizes; avoid photographic rendering or a texture over a photo.
 - A mature, expressive treatment with natural proportions and a clear silhouette. Avoid mascot
   proportions, toy-like gloss and unnecessary props.
-- Graphite and plum, warm ivory and champagne-gold highlights, with controlled coral and muted
-  teal geometric background shapes. These artwork colours do not replace semantic UI tokens.
+- Use a coherent colour family with graphite, warm ivory and restrained gold, plus muted warm
+  or cool accents. Vary the dominant hue, colour balance, background geometry and clear space
+  across the set. Each portrait can use a different subset of the family. Artwork colours do
+  not replace semantic UI tokens.
 - A square head-and-shoulders crop with clear margins, readable at 88 px and 80 px. Keep labels,
   capabilities and text in the UI rather than painting them into an asset.
 
-Keep the subject description separate from the style specification. The reference governs medium,
-texture, palette and composition; it does not prescribe the person's identity, hair, clothing,
-pose, gaze or expression. Specify those choices separately for each subject.
+The reference governs medium, brushwork, texture, abstraction and finish. Colour balance and
+background arrangement vary within the family. Keep the shared square portrait framing and
+readable small crops.
+
+Keep the subject description separate from the style specification. The reference does not
+prescribe the person's identity, hair, clothing, pose, gaze or expression. Specify those choices
+separately for each subject.
 Use a style reference and a subject reference for their distinct purposes when both are supplied.
 Judge new assets against the reference in the actual card crops and both themes, then assess the
 whole set: distinct people that look painted by the same hand. A style name
@@ -349,6 +363,36 @@ actions retain their declared desktop and owner-authority requirements; do not s
 that merely acknowledge an action without opening the named application. Library retains the
 universal file-browsing path.
 
+Packaged workspace members start their human browser only when the owner opens **Live desktop**.
+The display reuses the native image, the member's network namespace and the installed noVNC tools;
+it mounts only that member's private display state, without its worktree or AI account files.
+The existing runtime proxies the view; no additional host port or always-running desktop is needed.
+The view states: **This desktop is shared with this worker, including anything you open or sign in to.**
+Native work can use the same authenticated display. The graphical browser runs separately from AI
+execution, so **Pause** leaves human takeover usable without resuming the AI. A paused native
+terminal stays paused; **Resume** remains explicit. **Close workspace** removes the display and its
+view route as well as native work. Terminal and Library continue to show the actual worker's work
+and files; the display does not substitute an empty shell or folder. Desktop startup uses the
+existing measured capacity admission and reserves 512 MiB for each open display, with a 256-task
+process/thread limit. Both startup and later admission account for each display; a second display
+needs its own headroom. These bounds cover the browser and display together. Its dedicated
+Chromium sandbox policy is shipped and checked; the AI workspace's sandbox policy is unchanged.
+A retained display from another resource budget still counts at its actual enforced limit and
+can be closed only after its exact identity and isolation are checked. Reopening replaces that
+owned display with the current budget. Explicit package maintenance retires eligible idle displays
+before switching or rolling back code; normal idle reaping keeps human takeover open.
+Native browser profiles stay with their worker across maintenance. New workspace containers keep a
+stable private hostname so Chromium can reopen its own retained profile after compute is recreated.
+For an older Docker-hostname lock, recovery removes only Chromium’s temporary socket/cookie/lock
+links after proving the old container no longer exists and validating the exact private member
+directory and ACL. It keeps browser history, preferences and sign-ins. If ownership or old-session
+absence cannot be proved, it keeps the profile and reports the refusal. Maintenance still stops idle
+compute; use Resume, then Open browser. Pause keeps an already-open human desktop usable.
+
+Missing storage, capacity, display readiness or a supported graphical action is a visible failure,
+not a successful launch. This source contract requires real input, pause, reload and close acceptance
+on the built packaged runtime; unit tests and a VNC handshake alone do not establish that result.
+
 Message hints float immediately above the composer on hover, keyboard focus or an active Queue
 modifier, without reserving another permanent row. A real unavailable or closed-state notice
 remains visible. Keep the same accessible description, exact Send/Queue behavior and failure
@@ -432,7 +476,9 @@ Watch changes only the existing drawer's label and contents. Keep the current he
 strip and Files component. On desktop its Library drawer starts at 840px, clamps to the available viewport and can be resized with the pointer or keyboard. The resize separator supports arrow keys, Shift for larger steps, Home/End and double-click reset. Width, the last explicitly chosen authorized tab and Library display filters are remembered in this browser; no account material is saved in those preferences. Phones use the available width without a narrow drag handle. Its tabs are:
 
 - **Files** opens on first use; reopening can restore the last chosen tab when authorized. The existing browse, upload, folder, preview, download, replace, Trash and
-  Undo controls keep their current authorization and behavior. Add files writes the workspace copy
+  Undo controls keep their current authorization and behavior. A filename opens the shared file
+  reader in a new tab, bound to that file ID and exact revision; a changed revision asks the user
+  to refresh Files. Download and drag-to-copy remain byte-exact attachments. Add files writes the workspace copy
   immediately, including during work. The native input list is prepared at the next start; this is
   not proof an already-running model read a newly added file.
 - **Added here** lists exact item/version contributions for this worker. Use plain states such as
@@ -616,14 +662,29 @@ refresh or optional browser storage hint fails.
 11a. Chat/tool takeover links must target the configured xPerfect operator `/watch/{worker}` URL
     as the primary user-facing surface. The compatibility `worker_url` field is an alias for that
     operator URL; raw noVNC and runtime takeover URLs are diagnostic-only.
-11b. The secondary `Open` action for a self-contained `.html` or `.htm` artifact must render the
-    page inside the existing xPerfect file landing page, not show raw markup. That preview runs in
-    a credentialless, no-referrer, unique-origin iframe sandbox with no scripts, authenticated
+11b. The secondary `Open` action uses a readable file view with ordinary file actions and optional
+    technical details. Markdown opens as a document with headings, lists, tables, links and code;
+    CSV/TSV opens as an escaped table, preserving cell text. Source remains available. Plain text,
+    JSON, code and SVG remain escaped source. Text previews are bounded and disclose shortening;
+    table previews cap rows and columns and fall back to source when malformed. Office and other
+    unsupported formats show a clear download action instead of claiming a browser preview.
+    PDF, raster images, audio and video use the browser's native viewers and existing bounded
+    range transport; playback depends on browser support. Native PDF frames retain a separate
+    open-in-new-tab fallback. Native media is not loaded into the landing page as a full snapshot.
+    Readers follow the app's validated appearance choice for the same origin, or system appearance.
+    Raw Markdown HTML and unsafe links are disabled. Markdown image labels do not fetch remote
+    tracking pixels or infer neighboring file authority; native artifact identifiers remain labels.
+    A self-contained `.html` or `.htm` page renders in a credentialless, no-referrer,
+    unique-origin iframe sandbox with no scripts, authenticated
     same-origin access, forms, popups, top-level navigation, connection APIs, or external
-    subresources. Ordinary link or frame navigation remains confined to that sandbox. Other text
-    formats remain escaped source previews; interactive or multi-file web apps stay on the isolated
+    subresources. Ordinary link or frame navigation remains confined to that sandbox. Interactive
+    or multi-file web apps stay on the isolated
     workspace desktop. `Download` remains a distinct attachment action and must not navigate the
     user into an error page.
+    Browser document requests for unavailable, expired, denied, changed or incomplete preview
+    links show a plain explanation and recovery action with the original error status. API clients
+    retain structured JSON errors. Error pages must not expose exception details, private paths
+    or link tokens.
 12. The raw live terminal session must still exist and stay available as a secondary surface for takeover and debugging.
     A settled terminal-only workspace opens its readable result in the main view. The same native
     session remains available in a collapsed **Technical log**. Live work and pending native input
@@ -1101,7 +1162,7 @@ Watch ZIP downloads submit selected file IDs in a native POST form, so selection
 
 The old operator `/api/launch` inline-base64 `files` transport is retired. Non-empty legacy payloads receive 422 with `legacy_upload_transport` before any workspace change. Clients must create streamed draft receipts and send `file_upload_ids`; the browser already uses this contract. Runtime bootstrap compatibility is separate and remains subject to the native storage policy.
 
-Files downloads bind the selected revision and abort if the open file changes during transfer. Same-name uploads retain both versions, including names at the filesystem UTF-8 byte limit. Native quota or disk-full errors leave a visible retry state, release the failed transfer reservation after cleanup, and preserve the same upload ID for retry.
+Files downloads bind the selected revision and abort if the open file changes during transfer. Same-name uploads retain both versions, including names at the filesystem UTF-8 byte limit. Native quota or disk-full errors leave a visible retry state, release the failed transfer reservation after cleanup, and preserve the same upload ID for retry. The error tells the user to remove unneeded files or ask an administrator to check their limit and disk space, then retry. A kernel allocation refusal can occur before the usage meter reaches its limit; do not call that an invalid file or claim the failed file's bytes were saved.
 
 Unlimited logical-storage admission does not scan retained work for an unused total. Upload reservation, transfer checks, and accepted-input copy reservation still validate the storage adapter and owner policy. Finite logical limits and native hard quotas retain their existing accounting and guards. The storage display always computes actual usage; canonical root ancestry prevents double counting without comparing every prior workspace.
 
@@ -1287,3 +1348,30 @@ Do not put a white raster tile behind every mark or squeeze a wide wordmark into
 Connections' **More** menu shows concise dates and the runs observed by this deployment. Token
 counts and elapsed worker time sit behind **Usage details**. Saved account names remain user data;
 updating a provider's display brand must not silently rename those accounts or change identifiers.
+
+### Manage experts and retained work without a second object model
+
+**Run Project → My experts** keeps the same expert cards and approved artwork. Available, Archived
+and Removed are a compact toggle. Each saved card has one **Manage** menu: Edit, Copy, Archive,
+Remove and Versions. Edit saves a new version; its optional worker choice updates knowledge and
+setup through the existing sanitized save path. Versions shows the exact earlier setup, with Use
+this version when the lineage is Available. Tools and knowledge keep their real approval gates.
+
+Remove requires a clear confirmation and is recoverable from Removed. Existing workers and saved
+versions stay intact. The active-expert limit explains the recovery: archive/remove a choice and
+retry. A conflicting revision or unavailable account must keep entered text and provide the actual
+next action. Catalog filters are owner-scoped, and stale filter responses cannot replace a newer
+selection. Account changes close pending dialogs and discard their authority.
+
+**Workspaces → More → Remove** states that current/scheduled work will stop while saved files and
+results remain. The card disappears only after confirmed native Close. Removed offers Restore,
+which restores the card **still Closed**; Copy starts fresh work. Cancel changes nothing. Close
+remains the existing compute action and does not itself remove the card. An unknown live status
+disables Steer/Send while showing Checking workspace status; it must not briefly offer work on a
+closed worker. Known live status settles the existing controls without losing a draft.
+
+Starting a new worker from an expert owns one persisted pending creation attempt. Network retries
+reuse it. An accepted job clears that attempt; the next explicit creation with the same expert/name
+gets a fresh worker. An earlier pending worker found Closed is never announced Ready: the user can
+choose Start a new worker while keeping the job and selected expert. Do not derive a permanent
+creation key only from owner, expert and name.

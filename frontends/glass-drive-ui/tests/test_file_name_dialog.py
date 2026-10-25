@@ -73,8 +73,11 @@ const rename=descendants(controls.list).find(item=>item.tag==='button'&&item.tex
 let pending=rename.fire('click');await submit(activeDialog(),'changed.txt');await pending;
 let mutations=calls.filter(call=>call.method==='PATCH');assert.equal(mutations.length,1);assert.equal(mutations[0].url,'/api/workspace/worker-exact/files/file%2Fexact');
 assert.deepEqual(JSON.parse(mutations[0].body),{path:'notes/changed.txt',revision:'revision-exact'});assert.equal(mutations[0].headers['X-GlassHive-CSRF'],'synthetic-csrf');
-pending=descendants(controls.list).find(item=>item.tag==='button'&&item.textContent==='Rename').fire('click');await submit(activeDialog(),'bad/name');await pending;
-assert.equal(calls.filter(call=>call.method==='PATCH').length,1);assert.match(controls.status.textContent,/without slashes/);
+pending=descendants(controls.list).find(item=>item.tag==='button'&&item.textContent==='Rename').fire('click');await submit(activeDialog(),'bad/name');
+assert.equal(activeDialog().open,true);assert.equal(child(activeDialog(),'input').value,'bad/name');
+assert.match(child(activeDialog(),'p').textContent,/without slashes/);
+assert.equal(calls.filter(call=>call.method==='PATCH').length,1);
+await button(activeDialog(),'Cancel').fire('click');await pending;
 pending=controls.folderButton.fire('click');await button(activeDialog(),'Cancel').fire('click');await pending;assert.equal(calls.filter(call=>call.method==='POST').length,0);assert.equal(fileMenuOpener.focused,true);
 pending=controls.folderButton.fire('click');await submit(activeDialog(),'Research');await pending;
 const folder=calls.find(call=>call.method==='POST');assert.equal(folder.url,'/api/workspace/worker-exact/directories');assert.deepEqual(JSON.parse(folder.body),{path:'notes/Research'});
@@ -159,4 +162,18 @@ assert.equal(current['aria-label'],'More options for renamed.txt');
 const mutation=calls.find(call=>call.method==='PATCH');assert.equal(mutation.url,'/api/file-uploads/upload-exact');
 assert.deepEqual(JSON.parse(mutation.body),{relative_path:'renamed.txt',revision:'revision-exact'});
 assert.equal(mutation.headers['X-GlassHive-CSRF'],'synthetic-csrf');
+''')
+
+
+def test_invalid_name_stays_open_preserves_input_and_can_recover_or_cancel():
+    run(r'''
+let answer=requestFileName({title:'New folder',folder:true});let dialog=activeDialog();
+for(const name of ['../parent','bad\\name','.','..','   ']){
+ await submit(dialog,name);assert.equal(dialog.open,true);assert.equal(child(dialog,'input').value,name);
+ assert.equal(child(dialog,'p').hidden,false);assert.equal(child(dialog,'input')['aria-invalid'],'true');
+}
+await child(dialog,'input').fire('input');assert.equal(child(dialog,'p').hidden,true);
+await submit(dialog,'Research');assert.equal(await answer,'Research');
+answer=requestFileName({title:'Keep for reuse'});dialog=activeDialog();
+await submit(dialog,'Research / approved reference');assert.equal(await answer,'Research / approved reference');
 ''')

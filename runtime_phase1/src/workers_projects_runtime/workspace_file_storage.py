@@ -295,12 +295,14 @@ class FileStorageAdapter:
             limit = snapshot.kernel_hard_limit_bytes
             if limit is not None and limit - snapshot.used_allocated_bytes < snapshot.filesystem_block_bytes:
                 return FileAdmissionError(
-                    "Owner storage quota is full; free space and retry", 413,
+                    "Your storage limit is full. Remove unneeded files or ask your administrator "
+                    "to raise your limit, then try again.", 413,
                     code="owner_storage_insufficient",
                 )
             if error.errno == errno.EDQUOT:
                 return FileAdmissionError(
-                    "An operating-system quota blocked this write; operator review is needed", 507,
+                    "A storage limit blocked this file. Remove unneeded files or ask your "
+                    "administrator to check your limit, then try again.", 507,
                     code="storage_quota_blocked",
                 )
             try:
@@ -309,15 +311,18 @@ class FileStorageAdapter:
                 raise FileAdmissionError("Filesystem capacity verification is unavailable", 503) from exc
             if free.f_bavail * free.f_frsize < snapshot.filesystem_block_bytes:
                 return FileAdmissionError(
-                    "The storage filesystem is full; ask the operator to free space", 507,
+                    "The disk is full. Ask your administrator to free disk space, "
+                    "then try again.", 507,
                     code="storage_filesystem_full",
                 )
             return FileAdmissionError(
-                "Storage allocation failed; quota and filesystem capacity need review", 507,
+                "Your file could not be stored. Remove unneeded files or ask your administrator "
+                "to check your storage limit and available disk space, then try again.", 507,
                 code="storage_allocation_failed",
             )
         return FileAdmissionError(
-            "Storage allocation failed; free space or review storage capacity", 507,
+            "Your file could not be stored. Remove unneeded files or ask your administrator "
+            "to check your storage limit and available disk space, then try again.", 507,
             code="storage_allocation_failed",
         )
 

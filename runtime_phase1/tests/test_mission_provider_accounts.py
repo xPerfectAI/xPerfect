@@ -901,7 +901,7 @@ def test_profiled_runtime_binds_private_home_and_holds_exclusive_lease_for_entir
     assert store.active_provider_lease(account["account_id"], "codex-cli:mission") is None
 
 
-def test_desktop_action_projects_the_exact_active_mission_provider_binding(tmp_path, monkeypatch):
+def test_native_account_action_projects_the_exact_active_mission_provider_binding(tmp_path, monkeypatch):
     database = tmp_path / "runtime.db"
     store = ControlPlaneStore(str(database))
     account = _account(store)
@@ -931,8 +931,7 @@ def test_desktop_action_projects_the_exact_active_mission_provider_binding(tmp_p
         account_home = Path(bound["_glasshive_provider_account_mount_host"])
         launched = runtime.desktop_action(
             worker,
-            "browser",
-            url="file:///workspace/project/index.html",
+            "codex",
             run_id="run_personal",
         )
         assert launched["status"] == "launched"
@@ -1585,7 +1584,7 @@ def test_desktop_action_rejects_reacquired_lease_with_identical_run_metadata(
     )
 
 
-def test_personal_preferred_fallback_desktop_action_uses_its_active_unbound_route(
+def test_personal_preferred_fallback_native_account_action_uses_its_active_unbound_route(
     tmp_path,
 ):
     database = tmp_path / "runtime.db"
@@ -1627,8 +1626,7 @@ def test_personal_preferred_fallback_desktop_action_uses_its_active_unbound_rout
     assert mission_running.wait(5)
     result = runtime.desktop_action(
         worker,
-        "browser",
-        url="file:///workspace/project/index.html",
+        "codex",
         run_id="run_fallback",
     )
     assert result["status"] == "launched"
@@ -1641,7 +1639,7 @@ def test_personal_preferred_fallback_desktop_action_uses_its_active_unbound_rout
     assert errors == []
 
 
-def test_broker_mission_desktop_action_uses_its_active_unbound_route(tmp_path):
+def test_broker_mission_native_account_action_uses_its_active_unbound_route(tmp_path):
     database = tmp_path / "runtime.db"
     store = ControlPlaneStore(str(database))
     account = _account(store, auth_method="api_key")
@@ -1678,8 +1676,7 @@ def test_broker_mission_desktop_action_uses_its_active_unbound_route(tmp_path):
     assert mission_running.wait(5)
     result = runtime.desktop_action(
         worker,
-        "browser",
-        url="file:///workspace/project/index.html",
+        "codex",
         run_id="run_broker",
     )
     assert result["status"] == "launched"
@@ -1692,7 +1689,7 @@ def test_broker_mission_desktop_action_uses_its_active_unbound_route(tmp_path):
     assert errors == []
 
 
-def test_desktop_action_waits_until_the_mission_container_is_initially_ready(
+def test_native_account_action_waits_until_the_mission_container_is_initially_ready(
     tmp_path, monkeypatch
 ):
     database = tmp_path / "runtime.db"
@@ -1747,13 +1744,13 @@ def test_desktop_action_waits_until_the_mission_container_is_initially_ready(
     thread.start()
     assert first_ensure.wait(5)
     with pytest.raises(RuntimeErrorBase, match="ready provider route"):
-        runtime.desktop_action(worker, "browser", run_id="run_ready")
+        runtime.desktop_action(worker, "codex", run_id="run_ready")
     assert recorder.create_count == 1
     assert recorder.ensure_calls == 1
 
     allow_ready.set()
     assert mission_running.wait(5)
-    result = runtime.desktop_action(worker, "browser", run_id="run_ready")
+    result = runtime.desktop_action(worker, "codex", run_id="run_ready")
     assert result["status"] == "launched"
     assert recorder.create_count == 1
     finish_mission.set()
@@ -2199,3 +2196,22 @@ def test_direct_binding_rejects_incompatible_account_before_native_route(tmp_pat
     runtime=ProfiledWorkerRuntime(base_dir=str(tmp_path),provider_account_db_path=str(database))
     with pytest.raises(RuntimeErrorBase,match='API-key account'):
         runtime.run_task(_worker(account['account_id'],profile=profile),'Synthetic task',run_id='run_direct_incompatible')
+
+
+@pytest.mark.parametrize('action', ['browser', 'focus_browser', 'files', 'terminal'])
+def test_active_run_graphical_or_work_surface_never_borrows_provider_credentials(tmp_path, monkeypatch, action):
+    database = tmp_path / 'runtime.db'
+    store = ControlPlaneStore(str(database))
+    account = _account(store)
+    runtime = ProfiledWorkerRuntime(base_dir=str(tmp_path), provider_account_db_path=str(database))
+    worker = {**_worker(account['account_id']), 'execution_mode': 'docker'}
+    recorder = RecordingRuntime()
+    runtime.codex = recorder
+    monkeypatch.setattr(runtime.provider_account_binder, 'project_active_route',
+                        lambda *a, **k: pytest.fail('a work/browser surface must not borrow credentials'))
+    launched = runtime.desktop_action(worker, action, run_id='run_active', url='about:blank')
+    assert launched['status'] == 'launched'
+    assert recorder.worker is not None
+    assert '_glasshive_provider_account_bound' not in recorder.worker
+    assert '_glasshive_provider_account_mount_host' not in recorder.worker
+    assert store.active_provider_account_lease(account['account_id']) is None

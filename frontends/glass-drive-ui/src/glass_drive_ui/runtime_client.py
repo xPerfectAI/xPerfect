@@ -132,8 +132,9 @@ class RuntimeClient:
         favorite: bool | None = None,
         cursor: str | None = None,
         limit: int = 25,
+        catalog_state: str = "active",
     ) -> dict[str, Any]:
-        query: dict[str, str] = {"kind": kind, "search": search, "tags": tags, "limit": str(limit)}
+        query: dict[str, str] = {"kind": kind, "search": search, "tags": tags, "limit": str(limit), "catalog_state": catalog_state}
         if favorite is not None:
             query["favorite"] = "true" if favorite else "false"
         if cursor:
@@ -156,8 +157,8 @@ class RuntimeClient:
             json_body=payload,
         )
 
-    def list_workspace_templates(self) -> list[dict[str, Any]]:
-        return self._request("GET", "/v1/workspace-templates").get("items", [])
+    def list_workspace_templates(self, state: str = "active") -> list[dict[str, Any]]:
+        return self._request("GET", "/v1/workspace-templates?" + urlencode({"state": state})).get("items", [])
 
     def save_workspace_template(self, worker_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request(

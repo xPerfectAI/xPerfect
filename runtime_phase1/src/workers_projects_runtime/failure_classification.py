@@ -455,6 +455,8 @@ def classify_cli_failure(
         )
     if provider_codes & _STRUCTURED_PROVIDER_MODEL_CODES:
         return _model_access_failure(diagnostic_summary)
+    if 403 in provider_statuses:
+        return _provider_access_denied_failure(diagnostic_summary)
     if "content_filter" in lowered or "content filter" in lowered:
         return FailureClassification(
             failure_class="provider_content_filter",
@@ -1150,6 +1152,22 @@ def _model_access_failure(diagnostic_summary: str) -> FailureClassification:
     )
 
 
+def _provider_access_denied_failure(diagnostic_summary: str) -> FailureClassification:
+    return FailureClassification(
+        failure_class="provider_request_rejected",
+        retryable=False,
+        user_message="The model provider denied access for this account or project.",
+        recommended_recovery=(
+            "Review this account's project permissions and model access. After correcting access "
+            "or explicitly choosing another account or model, send a new instruction in the same "
+            "workspace; its files are kept."
+        ),
+        diagnostic_summary=diagnostic_summary,
+        structured=True,
+        provider_event_source="provider_native",
+    )
+
+
 _STRUCTURED_PROVIDER_REQUEST_CODES = frozenset(
     {
         "bad_request",
@@ -1428,7 +1446,7 @@ def _structured_provider_auth_failure(*texts: str) -> bool:
     """Recognize provider authentication only from exact JSONL control fields."""
 
     statuses, codes = _structured_provider_signals(*texts)
-    return bool(statuses & {401, 403} or codes & _STRUCTURED_PROVIDER_AUTH_CODES)
+    return bool(401 in statuses or codes & _STRUCTURED_PROVIDER_AUTH_CODES)
 
 def _terminal_native_provider_error(*texts: str) -> dict[str, Any] | None:
     """Return the final native result error without inspecting assistant or task prose."""
@@ -1548,11 +1566,7 @@ def _classify_terminal_native_provider_error(
 ) -> FailureClassification:
     """Classify the final provider attempt without inheriting stale earlier failures."""
 
-    try:
-        status = int(terminal_result.get("api_error_status") or 0)
-    except (TypeError, ValueError):
-        status = 0
-    _statuses, codes = _structured_provider_signals(json.dumps(terminal_result))
+    statuses, codes = _structured_provider_signals(json.dumps(terminal_result))
     terminal_code = _normalized_structured_code(
         terminal_result.get("error")
         or terminal_result.get("code")
@@ -1562,7 +1576,7 @@ def _classify_terminal_native_provider_error(
     if terminal_code:
         codes.add(terminal_code)
 
-    if status in {401, 403} or codes & _STRUCTURED_PROVIDER_AUTH_CODES:
+    if 401 in statuses or codes & _STRUCTURED_PROVIDER_AUTH_CODES:
         return FailureClassification(
             failure_class="provider_auth_missing",
             retryable=False,
@@ -1606,7 +1620,7 @@ def _classify_terminal_native_provider_error(
             structured=True,
             provider_event_source="provider_native",
         )
-    if status == 429 or codes & _STRUCTURED_RATE_LIMIT_CODES:
+    if 429 in statuses or codes & _STRUCTURED_RATE_LIMIT_CODES:
         return FailureClassification(
             failure_class="provider_rate_limited",
             retryable=True,
@@ -1623,7 +1637,9 @@ def _classify_terminal_native_provider_error(
         )
     if codes & _STRUCTURED_PROVIDER_MODEL_CODES:
         return _model_access_failure(diagnostic_summary)
-    if status == 400 or codes & _STRUCTURED_PROVIDER_REQUEST_CODES:
+    if 403 in statuses:
+        return _provider_access_denied_failure(diagnostic_summary)
+    if 400 in statuses or codes & _STRUCTURED_PROVIDER_REQUEST_CODES:
         return FailureClassification(
             failure_class="provider_request_rejected",
             retryable=False,

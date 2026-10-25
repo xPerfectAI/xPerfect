@@ -47,7 +47,7 @@ const calls=[],navigations=[];let resets=0;
 const fileDraft={blocked:()=>false,readyRefs:()=>[{upload_id:'exact-file',revision:'exact-revision'}],reset(){resets++;}};
 const launchLibrary={refs:()=>[],resolve:async()=>({items:[]}),clear(){}};
 // Recovery here exercises native workers with no starter expert selected.
-const expertPicker={selection:()=>null,prepare(){throw new Error('No expert selected');}};
+const expertPicker={accepted(){},selection:()=>null,prepare(){throw new Error('No expert selected');}};
 const selectedWorkerEffort=()=>select.value.startsWith('new:')?codexEffort.value:'';
 const syncWorkspaceUI=()=>({statusText:'Starting…'}),syncDirectEffort=async()=>{},withAuth=url=>url,csrfToken='csrf';
 const launchFailureMessage=error=>error.message,responseError=async response=>Object.assign(new Error('Unavailable'),{status:response.status});

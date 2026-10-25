@@ -491,6 +491,10 @@ def test_controlled_refresh_and_concurrent_roster_reads_keep_active_checks_out_o
             output = guard_id
         elif arguments[:1] == ['info']:
             output = json.dumps({'CgroupVersion': '2', 'MemTotal': 16 * 1024**3})
+        elif arguments[:2] == ['container', 'ls']:
+            from workers_projects_runtime.workspace_desktop import WorkspaceMemberDesktop
+            assert 'label=xperfect.desktop.deployment=' + WorkspaceMemberDesktop.deployment_for_volume('shared-data') in arguments
+            output = ''
         elif arguments[:1] == ['stats']:
             output = ''
         elif arguments[:1] != ['start']:
@@ -524,7 +528,8 @@ def test_controlled_refresh_and_concurrent_roster_reads_keep_active_checks_out_o
             lambda _index: shared.readiness(workspace, runtime=runtime), range(32)
         ))
     assert all(item['code'] == 'ready' for item in results)
-    assert all(call[0] in {'info', 'network', 'stats'} for call in calls)
+    assert all(call[0] in {'info', 'network', 'stats'}
+               or call[:2] == ('container', 'ls') for call in calls)
     assert acl_calls == ['getfacl', 'setfacl']
 
     from fastapi.testclient import TestClient
@@ -1040,6 +1045,10 @@ def test_refresh_settles_a_box_change_but_keeps_typed_membership_refusal(
             output = guard_id
         elif arguments[:1] == ['info']:
             output = json.dumps({'CgroupVersion': '2', 'MemTotal': 16 * 1024**3})
+        elif arguments[:2] == ['container', 'ls']:
+            from workers_projects_runtime.workspace_desktop import WorkspaceMemberDesktop
+            assert 'label=xperfect.desktop.deployment=' + WorkspaceMemberDesktop.deployment_for_volume('shared-data') in arguments
+            output = ''
         elif arguments[:1] == ['stats']:
             output = ''
         elif arguments[:1] != ['start']:

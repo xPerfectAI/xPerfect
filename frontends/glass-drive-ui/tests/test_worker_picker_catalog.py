@@ -16,6 +16,8 @@ def run(body):
         return match.group(0)
 
     helpers = "\n".join(function(name) for name in ("bindWorkspaceInteractionOwner", "renderWorkspaceOptions", "runnableDefaultOption", "uniqueWorkspaces", "findWorkspace"))
+    catalog_fetch = source[source.index("  const fetchCatalogPage = async"):source.index("  const refreshWorkspaceCatalog = async")]
+    catalog_refresh = source[source.index("  const refreshWorkspaceCatalog = async"):source.index("  const onboarding = mountWorkerOnboarding")]
     browse = source[source.index("  const loadWorkerChoices = async"):source.index("  const currentBootstrapResult =")]
     refresh = source[source.index("  const currentBootstrapResult ="):source.index("\n  function stopHivePolling()")]
     harness = r'''
@@ -38,13 +40,15 @@ const scopeA='a'.repeat(64),scopeB='b'.repeat(64);
 const worker=n=>({worker_id:'worker-'+n,name:'Worker '+n,profile:'codex-cli',workspace_kind:n%2?'legacy':'ephemeral',workspace_id:'place-'+n,workspace_name:'Workspace '+n,execution_workspace_mode:'shared'});
 function harness(savedValue=null,savedLocation=null){
  let bootstrap=null,bootstrapGeneration=0,bootstrapFlight=null,identityTransition=false,workerChoiceGeneration=0,csrfToken='';
+ let workspaceCatalogState='active';
  let workspaceInteractionOwnerScope='',workspaceSteerInFlight=new Map();
  const select=new Element('select'),providerAccountPolicy={value:'personal_required',dataset:{}};
  const elements={'workspace-option':select,'provider-account-policy':providerAccountPolicy};
  for(const id of ['worker-choice','workspace-choice'])elements[id]=new Element('input','new');
  for(const id of ['worker-type','existing-worker','copy-worker','execution-workspace'])elements[id]=new Element('select');
  for(const id of ['new-worker-fields','existing-worker-field','workspace-location-choices','saved-worker-location','existing-workspace-field','new-workspace-fields','execution-workspace-help'])elements[id]=new Element('div');
- const document={createElement:tag=>new Element(tag),getElementById:id=>elements[id],querySelectorAll:()=>[]};
+ const workerRadios=[new Element('input','new'),new Element('input','existing')];
+ const document={createElement:tag=>new Element(tag),getElementById:id=>elements[id],querySelectorAll:selector=>selector==='[name="worker-choice-radio"]'?workerRadios:[]};
  const workspaceOptionLabel=item=>item.name||'Selected workspace';
  HELPERS
  const storage=new Map();
@@ -59,8 +63,11 @@ function harness(savedValue=null,savedLocation=null){
  let detail=async()=>({...worker(26),provider_account:{account_id:'account-a',policy:'personal_required'}});
  let members=async()=>({workspace_id:'place-26',mode:'shared',default_worker_id:'worker-26',members:[worker(26)]});
  const loadBootstrap=async()=>structuredClone(incoming);
- const fetchCatalogPage=async request=>{loads.push(request);return page(request);};
- const getJson=async path=>{details.push(path);return path.startsWith('/api/execution-workspaces/')?members(path):detail(path);};
+ const getJson=async path=>{
+  if(path.startsWith('/api/workspaces?')){const request=Object.fromEntries(new URL(path,'http://example.test').searchParams);loads.push(request);return page(request);}
+  details.push(path);return path.startsWith('/api/execution-workspaces/')?members(path):detail(path);
+ };
+ CATALOG_FETCH
  const decorateCatalogWorkspace=value=>value;
  const onboarding=mountWorkerOnboarding({root:document,getData:()=>bootstrap,onChoice:value=>{select.value=value;}});
  const fileDraft={setOwnerScope(){}};
@@ -69,15 +76,16 @@ function harness(savedValue=null,savedLocation=null){
  const providerAccount={},providerAccountHelp={},defaultWorker={},codexEffort={},claudeEffort={},openclawEffort={};
  const workspaceKindFilter={value:'named,ephemeral,legacy'},workspaceSearch={value:''},workspaceTagFilter={value:''};
  const workspaceMode={},workspaceFilePlacementField={},workspaceFilePlacement={},workspaceModeHelp={},workspaceType={},button={},help={};
- const templateStartStatus={},workspaceCatalogStatus={},status={};
+ const templateStartStatus={},workspaceCatalogStatus={},workspaceLoadMore={disabled:false},status={};
  const renderCurrentUser=()=>{},renderLaunchProviderAccounts=()=>{},syncAccountSummary=()=>{},syncPreferenceControls=()=>{};
- const renderWorkspaceHive=()=>{},workspaceViewData=()=>({}),hivePrefs=()=>({}),refreshWorkspaceCatalog=async()=>{};
+ const renderWorkspaceHive=()=>{},workspaceViewData=()=>({}),hivePrefs=()=>({});
+ CATALOG_REFRESH
  const renderActivity=()=>{},syncWorkspaceUI=()=>{},syncWorkspaceModeUI=()=>{};
  BROWSE
  REFRESH
- return {refresh:refreshBootstrap,browse:loadWorkerChoices,select,loads,details,elements,current:()=>bootstrap,
+ return {refresh:refreshBootstrap,browse:loadWorkerChoices,select,loads,details,elements,workerRadios,current:()=>bootstrap,
   page(fn){page=fn;},detail(fn){detail=fn;},owner(scope){incoming={...incoming,draft_owner_scope:scope,csrf_token:scope};},
-  members(fn){members=fn;},
+  members(fn){members=fn;}, catalogFilter(state){workspaceCatalogState=state;}, catalogPage:fetchCatalogPage,
   invalidate(){identityTransition=true;bootstrapGeneration++;}};
 }
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
@@ -85,7 +93,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
     harness = (harness.replace("DRAFT", json.dumps((STATIC / "launch-draft.js").as_uri()))
                .replace("POLICY", json.dumps((STATIC / "launch-policy.js").as_uri()))
                .replace("ONBOARDING", json.dumps((STATIC / "worker-onboarding.js").as_uri()))
-               .replace("HELPERS", helpers).replace("BROWSE", browse).replace("REFRESH", refresh))
+               .replace("HELPERS", helpers).replace("CATALOG_FETCH", catalog_fetch).replace("CATALOG_REFRESH", catalog_refresh).replace("BROWSE", browse).replace("REFRESH", refresh))
     result = subprocess.run(["node", "--input-type=module"], input=harness + body, text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -177,4 +185,25 @@ const a=other.refresh();for(let i=0;i<12;i++)await Promise.resolve();
 other.owner(scopeB);await other.refresh();old.resolve({workspace_id:'place-26',mode:'shared',members:[worker(26)]});await a;
 assert.equal(other.current().draft_owner_scope,scopeB);assert.deepEqual(other.current().execution_workspace_choices,[]);
 assert.equal(other.elements['workspace-choice'].value,'new');assert.equal(other.elements['execution-workspace'].value,'');
+''')
+
+
+def test_removed_workspace_filter_does_not_empty_existing_worker_choices():
+    run(r'''
+const ui=harness();ui.catalogFilter('deleted');
+ui.page(async request=>({items:request.catalog_state==='active'?Array.from({length:25},(_,n)=>worker(n+1)):[],next_cursor:'page-2'}));
+await ui.refresh();
+assert.equal(ui.loads[0].catalog_state,'active','Run Project bootstrap must load reusable workers independently of the Workspaces filter');
+assert.equal(ui.loads[1].catalog_state,'deleted','The Workspaces panel must retain its explicitly chosen Removed filter');
+assert.equal(ui.current().existing_workspaces.length,25);
+assert.equal(ui.current().worker_catalog.items.length,25);
+assert.equal(ui.workerRadios[1].disabled,false,'Existing must remain usable after visiting Removed');
+assert.equal(ui.workerRadios[1].title,'');
+assert.equal(ui.elements['existing-worker'].options.length,26);
+await ui.browse({search:'Worker'});
+assert.equal(ui.loads.at(-1).catalog_state,'active','Existing worker search must not inherit Removed');
+assert.equal(ui.current().worker_catalog.items.length,25);
+const removed=await ui.catalogPage({kind:'named,ephemeral,legacy',state:'deleted'});
+assert.equal(ui.loads.at(-1).catalog_state,'deleted');assert.deepEqual(removed.items,[]);
+assert.equal(ui.current().existing_workspaces.length,25,'A separate Removed view must not replace reusable choices');
 ''')

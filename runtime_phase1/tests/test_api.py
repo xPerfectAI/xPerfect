@@ -4336,7 +4336,7 @@ def test_enterprise_member_ui_redacts_runtime_internals(tmp_path, monkeypatch):
     assert "Open full workspace" in project_body
     assert "Open desktop directly" not in project_body
     assert "http://127.0.0.1:5901" not in project_body
-    assert f"/watch/{worker['worker_id']}?project_id={project['project_id']}&surface=desktop" in project_body
+    assert f"/watch/{worker['worker_id']}?project_id={project['project_id']}&amp;surface=desktop" in project_body
     assert f"/desktop/{worker['worker_id']}" in project_body
 
 
@@ -10618,9 +10618,9 @@ def test_interrupt_generation_race_returns_typed_conflict(tmp_path, monkeypatch)
     assert runtime.running.wait(timeout=2)
 
     def changed(*_args, **_kwargs):
-        raise RuntimeErrorBase("active_work_generation_changed")
+        return None
 
-    monkeypatch.setattr(client.app.state.service, "_claim_exact_run_control", changed)
+    monkeypatch.setattr(client.app.state.store, "try_claim_worker_compute_release", changed)
     try:
         response = client.post(f"/v1/workers/{worker['worker_id']}/interrupt")
         assert response.status_code == 409
@@ -10658,9 +10658,9 @@ def test_signed_view_interrupt_generation_race_returns_typed_conflict(tmp_path, 
     ref_id = create_signed_link_ref(token=token, target_url=f"/watch/{worker['worker_id']}")
 
     def changed(*_args, **_kwargs):
-        raise RuntimeErrorBase("active_work_generation_changed")
+        return None
 
-    monkeypatch.setattr(client.app.state.service, "_claim_exact_run_control", changed)
+    monkeypatch.setattr(client.app.state.store, "try_claim_worker_compute_release", changed)
     try:
         response = client.post(f"/w/{ref_id}/actions/interrupt")
         assert response.status_code == 409
@@ -14011,6 +14011,8 @@ def test_artifact_open_page_previews_text_without_forcing_download(tmp_path, mon
         assert "frame-src 'self'" in opened.headers["content-security-policy"]
         assert "frame-ancestors 'self'" in opened.headers["content-security-policy"]
         assert "GlassHive preview works." in opened.text
+        assert '<article class="document-preview rendered-result"><h1>Result</h1>' in opened.text
+        assert "View source" in opened.text
         assert "Download file" in opened.text
         assert "/v1/signed-links/" not in opened.text
         assert 'href="/v1/link-refs/' in opened.text
@@ -14055,7 +14057,8 @@ def test_artifact_open_page_previews_text_without_forcing_download(tmp_path, mon
         assert opened_binary.status_code == 200
         assert "text/html" in opened_binary.headers["content-type"]
         assert "content-disposition" not in opened_binary.headers
-        assert "File is ready" in opened_binary.text
+        assert 'class="pdf-preview"' in opened_binary.text
+        assert "open the PDF in a new tab" in opened_binary.text
         assert "Download file" in opened_binary.text
 
         image_artifact = workspace / "pixel.png"
@@ -14068,13 +14071,13 @@ def test_artifact_open_page_previews_text_without_forcing_download(tmp_path, mon
         assert opened_image.status_code == 200
         assert "content-disposition" not in opened_image.headers
         assert 'class="image-preview"' in opened_image.text
-        assert "data:image/png;base64," in opened_image.text
+        assert "inline=1" in opened_image.text
 
         svg_artifact = workspace / "unsafe.svg"
         svg_artifact.write_text('<svg><script>alert("x")</script></svg>', encoding="utf-8")
         opened_svg = client.get(f"/v1/workers/{worker['worker_id']}/artifacts/open?path=unsafe.svg")
         assert opened_svg.status_code == 200
-        assert "File is ready" in opened_svg.text
+        assert "Source file" in opened_svg.text
         assert 'class="image-preview"' not in opened_svg.text
         assert "<script>" not in opened_svg.text
 

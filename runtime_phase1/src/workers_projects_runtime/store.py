@@ -56,7 +56,7 @@ from .models import (
 )
 
 
-RUNTIME_STORE_SCHEMA_VERSION = 12
+RUNTIME_STORE_SCHEMA_VERSION = 13
 
 
 class SchedulePrincipalAuthorityStoreError(ValueError):
@@ -4570,6 +4570,11 @@ class Store:
                     "(one or more violations)"
                 )
             ensure_peer_schema(conn)
+            catalog_columns = {row["name"] for row in conn.execute("PRAGMA table_info(workers)")}
+            for name, declaration in (("catalog_state", "TEXT NOT NULL DEFAULT 'active'"),
+                                      ("catalog_revision", "INTEGER NOT NULL DEFAULT 1")):
+                if name not in catalog_columns:
+                    conn.execute(f"ALTER TABLE workers ADD COLUMN {name} {declaration}")
             record_schema_version(
                 conn,
                 component="runtime_store",
@@ -6755,6 +6760,8 @@ class Store:
             "workspace_root": workspace_root,
             "favorite": 0,
             "workspace_kind": normalize_workspace_kind(workspace_kind),
+            "catalog_state": "active",
+            "catalog_revision": 1,
             "workspace_tags_json": _workspace_tags_json(tags),
             "duplication_report_json": json.dumps(
                 duplication_report or {},
@@ -6988,6 +6995,7 @@ class Store:
         cursor_activity_at: str = "",
         cursor_worker_id: str = "",
         limit: int = 25,
+        catalog_state: str = "active",
     ) -> list[dict[str, Any]]:
         query = """
             SELECT
@@ -7020,6 +7028,11 @@ class Store:
             )""",
         ]
         params: list[Any] = [tenant_id or "local", owner_id]
+        if catalog_state not in {"active", "deleted", "all"}:
+            raise ValueError("Choose active, deleted or all workspaces")
+        if catalog_state != "all":
+            clauses.append("workers.catalog_state = ?")
+            params.append(catalog_state)
         normalized_kinds = {normalize_workspace_kind(value) for value in workspace_kinds or set()}
         if normalized_kinds:
             placeholders = ", ".join("?" for _ in normalized_kinds)
@@ -7083,7 +7096,7 @@ class Store:
                 """
                 SELECT workers.*
                 FROM workers
-                WHERE workers.workspace_kind = 'ephemeral'
+                WHERE workers.workspace_kind = 'ephemeral' AND workers.catalog_state = 'active'
                   AND workers.updated_at < ?
                   AND workers.state NOT IN ('created', 'starting', 'running')
                   AND NOT EXISTS (
@@ -7357,7 +7370,7 @@ class Store:
             row = conn.execute(
                 """
                 SELECT * FROM workers
-                WHERE worker_id = ? AND workspace_kind = 'ephemeral' AND updated_at < ?
+                WHERE worker_id = ? AND workspace_kind = 'ephemeral' AND catalog_state = 'active' AND updated_at < ?
                 """,
                 (worker_id, updated_before),
             ).fetchone()
@@ -7915,7 +7928,7 @@ class Store:
             FROM workers
             LEFT JOIN projects ON projects.project_id = workers.project_id
         """
-        clauses: list[str] = []
+        clauses: list[str] = ["workers.catalog_state = 'active'"]
         params: list[Any] = []
         if tenant_id:
             clauses.append("workers.tenant_id = ?")
@@ -7979,7 +7992,7 @@ class Store:
         alias_value = alias.strip()
         if not alias_value:
             return None
-        query = "SELECT * FROM workers WHERE project_id = ? AND owner_id = ? AND alias = ?"
+        query = "SELECT * FROM workers WHERE project_id = ? AND owner_id = ? AND alias = ? AND catalog_state = 'active'"
         params: list[Any] = [project_id, owner_id, alias_value]
         if tenant_id:
             query += " AND tenant_id = ?"
@@ -8174,13 +8187,46 @@ class Store:
             row = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
         return self._row(row)
 
+    def update_worker_catalog(self, worker_id: str, *, expected_catalog_revision: int | None = None,
+                              catalog_state: str | None = None, **fields: Any) -> dict[str, Any]:
+        """Change only catalog metadata; runtime telemetry never owns its revision."""
+        allowed = {"name", "favorite", "workspace_kind", "workspace_tags_json"}
+        if set(fields) - allowed or catalog_state not in {None, "active", "deleted"}:
+            raise ValueError("Workspace catalog change is invalid")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+            if row is None:
+                raise KeyError("Workspace not found")
+            if (not fields and catalog_state is not None and row["catalog_state"] == catalog_state
+                    and expected_catalog_revision is not None
+                    and int(row["catalog_revision"]) == expected_catalog_revision + 1):
+                return self._row(row)
+            if (expected_catalog_revision is not None and int(row["catalog_revision"]) != expected_catalog_revision):
+                raise WorkerClosedStoreError("This workspace changed; reload before changing it")
+            if row["state"] in {"terminating", "gc_claimed"} or conn.execute(
+                "SELECT 1 FROM workspace_gc_tombstones WHERE worker_id=? AND phase IN ('claimed','cleanup_pending')", (worker_id,)).fetchone():
+                raise WorkerClosedStoreError("Workspace lifecycle is busy; retry after it settles")
+            if fields and row["catalog_state"] == "deleted":
+                raise WorkerClosedStoreError("Restore this workspace before editing it")
+            if catalog_state == "deleted" and row["state"] != "terminated":
+                raise WorkerClosedStoreError("Close this workspace before removing it")
+            if catalog_state is not None:
+                fields["catalog_state"] = catalog_state
+            if fields and any(row[key] != value for key, value in fields.items()):
+                fields["updated_at"] = utc_now()
+                conn.execute("UPDATE workers SET " + ",".join(f"{key}=?" for key in fields)
+                             + ",catalog_revision=catalog_revision+1 WHERE worker_id=?", (*fields.values(), worker_id))
+            updated = conn.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+        return self._row(updated)
+
     def update_worker_state(self, worker_id: str, state: str, last_error: str | None = None) -> dict[str, Any] | None:
         fields: dict[str, Any] = {"state": state}
         if last_error is not None:
             fields["last_error"] = last_error
         return self.update_worker(worker_id, **fields)
 
-    def begin_worker_termination(self, worker_id: str) -> tuple[dict[str, Any] | None, bool]:
+    def begin_worker_termination(self, worker_id: str, *, expected_catalog_revision: int | None = None) -> tuple[dict[str, Any] | None, bool]:
         """Publish permanent close intent once before any external runtime teardown."""
 
         now = utc_now()
@@ -8193,6 +8239,8 @@ class Store:
             if worker is None:
                 conn.execute("COMMIT")
                 return None, False
+            if expected_catalog_revision is not None and int(worker["catalog_revision"]) != expected_catalog_revision:
+                raise WorkerClosedStoreError("This workspace changed; reload before removing it")
             if str(worker["state"] or "") in {"terminating", "terminated"}:
                 conn.execute("COMMIT")
                 return self._row(worker), False
@@ -8269,7 +8317,9 @@ class Store:
             conn.execute(
                 """
                 UPDATE workers
-                SET state = 'termination_failed', last_error = ?, updated_at = ?
+                SET state = 'termination_failed', last_error = ?, updated_at = ?,
+                    catalog_revision = catalog_revision + CASE WHEN catalog_state='deleted' THEN 1 ELSE 0 END,
+                    catalog_state = 'active'
                 WHERE worker_id = ?
                   AND state IN ('terminating', 'termination_failed', 'terminated')
                 """,

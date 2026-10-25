@@ -71,6 +71,10 @@ function viewHealthHealthy(data) {
 function isSettledWorkspaceState(data) {
   const workerState = normalizedState(data?.worker?.close_state || data?.worker?.state);
   const runState = normalizedState(data?.latest_run?.state);
+  if (['terminating', 'termination_failed', 'terminated'].includes(workerState)) return true;
+  // Human takeover can stay live after AI work is paused or complete. A
+  // currently attested display must reconnect independently of that job state.
+  if (data?.runtime_details?.view_available === true && viewHealthHealthy(data) === true) return false;
   if (ACTIVE_RUN_STATES.has(runState)) {
     return false;
   }
@@ -180,7 +184,7 @@ function installClipboardSync() {
       await pushLocalClipboardToRemote(text);
       setClipboardStatus('Clipboard sync: bi-directional');
     } catch (error) {
-      setClipboardStatus('Clipboard sync: click desktop once to enable');
+      setClipboardStatus('Clipboard access unavailable. Check browser permissions.');
     }
   };
 

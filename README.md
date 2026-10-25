@@ -26,6 +26,8 @@ Starting from one creates a new worker. Reusing an existing worker continues its
 
 ![Choose from five professional AI Workers, with their included knowledge and abilities](docs/assets/screens/expert-team.jpg)
 
+*Actual profession picker, recorded 24 October 2026; later portrait revisions can differ.*
+
 ## Meet your starting team
 
 | Professional | Give them a job | Inspect the result |
@@ -57,6 +59,18 @@ part of the public starter package.
 pause or stop supported work, and return to its recorded status. In **Workspaces**, reopen a
 worker or make a separate copy. **Schedules** can run a saved workspace later or send a webhook
 to your app; the receiving app decides what happens next.
+
+### Manage your experts and saved work
+
+- **Workspaces → More → Save as expert** keeps a worker’s setup for another job. In
+  **Run Project → My experts → Manage**, use **Edit** to save a new version, **Copy** for a
+  separate expert, or **Versions** to inspect an earlier setup. Existing workers keep their setup.
+- **Archive** puts an expert aside. **Remove** hides it after confirmation. Find it under
+  **Archived** or **Removed** and choose **Restore** when you need it again.
+- **Workspaces → More → Remove** stops that worker’s current and scheduled work, then hides its
+  card. Files, results and history stay saved, including one-off work. **Removed → Restore**
+  brings the same card back **Closed**; it does not restart the work. Use **Duplicate** for a
+  fresh worker. Removal is recoverable and does not free that saved storage.
 
 Use the browser, your own code or another AI application:
 
@@ -140,8 +154,9 @@ local-only inference. [Security](SECURITY.md) · [Capabilities](docs/capability-
   account connection and result delivery are not verified for every hosted route.
 - **File drag and drop:** a full browser pass remains open. Use **Add files** and **Download**.
 - **API-key accounts:** end-to-end setup remains unverified. Use a supported subscription sign-in.
-- **Personal-account copies:** not every account-confirmation and continuation path is verified.
-  Check the copied worker's selected account before running it.
+- **Worker copies:** a copy can retain a Ready, compatible account selected by the same owner.
+  Credentials, browser sign-ins and native chat history are not copied. An unavailable or
+  incompatible account needs a new selection. [Copy behavior](docs/capability-matrix.md).
 - **Shared workspaces:** require a configured Linux host; use a separate workspace on a Mac.
   This limit is separate from supported local Chat. Chat offers only the routes the actual
   deployment and installed tools can use. [Current support](docs/capability-matrix.md).

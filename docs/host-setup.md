@@ -44,8 +44,16 @@ keys, permission failures, rate limits, or network failure. An accepted key does
 a particular model or available credit. Codex uses its native stdin login and private file credential
 store; Claude must confirm that it selected the API-key authentication method.
 
-**Current limit:** the full API-key path, from entering a key to a finished result, has not been
-verified end to end yet. Until it is, prefer a subscription sign-in.
+A provider access denial asks you to review the account's project permissions and model access.
+It does not by itself mean the key is missing or invalid. An explicit model-unavailable error
+keeps its model-specific guidance; xPerfect does not choose a replacement account or model.
+If native Codex reports a typed quota stop before producing an answer or using a tool, Watch
+shows the quota cause and asks you to review usage limits and billing before starting new work.
+
+**Verified path:** a connected API key through native Codex completed work with an account-supported
+model, including a Watch follow-up after quota recovery, a downloaded file, and completed state after
+reload. This does not verify other native providers' API-key paths or GPT-6.1 API access.
+Check that the selected account supports the exact model and has available quota.
 
 **Run project** starts on a worker whose account is ready; check its **Worker** and **Account**, enter your goal, and start. Verify a real completed
 result before relying on that route. **Verify** checks an existing Claude sign-in without copying credentials or signing out the native app. If the account says the exact native process was not confirmed stopped, wait until that workspace's run has ended, then select **Verify** again. **More → Test connection** checks a ready account

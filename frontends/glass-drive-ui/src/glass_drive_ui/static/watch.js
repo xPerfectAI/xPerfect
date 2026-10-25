@@ -167,6 +167,7 @@ let currentResultArtifacts = [];
 let currentProjectTitle = projectId || 'Project';
 let currentDeliverable = null;
 let currentDesktopAvailable = false;
+let currentDesktopCanStart = false;
 let currentNoRunActivity = false;
 let lastPromotedDeliverableKey = '';
 let lastAttachedFilePreviewKey = '';
@@ -554,14 +555,18 @@ function syncWatchMenuAvailability(data) {
   const desktop = Boolean(runtime.view_available || runtime.view_url);
   const closed = ['terminating', 'termination_failed', 'terminated'].includes(String(data?.worker?.close_state || data?.worker?.state || ''));
   const manage = data?.can_manage_workspace === true && !closed;
+  const pausedWithoutCompute = String(data?.worker?.state || '') === 'paused'
+    && ['absent', 'missing', 'stopped', 'compute_unavailable'].includes(String(runtime.sandbox_state || ''));
+  const desktopCanStart = runtime.desktop_supported === true && manage && !pausedWithoutCompute;
   const appActions = document.getElementById('watch-app-actions');
-  if (appActions) appActions.hidden = !desktop || !manage;
+  if (appActions) appActions.hidden = !(desktop || desktopCanStart) || !manage;
   const nativeAction = { 'codex-cli': 'codex', 'claude-code': 'claude', 'openclaw-general': 'openclaw' }[data?.worker?.profile];
   for (const action of ['codex', 'claude', 'openclaw']) {
     const button = menu.querySelector(`[data-action="${action}"]`);
-    if (button) button.hidden = !desktop || !manage || action !== nativeAction;
+    const supported = !Array.isArray(runtime.desktop_actions) || runtime.desktop_actions.includes(action);
+    if (button) button.hidden = !desktop || !manage || action !== nativeAction || !supported;
   }
-  surfaceDesktopButton.hidden = !desktop;
+  surfaceDesktopButton.hidden = !manage || !(desktop || desktopCanStart);
   // Keep the selected view discoverable alongside alternate supported views.
   surfaceTerminalButton.hidden = false;
   surfaceTerminalButton.disabled = currentNoRunActivity;
@@ -599,13 +604,16 @@ function setSurface(surface, { force = false } = {}) {
     setOverlay('terminated');
     return;
   }
-  if (currentNoRunActivity && state === 'ready') {
+  if (activeSurface === 'terminal' && currentNoRunActivity && state === 'ready') {
     clearAttachedView();
     setOverlay(state);
     return;
   }
-  if (['created', 'starting', 'paused', 'idle', 'idle_terminated', 'stopped', 'terminating', 'termination_failed', 'terminated'].includes(state)
-      || (TERMINAL_ATTENTION_STATES.has(state) && !showsSavedRunOutput(state))) {
+  if ((['created', 'starting', 'paused', 'idle', 'idle_terminated', 'stopped', 'terminating', 'termination_failed', 'terminated'].includes(state)
+       && !(activeSurface === 'desktop' && currentDesktopAvailable
+            && !['terminating', 'termination_failed', 'terminated'].includes(state)))
+      || (TERMINAL_ATTENTION_STATES.has(state) && !showsSavedRunOutput(state)
+          && !(activeSurface === 'desktop' && currentDesktopAvailable))) {
     clearAttachedView();
     setOverlay(state);
     return;
@@ -1290,6 +1298,12 @@ async function submitFooterInstruction(mode) {
 function setOverlay(state, detail) {
   const needsAttention = TERMINAL_ATTENTION_STATES.has(state);
   const connecting = Boolean(attachStartedAt && !frameReady);
+  if (activeSurface === 'desktop' && currentDesktopAvailable && !connecting
+      && !['terminating', 'termination_failed', 'terminated'].includes(state)) {
+    overlay.hidden = true;
+    if (stage) { stage.dataset.overlayActive = 'false'; stage.dataset.overlayMode = ''; }
+    return;
+  }
   const filePreviewActive = activeSurface === 'desktop' && Boolean(filePreviewUrl());
   const readyForFirstRun = currentNoRunActivity && state === 'ready';
   const waiting = readyForFirstRun || state === 'starting' || state === 'paused' || state === 'idle' || state === 'idle_terminated' || state === 'stopped' || state === 'terminating' || state === 'termination_failed' || state === 'terminated' || needsAttention || connecting;
@@ -1507,6 +1521,9 @@ async function refresh() {
     syncRunToggle(displayState === 'completed' ? displayState : currentWorkerState, data.latest_run?.state);
 
     currentDesktopAvailable = Boolean(runtime.view_available || runtime.view_url);
+    currentDesktopCanStart = runtime.desktop_supported === true && data.can_manage_workspace === true
+      && !['terminating', 'termination_failed', 'terminated'].includes(String(worker.close_state || worker.state || ''))
+      && !(worker.state === 'paused' && ['absent', 'missing', 'stopped', 'compute_unavailable'].includes(String(runtime.sandbox_state || '')));
     currentNoRunActivity = noRunActivityFor(data);
   currentDesktopUrl = currentDesktopAvailable ? withUiRev(withAuth(`${uiBase}/desktop/${workerId}`)) : '';
     currentTerminalUrl = withAuth(terminalViewUrl(runtimeBase, workerId, String(data.latest_run?.run_id || ''),
@@ -1656,8 +1673,20 @@ surfaceTerminalButton.addEventListener('click', () => {
   setSurface('terminal', { force: true });
 });
 
-surfaceDesktopButton.addEventListener('click', () => {
+surfaceDesktopButton.addEventListener('click', async () => {
   closeMenu();
+  if (!currentDesktopAvailable && currentDesktopCanStart) {
+    surfaceDesktopButton.disabled = true;
+    try {
+      await postAction('action:browser', { url: 'about:blank' });
+      await refresh();
+    } catch (error) {
+      showActionFailure(error);
+      return;
+    } finally {
+      surfaceDesktopButton.disabled = false;
+    }
+  }
   if (terminalResultPreferred) closeResultPanel();
   setSurface('desktop', { force: true });
 });

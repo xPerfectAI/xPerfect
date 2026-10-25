@@ -64,7 +64,7 @@ def test_watch_renderer_clears_stale_result_and_preserves_action_failure_during_
       const node=()=>({{textContent:'stale',innerHTML:'stale',hidden:false,open:true,setAttribute:()=>{{}}}});
       const resultMarkdown={{render:(text)=>`<p>${{text}}</p>`}};
       const statusLabel=node(),resultPanelTitle=node(),latestOutputInline=node(),latestOutputHuman=node(),latestOutputFull=node(),latestOutputTechnical=node(),resultTechnical=node(),resultToggle=node(),resultToggleAction=node(),resultPanel=node();
-      let currentSummary='',currentFullOutput='',currentResultText='',currentRunState='',actionFailure=null,opened=false;
+      let currentSummary='',currentFullOutput='',currentResultText='',currentRunState='',currentResultArtifacts=[],actionFailure=null,opened=false;
       const openResultPanel=()=>{{opened=true;}}; const closeResultPanel=()=>{{}};
       const syncResultActions=()=>{{}}; const syncArtifactList=()=>{{}};
       const summarizeOutput=data=>{{currentRunState=data?.latest_run?.state || '';return watchOutputModel(data,'trace');}};

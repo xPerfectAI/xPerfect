@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode
 
 from fastapi import HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .workspace_files import FileAdmissionError, WorkspaceFiles
 from .workspace_file_exports import WorkspaceFileExport
+from .artifact_preview import (
+    INLINE_MEDIA_TYPES, INLINE_SECURITY_HEADERS, PREVIEW_SECURITY_HEADERS, is_text_preview, preview_appearance,
+    preview_media_type, preview_text_limit, render_artifact_page,
+)
 
 
 class UploadRequest(BaseModel):
@@ -356,9 +361,9 @@ def install_workspace_file_routes(
             result["download_url"] = f"/v1/workers/{quote(worker_id, safe='')}/files/{quote(file_id, safe='')}/content?" + urlencode({"revision": result["revision"]})
         return result
 
-    @app.get("/v1/workers/{worker_id}/files/{file_id}/content")
-    def download(
-        worker_id: str, file_id: str, request: Request, revision: str | None = None
+    def stream_download(
+        worker_id: str, file_id: str, request: Request, revision: str | None = None,
+        *, inline: bool = False,
     ):
         from starlette.background import BackgroundTask
         from .workspace_file_exports import CHUNK_BYTES, _identity
@@ -366,6 +371,10 @@ def install_workspace_file_routes(
         descriptor, name, size = files.open_download(
             worker_id, *owner(request), file_id, revision=revision
         )
+        media_type = preview_media_type(name) if inline else "application/octet-stream"
+        if inline and media_type not in INLINE_MEDIA_TYPES:
+            os.close(descriptor)
+            raise HTTPException(status_code=415, detail="This file format cannot be displayed inline")
         closed = False
 
         def close():
@@ -396,11 +405,13 @@ def install_workspace_file_routes(
         start, end = 0, size - 1
         status = 200
         headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
+            "Content-Disposition": f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(name, safe='')}",
             "Accept-Ranges": "bytes",
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
         }
+        if inline:
+            headers.update(INLINE_SECURITY_HEADERS)
         range_header = request.headers.get("range")
         if range_header:
             try:
@@ -450,6 +461,43 @@ def install_workspace_file_routes(
             body(),
             status_code=status,
             headers=headers,
-            media_type="application/octet-stream",
+            media_type=media_type,
             background=BackgroundTask(close),
         )
+
+    @app.get("/v1/workers/{worker_id}/files/{file_id}/content")
+    def download(
+        worker_id: str, file_id: str, request: Request, revision: str | None = None
+    ):
+        return stream_download(worker_id, file_id, request, revision)
+
+    @app.get("/v1/workers/{worker_id}/files/{file_id}/preview")
+    def preview(
+        worker_id: str, file_id: str, request: Request, revision: str = Query(..., min_length=1)
+    ):
+        # IDs and exact revisions remain owned by Files; never reinterpret them
+        # as mutable artifact paths or resolve adjacent Markdown image names.
+        if request.query_params.get("inline") == "1":
+            return stream_download(worker_id, file_id, request, revision, inline=True)
+        descriptor, name, size = files.open_download(worker_id, *owner(request), file_id, revision=revision)
+        from .workspace_file_exports import _identity
+        try:
+            before = _identity(os.fstat(descriptor))
+            media_type = preview_media_type(name)
+            limit = preview_text_limit()
+            content = os.read(descriptor, limit + 1) if is_text_preview(name, media_type) else b""
+            if _identity(os.fstat(descriptor)) != before:
+                raise FileAdmissionError("File changed while it was read; refresh Files and retry", 409)
+        finally:
+            os.close(descriptor)
+        ui = request.headers.get("x-xperfect-file-ui") == "1"
+        prefix = "/api/workspace" if ui else "/v1/workers"
+        base = f"{prefix}/{quote(worker_id, safe='')}/files/{quote(file_id, safe='')}"
+        query = urlencode({"revision": revision})
+        workspace = f"/watch/{quote(worker_id, safe='')}" if ui else f"/ui/workers/{quote(worker_id, safe='')}/view"
+        return HTMLResponse(render_artifact_page(
+            display_name=name, suffix=Path(name).suffix, media_type=media_type, content=content,
+            size=size, download_url=f"{base}/content?{query}", workspace_url=workspace,
+            inline_url=f"{base}/preview?{query}&inline=1", text_limit=limit,
+            appearance=preview_appearance(request),
+        ), headers=PREVIEW_SECURITY_HEADERS)

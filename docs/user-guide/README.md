@@ -30,18 +30,29 @@ desktop and mobile. This documentation change does not require a product runtime
 
 ## Provenance and privacy
 
-Instructions now match accepted published package `91f3120583df7cb549e7f81924a4f751089c1c31`
-and its immutable `linux/arm64` service/native pair. One-command public startup, the corrected
-manual MCP address and all repaired host expert/file/schedule paths have dated actual evidence.
-Mac package and real Arm Linux/hosted results are retained on their recorded candidates;
-Windows/x86-64 and automatic container client setup remain explicit limits. No new Grok run
-is claimed. The earlier hosted diagnostic expert was preserved, not overwritten.
+The guide is maintained with the product source. Its dated release evidence records the
+published 25 October 2026 release at
+`a6e0825b267d9fa4d88244bc0427d16bb7ab6638`. Its default manifest selects the audited
+`linux/arm64` service/native pair. Actual anonymous package startup, native Codex/Claude/Grok
+work, same-worker reuse, exact file delivery, API/MCP and saved-state recovery have recorded
+proof at their stated routes. Hosted TLS/XFS/OIDC with a second member and native API-key
+onboarding remain separate prerequisites, not inherited passes.
 
-The five PNGs were captured from the xPerfect app on 29 September 2026 at public source `5d9a851`.
-They show synthetic onboarding tasks, a generic local-owner account and sample results. They contain
-no sign-in credentials, personal account addresses or customer material. The sample skill, CSV and
-ZIP are synthetic fixtures covered by this repository's Apache-2.0 license. The demonstration
-phrase is not a secret credential. Raw sessions, private reports, state and logs are not published.
+The recommended five-profession example uses the supported host Claude Code Skill route.
+Docker remains an alternative for its offered native worker routes; the guide does not claim
+that every professional starter or Skill works on every deployment.
+
+The expert/Finance illustrations are byte-identical publication mirrors of the canonical files
+under `docs/assets/screens/`. The local copies under this guide's `assets/` make its portable
+preview and existing same-origin website publication work without changing the site CSP. Update
+these mirrors only by copying the reviewed canonical files; do not edit a second image source.
+They show real synthetic work from 24 October, with dated captions rather than a claim that
+later portrait/preview revisions have identical pixels. Earlier local guide screenshots and
+stock/Skill fixtures remain marked as connectivity examples, not the professional demonstration.
+
+No raw sessions, prompts, private accounts, customer material, logs or local runtime state are
+published. The small Skill, CSV and ZIP are synthetic fixtures under the repository's license;
+their demonstration phrase is not a credential. See the [asset owner](../assets/screens/README.md).
 
 ## Why the guide lives here
 

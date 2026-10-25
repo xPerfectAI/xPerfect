@@ -4,8 +4,10 @@ These five portraits depict fictional AI experts. They were generated with OpenA
 for xPerfect, then encoded as small 320 × 320 WebP assets. They do not depict employees or imply
 professional credentials or endorsement.
 
-The complete bundled set follows the approved Editorial Gouache v1 design direction. Use the
-approved style reference in the operator UI contract for future artwork, keeping each subject
+The complete bundled set follows the approved Editorial Gouache v1 medium and style, with varied
+dominant accents and background geometry. The approved reference governs medium, brushwork,
+texture, abstraction and finish; colour balance and background arrangement vary within the
+coherent graphite, ivory and gold family with muted warm or cool accents. Keep each subject
 separate from the shared style. Verify the complete set before replacing its delivered assets.
 
 This directory owns the bundled presentation assets and their factual provenance. The

@@ -858,10 +858,44 @@ def test_rollback_refuses_while_the_new_version_has_active_work(package):
     fake.busy_images.add(NEW)
     with pytest.raises(linux_upgrade.UpgradeError, match='new version is not idle: GlassHive active work'):
         runner.rollback()
+    assert fake.idle_release_calls[-1] == NEW
     assert _mutations(fake) == []
     _unchanged_new_version(fake, path, new)
     fake.busy_images.clear()
     assert runner.rollback()['idle_proof'] == 'runtime records and workspace containers'
+
+
+def test_rollback_releases_idle_new_compute_after_backup_verification_before_idle_proof(package, monkeypatch):
+    fake, path, receipt, runner, result, new = _upgraded(package)
+    sidecar = 'f' * 64
+    _box(fake, sidecar)
+    fake.idle_release = ['wrk_0123456789']
+    fake.idle_release_calls.clear()
+
+    def release_sidecar(endpoint, *args, data=None, timeout=90):
+        response = fake(endpoint, *args, data=data, timeout=timeout)
+        if args[:2] == ('exec', new['runtime']) and linux_upgrade.RELEASE_IDLE_COMPUTE in args:
+            # The current runtime owns exact idle-desktop retirement. Rollback
+            # consumes that existing hook before its no-orphan proof.
+            fake.containers.pop(sidecar)
+        return response
+
+    monkeypatch.setattr(linux_upgrade, '_docker', release_sidecar)
+    rolled = runner.rollback()
+    assert rolled['status'] == 'rolled_back'
+    assert sidecar not in fake.containers
+    assert fake.idle_release_calls == [NEW]
+    verify = next(i for i, call in enumerate(fake.calls)
+                  if call[:1] == ('run',) and linux_upgrade.STATE_TOOL in call
+                  and call[call.index(linux_upgrade.STATE_TOOL) + 1] == 'verify')
+    release = next(i for i, call in enumerate(fake.calls)
+                   if call[:2] == ('exec', new['runtime']) and linux_upgrade.RELEASE_IDLE_COMPUTE in call)
+    proof = next(i for i, call in enumerate(fake.calls)
+                 if call[:2] == ('exec', new['runtime']) and linux_upgrade.QUIESCENT in call)
+    stop = next(i for i, call in enumerate(fake.calls) if call[:1] == ('stop',))
+    assert verify < release < proof < stop
+    assert json.loads(path.read_text()) == receipt
+    assert fake.volumes[f'{NAME}-control']['runtime.db'] == b'runtime rows v1'
 
 
 def _box(fake, identity='f' * 64):
