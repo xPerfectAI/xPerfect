@@ -447,6 +447,22 @@ authorized files remain in the separate collapsed Workspace files section, label
 reusable workspace content that may come from other work. Neither section grants new
 file access or worker controls.
 
+Some standalone native Chat results name a workspace file without an immutable capture. The
+existing Files service can offer that exact **current workspace file**, using the same trusted
+native placement mapping as Watch. `result.current_workspace_files` contains `filename`,
+`open_url`, `download_url` and `semantics: "current_workspace_file"`. These actions read the file
+as it exists now; they do not claim to preserve the bytes from the completed reply.
+
+This read requires the conversation's authenticated owner, exact completed goal/run and matching
+worker, project and workspace placement. The final Queen answer can use the same declared file
+from that authorized child result, including when an existing completed answer is reloaded. An
+exact native path declared by multiple workers is ambiguous and is not reassigned by filename.
+Callback-backed missions still require their accepted completion envelope; this current-file
+path does not bypass it. Reading an existing saved answer projects only the returned view;
+it does not rewrite that stored response, raw worker output, result hashes or bounded paging.
+A new answer uses the normal response storage path with its rendered file actions. Immutable
+artifact references continue to use their existing captured-file path.
+
 Host native file selections may use the admitted workspace or the current worker's managed
 `TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes
 for replay; it does not grant the worker's whole home, another worker's temporary root, or an OS

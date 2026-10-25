@@ -122,8 +122,11 @@ also offer **Common project files** or **Private files per member**. Sign-ins an
 separate. Sharing files does not by itself share chat history, tools or permissions. See
 [workspace modes](docs/02_Architecture_and_Components.md#workspace-file-placement).
 
-Ten goals do not mean ten workers at once. Ready accounts, machine resources and configured
-limits decide what starts now. **Work together** lets you approve discovery and messages between
+Ten goals do not mean ten workers at once. Manual host jobs take turns under a shared safety
+lock. Chat can run its independent worker jobs together within account, native tool, machine and
+configured limits. Host workers share the same desktop; native approval rules still apply.
+A Direct model for Chat needs a configured API route; a native subscription sign-in alone does
+not provide one. **Work together** lets you approve discovery and messages between
 exact workers in your account; deployments without the required secure connection explain that
 limit. [Working on several goals](docs/capability-matrix.md#working-on-several-goals).
 

@@ -14,6 +14,8 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 - **Fixed:** Standalone Chat can run independent helpers in parallel using each accepted goal and current run. Reuse, retries and restarts keep that ownership; manual work and account limits remain protected.
 - **Fixed:** Saved Chat files use their captured names for downloads when no completion callback is configured. Callback-backed missions still require their owning publication evidence.
+- **Fixed:** Accepted work held for recovery keeps its run and waits safely instead of retrying immediately. It resumes after the conversation is ready.
+- **Fixed:** Native Chat replies open authorized workspace files instead of internal filesystem addresses. Saved replies use the same file actions without rewriting their stored results; current files remain distinct from captured completion snapshots.
 
 ## 2026-10-24 — Useful results and clearer recovery
 

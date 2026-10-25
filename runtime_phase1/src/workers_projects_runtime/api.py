@@ -2074,6 +2074,7 @@ def create_app(
         source_items = workspace_items if workspace_items is not None else _workspace_items(worker, max_entries=max_entries, max_depth=8)
         if not source_items:
             return items
+        from .workspace_files import native_workspace_root
         native_root = ""
         # Mission file identities remain owned by their verified completion
         # envelope, never by a current-directory filename match.
@@ -2083,24 +2084,7 @@ def create_app(
             owner_id=str(worker.get("owner_id") or ""),
         )
         if not delegation:
-            if str(worker.get("execution_mode") or "") == "host":
-                if include_host_paths:
-                    native_root = str(worker.get("workspace_dir") or "")
-            else:
-                placement_reader = getattr(service.runtime, "native_workspace_placement", None)
-                try:
-                    placement = placement_reader(worker) if callable(placement_reader) else None
-                except Exception:
-                    placement = None  # Unavailable placement grants no native path alias.
-                if (
-                    isinstance(placement, dict)
-                    and placement.get("workspace_id") == worker.get("workspace_id")
-                    and placement.get("member_id") == worker.get("worker_id")
-                    and placement.get("workspace_dir") == worker.get("workspace_dir")
-                ):
-                    native_root = str(placement.get("native_workspace") or "")
-        if not Path(native_root).is_absolute() or ".." in Path(native_root).parts:
-            native_root = ""
+            native_root = native_workspace_root(service.runtime, worker, include_host_paths=include_host_paths)
         for item in source_items:
             if item.get("is_dir") or item.get("origin") == "user_input":
                 continue

@@ -1103,6 +1103,14 @@ class CoordinatorService:
         selected_library["context"] = []
         if prepared_library and json.loads(prepared_library["refs"] or "[]") == selected_library["refs"]:
             selected_library["context"] = json.loads(prepared_library["context"] or "[]")
+        for turn in turns:
+            if turn["response_json"]:
+                try:
+                    response = json.loads(turn["response_json"])
+                except (TypeError, ValueError):
+                    continue
+                turn["response_json"] = canonical(project_coordinator_response(
+                    self.service, tenant, owner, str(turn["request_id"]), response))
         return {"conversation_id": conversation_id, "model": config.model, "effort": config.effort,
                 **self._available_workers(tenant, owner, conversation),
                 "max_goals": config.max_goals, "routes": [{k: v for k, v in r.model_dump().items() if k != "bootstrap_bundle"} for r in config.routes],
@@ -1851,6 +1859,12 @@ class CoordinatorService:
                             "sha256": hashlib.sha256(output.encode()).hexdigest(),
                             "failure_class": str(run["failure_class"] or ""),
                         }
+                        files = coordinator_current_result_files(
+                            self.service, conn, tenant, owner, conversation_id,
+                            str(item["goal_id"]), str(item["run_id"]),
+                        )
+                        if files:
+                            item["result"]["current_workspace_files"] = list(files.values())
                         inline_remaining -= length
                 items.append(item)
             evidence = {"kind": "worker_result_notifications", "items": items}
@@ -2144,11 +2158,160 @@ class CoordinatorService:
         if offset > len(text):
             raise CoordinatorConflict("Result offset exceeds source")
         end = min(len(text), offset + max_chars)
+        with self.store._connect() as conn:
+            files = coordinator_current_result_files(
+                self.service, conn, tenant, owner, conversation_id, goal_id, str(goal["run_id"]),
+            )
         return {"goal_id": goal_id, "run_id": goal["run_id"], "state": goal["state"],
                 "output_text": text[offset:end], "total_chars": len(text), "offset": offset,
                 "next_offset": end if end < len(text) else None,
                 "sha256": hashlib.sha256(text.encode()).hexdigest(),
-                "failure_class": goal.get("failure_class", "")}
+                "failure_class": goal.get("failure_class", ""),
+                **({"current_workspace_files": list(files.values())} if files else {})}
+
+
+def _current_path_references(output: str) -> set[str]:
+    from .deliverables import NATIVE_MARKDOWN_LINK_OR_ESCAPE
+
+    references = {match.group(2).strip().removeprefix("<").removesuffix(">")
+        for match in NATIVE_MARKDOWN_LINK_OR_ESCAPE.finditer(output) if match.group(2) is not None}
+    # Web/action URLs and immutable identities already have their own renderer.
+    return {reference for reference in references if reference and ":" not in reference
+            and not reference.startswith("//") and not any(c in reference for c in "?#\\\x00\r\n")}
+
+
+def coordinator_current_result_files(service: Any, conn: Any, tenant: str, owner: str,
+                                     conversation_id: str, goal_id: str, run_id: str,
+                                     *, references: set[str] | None = None) -> dict[str, dict]:
+    """Project exact declared current files; never manufacture captured run bytes."""
+    from .workspace_files import FileAdmissionError, native_workspace_relative_path
+
+    source = CoordinatorService._owned_goal_result_run(conn, tenant, owner, conversation_id, goal_id, run_id)
+    if not source or source["state"] != "completed":
+        return {}
+    references_in_source = _current_path_references(str(source["output_text"] or ""))
+    if references is not None:
+        references_in_source.intersection_update(references)
+    if not references_in_source:
+        return {}
+    row = conn.execute(
+        "SELECT g.work_ref,c.scope_json FROM coordinator_goals g "
+        "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+        "WHERE g.conversation_id=? AND g.goal_id=? AND c.tenant_id=? AND c.owner_id=?",
+        (conversation_id, goal_id, tenant, owner),
+    ).fetchone()
+    worker = service.store.get_worker(source["worker_id"], tenant, owner)
+    if not row or not worker or source["project_id"] != worker.get("project_id"):
+        return {}
+    # Callback missions retain their completion-envelope publication fence.
+    if (service._bootstrap_bundle_for(worker) or {}).get("callbacks") not in (None, {}):
+        return {}
+    delegation = service.store.get_delegation_for_worker(worker["worker_id"], tenant_id=tenant, owner_id=owner)
+    if row["work_ref"]:
+        if (not delegation or delegation["work_ref"] != row["work_ref"]
+                or delegation.get("origin_surface") != "coordinator"
+                or delegation.get("origin_ref") != f"{conversation_id}:{goal_id}"
+                or delegation.get("project_id") != source["project_id"]):
+            return {}
+    else:
+        scope = json.loads(row["scope_json"] or "{}")
+        if (delegation or not scope.get("project_id") or scope["project_id"] != worker["project_id"]
+                or (scope.get("workspace_id") and scope["workspace_id"] != worker.get("workspace_id"))):
+            return {}
+    files = {}
+    for reference in sorted(references_in_source):
+        relative = native_workspace_relative_path(service.runtime, worker, reference)
+        if relative is None or reference in files:
+            continue
+        try:
+            file = service.files.current_artifact(worker, relative)
+        except (FileAdmissionError, OSError, ValueError):
+            continue
+        open_url = service._signed_artifact_open_url(worker, relative)
+        download_url = service._signed_artifact_download_url(worker, relative)
+        if open_url and download_url:
+            files[reference] = {
+                "filename": file["filename"], "open_url": open_url, "download_url": download_url,
+                "semantics": "current_workspace_file",
+            }
+    return files
+
+
+def project_coordinator_response(service: Any, tenant: str, owner: str,
+                                 request_id: str, response: dict) -> dict:
+    """Render a response copy with exact owner-authorized current-file actions.
+
+    Stored provider/turn text and result hashes remain unchanged. Multiple workers
+    declaring the same native path are ambiguous and grant no link authority.
+    """
+    from .deliverables import NATIVE_MARKDOWN_LINK_OR_ESCAPE
+
+    if not request_id or not isinstance(response, dict):
+        return response
+    references = set()
+    for choice in response.get("choices", []):
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            references.update(_current_path_references(message["content"]))
+    if not references:
+        return response
+    with service.store._connect() as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_turns'").fetchone():
+            return response
+        conversation = conn.execute(
+            "SELECT c.conversation_id FROM coordinator_conversations c "
+            "JOIN coordinator_turns t ON t.conversation_id=c.conversation_id "
+            "JOIN provider_requests p ON p.request_id=t.request_id "
+            "WHERE t.request_id=? AND c.tenant_id=? AND c.owner_id=? "
+            "AND p.tenant_id=c.tenant_id AND p.owner_id=c.owner_id",
+            (request_id, tenant, owner),
+        ).fetchone()
+        if not conversation:
+            return response
+        cid = conversation["conversation_id"]
+        candidates = conn.execute(
+            "SELECT DISTINCT g.goal_id,r.run_id,r.worker_id FROM coordinator_goals g "
+            "JOIN runs r ON r.worker_id=g.worker_id WHERE g.conversation_id=? AND r.state='completed' "
+            "AND (g.run_id=r.run_id OR EXISTS (SELECT 1 FROM coordinator_actions a "
+            "WHERE a.conversation_id=g.conversation_id AND a.goal_id=g.goal_id "
+            "AND json_valid(a.payload_json) "
+            "AND json_extract(a.payload_json,'$.action') IN ('queue','message') "
+            "AND (json_extract(a.payload_json,'$.run_id')=r.run_id "
+            "OR (json_valid(a.response_json) AND json_extract(a.response_json,'$.run_id')=r.run_id))))",
+            (cid,),
+        ).fetchall()
+        aliases: dict[str, dict[tuple[str, str], dict]] = {}
+        for candidate in candidates:
+            files = coordinator_current_result_files(service, conn, tenant, owner, cid,
+                candidate["goal_id"], candidate["run_id"], references=references)
+            for reference, file in files.items():
+                identity = (candidate["worker_id"], reference)
+                aliases.setdefault(reference, {})[identity] = file
+    if not aliases:
+        return response
+    projected = json.loads(json.dumps(response))
+
+    def render(match):
+        if match.group(2) is None:
+            return match.group(0)
+        reference = match.group(2).strip().removeprefix("<").removesuffix(">")
+        choices = aliases.get(reference, {})
+        if len(choices) != 1:
+            return match.group(0)
+        return f"{match.group(1)}({next(iter(choices.values()))['download_url']})"
+
+    for choice in projected.get("choices", []):
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            message["content"] = NATIVE_MARKDOWN_LINK_OR_ESCAPE.sub(render, message["content"])
+    return projected
+
+
+def project_coordinator_output(service: Any, request: dict, output: str) -> str:
+    response = project_coordinator_response(service, str(request.get("tenant_id") or ""),
+        str(request.get("owner_id") or ""), str(request.get("request_id") or ""),
+        {"choices": [{"message": {"content": output}}]})
+    return response["choices"][0]["message"]["content"]
 
 
 def render_coordinator_result_file(service: Any, request: dict, reference: str,

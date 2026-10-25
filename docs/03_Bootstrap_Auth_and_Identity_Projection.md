@@ -269,15 +269,28 @@ Host resource headroom is a separate measured vector.
 Standalone Chat's Queen can run independent helpers within that capacity. The exception belongs
 only to the authenticated owner's current accepted goal and exact worker/run (including a saved
 worker reused by the Queen), or its recorded current follow-up effect. A fresh helper uses the saved
-route, model and account choice. A reused worker keeps its own model, account and tools; its scoped
-worker and Allowed AI admission are rechecked instead of requiring a new route. Execution checks
-the durable binding again. Stopped or held goals,
+route, model and account choice. Fresh route children prove that choice at preflight, reservation
+and execution. A reused worker keeps its own model, account and tools; its scoped worker and Allowed
+AI admission are rechecked instead of requiring a new route. Its ordinary assignment preflight may
+leave the request queued. After the goal is attached, execution checks the exact current run's
+durable binding; reuse does not bypass that first preflight. Stopped or held goals,
 foreign or stale bindings, historical result access and later manual work receive no exception.
 No client-specific execution flag or full-access setting is needed. This changes mutation admission
 only: it grants neither additional native permissions nor exclusive control of the shared desktop.
 Existing account credential leases remain exclusive, so jobs using one selected account may queue
 even when profile, tenant and machine capacity remain available. Slot counts are ceilings, not a
 promise that every account can run that many jobs at once.
+
+A reused single-user worker without an explicit account selection keeps its existing native
+authentication route, including an OS sign-in where already allowed. That legacy route has no
+selected-account credential lease, so its Queen-owned runs may overlap within native/provider
+limits. This is different from selecting an **Existing Claude sign-in** connection: that registered
+current-native account still holds its exclusive lease. Reuse does not itself require a new account
+selection or enable ambient credentials in enterprise mode.
+
+A continuity hold preserves an accepted child's run. The existing queue releases its startup
+reservation and waits for the current scope to become valid again, without consuming provider
+retry budget. Once the hold clears and the exact goal binding is ready, that same run can resume.
 
 The conversation processor pool uses the existing service dispatch budget. Account and tenant
 mission limits cannot cap that pool across CLI families. Dispatch still requires the exact

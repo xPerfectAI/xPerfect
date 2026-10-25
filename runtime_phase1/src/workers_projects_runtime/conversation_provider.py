@@ -6771,9 +6771,11 @@ class ConversationProvider:
             public_text = output
         sources = (self._native_citation_sources_snapshot(request_record, run)
                    if isinstance(public_text, str) and _PRIVATE_CITATION_RUN_RE.search(public_text) else ())
-        return _redact_provider_output(self.service.render_provider_native_images(
+        from .coordinator import project_coordinator_output
+        rendered = self.service.render_provider_native_images(
             request_record, run, output, output_files=output_files, output_rejections=output_rejections,
-            include_captured_files=output_files is not None), sources)
+            include_captured_files=output_files is not None)
+        return _redact_provider_output(project_coordinator_output(self.service, request_record, rendered), sources)
 
     def _completion_usage(
         self,
@@ -6860,7 +6862,9 @@ class ConversationProvider:
             try:
                 parsed = json.loads(cached)
                 if isinstance(parsed, dict):
-                    return parsed
+                    from .coordinator import project_coordinator_response
+                    return project_coordinator_response(self.service, str(request_record.get("tenant_id") or ""),
+                        str(request_record.get("owner_id") or ""), str(request_record["request_id"]), parsed)
             except json.JSONDecodeError:
                 pass
         contract = self._saved_completion_contract(request_record) or self._completion_contract(payload)
@@ -6871,7 +6875,10 @@ class ConversationProvider:
         )
         if not winner or winner.get("state") != "completed" or not winner.get("response_json"):
             raise HTTPException(status_code=409, detail="Native completion lost its terminal authority")
-        return json.loads(winner["response_json"])
+        from .coordinator import project_coordinator_response
+        return project_coordinator_response(self.service, str(request_record.get("tenant_id") or ""),
+            str(request_record.get("owner_id") or ""), str(request_record["request_id"]),
+            json.loads(winner["response_json"]))
 
     def _completion_contract(self, payload: ChatCompletionRequest) -> dict[str, Any]:
         private_contract = _private_machine_state_response_contract(payload.metadata)
