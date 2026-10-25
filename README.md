@@ -151,7 +151,7 @@ Technical contracts:
 4. [MCP publication and clients](docs/04_MCP_Publication_and_Client_Compatibility.md)
 5. [QA playbook](docs/05_QA_Quick_Power_Playbook.md)
 6. [References](docs/06_References.md)
-7. [Operator UI](docs/07_Minimal_Unified_Operator_UI.md)
+7. [Operator UI and design guidelines](docs/07_Minimal_Unified_Operator_UI.md)
 8. [Repository and publication boundaries](docs/08_Repository_Structure_and_Publication_Boundaries.md)
 9. [Application boundary and generic scheduled delivery](docs/09_Application_Boundary_Contract.md) — proposed extension, technical plan and standalone acceptance.
 See [CHANGELOG](CHANGELOG.md) and the [runtime](runtime_phase1/README.md). Existing Python package names, `WPR_`/`GLASSHIVE_` configuration

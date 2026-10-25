@@ -62,8 +62,8 @@ truthful errors and security, not hide them.
 Use the language of the user's job: the work, its outcome, onboarding material, the named AI worker
 and its workplace. Make identity distinct from worker type and execution location. Preserve the
 user's choices and draft through account connection and recovery. Shared navigation and account
-controls must remain stable between pages. The [operator UI contract](07_Minimal_Unified_Operator_UI.md)
-owns the concrete labels, grouping and interactions.
+controls must remain stable between pages. The [operator UI contract](07_Minimal_Unified_Operator_UI.md#ui-design-principles)
+owns the current visual baseline, design guidelines, labels, grouping and interactions.
 
 ## 7. Think and plan, then complete the work
 
