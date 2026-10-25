@@ -6930,6 +6930,30 @@ def create_app(
             })
         return items
 
+    def _coordinator_native_result_file_scope(worker: dict, run: dict, delegation: dict) -> bool:
+        """Use an exact saved Chat result when no callback envelope is configured."""
+        if (run.get("state") != "completed" or delegation.get("origin_surface") != "coordinator"
+                or delegation.get("project_id") != worker.get("project_id")
+                or (service._bootstrap_bundle_for(worker) or {}).get("callbacks") not in (None, {})):
+            return False
+        with store._connect() as conn:
+            goals = conn.execute(
+                "SELECT g.goal_id,c.conversation_id FROM coordinator_goals g "
+                "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+                "WHERE g.work_ref=? AND g.worker_id=? AND c.tenant_id=? AND c.owner_id=?",
+                (delegation["work_ref"], worker["worker_id"], worker["tenant_id"], worker["owner_id"]),
+            ).fetchall()
+            for goal in goals:
+                if delegation.get("origin_ref") != f'{goal["conversation_id"]}:{goal["goal_id"]}':
+                    continue
+                source = CoordinatorService._owned_goal_result_run(
+                    conn, worker["tenant_id"], worker["owner_id"], goal["conversation_id"],
+                    goal["goal_id"], str(run["run_id"]),
+                )
+                if source and source["project_id"] == worker["project_id"]:
+                    return True
+        return False
+
     def _artifact_display_name(worker: dict, relative_path: str) -> str:
         relative = Path(relative_path.strip().lstrip("/"))
         fallback = relative.name
@@ -6945,9 +6969,10 @@ def create_app(
         )
         selected = [file for file in _mission_result_file_metadata(worker, run, delegation)
                     if file["artifact_path"] == relative] if delegation else []
-        if not selected and not delegation:
-            # Ordinary Chat workers have no mission callback. Their native capture
-            # already owns the exact selected names, run, attempt and file bytes.
+        if not selected and (not delegation or _coordinator_native_result_file_scope(worker, run, delegation)):
+            # Ordinary workers and callback-free Chat results use the native
+            # capture's exact selected names, run, attempt and immutable bytes.
+            # Callback-backed missions still require their completion envelope.
             resolver = getattr(service.runtime, "provider_native_image_output", None)
             if callable(resolver):
                 try:

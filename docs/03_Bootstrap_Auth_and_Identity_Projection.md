@@ -262,9 +262,22 @@ For Docker sandboxes, minimal host CLI auth is copied into the worker home accor
 For host-native workers, the CLI runs on the host and uses the host's existing CLI/browser/OS
 session directly. The typed v1 capacity dimensions are separate: 2 active conversation turns per
 CLI profile/family lane, 3 active missions per CLI profile/family lane, 4 active missions per
-account, and 12 active missions per tenant by default. Repository mutation scope is an additional
-one-owner exclusion only when a host mission declares that exact scope; it is not a general
-"one worker per family" rule. Host resource headroom is a separate measured vector.
+account, and 12 active missions per tenant by default. Manual host missions share a conservative
+mutation lease: model-supplied repository names or bootstrap fields cannot buy independent access.
+Host resource headroom is a separate measured vector.
+
+Standalone Chat's Queen can run independent helpers within that capacity. The exception belongs
+only to the authenticated owner's current accepted goal and exact worker/run (including a saved
+worker reused by the Queen), or its recorded current follow-up effect. A fresh helper uses the saved
+route, model and account choice. A reused worker keeps its own model, account and tools; its scoped
+worker and Allowed AI admission are rechecked instead of requiring a new route. Execution checks
+the durable binding again. Stopped or held goals,
+foreign or stale bindings, historical result access and later manual work receive no exception.
+No client-specific execution flag or full-access setting is needed. This changes mutation admission
+only: it grants neither additional native permissions nor exclusive control of the shared desktop.
+Existing account credential leases remain exclusive, so jobs using one selected account may queue
+even when profile, tenant and machine capacity remain available. Slot counts are ceilings, not a
+promise that every account can run that many jobs at once.
 
 The conversation processor pool uses the existing service dispatch budget. Account and tenant
 mission limits cannot cap that pool across CLI families. Dispatch still requires the exact

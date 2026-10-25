@@ -10,6 +10,11 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
+## 2026-10-25 — Parallel helpers and useful file names
+
+- **Fixed:** Standalone Chat can run independent helpers in parallel using each accepted goal and current run. Reuse, retries and restarts keep that ownership; manual work and account limits remain protected.
+- **Fixed:** Saved Chat files use their captured names for downloads when no completion callback is configured. Callback-backed missions still require their owning publication evidence.
+
 ## 2026-10-24 — Useful results and clearer recovery
 
 - **Improved:** First-use guides now follow a named expert from company onboarding through a useful report, its original files and a follow-up. UI, API and MCP examples use the same saved work.
