@@ -1485,6 +1485,25 @@ def test_server_instructions_advertise_mcp_owned_usage_contract(monkeypatch):
     assert len(server.instructions) < 1_000
 
 
+@pytest.mark.parametrize("default_profile", ["codex-cli", "claude-code", "grok-build", "openclaw-general", "direct-openai", "direct-anthropic", "direct-xai"])
+@pytest.mark.parametrize("available", [True, False])
+def test_compact_instructions_preserve_every_profile_and_the_configured_default(monkeypatch, default_profile, available):
+    profiles = {"codex-cli", "claude-code", "grok-build", "openclaw-general", "direct-openai", "direct-anthropic", "direct-xai"}
+    monkeypatch.setattr(mcp_server, "_host_workers_enabled", lambda: True)
+    monkeypatch.setattr(mcp_server, "_allowed_worker_profiles", lambda: profiles)
+    monkeypatch.setattr(mcp_server, "_configured_default_worker_profile", lambda: default_profile)
+    monkeypatch.setattr(mcp_server, "_default_execution_mode", lambda: "host")
+    monkeypatch.setattr(mcp_server, "_host_profile_available", lambda _profile: available)
+    instructions = mcp_server.glasshive_workers_server_instructions()
+    assert "For a fresh delegated task, use workspace_launch" in instructions
+    assert "workspace_launch resolves the human name" in instructions
+    assert "execution_mode=`host`" in instructions
+    assert f"profile=`{default_profile}`" in instructions
+    for profile in profiles:
+        assert f"{profile}={'available' if available else 'unavailable'}" in instructions
+    assert len(instructions) < 1_000
+
+
 def test_server_instructions_reflect_disabled_host_workers(monkeypatch):
     monkeypatch.setenv("GLASSHIVE_HOST_WORKERS_ENABLED", "false")
     monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "host")
