@@ -5,6 +5,8 @@
 name: Publish candidate package images
 
 on:
+  # Maintainers can publish the same digest-checked archive without creating a branch.
+  workflow_dispatch:
   push:
     branches: ['candidate/**']
     paths:
