@@ -4,7 +4,7 @@ import { watchOutputModel, watchTimingModel } from './delivery-presenter.js?v=20
 import { workspaceLifecycleControl } from './launch-policy.js?v=20261024polish1';
 import { createFileDraft, createWorkspaceFiles } from './files.js?v=20261024polish1';
 import { attachNativeControls, canGuideNativeTurn } from './native-controls.js?v=20261024polish1';
-import { createResultMarkdown } from './result-markdown.js?v=20261024polish1';
+import { createResultMarkdown } from './result-markdown.js?v=20261025filelinks1';
 
 // The same safe rendering as conversation replies: raw HTML is escaped and unsafe link
 // schemes are refused. Links open beside the workspace instead of replacing it.
@@ -43,7 +43,7 @@ const stageResultText = document.getElementById('stage-result-text');
 
 // A shown result is read from the top of the stage, not centred under empty space.
 function showResult(text) {
-  stageResultText.innerHTML = text ? resultMarkdown.render(text) : '';
+  stageResultText.innerHTML = text ? resultMarkdown.render(text, { resultArtifacts: currentResultArtifacts }) : '';
   stageResultText.hidden = !text;
   overlay.dataset.result = String(Boolean(text));
 }
@@ -163,6 +163,7 @@ let currentWorkerState = '';
 let currentSummary = 'No run output yet.';
 let currentFullOutput = 'No run output yet.';
 let currentResultText = '';
+let currentResultArtifacts = [];
 let currentProjectTitle = projectId || 'Project';
 let currentDeliverable = null;
 let currentDesktopAvailable = false;
@@ -1182,7 +1183,7 @@ function renderOutputContent(output) {
   latestOutputHuman.textContent = output.summary;
   latestOutputHuman.hidden = Boolean(output.result);
   // Only a completed run's answer is a result; other output stays in Technical details.
-  latestOutputFull.innerHTML = output.result ? resultMarkdown.render(output.result) : '';
+  latestOutputFull.innerHTML = output.result ? resultMarkdown.render(output.result, { resultArtifacts: currentResultArtifacts }) : '';
   latestOutputFull.hidden = !output.result;
   const kind = output.result ? 'result' : 'status';
   const verb = resultPanel.hidden ? 'Open' : 'Close';
@@ -1197,15 +1198,24 @@ function renderOutputContent(output) {
 }
 
 function showActionFailure(error) {
+  const technical = String(error?.message || error || 'Unknown error');
+  let summary = 'The action could not be confirmed. Check the workspace status before trying again.';
+  try {
+    const detail = JSON.parse(technical)?.detail;
+    if (typeof detail === 'string' && detail.trim()) summary = detail;
+    else if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+      summary = [detail.message, detail.recovery].filter(value => typeof value === 'string' && value.trim()).join(' ') || summary;
+    }
+  } catch { /* Keep the existing fallback for unstructured failures. */ }
   actionFailure = { label: 'Action not confirmed', panelTitle: 'Action needs attention',
-    summary: 'The action could not be confirmed. Check the workspace status before trying again.',
-    result: '', technical: String(error?.message || error || 'Unknown error') };
+    summary, result: '', technical };
   renderOutputContent(actionFailure);
   resultTechnical.open = false;
   openResultPanel();
 }
 
 function renderOutput(data) {
+  currentResultArtifacts = data.artifacts?.items || [];
   const output = summarizeOutput(data);
   renderOutputContent(actionFailure || output);
   syncResultActions(data.deliverable || null);

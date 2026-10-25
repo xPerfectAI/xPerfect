@@ -115,7 +115,7 @@ from .models import (
     WorkerResponse,
 )
 from .native_model_selection import ModelConfigurationRequired, native_grok_models, selected_grok_model, valid_model_id, native_timing_event
-from .openclaw_runtime import RuntimeConfigurationError, RuntimeControlNotReadyError, RuntimeDependencyMissingError, RuntimeErrorBase, StubRuntime, WorkerRuntime
+from .openclaw_runtime import RuntimeConfigurationError, RuntimeControlNotReadyError, RuntimeGenerationChangedError, RuntimeDependencyMissingError, RuntimeErrorBase, StubRuntime, WorkerRuntime
 from .profile_runtime import ProfiledWorkerRuntime, _redact_text
 from .peer_api import install_peer_routes
 from .peer_mcp import native_peer_server
@@ -539,13 +539,14 @@ def create_app(
         )
 
     @app.exception_handler(RuntimeControlNotReadyError)
-    async def runtime_control_not_ready_handler(
-        request: Request, exc: RuntimeControlNotReadyError
+    @app.exception_handler(RuntimeGenerationChangedError)
+    async def runtime_control_conflict_handler(
+        request: Request, exc: RuntimeControlNotReadyError | RuntimeGenerationChangedError
     ) -> JSONResponse:
         _ = request
         return JSONResponse(
             status_code=409,
-            content={"detail": {"code": exc.code, "message": str(exc), "retryable": True}},
+            content={"detail": {"code": exc.code, "message": getattr(exc, "public_message", str(exc)), "retryable": True}},
         )
 
     @app.exception_handler(HostWorkersDisabledError)
@@ -2067,9 +2068,39 @@ def create_app(
         workspace_items: list[dict[str, object]] | None = None,
         *,
         max_entries: int = 100,
+        include_host_paths: bool = False,
     ) -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
         source_items = workspace_items if workspace_items is not None else _workspace_items(worker, max_entries=max_entries, max_depth=8)
+        if not source_items:
+            return items
+        native_root = ""
+        # Mission file identities remain owned by their verified completion
+        # envelope, never by a current-directory filename match.
+        delegation = store.get_delegation_for_worker(
+            str(worker.get("worker_id") or ""),
+            tenant_id=str(worker.get("tenant_id") or "local"),
+            owner_id=str(worker.get("owner_id") or ""),
+        )
+        if not delegation:
+            if str(worker.get("execution_mode") or "") == "host":
+                if include_host_paths:
+                    native_root = str(worker.get("workspace_dir") or "")
+            else:
+                placement_reader = getattr(service.runtime, "native_workspace_placement", None)
+                try:
+                    placement = placement_reader(worker) if callable(placement_reader) else None
+                except Exception:
+                    placement = None  # Unavailable placement grants no native path alias.
+                if (
+                    isinstance(placement, dict)
+                    and placement.get("workspace_id") == worker.get("workspace_id")
+                    and placement.get("member_id") == worker.get("worker_id")
+                    and placement.get("workspace_dir") == worker.get("workspace_dir")
+                ):
+                    native_root = str(placement.get("native_workspace") or "")
+        if not Path(native_root).is_absolute() or ".." in Path(native_root).parts:
+            native_root = ""
         for item in source_items:
             if item.get("is_dir") or item.get("origin") == "user_input":
                 continue
@@ -2091,6 +2122,16 @@ def create_app(
                         kind="artifact_download",
                         fallback_action="download",
                     ),
+                    # Exact aliases name this authorized current file; they do
+                    # not claim that this worker/run authored a shared file.
+                    **({
+                        "native_paths": [
+                            str(Path(native_root) / workspace_path),
+                            workspace_path,
+                            "./" + workspace_path,
+                        ],
+                        "native_workspace_root": native_root,
+                    } if native_root else {}),
                 }
             )
             if len(items) >= max_entries:
@@ -2251,11 +2292,10 @@ def create_app(
     def _can_show_internal_details(ctx: AuthContext) -> bool:
         # A workspace link's viewer assertion never sees gateway credentials or
         # host details, on the local owner channel as on hosted packages.
-        link_viewer = ctx.auth_mode == "signed_internal_assertion" and ctx.role.strip().lower() == "viewer"
-        if not auth_settings.enterprise and not ctx.enterprise and not link_viewer:
-            return True
-        if ctx.auth_mode == "signed_link":
+        if ctx.auth_mode == "signed_link" or ctx.role.strip().lower() == "viewer":
             return False
+        if not auth_settings.enterprise and not ctx.enterprise:
+            return True
         if "runtime:internal_details" in ctx.scopes:
             return True
         return ctx.role.strip().lower() in {"admin", "operator", "owner"}
@@ -2880,7 +2920,9 @@ def create_app(
             "artifacts": {
                 "latest_image_name": latest_image.name if latest_image else None,
                 "latest_image_url": f"/v1/workers/{worker_id}/artifacts/latest-image" if latest_image else None,
-                "items": _artifact_items_with_action_urls(worker, workspace_items),
+                "items": _artifact_items_with_action_urls(
+                    worker, workspace_items, include_host_paths=show_internal
+                ),
             },
             "deliverable": deliverable,
         }
@@ -6540,18 +6582,7 @@ def create_app(
     @app.post("/v1/workers/{worker_id}/interrupt", response_model=WorkerResponse, status_code=202)
     def interrupt(worker_id: str, request: Request) -> WorkerResponse:
         require_worker(worker_id, request)
-        try:
-            return WorkerResponse(**service.interrupt_worker(worker_id))
-        except RuntimeErrorBase as exc:
-            if str(exc) != "active_work_generation_changed":
-                raise
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "active_work_generation_changed",
-                    "message": "Current work changed. Check its status and try again.",
-                },
-            ) from exc
+        return WorkerResponse(**service.interrupt_worker(worker_id))
 
     @app.post("/v1/workers/{worker_id}/pause", response_model=WorkerResponse, status_code=202)
     def pause(worker_id: str, request: Request) -> WorkerResponse:
@@ -7246,18 +7277,7 @@ def create_app(
         elif action == "pause":
             updated = service.pause_worker(worker_id)
         elif action == "interrupt":
-            try:
-                updated = service.interrupt_worker(worker_id)
-            except RuntimeErrorBase as exc:
-                if str(exc) != "active_work_generation_changed":
-                    raise
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "active_work_generation_changed",
-                        "message": "Current work changed. Check its status and try again.",
-                    },
-                ) from exc
+            updated = service.interrupt_worker(worker_id)
         elif action == "terminate":
             updated = service.terminate_worker(worker_id)
         else:

@@ -92,7 +92,9 @@ def test_watch_uses_native_collapsible_log_and_same_human_result_renderer():
     assert refresh.index("syncTerminalResultPresentation(data);") < refresh.index("setSurface(activeSurface, { force: false });")
     assert "!terminalResultPreferred && !resultPanel.hidden" in source
     assert "else if (!resultPanel.hidden) closeResultPanel({ restoreFocus: true });" in source
-    assert "resultMarkdown.render(output.result)" in source
+    assert "resultMarkdown.render(output.result, { resultArtifacts: currentResultArtifacts })" in source
+    assert "resultMarkdown.render(text, { resultArtifacts: currentResultArtifacts })" in source
+    assert "currentResultArtifacts = data.artifacts?.items || [];" in source
     assert "frame.src = url;" in source
 
 

@@ -369,6 +369,18 @@ after its existing state controller clears the old target; pending and unknown a
 their existing native request and draft behavior. Preserve current-result identity, signed and
 read-only access, failed/unknown state distinctions, draft recovery and native turn controls.
 
+A file named in a worker's reply must open the authorized file rather than a native filesystem
+path as a browser page. Resolve exact file references from that worker's current file metadata and
+accepted workspace placement. Do not guess by basename, cross member boundaries, or bypass mission
+completion evidence. Unknown native file paths remain readable text. Shared workspace files remain
+labelled as available project files; linking one does not claim that the current worker authored it.
+Host path aliases stay owner-only.
+
+Steering must preserve a new instruction when the prior job finishes before control is claimed.
+Keep the completed result and accept the instruction through the existing follow-up path. A newer
+run or competing control remains a conflict; never interrupt different work or turn that conflict
+into an unhandled server error. Read-only viewers retain only their explicitly granted controls.
+
 The shared theme owns the Run Project title/form width, centring, card padding and spacing. Page
 styles must not override it with older layout values. Chat keeps its readable column and compact
 fixed empty-state spacing. Its title and New chat action share one heading row; the two existing
