@@ -21,7 +21,7 @@ jobs:
       contents: write  # read the maintainer's draft staging release; drafts need write access
       packages: write  # push to this repository's container packages
     env:
-      SKOPEO: quay.io/skopeo/stable@sha256:a45bb1884fe85a16b7be0612b847123495f42b6e3eb1e7c962df20490a5a9b03
+      SKOPEO: quay.io/skopeo/stable@sha256:24940638e4abb0edfedc78a680554f316069d0212a00159276759421a059e611
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Read the manifest of this commit
