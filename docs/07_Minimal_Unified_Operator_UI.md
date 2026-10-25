@@ -377,8 +377,10 @@ labelled as available project files; linking one does not claim that the current
 Host path aliases stay owner-only.
 
 Chat uses that same trusted placement mapping for a completed helper's declared current file,
-including links in the Queen's final answer and saved-answer reload. Label these as current
-workspace files: Open/Download reads their present bytes, not an immutable completion snapshot.
+including links in the Queen's final answer and saved-answer reload. These are current workspace
+files: Open/Download reads their present bytes, not an immutable completion snapshot. The API
+marks that distinction with `semantics: "current_workspace_file"`; the answer keeps its authored
+link text.
 The exact owner, conversation, goal/run and worker remain the authority; ambiguous native paths
 do not pick another worker's file. The displayed projection leaves the saved response and raw
 worker result unchanged. Captured result files and callback-backed mission results keep their

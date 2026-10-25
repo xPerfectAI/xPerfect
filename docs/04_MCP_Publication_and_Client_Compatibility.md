@@ -458,9 +458,10 @@ worker, project and workspace placement. The final Queen answer can use the same
 from that authorized child result, including when an existing completed answer is reloaded. An
 exact native path declared by multiple workers is ambiguous and is not reassigned by filename.
 Callback-backed missions still require their accepted completion envelope; this current-file
-path does not bypass it. The projection changes only the returned view: saved worker output,
-result hashes, bounded paging and the stored response remain unchanged. Immutable artifact
-references continue to use their existing captured-file path.
+path does not bypass it. Reading an existing saved answer projects only the returned view;
+it does not rewrite that stored response, raw worker output, result hashes or bounded paging.
+A new answer uses the normal response storage path with its rendered file actions. Immutable
+artifact references continue to use their existing captured-file path.
 
 Host native file selections may use the admitted workspace or the current worker's managed
 `TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes

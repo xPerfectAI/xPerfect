@@ -9623,6 +9623,11 @@ class Store:
             ).fetchone()
         return self._row(row)
 
+    def coordinator_run_admission_ready(self, run_id: str) -> bool:
+        """Use the claim owner's existing held/unattached coordinator fence."""
+        with self._connect() as conn:
+            return coordinator_run_ready(conn, str(run_id))
+
     def can_reselect_stateless_provider_session_branch(
         self, session_id: str, *, tenant_id: str, owner_id: str,
     ) -> bool:

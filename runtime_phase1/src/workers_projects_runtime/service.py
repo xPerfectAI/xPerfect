@@ -6340,7 +6340,7 @@ class WorkersProjectsService:
                 "failure_structured": True,
                 "failure_user_message": str(exc),
                 "failure_recommended_recovery": "This work is saved and will retry when its conversation is ready.",
-                "failure_diagnostic_summary": "The accepted coordinator run no longer matches its startup reservation.",
+                "failure_diagnostic_summary": "Coordinator goal readiness or its exact startup reservation changed before execution.",
             }
         if not failure_fields:
             failure_fields = classify_runtime_error(
@@ -15165,8 +15165,21 @@ class WorkersProjectsService:
                 if queued_run:
                     if not self._coordinator_retry_dispatch_ready(worker, queued_run):
                         # Another scheduler may wake this worker between the
-                        # durable retry reservation and goal rebinding. Leave
-                        # the run queued; the coordinator wakes it after bind.
+                        # durable effect reservation and goal rebinding, or
+                        # while that goal is held. Keep the same bounded wait.
+                        reservation = self.store.get_active_host_run_lease_for_run(str(queued_run["run_id"]))
+                        if (reservation and reservation.get("startup_state") == "reserved"
+                                and not str(reservation.get("attempt_id") or "")):
+                            self._release_host_run_lease(
+                                str(queued_run["run_id"]), reason="coordinator_scope_wait",
+                                expected_reservation=reservation,
+                            )
+                        self._requeue_retryable_run(
+                            worker, queued_run, WorkAdmissionError(
+                                "coordinator_run_scope_changed",
+                                "This work is saved and will retry when its conversation is ready.",
+                            ),
+                        )
                         return
                     capacity_error = (
                         self._runtime_capacity_error(worker)
@@ -15208,7 +15221,8 @@ class WorkersProjectsService:
                         )
                         if isinstance(exc, WorkAdmissionError):
                             self._release_host_run_lease(
-                                str(queued_run["run_id"]), reason="coordinator_scope_wait"
+                                str(queued_run["run_id"]), reason="coordinator_scope_wait",
+                                expected_reservation=getattr(exc, "preaccept_reservation", {}),
                             )
                         self._requeue_retryable_run(
                             worker,
@@ -15234,10 +15248,6 @@ class WorkersProjectsService:
                     if isinstance(run, dict):
                         admission_timing["run"] = run.get("run_id")
                 if not run:
-                    self._schedule_worker_retry_after(
-                        worker_id,
-                        self.store.next_retry_after_for_worker(worker_id),
-                    )
                     if queued_run:
                         self._clear_run_local_grant_waiter(
                             str(queued_run["run_id"]), owner=grant_waiter_owner
@@ -15251,6 +15261,17 @@ class WorkersProjectsService:
                             reason="preclaim_generation_lost",
                             expected_reservation=preclaim_reservation or {},
                         )
+                        if not self.store.coordinator_run_admission_ready(str(queued_run["run_id"])):
+                            self._requeue_retryable_run(
+                                worker, queued_run, WorkAdmissionError(
+                                    "coordinator_run_scope_changed",
+                                    "This work is saved and will retry when its conversation is ready.",
+                                ),
+                            )
+                    self._schedule_worker_retry_after(
+                        worker_id,
+                        self.store.next_retry_after_for_worker(worker_id),
+                    )
                     current = self.store.get_worker(worker_id)
                     if (
                         self._processor_is_current(worker_id, generation)
@@ -20513,17 +20534,25 @@ class WorkersProjectsService:
         existing_lease = self.store.get_active_host_run_lease_for_run(
             str(run.get("run_id") or "")
         )
-        if existing_lease is not None:
-            if (execution_mode == "host" and lane == "mission"
+        if (not self.store.coordinator_run_admission_ready(str(run.get("run_id") or ""))
+                or (existing_lease is not None
+                    and execution_mode == "host" and lane == "mission"
                     and standalone_coordinator_host_enabled()
                     and not str(existing_lease.get("mutation_scope") or "")
                     and not self._standalone_coordinator_mutation_owner(
                         worker, run_id=str(run.get("run_id") or ""),
-                    )):
-                raise WorkAdmissionError(
-                    "coordinator_run_scope_changed",
-                    "Current accepted conversation work changed; refresh its status before retrying.",
-                )
+                    ))):
+            conflict = WorkAdmissionError(
+                "coordinator_run_scope_changed",
+                "This work is saved and will retry when its conversation is ready.",
+            )
+            conflict.preaccept_reservation = (
+                dict(existing_lease) if existing_lease
+                and existing_lease.get("startup_state") == "reserved"
+                and not str(existing_lease.get("attempt_id") or "") else {}
+            )
+            raise conflict
+        if existing_lease is not None:
             exact_lease_owner = bool(
                 str(existing_lease.get("executor_id") or "") == self._executor_id
                 and str(existing_lease.get("worker_id") or "")

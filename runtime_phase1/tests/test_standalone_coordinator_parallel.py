@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -243,13 +243,30 @@ def test_preaccept_lease_cannot_keep_an_obsolete_standalone_exemption(standalone
     assert store.get_run(run["run_id"])["runtime_invoked_at"] is None
 
 
-@pytest.mark.parametrize("boundary", ["preclaim", "claimed"])
+@pytest.mark.parametrize("target", ["fresh", "reused", "queue", "message"])
+@pytest.mark.parametrize("boundary", ["preclaim", "claim_refused", "claimed"])
 def test_processor_requeues_changed_coordinator_admission_without_losing_continuity(
-    standalone, monkeypatch, caplog, boundary,
+    standalone, monkeypatch, caplog, boundary, target,
 ):
-    store,service,_core,cid,_=standalone
+    store,service,core,cid,project=standalone
     monkeypatch.setenv("GLASSHIVE_MAX_CAPACITY_RETRY_ATTEMPTS","0")
-    worker,run=dispatch_first(standalone)
+    clock={"now":datetime.now(timezone.utc)}
+    monkeypatch.setattr(service,"_now_datetime",lambda:clock["now"])
+    monkeypatch.setattr("workers_projects_runtime.store.utc_now",lambda:clock["now"].isoformat())
+    if target!="reused": worker,run=dispatch_first(standalone)
+    else:
+        worker=store.create_worker(project_id=project["project_id"],owner_id="owner",name="Existing specialist",role="Retain expertise",profile="codex-cli",backend="codex-cli",runtime="codex-cli",model="gpt-6.1-sol",execution_mode="host",workspace_kind="named",bootstrap_bundle={"provider_model":"gpt-6.1-sol","env":{"WPR_CODEX_CLI_REASONING_EFFORT":"high"},"provider_account":{"policy":"personal_required","account_id":"owned-codex"}})
+        store.update_worker_state(worker["worker_id"],"ready")
+        result=core.dispatch("local","owner",cid,Dispatch(goal_id="first",worker_id=worker["worker_id"],instruction="Use this exact existing expert"))
+        assert result["state"]=="queued",result
+        worker=store.get_worker(worker["worker_id"]);run=store.get_run(result["run_id"])
+    if target in {"queue","message"}:
+        _start_exact_in_process(store,service,worker,run)
+        store.update_run(run["run_id"],state="completed",output_text="Original accepted work completed")
+        store.update_worker_state(worker["worker_id"],"ready")
+        followup=core.control("local","owner",cid,"first",Control(
+            action=target,run_id=run["run_id"],idempotency_key="held-durable-"+target,message="Accepted follow-up work"))
+        run=store.get_run(followup["run_id"]);worker=store.get_worker(worker["worker_id"])
     wakes=[]
     monkeypatch.setattr(service,"_ensure_worker_processor",wakes.append)
     def hold():
@@ -259,8 +276,9 @@ def test_processor_requeues_changed_coordinator_admission_without_losing_continu
     else:
         original_claim=store.claim_next_queued_run
         def held_after_claim(*args,**kwargs):
+            if boundary=="claim_refused": hold()
             result=original_claim(*args,**kwargs)
-            if result: hold()
+            if result and boundary=="claimed": hold()
             return result
         monkeypatch.setattr(store,"claim_next_queued_run",held_after_claim)
     with service._processors_lock:
@@ -278,18 +296,73 @@ def test_processor_requeues_changed_coordinator_admission_without_losing_continu
     assert not service._run_local_grant_waiters and not service._run_local_grant_claimants
     assert not wakes
     assert "Unexpected GlassHive worker processor failure" not in caplog.text
-    if boundary=="claimed": monkeypatch.setattr(store,"claim_next_queued_run",original_claim)
-    with store._connect() as conn:
-        conn.execute("UPDATE coordinator_goals SET restore_hold=0 WHERE conversation_id=?",(cid,))
-    retry_time=(datetime.fromisoformat(current["retry_after"])+timedelta(seconds=1)).isoformat()
-    monkeypatch.setattr("workers_projects_runtime.store.utc_now",lambda:retry_time)
+
+    if boundary!="preclaim": monkeypatch.setattr(store,"claim_next_queued_run",original_claim)
+    for generation in (2,3):
+        clock["now"]=datetime.fromisoformat(current["retry_after"])+timedelta(seconds=1)
+        with service._processors_lock:
+            service._active_processors.add(worker["worker_id"])
+            service._processor_generations[worker["worker_id"]]=generation
+        service._process_worker_queue_parallel(worker["worker_id"],generation)
+        current=store.get_run(run["run_id"])
+        assert current["state"]=="queued" and current["failure_class"]=="coordinator_run_scope_changed"
+        assert datetime.fromisoformat(current["retry_after"])>clock["now"]
+        assert current["runtime_invoked_at"] is None and current["retry_attempts"]==0
+        assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
+        assert not wakes and not service._run_local_grant_waiters and not service._run_local_grant_claimants
+        assert worker["worker_id"] not in service._active_processors
+    independent=service.assign_run(worker["worker_id"],"Independent accepted work",start_processor=False)
     with service._processors_lock:
         service._active_processors.add(worker["worker_id"])
-        service._processor_generations[worker["worker_id"]]=2
-    service._process_worker_queue_parallel(worker["worker_id"],2)
+        service._processor_generations[worker["worker_id"]]=4
+    service._process_worker_queue_parallel(worker["worker_id"],4)
+    assert store.get_run(independent["run_id"])["state"]=="completed"
+    assert store.get_run(run["run_id"])["state"]=="queued"
+    with store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET restore_hold=0 WHERE conversation_id=?",(cid,))
+    clock["now"]=datetime.fromisoformat(current["retry_after"])+timedelta(seconds=1)
+    with service._processors_lock:
+        service._active_processors.add(worker["worker_id"])
+        service._processor_generations[worker["worker_id"]]=5
+    service._process_worker_queue_parallel(worker["worker_id"],5)
     recovered=store.get_run(run["run_id"])
     assert recovered["state"]=="completed",recovered
     assert recovered["run_id"]==run["run_id"] and recovered["runtime_invoked_at"]
     assert not service._run_local_grant_waiters and not service._run_local_grant_claimants
     assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
     assert "Unexpected GlassHive worker processor failure" not in caplog.text
+
+
+def test_scope_wait_cannot_release_a_reservation_adopted_by_another_processor(standalone, monkeypatch):
+    store,service,_core,cid,_=standalone
+    worker,run=dispatch_first(standalone)
+    reserved=store.get_active_host_run_lease_for_run(run["run_id"])
+    assert reserved and not reserved["attempt_id"]
+    with store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET restore_hold=1 WHERE conversation_id=?",(cid,))
+    original_clear=service._clear_run_local_grant_waiter
+    adopted=[]
+    def adopt_after_scope_refusal(run_id,**kwargs):
+        original_clear(run_id,**kwargs)
+        if run_id!=run["run_id"] or adopted: return
+        with store._connect() as conn:
+            conn.execute("UPDATE coordinator_goals SET restore_hold=0 WHERE conversation_id=?",(cid,))
+        claim=store.claim_next_queued_run(worker["worker_id"],executor_id=service.executor_id)
+        assert claim and claim["run_id"]==run_id and claim["active_attempt_id"]
+        adopted.append(claim)
+        with service._processors_lock:
+            service._processor_generations[worker["worker_id"]]=2
+    monkeypatch.setattr(service,"_clear_run_local_grant_waiter",adopt_after_scope_refusal)
+    with service._processors_lock:
+        service._active_processors.add(worker["worker_id"])
+        service._processor_generations[worker["worker_id"]]=1
+    service._process_worker_queue_parallel(worker["worker_id"],1)
+    assert len(adopted)==1
+    current=store.get_run(run["run_id"])
+    lease=store.get_active_host_run_lease_for_run(run["run_id"])
+    assert current["state"]=="claimed" and current["active_attempt_id"]==adopted[0]["active_attempt_id"]
+    assert lease and lease["lease_id"]==reserved["lease_id"] and lease["attempt_id"]==current["active_attempt_id"]
+    assert current["runtime_invoked_at"] is None and not current["failure_class"]
+    assert worker["worker_id"] in service._active_processors
+    assert service._processor_generations[worker["worker_id"]]==2
+    assert not service._run_local_grant_waiters

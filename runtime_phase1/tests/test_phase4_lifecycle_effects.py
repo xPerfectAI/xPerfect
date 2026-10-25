@@ -1083,8 +1083,10 @@ def test_startup_recovery_does_not_consume_callbacks_created_after_service_start
     lifecycle_started = Event()
     release_recovery = Event()
     callback_replay_finished = Event()
+    regular_delivery_finished = Event()
     original_lifecycle_replay = WorkersProjectsService._replay_pending_lifecycle_effects
     original_callback_replay = WorkersProjectsService._replay_pending_callbacks
+    original_delivery = WorkersProjectsService._deliver_transport_callback
 
     def blocked_lifecycle_replay(self, *args, **kwargs):
         lifecycle_started.set()
@@ -1097,6 +1099,12 @@ def test_startup_recovery_does_not_consume_callbacks_created_after_service_start
             return original_callback_replay(self, *args, **kwargs)
         finally:
             callback_replay_finished.set()
+
+    def tracked_delivery(self, *args, **kwargs):
+        try:
+            return original_delivery(self, *args, **kwargs)
+        finally:
+            regular_delivery_finished.set()
 
     delivered: list[str] = []
 
@@ -1113,6 +1121,14 @@ def test_startup_recovery_does_not_consume_callbacks_created_after_service_start
         return Response()
 
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_INTERVAL_S", "3600")
+    # The ordinary scheduler may legitimately deliver a newly accepted callback.
+    # Hold that independent consumer while checking only startup's backlog cutoff.
+    monkeypatch.setattr(
+        WorkersProjectsService, "_scheduler_loop", lambda self: self._shutdown_event.wait()
+    )
+    monkeypatch.setattr(
+        WorkersProjectsService, "_deliver_transport_callback", tracked_delivery
+    )
     monkeypatch.setattr(
         WorkersProjectsService,
         "_replay_pending_lifecycle_effects",
@@ -1152,6 +1168,13 @@ def test_startup_recovery_does_not_consume_callbacks_created_after_service_start
         assert record["status"] == "pending"
         assert record["attempts"] == 0
         assert delivered == []
+
+        service._process_scheduler_cycle()
+        assert regular_delivery_finished.wait(2)
+        record = store.get_callback_outbox(callback_id)
+        assert record["status"] == "http_accepted"
+        assert record["attempts"] == 1
+        assert delivered == ["http://callback.local/glasshive"]
     finally:
         release_recovery.set()
         service.shutdown()
