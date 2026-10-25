@@ -73,10 +73,12 @@ jobs:
           policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
               'positive': [{'host': 'www.wikipedia.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
           policy.chmod(0o600)
+          images = {role: subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}',
+              'xperfect-' + role + ':build'], text=True).strip() for role in ('service', 'native')}
           with (root / 'policy-start-private.txt').open('wb') as output:
               result = subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
                   '--state-dir', str(root / 'policy-state'), '--ui-port', '18780', '--mcp-port', '18767',
-                  '--service-image', 'xperfect-service:build', '--native-image', 'xperfect-native:build',
+                  '--service-image', images['service'], '--native-image', images['native'],
                   '--worker-egress-policy', str(policy)], stdout=output, stderr=subprocess.STDOUT)
           if result.returncode:
               lines = (root / 'policy-start-private.txt').read_text().splitlines()
