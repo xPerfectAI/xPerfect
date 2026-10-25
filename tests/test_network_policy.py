@@ -146,6 +146,27 @@ def test_another_bridge_rule_is_safe_but_wildcard_or_negation_is_not():
             guard.verify_rules(NETWORK, POLICY, execute=firewall)
 
 
+def test_owned_dispatch_accepts_iptables_canonical_order_without_accepting_extra_fields():
+    firewall = Firewall()
+    def canonical(args, **kwargs):
+        result = firewall(args, **kwargs)
+        if args[3:] == ['-S', 'DOCKER-USER'] and result.returncode == 0:
+            chain, jump, _ = guard.rules_for(NETWORK, POLICY)
+            printed = ['-s', jump[3], '-i', jump[1], '-j', chain]
+            result.stdout = result.stdout.replace(shlex.join(jump), shlex.join(printed))
+        return result
+    guard.apply_rules(NETWORK, POLICY, execute=canonical)
+    guard.verify_rules(NETWORK, POLICY, execute=canonical)
+    chain, jump, _ = guard.rules_for(NETWORK, POLICY)
+    for altered in (['!', *jump], [*jump, '-m', 'comment', '--comment', 'extra'],
+                    ['-i', jump[1], '-i', jump[1], '-j', chain]):
+        firewall.chains['DOCKER-USER'] = [altered]
+        with pytest.raises(RuntimeError):
+            guard.verify_rules(NETWORK, POLICY, execute=canonical)
+    firewall.chains['DOCKER-USER'] = [jump]
+    guard.remove_rules(NETWORK, POLICY, execute=canonical)
+
+
 def test_failed_positive_probe_rolls_back_only_new_owned_rules(monkeypatch):
     firewall = Firewall()
     monkeypatch.setattr(guard, 'require_operator', lambda: None)

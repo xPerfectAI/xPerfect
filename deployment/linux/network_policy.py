@@ -59,11 +59,19 @@ def verify_rules(record, policy, *, execute=run):
     execute(["iptables", "-w", "5", "-C", "DOCKER-USER", *jump])
     dispatch = [shlex.split(line) for line in execute(["iptables", "-w", "5", "-S", "DOCKER-USER"]).stdout.splitlines() if line.strip()]
     dispatch = [line for line in dispatch if line[:2] == ["-A", "DOCKER-USER"]]
-    expected_jump = ["-A", "DOCKER-USER", *jump]
-    if expected_jump not in dispatch:
+    expected_fields = dict(zip(jump[::2], jump[1::2]))
+    def owned_jump(line):
+        # iptables -S prints its canonical option order, which need not be the
+        # insertion order. Admit only these exact three positive field pairs.
+        if len(line) != 8:
+            return False
+        pairs = list(zip(line[2::2], line[3::2]))
+        return len({key for key, _ in pairs}) == 3 and dict(pairs) == expected_fields
+    positions = [index for index, line in enumerate(dispatch) if owned_jump(line)]
+    if not positions:
         raise RuntimeError("Worker bridge dispatch is missing")
     bridge = jump[1]
-    for preceding in dispatch[:dispatch.index(expected_jump)]:
+    for preceding in dispatch[:positions[0]]:
         # Another package may have its own restrictive jump. A positive literal
         # input-interface match for a different bridge cannot bypass this one.
         interface = preceding[preceding.index("-i") + 1] if "-i" in preceding else ""
