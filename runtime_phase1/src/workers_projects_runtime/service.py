@@ -3985,6 +3985,7 @@ class WorkersProjectsService:
         lane: str = "mission",
         worker: dict | None = None,
         trusted_delegation: bool = False,
+        coordinator_origin_ref: str = "",
     ):
         """Hold one durable capacity claim around an external runtime probe."""
 
@@ -4035,6 +4036,7 @@ class WorkersProjectsService:
                     self._host_mutation_scope(
                         prospective_worker,
                         trusted_delegation=trusted_delegation,
+                        coordinator_origin_ref=coordinator_origin_ref,
                     )
                     if execution_mode == "host"
                     else ""
@@ -4168,6 +4170,7 @@ class WorkersProjectsService:
         worker: dict | None = None,
         require_capacity_snapshot: bool = False,
         trusted_delegation: bool = False,
+        coordinator_origin_ref: str = "",
     ) -> dict[str, object]:
         """Fence every adapter CLI preflight behind durable, live capacity."""
 
@@ -4190,6 +4193,7 @@ class WorkersProjectsService:
             lane=lane,
             worker=worker,
             trusted_delegation=trusted_delegation,
+            coordinator_origin_ref=coordinator_origin_ref,
         ) as (capacity_snapshot, _probe_lease):
             if has_preflight:
                 self._ensure_runtime_available(profile, execution_mode)
@@ -7730,16 +7734,6 @@ class WorkersProjectsService:
                 )
         self._ensure_execution_allowed(execution_mode)
         self._ensure_profile_allowed(profile)
-        capacity_snapshot = self._queued_runtime_preflight(
-            profile,
-            execution_mode,
-            tenant_id=tenant_id,
-            owner_id=owner_id,
-            lane="mission",
-            worker=prospective_worker,
-            require_capacity_snapshot=True,
-            trusted_delegation=launch_authority is not None,
-        )
         if launch_authority is None:
             model = self._resolve_worker_model(profile, execution_mode, tenant_id=tenant_id, owner_id=owner_id)
             if trusted_coordinator_model is not None:
@@ -7760,17 +7754,20 @@ class WorkersProjectsService:
                     # owner's durable accepted goal and its configured route.
                     owned_host_route = False
                     try:
+                        from .coordinator import CoordinatorConfig, Dispatch, coordinator_dispatch_origin
                         with self.store._connect() as conn:
-                            origin = conn.execute(
-                                "SELECT c.config_json,g.dispatch_json FROM coordinator_conversations c "
-                                "JOIN coordinator_goals g ON g.conversation_id=c.conversation_id "
-                                "WHERE c.tenant_id=? AND c.owner_id=? AND c.conversation_id || ':' || g.goal_id=?",
-                                (tenant_id,owner_id,origin_ref),
-                            ).fetchone()
-                        route_id = json.loads(origin["dispatch_json"])["route_id"] if origin else None
-                        declared = next((route for route in json.loads(origin["config_json"])["routes"] if route["id"]==route_id), {}) if origin else {}
-                        owned_host_route = bool(len(selected)==1 and declared.get("model")==selected[0].id
-                            and declared.get("profile")==profile and declared.get("execution_mode")=="host")
+                            origin = coordinator_dispatch_origin(conn, tenant_id, owner_id, origin_ref)
+                        command = Dispatch.model_validate_json(origin["dispatch_json"]) if origin else None
+                        config = CoordinatorConfig.model_validate_json(origin["config_json"]) if origin else None
+                        declared = next((route for route in config.routes if route.id == command.route_id), None) if command and config else None
+                        owned_host_route = bool(
+                            len(selected) == 1 and declared and declared.model == selected[0].id
+                            and declared.profile == profile and declared.execution_mode == "host"
+                            and command.goal_id == origin["goal_id"] and not command.worker_id
+                            and command.instruction == instruction and origin["text"] == goal
+                            and idempotency_key == origin_ref
+                            and not any(origin[key] for key in ("work_ref", "worker_id", "run_id"))
+                        )
                     except (sqlite3.OperationalError,ValueError,KeyError,TypeError):
                         pass
                 if (not allowed_placement or origin_surface != "coordinator"
@@ -7784,6 +7781,28 @@ class WorkersProjectsService:
                         "The standalone child route is unavailable or does not match its exact model."
                     )
                 model = trusted_coordinator_model
+        coordinator_origin_ref = (
+            origin_ref if trusted_coordinator_model is not None and execution_mode == "host" else ""
+        )
+        prospective_worker["model"] = model
+        prospective_worker["bootstrap_bundle_json"] = json.dumps(bootstrap_bundle or {})
+        if coordinator_origin_ref and not self._standalone_coordinator_mutation_owner(
+            prospective_worker, origin_ref=coordinator_origin_ref,
+        ):
+            raise BackgroundWorkerConfigurationError(
+                "The standalone child route is unavailable or does not match its accepted configuration."
+            )
+        capacity_snapshot = self._queued_runtime_preflight(
+            profile,
+            execution_mode,
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            lane="mission",
+            worker=prospective_worker,
+            require_capacity_snapshot=True,
+            trusted_delegation=launch_authority is not None,
+            coordinator_origin_ref=coordinator_origin_ref,
+        )
         if origin_scope and self.allowed_ai_policy is not None:
             # Validate the inherited origin ceiling before the child project is
             # created. The destination project may start with all-authorized,
@@ -7849,6 +7868,7 @@ class WorkersProjectsService:
                             self._host_mutation_scope(
                                 prospective_worker,
                                 trusted_delegation=launch_authority is not None,
+                                coordinator_origin_ref=coordinator_origin_ref,
                             )
                             if execution_mode == "host"
                             else ""
@@ -20251,10 +20271,70 @@ class WorkersProjectsService:
     def _has_native_delegation_authority(self, worker: dict) -> bool:
         return native_parallel_policy_enabled() and self._is_native_conversation_delegation(worker)
 
-    def _host_mutation_scope(self, worker: dict, *, trusted_delegation: bool = False) -> str:
+    def _standalone_coordinator_mutation_owner(
+        self, worker: dict, *, run_id: str = "", origin_ref: str = "",
+    ) -> bool:
+        """One current owner goal may use capacity; this grants no native access."""
+        if not standalone_coordinator_host_enabled() or not (run_id or origin_ref):
+            return False
+        from .coordinator import (
+            CoordinatorConfig, Dispatch, coordinator_current_run_origins,
+            coordinator_dispatch_origin,
+        )
+        try:
+            with self.store._connect() as conn:
+                if run_id:
+                    origins = coordinator_current_run_origins(conn, worker, run_id)
+                else:
+                    origin = coordinator_dispatch_origin(
+                        conn, str(worker.get("tenant_id") or "local"),
+                        str(worker.get("owner_id") or ""), origin_ref,
+                    )
+                    origins = [origin] if origin else []
+            for origin in origins:
+                command = Dispatch.model_validate_json(origin["dispatch_json"])
+                config = CoordinatorConfig.model_validate_json(origin["config_json"])
+                if command.goal_id != origin["goal_id"]:
+                    continue
+                if command.worker_id:
+                    # The run query already checks the saved existing-worker
+                    # dispatch and its exact scoped current goal/effect.
+                    if run_id and command.worker_id == worker.get("worker_id"):
+                        return True
+                    continue
+                route = next((route for route in config.routes if route.id == command.route_id), None)
+                if (route is None or route.profile != worker.get("profile")
+                        or route.execution_mode != "host"):
+                    continue
+                # Reuse the model/effort owner as a pure configuration check.
+                # This temporary carrier is never persisted or an access grant.
+                model, controls = self._configured_parallel_worker_route(
+                    route.profile, "host", {"launch_authority": {
+                        "worker_model": route.model, "worker_reasoning_effort": route.effort,
+                    }}, tenant_id=origin["tenant_id"], owner_id=origin["owner_id"],
+                )
+                bundle = self._bootstrap_bundle_for(worker) or {}
+                env = bundle.get("env") or {}
+                if (model != worker.get("model") or bundle.get("provider_model") != model
+                        or any(env.get(key) != value for key, value in controls.get("env", {}).items())):
+                    continue
+                account = mission_provider_account_selection(worker)
+                if (account is None or account.policy != "personal_required"
+                        or (route.connection_id and account.account_id != route.connection_id)):
+                    continue
+                return True
+        except (sqlite3.OperationalError, ValueError, KeyError, TypeError, BackgroundWorkerConfigurationError):
+            # Missing, malformed or stale scope keeps the ordinary manual fence.
+            pass
+        return False
+
+    def _host_mutation_scope(
+        self, worker: dict, *, trusted_delegation: bool = False,
+        coordinator_origin_ref: str = "", run_id: str = "",
+    ) -> str:
         """Keep the conservative fence for manual host missions.
 
-        Core-owned native missions use distinct workspaces and model coordination.
+        Application-owned native missions use accepted scoped work and model coordination.
         This fence does not give them exclusive control of the shared desktop.
         """
 
@@ -20267,8 +20347,12 @@ class WorkersProjectsService:
             trusted_delegation or self._has_native_delegation_authority(worker)
         ):
             return ""
+        if self._standalone_coordinator_mutation_owner(
+            worker, run_id=run_id, origin_ref=coordinator_origin_ref,
+        ):
+            return ""
         # Model-authored bootstrap fields cannot turn a manual worker into a
-        # Core-owned mission or buy an independent mutation lease.
+        # application-owned mission or buy an independent mutation lease.
         return hashlib.sha256(b"host-mission:unscoped-mutation-target").hexdigest()
 
     def _relieve_docker_resource_pressure(
@@ -20412,6 +20496,16 @@ class WorkersProjectsService:
             str(run.get("run_id") or "")
         )
         if existing_lease is not None:
+            if (execution_mode == "host" and lane == "mission"
+                    and standalone_coordinator_host_enabled()
+                    and not str(existing_lease.get("mutation_scope") or "")
+                    and not self._standalone_coordinator_mutation_owner(
+                        worker, run_id=str(run.get("run_id") or ""),
+                    )):
+                raise WorkAdmissionError(
+                    "coordinator_run_scope_changed",
+                    "Current accepted conversation work changed; refresh its status before retrying.",
+                )
             exact_lease_owner = bool(
                 str(existing_lease.get("executor_id") or "") == self._executor_id
                 and str(existing_lease.get("worker_id") or "")
@@ -20564,7 +20658,7 @@ class WorkersProjectsService:
                 executor_id=self._executor_id,
                 **capacity_policy,
                 mutation_scope=(
-                    self._host_mutation_scope(worker)
+                    self._host_mutation_scope(worker, run_id=str(run.get("run_id") or ""))
                     if execution_mode == "host"
                     else ""
                 ),

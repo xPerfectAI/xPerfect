@@ -2274,3 +2274,76 @@ def guard_coordinator_run(conn: Any, run_id: str) -> None:
         if (bound or reserved) and (not bound or goal["intent_state"] == "cancelled"
                 or goal["restore_hold"] or goal["conversation_restore_hold"]):
             raise CoordinatorConflict("Coordinator goal is unattached, held or stopped before execution")
+
+
+def coordinator_dispatch_origin(conn: Any, tenant: str, owner: str, origin_ref: str) -> dict | None:
+    """Current accepted dispatch provenance, before its worker/run is reserved."""
+    row = conn.execute(
+        "SELECT g.*,c.config_json,c.scope_json,c.tenant_id,c.owner_id "
+        "FROM coordinator_goals g JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+        "JOIN coordinator_turns t ON t.conversation_id=g.conversation_id AND t.turn_id=g.source_turn_id "
+        "WHERE c.tenant_id=? AND c.owner_id=? AND c.conversation_id || ':' || g.goal_id=? "
+        "AND g.intent_state='accepted' AND g.restore_hold=0 AND c.restore_hold=0 AND t.restore_hold=0",
+        (tenant, owner, origin_ref),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def coordinator_current_run_origins(conn: Any, worker: dict, run_id: str) -> list[dict]:
+    """Exact active goal/effect ownership, narrower than historical result access."""
+    rows = conn.execute(
+        "SELECT g.*,c.config_json,c.scope_json,c.tenant_id,c.owner_id,"
+        "w.project_id AS worker_project_id,w.workspace_id AS worker_workspace_id,"
+        "w.profile AS worker_profile,w.model AS worker_model,w.execution_mode AS worker_mode,"
+        "w.workspace_kind AS worker_kind,w.trusted_run_lane AS worker_lane,"
+        "w.bootstrap_bundle_json AS worker_bootstrap "
+        "FROM runs r JOIN workers w ON w.worker_id=r.worker_id "
+        "JOIN coordinator_goals g ON g.worker_id=w.worker_id "
+        "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+        "JOIN coordinator_turns t ON t.conversation_id=g.conversation_id AND t.turn_id=g.source_turn_id "
+        "WHERE r.run_id=? AND w.worker_id=? AND c.tenant_id=? AND c.owner_id=? "
+        "AND r.tenant_id=c.tenant_id AND w.tenant_id=c.tenant_id AND w.owner_id=c.owner_id "
+        "AND r.project_id=w.project_id "
+        "AND g.intent_state='accepted' AND g.restore_hold=0 AND c.restore_hold=0 AND t.restore_hold=0 "
+        "AND w.state NOT IN ('terminated','terminating','termination_failed','stopping') "
+        "AND r.state IN ('queued','claimed','admitted','running','settling','paused') "
+        "AND (g.run_id=r.run_id OR EXISTS (SELECT 1 FROM coordinator_actions a "
+        "WHERE a.conversation_id=g.conversation_id AND a.goal_id=g.goal_id "
+        "AND json_valid(a.payload_json) AND json_valid(a.response_json) "
+        "AND json_extract(a.payload_json,'$.action') IN ('queue','message') "
+        "AND json_extract(a.response_json,'$.run_id')=r.run_id))",
+        (run_id, worker.get("worker_id"), worker.get("tenant_id") or "local", worker.get("owner_id")),
+    ).fetchall()
+    origins = []
+    for raw in rows:
+        row = dict(raw)
+        if any(str(row[column] or "") != str(worker.get(key) or "") for column, key in (
+            ("worker_profile", "profile"), ("worker_model", "model"), ("worker_mode", "execution_mode"),
+            ("worker_bootstrap", "bootstrap_bundle_json"),
+        )):
+            continue
+        try:
+            dispatch = Dispatch.model_validate_json(row["dispatch_json"])
+            stored_scope = json.loads(row["scope_json"])
+            scope = CoordinatorScope.model_validate({
+                key: stored_scope[key] for key in CoordinatorScope.model_fields if key in stored_scope
+            })
+        except ValueError:
+            continue
+        if dispatch.worker_id:
+            if (dispatch.worker_id != worker.get("worker_id") or row["work_ref"]
+                    or scope.project_id != row["worker_project_id"]
+                    or (scope.workspace_id and scope.workspace_id != row["worker_workspace_id"])
+                    or row["worker_kind"] == "ephemeral" or row["worker_lane"] == "conversation"
+                    or conn.execute("SELECT 1 FROM delegations WHERE worker_id=?", (worker["worker_id"],)).fetchone()
+                    or conn.execute("SELECT 1 FROM provider_sessions WHERE worker_id=?", (worker["worker_id"],)).fetchone()):
+                continue
+        elif not conn.execute(
+            "SELECT 1 FROM delegations WHERE work_ref=? AND worker_id=? AND tenant_id=? AND owner_id=? "
+            "AND origin_surface='coordinator' AND origin_ref=?",
+            (row["work_ref"], worker["worker_id"], row["tenant_id"], row["owner_id"],
+             row["conversation_id"] + ":" + row["goal_id"]),
+        ).fetchone():
+            continue
+        origins.append(row)
+    return origins

@@ -1,9 +1,9 @@
 # Application boundary and generic scheduled delivery
 
-**Status:** design approved on 2026-10-23. The generic target, transport and native-worker
-interfaces are implemented in the local candidate. Product acceptance and installed-runtime proof
-are recorded separately below; design approval alone is not a release claim. Existing compatibility
-and schedules remain supported. Client migration is separate.
+**Status:** design approved on 2026-10-23; the generic target, transport and native-worker
+interfaces are implemented. The implementation record below states the tested behavior and limits.
+A source merge does not update an installed runtime or its pinned container images. Existing
+compatibility and schedules remain supported. Client migration is separate.
 
 ## One product, many clients
 

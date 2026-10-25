@@ -14,18 +14,20 @@ from workers_projects_runtime.conversation_provider import ConversationProvider
 from workers_projects_runtime.openclaw_runtime import RuntimeErrorBase, StubRuntime
 
 
-@pytest.fixture(params=['existing', 'helper'])
+@pytest.fixture(params=['existing', 'helper', 'coordinator_native'])
 def result_files(existing, tmp_path, monkeypatch, request):
     core, cid, worker_id, _ = existing
     store, service = core.store, core.service
     run_id = dispatch(existing)['run_id']
-    if request.param == 'helper':
+    if request.param in {'helper', 'coordinator_native'}:
         receipt = store.reserve_delegation(
             tenant_id='local', owner_id='owner', idempotency_key='file-helper', request_digest='digest',
-            origin_ref='file-helper-origin', title='Selected report', goal='Report', instruction='Report',
+            origin_ref=f'{cid}:followup' if request.param == 'coordinator_native' else 'file-helper-origin',
+            title='Selected report', goal='Report', instruction='Report',
             origin_surface='coordinator', worker_name='Helper', worker_role='worker', profile='codex-cli',
             backend='codex-cli', runtime='codex-cli', model='configured', execution_mode='host',
-            bootstrap_bundle={'callbacks': {'events_webhook_url': 'https://example.test/worker-events'}})
+            bootstrap_bundle={} if request.param == 'coordinator_native' else {
+                'callbacks': {'events_webhook_url': 'https://example.test/worker-events'}})
         worker_id, run_id = receipt['worker_id'], receipt['initial_run_id']
         with store._connect() as conn:
             conn.execute('UPDATE coordinator_goals SET worker_id=?,run_id=?,work_ref=? WHERE conversation_id=?',
@@ -37,10 +39,20 @@ def result_files(existing, tmp_path, monkeypatch, request):
     scope.update(worker_id=worker_id, run_id=run_id, owner_id='owner', images=[],
                  file_output_transport='artifact_sha256', attempt_id=attempt_id)
     expected = {'report.csv': b'item,value\nExample,17\n', 'report.html': b'<!doctype html><h1>Report</h1>'}
+    paths = {name: name for name in expected}
+    if request.param == 'coordinator_native':
+        expected = {'parallel-finance.md': b'# Finance\n900 - 75 = 825\n',
+                    'parallel-capacity.csv': b'worker,capacity\nExample,2\n',
+                    'parallel-release.md': b'# Release\nAll four results retained.\n',
+                    'parallel-inventory.csv': b'item,count\nExample,4\n'}
+        paths = {name: name for name in expected}
+        paths['parallel-finance.md'] = 'finance-delivery/parallel-finance.md'
     for name, data in expected.items():
-        (Path(info.workspace_dir)/name).write_bytes(data)
+        target = Path(info.workspace_dir)/paths[name]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
     selected = project(runtime, {**worker, '_run_attempt_id': attempt_id}, info,
-                       '\n'.join(f'[{name}]({name})' for name in expected), scope, run_id)
+                       '\n'.join(f'[{name}]({paths[name]})' for name in expected), scope, run_id)
     source = store.update_run(run_id, state='completed', output_text=selected, ended_at='2026-01-01T00:00:00Z')
     foreground = store.create_worker(worker['project_id'], 'owner', 'Assistant', 'Chat',
                                      'codex-cli', 'codex-cli', 'codex-cli', 'configured')
@@ -109,6 +121,68 @@ def test_exact_files_publish_and_replay_without_native_work(result_files, monkey
         app.state.store.close()
 
 
+@pytest.mark.parametrize('result_files', ['coordinator_native'], indirect=True)
+@pytest.mark.parametrize('change', [
+    'conversation_owner', 'conversation_tenant', 'goal_work_ref', 'goal_run',
+    'origin_ref', 'origin_surface', 'project', 'callbacks', 'malformed_callbacks',
+    'nonterminal', 'attempt', 'manifest_owner', 'manifest_worker', 'manifest_run',
+    'manifest_workspace', 'manifest_files', 'manifest_digest', 'manifest_path',
+])
+def test_callback_free_download_name_needs_exact_saved_result_and_native_manifest(
+    result_files, monkeypatch, change,
+):
+    f = result_files
+    provider = ConversationProvider(f.store, f.service)
+    monkeypatch.setattr(provider, '_native_output_snapshot', lambda *_: f.selected)
+    monkeypatch.setattr(provider, '_native_citation_sources_snapshot', lambda *_: [])
+    files = []
+    provider._conversation_output(f.request, f.run, output_files=files)
+    item = next(item for item in files if item['filename'] == 'parallel-finance.md')
+    if change in {'conversation_owner', 'conversation_tenant', 'goal_work_ref', 'goal_run'}:
+        table, column = {
+            'conversation_owner': ('coordinator_conversations', 'owner_id'),
+            'conversation_tenant': ('coordinator_conversations', 'tenant_id'),
+            'goal_work_ref': ('coordinator_goals', 'work_ref'),
+            'goal_run': ('coordinator_goals', 'run_id'),
+        }[change]
+        with f.store._connect() as conn:
+            conn.execute(f'UPDATE {table} SET {column}=? WHERE conversation_id=?', ('foreign', f.cid))
+    elif change in {'origin_ref', 'origin_surface', 'project'}:
+        column = 'project_id' if change == 'project' else change
+        value = f.store.create_project('owner', 'Other report', 'Separate report', 'openclaw-general')['project_id'] if change == 'project' else 'foreign'
+        with f.store._connect() as conn:
+            conn.execute(f'UPDATE delegations SET {column}=? WHERE worker_id=?', (value, f.worker['worker_id']))
+    elif change in {'callbacks', 'malformed_callbacks'}:
+        bundle = json.loads(f.worker.get('bootstrap_bundle_json') or '{}')
+        bundle['callbacks'] = {'events_webhook_url': 'https://example.test/worker-events'} if change == 'callbacks' else ['invalid']
+        f.store.update_worker(f.worker['worker_id'], bootstrap_bundle_json=json.dumps(bundle))
+    elif change == 'nonterminal':
+        with f.store._connect() as conn:
+            conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (f.source['run_id'],))
+    elif change == 'attempt':
+        f.store.update_run(f.source['run_id'], active_attempt_id='later-attempt')
+    else:
+        scope_path = f.runtime._run_root(f.worker['worker_id'], f.source['run_id'])/'native-image-scope.json'
+        scope = json.loads(scope_path.read_text())
+        if change in {'manifest_owner', 'manifest_worker', 'manifest_run', 'manifest_workspace'}:
+            column = {'manifest_owner': 'owner_id', 'manifest_worker': 'worker_id',
+                      'manifest_run': 'run_id', 'manifest_workspace': 'workspace_dir'}[change]
+            scope[column] = 'foreign'
+        elif change == 'manifest_files': scope['output_files'] = {'invalid': []}
+        elif change == 'manifest_digest': scope['output_files'][0]['sha256'] = 'invalid'
+        else: scope['output_files'][0]['root_path'] = '../parallel-finance.md'
+        scope_path.write_text(json.dumps(scope))
+    app = api.create_app(db_path=str(f.store.db_path), runtime_backend='stub', runtime=StubRuntime(), reconcile_on_startup=False)
+    try:
+        app.state.service.runtime = f.service.runtime
+        response = TestClient(app).get(item['download_url'], follow_redirects=False)
+        assert response.status_code == 200 and response.content == f.expected[item['filename']]
+        assert f'filename="{item["sha256"]}.md"' in response.headers['content-disposition']
+    finally:
+        app.state.service.shutdown()
+        app.state.store.close()
+
+
 @pytest.mark.parametrize('change', ['owner', 'tenant', 'request', 'request_run', 'other_conversation',
     'unbound_run', 'nonterminal', 'stale_attempt', 'missing_bytes', 'unselected_hash', 'source_owner', 'source_tenant'])
 def test_file_authority_refuses_unbound_or_unavailable_sources(result_files, change):
@@ -154,7 +228,19 @@ def test_recorded_queue_result_keeps_exact_source_file_authority(result_files):
         conn.execute('UPDATE coordinator_goals SET run_id=? WHERE conversation_id=?', (replacement['run_id'], f.cid))
         conn.execute('INSERT INTO coordinator_actions(conversation_id,goal_id,idempotency_key,payload_json,response_json) VALUES(?,?,?,?,?)',
             (f.cid,'followup','queue-file',json.dumps({'action':'queue','run_id':f.source['run_id']}),json.dumps({'run_id':replacement['run_id']})))
-    assert 'artifact_sha256:' not in f.service.render_provider_native_images(f.request, f.run, f.selected)
+    files = []
+    assert 'artifact_sha256:' not in f.service.render_provider_native_images(
+        f.request, f.run, f.selected, output_files=files)
+    app = api.create_app(db_path=str(f.store.db_path), runtime_backend='stub', runtime=StubRuntime(), reconcile_on_startup=False)
+    try:
+        app.state.service.runtime = f.service.runtime
+        for item in files:
+            response = TestClient(app).get(item['download_url'], follow_redirects=False)
+            assert response.status_code == 200 and response.content == f.expected[item['filename']]
+            assert f'filename="{item["filename"]}"' in response.headers['content-disposition']
+    finally:
+        app.state.service.shutdown()
+        app.state.store.close()
     with f.store._connect() as conn:
         conn.execute("UPDATE coordinator_actions SET response_json='' WHERE conversation_id=?", (f.cid,))
     with pytest.raises(RuntimeErrorBase, match='unavailable'):
