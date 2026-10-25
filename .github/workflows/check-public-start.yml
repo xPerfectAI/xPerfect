@@ -144,9 +144,12 @@ jobs:
               subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', command[0], image, *command[1:]], check=True, timeout=60)
           # Run the native Chromium binary and write/read an actual file. No
           # account, model response or network page is required for CPU proof.
+          # Like the product desktop, give this unprivileged process a writable
+          # HOME; user-data-dir alone does not supply Crashpad's config directory.
           try:
-              subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c',
-                  "set -eu; chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/xperfect-browser-check --dump-dom 'data:text/html,<title>Native architecture check</title><p>Ready</p>' > /tmp/result.html; grep -q 'Ready' /tmp/result.html"], check=True, timeout=60, capture_output=True)
+              subprocess.run(['docker', 'run', '--rm', '--network', 'none',
+                  '--env', 'HOME=/tmp/xperfect-browser-home', '--entrypoint', 'sh', image, '-c',
+                  "set -eu; mkdir -p \"$HOME\"; chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/xperfect-browser-check --dump-dom 'data:text/html,<title>Native architecture check</title><p>Ready</p>' > /tmp/result.html; grep -q 'Ready' /tmp/result.html"], check=True, timeout=60, capture_output=True)
           except subprocess.CalledProcessError as error:
               # This fixture has no network, mounts, credentials or user content.
               # Retain its bounded native diagnostic without changing acceptance.
