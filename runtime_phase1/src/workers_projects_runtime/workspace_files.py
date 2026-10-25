@@ -21,6 +21,51 @@ from typing import AsyncIterable
 DEFAULT_OWNER_STORAGE_BYTES = 5_000_000_000
 
 
+def native_workspace_root(runtime, worker: dict, *, include_host_paths: bool = False) -> str:
+    """Return only the runtime-declared root for this exact worker placement."""
+    root = ""
+    if str(worker.get("execution_mode") or "") == "host":
+        if include_host_paths:
+            root = str(worker.get("workspace_dir") or "")
+    else:
+        reader = getattr(runtime, "native_workspace_placement", None)
+        try:
+            placement = reader(worker) if callable(reader) else None
+        except Exception:
+            placement = None  # Unavailable placement grants no native path alias.
+        if (isinstance(placement, dict)
+                and placement.get("workspace_id") == worker.get("workspace_id")
+                and placement.get("member_id") == worker.get("worker_id")
+                and placement.get("workspace_dir") == worker.get("workspace_dir")):
+            root = str(placement.get("native_workspace") or "")
+    return root if Path(root).is_absolute() and ".." not in Path(root).parts else ""
+
+
+def native_workspace_relative_path(runtime, worker: dict, reference: str) -> str | None:
+    """Map an exact declared path, with the same single decoding as Watch."""
+    from .deliverables import is_user_deliverable_relative_path
+    from urllib.parse import unquote
+
+    try:
+        reference = unquote(reference, errors="strict")
+    except (UnicodeError, ValueError):
+        return None
+    if (not reference or any(char in reference for char in "\\%?#\x00\r\n")
+            or ":" in reference or reference.startswith("//") or ".." in Path(reference).parts):
+        return None
+    root = native_workspace_root(runtime, worker, include_host_paths=True)
+    if not root:
+        return None
+    path = Path(reference)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(root)
+        except ValueError:
+            return None
+    relative = path.as_posix()
+    return relative if is_user_deliverable_relative_path(relative) else None
+
+
 class FileAdmissionError(ValueError):
     def __init__(self, message: str, status_code: int = 409, *, code: str = "file_operation_failed") -> None:
         super().__init__(message)
@@ -313,7 +358,7 @@ def _directory(root: Path, relative: Path = Path("."), *, create: bool = False, 
             os.close(descriptor)
 
 
-def _snapshot_fd(parent: int, name: str) -> tuple[int, str, int]:
+def _ordinary_file_fd(parent: int, name: str) -> int:
     try:
         descriptor = os.open(
             name,
@@ -328,6 +373,16 @@ def _snapshot_fd(parent: int, name: str) -> tuple[int, str, int]:
             raise FileAdmissionError(
                 "Only ordinary workspace files can be accessed", 403
             )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _snapshot_fd(parent: int, name: str) -> tuple[int, str, int]:
+    descriptor = _ordinary_file_fd(parent, name)
+    try:
+        before = os.fstat(descriptor)
         digest = hashlib.sha256()
         while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
@@ -1418,6 +1473,29 @@ class WorkspaceFiles:
     def artifact_worker(self, worker: dict) -> dict:
         with self.store._connect() as conn:
             return artifact_worker_context(conn, worker, files=self)
+
+    def current_artifact(self, worker: dict, relative_path: str) -> dict:
+        """Inspect an exact current deliverable through the existing file scope.
+
+        This is not a run-authored snapshot. The ordinary artifact action checks
+        the same scope and opens the file again when the user follows its link.
+        """
+        from .deliverables import is_unmodified_user_input, is_user_deliverable_relative_path
+
+        if not is_user_deliverable_relative_path(relative_path):
+            raise FileAdmissionError("File not found", 404)
+        worker = self.artifact_worker(worker)
+        root = self._root(worker)
+        relative = _relative(relative_path)
+        with _directory(root, relative.parent) as parent:
+            descriptor = _ordinary_file_fd(parent, relative.name)
+            try:
+                size = os.fstat(descriptor).st_size
+            finally:
+                os.close(descriptor)
+        if is_unmodified_user_input(worker, root / relative):
+            raise FileAdmissionError("File not found", 404)
+        return {"filename": relative.name, "size_bytes": size}
 
     def scope_manifest(self, worker: dict, manifest: list[dict], *, connection=None) -> None:
         scope_id = self._workspace_key(self._scope_worker(worker, connection=connection))

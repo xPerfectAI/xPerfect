@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +33,7 @@ def standalone(tmp_path, monkeypatch):
         def get_provider_account(self, *, account_id, tenant_id, owner_id):
             return account if (account_id,tenant_id,owner_id)==("owned-codex","local","owner") else None
         def list_connections(self, **_kwargs): return []
+        def active_provider_account_lease(self, _account_id): return None
     class Provider:
         def _model(self, _model, **_kwargs): return SimpleNamespace(effort_choices=("high",))
     store=Store(tmp_path/"standalone.db")
@@ -116,6 +118,7 @@ def test_current_run_exemption_rejects_missing_stale_or_foreign_proof(standalone
                 elif change=="account": bundle["provider_account"]["account_id"]="foreign-account"
                 else: bundle["provider_account"]["policy"]="personal_preferred"
                 store.update_worker(worker["worker_id"],bootstrap_bundle_json=json.dumps(bundle))
+                worker=store.get_worker(worker["worker_id"])
     assert service._host_mutation_scope(worker,run_id=run["run_id"])
 
 
@@ -238,3 +241,55 @@ def test_preaccept_lease_cannot_keep_an_obsolete_standalone_exemption(standalone
     with pytest.raises(WorkAdmissionError) as conflict:service._acquire_host_run_lease(worker,run)
     assert conflict.value.code=="coordinator_run_scope_changed"
     assert store.get_run(run["run_id"])["runtime_invoked_at"] is None
+
+
+@pytest.mark.parametrize("boundary", ["preclaim", "claimed"])
+def test_processor_requeues_changed_coordinator_admission_without_losing_continuity(
+    standalone, monkeypatch, caplog, boundary,
+):
+    store,service,_core,cid,_=standalone
+    monkeypatch.setenv("GLASSHIVE_MAX_CAPACITY_RETRY_ATTEMPTS","0")
+    worker,run=dispatch_first(standalone)
+    wakes=[]
+    monkeypatch.setattr(service,"_ensure_worker_processor",wakes.append)
+    def hold():
+        with store._connect() as conn:
+            conn.execute("UPDATE coordinator_goals SET restore_hold=1 WHERE conversation_id=?",(cid,))
+    if boundary=="preclaim": hold()
+    else:
+        original_claim=store.claim_next_queued_run
+        def held_after_claim(*args,**kwargs):
+            result=original_claim(*args,**kwargs)
+            if result: hold()
+            return result
+        monkeypatch.setattr(store,"claim_next_queued_run",held_after_claim)
+    with service._processors_lock:
+        service._active_processors.add(worker["worker_id"])
+        service._processor_generations[worker["worker_id"]]=1
+    service._process_worker_queue_parallel(worker["worker_id"],1)
+    current=store.get_run(run["run_id"])
+    assert current["state"]=="queued",current
+    assert current["failure_class"]=="coordinator_run_scope_changed",current
+    assert current["failure_retryable"] and current["failure_structured"]
+    assert current["retry_after"] and current["retry_attempts"]==0
+    assert current["runtime_invoked_at"] is None
+    assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
+    assert worker["worker_id"] not in service._active_processors
+    assert not service._run_local_grant_waiters and not service._run_local_grant_claimants
+    assert not wakes
+    assert "Unexpected GlassHive worker processor failure" not in caplog.text
+    if boundary=="claimed": monkeypatch.setattr(store,"claim_next_queued_run",original_claim)
+    with store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET restore_hold=0 WHERE conversation_id=?",(cid,))
+    retry_time=(datetime.fromisoformat(current["retry_after"])+timedelta(seconds=1)).isoformat()
+    monkeypatch.setattr("workers_projects_runtime.store.utc_now",lambda:retry_time)
+    with service._processors_lock:
+        service._active_processors.add(worker["worker_id"])
+        service._processor_generations[worker["worker_id"]]=2
+    service._process_worker_queue_parallel(worker["worker_id"],2)
+    recovered=store.get_run(run["run_id"])
+    assert recovered["state"]=="completed",recovered
+    assert recovered["run_id"]==run["run_id"] and recovered["runtime_invoked_at"]
+    assert not service._run_local_grant_waiters and not service._run_local_grant_claimants
+    assert store.get_active_host_run_lease_for_run(run["run_id"]) is None
+    assert "Unexpected GlassHive worker processor failure" not in caplog.text

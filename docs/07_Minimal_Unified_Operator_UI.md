@@ -376,6 +376,14 @@ completion evidence. Unknown native file paths remain readable text. Shared work
 labelled as available project files; linking one does not claim that the current worker authored it.
 Host path aliases stay owner-only.
 
+Chat uses that same trusted placement mapping for a completed helper's declared current file,
+including links in the Queen's final answer and saved-answer reload. Label these as current
+workspace files: Open/Download reads their present bytes, not an immutable completion snapshot.
+The exact owner, conversation, goal/run and worker remain the authority; ambiguous native paths
+do not pick another worker's file. The displayed projection leaves the saved response and raw
+worker result unchanged. Captured result files and callback-backed mission results keep their
+existing publication requirements. See the [file publication contract](04_MCP_Publication_and_Client_Compatibility.md).
+
 Steering must preserve a new instruction when the prior job finishes before control is claimed.
 Keep the completed result and accept the instruction through the existing follow-up path. A newer
 run or competing control remains a conflict; never interrupt different work or turn that conflict

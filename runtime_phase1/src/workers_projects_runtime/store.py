@@ -17435,10 +17435,11 @@ class Store:
             if run is None:
                 return None
             attempt_id = str(run["active_attempt_id"] or "")
+            # A queued startup reservation is not an immutable attempt generation.
             lease = conn.execute(
                 "SELECT * FROM host_run_leases WHERE run_id = ? AND attempt_id = ?",
                 (str(run_id), attempt_id),
-            ).fetchone()
+            ).fetchone() if attempt_id else None
         return {
             "expected_attempt_id": attempt_id,
             "expected_lease_id": str(lease["lease_id"] or "") if lease else "",

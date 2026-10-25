@@ -6328,11 +6328,20 @@ class WorkersProjectsService:
         self,
         worker: dict,
         run: dict,
-        exc: RuntimeErrorBase,
+        exc: RuntimeErrorBase | WorkAdmissionError,
         *,
         failure_fields: dict[str, object] | None = None,
     ) -> dict | None:
         failure_fields = dict(failure_fields or {})
+        if isinstance(exc, WorkAdmissionError) and exc.code == "coordinator_run_scope_changed":
+            failure_fields = {
+                "failure_class": exc.code,
+                "failure_retryable": True,
+                "failure_structured": True,
+                "failure_user_message": str(exc),
+                "failure_recommended_recovery": "This work is saved and will retry when its conversation is ready.",
+                "failure_diagnostic_summary": "The accepted coordinator run no longer matches its startup reservation.",
+            }
         if not failure_fields:
             failure_fields = classify_runtime_error(
                 exc,
@@ -6350,6 +6359,7 @@ class WorkersProjectsService:
             "host_worker_busy",
             "provider_rate_limited",
             "provider_quota_exhausted",
+            "coordinator_run_scope_changed",
         }
         consume_retry_budget = failure_class not in indefinite_wait_classes
         if consume_retry_budget and attempts > max_attempts:
@@ -6511,7 +6521,7 @@ class WorkersProjectsService:
         self,
         worker: dict,
         run: dict,
-        exc: RuntimeErrorBase,
+        exc: RuntimeErrorBase | WorkAdmissionError,
         *,
         failure_fields: dict[str, object] | None = None,
     ) -> dict | None:
@@ -15190,10 +15200,16 @@ class WorkersProjectsService:
                         preclaim_reservation = self._acquire_host_run_lease(
                             worker, queued_run
                         )
-                    except HostCapacityError as exc:
+                    except (HostCapacityError, WorkAdmissionError) as exc:
+                        if isinstance(exc, WorkAdmissionError) and exc.code != "coordinator_run_scope_changed":
+                            raise
                         self._clear_run_local_grant_waiter(
                             str(queued_run["run_id"]), owner=grant_waiter_owner
                         )
+                        if isinstance(exc, WorkAdmissionError):
+                            self._release_host_run_lease(
+                                str(queued_run["run_id"]), reason="coordinator_scope_wait"
+                            )
                         self._requeue_retryable_run(
                             worker,
                             queued_run,
@@ -15441,7 +15457,9 @@ class WorkersProjectsService:
                             else "admitted_wait_generation_lost",
                         )
                         return
-                except HostCapacityError as exc:
+                except (HostCapacityError, WorkAdmissionError) as exc:
+                    if isinstance(exc, WorkAdmissionError) and exc.code != "coordinator_run_scope_changed":
+                        raise
                     self._clear_run_local_grant_waiter(
                         str(run["run_id"]), owner=grant_waiter_owner
                     )
