@@ -10,7 +10,13 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
-## 2026-10-25 — Parallel helpers and useful file names
+## 2026-10-25 — Reuse expertise, control work and recover safely
+
+- **Added:** Save a worker as an expert, keep exact versions, and edit, copy, archive, remove or restore it through the UI, API or MCP. Reuse a successful setup for another job without changing existing workers or losing saved work.
+- **Improved:** Run Project keeps the job, outcome, background and files while you choose a new, existing or copied worker. Section icons make the form easier to scan. The sixth expert card, Create, opens the normal new-worker setup without entering the brief again.
+- **Fixed:** An already-open native browser in a configured Linux shared workspace stays usable while AI work is paused. After supported idle maintenance, Resume then Open browser reuses the saved profile without resetting it. Legacy desktop limits remain documented.
+- **Improved:** Storage refusals explain what to correct and keep the failed upload available for Retry. MCP admission refusal names the required administrator approval without repeating sign-in. Account, model-access and quota failures retain their own recovery steps.
+- **Improved:** The public Linux arm64 Docker package includes these controls through the existing start command. The canonical visual guide is live; current image pins and the guide source are recorded without runtime data or credentials.
 
 - **Fixed:** Standalone Chat can run independent helpers in parallel using each accepted goal and current run. Reuse, retries and restarts keep that ownership; manual work and account limits remain protected.
 - **Fixed:** Saved Chat files use their captured names for downloads when no completion callback is configured. Callback-backed missions still require their owning publication evidence.

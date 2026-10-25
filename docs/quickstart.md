@@ -148,8 +148,10 @@ the operator to fix it; do not copy credentials or disable approval to bypass it
 
 ## Current support boundaries
 
-File drag-and-drop and native API-key sign-in still have open end-to-end acceptance; use
-**Add files**, **Download** and a supported subscription sign-in. A copy can retain the same
+File drag-and-drop still has open browser acceptance; use **Add files** and **Download**.
+One native Codex API-key path completed setup, work, a download and reload with an
+account-supported model. Other native API-key paths and GPT-6.1 API access remain unverified;
+see [account requirements](host-setup.md). A copy can retain the same
 owner's Ready, compatible selected account; it does not clone credentials, browser sign-ins or
 native chat history. Hosted identity and shared workspace acceptance remain deployment-specific. [Current limits](../README.md#current-limits) · [Capability guide](capability-matrix.md).
 
