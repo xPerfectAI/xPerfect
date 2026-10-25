@@ -12,6 +12,72 @@ separate surface, text, border and semantic state colours. Keep the same visual 
 Run Project, Chat, Workspaces, Connections, Library, Schedules, Activity, sign-in and Watch chrome.
 The native desktop and terminal retain their own appearance.
 
+### UI design principles
+
+Use the visual roles below as the design baseline. Extend the current layout and palette when a
+clear user need requires a change; keep the shared shell and control behavior consistent.
+
+- **Explain the work.** Use human job language and concrete action verbs. A function or profession
+  label needs one short explanation of the work it can do and the useful outcome. Keep names,
+  functions and execution locations distinct. The normal path should make sense without a manual
+  or knowledge of harnesses and protocols. Reveal technical detail when it helps a decision.
+- **Keep the path short.** Make the next useful action clear, use safe configured defaults, and
+  reveal advanced choices when needed. Judge necessary clicks, required decisions and time to
+  useful value on the actual journey. Preserve drafts and selections through setup and recovery.
+- **Keep meaning truthful.** Distinguish saved setup, active work and delivered results. A display
+  treatment must not change accounts, models, permissions, exact saved versions or workspace
+  identity. Keep unfamiliar states readable and give failures a specific recovery action.
+- **Use the existing system.** Reuse shared tokens, native controls and the current lightweight
+  frontend. Fix the owning rule instead of adding another override. Add a library or replace a
+  framework only when an evidenced requirement outweighs its cost. Reserve image dimensions,
+  bound previews and polling, and keep decoration from delaying input or useful content.
+- **Research the decision.** For a new pattern or material redesign, compare relevant current
+  primary guidance and credible alternatives. Keep a dated rationale and its limits with the
+  owning change. Treat community opinions as hypotheses to check. Reuse valid research; a small
+  repair does not require a new survey. [WCAG 2.2](https://www.w3.org/TR/WCAG22/) and
+  [Web Vitals](https://web.dev/articles/vitals) provide accessibility and performance references,
+  not a substitute for understanding the product's users.
+- **Verify the real result.** Within the agreed QA scope, use the affected browser journey and
+  inspect both themes, relevant wide/narrow layouts, keyboard focus, menus and dialogs. Check
+  affected empty/error/recovery and reload behavior. Measure loading, response to input, layout
+  movement and time to useful value when making performance claims. Source tests and screenshots
+  alone do not prove an interaction. Follow the [shared UI acceptance cases](05_QA_Quick_Power_Playbook.md#9-shared-ui-and-library-acceptance)
+  and reuse still-valid evidence.
+- **Keep public guidance clean.** Publish reusable design rules, factual asset provenance and
+  sanitized results. Keep raw requests, generation prompts, creative working records, screenshots
+  and machine-specific evidence outside public source and history.
+
+### Expert artwork style
+
+**xPerfect Editorial Gouache v1** (`xperfect-editorial-gouache-v1`) is the approved artwork
+direction: painterly editorial illustration with expressive gouache-like brushwork and bold
+colour blocking. The [approved visual reference](assets/editorial-gouache-v1-reference.webp)
+is an original generated illustration of a fictional AI persona. It does not depict an employee
+or imply credentials or endorsement. The complete five-character bundled set uses this style;
+runtime portraits are separately optimized assets verified in their actual cards. Future
+replacements use normal asset delivery and affected UI checks. This baseline governs bundled expert artwork;
+preserve user-supplied branding and identity rather than replacing it automatically.
+
+Keep these properties consistent across subjects:
+
+- Opaque painted colour planes, visible brush texture and subtle paper grain. Facial forms stay
+  visibly illustrated at small sizes; avoid photographic rendering or a texture over a photo.
+- A mature, expressive treatment with natural proportions and a clear silhouette. Avoid mascot
+  proportions, toy-like gloss and unnecessary props.
+- Graphite and plum, warm ivory and champagne-gold highlights, with controlled coral and muted
+  teal geometric background shapes. These artwork colours do not replace semantic UI tokens.
+- A square head-and-shoulders crop with clear margins, readable at 88 px and 80 px. Keep labels,
+  capabilities and text in the UI rather than painting them into an asset.
+
+Keep the subject description separate from the style specification. The reference governs medium,
+texture, palette and composition; it does not prescribe the person's identity, hair, clothing,
+pose, gaze or expression. Specify those choices separately for each subject.
+Use a style reference and a subject reference for their distinct purposes when both are supplied.
+Judge new assets against the reference in the actual card crops and both themes, then assess the
+whole set: distinct people that look painted by the same hand. A style name
+alone does not guarantee matching output. Record generation settings when exposed, keep working
+prompts private, and introduce a new style version when the approved direction changes.
+
 ### Shared appearance and navigation
 
 `frontends/glass-drive-ui/src/glass_drive_ui/static/theme.css` owns shared colours, atmosphere,
@@ -28,15 +94,15 @@ page's tinted background into every work surface. The taupe accent and subtle wa
 glows remain part of the brand. These hue choices serve the product design, not a universal
 claim about eye comfort or a rule that every background must be pure white or black.
 
-| Surface role | Light | Dark |
-|---|---|---|
-| Surrounding canvas | `#f4f5f7` | `#151618` |
-| Work and reading plane | `#ffffff` | `#1c1e21` |
-| Grouped forms and cards | `#f7f8fa` | `#25282c` |
-| Fields | `#ffffff` | `#202327` |
-| Menus, dialogs and drawers | `#ffffff` | `#2d3137` |
-| Main text | `#17191e` | `#e8eaed` |
-| Brand accent | `#786248` | `#d8c3a5` |
+| Surface role | Shared token | Light | Dark |
+|---|---|---|---|
+| Surrounding canvas | `--bg` | `#f4f5f7` | `#151618` |
+| Work and reading plane | `--panel` | `#ffffff` | `#1c1e21` |
+| Grouped forms and cards | `--panel-strong` | `#f7f8fa` | `#25282c` |
+| Fields | `--control-bg` | `#ffffff` | `#202327` |
+| Menus, dialogs and drawers | `--overlay-surface` | `#ffffff` | `#2d3137` |
+| Main text | `--text` | `#17191e` | `#e8eaed` |
+| Warm gold/taupe accent | `--accent` | `#786248` | `#d8c3a5` |
 
 Selected segments keep their fill and raised treatment, with an inset accent keyline where a
 subtle fill alone would be unclear. Keyboard focus has its own outer ring. Keep normal text,
@@ -432,8 +498,10 @@ native worker to perform setup from the exact retained source metadata. Use supp
 the original job with applied knowledge, supported reviewed skills and the worker's existing
 abilities. Other native/approved references remain visibly pending or Not available in this exact
 worker's Library → Added here view. They grant no tools, project no unreviewed executable files and
-never silently discard the job. They are not mislabeled as copied-workspace grants. Existing copy
-and template reapproval keep their blocking confirmation path unchanged.
+never silently discard the job. They are not mislabeled as copied-workspace grants. Copy and
+template reviews retain their blocking confirmation where a capability or account choice is
+unresolved. Keeping an eligible same-owner Ready account reference does not require a new sign-in
+or copy its credentials.
 
 Approved review uses the existing exact-target pending change and confirmation. Personal source
 selection is not a shortcut around approval. Existing connection/account ownership remains intact.
@@ -569,7 +637,7 @@ A selected Docker account starts in a private execution-workspace member. Its pr
    - resume/play
    - interrupt
    - more menu
-   - delete/shut down available from more menu
+   - Close workspace is available from More; it shuts down compute and retains saved work/results
 18. The latest result must be visible in the top ribbon and expandable without leaving the live view.
    In an isolated workspace, automatic file previews use the current run's recorded start/end
    window. Older files remain available in Files and the output's workspace-file list, but a
@@ -698,7 +766,11 @@ Secondary:
 1. `Pause`
 2. `Resume`
 3. `Interrupt`
-4. `Delete`
+4. `Close workspace`
+
+Close stops the workspace's compute and retains its saved work and results. The compatibility
+API/MCP action is `terminate`; it is not a hard-delete operation. Library item deletion and
+recoverable Files Trash have their own separate controls and retention rules.
 
 Failed, cancelled, and interrupted workspaces must keep an explicit `Pause` recovery action when
 their workspace substrate can still be running. Error guidance must never recommend pausing while
@@ -733,11 +805,19 @@ request/response compatibility but uses the same fail-closed destination review 
 
 Capabilities that cannot be copied safely are returned as exact, owner-scoped review items. Duplicate
 and template destinations are created with that deterministic action-id report in the same durable
-write as the new worker, before file copy or HTTP success. The destination remains unable to run until
-every Library item is restored through its real approval, a concrete personal provider selection is
-reviewed again, or the user explicitly confirms `Continue without this capability`. Legacy brokered
-connection and provider-grant references are deliberately non-transferable: the UI says they were
-not copied and never claims a setup message restored them. Provider selection cannot be waived.
+write as the new worker, before file copy or HTTP success. A copy retains its concrete personal
+provider account selection when that account belongs to the same owner, is Ready and supports the
+worker type. The reference points to the existing account; its credential home, browser sign-ins
+and native conversation history are not copied. That retained selection resolves its provider
+review item without another sign-in or confirmation. An unavailable, unready, mismatched or foreign
+account cannot take this retention path and is never silently substituted.
+
+The destination remains unable to run while a required review is unresolved: each applicable
+Library item needs its real approval, an unresolved personal provider selection needs an authorized
+choice, and an optional capability may be omitted only when the user explicitly confirms
+`Continue without this capability`. Legacy brokered connection and provider-grant references are
+deliberately non-transferable: the UI says they were not copied and never claims a setup message
+restored them. Provider selection cannot be waived.
 Reapproval preserves the source grant's exact scope subset rather than requesting every current
 manifest scope; API and MCP omission cannot widen it. Account-less `personal_preferred` fallback has
 no private capability and therefore creates no impossible review item. A preferred account that is
@@ -751,7 +831,8 @@ attempt has no retained project or worker. If a destination remains, the respons
 keeps the same idempotency key bound to that attempt. Host-capacity and storage failures retain
 their typed cause so the UI can show the applicable recovery.
 
-This gives users a real branch/fork action without silently carrying over sensitive browser state.
+This gives users a separate working copy without carrying over sensitive browser state or
+promising a native conversation/session fork.
 Duplicate has no default per-file, file-count, or batch-byte limit. Explicit
 `GLASSHIVE_DUPLICATE_MAX_FILES` and `GLASSHIVE_DUPLICATE_MAX_BYTES` settings
 remain available; the owner storage quota, safe-file checks, and copy deadline
@@ -803,7 +884,7 @@ Use a separate frontend service that:
 2. The new UI works as a separate service.
 3. A user can launch a project from the new UI with one primary interaction flow.
 4. A user is redirected into a live watch surface automatically.
-5. A worker can be paused, resumed, interrupted, and deleted from the new UI.
+5. A worker can be paused, resumed, interrupted, and closed from the new UI; Close retains its saved work and results.
 6. The live desktop remains the dominant surface.
 7. A hello-world landing page task ends on the rendered page in the sandbox browser.
 8. The active worker terminal is visible inside the desktop-first watch flow by default.
@@ -1109,23 +1190,24 @@ failure notice. Finished work stays result-first, with its technical log availab
 
 ## Starting with a professional AI Worker
 
-Run Project presents **Experts** and **My experts** before the job form. Lead each card with the
-profession or function; show its optional human name as secondary information. Keep one short
+Run Project presents **Experts** and **My experts** before the job form. Lead each bundled expert
+card with the profession or function; show its optional human name as secondary information. Keep one short
 outcome sentence visible. Included knowledge and abilities belong inside the existing **What’s
 included** disclosure, with setup and optional tools, so the gallery stays easy to scan.
 
-Use cohesive, varied fictional portraits for the five bundled public experts, with distinct
-faces, ages and styling. Favor softly blurred architectural settings with natural depth and
-cinematic lighting over flat studio gradients. Faces must remain clear at 88 px on desktop and
-80 px on narrow screens, in both themes. Use restrained teal, blue, ochre, coral and violet
-accents. Keep text on the shared neutral surfaces, reserve the
-taupe selection treatment, and retain an explicit selected label and keyboard focus. Portraits use
-stable catalog IDs as presentation metadata; names, list order and prompt text must not assign a
-portrait or change execution. Custom saved experts keep their supplied name as the title; their free-form worker role stays
-inside details rather than being guessed to be a profession. If no known portrait
-exists or an image fails, use a neutral non-letter symbol, without guessing a profession or
-inventing a person's photo. The generated portraits are fictional AI personas, not employees,
-credentials or endorsements. Keep the five optimized local assets together below 100 KB.
+The five bundled portraits are generated fictional AI personas, not employees, credentials or
+endorsements. Their assets and factual provenance belong in
+`frontends/glass-drive-ui/src/glass_drive_ui/static/experts/README.md`. Keep the displayed crops
+clear at 88 px on desktop and 80 px on narrow screens, in both themes, with dimensions reserved
+before loading. Keep the five optimized local assets together below 100 KB. Text stays on the
+shared neutral surfaces; the taupe selection treatment, explicit selected label and keyboard
+focus remain distinct from decorative accents.
+
+Stable catalog IDs map presentation assets only; names, list order and request wording must not
+assign an asset or change execution. Custom saved experts keep their supplied name as the title;
+their free-form worker role stays inside details. If no known asset exists or an image fails, use
+the neutral non-letter fallback without guessing a profession or inventing an identity. Creative
+working records and detailed generation instructions remain private.
 
 Keep clear space between shared navigation and the gallery: about 44 px on desktop and 30 px on
 narrow screens. Portraits reserve their dimensions before loading. Avoid large decorative banners,

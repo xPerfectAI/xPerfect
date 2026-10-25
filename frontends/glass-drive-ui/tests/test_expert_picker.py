@@ -213,7 +213,7 @@ const walk=e=>[e,...e.children.flatMap(walk)];
  let cards=walk(form).filter(e=>e.className==='expert-card');
  assert.equal(walk(cards[0]).find(e=>e.tag==='h3').textContent,known.role);
  assert.equal(walk(cards[0]).find(e=>e.className==='expert-name').textContent,known.name);
- const image=walk(cards[0]).find(e=>e.tag==='img');assert.equal(image.src,'/static/experts/bioanalytical-scientist.webp?v=20261024portraits2');
+ const image=walk(cards[0]).find(e=>e.tag==='img');assert.equal(image.src,'/static/experts/bioanalytical-scientist.webp?v=20261024gouache1');
  assert.equal(image.width,88);assert.equal(image.height,88);assert.equal(image.alt,'');image.onerror();assert.equal(image.hidden,true);
  assert(walk(cards[0]).some(e=>e.className==='expert-avatar-fallback'&&e.innerHTML.includes('<svg')));
  assert.equal(walk(cards[1]).filter(e=>e.tag==='img').length,0,'a matching name or role must not assign another expert portrait');

@@ -1,81 +1,119 @@
-# xPerfect: from a goal to a useful result
+# Watch an AI expert do useful work
 
-A practical build-and-review exercise for a technical workshop. The demonstration takes about
-15 minutes; participants can then repeat it with the same synthetic input.
+Choose a professional, give them the material they need, and inspect what they deliver.
+This exercise uses an ordinary reusable xPerfect worker and synthetic data. No company or
+customer information, external publishing or financial transactions are needed.
 
-## What participants make
+The main example is a **Finance Director** preparing a performance and cash review. The same
+pattern applies to the other four starting experts below. For installation and account setup,
+use the [quickstart](quickstart.md).
 
-A small AI Expert: one intended user, one mission, a known source, an output, and a clear check.
+## Prepare the example
 
-Synthetic example: a release-note editor. Give it a short changelog and ask it to write a concise
-Markdown release note that preserves all changes and identifies missing facts. The peer checks
-the output against the input. This requires no customer data, external posting or repository write.
+1. Open **Run Project → Experts → Finance Director**. Check **What's included** and connect a
+   ready Claude Code account on the host. This is the starter's current native skill path.
+2. Under **Background Context → Add files**, add these three files from the source folder:
 
-Use [the synthetic changelog](demo/changelog.md) with this task:
+   | Material | Purpose |
+   | --- | --- |
+   | [Company onboarding](../runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/demo/company-onboarding.md) | The company's reporting instructions and limits. |
+   | [Monthly accounts](../runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/demo/data.csv) | Actual and budget figures to reconcile. |
+   | [Planning assumptions](../runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/demo/plan.json) | Cash balances and forecast receipts/payments. |
 
-> Write `release-notes.md` for readers of this app. Use only the attached changelog. Include each
-> of the four changes once. Keep the missing release date and unreviewed compatibility explicit.
-> Do not imply that bulk export is available. Stay under 150 words.
+3. Copy the [supplied job](../runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/demo/job.md)
+   into **What's the Job?**. It asks for a board-ready review, editable calculations, a variance
+   bridge and a cash scenario. It also requires uncertainty and unresolved differences to stay
+   visible. Keep the account and workspace choices explicit.
+4. Select **Run Project**. Review the included native abilities when asked. Optional community
+   tools are separate; this example does not require silently installing or authorizing them.
 
-Peer check: all four changes, no invented date, no bulk-export promise, compatibility uncertainty
-preserved, and a readable downloadable Markdown file under 150 words.
+The files and instructions above are the source of the example. The checks below describe
+expected work; they are not a pre-generated report or a claim that every model run is correct.
 
-## A 15-minute demonstration
+## Follow the work
 
-| Time | Show | Say |
+Watch shows the selected worker, progress and delivered files. Give direction in the same
+workspace rather than creating another worker for each follow-up. If the native AI asks for
+permission, answer in its visible controls.
+
+Open the actual memo and calculation files with **Open result** or **Library → Files**.
+Download the editable files. Check the figures and reasoning against the supplied inputs, then
+reload and reopen that same workspace. The result should remain available without rerunning it.
+
+## Inspect the result
+
+The first page of an actual report produced from these synthetic inputs:
+
+![Delivered Finance report showing the operating result, cash scenario and unresolved bank difference](assets/screens/finance-report.png)
+
+*Recorded 24 October 2026 from local Claude Code work using the bundled synthetic inputs.
+The image is the first page of the downloaded report.*
+
+| Check | Expected from these synthetic inputs |
+| --- | --- |
+| Quarterly operating performance | July and August each produce USD 20,000; September produces a USD 5,000 loss. The quarterly result is USD 35,000 against a USD 45,000 budget. |
+| Cash reconciliation | Bank cash is USD 1,500 below ledger cash. The difference stays unexplained; the worker must not invent an entry to remove it. |
+| Cash scenario | With the supplied opening cash and assumptions, month-end cash is USD 160,000, then 110,000, then 120,000. A forecast is not an observed result. |
+| Traceability | Calculations and the memo identify their sources, units, assumptions and unresolved questions. |
+| Useful delivery | The review is readable and calculations are editable. A filename in chat alone is not a delivered file. |
+| Boundaries | No entries are posted, money transferred or investment decisions executed. |
+
+The [fixture acceptance record](../runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/demo/acceptance.json)
+keeps the numerical and quality checks beside their source. This demonstration does not establish
+professional certification or replace review by a qualified finance professional.
+
+## Change one assumption, then try bad input
+
+**Follow-up:** ask the same worker to explain how an approved cash assumption changes the
+forecast. Require it to keep the original inputs and distinguish the revised scenario from the
+first one. Inspect the new files and confirm that the original result remains available.
+
+**Unhappy path:** use the supplied
+[bad-input.csv](../runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/demo/bad-input.csv)
+in a separate disposable workspace. The expected behavior is a clear request for the missing or
+corrected input, with the source preserved. The worker must not call an incomplete analysis
+finished or invent values to make a report look complete.
+
+To repeat the setup for another job, save it as an expert and start from **My experts**. To
+continue this exact job, reopen its existing worker. Those are different actions.
+
+## Try another profession
+
+Each package contains its own job, synthetic inputs, company onboarding material and acceptance
+checks. Use the same choose → onboard → run → inspect → follow-up pattern.
+
+| Professional | Work to demonstrate | What makes the result useful |
 | --- | --- | --- |
-| 0–2 min | A previously rehearsed input and output, clearly labelled as recorded evidence, such as [this recorded result](assets/screens/result.png) | “The result must be useful to someone. We will check this one against its source.” |
-| 2–4 min | [First result](assets/first-result.png), then the [workspace diagram](assets/workspaces.png) | “A project groups the work. Each worker uses a native agent and an execution workspace. Grouping workers does not itself make them share a computer.” |
-| 4–6 min | The unlocked web UI, then `./xperfect doctor` | “A running UI is only the start. Doctor shows the exact model and whether the provider's tool is installed; Connections shows the signed-in account.” |
-| 6–10 min | **Run project** with the synthetic file added through **Add files**, progress and the produced Markdown file; the [context and tools diagram](assets/context-tools.png) while it runs. If the worker asks before running a command, answer it: an unanswered request expires. | “The worker gets the goal and the file we attached. It keeps its own built-in tools, and only the connections we allow. Our check is simple: every listed change survives, and missing information stays explicit.” |
-| 10–12 min | **Open result**, then open or download `release-notes.md`, and reload the same task | “Inspect the file. Return to the work without starting it again.” |
-| 12–14 min | A rehearsed interrupt/continue flow on a disposable task | “Control and recovery are part of the work.” |
-| 14–15 min | [Deployment diagram](assets/deployment.png) and the next exercise | “On your computer or a hosted server, the work stays with you; provider requests can leave. Use one source, one useful output and one peer who can tell you whether it worked.” |
+| [Clinical Biostatistician](../runtime_phase1/src/workers_projects_runtime/starter_packs/clinical-biostatistician/README.md) | Analyze a small study against its plan. | Response counts, uncertainty and missing participants remain explicit; no unsupported efficacy claim. |
+| [Bioanalytical Scientist](../runtime_phase1/src/workers_projects_runtime/starter_packs/bioanalytical-scientist/README.md) | Reconcile assay exports and review QC exceptions. | The report links sample conclusions to calculations and flags what needs expert review. |
+| [Regulatory Affairs Specialist](../runtime_phase1/src/workers_projects_runtime/starter_packs/regulatory-affairs-specialist/README.md) | Compare technical claims with source evidence. | Supported, conflicting and missing evidence stay distinct; no invented submission readiness. |
+| [Growth Marketer](../runtime_phase1/src/workers_projects_runtime/starter_packs/growth-marketer/README.md) | Build a 90-day launch from a brand brief and channel results. | Usable campaign/copy drafts and measurement files separate observations from hypotheses; nothing is sent or published. |
 
-Optional 3-minute extension, only if rehearsed on the same release and install route. A
-conversation with a connected account needs a configured Linux host such as the packaged install;
-with `./xperfect start` only **Assistant on this computer** can run, when the AI tool chosen as
-**Default Worker** is installed on this computer. Ask for two
-independent short results in one **Conversation**. Show the [several-goals diagram](assets/parallel-work.png),
-then each goal's status and the answer after a reload. Describe what the AI actually did: it may
-answer itself or use workers. Say: “Ten goals would not mean ten workers at once.”
+The bundles are starting material for ordinary AI Workers. Your own company knowledge can be
+added privately through the same Library and file controls. Optional external tools retain
+their own connection, permission, dependency and license requirements.
 
-## Participant exercise
+## Use the same capabilities through API or MCP
 
-Write five lines: **User / Mission / Sources / Output / Done**. Connect an approved provider, add the
-synthetic source, run the task, inspect the output and ask a peer for one line of feedback. Record
-the problem they found and refine the mission. Serving the Expert to other users requires the
-separate, tested hosted identity and access path; a local worker is not automatically a public app.
+Follow the [developer walkthrough](developer.md) to connect, discover the available tools, start
+work, check its state, steer the exact worker and retrieve its results. Keep the returned worker
+and run IDs; do not create another worker just to ask whether the first one finished.
 
-## Presenter release check
+Starting from a saved expert creates a fresh worker with that setup. Reusing a worker preserves
+its own context and history. Neither route grants access to someone else's accounts or files.
 
-Before the session, on the machine you will present from:
+## Before a live demonstration
 
-```sh
-./xperfect start      # first start asks for the unlock password
-./xperfect doctor     # exact model, provider tool and account setup status
-```
+Rehearse the exact release, deployment, account and skill route that you will present. Open the
+result and download it, check representative figures, reload the workspace, and try the follow-up
+and bad-input paths. Run `./xperfect doctor` before starting. Respect the
+[current limits](../README.md#current-limits).
 
-Then connect your provider in **Connections**, run the synthetic task once, and record it.
+A recording must show actual work from its named release; label cuts that skip model execution.
+If the live route fails, show a labelled rehearsed recording and explain the observed failure.
+Do not present a mock, a setup screen or an architecture diagram as successful execution.
 
-Rehearse the exact release, account route, Files controls and output download before this becomes
-a live script. Record the revision, readiness, successful result, reload and recovery evidence.
-Use only profiles that passed that rehearsal. Rehearse each provider and deployment route you plan to demonstrate.
-State the [current limits](../README.md#current-limits) in the session.
-
-If live readiness fails, show the labelled recording from the same verified release and explain
-the observed failure. If no verified recording exists, present the architecture as a design
-walkthrough and do not claim participants have built a working Expert.
-
-## Close
-
-“Try one real task. Follow the project, star or watch the repository, and share what you made and
-what you learned. If you want to contribute, use the contribution guide.” Forking is an optional
-contributor path. Use links that match the demonstrated release.
-
-Developers can continue with the [developer walkthrough](developer.md): connect over MCP, start and
-steer work, or add a harness.
-
-[Repository](https://github.com/xPerfectAI/xPerfect) ·
-[Adrien on LinkedIn](https://www.linkedin.com/in/adrienbeyk/) ·
-[Instagram](https://www.instagram.com/adrienbeyk/)
+For a small connectivity check before the full exercise, the
+[synthetic changelog](demo/changelog.md) remains available: ask the worker to preserve its four
+changes in a short release note and keep the missing date and compatibility review explicit.
+This checks connection and file delivery; it is not the professional-work demonstration.

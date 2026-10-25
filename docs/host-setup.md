@@ -23,6 +23,10 @@ Install your provider's native CLI, then open **Connections → Connect an AI ac
 - [Claude Code](https://code.claude.com/docs/en/setup): choose **Connected API key**. For an existing Claude subscription, choose **Use existing Claude sign-in** in Connections. xPerfect verifies the current OS sign-in and connects it as a distinct selected account. If setup is needed, open **Sign-in help**, complete the native install/sign-in, then choose **Check again**. Named Claude subscription accounts are unavailable on macOS because their isolation cannot be guaranteed; there, `./xperfect doctor` shows Claude setup as `use_existing_sign_in`.
 - [Grok](https://github.com/xai-org/grok-build): choose **My subscription** for native device sign-in, or **Connected API key**. Grok also needs one exact model: choose it under **Grok model** in Connections and select **Use model**, or run `grok models` and `./xperfect restart --model grok-build=<model>`. xPerfect never picks a Grok model for you; `./xperfect doctor` shows what each installed harness will use.
 
+If a selected existing sign-in needs verification, open **Connections → Verify**, then retry the
+requested work. Saved work is retained. An uncertain native stop keeps that account unavailable
+until its exact prior process has ended; verification does not replace the selected identity.
+
 Tested versions are the ones the workspace image pins: Codex `0.159.0` and Claude Code
 `2.1.280` from npm (with Node.js 22), and Grok `1.0.34` from xAI's CLI download. A per-user install
 needs no root, for example `npm install -g --prefix ~/.local @openai/codex@0.159.0`, with
@@ -98,9 +102,20 @@ To use another state directory and avoid occupied ports on first setup:
 Keep state outside the Git checkout. `XPERFECT_STATE_DIR` can also select it. The initial ports are
 saved; later changes go in `config.json` while stopped. Port flags do not overwrite existing
 configuration. Package names, module names and `WPR_`/`GLASSHIVE_` settings remain compatibility IDs.
+Each local instance uses its saved private auth namespace for separate browser session and CSRF
+cookie names, so signing into another local instance on a different port does not sign you out.
+These names stay stable across restarts. After upgrading from shared cookie names, unlock each
+local instance once; old shared cookies are not reused. Hosted organization sign-in keeps its
+existing cookie names and security settings.
 Set optional runtime settings in the `env` object; this launcher always owns its local binding,
 state paths, authentication mode and service credentials. It ignores ambient parent-app runtime
 configuration. Provider API keys inherited from your shell are not persisted by the launcher.
+
+External clients using the OpenAI-compatible model endpoints need a separate, explicitly enabled
+provider API credential and fixed owner. This is different from the management `api_token` and
+the connected AI account. Follow the [model API setup](04_MCP_Publication_and_Client_Compatibility.md#optional-openai-compatible-model-api)
+before using `/v1/chat/completions` or `/v1/responses`; otherwise they report that provider
+authentication is not configured.
 
 ## Check, stop and recover
 

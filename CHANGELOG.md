@@ -10,6 +10,16 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
+## 2026-10-24 — Useful results and clearer recovery
+
+- **Improved:** First-use guides now follow a named expert from company onboarding through a useful report, its original files and a follow-up. UI, API and MCP examples use the same saved work.
+- **Improved:** The five bundled experts use the approved illustrated artwork. The README and walkthroughs show actual product screens and a synthetic Finance report.
+- **Fixed:** Assignment retries preserve the accepted inputs and effort. Reusing a key for different work returns a conflict before changing configuration or starting more work.
+- **Fixed:** Native-host Pause uses the exact accepted run and process identity. A worker still starting reports a retryable readiness response without losing its accepted work.
+- **Fixed:** Local browser instances keep separate sign-in and CSRF cookies. Enterprise authentication cannot import the current OS user's ambient credentials.
+- **Improved:** Chat describes the user's work without routine routing narration or internal IDs. Account setup failures preserve completed results and point to Connections for recovery.
+- **Fixed:** Library read tools declare their read-only behavior to native MCP clients. Mission result names still require the owning completion evidence.
+
 ## 2026-09-29 — Start, reuse and schedule an expert
 
 - **Added:** One `./xperfect start --docker` command obtains the published package, starts the local app and reports its address and private setup files.
