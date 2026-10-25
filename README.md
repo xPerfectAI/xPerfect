@@ -153,7 +153,9 @@ local-only inference. [Security](SECURITY.md) · [Capabilities](docs/capability-
 - **Hosted servers:** sign-in, per-person storage and upgrades have recorded checks. Full AI
   account connection and result delivery are not verified for every hosted route.
 - **File drag and drop:** a full browser pass remains open. Use **Add files** and **Download**.
-- **API-key accounts:** end-to-end setup remains unverified. Use a supported subscription sign-in.
+- **API-key accounts:** one native Codex path completed setup, work, a download and reload with
+  an account-supported model. Other native API-key paths and GPT-6.1 API access remain unverified.
+  See [account requirements](docs/host-setup.md).
 - **Worker copies:** a copy can retain a Ready, compatible account selected by the same owner.
   Credentials, browser sign-ins and native chat history are not copied. An unavailable or
   incompatible account needs a new selection. [Copy behavior](docs/capability-matrix.md).

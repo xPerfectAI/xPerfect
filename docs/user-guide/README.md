@@ -30,13 +30,14 @@ desktop and mobile. This documentation change does not require a product runtime
 
 ## Provenance and privacy
 
-The guide is maintained with the product source. Its dated release evidence records the
-published 25 October 2026 release at
-`a6e0825b267d9fa4d88244bc0427d16bb7ab6638`. Its default manifest selects the audited
-`linux/arm64` service/native pair. Actual anonymous package startup, native Codex/Claude/Grok
+The guide is maintained with the product source. The published 25 October 2026 package is
+recorded at `be743cef87c1a1a887057c2bfa9befcc638cc0d4`; its default manifest selects the
+audited `linux/arm64` service/native pair. Anonymous package startup, native Codex/Claude/Grok
 work, same-worker reuse, exact file delivery, API/MCP and saved-state recovery have recorded
-proof at their stated routes. Hosted TLS/XFS/OIDC with a second member and native API-key
-onboarding remain separate prerequisites, not inherited passes.
+proof at their stated routes. Hosted TLS/XFS/OIDC member isolation and storage recovery,
+and one native Codex API-key setup-to-result path, have separate scoped proof. Internet/cloud
+onboarding, other native API-key providers and GPT-6.1 API access remain unverified.
+The live guide records its own documentation source pin in `/docs/source.json`.
 
 The recommended five-profession example uses the supported host Claude Code Skill route.
 Docker remains an alternative for its offered native worker routes; the guide does not claim
