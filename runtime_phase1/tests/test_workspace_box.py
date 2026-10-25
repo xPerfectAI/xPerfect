@@ -389,3 +389,49 @@ def test_a_box_whose_runtime_socket_cannot_be_served_is_unavailable(tmp_path, mo
     monkeypatch.setattr(native_transport, 'ensure_box_socket', refused)
     with pytest.raises(WorkspaceBoxUnavailable, match='runtime socket'):
         box._serve_native_socket()
+
+
+def test_native_parent_hostname_is_stable_scoped_and_bounded_for_long_workspace_ids(tmp_path):
+    def create(workspace, owner='owner', uid=20001):
+        return WorkspaceBox(volume_root=tmp_path, volume_name='synthetic', image='reviewed',
+            binding=WorkspaceMemberBinding(workspace, 'wrk_test', 'tenant', owner, uid),
+            memory_bytes=1, pids_limit=1)
+    workspace = 'wsp_' + 'a' * 76
+    first = create(workspace)
+    assert first.hostname == create(workspace, uid=20002).hostname
+    assert first.hostname != create(workspace, owner='another-owner').hostname
+    assert first.hostname != create('wsp_other').hostname
+    assert len(first.hostname) <= 63
+    assert all(char in 'abcdefghijklmnopqrstuvwxyz0123456789-' for char in first.hostname)
+
+
+def test_new_native_parent_uses_stable_hostname_without_changing_existing_attestation(tmp_path, monkeypatch):
+    box = WorkspaceBox(volume_root=tmp_path, volume_name='synthetic', image='reviewed',
+        binding=WorkspaceMemberBinding('wsp_test', 'wrk_test', 'tenant', 'owner', 20001),
+        memory_bytes=1, pids_limit=1, control_root=tmp_path / 'control')
+    box.supervisor.mkdir(parents=True)
+    box.native_root.mkdir(parents=True)
+    (box.supervisor / 'image.json').write_text('{"image_id":"sha256:' + 'a' * 64 + '"}')
+    monkeypatch.setattr(box, 'prepare_member', lambda: None)
+    monkeypatch.setattr(box, 'locked', nullcontext)
+    monkeypatch.setattr(box, 'guarded_command', lambda command: command)
+    monkeypatch.setattr(box, '_serve_native_socket', lambda: None)
+    created, calls = [False], []
+    def inspect():
+        return {'Id': 'b' * 64, 'State': {'Running': True}} if created[0] else None
+    def docker(args):
+        calls.append(args)
+        if args[0] == 'run':
+            created[0] = True
+            return subprocess.CompletedProcess(args, 0, 'b' * 64, '')
+        if args[-2] == '/bin/cat':
+            return subprocess.CompletedProcess(args, 0, (box.native_root / Path(args[-1]).name).read_text(), '')
+        return subprocess.CompletedProcess(args, 0, '', '')
+    monkeypatch.setattr(box, '_inspect', inspect)
+    monkeypatch.setattr(box, 'docker', docker)
+    assert box.ensure_box() == 'b' * 64
+    run = calls[0]
+    assert run[run.index('--hostname') + 1] == box.hostname
+    calls.clear()
+    assert box.ensure_box() == 'b' * 64
+    assert not any(row[0] == 'run' for row in calls)

@@ -34,6 +34,80 @@ DISPLAY_PIDS_LIMIT = 256
 DESKTOP_SECCOMP_SHA256 = 'f2fba29948746aa17af5601d59ccf36d3e1fcb6213325e2861d676a59fd54cc3'
 _HEX = re.compile(r"[a-f0-9]{64}")
 
+# Executed as the member UID in the attested display, never as the controller.
+# Only Chromium's ephemeral singleton symlinks are recoverable; profile data stays.
+_CHROMIUM_PROFILE_HELPERS = r'''
+import os,stat,subprocess
+def profile_descriptor(root,*,service_uid,root_identity):
+    descriptor=None
+    try:
+        descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        for part in (None,'.config','chromium'):
+            if part is not None:
+                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=descriptor)
+                os.close(descriptor);descriptor=child
+            info=os.fstat(descriptor)
+            if (info.st_uid not in {os.getuid(),service_uid} or info.st_mode&0o007
+                    or (part is None and (info.st_dev,info.st_ino)!=root_identity)):
+                raise ValueError('Browser profile directory ownership changed')
+            if info.st_mode&0o070:
+                # The existing private-member ACL can have a group mask, not a
+                # shared group grant. Validate that same grant set, never relax it.
+                acl=subprocess.run(['getfacl','-cEpn','/proc/self/fd/'+str(descriptor)],
+                    capture_output=True,text=True,timeout=5,pass_fds=(descriptor,))
+                access={'user::rwx',f'user:{os.getuid()}:rwx',f'user:{service_uid}:rwx',
+                    'group::---','mask::rwx','mask::---','other::---'}
+                allowed=access|{'default:'+entry for entry in access}
+                if acl.returncode or {line.strip() for line in acl.stdout.splitlines() if line.strip()}-allowed:
+                    raise ValueError('Browser profile directory ACL changed')
+        return descriptor
+    except FileNotFoundError as error:
+        if descriptor is not None:os.close(descriptor)
+        if error.filename in {os.fspath(root),'.config','chromium'}:return None
+        raise
+    except BaseException:
+        if descriptor is not None:os.close(descriptor)
+        raise
+def profile_links(descriptor):
+    result={}
+    for name in ('SingletonSocket','SingletonCookie','SingletonLock'):
+        try:info=os.stat(name,dir_fd=descriptor,follow_symlinks=False)
+        except FileNotFoundError:continue
+        if not stat.S_ISLNK(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1:
+            raise ValueError('Browser profile lock ownership changed')
+        result[name]=(info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink)
+    return result
+def profile_lock_target(root,*,service_uid,root_identity):
+    descriptor=profile_descriptor(root,service_uid=service_uid,root_identity=root_identity)
+    if descriptor is None:return None
+    try:
+        links=profile_links(descriptor)
+        return os.readlink('SingletonLock',dir_fd=descriptor) if 'SingletonLock' in links else None
+    finally:os.close(descriptor)
+def retire_profile_lock(root,expected,*,service_uid,root_identity):
+    descriptor=profile_descriptor(root,service_uid=service_uid,root_identity=root_identity)
+    if descriptor is None:return False
+    try:
+        links=profile_links(descriptor)
+        if ('SingletonLock' not in links
+                or os.readlink('SingletonLock',dir_fd=descriptor)!=expected):return False
+        # Validate every entry before removing anything. Keep the native lock
+        # until its socket/cookie links are retired, so a fresh browser can own it.
+        for name,identity in links.items():
+            info=os.stat(name,dir_fd=descriptor,follow_symlinks=False)
+            if (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink)!=identity:
+                raise ValueError('Browser profile lock changed during recovery')
+        for name,identity in links.items():
+            info=os.stat(name,dir_fd=descriptor,follow_symlinks=False)
+            if (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink)!=identity:
+                raise ValueError('Browser profile lock changed during recovery')
+            if name=='SingletonLock' and os.readlink(name,dir_fd=descriptor)!=expected:
+                raise ValueError('Browser profile lock changed during recovery')
+            os.unlink(name,dir_fd=descriptor)
+        return True
+    finally:os.close(descriptor)
+'''
+
 
 def desktop_sandbox_policy():
     path = Path(__file__).with_name('desktop_chromium_seccomp.json')
@@ -426,12 +500,37 @@ class WorkspaceMemberDesktop:
                        '--env', 'TMPDIR=' + self.display_mount + '/tmp',
                        '--env', 'XDG_CONFIG_HOME=' + self.display_mount + '/.config',
                        '--env', 'XDG_CACHE_HOME=' + self.display_mount + '/.cache']
-        self.box.docker(['exec', '--user', f'{self.uid}:{self.box.member_gid}', *environment,
-                         state['container_id'], 'xdpyinfo'])
+        probe = _CHROMIUM_PROFILE_HELPERS + '''
+import json,subprocess
+subprocess.run(['xdpyinfo'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+print(json.dumps({'hostname':os.uname().nodename,'lock':profile_lock_target(ROOT,service_uid=SERVICE_UID,root_identity=ROOT_IDENTITY)}))
+'''.replace('ROOT_IDENTITY', repr((state['directory_device'], state['directory_inode']))).replace('SERVICE_UID', repr(os.geteuid())).replace('ROOT', repr(self.display_mount))
+        try:
+            profile = json.loads(self.box.docker([
+                'exec', '--user', f'{self.uid}:{self.box.member_gid}', *environment,
+                state['container_id'], '/usr/bin/python3', '-c', probe]).stdout)
+        except (ValueError, subprocess.CalledProcessError, WorkspaceBoxUnavailable):
+            raise WorkspaceBoxUnavailable('Saved browser data could not be checked safely. Your data was kept.') from None
+        legacy_lock = None
+        target = str(profile.get('lock') or '')
+        hostname, separator, pid = target.rpartition('-')
+        if (separator and hostname != profile.get('hostname') and pid.isdecimal()
+                and re.fullmatch(r'[a-f0-9]{12,64}', hostname)):
+            previous = self.box.docker(['inspect', hostname], check=False)
+            if previous.returncode == 0:
+                raise WorkspaceBoxUnavailable('The previous browser session is still present. Close it before reopening.')
+            listing = self.box.docker(['container', 'ls', '-a', '--no-trunc', '--format', '{{.ID}}'])
+            identities = listing.stdout.splitlines()
+            if (any(not _HEX.fullmatch(value) for value in identities)
+                    or any(value.startswith(hostname) for value in identities)):
+                raise WorkspaceBoxUnavailable('The previous browser session could not be checked safely. Your data was kept.')
+            legacy_lock = target
         # Confirm an immediate native failure instead of treating detached
         # Docker acceptance as a successful browser launch. The log stays in
         # the member's private display state; never return its contents.
-        program = '''import json,os,stat,subprocess,time
+        program = _CHROMIUM_PROFILE_HELPERS + '''
+import json,subprocess,time
+if LEGACY_LOCK is not None:retire_profile_lock(ROOT,LEGACY_LOCK,service_uid=SERVICE_UID,root_identity=ROOT_IDENTITY)
 path=ROOT+'/browser.log'
 fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600)
 info=os.fstat(fd)
@@ -440,7 +539,7 @@ os.ftruncate(fd,0);os.fchmod(fd,0o600)
 p=subprocess.Popen(COMMAND,cwd=ROOT,stdin=subprocess.DEVNULL,stdout=fd,stderr=fd,start_new_session=True)
 os.close(fd);time.sleep(.3)
 code=p.poll();print(json.dumps({'exit_code':code,'accepted':code in (None,0)}))
-'''.replace('ROOT', repr(self.display_mount)).replace('COMMAND', repr(command))
+'''.replace('ROOT_IDENTITY', repr((state['directory_device'], state['directory_inode']))).replace('SERVICE_UID', repr(os.geteuid())).replace('ROOT', repr(self.display_mount)).replace('LEGACY_LOCK', repr(legacy_lock)).replace('COMMAND', repr(command))
         outcome = json.loads(self.box.docker(['exec', '--user', f'{self.uid}:{self.box.member_gid}', *environment,
                                              state['container_id'], '/usr/bin/python3', '-c', program]).stdout)
         if outcome.get('accepted') is not True:

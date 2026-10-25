@@ -87,6 +87,10 @@ class WorkspaceBox:
         self.native_root = self.root / 'native'
         self.member_root = self.native_root / 'members' / str(binding.uid)
         self.name = 'xperfect-' + binding.workspace_id.replace('_', '-')
+        # Chromium records this name in its native profile lock. Keep it stable
+        # across container generations, bounded even for a long valid workspace ID.
+        self.hostname = 'xperfect-' + hashlib.sha256(
+            f'{binding.owner_digest}:{binding.workspace_id}'.encode()).hexdigest()[:48]
         self.docker = docker or self._docker
 
     @property
@@ -351,7 +355,7 @@ class WorkspaceBox:
                 # Mount only this workspace's subdirectory. Repeated member UIDs in
                 # another workspace can never reach another owner's volume subtree.
                 self.docker([
-                    'run', '-d', '--name', self.name, '--init',
+                    'run', '-d', '--name', self.name, '--hostname', self.hostname, '--init',
                     *(['--network', self.network] if self.network else []),
                     '--user', '65534:65534', '--read-only', '--cap-drop', 'ALL',
                     '--ipc', 'none', '--no-healthcheck',

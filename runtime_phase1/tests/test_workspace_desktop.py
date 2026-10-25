@@ -491,3 +491,243 @@ def test_desktop_storage_failure_has_truthful_recovery(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop, '_start_controlled', full)
     with pytest.raises(WorkspaceBoxUnavailable, match='Workspace storage is full'):
         desktop.start('synthetic')
+
+
+def browser_profile_helpers():
+    from workers_projects_runtime.workspace_desktop import _CHROMIUM_PROFILE_HELPERS
+    namespace = {}
+    exec(_CHROMIUM_PROFILE_HELPERS, namespace)
+    def scoped(function):
+        def invoke(root, *args):
+            info = os.stat(root, follow_symlinks=False)
+            return function(root, *args, service_uid=os.getuid(), root_identity=(info.st_dev, info.st_ino))
+        return invoke
+    return {name: scoped(namespace[name]) for name in ('profile_lock_target', 'retire_profile_lock')}
+
+
+def native_browser_profile(tmp_path):
+    root = tmp_path / 'display'
+    profile = root / '.config' / 'chromium'
+    profile.mkdir(parents=True, mode=0o700)
+    root.chmod(0o700)
+    profile.parent.chmod(0o700)
+    (profile / 'Preferences').write_bytes(b'{"user_setting":"keep this"}')
+    (profile / 'History').write_bytes(b'keep browser history')
+    for name, target in [('SingletonSocket', '/tmp/chromium-fixture/socket'),
+                         ('SingletonCookie', 'fixture-cookie'),
+                         ('SingletonLock', 'a' * 12 + '-73')]:
+        (profile / name).symlink_to(target)
+    return root, profile
+
+
+def test_native_browser_recovery_removes_only_validated_ephemeral_links(tmp_path, monkeypatch):
+    root, profile = native_browser_profile(tmp_path)
+    helpers = browser_profile_helpers()
+    before = {name: (profile / name).read_bytes() for name in ('Preferences', 'History')}
+    removed = []
+    real_unlink = os.unlink
+    def unlink(path, *args, **kwargs):
+        removed.append(path)
+        return real_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'unlink', unlink)
+    assert helpers['profile_lock_target'](root) == 'a' * 12 + '-73'
+    assert helpers['retire_profile_lock'](root, 'a' * 12 + '-73') is True
+    assert removed == ['SingletonSocket', 'SingletonCookie', 'SingletonLock']
+    assert {name: (profile / name).read_bytes() for name in before} == before
+    assert helpers['profile_lock_target'](root) is None
+
+
+@pytest.mark.parametrize('entry', ['SingletonSocket', 'SingletonCookie', 'SingletonLock'])
+def test_browser_recovery_validates_every_link_before_deleting_any(tmp_path, entry):
+    root, profile = native_browser_profile(tmp_path)
+    (profile / entry).unlink()
+    (profile / entry).write_bytes(b'not a native singleton symlink')
+    helpers = browser_profile_helpers()
+    with pytest.raises(ValueError, match='ownership'):
+        helpers['retire_profile_lock'](root, 'a' * 12 + '-73')
+    assert all(os.path.lexists(profile / name) for name in ('SingletonSocket', 'SingletonCookie', 'SingletonLock'))
+    assert (profile / entry).read_bytes() == b'not a native singleton symlink'
+
+
+def test_browser_recovery_changed_lock_keeps_every_entry(tmp_path):
+    root, profile = native_browser_profile(tmp_path)
+    assert browser_profile_helpers()['retire_profile_lock'](root, 'b' * 12 + '-73') is False
+    assert all(os.path.lexists(profile / name) for name in ('SingletonSocket', 'SingletonCookie', 'SingletonLock'))
+
+
+@pytest.mark.parametrize('mutation', ['symlink_parent', 'writable_parent', 'foreign_owner', 'hardlink'])
+def test_browser_profile_recovery_refuses_unsafe_filesystem_scope(tmp_path, monkeypatch, mutation):
+    root, profile = native_browser_profile(tmp_path)
+    helpers = browser_profile_helpers()
+    if mutation == 'symlink_parent':
+        config = root / '.config'
+        real = root / 'kept-config'
+        config.rename(real)
+        config.symlink_to(real, target_is_directory=True)
+    elif mutation == 'writable_parent':
+        profile.parent.chmod(0o777)
+    elif mutation == 'foreign_owner':
+        monkeypatch.setattr(os, 'getuid', lambda: os.geteuid() + 1)
+    else:
+        os.link(profile / 'SingletonCookie', profile / 'second-link', follow_symlinks=False)
+    with pytest.raises((ValueError, OSError)):
+        helpers['retire_profile_lock'](root, 'a' * 12 + '-73')
+    assert (profile / 'Preferences').read_bytes() == b'{"user_setting":"keep this"}'
+    assert os.path.lexists(profile / 'SingletonLock')
+
+
+def test_browser_profile_recovery_detects_concurrent_replacement_before_first_unlink(tmp_path, monkeypatch):
+    root, profile = native_browser_profile(tmp_path)
+    helpers = browser_profile_helpers()
+    real_stat = os.stat
+    reads = [0]
+    def replace_before_validation(path, *args, **kwargs):
+        if path == 'SingletonCookie':
+            reads[0] += 1
+            if reads[0] == 2:
+                (profile / 'SingletonCookie').unlink()
+                (profile / 'SingletonCookie').write_bytes(b'replaced')
+        return real_stat(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'stat', replace_before_validation)
+    with pytest.raises(ValueError, match='changed during recovery'):
+        helpers['retire_profile_lock'](root, 'a' * 12 + '-73')
+    assert os.path.lexists(profile / 'SingletonSocket')
+    assert os.path.lexists(profile / 'SingletonLock')
+    assert (profile / 'SingletonCookie').read_bytes() == b'replaced'
+
+
+def launch_fixture(tmp_path, monkeypatch, *, lock=None, previous_present=False, listing='', listing_error=False):
+    root, profile = native_browser_profile(tmp_path)
+    desktop = WorkspaceMemberDesktop(member(tmp_path, monkeypatch))
+    desktop.display_mount = str(root)
+    state = state_for(desktop)
+    info = root.stat()
+    state.update(directory_device=info.st_dev, directory_inode=info.st_ino)
+    monkeypatch.setattr(desktop, '_read_state', lambda: state)
+    monkeypatch.setattr(desktop, '_record', lambda _: display_record(desktop, state))
+    monkeypatch.setattr(desktop.box, '_inspect', lambda: {'Id': state['box_id']})
+    calls, programs = [], []
+    def docker(args, **kwargs):
+        calls.append(args)
+        if args[:1] == ['inspect']:
+            return subprocess.CompletedProcess(args, 0 if previous_present else 1, '', '')
+        if args[:2] == ['container', 'ls']:
+            if listing_error:
+                raise WorkspaceBoxUnavailable('Docker inventory unavailable')
+            return subprocess.CompletedProcess(args, 0, listing, '')
+        assert args[0] == 'exec'
+        if args[-1] == 'xdpyinfo':
+            return subprocess.CompletedProcess(args, 0, '', '')
+        program = args[-1]
+        assert args[args.index('--user') + 1] == f'{desktop.uid}:{desktop.box.member_gid}'
+        programs.append(program)
+        if "subprocess.run(['xdpyinfo']" in program:
+            return subprocess.CompletedProcess(args, 0, json.dumps({'hostname': 'xperfect-stable', 'lock': lock}), '')
+        return subprocess.run(['/usr/bin/env', 'python3', '-c', program], capture_output=True, text=True, check=True)
+    monkeypatch.setattr(desktop.box, 'docker', docker)
+    return desktop, root, profile, calls, programs
+
+
+def test_confirmed_absent_old_docker_generation_recovers_profile_without_rescanning_user_url(tmp_path, monkeypatch):
+    desktop, root, profile, calls, programs = launch_fixture(tmp_path, monkeypatch, lock='a' * 12 + '-73')
+    url = 'https://example.invalid/LEGACY_LOCK/COMMAND/ROOT'
+    desktop.launch_application(['/usr/bin/true', url])
+    assert not os.path.lexists(profile / 'SingletonLock')
+    assert (profile / 'Preferences').read_bytes() == b'{"user_setting":"keep this"}'
+    assert calls[1] == ['inspect', 'a' * 12]
+    assert calls[2] == ['container', 'ls', '-a', '--no-trunc', '--format', '{{.ID}}']
+    assert repr(['/usr/bin/true', url]) in programs[-1]
+
+
+@pytest.mark.parametrize(('present', 'listing', 'error'), [
+    (True, '', False),
+    (False, 'a' * 64, False),
+    (False, 'not-a-container-id', False),
+    (False, '', True),
+])
+def test_uncertain_previous_browser_generation_cannot_remove_profile_lock(tmp_path, monkeypatch, present, listing, error):
+    desktop, root, profile, calls, programs = launch_fixture(
+        tmp_path, monkeypatch, lock='a' * 12 + '-73', previous_present=present, listing=listing, listing_error=error)
+    with pytest.raises(WorkspaceBoxUnavailable):
+        desktop.launch_application(['/usr/bin/true'])
+    assert len(programs) == 1
+    assert os.readlink(profile / 'SingletonLock') == 'a' * 12 + '-73'
+    assert (profile / 'History').read_bytes() == b'keep browser history'
+
+
+@pytest.mark.parametrize('lock', ['xperfect-stable-73', 'another-computer-73', None])
+def test_current_or_unrecognized_hostname_keeps_native_chromium_lock_handling(tmp_path, monkeypatch, lock):
+    desktop, root, profile, calls, programs = launch_fixture(tmp_path, monkeypatch, lock=lock)
+    desktop.launch_application(['/usr/bin/true'])
+    assert len(calls) == 2
+    assert os.readlink(profile / 'SingletonLock') == 'a' * 12 + '-73'
+    assert (profile / 'Preferences').read_bytes() == b'{"user_setting":"keep this"}'
+
+
+def test_absent_browser_profile_is_not_created_by_recovery(tmp_path):
+    root = tmp_path / 'display'
+    root.mkdir(mode=0o700)
+    helpers = browser_profile_helpers()
+    assert helpers['profile_lock_target'](root) is None
+    assert helpers['retire_profile_lock'](root, 'a' * 12 + '-73') is False
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize('foreign_grant', [False, True])
+def test_service_owned_profile_uses_existing_private_member_acl_without_exposing_group_access(tmp_path, monkeypatch, foreign_grant):
+    root, profile = native_browser_profile(tmp_path)
+    root.chmod(0o770)
+    profile.parent.chmod(0o770)
+    own_acl = 'user::rwx\nuser:' + str(os.getuid()) + ':rwx\ngroup::---\nmask::rwx\nother::---\n'
+    if foreign_grant:
+        own_acl += 'user:60000:rwx\n'
+    def read_acl(args, **kwargs):
+        assert args[:2] == ['getfacl', '-cEpn']
+        assert kwargs['pass_fds']
+        return subprocess.CompletedProcess(args, 0, own_acl, '')
+    monkeypatch.setattr(subprocess, 'run', read_acl)
+    helpers = browser_profile_helpers()
+    if foreign_grant:
+        with pytest.raises(ValueError, match='ACL changed'):
+            helpers['retire_profile_lock'](root, 'a' * 12 + '-73')
+        assert os.path.lexists(profile / 'SingletonLock')
+    else:
+        assert helpers['retire_profile_lock'](root, 'a' * 12 + '-73') is True
+        assert (profile / 'History').read_bytes() == b'keep browser history'
+
+
+def test_browser_profile_cannot_substitute_a_different_bound_display_inode(tmp_path):
+    from workers_projects_runtime.workspace_desktop import _CHROMIUM_PROFILE_HELPERS
+    root, profile = native_browser_profile(tmp_path)
+    namespace = {}
+    exec(_CHROMIUM_PROFILE_HELPERS, namespace)
+    info = root.stat()
+    with pytest.raises(ValueError, match='ownership'):
+        namespace['retire_profile_lock'](root, 'a' * 12 + '-73', service_uid=os.getuid(),
+                                          root_identity=(info.st_dev, info.st_ino + 1))
+    assert os.path.lexists(profile / 'SingletonLock')
+
+
+def test_missing_native_acl_inspector_refuses_recovery_instead_of_treating_profile_as_absent(tmp_path, monkeypatch):
+    root, profile = native_browser_profile(tmp_path)
+    root.chmod(0o770)
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError(2, 'missing native inspector', 'getfacl')
+    monkeypatch.setattr(subprocess, 'run', unavailable)
+    with pytest.raises(FileNotFoundError):
+        browser_profile_helpers()['retire_profile_lock'](root, 'a' * 12 + '-73')
+    assert os.path.lexists(profile / 'SingletonLock')
+
+
+@pytest.mark.parametrize('directory', ['root', 'config', 'chromium'])
+def test_browser_profile_foreign_read_execute_acl_is_refused_on_every_directory(tmp_path, monkeypatch, directory):
+    root, profile = native_browser_profile(tmp_path)
+    selected = {'root': root, 'config': profile.parent, 'chromium': profile}[directory]
+    selected.chmod(0o750)
+    acl = ('user::rwx\nuser:' + str(os.getuid())
+           + ':rwx\nuser:60000:r-x\ngroup::---\nmask::r-x\nother::---\n')
+    monkeypatch.setattr(subprocess, 'run', lambda args, **kwargs: subprocess.CompletedProcess(args, 0, acl, ''))
+    with pytest.raises(ValueError, match='ACL changed'):
+        browser_profile_helpers()['retire_profile_lock'](root, 'a' * 12 + '-73')
+    assert all(os.path.lexists(profile / name) for name in ('SingletonSocket', 'SingletonCookie', 'SingletonLock'))
+    assert (profile / 'Preferences').read_bytes() == b'{"user_setting":"keep this"}'

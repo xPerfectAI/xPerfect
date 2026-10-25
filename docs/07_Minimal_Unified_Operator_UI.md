@@ -381,6 +381,14 @@ A retained display from another resource budget still counts at its actual enfor
 can be closed only after its exact identity and isolation are checked. Reopening replaces that
 owned display with the current budget. Explicit package maintenance retires eligible idle displays
 before switching or rolling back code; normal idle reaping keeps human takeover open.
+Native browser profiles stay with their worker across maintenance. New workspace containers keep a
+stable private hostname so Chromium can reopen its own retained profile after compute is recreated.
+For an older Docker-hostname lock, recovery removes only Chromium’s temporary socket/cookie/lock
+links after proving the old container no longer exists and validating the exact private member
+directory and ACL. It keeps browser history, preferences and sign-ins. If ownership or old-session
+absence cannot be proved, it keeps the profile and reports the refusal. Maintenance still stops idle
+compute; use Resume, then Open browser. Pause keeps an already-open human desktop usable.
+
 Missing storage, capacity, display readiness or a supported graphical action is a visible failure,
 not a successful launch. This source contract requires real input, pause, reload and close acceptance
 on the built packaged runtime; unit tests and a VNC handshake alone do not establish that result.
