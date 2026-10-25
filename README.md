@@ -64,7 +64,7 @@ Use the browser, your own code or another AI application:
 | --- | --- |
 | Browser | [Quickstart](docs/quickstart.md): connect → run → open a result → return to it |
 | Another AI app | [MCP walkthrough](docs/developer.md#1-connect-a-client): connect once, then discover and control work |
-| Your own code | [HTTP API](docs/developer.md#4-runtime-http-api-local): use the same worker, run and result records |
+| Your own code | [HTTP API](docs/developer.md#4-the-same-finance-job-through-http-local): use the same worker, run and result records |
 | A team server | [Hosted setup](docs/deployment-hosted.md): identity, storage, account setup and current limits |
 
 ## Start locally
