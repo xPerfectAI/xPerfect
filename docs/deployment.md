@@ -388,7 +388,9 @@ placeholder with a reachable DNS name approved for this deployment:
 Choose addresses for the actual environment. A denied address may declare narrow `exceptions`,
 such as `[{"protocol":"udp","port":53},{"protocol":"tcp","port":53}]` when that same address
 also provides DNS. Only TCP/UDP with an exact port is supported. A TCP exception cannot equal
-the denied `probe_port`. The earlier denied `port` spelling is accepted as a probe-port alias.
+the denied `probe_port`. Exceptions return to the remaining Docker forwarding rules, including
+container isolation; they do not grant access those rules refuse. The earlier denied `port`
+spelling is accepted as a probe-port alias.
 A failed positive control refuses the proof. Timeouts, connection refusal and network-unreachable
 errors do not count as denial proof. The Linux `icmp-admin-prohibited` REJECT must produce
 `EHOSTUNREACH` (113), alongside exact rule readback and reachable positive controls. Linux's

@@ -8,9 +8,9 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
-from .usage_accounting import decimal_amount, add_money
+from .usage_accounting import decimal_amount, add_money, register_decimal_sum
 
 
 class AdmissionPolicyHold(RuntimeError):
@@ -98,18 +98,74 @@ def place_hold(conn, *, tenant_id, owner_id, scope_type, scope_id, kind, reason_
                                 (tenant_id, owner_id, scope_type, scope_id, kind)).fetchone())
 
 
-def run_scope(conn, run):
+def run_scope(conn, run, cache=None):
+    key = ("owner", run["tenant_id"], run["worker_id"])
+    if cache is not None and key in cache:
+        return str(run["tenant_id"]), cache[key], str(run["project_id"])
     worker = conn.execute("SELECT owner_id FROM workers WHERE worker_id=? AND tenant_id=?", (run["worker_id"], run["tenant_id"])).fetchone()
     if worker is None:
         raise ValueError("Run owner is unavailable")
+    if cache is not None:
+        cache[key] = str(worker["owner_id"])
     return str(run["tenant_id"]), str(worker["owner_id"]), str(run["project_id"])
 
 
-def blocker(conn, run, *, now: str, reserve: bool = False) -> dict | None:
-    tenant, owner, project = run_scope(conn, run)
+def _scope_exposure(conn, row, tenant, owner):
+    """Aggregate lifetime exposure once per scope, never one query per attempt."""
+    register_decimal_sum(conn)
+    project = " AND r.project_id=?" if row["scope_type"] == "project" else ""
+    policy = json.loads(row["policy_json"])
+    params = [policy["currency"], policy["currency"], tenant, owner, row["created_at"]]
+    if project:
+        params.append(row["scope_id"])
+    history = """WITH spend_attempt_cost AS (
+        SELECT a.attempt_id,a.ended_at,COUNT(DISTINCT u.receipt_id) AS receipts,
+            COUNT(DISTINCT CASE WHEN json_extract(m.value,'$.currency')=? THEN u.receipt_id END) AS known_receipts,
+            usage_decimal_sum(CASE WHEN json_extract(m.value,'$.currency')=? THEN json_extract(m.value,'$.amount') END) AS amount
+        FROM run_attempts a JOIN runs r ON r.run_id=a.run_id
+        JOIN workers w ON w.worker_id=r.worker_id
+        LEFT JOIN usage_receipts u ON u.attempt_id=a.attempt_id
+        LEFT JOIN json_each(u.usage_json,'$.money') m
+        WHERE r.tenant_id=? AND w.owner_id=? AND a.runtime_invoked_at>=?""" + project + " GROUP BY a.attempt_id) "
+    # Receipt arrival owns the evidence; the existing admission transaction can
+    # settle all known terminal reserves together without per-attempt writes.
+    conn.execute(history + """UPDATE spend_reservations SET state='settled'
+        WHERE tenant_id=? AND owner_id=? AND scope_type=? AND scope_id=? AND state IN ('open','unknown')
+        AND attempt_id IN (SELECT attempt_id FROM spend_attempt_cost
+            WHERE ended_at IS NOT NULL AND receipts>0 AND receipts=known_receipts)""",
+        [*params, tenant, owner, row["scope_type"], row["scope_id"]])
+    totals = conn.execute(history + """SELECT usage_decimal_sum(amount) AS spent,
+        MAX(CASE WHEN receipts=0 OR receipts!=known_receipts OR ended_at IS NULL THEN 1 ELSE 0 END) AS unknown
+        FROM spend_attempt_cost""", params).fetchone()
+    reserves = conn.execute("""SELECT
+        usage_decimal_sum(CASE WHEN a.runtime_invoked_at IS NOT NULL AND s.currency=? THEN s.amount END) AS amount,
+        COALESCE(SUM(CASE WHEN a.runtime_invoked_at IS NULL THEN 1 ELSE 0 END),0) AS uninvoked,
+        MAX(CASE WHEN a.runtime_invoked_at IS NOT NULL AND s.currency!=? THEN 1 ELSE 0 END) AS currency_unknown
+        FROM spend_reservations s JOIN run_attempts a ON a.attempt_id=s.attempt_id
+        WHERE s.tenant_id=? AND s.owner_id=? AND s.scope_type=? AND s.scope_id=? AND s.state IN ('open','unknown')""",
+        (policy["currency"],policy["currency"],tenant,owner,row["scope_type"],row["scope_id"])).fetchone()
+    return {"spent": add_money((totals["spent"] or "0",reserves["amount"] or "0")),
+            "unknown": bool(totals["unknown"]), "uninvoked": reserves["uninvoked"],
+            "currency_unknown": bool(reserves["currency_unknown"])}
+
+
+def blocker(conn, run, *, now: str, reserve: bool = False, cache: dict | None = None) -> dict | None:
+    # Callers may reuse only within their existing transaction/unchanged batch.
+    # Admission/invocation always re-read after intervening policy/receipt writes.
+    if reserve:
+        cache = None
+    tenant, owner, project = run_scope(conn, run, cache)
+    decision_key = ("decision", tenant, owner, project, str(run["active_attempt_id"] or ""))
+    if cache is not None and decision_key in cache:
+        held = cache[decision_key]
+        if held:
+            conn.execute("UPDATE runs SET admission_hold_started_at=COALESCE(admission_hold_started_at,?),queue_blocker_class='admission_policy_hold' WHERE run_id=? AND queue_wait_open=1 AND runtime_invoked_at IS NULL", (now, run["run_id"]))
+        return held
     held = conn.execute("""SELECT * FROM admission_holds WHERE tenant_id=? AND owner_id=? AND active=1
         AND (scope_type='owner' OR (scope_type='project' AND scope_id=?)) ORDER BY kind,hold_id LIMIT 1""", (tenant, owner, project)).fetchone()
     if held:
+        if cache is not None:
+            cache[decision_key] = hold_row(held)
         conn.execute("UPDATE runs SET admission_hold_started_at=COALESCE(admission_hold_started_at,?),queue_blocker_class='admission_policy_hold' WHERE run_id=? AND queue_wait_open=1 AND runtime_invoked_at IS NULL", (now, run["run_id"]))
         return hold_row(held)
     policies = conn.execute("""SELECT * FROM spend_policies WHERE tenant_id=? AND owner_id=?
@@ -119,54 +175,40 @@ def blocker(conn, run, *, now: str, reserve: bool = False) -> dict | None:
         if not policy["enabled"]:
             continue
         scope_type, scope_id = row["scope_type"], row["scope_id"]
-        conditions = " AND r.project_id=?" if scope_type == "project" else ""
-        params = [tenant, owner, row["created_at"]] + ([scope_id] if conditions else [])
-        attempts = conn.execute("""SELECT a.attempt_id,a.state,a.runtime_invoked_at,a.ended_at FROM run_attempts a JOIN runs r ON r.run_id=a.run_id
-            JOIN workers w ON w.worker_id=r.worker_id WHERE r.tenant_id=? AND w.owner_id=?
-            AND a.runtime_invoked_at>=?""" + conditions, params).fetchall()
-        spent = Decimal(0)
-        unknown = False
-        for attempt in attempts:
-            receipts = conn.execute("SELECT usage_json FROM usage_receipts WHERE attempt_id=?", (attempt["attempt_id"],)).fetchall()
-            normalized = [json.loads(receipt[0]) for receipt in receipts]
-            charges = [charge for receipt in normalized for charge in receipt["money"]
-                       if charge["currency"] == policy["currency"]]
-            if charges:
-                spent = add_money((spent, add_money(charge["amount"] for charge in charges)))
-            complete_money = bool(normalized) and all(any(charge["currency"] == policy["currency"] for charge in receipt["money"]) for receipt in normalized)
-            if complete_money and attempt["ended_at"] is not None:
-                conn.execute("UPDATE spend_reservations SET state='settled' WHERE attempt_id=? AND scope_type=? AND scope_id=?",
-                             (attempt["attempt_id"], scope_type, scope_id))
-            else:
-                unknown = True
-        reservations = conn.execute("""SELECT s.*,a.runtime_invoked_at FROM spend_reservations s
-            JOIN run_attempts a ON a.attempt_id=s.attempt_id
-            WHERE s.tenant_id=? AND s.owner_id=? AND s.scope_type=? AND s.scope_id=? AND s.state IN ('open','unknown')""",
-                                    (tenant, owner, scope_type, scope_id)).fetchall()
+        scope_key = ("exposure", tenant, owner, scope_type, scope_id, row["revision"])
+        if cache is not None and scope_key in cache:
+            exposure = cache[scope_key]
+        else:
+            exposure = _scope_exposure(conn, row, tenant, owner)
+            if cache is not None:
+                cache[scope_key] = exposure
         attempt_id = str(run["active_attempt_id"] or "")
         # Admission may precede a policy edit. Reprice only work that has not
         # invoked, including other admitted reservations in this scope. The
         # current attempt replaces its previous reserve, rather than adding to
         # it or inheriting its obsolete currency/amount at the final gate.
-        has_reservation = False
-        currency_unknown = False
-        for item in reservations:
-            if not item["runtime_invoked_at"]:
-                if item["attempt_id"] != attempt_id:
-                    spent = add_money((spent, policy["reserve_amount"]))
-                continue
-            has_reservation = has_reservation or item["attempt_id"] == attempt_id
-            if item["currency"] == policy["currency"]:
-                spent = add_money((spent, item["amount"]))
-            else:
-                # An invoked reservation cannot be converted or discarded by a
-                # later policy edit. Its charge in the new currency is unknown.
-                currency_unknown = True
+        own = conn.execute("""SELECT a.runtime_invoked_at FROM spend_reservations s
+            JOIN run_attempts a ON a.attempt_id=s.attempt_id
+            WHERE s.attempt_id=? AND s.scope_type=? AND s.scope_id=? AND s.state IN ('open','unknown')""",
+            (attempt_id,scope_type,scope_id)).fetchone() if attempt_id else None
+        has_reservation = own is not None and bool(own["runtime_invoked_at"])
+        uninvoked = exposure["uninvoked"] - int(own is not None and not own["runtime_invoked_at"])
+        with localcontext() as context:
+            context.prec = 512
+            pending = Decimal(policy["reserve_amount"]) * uninvoked
+        spent = add_money((exposure["spent"], pending))
         proposed = Decimal(0) if has_reservation else Decimal(policy["reserve_amount"])
-        reason = "usage_unknown" if currency_unknown or (unknown and policy["unknown_policy"] == "pause") else "spend_limit" if add_money((spent, proposed)) > Decimal(policy["limit_amount"]) else ""
+        reason = "usage_unknown" if exposure["currency_unknown"] or (exposure["unknown"] and policy["unknown_policy"] == "pause") else "spend_limit" if add_money((spent, proposed)) > Decimal(policy["limit_amount"]) else ""
         if reason:
-            return place_hold(conn, tenant_id=tenant, owner_id=owner, scope_type=scope_type,
+            held = place_hold(conn, tenant_id=tenant, owner_id=owner, scope_type=scope_type,
                               scope_id=scope_id, kind="spend", reason_code=reason, now=now)
+            if cache is not None:
+                # A new owner hold can also cover a previously allowed project.
+                for key in tuple(cache):
+                    if key[0] == "decision":
+                        del cache[key]
+                cache[decision_key] = held
+            return held
         if reserve and attempt_id:
             conn.execute("""INSERT INTO spend_reservations
                 (attempt_id,tenant_id,owner_id,scope_type,scope_id,currency,amount,state) VALUES (?,?,?,?,?,?,?,'open')
@@ -175,6 +217,8 @@ def blocker(conn, run, *, now: str, reserve: bool = False) -> dict | None:
                 WHERE EXISTS (SELECT 1 FROM run_attempts a WHERE a.attempt_id=excluded.attempt_id
                     AND a.runtime_invoked_at IS NULL AND a.ended_at IS NULL)""",
                 (attempt_id, tenant, owner, scope_type, scope_id, policy["currency"], policy["reserve_amount"]))
+    if cache is not None:
+        cache[decision_key] = None
     return None
 
 

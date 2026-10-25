@@ -9854,10 +9854,11 @@ class Store:
             "AND (retry_after IS NULL OR retry_after='' OR retry_after<=?) "
             "ORDER BY queued_at ASC LIMIT 256", (worker_id, now_iso),
         ).fetchall()
+        spend_cache = {}
         for row in rows:
             if not coordinator_run_ready(conn, str(row["run_id"])):
                 continue
-            if spend_admission.blocker(conn, row, now=now_iso):
+            if spend_admission.blocker(conn, row, now=now_iso, cache=spend_cache):
                 conn.execute("UPDATE runs SET queue_blocker_class='admission_policy_hold' WHERE run_id=?", (row["run_id"],))
                 continue
             return row
@@ -15547,7 +15548,7 @@ class Store:
             event_clause = " WHERE " + " AND ".join(event_filters)
             callback_clause = " WHERE " + " AND ".join(callback_filters)
         with self._connect() as conn:
-            usage_rows = conn.execute(f"SELECT runs.run_id, runs.usage_summary_json FROM runs{run_join}{run_clause}", run_params).fetchall()
+            usage_summary = usage_accounting.aggregate_metrics_conn(conn, run_join, run_clause, run_params)
             projects = conn.execute(f"SELECT COUNT(*) FROM projects{project_clause}", project_params).fetchone()[0]
             workers = conn.execute(f"SELECT COUNT(*) FROM workers{worker_clause}", worker_params).fetchone()[0]
             runs = conn.execute(f"SELECT COUNT(*) FROM runs{run_join}{run_clause}", run_params).fetchone()[0]
@@ -15608,11 +15609,6 @@ class Store:
                 )
             except ValueError:
                 callback_oldest_pending_age_seconds = 0
-        summaries = [{"receipt_id": row["run_id"], "usage": json.loads(row["usage_summary_json"] or "{}") or usage_accounting.unknown_summary()} for row in usage_rows]
-        usage_summary = usage_accounting.summarize(summaries,
-            attempts=sum(item["usage"].get("attempts", 0) for item in summaries),
-            unknown_attempts=sum(item["usage"].get("unknown_attempts", 0) or int(item["usage"].get("coverage") == "unknown") for item in summaries))
-        usage_summary["receipt_ids"] = []
         return {
             "usage": usage_summary,
             "projects": projects,
@@ -27220,7 +27216,8 @@ class Store:
                 """,
                 (str(now), str(now), max(1, min(int(limit), 1000))),
             ).fetchall()
-            rows = [row for row in rows if not spend_admission.blocker(conn, row, now=str(now))]
+            spend_cache = {}
+            rows = [row for row in rows if not spend_admission.blocker(conn, row, now=str(now), cache=spend_cache)]
         return self._rows(rows)
 
     def list_due_queue_timeouts(
@@ -27243,7 +27240,8 @@ class Store:
                 """,
                 (str(now), max(1, min(int(limit), 1000))),
             ).fetchall()
-            rows = [row for row in rows if not spend_admission.blocker(conn, row, now=str(now))]
+            spend_cache = {}
+            rows = [row for row in rows if not spend_admission.blocker(conn, row, now=str(now), cache=spend_cache)]
         return self._rows(rows)
 
     def next_queue_maintenance_at(self, *, now: str | None = None) -> str | None:

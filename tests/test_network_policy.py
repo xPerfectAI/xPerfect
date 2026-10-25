@@ -86,10 +86,29 @@ def test_denial_covers_all_protocols_and_only_explicit_narrow_exceptions_precede
         {'protocol': 'udp', 'port': 53}, {'protocol': 'tcp', 'port': 53}]}]}
     _, _, rules = guard.rules_for(NETWORK, policy)
     assert rules == [
-        ['-d', '169.254.169.254/32', '-p', 'tcp', '-m', 'tcp', '--dport', '53', '-j', 'ACCEPT'],
-        ['-d', '169.254.169.254/32', '-p', 'udp', '-m', 'udp', '--dport', '53', '-j', 'ACCEPT'],
+        ['-d', '169.254.169.254/32', '-p', 'tcp', '-m', 'tcp', '--dport', '53', '-j', 'RETURN'],
+        ['-d', '169.254.169.254/32', '-p', 'udp', '-m', 'udp', '--dport', '53', '-j', 'RETURN'],
         ['-d', '169.254.169.254/32', '-j', 'REJECT', '--reject-with', 'icmp-admin-prohibited'],
         ['-j', 'RETURN']]
+
+
+def test_an_exception_never_accepts_forwarding_or_adopts_a_rule_that_bypasses_icc():
+    policy = {**POLICY, 'denied': [{'host': '10.44.0.3', 'probe_port': 18081,
+                                  'exceptions': [{'protocol': 'tcp', 'port': 18080}]}]}
+    firewall = Firewall()
+    guard.apply_rules(NETWORK, policy, execute=firewall)
+    chain, _, rules = guard.rules_for(NETWORK, policy)
+    assert rules[0][-2:] == ['-j', 'RETURN']
+    assert rules[1][-3:] == ['REJECT', '--reject-with', 'icmp-admin-prohibited']
+    assert all('ACCEPT' not in rule for rule in rules)
+    # An earlier ACCEPT-shaped exception would bypass Docker's ICC=false rules.
+    # It is foreign state now and must not be adopted or silently replaced.
+    firewall.chains[chain][0][-1] = 'ACCEPT'
+    before = json.dumps(firewall.chains, sort_keys=True)
+    for operation in (guard.verify_rules, guard.apply_rules, guard.remove_rules):
+        with pytest.raises(RuntimeError, match='unrecognized'):
+            operation(NETWORK, policy, execute=firewall)
+    assert json.dumps(firewall.chains, sort_keys=True) == before
 
 
 def test_unrecognized_rule_is_preserved_and_never_adopted():
@@ -252,3 +271,45 @@ def test_apply_revokes_removal_ack_before_new_rules_but_preserves_current_proof_
     monkeypatch.setattr(guard, 'attest', attest)
     guard.main()
     assert copied == (['iptables_readback'] if installed else ['applying', 'iptables_readback'])
+
+
+@pytest.mark.parametrize('exception_bypasses_icc', [False, True])
+def test_live_peer_check_refuses_an_exception_that_enables_a_real_listener(monkeypatch, exception_bypasses_icc):
+    spec = importlib.util.spec_from_file_location('check_worker_network_live', ROOT / 'tests/check_worker_network_live.py')
+    live = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(live)
+    applied, calls, removed = [False], [], []
+    def docker(args):
+        calls.append(args)
+        if args[:2] == ['network', 'create']:
+            return 'a' * 64
+        if args[:2] == ['run', '-d']:
+            return 'b' * 64
+        if args[:1] == ['inspect']:
+            return json.dumps([{'NetworkSettings': {'Networks': {'fixture-peer': {'IPAddress': '10.44.0.3'}}}}])
+        if args[:2] == ['network', 'inspect']:
+            return json.dumps([NETWORK])
+        if args[:2] == ['run', '--rm']:
+            return json.dumps({'results': [
+                {'kind': 'positive', 'host': 'example.test', 'port': 443, 'status': 'reachable'},
+                {'kind': 'positive', 'host': '10.44.0.3', 'port': 18080,
+                 'status': 'reachable' if applied[0] and exception_bypasses_icc else 'unavailable'},
+                {'kind': 'denied', 'host': '10.44.0.3', 'port': 18081, 'status': 'refused', 'errno': 113}]})
+        return ''
+    def attest(**kwargs):
+        assert kwargs['policy']['denied'][0]['exceptions'] == [{'protocol': 'tcp', 'port': 18080}]
+        applied[0] = True
+        return {'results': [{'errno': 113}]}
+    monkeypatch.setattr(live.guard, 'attest', attest)
+    monkeypatch.setattr(live.guard, 'remove_rules', lambda *args: removed.append(True))
+    action = lambda: live.check_peer_exception_isolation(docker, network='fixture-peer',
+        image='sha256:' + 'b' * 64, positive=[{'host': 'example.test', 'port': 443}])
+    if exception_bypasses_icc:
+        with pytest.raises(AssertionError, match='bypassed Docker worker isolation'):
+            action()
+    else:
+        action()
+        assert len([call for call in calls if call[:1] == ['exec']]) == 2
+    assert removed == [True]
+    assert ['rm', '-f', 'b' * 64] in calls
+    assert ['network', 'rm', 'a' * 64] in calls

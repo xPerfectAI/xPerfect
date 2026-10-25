@@ -10,13 +10,15 @@ from .manifest import EvidenceError, digest, fields, file_plan, hash_value, sour
 
 VALIDATOR_ID = "byte-map"
 VALIDATOR_VERSION = 1
+TRUSTED_VALIDATION_MODULES = ("validators.py", "manifest.py", "files.py")
 
 
 def validator_identity():
     path = Path(__file__).absolute()
     root = Root(path.parent)
     return {"validator_id": VALIDATOR_ID, "validator_version": VALIDATOR_VERSION,
-            "validator_sha256": root.snapshot(path.name)["sha256"]}
+            "validator_sha256": digest({name: root.snapshot(name)["sha256"]
+                                        for name in TRUSTED_VALIDATION_MODULES})}
 
 
 def selected_policy(policy, *, worker_roots=()):

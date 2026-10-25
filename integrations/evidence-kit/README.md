@@ -118,7 +118,9 @@ source ID, output identity, digest, trusted validator version/code digest and re
 It does not implement business acceptance. Missing expected evidence remains unknown; partial
 review remains partial. Native completion, structural validity, source correctness and delivery are
 separate facts. `validator-policy` prints the installed code pin; pin it before work, from the trusted
-installation. Never accept a validator path, module, command or replacement policy from a worker.
+installation. The code pin covers `validators.py`, `manifest.py` and `files.py` as one canonical
+module-name/digest map. A change to any module requires a new pin; earlier single-file pins refuse.
+Never accept a validator path, module, command or replacement policy from a worker.
 
 ## Receive the existing callback
 

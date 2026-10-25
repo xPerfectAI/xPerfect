@@ -1015,6 +1015,10 @@ Interrupt retries once for that same active run. If the run changes or another
 control wins, the direct and signed workspace view routes return a typed `active_work_generation_changed`
 conflict so the user can review current status and retry; it never signals a
 replacement run by inference. Permanent close stays under More actions.
+When Interrupt targets saved queued work that has never been invoked, it uses the existing
+work Stop owner: all unfinished runs for that worker, including queued follow-ups, and its pending
+scheduled runs are cancelled. They never start. Other workers are unaffected. Invoked work keeps
+its native interruption behavior.
 Provider/model readback stays under Advanced settings. The modal keeps
 keyboard focus, closes with Escape, returns focus to its opener, and supports narrow screens.
 
@@ -1386,5 +1390,11 @@ off by default. The owner selects currency, lifetime threshold and explicit unkn
 a reserve is a policy amount, not a price estimate. State clearly that active native work and delayed
 usage can exceed the threshold. A spending or operator pause leaves saved work queued and active
 invocations running. Explain the bounded reason and provide generation-checked Resume. The same
-queue episode and native Pause/Stop/Steer controls keep their existing meanings. A policy edit
+queue episode and invoked native Pause/Stop/Steer controls keep their existing meanings. A policy edit
 does not silently clear a hold or reset spending.
+Unknown-cost `pause` keeps new work held while any prior invocation lacks a complete cost report,
+including active work. Resume alone does not approve that unknown cost; the hold returns until
+the cost arrives or the policy changes. Recommend `reserve` for providers that do not report
+money. A reported token count does not prove cost. Owner-authenticated apps and AI clients can
+change or disable the policy and Resume under the existing owner authority; this is not a
+human-only approval gate or a provider billing cap.

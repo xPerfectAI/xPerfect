@@ -29,6 +29,23 @@ def add_money(values) -> Decimal:
         return sum((Decimal(value) for value in values), Decimal(0))
 
 
+class _DecimalSum:
+    """SQLite aggregate over normalized decimal strings, without binary rounding."""
+    def __init__(self):
+        self.amount = Decimal(0)
+
+    def step(self, value):
+        if value is not None:
+            self.amount = add_money((self.amount, value))
+
+    def finalize(self):
+        return format(self.amount, "f")
+
+
+def register_decimal_sum(conn) -> None:
+    conn.create_aggregate("usage_decimal_sum", 1, _DecimalSum)
+
+
 def normalize_observation(usage: dict[str, Any] | None, *, total_cost_usd: object = None) -> dict[str, Any]:
     """Accept reported values only. Missing and invalid counts remain distinguishable."""
     raw = usage if isinstance(usage, dict) else {}
@@ -146,6 +163,46 @@ def summarize(observations: list[dict[str, Any]], *, attempts: int, unknown_atte
     return summary
 
 
+def aggregate_metrics_conn(conn, run_join: str, run_clause: str, params) -> dict[str, Any]:
+    """Aggregate the existing run summaries without materializing lifetime JSON."""
+    register_decimal_sum(conn)
+    scope = "WITH metric_usage AS (SELECT COALESCE(NULLIF(runs.usage_summary_json,''),'{}') AS body FROM runs" + run_join + run_clause + ") "
+    fields = ["COUNT(*) AS runs", "COALESCE(SUM(json_extract(body,'$.attempts')),0) AS attempts",
+        "COALESCE(SUM(CASE WHEN COALESCE(json_extract(body,'$.unknown_attempts'),0)>0 THEN json_extract(body,'$.unknown_attempts') WHEN COALESCE(json_extract(body,'$.coverage'),'unknown')='unknown' THEN 1 ELSE 0 END),0) AS unknown_attempts",
+        "MAX(CASE WHEN json_extract(body,'$.measurement_coverage')='partial' THEN 1 ELSE 0 END) AS partial_measurement",
+        "COALESCE(SUM(CASE WHEN json_array_length(body,'$.money')>0 AND COALESCE(json_extract(body,'$.money_coverage'),'complete')='complete' THEN 1 ELSE 0 END),0) AS complete_money"]
+    for group, names in (("tokens",TOKEN_FIELDS),("native_totals",NATIVE_TOTAL_FIELDS)):
+        for name in names:
+            alias = group + "_" + name
+            path = "$." + group + "." + name
+            known = f"json_extract(body,'{path}.status') IN ('reported','partial') AND json_extract(body,'{path}.value') IS NOT NULL"
+            fields.extend((f"SUM(CASE WHEN {known} THEN json_extract(body,'{path}.value') ELSE 0 END) AS {alias}_value",
+                f"COALESCE(SUM(CASE WHEN {known} THEN 1 ELSE 0 END),0) AS {alias}_known",
+                f"COALESCE(SUM(CASE WHEN json_extract(body,'{path}.status')='reported' THEN 1 ELSE 0 END),0) AS {alias}_reported",
+                f"MAX(CASE WHEN json_extract(body,'{path}.status')='invalid' THEN 1 ELSE 0 END) AS {alias}_invalid"))
+    totals = conn.execute(scope + "SELECT " + ",".join(fields) + " FROM metric_usage",params).fetchone()
+    money = conn.execute(scope + """SELECT json_extract(m.value,'$.currency') AS currency,
+        usage_decimal_sum(json_extract(m.value,'$.amount')) AS amount
+        FROM metric_usage JOIN json_each(body,'$.money') m GROUP BY currency ORDER BY currency""",params).fetchall()
+    result = unknown_summary()
+    result.update(attempts=totals["attempts"],unknown_attempts=totals["unknown_attempts"],
+                  measurement_coverage="partial" if totals["partial_measurement"] else "complete")
+    for group,names in (("tokens",TOKEN_FIELDS),("native_totals",NATIVE_TOTAL_FIELDS)):
+        for name in names:
+            alias=group+"_"+name
+            known=totals[alias+"_known"]
+            complete=known and known==totals["runs"] and not totals["unknown_attempts"]
+            if group=="tokens":
+                complete=complete and totals[alias+"_reported"]==totals["runs"]
+            result[group][name]={"value":totals[alias+"_value"] if known else None,
+                "status":"reported" if complete else "partial" if known else "invalid" if totals[alias+"_invalid"] else "not_reported"}
+    result["money"]=[{"currency":item["currency"],"amount":item["amount"],"source":"provider_reported"} for item in money]
+    complete = totals["runs"] and not totals["unknown_attempts"] and not totals["partial_measurement"] and all(item["status"]=="reported" for item in result["tokens"].values())
+    result["coverage"]="complete" if complete else "partial" if money or any(item["value"] is not None for item in (*result["tokens"].values(),*result["native_totals"].values())) else "unknown"
+    result["money_coverage"]="complete" if totals["runs"] and not totals["unknown_attempts"] and totals["complete_money"]==totals["runs"] else "partial" if money else "unknown"
+    return result
+
+
 def ensure_schema(conn) -> None:
     """Called only by the runtime Store schema owner, including fresh databases."""
     ensure_account_schema(conn)
@@ -179,6 +236,17 @@ def ensure_account_schema(conn) -> None:
     if "complete" not in columns:
         conn.execute("ALTER TABLE account_usage_receipts ADD COLUMN complete INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE account_usage_receipts SET complete=CASE WHEN input_tokens IS NOT NULL AND output_tokens IS NOT NULL THEN 1 ELSE 0 END")
+    if "duration_seconds" not in columns:
+        conn.execute("ALTER TABLE account_usage_receipts ADD COLUMN duration_seconds REAL")
+
+
+def account_duration_delta(conn, *, receipt_id: str, account_id: str,
+                           tenant_id: str, owner_id: str, duration: float) -> float:
+    """The wrapper's measured duration has its own once-only receipt slot."""
+    changed = conn.execute("""UPDATE account_usage_receipts SET duration_seconds=?
+        WHERE receipt_id=? AND account_id=? AND tenant_id=? AND owner_id=?
+        AND duration_seconds IS NULL""", (duration,receipt_id,account_id,tenant_id,owner_id))
+    return duration if changed.rowcount else 0.0
 
 
 def account_usage_delta(conn, *, receipt_id: str, revision: int, account_id: str,

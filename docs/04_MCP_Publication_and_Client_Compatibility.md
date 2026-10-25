@@ -985,6 +985,15 @@ The same `glasshive` extension adds `usage_receipt_ids` and `usage_coverage`; ch
 never become accounting receipts or spend inputs. Existing client parsing and native control
 contracts remain intact. UI, API and MCP use the same owner/project spend-policy and hold methods,
 revision/generation checks and existing mutation authority. Resume never clears recorded spending.
+The same authenticated owner, including an authorized AI client, can edit/disable spending
+settings and Resume holds. Unknown-cost `pause` holds again if cost is still unknown; Resume is
+not approval of an unreported charge. Use `reserve` when the provider reports no money. No billing
+cap or separate human approval framework is implied.
+
+`worker_interrupt` and `POST /v1/workers/{worker_id}/interrupt` retain native interruption for
+invoked work. When they target queued work that never started, the existing work Stop owner
+cancels that worker's unfinished runs, queued follow-ups and pending scheduled runs. Cancelled
+work never starts; other workers are unaffected.
 
 An owned Bedrock connection can publish exact declared model contracts in the existing account
 picker. `POST /v1/coordinator/conversations` accepts `model_id` only with that selected connection

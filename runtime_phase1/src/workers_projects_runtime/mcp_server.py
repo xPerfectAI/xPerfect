@@ -4676,7 +4676,7 @@ def create_mcp_server(
         return client.spend_policy(project_id)
 
     @server.tool(name="spend_policy_set", title="Save Spend Pause Settings", structured_output=True,
-                 description="Save an explicitly requested owner or project spend policy with its expected revision. Unknown usage remains unknown. Settings apply until changed.")
+                 description="Save an explicitly requested owner or project spend policy with its expected revision. This uses the existing owner authority: owner-authenticated AI clients can also change or disable it. Unknown cost stays unknown; pause keeps new work held until cost is reported or the policy changes. Use reserve for providers without cost reports. This is not a billing cap.")
     def spend_policy_set(expected_revision: int, policy: dict[str, Any], project_id: str = "") -> dict[str, Any]:
         return client.update_spend_policy(expected_revision=expected_revision, policy=policy, project_id=project_id)
 
@@ -4692,7 +4692,7 @@ def create_mcp_server(
         return client.place_admission_hold(scope_type=scope_type, scope_id=scope_id, reason_code=reason_code)
 
     @server.tool(name="admission_hold_resume", title="Resume New Work", structured_output=True,
-                 description="Resume an explicitly requested saved pause using its exact generation. Spend settings still apply; resume does not erase reported spend or unknown usage.")
+                 description="Resume an explicitly requested saved pause using its exact generation and existing owner authority. Owner-authenticated AI clients can resume it. Spend settings still apply: resume does not erase spending or approve unknown cost; unknown=pause holds again while cost remains unknown.")
     def admission_hold_resume(hold_id: str, expected_generation: int) -> dict[str, Any]:
         return client.resume_admission_hold(hold_id, expected_generation=expected_generation)
 
@@ -6915,6 +6915,7 @@ def create_mcp_server(
         title="Interrupt Worker",
         description=(
             "Interrupt the active task while keeping the worker available. Use when the user changes direction, cancels the current step, or requests immediate steering without destroying the worker. "
+            "When Interrupt targets saved queued work that never started, it cancels that worker's unfinished work, including queued follow-ups and pending scheduled runs; cancelled work never starts. Other workers are unaffected. "
             "Do not terminate persistent context unless the user asks. Returns lifecycle state and runtime blocker details when available."
         ),
         structured_output=True,

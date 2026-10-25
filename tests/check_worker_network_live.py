@@ -45,14 +45,22 @@ from pathlib import Path
 s=importlib.util.spec_from_file_location("service","/opt/xperfect/deployment/linux/service.py")
 m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 os.environ.update(m.load_environment(Path("/control/config.json"),"runtime"))
-from workers_projects_runtime.worker_egress import require_current_receipt,WorkerEgressUnavailable
-from workers_projects_runtime.packaged_linux import _docker
-try:require_current_receipt(network=os.environ["XPERFECT_SHARED_NETWORK"],docker=_docker)
+from workers_projects_runtime.worker_egress import WorkerEgressUnavailable
+from workers_projects_runtime.workspace_box import WorkspaceBox,WorkspaceMemberBinding
+box=WorkspaceBox(volume_root=Path(os.environ["XPERFECT_SHARED_VOLUME_ROOT"]),
+ volume_name=os.environ["XPERFECT_SHARED_VOLUME_NAME"],image=os.environ["XPERFECT_SHARED_IMAGE"],
+ binding=WorkspaceMemberBinding("wsp_egress_acceptance","wrk_egress_acceptance","local","acceptance",20001),
+ memory_bytes=268435456,pids_limit=64,
+ control_root=Path(os.environ["XPERFECT_CONTROL_ROOT"])/"workspaces",
+ network=os.environ["XPERFECT_SHARED_NETWORK"])
+try:
+ command=box.command(["/bin/true"])
+ result=subprocess.run(command,capture_output=True,text=True,timeout=45)
+ if result.returncode:raise RuntimeError("Product workspace command failed")
+ # The normal product owner, not a reconstructed docker-run approximation,
+ # created and verified this exact native member container and command.
+ box.release_if_sole_member(box._inspect()["Id"])
 except WorkerEgressUnavailable:sys.exit(42)
-_docker(["run","--rm","--network",os.environ["XPERFECT_SHARED_NETWORK"],"--read-only","--cap-drop","ALL",
- "--security-opt","no-new-privileges","--user","65534:65534","--memory","128m","--pids-limit","32",
- "--entrypoint","/usr/bin/python3",os.environ["XPERFECT_SHARED_IMAGE"],"-I","-m",
- "workers_projects_runtime.storage_quota_guard","--","/bin/true"])
 '''
 
     def native(expected):
@@ -105,8 +113,78 @@ _docker(["run","--rm","--network",os.environ["XPERFECT_SHARED_NETWORK"],"--read-
         command[2] = "remove"
         guard.run(command)
     print(json.dumps({"result": "PASS", "package_checks": ["healthy-without-proof", "native-refused",
-        "operator-apply", "guarded-native-execution", "stale-refused", "healthy-restart-with-stale-proof",
+        "operator-apply", "product-workspace-command", "stale-refused", "healthy-restart-with-stale-proof",
         "rules-reinstalled", "native-recovered", "stopped-policy-removal"]}))
+
+
+def check_peer_exception_isolation(docker, *, network, image, positive):
+    """A scoped exception must still traverse Docker's ICC=false peer denial."""
+    identity = docker(["network", "create", "--driver", "bridge", "--label", "xperfect.package=" + network,
+                       "--opt", "com.docker.network.bridge.enable_icc=false", network])
+    peer = None
+    applied = False
+    removed = True
+    listener_port = 18080
+    try:
+        # The target is disposable and unprivileged. A loopback control proves
+        # it really listens even though another bridge member cannot reach it.
+        listener = '''import signal,socket
+signal.alarm(90)
+with socket.socket() as s:
+ s.bind(('0.0.0.0',18080));s.listen()
+ while True:
+  c,_=s.accept();c.close()
+'''
+        peer = docker(["run", "-d", "--network", network, "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--user", "65534:65534", "--memory", "64m",
+            "--pids-limit", "32", "--entrypoint", "/usr/bin/python3", image, "-I", "-c", listener])
+        ready = '''import socket,time
+deadline=time.monotonic()+5
+while True:
+ try:
+  with socket.create_connection(('127.0.0.1',18080),timeout=.2):pass
+  break
+ except OSError:
+  if time.monotonic()>=deadline:raise
+  time.sleep(.05)
+'''
+        docker(["exec", "--user", "65534:65534", peer, "/usr/bin/python3", "-I", "-c", ready])
+        peer_record = json.loads(docker(["inspect", peer]))[0]
+        address = peer_record["NetworkSettings"]["Networks"][network]["IPAddress"]
+        policy = guard.contract.normalize_policy({
+            "denied": [{"host": address, "probe_port": listener_port + 1,
+                        "exceptions": [{"protocol": "tcp", "port": listener_port}]}],
+            "positive": positive, "timeout_seconds": 1, "max_age_seconds": 60})
+        checked = guard.contract.normalize_policy({**policy,
+            "positive": [*positive, {"host": address, "port": listener_port}]})
+        def peer_is_blocked():
+            output = docker(["run", "--rm", "--network", network, "--read-only", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges", "--user", "65534:65534", "--memory", "64m",
+                "--pids-limit", "32", "--entrypoint", "/usr/bin/python3", image, "-I", "-c",
+                guard.contract.PROBE_PROGRAM, json.dumps(checked)])
+            results = json.loads(output)["results"]
+            target = next(row for row in results if row["kind"] == "positive" and row["host"] == address)
+            assert target["status"] != "reachable", "An exact exception bypassed Docker worker isolation"
+            assert all(row["status"] == "reachable" for row in results
+                       if row["kind"] == "positive" and row["host"] != address), "External positive control failed"
+        peer_is_blocked()
+        receipt = guard.attest(docker=docker, network=network, image=image, policy=policy, apply=True)
+        applied = True
+        peer_is_blocked()
+        # Exclude a dead listener as the cause of peer refusal after enforcement.
+        docker(["exec", "--user", "65534:65534", peer, "/usr/bin/python3", "-I", "-c", ready])
+        assert receipt["results"][-1]["errno"] == guard.contract.LINUX_REJECT_ERRNO
+    finally:
+        try:
+            if applied:
+                removed = False
+                guard.remove_rules(json.loads(docker(["network", "inspect", network]))[0], policy)
+                removed = True
+        finally:
+            if peer:
+                docker(["rm", "-f", peer])
+            if removed:
+                docker(["network", "rm", identity])
 
 
 def main():
@@ -193,11 +271,14 @@ def main():
         assert all(row["status"] == "reachable" for row in narrowed["results"][:-1]), "An exact TCP exception was not reachable"
         guard.remove_rules(record, policy)
         applied = False
+        check_peer_exception_isolation(docker, network=network + "-peer", image=args.native_image,
+                                       positive=[{"host": "example.org", "port": 443}])
         print(json.dumps({"result": "PASS", "enforcement": receipt["enforcement"],
             "native_image": args.native_image,
             "network_generation_sha256": hashlib.sha256(receipt["network_id"].encode()).hexdigest(),
             "reject_errno": errno.EHOSTUNREACH,
-            "checks": ["reachable-before", "exact-rules", "address-denial-two-tcp-ports", "narrow-exception", "positive-after",
+            "checks": ["reachable-before", "exact-rules", "address-denial-two-tcp-ports", "narrow-exception",
+                       "exception-keeps-worker-isolation", "peer-listener-positive-control", "positive-after",
                        "unrelated-bridge", "repeat-readback", "stale-refusal", "generation-refusal", "remove-readback"]}))
     finally:
         for key, value in original_environment.items():

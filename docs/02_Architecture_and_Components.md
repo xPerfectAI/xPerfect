@@ -1325,6 +1325,10 @@ identity/revision idempotently in the same runtime database and expose unknown-r
 Recovered receipts wait for the exact attempt's terminal outcome before projecting account
 counters. The immutable attempt start fence owns the account binding; a later retry's run state
 or connection cannot change an earlier attempt's account or outcome.
+Measured wrapper duration has its own once-only receipt slot, independent of whether a recovered
+usage projection counted the run first. Admission aggregates exact decimal exposure once per
+scope in each unchanged transaction batch. General metrics aggregate existing summaries in SQL;
+neither path materializes and reparses every historical receipt per queued row.
 Native terminal controls also close the exact attempt and settle its reservation in their existing
 transaction. Interrupted work without a native usage report remains unknown; it is never free.
 Host conversation cleanup uses the same attempt metric writer before publishing its result.

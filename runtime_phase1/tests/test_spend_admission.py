@@ -160,6 +160,8 @@ def test_interrupt_held_uninvoked_work_uses_cancellation_without_native_binding(
     from workers_projects_runtime.openclaw_runtime import StubRuntime
     from workers_projects_runtime.service import WorkersProjectsService
     store, _, worker, run = fixture_run(tmp_path)
+    followup=store.create_run(worker["worker_id"],worker["project_id"],"Saved follow-up")
+    _,_,other,other_run=fixture_run(tmp_path,"other",store)
     store.place_admission_hold("local","owner")
     class NoNativeInterrupt(StubRuntime):
         def interrupt_worker(self, *args, **kwargs):
@@ -169,7 +171,10 @@ def test_interrupt_held_uninvoked_work_uses_cancellation_without_native_binding(
         result=service.interrupt_worker(worker["worker_id"])
         assert result["worker_id"] == worker["worker_id"]
         assert store.get_run(run["run_id"])["state"] == "cancelled"
+        assert store.get_run(followup["run_id"])["state"] == "cancelled"
+        assert store.get_run(other_run["run_id"])["state"] == "queued"
         assert store.list_run_attempts(run["run_id"]) == []
+        assert store.list_run_attempts(followup["run_id"]) == []
         assert store.list_admission_holds("local","owner")[0]["active"]
     finally:
         service.shutdown()
@@ -205,3 +210,56 @@ def test_late_money_and_unknown_policy_pause_new_work_without_cancelling_active(
     store.finalize_run(run["run_id"], "completed")
     store.resume_admission_hold(hold["hold_id"],"local","owner",hold["generation"])
     assert store.claim_next_queued_run(other["worker_id"]) is not None
+
+
+def test_resume_does_not_approve_permanently_unknown_cost_under_pause_policy(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="10",unknown_policy="pause"),0)
+    run,_=invoked_attempt(store,worker,run)
+    store.finalize_run(run["run_id"],"completed")
+    _,_,other,_=fixture_run(tmp_path,"two",store)
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    hold=store.list_admission_holds("local","owner")[0]
+    store.resume_admission_hold(hold["hold_id"],"local","owner",hold["generation"])
+    assert store.claim_next_queued_run(other["worker_id"]) is None
+    renewed=store.list_admission_holds("local","owner")[0]
+    assert renewed["active"] and renewed["generation"]==hold["generation"]+1
+
+
+def test_spend_history_queries_are_bounded_per_scope_for_large_due_batch(tmp_path,monkeypatch):
+    import json
+    from contextlib import contextmanager
+    from workers_projects_runtime.store import utc_now
+    store,_,worker,run=fixture_run(tmp_path)
+    store.put_spend_policy("local","owner",policy(limit_amount="100000",reserve_amount="0.1"),0)
+    invoked,_=invoked_attempt(store,worker,run)
+    reconcile(store,invoked,total_cost_usd="0.000000000000000000001")
+    store.finalize_run(run["run_id"],"completed")
+    queued=store.create_run(worker["worker_id"],worker["project_id"],"Saved synthetic batch")
+    with store._connect() as conn:
+        for table,identity,count,source_id in (("run_attempts","attempt_id",3000,invoked["active_attempt_id"]),("usage_receipts","receipt_id",3000,None),("runs","run_id",300,queued["run_id"])):
+            if table=="usage_receipts":
+                original=dict(conn.execute("SELECT * FROM usage_receipts WHERE attempt_id=?",(invoked["active_attempt_id"],)).fetchone())
+            else:
+                original=dict(conn.execute(f"SELECT * FROM {table} WHERE {identity}=?",(source_id,)).fetchone())
+            columns=list(original)
+            copies=[]
+            for index in range(count):
+                row={**original,identity:f"scale_{table}_{index}"}
+                if table=="run_attempts":row["attempt_number"]=index+2
+                elif table=="usage_receipts":row["attempt_id"]=f"scale_run_attempts_{index}"
+                else:row["queue_next_status_at"]=row["queued_at"]
+                copies.append(tuple(row[key] for key in columns))
+            conn.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",copies)
+    queries=[]
+    original_connect=store._connect
+    @contextmanager
+    def traced():
+        with original_connect() as conn:
+            conn.set_trace_callback(queries.append)
+            try:yield conn
+            finally:conn.set_trace_callback(None)
+    monkeypatch.setattr(store,"_connect",traced)
+    assert len(store.list_due_queue_status(now=utc_now(),limit=1000))==300
+    assert sum(query.startswith("WITH spend_attempt_cost AS") for query in queries)==2
+    assert not any("SELECT usage_json FROM usage_receipts WHERE attempt_id=" in query for query in queries)

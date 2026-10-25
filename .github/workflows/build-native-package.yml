@@ -61,6 +61,28 @@ jobs:
             test "$actual" = "$expected"
             echo "Verified $client version"
           done
+      - name: Qualify the native worker policy through the package entry point
+        run: |
+          cd "$RUNNER_TEMP/source"
+          python3 - <<'PY_POLICY'
+          import json, os, socket, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          address = sorted({item[4][0] for item in socket.getaddrinfo('example.com', 80, socket.AF_INET, socket.SOCK_STREAM)})[0]
+          policy = root / 'worker-policy.json'
+          policy.write_text(json.dumps({'denied': [{'host': address, 'probe_port': 80}],
+              'positive': [{'host': 'example.org', 'port': 443}], 'max_age_seconds': 300, 'timeout_seconds': 2}))
+          policy.chmod(0o600)
+          with (root / 'policy-start-private.txt').open('wb') as output:
+              subprocess.run(['./xperfect', 'start', '--docker', '--name', 'xperfect-qa-policy',
+                  '--state-dir', str(root / 'policy-state'), '--ui-port', '18780', '--mcp-port', '18767',
+                  '--service-image', 'xperfect-service:build', '--native-image', 'xperfect-native:build',
+                  '--worker-egress-policy', str(policy)], check=True, stdout=output, stderr=subprocess.STDOUT)
+          print('Opt-in package started without operator privileges')
+          PY_POLICY
+          native=$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"])/"policy-state/receipt.json").read_text())["native_image"])')
+          sudo python3 tests/check_worker_network_live.py --native-image "$native" \
+            --package-receipt "$RUNNER_TEMP/policy-state/receipt.json" --package-policy "$RUNNER_TEMP/worker-policy.json"
       - name: Export exact images for review and existing publication
         run: |
           cd "$RUNNER_TEMP/source"

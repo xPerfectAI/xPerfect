@@ -48,10 +48,12 @@ export function mountSpendControls(container, { projectId = '', request }) {
     const enabledLabel = node('label', 'Pause new work at a spend threshold '); const enabled = node('input'); enabled.type = 'checkbox'; enabled.checked = Boolean(policy.enabled); enabledLabel.append(enabled); form.append(enabledLabel);
     const currencyLabel = node('label', 'Currency '); const currency = node('input'); currency.value = policy.currency || 'USD'; currency.maxLength = 3; currencyLabel.append(currency); form.append(currencyLabel);
     const amountLabel = node('label', 'Threshold '); const amount = node('input'); amount.inputMode = 'decimal'; amount.value = policy.limit_amount || ''; amount.placeholder = 'Amount'; amountLabel.append(amount); form.append(amountLabel);
-    const unknownLabel = node('label', 'When usage is unknown '); const unknown = node('select'); unknown.append(new Option('Pause new work', 'pause'), new Option('Reserve an amount for each invocation', 'reserve')); unknown.value = policy.unknown_policy || 'pause'; unknownLabel.append(unknown); form.append(unknownLabel);
+    const unknownLabel = node('label', 'When cost is unknown '); const unknown = node('select'); unknown.append(new Option('Pause new work', 'pause'), new Option('Reserve an amount for each invocation', 'reserve')); unknown.value = policy.unknown_policy || 'pause'; unknownLabel.append(unknown); form.append(unknownLabel);
     const reserveLabel = node('label', 'Reserve per invocation '); const reserve = node('input'); reserve.inputMode = 'decimal'; reserve.value = policy.reserve_amount || '0'; reserveLabel.append(reserve); form.append(reserveLabel);
     const showReserve = () => { reserveLabel.hidden = unknown.value !== 'reserve'; }; unknown.addEventListener('change', showReserve); showReserve();
+    form.append(node('p', 'Pause waits while any earlier invocation has no complete cost report, including active work. Resume does not approve unknown cost. Use Reserve for providers that do not report cost.'));
     form.append(node('p', 'Counts reported spend since this setting was first saved, until changed. Active work and delayed usage can exceed the threshold. This is not a hard billing cap.'));
+    form.append(node('p', 'Apps and AI clients signed in as you can change these settings or resume work.'));
     const save = node('button', 'Save spend settings'); save.type = 'submit'; form.append(save);
     form.onsubmit = async event => {
       event.preventDefault();

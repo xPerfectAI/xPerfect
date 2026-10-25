@@ -45,8 +45,10 @@ def rules_for(record, policy):
     for target in policy["denied"]:
         for exception in target["exceptions"]:
             protocol = exception["protocol"]
+            # The exception skips our address reject, never Docker's later
+            # forwarding/ICC policy or another operator's rules.
             rules.append(["-d", target["host"] + "/32", "-p", protocol, "-m", protocol,
-                          "--dport", str(exception["port"]), "-j", "ACCEPT"])
+                          "--dport", str(exception["port"]), "-j", "RETURN"])
         rules.append(["-d", target["host"] + "/32", "-j", "REJECT", "--reject-with", "icmp-admin-prohibited"])
     rules.append(["-j", "RETURN"])
     return chain, ["-i", bridge, "-s", subnet, "-j", chain], rules

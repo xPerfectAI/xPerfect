@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from pathlib import Path
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -85,6 +87,33 @@ def test_trusted_validator_separates_source_unknown_partial_and_contradicted_bas
         validate_package(sample["package"], output=sample["output"], source_manifest=sample["event"], policy={**sample["policy"], "validator_sha256": "0" * 64}, expected=sample["expected"])
     with pytest.raises(EvidenceError):
         validate_package({**sample["package"], "outputs": [{**sample["package"]["outputs"][0], "source_id": "invented"}]}, output=sample["output"], source_manifest=sample["event"], policy=sample["policy"])
+
+
+@pytest.mark.parametrize("changed_module", ["validators.py", "manifest.py", "files.py"])
+def test_validator_pin_covers_each_trusted_validation_module(tmp_path, monkeypatch, changed_module):
+    from xperfect_evidence import validators
+    source = Path(validators.__file__).parent
+    original = validators.validator_identity()
+    for name in validators.TRUSTED_VALIDATION_MODULES:
+        shutil.copyfile(source / name, tmp_path / name)
+    monkeypatch.setattr(validators, "__file__", str(tmp_path / "validators.py"))
+    assert validators.validator_identity() == original
+    policy = {**original, "require_source_review": True}
+    assert validators.selected_policy(policy) == original
+    path = tmp_path / changed_module
+    path.write_bytes(path.read_bytes() + b"\n# Synthetic trusted-code change.\n")
+    assert validators.validator_identity()["validator_sha256"] != original["validator_sha256"]
+    with pytest.raises(EvidenceError, match="code pin differs"):
+        validators.selected_policy(policy)
+
+
+def test_earlier_single_file_validator_pin_is_refused():
+    from xperfect_evidence import validators
+    from xperfect_evidence.files import Root
+    identity = validators.validator_identity()
+    single_file_pin = Root(Path(validators.__file__).parent).snapshot("validators.py")["sha256"]
+    with pytest.raises(EvidenceError, match="code pin differs"):
+        validators.selected_policy({**identity, "validator_sha256": single_file_pin, "require_source_review": True})
 
 
 def test_partial_source_review_and_fake_native_success_cannot_be_full_acceptance(sample):

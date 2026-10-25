@@ -1166,14 +1166,17 @@ class ControlPlaneStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             first = True
+            duration_delta = duration
             unknown_delta = int(input_count is None or output_count is None)
             if receipt_id:
-                from .usage_accounting import account_usage_delta
+                from .usage_accounting import account_duration_delta, account_usage_delta
                 if type(revision) is not int or revision < 0:
                     raise ControlPlaneError("Usage receipt revision is invalid")
                 first, input_count, output_count, unknown_delta = account_usage_delta(
                     conn, receipt_id=receipt_id, revision=revision, account_id=account_id,
                     tenant_id=tenant_id, owner_id=owner_id, input_tokens=input_count, output_tokens=output_count)
+                duration_delta = account_duration_delta(conn, receipt_id=receipt_id,
+                    account_id=account_id, tenant_id=tenant_id, owner_id=owner_id, duration=duration)
             cursor = conn.execute(
                 """
                 UPDATE provider_accounts
@@ -1197,7 +1200,7 @@ class ControlPlaneStore:
                     timestamp,
                     int(first),
                     int(first and not succeeded),
-                    duration if first else 0,
+                    duration_delta,
                     unknown_delta,
                     input_count,
                     input_count,

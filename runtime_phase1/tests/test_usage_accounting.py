@@ -270,6 +270,47 @@ def test_wrapper_first_and_terminal_projection_count_outcome_and_duration_once(t
     assert (result["observed_runs"],result["observed_failures"],result["observed_duration_seconds"],result["observed_output_tokens"]) == (1,1,2,6)
 
 
+def test_terminal_projection_before_wrapper_keeps_measured_duration_once_at_stale_revision(tmp_path):
+    store,_,worker,run=fixture_run(tmp_path)
+    run,_=invoked_attempt(store,worker,run)
+    control,account=bound_account(store,worker,run)
+    reconcile(store,run,{"input_tokens":0,"output_tokens":4})
+    store.finalize_run(run["run_id"],"completed")
+    before=control.get_provider_account(account_id=account["account_id"],tenant_id="local",owner_id="owner")
+    assert before["observed_runs"]==1 and before["observed_duration_seconds"]==0
+    args=dict(account_id=account["account_id"],tenant_id="local",owner_id="owner",succeeded=True,duration_seconds=2.5,receipt_id=run["active_attempt_id"],revision=0)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _:control.record_provider_account_usage(**args),range(8)))
+    result=control.get_provider_account(account_id=account["account_id"],tenant_id="local",owner_id="owner")
+    assert (result["observed_runs"],result["observed_failures"],result["observed_duration_seconds"],result["observed_output_tokens"])==(1,0,2.5,4)
+
+
+def test_sql_metrics_match_existing_summary_semantics_and_scope_without_python_history_parse(tmp_path,monkeypatch):
+    from workers_projects_runtime import usage_accounting
+    store,_,_,first=fixture_run(tmp_path)
+    summaries=[
+        usage_accounting.summarize([{"receipt_id":"one","usage":normalize_observation({"input_tokens":0,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},total_cost_usd="0.123456789012345678901")}],attempts=1,unknown_attempts=0),
+        usage_accounting.summarize([{"receipt_id":"two","usage":normalize_observation({"input_tokens":2,"_native_totals":{"input_tokens":8},"_measurement_coverage":"partial"},total_cost_usd="0.2")}],attempts=2,unknown_attempts=1),
+        usage_accounting.unknown_summary(),
+    ]
+    runs=[first]
+    for index in range(1,len(summaries)):
+        _,_,_,run=fixture_run(tmp_path,str(index),store);runs.append(run)
+    _,foreign_project,foreign_worker,foreign=fixture_run(tmp_path,"foreign",store)
+    with store._connect() as conn:
+        conn.execute("UPDATE projects SET owner_id='other' WHERE project_id=?",(foreign_project["project_id"],))
+        conn.execute("UPDATE workers SET owner_id='other' WHERE worker_id=?",(foreign_worker["worker_id"],))
+        for run,summary in zip(runs,summaries):
+            conn.execute("UPDATE runs SET usage_summary_json=? WHERE run_id=?",(json.dumps(summary),run["run_id"]))
+        conn.execute("UPDATE runs SET usage_summary_json=? WHERE run_id=?",(json.dumps(summaries[0]),foreign["run_id"]))
+    expected=usage_accounting.summarize([{"receipt_id":run["run_id"],"usage":summary} for run,summary in zip(runs,summaries)],attempts=3,unknown_attempts=2)
+    expected["receipt_ids"]=[]
+    # The metrics implementation must not deserialize one JSON object per run.
+    monkeypatch.setattr(usage_accounting.json,"loads",lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("metrics parsed history in Python")))
+    actual=store.metrics(owner_id="owner")
+    assert actual["runs"]==3 and actual["usage"]==expected
+
+
 @pytest.mark.parametrize("source", ["http_response", "harness_reported", "adapter_synthesized", "unavailable"])
 def test_failure_provenance_is_typed_and_identifier_bounded(source):
     fields = FailureClassification("provider_access_denied",False,"Access refused","Check access","class=provider_access_denied",
