@@ -160,3 +160,41 @@ assert.equal(input.placeholder,'This workspace is closed');
 syncTileSteerAvailability(tile,'ready');assert.equal(input.disabled,false);assert.equal(send.disabled,false);
 assert.equal(input.value,'Keep this work request');
 """)
+
+
+def test_create_card_uses_new_worker_setup_from_existing_or_copy_without_losing_job():
+    source = (STATIC / 'app.js').read_text()
+    start = source.index("      const name = document.getElementById('worker-name');", source.index('expertPicker = createExpertPicker'))
+    end = source.index('      const value = `new:${expert.profile}`;', start)
+    body = source[start:end]
+    run_node("import assert from 'node:assert/strict';\n" + r"""
+for(const value of ['open:worker-a','duplicate:worker-a','new:claude-code']){
+ const select={value,dispatchEvent(){}};
+ const fields={'description':{value:'Exact goal',focus(){this.focused=true}},'worker-name':{value:'My own name'},'worker-choice':{value:'existing'},
+  'worker-type':{value:'new:claude-code'},'worker-choice-title':{focus(){this.focused=true}}};
+ const document={getElementById:id=>fields[id]};
+ let automaticExpertName='Automatic expert',preparedExpertWorkerId='prepared',renders=0;
+ const bootstrap={};const onboarding={render(){renders++}};
+ function renderWorkspaceOptions(target,data,choice){assert.equal(data,bootstrap);target.value=choice;}
+ function act(options){const expert=null;
+""" + body + r"""
+ }
+ act({custom:true});
+ assert.equal(select.value,'new:claude-code');assert.equal(fields['worker-choice'].value,'new');
+ assert.equal(renders,1);assert.equal(fields['worker-name'].value,'My own name');
+ assert(fields['worker-choice-title'].focused);assert.equal(preparedExpertWorkerId,'');
+ fields.description.value='';act({custom:true});assert(fields.description.focused,'An empty job is the next required step');
+}
+""")
+
+
+def test_launch_label_updates_preserve_icon_and_truthful_recovery_text():
+    source = (STATIC / 'app.js').read_text()
+    run_node("import assert from 'node:assert/strict';\nconst workspaceMeta=()=>({buttonText:'Run Project',help:'Exact help'});\n"
+             + function('syncWorkspaceUI', source) + r"""
+const label={textContent:'Start fresh copy'}, icon={retained:true};
+const button={children:[icon,label],querySelector:()=>label};const help={};
+syncWorkspaceUI({value:'new:codex-cli'},{},button,help);
+assert.equal(label.textContent,'Run Project');assert.equal(button.children[0],icon);assert.equal(help.textContent,'Exact help');
+const legacy={textContent:''};syncWorkspaceUI({value:''},{},legacy,help);assert.equal(legacy.textContent,'Run Project');
+""")

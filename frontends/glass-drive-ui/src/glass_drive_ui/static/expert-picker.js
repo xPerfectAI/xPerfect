@@ -21,7 +21,9 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
   const section = node('section', 'expert-picker'); section.hidden = true; section.setAttribute('aria-label', 'Choose an expert');
   const heading = node('div', 'expert-heading');
   const words = node('div'); words.append(node('h2', '', 'Choose an expert'), node('p', '', 'Choose an AI expert, or create your own.'));
-  const own = node('button', 'expert-own', 'Create my own'); own.type = 'button'; heading.append(words, own);
+  const own = node('button', 'expert-create'); own.type = 'button';
+  own.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span>Create</span>';
+  heading.append(words);
   const tabs = node('div', 'expert-tabs'); tabs.setAttribute('role', 'group'); tabs.setAttribute('aria-label', 'Expert collection');
   const ready = node('button', '', 'Experts'); ready.type = 'button'; ready.setAttribute('aria-pressed', 'true');
   const saved = node('button', '', 'My experts'); saved.type = 'button'; saved.setAttribute('aria-pressed', 'false');
@@ -124,7 +126,6 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
   }
   function render() {
     ready.setAttribute('aria-pressed', String(view === 'starters')); saved.setAttribute('aria-pressed', String(view === 'templates'));
-    own.setAttribute('aria-pressed', String(!selected));
     filters.hidden = view !== 'templates';
     for (const button of filters.children) button.setAttribute('aria-pressed', String(button.dataset.catalogState === catalogState));
     const savedOptions = templates.map(t => ({ ...t, id: t.template_id, kind: 'template' }));
@@ -184,7 +185,8 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
       }
       return card;
     }));
-    if (!options.length) grid.append(node('p', 'expert-empty', loading ? 'Loading experts…' : view === 'templates' ? 'No saved experts yet. Save a worker as an expert from Workspaces.' : 'No experts to show. You can create your own worker below.'));
+    if (view === 'starters' || catalogState === 'active') grid.append(own);
+    if (!options.length) grid.append(node('p', 'expert-empty', loading ? 'Loading experts…' : view === 'templates' ? 'No saved experts yet. Save a worker as an expert from Workspaces.' : 'No experts to show. Use Create to set up your own worker.'));
   }
   own.onclick = () => choose(null, { custom: true });
   ready.onclick = () => { view = 'starters'; render(); };

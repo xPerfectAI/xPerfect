@@ -1,6 +1,6 @@
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
 import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
-import { createExpertPicker } from './expert-picker.js?v=20261024polish1';
+import { createExpertPicker } from './expert-picker.js?v=20261025visual1';
 import { createLibraryBrowser, createLibrarySelection, libraryModal, libraryRequest, libraryWorkerTarget, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
 import { renderAccountIdentity } from './account-menu.js?v=20261024polish1';
 import { mountWorkerOnboarding, workerChoiceLabel, hostAccountLabel, workerTypeOption } from './worker-onboarding.js?v=20261024polish1';
@@ -1842,7 +1842,7 @@ function selectedWorkerEffort(selectValue, controls) {
 
 function syncWorkspaceUI(select, data, button, help) {
   const meta = workspaceMeta(select.value, data);
-  button.textContent = meta.buttonText;
+  (button.querySelector?.('[data-launch-label]') || button).textContent = meta.buttonText;
   help.textContent = meta.help;
   return meta;
 }
@@ -2181,8 +2181,16 @@ async function main() {
       if (!expert) {
         if (name?.value === automaticExpertName) name.value = '';
         automaticExpertName = ''; preparedExpertWorkerId = '';
+        if (options.custom) {
+          document.getElementById('worker-choice').value = 'new';
+          renderWorkspaceOptions(select, bootstrap, document.getElementById('worker-type')?.value || '');
+          onboarding.render();
+        }
         select.dispatchEvent(new Event('change', { bubbles: true }));
-        if (options.custom) document.getElementById('worker-choice-title')?.focus();
+        if (options.custom) {
+          const job = document.getElementById('description');
+          (job?.value.trim() ? document.getElementById('worker-choice-title') : job)?.focus();
+        }
         return;
       }
       const value = `new:${expert.profile}`;
@@ -3100,7 +3108,7 @@ async function main() {
       if (error.code === 'workspace_duplication_failed' && select.value.startsWith('duplicate:')) {
         delete button.dataset.launchIdempotencyKey;
         launchDraftState.clearRequest();
-        button.textContent = 'Start fresh copy';
+        (button.querySelector?.('[data-launch-label]') || button).textContent = 'Start fresh copy';
       }
       if (!error.status || error.status >= 500) {
         launchDraftState.markUnknown(originalPayload, launchOwnerScope);

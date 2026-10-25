@@ -14,6 +14,14 @@ The native desktop and terminal retain their own appearance.
 
 ### UI design principles
 
+Run Project pairs concise, visible labels with one consistent outlined icon family. Icons help users
+find the job, outcome, background material, worker and workspace; they do not replace accessible
+names, required guidance, account readiness or recovery. Keep the shared gradient, neutral working
+surfaces and official identity assets. Avoid duplicate helper paragraphs and decorative icon clutter.
+The five ready-made experts are followed by a sixth **＋ Create** card. That card uses the existing
+custom-worker setup, keeps the job and background draft, and starts no work by itself. Do not add a
+second creation wizard or duplicate the action above the gallery. Preserve saved-expert management.
+
 Use the visual roles below as the design baseline. Extend the current layout and palette when a
 clear user need requires a change; keep the shared shell and control behavior consistent.
 
