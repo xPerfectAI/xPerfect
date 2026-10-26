@@ -10,7 +10,8 @@ wiki repository.
 
 - `index.html`: six user journeys, commands, screenshots and dated verified limits.
 - `styles.css` and `guide.js`: website-matched graphite/pearl/taupe colors; system light/dark by default, with an optional system → light → dark cycle. The system choice follows OS changes during the visit.
-- `assets/`: only reviewed product screenshots with synthetic tasks and downloadable sample files.
+- `assets/`: reviewed product screenshots, canonical brand/comparison artwork and downloadable synthetic sample files.
+- `compare.html`, `comparison.css`, `comparison.js`: focused landscape comparison. The renderer generates the HTML from `docs/comparison.json`; CSS and the small theme/filter script are maintained here.
 
 From this folder, run `python3 -m http.server 19990 --bind 127.0.0.1`, then open
 `http://127.0.0.1:19990`. Use an unused port if needed. No docs framework or package install is required.
@@ -63,3 +64,25 @@ of keeping documentation near its code, avoiding parallel maintenance, and linki
 publication. A separate repo would add coordination without giving this small guide a useful new
 boundary. The existing website hosts static files using its current Vercel deployment; no new site,
 CMS, service or runtime dependency is needed.
+
+## Public updates and comparison copy
+
+Lead with what a user can accomplish, the benefit and a concrete example. Explain unfamiliar
+terms for a reader with no project background. Organize related changes around expertise,
+knowledge, work, results, automation and ownership. Show current, reviewed screenshots when
+the interface or output makes the benefit clearer; retain their actual date and synthetic scope.
+Keep engineering details available in a disclosure instead of forcing everyone to read them.
+
+`CHANGELOG.md` is the dated source for the online changelog. Its small Markdown contract uses
+`> **Summary:**`, `> **Example:**`, `> **Topics:**`, up to three `- **Benefit:**` lines,
+ordinary reviewed screenshot links and `> **Image caption:**`, followed by technical change
+bullets. The website parser and saved edition share that contract. Sync new screenshots before
+relying on the live feed to show them; the page only renders its mirrored asset list.
+
+The comparison should make strengths easy to see. Use clear examples and positive, specific
+capability descriptions. A configured feature is a feature; do not label it Build or Partial
+merely because setup is required. Compare current, correctly named product layers against
+primary sources. Do not invent missing competitor capabilities, exclusivity or benchmark
+results. Keep product operation and qualification details in the capability guide, outside the
+main feature matrix. Update the JSON once, then regenerate the HTML, Markdown and SVG with
+`python3 scripts/render-capability-comparison.py`; use `--check` to detect drift.
