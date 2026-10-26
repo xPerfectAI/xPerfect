@@ -19,14 +19,14 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Topics:** Experts, Work control, Connections, Deployment, Reliability
 
 ![The current expert gallery with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
-> **Image caption:** Actual xPerfect gallery, 25 October 2026; fictional AI personas, not professional credentials.
+> **Image caption:** Expert gallery, captured 25 October 2026: five packaged AI Workers and Create.
 
 ![Choose an exact saved Finance Director version from the Versions dialog.](docs/assets/screens/expert-versions.jpg)
 > **Image caption:** Actual Versions dialog with a synthetic Finance Director setup, 25 October 2026.
 
 - **Benefit:** Reuse expertise: edit, copy, archive, restore and choose exact expert versions without changing workers already doing a job.
-- **Benefit:** Keep control: inspect reported usage, hold new work at owner or project level, and resume the same queue.
-- **Benefit:** Keep working on your terms: return to a retained browser profile, use a Bedrock connection, or start the matched arm64/amd64 Linux package.
+- **Benefit:** Keep control: inspect reported usage, pause new assignments for your account or a project, and resume the same queue.
+- **Benefit:** Install more easily: xPerfect selects the matching package for your computer or Linux server.
 
 - **Improved:** Public guides now show how to schedule an AI job or send a webhook, with practical app recipes and clear delivery checks. A source-linked comparison explains what xPerfect adds to native tools and its current limits.
 - **Improved:** The README and guide use the real brand mark, the current expert gallery and consistent package guidance. Obsolete UI/QA captures were removed from publication; retained result images keep their actual synthetic-work scope.
@@ -62,7 +62,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Image caption:** Actual native Claude Code work using bundled synthetic Finance inputs, 24 October 2026.
 
 ![A page from the downloaded synthetic Finance report.](docs/assets/screens/finance-report.png)
-> **Image caption:** Rendered from that delivered report; a real synthetic example, not a UI mock or a guarantee for every report.
+> **Image caption:** Page from the delivered report using public synthetic Finance inputs, 24 October 2026.
 
 - **Benefit:** Start with expertise: five illustrated professions include Clinical Biostatistician, Bioanalytical Scientist, Regulatory Affairs, Growth Marketer and Finance Director.
 - **Benefit:** Onboard once: save files, notes, skills and bundles in a private versioned Library; reuse selected versions in Run Project, Chat or Watch.
@@ -105,7 +105,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Example:** An executive can understand the work an AI specialist can take on; an engineer can follow the same page into the product source, setup guide and inspectable examples.
 >
-> **Topics:** Website, Integrations
+> **Topics:** Website
 
 - **Benefit:** Understand the value sooner: specific work examples and useful results replace general claims.
 - **Benefit:** Explore comfortably: consistent branding, mobile navigation, system appearance and readable first paint keep the experience coherent.
@@ -127,29 +127,29 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-10-17 — Continue after a failed or interrupted response
 
-> **Summary:** A failed or expired response no longer leaves a released conversation session blocking the next request. File-only messages and native continuations retain their source and completion state.
+> **Summary:** Continue in the same conversation after a failed or timed-out answer. Messages sent as a file keep that file and its supplied text.
 >
 > **Example:** After an interrupted answer, send another message or attach a file; the next request can proceed through the existing conversation rather than requiring a new workspace.
 >
 > **Topics:** Work control, Integrations, Results, Reliability
 
-- **Benefit:** Recover the conversation: released sessions and expired attempts are reconciled before the next request.
-- **Benefit:** Keep the actual input: declared upload text and file-only provenance survive the handoff.
+- **Benefit:** Pick up where you left off: continue the conversation without creating a new workspace.
+- **Benefit:** Keep what you sent: files and supplied text stay attached to their message.
 
 - **Fixed:** New stateless requests are admitted after released failures. Deadline cleanup reconciles the recorded session and worker so later requests can continue.
 - **Fixed:** File-only provenance, declared upload text and representation metadata remain intact. Native completion applies to every response and continuation, including recovered replies.
 
 ## 2026-10-16 — Choose the conversational path. Reuse the preparation.
 
-> **Summary:** Direct model calls and native harnesses now use the same worker configuration and control contracts. Configured native startup can be reused, and looking up available models does not start a harness.
+> **Summary:** Choose a direct model call or a native worker such as Codex. Both keep your chosen model, account, thinking settings and background. You can also keep supported workers prepared and browse available models without starting one.
 >
 > **Example:** Use a Direct AI for conversation and a native Codex worker for the job. A voice client can stream reply text through the same public conversation interface.
 >
 > **Topics:** Work control, Integrations, Connections, Reliability
 
-- **Benefit:** Choose the path: Direct and native execution retain configured model, effort, account and authorized context.
-- **Benefit:** Avoid repeat preparation: optional warm native capacity reuses supported startup; metadata-only model discovery stays separate from execution.
-- **Benefit:** Keep the result: streamed replies, selected files and generated images retain their native content and media types.
+- **Benefit:** Choose the setup: direct models and native workers retain the AI, account and background you selected.
+- **Benefit:** Reuse preparation: keep supported workers ready for the next job, and inspect available models without launching one.
+- **Benefit:** Keep every part of the answer: replies, selected files and generated images retain their original format.
 
 - **Added:** Direct execution and native workers share the configured worker execution contracts. A standalone LiveKit reference adapter uses the existing conversation interface; it is not a standalone calling service.
 - **Added:** Optional native warm startup reuses supported Codex and Grok preparation through the existing session/runtime owners. Warm capacity does not guarantee a particular reply time.
@@ -158,42 +158,42 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-10-14 — Guide active work and receive the result
 
-> **Summary:** Native steering, questions, permission requests and callbacks stay attached to the work they belong to. The control plane carries the user’s instructions while the native AI keeps its own tools and judgment.
+> **Summary:** Add direction, answer a question or grant a permission while work is underway. Your input reaches the right worker; its result comes back with its files or a clear reason for a failure.
 >
 > **Example:** Add a requirement while a worker is busy. The supported native control carries that guidance to the current job; its answer and files return through the existing result path.
 >
 > **Topics:** Work control, Integrations, Results, Reliability
 
-- **Benefit:** Guide the actual job: input, questions and controls retain the accepted worker and run.
-- **Benefit:** Get a useful outcome: native results and failures keep their evidence instead of becoming empty completions.
+- **Benefit:** Guide the current job: keep new instructions, questions and permission answers with the worker already doing the work.
+- **Benefit:** Know the outcome: get the actual answer and files, or the reason work stopped.
 
 - **Improved:** Native orchestration retains current worker identity through steering, questions, permission input, result callbacks and recovery. Native hooks preserve the existing harness execution path.
 - **Fixed:** Control receipts, callback inputs, uploaded files and terminal completion stay tied to the accepted run. Failures keep their structured reason and existing recovery path.
 
 ## 2026-10-10 — Keep native permissions and voice delivery intact
 
-> **Summary:** Native work starts only with its declared authority, and the conversation adapter preserves the accepted inputs, controls and delivery records used by voice-capable clients.
+> **Summary:** The worker keeps its real tools and the permissions you granted. A voice app sends the request with its files and controls intact; a missing permission produces a clear refusal.
 >
 > **Example:** A voice application sends an authorized request and its files to xPerfect. The selected native worker retains that request’s capabilities, while an unavailable permission is reported as a refusal.
 >
 > **Topics:** Work control, Connections, Integrations, Reliability
 
-- **Benefit:** Preserve native capability: validate authority before session admission rather than replacing the worker’s tools.
-- **Benefit:** Preserve the conversation: request segments, attachment records and supported interjections keep their original ownership.
+- **Benefit:** Keep the worker’s real tools: xPerfect checks permission before starting the job.
+- **Benefit:** Keep messages together: original input, files and updates stay with the same request.
 
 - **Improved:** Native admission retains the selected worker configuration, accepted input segments, attachment ledger and supported interjection controls used by conversation clients.
 - **Fixed:** Declared execution authority is validated before a native session is admitted. Provider progress, result names and completion evidence keep their source ownership.
 
 ## 2026-10-03 — Keep Grok choices and worker results intact
 
-> **Summary:** The native Grok path preserves the selected model and input while worker delivery retains its source files, images and tool evidence.
+> **Summary:** The Grok model you pick is the one that runs, with the input you gave it. Results return with their files and images intact.
 >
 > **Example:** Choose the supported Grok model for a worker and attach the material it needs. xPerfect passes those choices through rather than silently substituting another setup.
 >
 > **Topics:** Connections, Work control, Reliability
 
-- **Benefit:** Respect the chosen AI: keep declared provider, model and native execution authority.
-- **Benefit:** Keep the work usable: carry native text, media and file evidence through the existing delivery path.
+- **Benefit:** Use the AI you selected: the chosen model and account pass through to the worker.
+- **Benefit:** Receive complete work: text, files and images keep the information needed to open and use them.
 
 - **Improved:** Native Grok model selection, account projection and provider input retain their declared configuration and supported controls.
 - **Fixed:** Native worker text, image/file carriers and tool evidence retain the source information needed for faithful delivery and recovery.
@@ -204,7 +204,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Example:** Open the guide in a dark workspace or on a light laptop display without switching to a mismatched documentation theme.
 >
-> **Topics:** Integrations
+> **Topics:** Website
 
 - **Benefit:** Read comfortably: the same guide content adapts to light and dark appearance.
 
