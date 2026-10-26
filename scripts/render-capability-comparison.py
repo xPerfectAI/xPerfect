@@ -84,25 +84,26 @@ def render():
     preview = [p for p in products if p['id'] in ('xperfect','scion','omnigent','paperclip','agno','openhands','pydantic','langgraph','mastra','crewai','codex','claude-code')]
     if len(preview) < 6:
         preview = products[:14]
-    svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="1500" viewBox="0 0 1500 HEIGHT" role="img" aria-labelledby="title desc">', '<title id="title">AI worker landscape: from expertise to useful work</title>', '<desc id="desc">Source-led comparison. Product rows show reusable expertise, goals, parallel work, human control, deployment, files and integration. Open the full accessible chart for all projects and source details.</desc>', '<style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#eeeae4}.muted{fill:#b9bab8}.accent{fill:#d4c2a8}</style>', '<rect width="1500" height="HEIGHT" rx="22" fill="#171a1e"/>', '<text x="36" y="43" font-size="15" letter-spacing="2" class="accent">XPERFECT / THE AI WORKER LANDSCAPE</text>', '<text x="36" y="96" font-size="38" font-weight="700">From expertise to work you can use.</text>', f'<text x="36" y="134" font-size="19" class="muted">{len(products)} products in the full chart · Real capabilities, practical examples · Reviewed {E(data["reviewedOn"])}</text>']
-    widths=[222]+[int(1206/len(cols))]*len(cols)
+    svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="1500" viewBox="0 0 1500 HEIGHT" role="img" aria-labelledby="title desc">', '<title id="title">AI worker landscape: from expertise to useful work</title>', '<desc id="desc">Landscape overview: reusable expertise, job outcomes and where work runs. Open the full accessible chart for all products, seven benefit columns and source details.</desc>', '<style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#eeeae4}.muted{fill:#b9bab8}.accent{fill:#d4c2a8}</style>', '<rect width="1500" height="HEIGHT" rx="22" fill="#171a1e"/>', '<text x="36" y="43" font-size="15" letter-spacing="2" class="accent">XPERFECT / THE AI WORKER LANDSCAPE</text>', '<text x="36" y="96" font-size="38" font-weight="700">From expertise to work you can use.</text>', f'<text x="36" y="134" font-size="19" class="muted">{len(products)} products in the full chart · Real capabilities, practical examples · Reviewed {E(data["reviewedOn"])}</text>']
+    preview_cols=[c for c in cols if c['id'] in ('expertise','outcome','hosting')]
+    widths=[240,420,390,390]
     xs=[30]
     for width in widths: xs.append(xs[-1]+width)
     y=171
-    for i,h in enumerate(['Product', *[c['label'] for c in cols]]):
-        for j,line in enumerate(textwrap.wrap(h, max(12,int(widths[i]/9)))):
-            svg.append(f'<text x="{xs[i]+10}" y="{y+24+j*22}" font-size="17" font-weight="700">{E(line)}</text>')
+    for i,h in enumerate(['Product', *[c['label'] for c in preview_cols]]):
+        for j,line in enumerate(textwrap.wrap(h, max(12,int(widths[i]/14.5)))):
+            svg.append(f'<text x="{xs[i]+10}" y="{y+32+j*32}" font-size="27" font-weight="700">{E(line)}</text>')
     y+=82
     for p in preview:
-        labels=[p['name'], *[p['cells'][c['id']]['label'] for c in cols]]
-        wrapped=[textwrap.wrap(t, max(12,int(w/8.7))) for t,w in zip(labels,widths)]
-        height=max(len(lines) for lines in wrapped)*22+30
+        labels=[p['name'], *[p['cells'][c['id']]['label'] for c in preview_cols]]
+        wrapped=[textwrap.wrap(t, max(12,int(w/14.5))) for t,w in zip(labels,widths)]
+        height=max(len(lines) for lines in wrapped)*32+30
         if p['id']=='xperfect': svg.append(f'<rect x="30" y="{y}" width="1440" height="{height}" rx="8" fill="#34322e"/>')
         for i,lines in enumerate(wrapped):
-            for j,line in enumerate(lines): svg.append(f'<text x="{xs[i]+10}" y="{y+27+j*22}" font-size="17"'+(' font-weight="700" class="accent"' if p['id']=='xperfect' else '')+f'>{E(line)}</text>')
+            for j,line in enumerate(lines): svg.append(f'<text x="{xs[i]+10}" y="{y+34+j*32}" font-size="27"'+(' font-weight="700" class="accent"' if p['id']=='xperfect' else '')+f'>{E(line)}</text>')
         y+=height
         svg.append(f'<path d="M30 {y}H1470" stroke="#373a3e"/>')
-    svg += [f'<text x="40" y="{y+38}" font-size="18" class="accent">Explore every product, concrete examples and primary sources → xperfect.ai/docs/compare.html</text>', '</svg>']
+    svg += [f'<text x="40" y="{y+38}" font-size="22" class="accent">Explore every product, concrete examples and primary sources → xperfect.ai/docs/compare.html</text>', '</svg>']
     svg_text='\n'.join(svg).replace('HEIGHT',str(y+70))+'\n'
     guide=ROOT/'docs/user-guide/index.html'
     current=guide.read_text()
