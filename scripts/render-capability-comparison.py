@@ -66,11 +66,15 @@ def render():
     svg_text = '\n'.join(svg).replace('HEIGHT', str(y + 100)) + '\n'
     guide = ROOT / 'docs/user-guide/index.html'
     current = guide.read_text()
+    references = re.findall(r'^\d+\. \[([^\]]+)\]\((https://[^)]+)\)\.', source, re.M)
+    if len(references) != 8:
+        raise ValueError('Expected the eight source-owned native references')
+    legend = '<p class="comparison-caption">Numbers in the native column refer to the official sources below.</p><details><summary>Sources for this comparison</summary><ol>' + ''.join('<li><a href="'+html.escape(url, quote=True)+'">'+html.escape(label)+'</a></li>' for label,url in references) + '</ol></details>'
     block = '''<!-- comparison:generated:start -->
-<section id="compare"><div class="section-label">07 / COMPARE THE LAYERS</div>
+<section id="compare"><div class="section-label">07 / COMPARE NATIVE TOOLS</div>
 <h2>See what adding xPerfect changes.</h2>
 <p>Keep your native tools. Add one place for workers, knowledge, controls and results. Each row compares what you gain and today’s limits.</p>
-''' + '<p class="comparison-hint">On a small screen, scroll across the table to see all four columns.</p>' + '\n'.join(table) + '''
+''' + '<p class="comparison-hint">On a small screen, scroll across the table to see all four columns.</p>' + '\n'.join(table) + legend + '''
 <p class="comparison-caption">The five professional starters use host Claude Code. Native tool, account, deployment and real capacity determine availability. Shared workspaces need a configured Linux host; copies do not copy credentials or native chat history. Webhook acceptance is separate from completed work; spending policies govern new admissions. Local storage does not mean local-only inference.</p>
 <p><a class="quiet" href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md#what-xperfect-adds">Full boundaries and official native-tool sources →</a></p></section>
 <!-- comparison:generated:end -->'''

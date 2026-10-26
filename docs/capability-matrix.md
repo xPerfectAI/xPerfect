@@ -163,7 +163,7 @@ business rules and output channels through API/MCP.
 | --- | --- | --- | --- |
 | **Wake your application** | Claude's native scheduling runs its configured task/session [8]. | Send a signed scheduled webhook, inspect history and retry eligible delivery without AI. | A receiver is required. HTTP acceptance is not its completed business action. |
 | **One API and MCP surface** | Each native tool has its own client and connection setup [1–3]. | Use the same worker, file, status and control records from UI, HTTP or MCP. | Host stdio and authenticated HTTP use their own setup; supported routes remain explicit. |
-| **Workers working together** | Claude subagents have scoped tools and separate contexts [4]. | Grant discovery and communication between exact authorized workers. | Same ownership or shared files alone grant no peer access or merged history. |
+| **Workers working together** | Claude subagents have scoped tools and separate contexts [4]. | Grant discovery and communication between exact authorized workers. | Same ownership or shared files alone grant no peer access or merged history. Requires the deployment’s secure connection support. |
 
 ### Keep control
 

@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" viewBox="0 0 1300 2275" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" viewBox="0 0 1300 2329" role="img" aria-labelledby="title desc">
 <title id="title">What xPerfect adds: 14 practical capabilities</title>
 <desc id="desc">Native tools alone compared with adding xPerfect, with today’s limits. The complete accessible table and limits are in the capability guide.</desc>
 <style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#edf0f1}.small{fill:#b9bfc8}.heading{fill:#ddc5a3;font-weight:700}</style>
-<rect width="1300" height="2275" rx="22" fill="#12151a"/>
+<rect width="1300" height="2329" rx="22" fill="#12151a"/>
 <text x="42" y="52" font-size="16" class="heading" letter-spacing="2">XPERFECT AI / CAPABILITY COMPARISON</text>
 <text x="42" y="106" font-size="39" font-weight="700">What changes with xPerfect?</text>
 <text x="42" y="145" font-size="19" class="small">14 useful capabilities · Native tools alone / With xPerfect / Today’s limit</text>
@@ -144,7 +144,7 @@
 <text x="957" y="1582" font-size="20">supported routes remain</text>
 <text x="957" y="1609" font-size="20">explicit.</text>
 <path d="M30 1640H1270" stroke="#343941"/>
-<rect x="580" y="1640" width="365" height="115" fill="#23272e"/>
+<rect x="580" y="1640" width="365" height="169" fill="#23272e"/>
 <text x="42" y="1670" font-size="20" font-weight="650">Workers working</text>
 <text x="42" y="1697" font-size="20" font-weight="650">together</text>
 <text x="292" y="1670" font-size="20">Claude subagents have</text>
@@ -156,50 +156,52 @@
 <text x="957" y="1670" font-size="20">Same ownership or shared</text>
 <text x="957" y="1697" font-size="20">files alone grant no peer</text>
 <text x="957" y="1724" font-size="20">access or merged history.</text>
-<path d="M30 1755H1270" stroke="#343941"/>
-<rect x="30" y="1755" width="1240" height="48" rx="8" fill="#292d34"/>
-<text x="45" y="1786" font-size="22" class="heading">04 / Keep control</text>
-<rect x="580" y="1803" width="365" height="115" fill="#23272e"/>
-<text x="42" y="1833" font-size="20" font-weight="650">Pause new work and</text>
-<text x="42" y="1860" font-size="20" font-weight="650">track usage</text>
-<text x="292" y="1833" font-size="20">A shared multi-harness</text>
-<text x="292" y="1860" font-size="20">admission policy was not</text>
-<text x="292" y="1887" font-size="20">assessed.</text>
-<text x="592" y="1833" font-size="20" font-weight="650">Use account/project holds,</text>
-<text x="592" y="1860" font-size="20" font-weight="650">reported usage and optional</text>
-<text x="592" y="1887" font-size="20" font-weight="650">spending admission rules.</text>
-<text x="957" y="1833" font-size="20">Unknown cost stays unknown;</text>
-<text x="957" y="1860" font-size="20">these rules do not cap the</text>
-<text x="957" y="1887" font-size="20">provider&#x27;s final bill.</text>
-<path d="M30 1918H1270" stroke="#343941"/>
-<rect x="580" y="1918" width="365" height="115" fill="#23272e"/>
-<text x="42" y="1948" font-size="20" font-weight="650">Run on your</text>
-<text x="42" y="1975" font-size="20" font-weight="650">infrastructure</text>
-<text x="292" y="1948" font-size="20">Codex CLI and Claude Code</text>
-<text x="292" y="1975" font-size="20">can run on a local host</text>
-<text x="292" y="2002" font-size="20">[1,2].</text>
-<text x="592" y="1948" font-size="20" font-weight="650">Run xPerfect on your host or a</text>
-<text x="592" y="1975" font-size="20" font-weight="650">matched Linux Arm64/AMD64</text>
-<text x="592" y="2002" font-size="20" font-weight="650">package; configure team storage.</text>
-<text x="957" y="1948" font-size="20">Hosted identity/storage need</text>
-<text x="957" y="1975" font-size="20">setup. Connected providers</text>
-<text x="957" y="2002" font-size="20">can receive task content.</text>
-<path d="M30 2033H1270" stroke="#343941"/>
-<rect x="580" y="2033" width="365" height="142" fill="#23272e"/>
-<text x="42" y="2063" font-size="20" font-weight="650">Upgrade and recover</text>
-<text x="42" y="2090" font-size="20" font-weight="650">saved work</text>
-<text x="292" y="2063" font-size="20">Native tools own their</text>
-<text x="292" y="2090" font-size="20">session behavior; cross-</text>
-<text x="292" y="2117" font-size="20">tool recovery was not</text>
-<text x="292" y="2144" font-size="20">assessed.</text>
-<text x="592" y="2063" font-size="20" font-weight="650">Keep durable records and use</text>
-<text x="592" y="2090" font-size="20" font-weight="650">guarded package upgrade, commit</text>
-<text x="592" y="2117" font-size="20" font-weight="650">and rollback.</text>
-<text x="957" y="2063" font-size="20">Active work can block</text>
-<text x="957" y="2090" font-size="20">upgrade. Saved records do not</text>
-<text x="957" y="2117" font-size="20">promise arbitrary native</text>
-<text x="957" y="2144" font-size="20">auto-resume.</text>
-<path d="M30 2175H1270" stroke="#343941"/>
-<text x="42" y="2217" font-size="18" class="small">Supported routes, permissions and capacity apply. See the capability guide for full limits and sources.</text>
-<text x="42" y="2248" font-size="17" class="small">Source: docs/capability-matrix.md · Reviewed 25 October 2026 · No latency or universal-provider claim.</text>
+<text x="957" y="1751" font-size="20">Requires the deployment’s</text>
+<text x="957" y="1778" font-size="20">secure connection support.</text>
+<path d="M30 1809H1270" stroke="#343941"/>
+<rect x="30" y="1809" width="1240" height="48" rx="8" fill="#292d34"/>
+<text x="45" y="1840" font-size="22" class="heading">04 / Keep control</text>
+<rect x="580" y="1857" width="365" height="115" fill="#23272e"/>
+<text x="42" y="1887" font-size="20" font-weight="650">Pause new work and</text>
+<text x="42" y="1914" font-size="20" font-weight="650">track usage</text>
+<text x="292" y="1887" font-size="20">A shared multi-harness</text>
+<text x="292" y="1914" font-size="20">admission policy was not</text>
+<text x="292" y="1941" font-size="20">assessed.</text>
+<text x="592" y="1887" font-size="20" font-weight="650">Use account/project holds,</text>
+<text x="592" y="1914" font-size="20" font-weight="650">reported usage and optional</text>
+<text x="592" y="1941" font-size="20" font-weight="650">spending admission rules.</text>
+<text x="957" y="1887" font-size="20">Unknown cost stays unknown;</text>
+<text x="957" y="1914" font-size="20">these rules do not cap the</text>
+<text x="957" y="1941" font-size="20">provider&#x27;s final bill.</text>
+<path d="M30 1972H1270" stroke="#343941"/>
+<rect x="580" y="1972" width="365" height="115" fill="#23272e"/>
+<text x="42" y="2002" font-size="20" font-weight="650">Run on your</text>
+<text x="42" y="2029" font-size="20" font-weight="650">infrastructure</text>
+<text x="292" y="2002" font-size="20">Codex CLI and Claude Code</text>
+<text x="292" y="2029" font-size="20">can run on a local host</text>
+<text x="292" y="2056" font-size="20">[1,2].</text>
+<text x="592" y="2002" font-size="20" font-weight="650">Run xPerfect on your host or a</text>
+<text x="592" y="2029" font-size="20" font-weight="650">matched Linux Arm64/AMD64</text>
+<text x="592" y="2056" font-size="20" font-weight="650">package; configure team storage.</text>
+<text x="957" y="2002" font-size="20">Hosted identity/storage need</text>
+<text x="957" y="2029" font-size="20">setup. Connected providers</text>
+<text x="957" y="2056" font-size="20">can receive task content.</text>
+<path d="M30 2087H1270" stroke="#343941"/>
+<rect x="580" y="2087" width="365" height="142" fill="#23272e"/>
+<text x="42" y="2117" font-size="20" font-weight="650">Upgrade and recover</text>
+<text x="42" y="2144" font-size="20" font-weight="650">saved work</text>
+<text x="292" y="2117" font-size="20">Native tools own their</text>
+<text x="292" y="2144" font-size="20">session behavior; cross-</text>
+<text x="292" y="2171" font-size="20">tool recovery was not</text>
+<text x="292" y="2198" font-size="20">assessed.</text>
+<text x="592" y="2117" font-size="20" font-weight="650">Keep durable records and use</text>
+<text x="592" y="2144" font-size="20" font-weight="650">guarded package upgrade, commit</text>
+<text x="592" y="2171" font-size="20" font-weight="650">and rollback.</text>
+<text x="957" y="2117" font-size="20">Active work can block</text>
+<text x="957" y="2144" font-size="20">upgrade. Saved records do not</text>
+<text x="957" y="2171" font-size="20">promise arbitrary native</text>
+<text x="957" y="2198" font-size="20">auto-resume.</text>
+<path d="M30 2229H1270" stroke="#343941"/>
+<text x="42" y="2271" font-size="18" class="small">Supported routes, permissions and capacity apply. See the capability guide for full limits and sources.</text>
+<text x="42" y="2302" font-size="17" class="small">Source: docs/capability-matrix.md · Reviewed 25 October 2026 · No latency or universal-provider claim.</text>
 </svg>

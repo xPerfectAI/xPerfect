@@ -1,9 +1,9 @@
-# xPerfect
-
+<h1>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/xperfect-logo-light.svg">
   <img src="docs/assets/xperfect-logo-dark.svg" alt="xPerfect AI" width="310">
 </picture>
+</h1>
 
 **Build an AI team that knows your work.**
 
@@ -13,7 +13,7 @@ and Grok, keeping each worker's files, progress and results together on your com
 
 [**Start locally**](#start-locally) · [Visual guide](https://www.xperfect.ai/docs/) ·
 [Try a complete example](docs/workshop.md) · [API and MCP](docs/developer.md) ·
-[Compare the layers](docs/capability-matrix.md#what-xperfect-adds) · [Webhooks](runtime_phase1/README.md#generic-worker-and-webhook-schedules)
+[Compare native tools](docs/capability-matrix.md#what-xperfect-adds) · [Webhooks](runtime_phase1/README.md#generic-worker-and-webhook-schedules)
 
 Our vision: turn experts' knowledge and skills into reusable AI counterparts that can work
 across your channels and tools. The starting team below is one way to begin; you can create,

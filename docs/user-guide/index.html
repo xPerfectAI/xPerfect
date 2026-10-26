@@ -29,7 +29,7 @@
 <span>05</span>Schedule work</a>
 <a href="#reuse">
 <span>06</span>Reuse your expert</a>
-<a href="#compare"><span>07</span>Compare the layers</a>
+<a href="#compare"><span>07</span>Compare native tools</a>
 <a class="secondary" href="#proof">Current evidence</a>
 <a href="#help">Troubleshooting</a>
 </nav>
@@ -55,7 +55,7 @@
 <a href="#teach">04 · Files & skills</a>
 <a href="#schedule">05 · Schedule work</a>
 <a href="#reuse">06 · Reuse your expert</a>
-<a href="#compare">07 · Compare the layers</a>
+<a href="#compare">07 · Compare native tools</a>
 <a href="#proof">Current limits</a>
 <a href="#help">Troubleshooting</a>
 </nav>
@@ -186,7 +186,7 @@
 <div class="note"><b>Received by the app</b> means the receiver acknowledged the request. It does not mean the app finished its job. Keep xPerfect running; an unavailable receiver or busy AI account has its own recovery state.</div>
 <p><a class="quiet" href="https://github.com/xPerfectAI/xPerfect/tree/main/runtime_phase1#generic-worker-and-webhook-schedules">Webhook setup, common examples, API/MCP requests and delivery recovery →</a></p>
 <details><summary>What could I schedule?</summary><p>Have a Finance Director prepare a weekly review; ask a scientist to check new assay exports; draft a campaign update; send a Slack reminder; start an existing n8n or Make workflow; refresh your own dashboard; or wake your assistant to deliver through its own channels. Third-party recipes require their receiving URL, payload and permissions; they are not preconnected integrations.</p></details>
-<div id="schedule-proof" class="note">Recorded proof covers real due worker jobs, signed webhook acceptance and rejection, retained retries and reload. Follow the exact route and current limits in the capability guide; a saved schedule alone is not a completed job.</div>
+<div id="schedule-proof" class="note">Recorded proof covers real due one-time worker jobs, signed webhook acceptance and rejection, retained retries and reload. Follow the exact route and current limits in the capability guide; a saved schedule alone is not a completed job.</div>
 </section>
 <section id="reuse">
 <div class="section-label">06 / REUSE & SHARE THE INTERFACE</div>
@@ -238,7 +238,7 @@ A saved expert launch (<code>favorite=true</code>) works from a plain connected 
 </details>
 </section>
 <!-- comparison:generated:start -->
-<section id="compare"><div class="section-label">07 / COMPARE THE LAYERS</div>
+<section id="compare"><div class="section-label">07 / COMPARE NATIVE TOOLS</div>
 <h2>See what adding xPerfect changes.</h2>
 <p>Keep your native tools. Add one place for workers, knowledge, controls and results. Each row compares what you gain and today’s limits.</p>
 <p class="comparison-hint">On a small screen, scroll across the table to see all four columns.</p><div class="comparison-scroll" tabindex="0" role="region" aria-label="14 capabilities compared; scroll horizontally on small screens"><table class="comparison"><caption class="comparison-caption">Fourteen practical outcomes: the native baseline, the added control plane and the limits.</caption><thead><tr>
@@ -260,12 +260,12 @@ A saved expert launch (<code>favorite=true</code>) works from a plain connected 
 <tr class="group"><th colspan="4">Connect and collaborate</th></tr>
 <tr><th scope="row">Wake your application</th><td>Claude&#x27;s native scheduling runs its configured task/session [8].</td><td>Send a signed scheduled webhook, inspect history and retry eligible delivery without AI.</td><td>A receiver is required. HTTP acceptance is not its completed business action.</td></tr>
 <tr><th scope="row">One API and MCP surface</th><td>Each native tool has its own client and connection setup [1–3].</td><td>Use the same worker, file, status and control records from UI, HTTP or MCP.</td><td>Host stdio and authenticated HTTP use their own setup; supported routes remain explicit.</td></tr>
-<tr><th scope="row">Workers working together</th><td>Claude subagents have scoped tools and separate contexts [4].</td><td>Grant discovery and communication between exact authorized workers.</td><td>Same ownership or shared files alone grant no peer access or merged history.</td></tr>
+<tr><th scope="row">Workers working together</th><td>Claude subagents have scoped tools and separate contexts [4].</td><td>Grant discovery and communication between exact authorized workers.</td><td>Same ownership or shared files alone grant no peer access or merged history. Requires the deployment’s secure connection support.</td></tr>
 <tr class="group"><th colspan="4">Keep control</th></tr>
 <tr><th scope="row">Pause new work and track usage</th><td>A shared multi-harness admission policy was not assessed.</td><td>Use account/project holds, reported usage and optional spending admission rules.</td><td>Unknown cost stays unknown; these rules do not cap the provider&#x27;s final bill.</td></tr>
 <tr><th scope="row">Run on your infrastructure</th><td>Codex CLI and Claude Code can run on a local host [1,2].</td><td>Run xPerfect on your host or a matched Linux Arm64/AMD64 package; configure team storage.</td><td>Hosted identity/storage need setup. Connected providers can receive task content.</td></tr>
 <tr><th scope="row">Upgrade and recover saved work</th><td>Native tools own their session behavior; cross-tool recovery was not assessed.</td><td>Keep durable records and use guarded package upgrade, commit and rollback.</td><td>Active work can block upgrade. Saved records do not promise arbitrary native auto-resume.</td></tr>
-</tbody></table></div>
+</tbody></table></div><p class="comparison-caption">Numbers in the native column refer to the official sources below.</p><details><summary>Sources for this comparison</summary><ol><li><a href="https://code.claude.com/docs/en/overview">Claude Code overview</a></li><li><a href="https://github.com/openai/codex">Codex public source and clients</a></li><li><a href="https://github.com/xai-org/grok-build">Grok Build native harness</a></li><li><a href="https://code.claude.com/docs/en/sub-agents">Claude custom subagents and background work</a></li><li><a href="https://code.claude.com/docs/en/skills">Claude Skills</a></li><li><a href="https://learn.chatgpt.com/docs/environments/git-worktrees">Codex worktrees</a></li><li><a href="https://code.claude.com/docs/en/remote-control">Claude Remote Control</a></li><li><a href="https://code.claude.com/docs/en/scheduled-tasks">Claude scheduling options</a></li></ol></details>
 <p class="comparison-caption">The five professional starters use host Claude Code. Native tool, account, deployment and real capacity determine availability. Shared workspaces need a configured Linux host; copies do not copy credentials or native chat history. Webhook acceptance is separate from completed work; spending policies govern new admissions. Local storage does not mean local-only inference.</p>
 <p><a class="quiet" href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md#what-xperfect-adds">Full boundaries and official native-tool sources →</a></p></section>
 <!-- comparison:generated:end -->
@@ -278,7 +278,7 @@ A saved expert launch (<code>favorite=true</code>) works from a plain connected 
 <tr><td>Choose a professional</td><td>Five ordinary starters include public synthetic work, knowledge and abilities. Native Claude host demonstrations produced readable reports and editable calculations; their declared compatibility is not all-harness certification.</td></tr>
 <tr><td>Reuse a saved expert</td><td>The coordinator reused the exact saved Finance worker beside a new worker. Native session, account, history and old reports stayed intact; both new files downloaded and remained after reload.</td></tr>
 <tr><td>Do parallel work</td><td>The configured Direct coordinator accepted four jobs, replied early and combined four completed results. Two native children overlapped within real account/capacity limits. Manual host jobs still use their shared safety lock.</td></tr>
-<tr><td>Open results</td><td>Watch and Chat delivered exact authorized files. A saved native Queen reply reopened its current workspace file after upgrade without rerunning the model. Current workspace bytes and captured immutable results remain distinct.</td></tr>
+<tr><td>Open results</td><td>Watch and Chat delivered exact authorized files. A saved native coordinator reply reopened its current workspace file after upgrade without rerunning the model. Current workspace bytes and captured immutable results remain distinct.</td></tr>
 <tr><td>API and MCP</td><td>Fresh Codex/Claude clients executed their actual copied setup, discovered work and used the same records. HTTP/MCP create, copy, status, guidance, Library, results and refusal paths have scoped proof; native account sign-in is a separate connection.</td></tr>
 <tr><td>Native models</td><td>Actual Codex GPT6.1 Sol, Claude Opus5.5 and Grok4.7 native work is recorded, including real permission recovery and file delivery. Exact supported selections remain explicit. A native result does not establish Direct Grok API Chat or every API-key route.</td></tr>
 <tr><td>Schedules and recovery</td><td>Real due work and signed webhook delivery retain separate evidence. Repeated held-run retries now wait without executing the held child; unrelated work can continue. Stop/Close and restart preserve their exact recorded state rather than claiming unfinished work succeeded.</td></tr>
