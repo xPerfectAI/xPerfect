@@ -118,3 +118,13 @@ let them choose methods. Intervene for a demonstrated defect, drift or stall, no
 
 The shared outcome metric is **quality + performance**: intelligence, relevance, usefulness and
 alignment together with speed, smoothness and reliability. Neither side can replace the other.
+
+## Public communication
+
+Show the user’s job, useful result and benefit before implementation detail. Use concrete
+examples and current product images; assume no prior project knowledge. Keep detailed release
+notes accessible without turning the main story into a technical transcript. A comparison leads
+with meaningful capabilities, the real mechanism and reusable expertise. Configuration is not a
+partial feature. Keep qualifications beside the affected claim or in the operating guide, not
+as the organizing theme of every marketing surface. Cite current primary sources and never
+invent an exclusive advantage or an absent competitor feature.

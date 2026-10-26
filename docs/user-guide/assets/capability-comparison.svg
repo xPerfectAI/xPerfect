@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" viewBox="0 0 1500 1211" role="img" aria-labelledby="title desc">
+<title id="title">AI worker landscape: from expertise to useful work</title>
+<desc id="desc">Source-led comparison. Product rows show reusable expertise, goals, parallel work, human control, deployment, files and integration. Open the full accessible chart for all projects and source details.</desc>
+<style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#eeeae4}.muted{fill:#b9bab8}.accent{fill:#d4c2a8}</style>
+<rect width="1500" height="1211" rx="22" fill="#171a1e"/>
+<text x="36" y="43" font-size="15" letter-spacing="2" class="accent">XPERFECT / THE AI WORKER LANDSCAPE</text>
+<text x="36" y="96" font-size="38" font-weight="700">From expertise to work you can use.</text>
+<text x="36" y="134" font-size="19" class="muted">36 products in the full chart · Real capabilities, practical examples · Reviewed 2026-10-26</text>
+<text x="40" y="195" font-size="17" font-weight="700">Product</text>
+<text x="262" y="195" font-size="17" font-weight="700">Reuse expertise</text>
+<text x="434" y="195" font-size="17" font-weight="700">Set the job &amp;</text>
+<text x="434" y="217" font-size="17" font-weight="700">outcome</text>
+<text x="606" y="195" font-size="17" font-weight="700">Work with</text>
+<text x="606" y="217" font-size="17" font-weight="700">specialists</text>
+<text x="778" y="195" font-size="17" font-weight="700">Watch and steer</text>
+<text x="950" y="195" font-size="17" font-weight="700">Choose where it</text>
+<text x="950" y="217" font-size="17" font-weight="700">runs</text>
+<text x="1122" y="195" font-size="17" font-weight="700">Keep useful results</text>
+<text x="1294" y="195" font-size="17" font-weight="700">Connect and repeat</text>
+<rect x="30" y="253" width="1440" height="74" rx="8" fill="#34322e"/>
+<text x="40" y="280" font-size="17" font-weight="700" class="accent">xPerfect</text>
+<text x="262" y="280" font-size="17" font-weight="700" class="accent">Saved experts +</text>
+<text x="262" y="302" font-size="17" font-weight="700" class="accent">Library</text>
+<text x="434" y="280" font-size="17" font-weight="700" class="accent">Job + success</text>
+<text x="434" y="302" font-size="17" font-weight="700" class="accent">criteria</text>
+<text x="606" y="280" font-size="17" font-weight="700" class="accent">Parallel + shared</text>
+<text x="606" y="302" font-size="17" font-weight="700" class="accent">workers</text>
+<text x="778" y="280" font-size="17" font-weight="700" class="accent">Watch + steer</text>
+<text x="950" y="280" font-size="17" font-weight="700" class="accent">Your computer or</text>
+<text x="950" y="302" font-size="17" font-weight="700" class="accent">server</text>
+<text x="1122" y="280" font-size="17" font-weight="700" class="accent">Reports + saved</text>
+<text x="1122" y="302" font-size="17" font-weight="700" class="accent">files</text>
+<text x="1294" y="280" font-size="17" font-weight="700" class="accent">API, MCP +</text>
+<text x="1294" y="302" font-size="17" font-weight="700" class="accent">scheduled webhooks</text>
+<path d="M30 327H1470" stroke="#373a3e"/>
+<text x="40" y="354" font-size="17">Scion</text>
+<text x="262" y="354" font-size="17">Templates + Skill</text>
+<text x="262" y="376" font-size="17">Bank</text>
+<text x="434" y="354" font-size="17">Tasks + role</text>
+<text x="434" y="376" font-size="17">instructions</text>
+<text x="606" y="354" font-size="17">Parallel agents</text>
+<text x="778" y="354" font-size="17">Dashboard +</text>
+<text x="778" y="376" font-size="17">terminal</text>
+<text x="950" y="354" font-size="17">Local or hosted</text>
+<text x="950" y="376" font-size="17">brokers</text>
+<text x="1122" y="354" font-size="17">Agent workspaces</text>
+<text x="1294" y="354" font-size="17">API + schedules</text>
+<path d="M30 401H1470" stroke="#373a3e"/>
+<text x="40" y="428" font-size="17">Omnigent</text>
+<text x="262" y="428" font-size="17">Specialist</text>
+<text x="262" y="450" font-size="17">configuration files</text>
+<text x="434" y="428" font-size="17">Session task +</text>
+<text x="434" y="450" font-size="17">policies</text>
+<text x="606" y="428" font-size="17">Mixed-harness</text>
+<text x="606" y="450" font-size="17">specialists</text>
+<text x="778" y="428" font-size="17">Shared live</text>
+<text x="778" y="450" font-size="17">sessions</text>
+<text x="950" y="428" font-size="17">Local or cloud</text>
+<text x="950" y="450" font-size="17">sandboxes</text>
+<text x="1122" y="428" font-size="17">Synchronized files</text>
+<text x="1294" y="428" font-size="17">Functions + MCP</text>
+<path d="M30 475H1470" stroke="#373a3e"/>
+<text x="40" y="502" font-size="17">Paperclip</text>
+<text x="262" y="502" font-size="17">Agents + company</text>
+<text x="262" y="524" font-size="17">templates</text>
+<text x="434" y="502" font-size="17">Goals → projects →</text>
+<text x="434" y="524" font-size="17">tasks</text>
+<text x="606" y="502" font-size="17">Org chart +</text>
+<text x="606" y="524" font-size="17">delegation</text>
+<text x="778" y="502" font-size="17">Dashboard +</text>
+<text x="778" y="524" font-size="17">approvals</text>
+<text x="950" y="502" font-size="17">Self-hosted server</text>
+<text x="1122" y="502" font-size="17">Tasks + documents</text>
+<text x="1294" y="502" font-size="17">Adapters + gateways</text>
+<path d="M30 549H1470" stroke="#373a3e"/>
+<text x="40" y="576" font-size="17">Agno + AgentOS</text>
+<text x="262" y="576" font-size="17">Agents + knowledge</text>
+<text x="262" y="598" font-size="17">+ tools</text>
+<text x="434" y="576" font-size="17">Agent or workflow</text>
+<text x="434" y="598" font-size="17">request</text>
+<text x="606" y="576" font-size="17">Teams + workflows</text>
+<text x="778" y="576" font-size="17">Control Plane +</text>
+<text x="778" y="598" font-size="17">streams</text>
+<text x="950" y="576" font-size="17">Self-hosted AgentOS</text>
+<text x="1122" y="576" font-size="17">Sessions +</text>
+<text x="1122" y="598" font-size="17">responses</text>
+<text x="1294" y="576" font-size="17">API + MCP +</text>
+<text x="1294" y="598" font-size="17">schedules</text>
+<path d="M30 623H1470" stroke="#373a3e"/>
+<text x="40" y="650" font-size="17">OpenHands Agent Canvas +</text>
+<text x="40" y="672" font-size="17">SDK</text>
+<text x="262" y="650" font-size="17">Agent</text>
+<text x="262" y="672" font-size="17">configurations</text>
+<text x="434" y="650" font-size="17">Conversation task</text>
+<text x="606" y="650" font-size="17">Multiple</text>
+<text x="606" y="672" font-size="17">conversations</text>
+<text x="778" y="650" font-size="17">Canvas + terminals</text>
+<text x="950" y="650" font-size="17">Local or cloud</text>
+<text x="950" y="672" font-size="17">runtime</text>
+<text x="1122" y="650" font-size="17">Working files</text>
+<text x="1294" y="650" font-size="17">SDK + automation</text>
+<text x="1294" y="672" font-size="17">services</text>
+<path d="M30 697H1470" stroke="#373a3e"/>
+<text x="40" y="724" font-size="17">Pydantic AI + Harness</text>
+<text x="262" y="724" font-size="17">Reusable agent</text>
+<text x="262" y="746" font-size="17">blueprints</text>
+<text x="434" y="724" font-size="17">Instructions +</text>
+<text x="434" y="746" font-size="17">typed output</text>
+<text x="606" y="724" font-size="17">Subagents +</text>
+<text x="606" y="746" font-size="17">workflows</text>
+<text x="778" y="724" font-size="17">Persistence +</text>
+<text x="778" y="746" font-size="17">durable engines</text>
+<text x="950" y="724" font-size="17">Your application</text>
+<text x="950" y="746" font-size="17">runtime</text>
+<text x="1122" y="724" font-size="17">Workspaces + typed</text>
+<text x="1122" y="746" font-size="17">results</text>
+<text x="1294" y="724" font-size="17">Tools + MCP +</text>
+<text x="1294" y="746" font-size="17">interfaces</text>
+<path d="M30 771H1470" stroke="#373a3e"/>
+<text x="40" y="798" font-size="17">LangGraph + LangSmith</text>
+<text x="40" y="820" font-size="17">Deployment</text>
+<text x="262" y="798" font-size="17">Graphs + assistants</text>
+<text x="434" y="798" font-size="17">Graph state +</text>
+<text x="434" y="820" font-size="17">outputs</text>
+<text x="606" y="798" font-size="17">Multi-agent graphs</text>
+<text x="778" y="798" font-size="17">Checkpoints +</text>
+<text x="778" y="820" font-size="17">interrupts</text>
+<text x="950" y="798" font-size="17">Cloud, hybrid or</text>
+<text x="950" y="820" font-size="17">self-hosted</text>
+<text x="1122" y="798" font-size="17">State + run outputs</text>
+<text x="1294" y="798" font-size="17">APIs + MCP + cron</text>
+<path d="M30 845H1470" stroke="#373a3e"/>
+<text x="40" y="872" font-size="17">CrewAI + AMP</text>
+<text x="262" y="872" font-size="17">Roles +</text>
+<text x="262" y="894" font-size="17">capabilities</text>
+<text x="434" y="872" font-size="17">Tasks + expected</text>
+<text x="434" y="894" font-size="17">outputs</text>
+<text x="606" y="872" font-size="17">Crews + flows</text>
+<text x="778" y="872" font-size="17">Persisted flows +</text>
+<text x="778" y="894" font-size="17">AMP</text>
+<text x="950" y="872" font-size="17">Framework or</text>
+<text x="950" y="894" font-size="17">platform</text>
+<text x="1122" y="872" font-size="17">Task and flow</text>
+<text x="1122" y="894" font-size="17">results</text>
+<text x="1294" y="872" font-size="17">Tools + app</text>
+<text x="1294" y="894" font-size="17">triggers</text>
+<path d="M30 919H1470" stroke="#373a3e"/>
+<text x="40" y="946" font-size="17">Mastra</text>
+<text x="262" y="946" font-size="17">Agents + skills +</text>
+<text x="262" y="968" font-size="17">memory</text>
+<text x="434" y="946" font-size="17">Goals + evaluation</text>
+<text x="606" y="946" font-size="17">Subagents +</text>
+<text x="606" y="968" font-size="17">background work</text>
+<text x="778" y="946" font-size="17">Controller +</text>
+<text x="778" y="968" font-size="17">signals</text>
+<text x="950" y="946" font-size="17">Your app or</text>
+<text x="950" y="968" font-size="17">platform</text>
+<text x="1122" y="946" font-size="17">Workspace + results</text>
+<text x="1294" y="946" font-size="17">Tools + schedules +</text>
+<text x="1294" y="968" font-size="17">events</text>
+<path d="M30 993H1470" stroke="#373a3e"/>
+<text x="40" y="1020" font-size="17">Codex + App Server</text>
+<text x="262" y="1020" font-size="17">Skills +</text>
+<text x="262" y="1042" font-size="17">instructions</text>
+<text x="434" y="1020" font-size="17">Task + context</text>
+<text x="606" y="1020" font-size="17">Threads +</text>
+<text x="606" y="1042" font-size="17">delegation</text>
+<text x="778" y="1020" font-size="17">Events + steer +</text>
+<text x="778" y="1042" font-size="17">approvals</text>
+<text x="950" y="1020" font-size="17">Local harness</text>
+<text x="950" y="1042" font-size="17">integration</text>
+<text x="1122" y="1020" font-size="17">Files + structured</text>
+<text x="1122" y="1042" font-size="17">results</text>
+<text x="1294" y="1020" font-size="17">App Server + SDK +</text>
+<text x="1294" y="1042" font-size="17">MCP</text>
+<path d="M30 1067H1470" stroke="#373a3e"/>
+<text x="40" y="1094" font-size="17">Claude Code</text>
+<text x="262" y="1094" font-size="17">Skills + plugins +</text>
+<text x="262" y="1116" font-size="17">memory</text>
+<text x="434" y="1094" font-size="17">Task + project</text>
+<text x="434" y="1116" font-size="17">context</text>
+<text x="606" y="1094" font-size="17">Subagents</text>
+<text x="778" y="1094" font-size="17">Interactive</text>
+<text x="778" y="1116" font-size="17">sessions</text>
+<text x="950" y="1094" font-size="17">Local and remote</text>
+<text x="950" y="1116" font-size="17">surfaces</text>
+<text x="1122" y="1094" font-size="17">Files + commands</text>
+<text x="1294" y="1094" font-size="17">MCP + integrations</text>
+<path d="M30 1141H1470" stroke="#373a3e"/>
+<text x="40" y="1179" font-size="18" class="accent">Explore every product, concrete examples and primary sources → xperfect.ai/docs/compare.html</text>
+</svg>

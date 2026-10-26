@@ -1,99 +1,122 @@
 #!/usr/bin/env python3
-"""Render the public comparison from its single Markdown owner. No dependencies."""
+"""Generate the public landscape from docs/comparison.json. Standard library only."""
 from pathlib import Path
 import argparse
 import html
+import json
 import re
 import textwrap
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
+E = html.escape
+
+
+def load_data():
+    data = json.loads((ROOT / "docs/comparison.json").read_text())
+    columns, products = data["columns"], data["products"]
+    if not 5 <= len(columns) <= 7 or not 12 <= len(products) <= 45:
+        raise ValueError("Use a readable benefit matrix with the complete landscape")
+    ids = [c["id"] for c in columns]
+    if len(ids) != len(set(ids)) or products[0]["id"] != "xperfect":
+        raise ValueError("Unique columns and xPerfect first are required")
+    groups = {g["id"] for g in data["groups"]}
+    if len({p["id"] for p in products}) != len(products):
+        raise ValueError("Duplicate product")
+    for p in products:
+        if p["group"] not in groups or set(p["cells"]) != set(ids) or not p["sources"]:
+            raise ValueError("Each product needs a group, complete mechanisms and primary sources")
+        for url in [p["url"], *[s["url"] for s in p["sources"]]]:
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username:
+                raise ValueError("Use public HTTPS sources")
+        for cell in p["cells"].values():
+            if len(cell["label"]) > 65 or len(cell["detail"]) > 600:
+                raise ValueError("Keep labels scannable and details concise")
+            if cell["label"].lower() in {"partial", "build", "no", "unsupported"}:
+                raise ValueError("Describe the actual mechanism instead of a guessed rating")
+    return data
 
 
 def render():
-    source = (ROOT / "docs/capability-matrix.md").read_text()
-    section = source.split("<!-- comparison:start -->", 1)[1].split("<!-- comparison:end -->", 1)[0]
-    groups = []
-    for line in section.splitlines():
-        if line.startswith("### "):
-            groups.append((line[4:], []))
-        elif line.startswith("| **"):
-            cells = [c.strip().replace("**", "") for c in line.strip("|").split("|")]
-            if len(cells) != 4:
-                raise ValueError("Each comparison row must have four cells")
-            groups[-1][1].append(cells)
-    if sum(len(rows) for _, rows in groups) != 14:
-        raise ValueError("Expected the 14 source-owned comparison rows")
-
-    headings = ["Outcome", "Native tool alone", "With xPerfect", "Today’s limit"]
-    widths = [250, 300, 365, 325]
-    xs = [30]
-    for width in widths:
-        xs.append(xs[-1] + width)
-    svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="1300" viewBox="0 0 1300 HEIGHT" role="img" aria-labelledby="title desc">',
-           '<title id="title">What xPerfect adds: 14 practical capabilities</title>',
-           '<desc id="desc">Native tools alone compared with adding xPerfect, with today’s limits. The complete accessible table and limits are in the capability guide.</desc>',
-           '<style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#edf0f1}.small{fill:#b9bfc8}.heading{fill:#ddc5a3;font-weight:700}</style>',
-           '<rect width="1300" height="HEIGHT" rx="22" fill="#12151a"/>',
-           '<text x="42" y="52" font-size="16" class="heading" letter-spacing="2">XPERFECT AI / CAPABILITY COMPARISON</text>',
-           '<text x="42" y="106" font-size="39" font-weight="700">What changes with xPerfect?</text>',
-           '<text x="42" y="145" font-size="19" class="small">14 useful capabilities · Native tools alone / With xPerfect / Today’s limit</text>']
-    y = 184
-    for i, heading in enumerate(headings):
-        svg.append(f'<text x="{xs[i]+12}" y="{y+28}" font-size="21" font-weight="700">{html.escape(heading)}</text>')
-    y += 54
-    table = ['<div class="comparison-scroll" tabindex="0" role="region" aria-label="14 capabilities compared; scroll horizontally on small screens"><table class="comparison"><caption class="comparison-caption">Fourteen practical outcomes: the native baseline, the added control plane and the limits.</caption><thead><tr>']
-    table += [f'<th scope="col">{html.escape(h)}</th>' for h in headings]
-    table.append('</tr></thead><tbody>')
-    for number, (name, rows) in enumerate(groups, 1):
-        svg += [f'<rect x="30" y="{y}" width="1240" height="48" rx="8" fill="#292d34"/>',
-                f'<text x="45" y="{y+31}" font-size="22" class="heading">0{number} / {html.escape(name)}</text>']
-        y += 48
-        table.append(f'<tr class="group"><th colspan="4">{html.escape(name)}</th></tr>')
-        for cells in rows:
-            lines = [textwrap.wrap(cell, width=max(16, int(width / 11.1))) for cell, width in zip(cells, widths)]
-            height = max(map(len, lines)) * 27 + 34
-            svg.append(f'<rect x="{xs[2]}" y="{y}" width="{widths[2]}" height="{height}" fill="#23272e"/>')
-            for i, cell_lines in enumerate(lines):
-                for j, line in enumerate(cell_lines):
-                    weight = ' font-weight="650"' if i in (0, 2) else ''
-                    svg.append(f'<text x="{xs[i]+12}" y="{y+30+j*27}" font-size="20"{weight}>{html.escape(line)}</text>')
-            y += height
-            svg.append(f'<path d="M30 {y}H1270" stroke="#343941"/>')
-            table.append('<tr><th scope="row">'+html.escape(cells[0])+'</th>'+''.join('<td>'+html.escape(cell)+'</td>' for cell in cells[1:])+'</tr>')
-    table.append('</tbody></table></div>')
-    svg += [f'<text x="42" y="{y+42}" font-size="18" class="small">Supported routes, permissions and capacity apply. See the capability guide for full limits and sources.</text>',
-            f'<text x="42" y="{y+73}" font-size="17" class="small">Source: docs/capability-matrix.md · Reviewed 25 October 2026 · No latency or universal-provider claim.</text>', '</svg>']
-    svg_text = '\n'.join(svg).replace('HEIGHT', str(y + 100)) + '\n'
-    guide = ROOT / 'docs/user-guide/index.html'
-    current = guide.read_text()
-    references = re.findall(r'^\d+\. \[([^\]]+)\]\((https://[^)]+)\)\.', source, re.M)
-    if len(references) != 8:
-        raise ValueError('Expected the eight source-owned native references')
-    legend = '<p class="comparison-caption">Numbers in the native column refer to the official sources below.</p><details><summary>Sources for this comparison</summary><ol>' + ''.join('<li><a href="'+html.escape(url, quote=True)+'">'+html.escape(label)+'</a></li>' for label,url in references) + '</ol></details>'
-    block = '''<!-- comparison:generated:start -->
-<section id="compare"><div class="section-label">07 / COMPARE NATIVE TOOLS</div>
-<h2>See what adding xPerfect changes.</h2>
-<p>Keep your native tools. Add one place for workers, knowledge, controls and results. Each row compares what you gain and today’s limits.</p>
-''' + '<p class="comparison-hint">On a small screen, scroll across the table to see all four columns.</p>' + '\n'.join(table) + legend + '''
-<p class="comparison-caption">The five professional starters use host Claude Code. Native tool, account, deployment and real capacity determine availability. Shared workspaces need a configured Linux host; copies do not copy credentials or native chat history. Webhook acceptance is separate from completed work; spending policies govern new admissions. Local storage does not mean local-only inference.</p>
-<p><a class="quiet" href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md#what-xperfect-adds">Full boundaries and official native-tool sources →</a></p></section>
-<!-- comparison:generated:end -->'''
-    pattern = r'<!-- comparison:generated:start -->.*?<!-- comparison:generated:end -->'
-    if re.search(pattern, current, re.S):
-        updated = re.sub(pattern, lambda _: block, current, flags=re.S)
-    else:
-        updated = current.replace('<section id="proof">', block+'\n<section id="proof">', 1)
-    return {ROOT / 'docs/assets/capability-comparison.svg': svg_text, guide: updated}
+    data = load_data()
+    cols, products = data["columns"], data["products"]
+    group_names = {g["id"]: g["label"] for g in data["groups"]}
+    rows = []
+    for p in products:
+        featured = p["id"] == "xperfect"
+        sources = "".join(f'<li><a href="{E(s["url"], quote=True)}">{E(s["label"])}</a></li>' for s in p["sources"])
+        badge = f'<span class="native-badge">{E(p["nativeHarnesses"])}</span>' if p.get("nativeHarnesses") else ""
+        cells = "".join(f'<td data-label="{E(c["label"], quote=True)}"><span class="mechanism">{E(p["cells"][c["id"]]["label"])}</span><span class="cell-detail">{E(p["cells"][c["id"]]["detail"])}</span></td>' for c in cols)
+        rows.append(f'<tr id="{E(p["id"], quote=True)}" data-product data-group="{E(p["group"], quote=True)}" class="{"featured" if featured else ""}"><th scope="row"><a class="product-name" href="{E(p["url"], quote=True)}">{E(p["name"])} <span aria-hidden="true">↗</span></a><span class="product-kind">{E(group_names[p["group"]])}</span>{badge}<details class="product-sources"><summary>Sources &amp; details</summary><p>{E(p["positioning"])}</p><ul>{sources}</ul></details></th>{cells}</tr>')
+    headers = "".join(f'<th scope="col">{E(c["label"])}<span class="column-example">{E(c["example"])}</span></th>' for c in cols)
+    filters = '<button type="button" data-group-filter="all" aria-pressed="true">All products</button>' + "".join(f'<button type="button" data-group-filter="{E(g["id"], quote=True)}" aria-pressed="false">{E(g["label"])}</button>' for g in data["groups"])
+    examples = "".join(f'<li><span class="story-number">0{i}</span><h3>{E(s["title"])}</h3><p>{E(s["example"])}</p><strong>{E(s["benefit"])}</strong></li>' for i,s in enumerate(data["exampleStories"], 1))
+    # Keep the canonical symbol geometry; the wordmark asset has no external resources.
+    logo = '<img src="assets/xperfect-logo-dark.svg" class="logo-light" alt="xPerfect AI" width="180"><img src="assets/xperfect-logo-light.svg" class="logo-dark" alt="xPerfect AI" width="180">'
+    table = f'<div class="landscape-scroll" role="region" aria-label="Product comparison" tabindex="0"><table class="landscape"><caption>How the tools turn expertise into useful work</caption><thead><tr><th scope="col">Product &amp; approach<span class="column-example">Choose a ready workplace, a framework or a runtime.</span></th>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+    page = f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Compare xPerfect, Scion, Pydantic AI, LangGraph and the wider AI worker landscape. Reusable expertise, clear jobs, native tools, human control and usable results."><link rel="canonical" href="https://www.xperfect.ai/docs/compare.html"><title>Compare AI workers, frameworks and control planes · xPerfect AI</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="comparison.css"><script src="comparison.js" defer></script></head>
+<body class="landscape-page"><a class="skip" href="#main-content">Skip to comparison</a><header class="landscape-header"><a href="https://www.xperfect.ai/" class="landscape-brand">{logo}</a><nav aria-label="Comparison navigation"><a href="index.html">User guide</a><a href="https://www.xperfect.ai/changelog/">What’s new</a><a href="https://github.com/xPerfectAI/xPerfect">GitHub ↗</a></nav><button class="theme" type="button" aria-label="Change appearance">◐ System</button></header>
+<main id="main-content"><header class="landscape-hero"><span class="section-label">THE AI WORKER LANDSCAPE · {E(data["reviewedOn"])}</span><h1>Your expertise.<br><em>A team that puts it to work.</em></h1><p class="lead">{E(data["intro"])}</p><div class="hero-actions"><a class="button" href="index.html#create">Build my AI team <span aria-hidden="true">↗</span></a><a class="quiet" href="#matrix">Compare the landscape ↓</a></div></header>
+<div class="compatibility-strip" aria-label="xPerfect compatibility"><strong>One workplace.</strong><span>Codex CLI</span><span>Claude Code</span><span>Grok Build</span><span>Direct model APIs</span><span>UI · API · MCP</span><span>Your machine or server</span></div>
+<ol class="landscape-stories" aria-label="What this means in practice">{examples}</ol>
+<section class="matrix-section" id="matrix"><div class="matrix-intro"><div><span class="section-label">FROM THE JOB TO THE RESULT</span><h2>Compare what you can do.</h2><p>Explore how each product packages expertise, runs the work and returns useful results. Choose a category; turn on “Show how it works” for plain examples and deeper explanations.</p></div><label class="details-switch"><input type="checkbox" id="show-mechanisms"> Show how it works</label></div><div class="landscape-filters" role="group" aria-label="Product categories">{filters}</div><p class="filter-count" role="status">{len(products)} products · xPerfect included in every category</p>{table}<p class="landscape-empty" hidden>No products in this category.</p></section>
+<section class="landscape-close"><div><span class="section-label">ONE WORKPLACE FOR THE WHOLE JOB</span><h2>Choose the expert. Add your knowledge.<br>Get work you can use.</h2><p>Start with the five professional packages or create your own. Reuse native AI tools, preserve working context and guide the exact worker from the interface, API or MCP.</p><a class="button" href="index.html#create">Try a complete example ↗</a></div><div class="reading-links"><h3>Go deeper</h3><a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/comparison.md">Accessible Markdown &amp; full sources ↗</a><a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md">Deployment and operating guide ↗</a><a href="https://www.xperfect.ai/changelog/">See what changed ↗</a></div></section>
+<footer class="landscape-footer"><a href="https://www.xperfect.ai/">xPerfect AI</a><span>Reviewed {E(data["reviewedOn"])} against linked primary sources. Product names belong to their owners.</span><a href="#main-content">Back to top ↑</a></footer></main></body></html>'''
+    md = ['# Compare the AI worker landscape', '', f'Reviewed {data["reviewedOn"]}. Generated from [comparison.json](comparison.json).', '', data['intro'], '', '## What this means in practice', '']
+    for s in data['exampleStories']:
+        md += [f'### {s["title"]}', '', s['example'], '', '**'+s['benefit']+'**', '']
+    md += ['## Product comparison', '', 'Cells describe the actual approach. Read the linked project sources for implementation details.', '']
+    for g in data['groups']:
+        group_products = [p for p in products if p['group'] == g['id']]
+        md += ['### '+g['label'], '', g['description'], '', '| Product | ' + ' | '.join(c['label'] for c in cols) + ' |', '| --- |' + ' --- |' * len(cols)]
+        for p in [products[0], *[p for p in group_products if p['id'] != 'xperfect']]:
+            md.append('| ['+p['name']+']('+p['url']+') | '+' | '.join(p['cells'][c['id']]['label'].replace('|','/') for c in cols)+' |')
+        md.append('')
+    md += ['## Details and primary sources', '']
+    for p in products:
+        md += ['### '+p['name'], '', p['positioning'], '']
+        for c in cols:
+            md.append('- **'+c['label']+':** '+p['cells'][c['id']]['detail'])
+        md += ['', 'Sources: '+', '.join('['+s['label']+']('+s['url']+')' for s in p['sources']), '']
+    # Compact repository overview: complete landscape is accessible through the linked HTML/Markdown.
+    preview = [p for p in products if p['id'] in ('xperfect','scion','omnigent','paperclip','agno','openhands','pydantic','langgraph','mastra','crewai','codex','claude-code')]
+    if len(preview) < 6:
+        preview = products[:14]
+    svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="1500" viewBox="0 0 1500 HEIGHT" role="img" aria-labelledby="title desc">', '<title id="title">AI worker landscape: from expertise to useful work</title>', '<desc id="desc">Source-led comparison. Product rows show reusable expertise, goals, parallel work, human control, deployment, files and integration. Open the full accessible chart for all projects and source details.</desc>', '<style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#eeeae4}.muted{fill:#b9bab8}.accent{fill:#d4c2a8}</style>', '<rect width="1500" height="HEIGHT" rx="22" fill="#171a1e"/>', '<text x="36" y="43" font-size="15" letter-spacing="2" class="accent">XPERFECT / THE AI WORKER LANDSCAPE</text>', '<text x="36" y="96" font-size="38" font-weight="700">From expertise to work you can use.</text>', f'<text x="36" y="134" font-size="19" class="muted">{len(products)} products in the full chart · Real capabilities, practical examples · Reviewed {E(data["reviewedOn"])}</text>']
+    widths=[222]+[int(1206/len(cols))]*len(cols)
+    xs=[30]
+    for width in widths: xs.append(xs[-1]+width)
+    y=171
+    for i,h in enumerate(['Product', *[c['label'] for c in cols]]):
+        for j,line in enumerate(textwrap.wrap(h, max(12,int(widths[i]/9)))):
+            svg.append(f'<text x="{xs[i]+10}" y="{y+24+j*22}" font-size="17" font-weight="700">{E(line)}</text>')
+    y+=82
+    for p in preview:
+        labels=[p['name'], *[p['cells'][c['id']]['label'] for c in cols]]
+        wrapped=[textwrap.wrap(t, max(12,int(w/8.7))) for t,w in zip(labels,widths)]
+        height=max(len(lines) for lines in wrapped)*22+30
+        if p['id']=='xperfect': svg.append(f'<rect x="30" y="{y}" width="1440" height="{height}" rx="8" fill="#34322e"/>')
+        for i,lines in enumerate(wrapped):
+            for j,line in enumerate(lines): svg.append(f'<text x="{xs[i]+10}" y="{y+27+j*22}" font-size="17"'+(' font-weight="700" class="accent"' if p['id']=='xperfect' else '')+f'>{E(line)}</text>')
+        y+=height
+        svg.append(f'<path d="M30 {y}H1470" stroke="#373a3e"/>')
+    svg += [f'<text x="40" y="{y+38}" font-size="18" class="accent">Explore every product, concrete examples and primary sources → xperfect.ai/docs/compare.html</text>', '</svg>']
+    svg_text='\n'.join(svg).replace('HEIGHT',str(y+70))+'\n'
+    guide=ROOT/'docs/user-guide/index.html'
+    current=guide.read_text()
+    block='<!-- comparison:generated:start -->\n<section id="compare"><div class="section-label">07 / COMPARE THE LANDSCAPE</div>\n<h2>Your expertise. One place to put it to work.</h2>\n<p>See how xPerfect and the wider landscape package knowledge, run specialists, keep you in control and deliver usable work. Compare ready applications, code frameworks and managed runtimes.</p>\n<a href="compare.html"><img src="assets/capability-comparison.svg" alt="AI worker landscape comparison: xPerfect, orchestration platforms, frameworks and native tools" loading="lazy" width="1500"></a>\n<p><a class="button" href="compare.html">Explore the full comparison ↗</a></p>\n</section>\n<!-- comparison:generated:end -->'
+    updated=re.sub(r'<!-- comparison:generated:start -->.*?<!-- comparison:generated:end -->',lambda _:block,current,flags=re.S).replace('Compare native tools','Compare the landscape')
+    return {ROOT/'docs/user-guide/assets/xperfect-logo-dark.svg':(ROOT/'docs/assets/xperfect-logo-dark.svg').read_text(), ROOT/'docs/user-guide/assets/xperfect-logo-light.svg':(ROOT/'docs/assets/xperfect-logo-light.svg').read_text(), ROOT/'docs/assets/capability-comparison.svg':svg_text, ROOT/'docs/user-guide/assets/capability-comparison.svg':svg_text, ROOT/'docs/comparison.md':'\n'.join(md)+'\n', ROOT/'docs/user-guide/compare.html':page, guide:updated}
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true')
-    args = parser.parse_args()
-    for path, expected in render().items():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check',action='store_true')
+    args=parser.parse_args()
+    for path,expected in render().items():
         if args.check:
-            if not path.exists() or path.read_text() != expected:
-                raise SystemExit(f'Generated comparison differs: {path.relative_to(ROOT)}')
-        else:
-            path.write_text(expected)
-    print('Comparison matches its 14-row source.' if args.check else 'Rendered the 14-row comparison.')
+            if not path.exists() or path.read_text()!=expected: raise SystemExit(f'Generated comparison differs: {path.relative_to(ROOT)}')
+        else: path.write_text(expected)
+    print('Comparison matches its single source.' if args.check else 'Rendered the complete landscape comparison.')

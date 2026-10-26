@@ -1,0 +1,1876 @@
+{
+  "reviewedOn": "2026-10-26",
+  "intro": "Build an AI team around your expertise. xPerfect brings reusable specialists, your company’s knowledge and tools, clear jobs, hands-on control and usable results into one workplace. Compare it with the frameworks, control planes and runtimes you can build on.",
+  "columns": [
+    {
+      "id": "expertise",
+      "label": "Reuse expertise",
+      "example": "Save a finance expert with its instructions, reference files and tools."
+    },
+    {
+      "id": "outcome",
+      "label": "Set the job & outcome",
+      "example": "Ask for a board brief with an editable forecast and stated assumptions."
+    },
+    {
+      "id": "teamwork",
+      "label": "Work with specialists",
+      "example": "Let research and finance workers handle separate parts of one job."
+    },
+    {
+      "id": "control",
+      "label": "Watch and steer",
+      "example": "See progress, add context and redirect work."
+    },
+    {
+      "id": "hosting",
+      "label": "Choose where it runs",
+      "example": "Operate the runtime yourself or choose managed hosting."
+    },
+    {
+      "id": "results",
+      "label": "Keep useful results",
+      "example": "Open the report, spreadsheet, files or structured output."
+    },
+    {
+      "id": "connect",
+      "label": "Connect and repeat",
+      "example": "Connect tools and apps; start work through APIs or schedules."
+    }
+  ],
+  "groups": [
+    {
+      "id": "control",
+      "label": "Worker control planes",
+      "description": "Interfaces and services for operating agents, teams or visual workflows."
+    },
+    {
+      "id": "visual",
+      "label": "Visual workflow builders",
+      "description": "Build connected workflows and agent tools through a visual editor."
+    },
+    {
+      "id": "framework",
+      "label": "Code frameworks",
+      "description": "Reusable agent behavior and workflows within your application."
+    },
+    {
+      "id": "native",
+      "label": "Native AI tools",
+      "description": "Agent tools and protocols that can also power other products."
+    },
+    {
+      "id": "managed",
+      "label": "Managed runtimes",
+      "description": "Cloud services that operate the harness or host your agent code."
+    },
+    {
+      "id": "infrastructure",
+      "label": "Execution infrastructure",
+      "description": "Durable execution components used with agent frameworks."
+    }
+  ],
+  "products": [
+    {
+      "id": "xperfect",
+      "name": "xPerfect",
+      "group": "control",
+      "positioning": "Turn reusable expertise into supervised work and retained deliverables.",
+      "url": "https://github.com/xPerfectAI/xPerfect/blob/main/README.md",
+      "sources": [
+        {
+          "label": "xPerfect · README",
+          "url": "https://github.com/xPerfectAI/xPerfect/blob/main/README.md"
+        },
+        {
+          "label": "xPerfect · 01 Vision Requirements and Terminology",
+          "url": "https://github.com/xPerfectAI/xPerfect/blob/main/docs/01_Vision_Requirements_and_Terminology.md"
+        },
+        {
+          "label": "xPerfect · 07 Minimal Unified Operator UI",
+          "url": "https://github.com/xPerfectAI/xPerfect/blob/main/docs/07_Minimal_Unified_Operator_UI.md"
+        },
+        {
+          "label": "xPerfect · Capability matrix",
+          "url": "https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md"
+        },
+        {
+          "label": "xPerfect · Workshop",
+          "url": "https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Saved experts + Library",
+          "detail": "Start with five professional experts or save your own setup. Reuse exact versions of knowledge, notes, files, skills and bundles."
+        },
+        "outcome": {
+          "label": "Job + success criteria",
+          "detail": "Set the job, desired outcome and background; retain project goals and success criteria."
+        },
+        "teamwork": {
+          "label": "Parallel + shared workers",
+          "detail": "Authorized workers discover and message each other. Configure parallel work, queues and shared workspaces."
+        },
+        "control": {
+          "label": "Watch + steer",
+          "detail": "Follow progress, give direction and use supported native controls from one operator surface."
+        },
+        "hosting": {
+          "label": "Your computer or server",
+          "detail": "Run the control plane on your own host, with supported accounts, models and harnesses. Hosted model calls still leave the host."
+        },
+        "results": {
+          "label": "Reports + saved files",
+          "detail": "Open and download retained results, including editable calculations. Continue a workspace or copy it for separate work."
+        },
+        "connect": {
+          "label": "API, MCP + scheduled webhooks",
+          "detail": "Operate the same records through UI, HTTP or MCP. Schedule saved work or signed outbound webhooks."
+        }
+      },
+      "nativeHarnesses": "Codex CLI · Claude Code · Grok Build"
+    },
+    {
+      "id": "scion",
+      "name": "Scion",
+      "group": "control",
+      "positioning": "Operate fleets of native agents with templates, skills and runtime brokers.",
+      "url": "https://github.com/GoogleCloudPlatform/scion",
+      "sources": [
+        {
+          "label": "Scion · Source repository",
+          "url": "https://github.com/GoogleCloudPlatform/scion"
+        },
+        {
+          "label": "Scion · Supported harnesses",
+          "url": "https://googlecloudplatform.github.io/scion/supported-harnesses/"
+        },
+        {
+          "label": "Scion · Templates",
+          "url": "https://googlecloudplatform.github.io/scion/local/templates/"
+        },
+        {
+          "label": "Scion · Skills",
+          "url": "https://googlecloudplatform.github.io/scion/local/skills/"
+        },
+        {
+          "label": "Scion · Dashboard",
+          "url": "https://googlecloudplatform.github.io/scion/workstation/dashboard/"
+        },
+        {
+          "label": "Scion · Scheduling",
+          "url": "https://googlecloudplatform.github.io/scion/hosted/user/scheduling/"
+        },
+        {
+          "label": "Scion · Agent config",
+          "url": "https://googlecloudplatform.github.io/scion/reference/agent-config/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Templates + Skill Bank",
+          "detail": "Reusable templates and a versioned Skill Bank package agent setup and capabilities."
+        },
+        "outcome": {
+          "label": "Tasks + role instructions",
+          "detail": "Give agents task input and reusable role instructions."
+        },
+        "teamwork": {
+          "label": "Parallel agents",
+          "detail": "Agents delegate, message each other and share project context."
+        },
+        "control": {
+          "label": "Dashboard + terminal",
+          "detail": "Workstation and hosted dashboards expose status, chat and terminals."
+        },
+        "hosting": {
+          "label": "Local or hosted brokers",
+          "detail": "Run workstation components or a hosted Hub with runtime brokers."
+        },
+        "results": {
+          "label": "Agent workspaces",
+          "detail": "Workspaces and file access retain the working material of each agent."
+        },
+        "connect": {
+          "label": "API + schedules",
+          "detail": "Manage agents and schedule project-scoped messages, including recurring messages."
+        }
+      },
+      "nativeHarnesses": "Multiple native coding-agent harnesses"
+    },
+    {
+      "id": "omnigent",
+      "name": "Omnigent",
+      "group": "control",
+      "positioning": "Combine native harnesses in sessions people can supervise together.",
+      "url": "https://github.com/omnigent-ai/omnigent",
+      "sources": [
+        {
+          "label": "Omnigent · Source repository",
+          "url": "https://github.com/omnigent-ai/omnigent"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Specialist configuration files",
+          "detail": "Package prompts, tools, specialists and reviewers in reusable agent files."
+        },
+        "outcome": {
+          "label": "Session task + policies",
+          "detail": "Give work in chat and apply policy controls for tools, approvals and budgets."
+        },
+        "teamwork": {
+          "label": "Mixed-harness specialists",
+          "detail": "Run specialists and reviewers together; share or fork sessions."
+        },
+        "control": {
+          "label": "Shared live sessions",
+          "detail": "Use terminal, browser or desktop to follow messages, tools and terminals."
+        },
+        "hosting": {
+          "label": "Local or cloud sandboxes",
+          "detail": "Use local hosts, remote hosts or configured sandbox providers."
+        },
+        "results": {
+          "label": "Synchronized files",
+          "detail": "Session files, messages and terminals stay synchronized across surfaces."
+        },
+        "connect": {
+          "label": "Functions + MCP",
+          "detail": "Connect code functions and local or remote MCP servers."
+        }
+      },
+      "nativeHarnesses": "Claude Code · Codex · Cursor · OpenCode · Pi and others"
+    },
+    {
+      "id": "paperclip",
+      "name": "Paperclip",
+      "group": "control",
+      "positioning": "Coordinate agents through goals, tasks, budgets and an organization chart.",
+      "url": "https://github.com/PaperclipAI/paperclip",
+      "sources": [
+        {
+          "label": "Paperclip · Source repository",
+          "url": "https://github.com/PaperclipAI/paperclip"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agents + company templates",
+          "detail": "Export and import organizations, agents and skills; retain versioned configuration."
+        },
+        "outcome": {
+          "label": "Goals → projects → tasks",
+          "detail": "Link assignments to their business goals so agents receive the purpose of the work."
+        },
+        "teamwork": {
+          "label": "Org chart + delegation",
+          "detail": "Coordinate agents with assignees, task checkout and execution locks."
+        },
+        "control": {
+          "label": "Dashboard + approvals",
+          "detail": "Track work and costs; apply approval gates and configuration rollback."
+        },
+        "hosting": {
+          "label": "Self-hosted server",
+          "detail": "Run the open-source server and UI with configured agent adapters."
+        },
+        "results": {
+          "label": "Tasks + documents",
+          "detail": "Keep task history, comments and documents; supporting adapters resume saved sessions."
+        },
+        "connect": {
+          "label": "Adapters + gateways",
+          "detail": "Connect agent runtimes and govern their calls through configured connections."
+        }
+      },
+      "nativeHarnesses": "Claude Code · Codex · Cursor and other adapters"
+    },
+    {
+      "id": "agno",
+      "name": "Agno + AgentOS",
+      "group": "control",
+      "positioning": "Serve agents, teams and native harnesses through AgentOS.",
+      "url": "https://docs.agno.com/",
+      "sources": [
+        {
+          "label": "Agno + AgentOS · Documentation",
+          "url": "https://docs.agno.com/"
+        },
+        {
+          "label": "Agno + AgentOS · Harnesses as a service",
+          "url": "https://docs.agno.com/use-cases/harnesses-as-a-service"
+        },
+        {
+          "label": "Agno + AgentOS · Scheduling",
+          "url": "https://docs.agno.com/features/scheduling"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agents + knowledge + tools",
+          "detail": "Define reusable agents and teams with instructions, knowledge and tools."
+        },
+        "outcome": {
+          "label": "Agent or workflow request",
+          "detail": "Use agent requests or workflow definitions to describe the work."
+        },
+        "teamwork": {
+          "label": "Teams + workflows",
+          "detail": "Coordinate agents in teams and workflows; run background tasks."
+        },
+        "control": {
+          "label": "Control Plane + streams",
+          "detail": "Use the Control Plane, streaming APIs and persisted sessions."
+        },
+        "hosting": {
+          "label": "Self-hosted AgentOS",
+          "detail": "Operate the runtime and choose supported model and harness integrations."
+        },
+        "results": {
+          "label": "Sessions + responses",
+          "detail": "Keep session state and return results through the configured agent or harness."
+        },
+        "connect": {
+          "label": "API + MCP + schedules",
+          "detail": "Expose agents as services and schedule agent, team or workflow runs."
+        }
+      },
+      "nativeHarnesses": "Native Claude Code and Codex service integrations"
+    },
+    {
+      "id": "openhands",
+      "name": "OpenHands Agent Canvas + SDK",
+      "group": "control",
+      "positioning": "Manage software work across agent backends and automation surfaces.",
+      "url": "https://docs.openhands.dev/overview/introduction",
+      "sources": [
+        {
+          "label": "OpenHands Agent Canvas + SDK · Introduction",
+          "url": "https://docs.openhands.dev/overview/introduction"
+        },
+        {
+          "label": "OpenHands Agent Canvas + SDK · Overview",
+          "url": "https://docs.openhands.dev/openhands/usage/agent-canvas/overview"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agent configurations",
+          "detail": "Configure the Software Agent SDK or choose an Agent Canvas backend."
+        },
+        "outcome": {
+          "label": "Conversation task",
+          "detail": "Give a task in a conversation with the relevant workspace."
+        },
+        "teamwork": {
+          "label": "Multiple conversations",
+          "detail": "Manage separate conversations and automations through Agent Canvas."
+        },
+        "control": {
+          "label": "Canvas + terminals",
+          "detail": "Follow conversations, files and terminal activity in the operator UI."
+        },
+        "hosting": {
+          "label": "Local or cloud runtime",
+          "detail": "Use local Docker, VM or cloud deployment paths with supported accounts."
+        },
+        "results": {
+          "label": "Working files",
+          "detail": "Review agent work through workspace files and terminals."
+        },
+        "connect": {
+          "label": "SDK + automation services",
+          "detail": "Integrate Agent Server, Automation Server and configured backend tools."
+        }
+      },
+      "nativeHarnesses": "OpenHands SDK · ACP Claude Code/Codex/Gemini"
+    },
+    {
+      "id": "dify",
+      "name": "Dify",
+      "group": "visual",
+      "positioning": "Create agent applications and knowledge workflows visually.",
+      "url": "https://docs.dify.ai/en/home",
+      "sources": [
+        {
+          "label": "Dify · Home",
+          "url": "https://docs.dify.ai/en/home"
+        },
+        {
+          "label": "Dify · Schedule trigger",
+          "url": "https://docs.dify.ai/en/cloud/use-dify/nodes/trigger/schedule-trigger"
+        },
+        {
+          "label": "Dify · Webhook trigger",
+          "url": "https://docs.dify.ai/en/cloud/use-dify/nodes/trigger/webhook-trigger"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Apps + knowledge",
+          "detail": "Package instructions, knowledge, tools and plugins into applications."
+        },
+        "outcome": {
+          "label": "Workflow inputs + outputs",
+          "detail": "Define the request and outputs in a visual agent or workflow application."
+        },
+        "teamwork": {
+          "label": "Workflow orchestration",
+          "detail": "Compose steps and agent/tool calls in the workflow."
+        },
+        "control": {
+          "label": "Visual workflow + runs",
+          "detail": "Configure and inspect applications through the product interface."
+        },
+        "hosting": {
+          "label": "Cloud or self-hosted",
+          "detail": "Choose Dify Cloud or Community self-hosting; features vary by edition."
+        },
+        "results": {
+          "label": "Application outputs",
+          "detail": "Return application responses and workflow outputs to users or clients."
+        },
+        "connect": {
+          "label": "APIs + triggers",
+          "detail": "Publish APIs; cloud docs include schedule and inbound webhook triggers."
+        }
+      }
+    },
+    {
+      "id": "flowise",
+      "name": "Flowise",
+      "group": "visual",
+      "positioning": "Build visual assistants and multi-agent flows with knowledge and tools.",
+      "url": "https://docs.flowiseai.com/",
+      "sources": [
+        {
+          "label": "Flowise · Documentation",
+          "url": "https://docs.flowiseai.com/"
+        },
+        {
+          "label": "Flowise · Agentflowv2",
+          "url": "https://docs.flowiseai.com/using-flowise/agentflowv2"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Assistants + RAG",
+          "detail": "Configure instructions, tools and uploaded knowledge."
+        },
+        "outcome": {
+          "label": "Visual flow outputs",
+          "detail": "Describe the request and design the response path in Agentflow."
+        },
+        "teamwork": {
+          "label": "Agentflow branches",
+          "detail": "Compose agents, shared state, loops and branches."
+        },
+        "control": {
+          "label": "Human review + resume",
+          "detail": "Use human input checkpoints, streaming and persisted flow state."
+        },
+        "hosting": {
+          "label": "Cloud or self-hosted",
+          "detail": "Operate Flowise on your infrastructure or use a hosted offering."
+        },
+        "results": {
+          "label": "Flow responses + state",
+          "detail": "Return results and retain workflow state through the configured flow."
+        },
+        "connect": {
+          "label": "API + SDK + MCP",
+          "detail": "Integrate applications using APIs, SDKs, embedded chat and MCP."
+        }
+      }
+    },
+    {
+      "id": "n8n",
+      "name": "n8n",
+      "group": "visual",
+      "positioning": "Connect agent decisions to repeatable application workflows.",
+      "url": "https://docs.n8n.io/build/integrate-ai.md",
+      "sources": [
+        {
+          "label": "n8n · Integrate ai.md",
+          "url": "https://docs.n8n.io/build/integrate-ai.md"
+        },
+        {
+          "label": "n8n · N8n nodes base.scheduletrigger",
+          "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger"
+        },
+        {
+          "label": "n8n · Share with others.md",
+          "url": "https://docs.n8n.io/build/manage-workflows/share-with-others.md"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Workflow templates",
+          "detail": "Reuse workflows containing agents, model providers, memory and tools."
+        },
+        "outcome": {
+          "label": "Trigger → workflow result",
+          "detail": "Define the input event and the application actions or output to produce."
+        },
+        "teamwork": {
+          "label": "Workflow orchestration",
+          "detail": "Connect agent and tool steps through the workflow graph."
+        },
+        "control": {
+          "label": "Workflow executions",
+          "detail": "Inspect and manage the executions of configured workflows."
+        },
+        "hosting": {
+          "label": "Cloud or self-hosted",
+          "detail": "Run n8n Cloud or your own instance; collaboration features depend on plan."
+        },
+        "results": {
+          "label": "Node data + app actions",
+          "detail": "Keep workflow execution data and send results to connected applications."
+        },
+        "connect": {
+          "label": "App nodes + schedules",
+          "detail": "Use application integrations, API/webhook paths and published schedule triggers."
+        }
+      }
+    },
+    {
+      "id": "pydantic",
+      "name": "Pydantic AI + Harness",
+      "group": "framework",
+      "positioning": "Define typed agents and use reusable harness capabilities.",
+      "url": "https://pydantic.dev/docs/ai/overview/",
+      "sources": [
+        {
+          "label": "Pydantic AI + Harness · Overview",
+          "url": "https://pydantic.dev/docs/ai/overview/"
+        },
+        {
+          "label": "Pydantic AI + Harness · Agent spec",
+          "url": "https://pydantic.dev/docs/ai/core-concepts/agent-spec/"
+        },
+        {
+          "label": "Pydantic AI + Harness · Harness",
+          "url": "https://pydantic.dev/docs/ai/harness/"
+        },
+        {
+          "label": "Pydantic AI + Harness · Skills",
+          "url": "https://pydantic.dev/docs/ai/harness/skills/"
+        },
+        {
+          "label": "Pydantic AI + Harness · Overview",
+          "url": "https://pydantic.dev/docs/ai/capabilities/durable_execution/overview/"
+        },
+        {
+          "label": "Pydantic AI + Harness · Web",
+          "url": "https://pydantic.dev/docs/ai/guides/web/"
+        },
+        {
+          "label": "Pydantic AI + Harness · Interfaces",
+          "url": "https://pydantic.dev/docs/ai/overview/interfaces/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Reusable agent blueprints",
+          "detail": "Share YAML or JSON agent specifications, capabilities and skills."
+        },
+        "outcome": {
+          "label": "Instructions + typed output",
+          "detail": "Describe work in instructions and define the result structure in code."
+        },
+        "teamwork": {
+          "label": "Subagents + workflows",
+          "detail": "Use harness subagents and application orchestration."
+        },
+        "control": {
+          "label": "Persistence + durable engines",
+          "detail": "Use step persistence or integrations such as Temporal and DBOS for durable work."
+        },
+        "hosting": {
+          "label": "Your application runtime",
+          "detail": "Run your Python application with supported model providers."
+        },
+        "results": {
+          "label": "Workspaces + typed results",
+          "detail": "Use harness workspaces and return typed agent results."
+        },
+        "connect": {
+          "label": "Tools + MCP + interfaces",
+          "detail": "Use tools, MCP and development web chat, CLI or application UI protocols."
+        }
+      }
+    },
+    {
+      "id": "langgraph",
+      "name": "LangGraph + LangSmith Deployment",
+      "group": "framework",
+      "positioning": "Combine a stateful agent runtime with deployment and operations tools.",
+      "url": "https://docs.langchain.com/oss/python/langgraph/overview",
+      "sources": [
+        {
+          "label": "LangGraph + LangSmith Deployment · Overview",
+          "url": "https://docs.langchain.com/oss/python/langgraph/overview"
+        },
+        {
+          "label": "LangGraph + LangSmith Deployment · Deployment",
+          "url": "https://www.langchain.com/langsmith/deployment"
+        },
+        {
+          "label": "LangGraph + LangSmith Deployment · Configuration cloud",
+          "url": "https://docs.langchain.com/langsmith/configuration-cloud"
+        },
+        {
+          "label": "LangGraph + LangSmith Deployment · Cron jobs",
+          "url": "https://docs.langchain.com/langsmith/cron-jobs"
+        },
+        {
+          "label": "LangGraph + LangSmith Deployment · Pricing",
+          "url": "https://www.langchain.com/pricing"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Graphs + assistants",
+          "detail": "Define agent graphs and configurable assistant versions."
+        },
+        "outcome": {
+          "label": "Graph state + outputs",
+          "detail": "Express the job through graph input, state and application-defined outputs."
+        },
+        "teamwork": {
+          "label": "Multi-agent graphs",
+          "detail": "Compose specialists and deterministic steps in graphs."
+        },
+        "control": {
+          "label": "Checkpoints + interrupts",
+          "detail": "Persist execution, stream progress and interrupt for human input."
+        },
+        "hosting": {
+          "label": "Cloud, hybrid or self-hosted",
+          "detail": "Choose LangSmith Deployment options or operate the graph runtime yourself."
+        },
+        "results": {
+          "label": "State + run outputs",
+          "detail": "Keep graph state and return results through deployed agent APIs."
+        },
+        "connect": {
+          "label": "APIs + MCP + cron",
+          "detail": "Expose agent interfaces and schedule assistant runs in deployment."
+        }
+      }
+    },
+    {
+      "id": "deep-agents",
+      "name": "Deep Agents",
+      "group": "framework",
+      "positioning": "Use planning, files, memory and specialists in a reusable harness.",
+      "url": "https://docs.langchain.com/oss/javascript/deepagents/overview",
+      "sources": [
+        {
+          "label": "Deep Agents · Overview",
+          "url": "https://docs.langchain.com/oss/javascript/deepagents/overview"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Skills + instructions",
+          "detail": "Package domain knowledge and workflows as reusable skills."
+        },
+        "outcome": {
+          "label": "Plans + tracked tasks",
+          "detail": "Use task planning and decomposition for complex work."
+        },
+        "teamwork": {
+          "label": "Specialist subagents",
+          "detail": "Delegate to subagents with separate contexts."
+        },
+        "control": {
+          "label": "Interrupts + memory",
+          "detail": "Use LangGraph approvals and persistent memory across work."
+        },
+        "hosting": {
+          "label": "Your chosen backend",
+          "detail": "Run the library with model and filesystem/sandbox backends."
+        },
+        "results": {
+          "label": "Pluggable filesystems",
+          "detail": "Use local disk, durable stores or sandbox files for work and results."
+        },
+        "connect": {
+          "label": "Tools + model adapters",
+          "detail": "Connect custom tools and supported model providers."
+        }
+      }
+    },
+    {
+      "id": "crewai",
+      "name": "CrewAI + AMP",
+      "group": "framework",
+      "positioning": "Define role-based crews and flows, with AMP for visual operations.",
+      "url": "https://docs.crewai.com/",
+      "sources": [
+        {
+          "label": "CrewAI + AMP · Documentation",
+          "url": "https://docs.crewai.com/"
+        },
+        {
+          "label": "CrewAI + AMP · Tasks",
+          "url": "https://docs.crewai.com/v1.15.30/en/concepts/tasks"
+        },
+        {
+          "label": "CrewAI + AMP · Agent capabilities",
+          "url": "https://docs.crewai.com/v1.15.30/en/concepts/agent-capabilities"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Roles + capabilities",
+          "detail": "Agents combine roles, knowledge, tools, MCP and skills."
+        },
+        "outcome": {
+          "label": "Tasks + expected outputs",
+          "detail": "Assign tasks and define the expected result; AMP includes a visual Task Builder."
+        },
+        "teamwork": {
+          "label": "Crews + flows",
+          "detail": "Use sequential or hierarchical teams and stateful flows."
+        },
+        "control": {
+          "label": "Persisted flows + AMP",
+          "detail": "Resume flow state and operate deployments through AMP features."
+        },
+        "hosting": {
+          "label": "Framework or platform",
+          "detail": "Run the code framework yourself or use the AMP platform."
+        },
+        "results": {
+          "label": "Task and flow results",
+          "detail": "Return outputs from agent tasks and flow steps."
+        },
+        "connect": {
+          "label": "Tools + app triggers",
+          "detail": "Use tools and MCP; platform integrations and triggers connect business apps."
+        }
+      }
+    },
+    {
+      "id": "maf",
+      "name": "Microsoft Agent Framework",
+      "group": "framework",
+      "positioning": "Compose agents and workflows with Microsoft Agent Framework.",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/overview/",
+      "sources": [
+        {
+          "label": "Microsoft Agent Framework · Overview",
+          "url": "https://learn.microsoft.com/en-us/agent-framework/overview/"
+        },
+        {
+          "label": "Microsoft Agent Framework · Checkpoints",
+          "url": "https://learn.microsoft.com/agent-framework/workflows/checkpoints"
+        },
+        {
+          "label": "Microsoft Agent Framework · Human in the loop",
+          "url": "https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop"
+        },
+        {
+          "label": "Microsoft Agent Framework · Source repository",
+          "url": "https://github.com/microsoft/agent-framework"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agents + HarnessAgent",
+          "detail": "Configure instructions, tools and reusable harness capabilities."
+        },
+        "outcome": {
+          "label": "Workflow + result contract",
+          "detail": "Define work as agent input or a graph/functional workflow."
+        },
+        "teamwork": {
+          "label": "Agent workflows",
+          "detail": "Compose agents and deterministic functions in workflows."
+        },
+        "control": {
+          "label": "Checkpoints + human input",
+          "detail": "Use persisted checkpoints and human-in-the-loop request ports."
+        },
+        "hosting": {
+          "label": "Self-host or Foundry",
+          "detail": "Run an application yourself or use Foundry Hosted Agents."
+        },
+        "results": {
+          "label": "Workflow results + files",
+          "detail": "Return workflow results; harness capabilities include files and memory."
+        },
+        "connect": {
+          "label": "Providers + tool interfaces",
+          "detail": "Connect model providers and application tools through framework interfaces."
+        }
+      }
+    },
+    {
+      "id": "adk",
+      "name": "Google ADK",
+      "group": "framework",
+      "positioning": "Build modular agents and workflows using Google ADK.",
+      "url": "https://adk.dev/",
+      "sources": [
+        {
+          "label": "Google ADK · Documentation",
+          "url": "https://adk.dev/"
+        },
+        {
+          "label": "Google ADK · Skills",
+          "url": "https://adk.dev/skills/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agents + skills",
+          "detail": "Package agent instructions, tools and reusable skills."
+        },
+        "outcome": {
+          "label": "Agent or workflow input",
+          "detail": "Describe work through agent input and workflow configuration."
+        },
+        "teamwork": {
+          "label": "Sequential + parallel agents",
+          "detail": "Compose agent workflows and specialist patterns."
+        },
+        "control": {
+          "label": "Sessions + resume",
+          "detail": "Use session state, streaming, cancellation and resume paths."
+        },
+        "hosting": {
+          "label": "Your app or Google runtime",
+          "detail": "Develop locally and choose a deployment target."
+        },
+        "results": {
+          "label": "Artifacts + outputs",
+          "detail": "Use artifact handling and agent outputs for application results."
+        },
+        "connect": {
+          "label": "API + MCP + A2A",
+          "detail": "Connect tools and agent services through supported protocols."
+        }
+      }
+    },
+    {
+      "id": "mastra",
+      "name": "Mastra",
+      "group": "framework",
+      "positioning": "Build agents and harnesses with goals and durable work.",
+      "url": "https://mastra.ai/docs",
+      "sources": [
+        {
+          "label": "Mastra · Docs",
+          "url": "https://mastra.ai/docs"
+        },
+        {
+          "label": "Mastra · Overview",
+          "url": "https://mastra.ai/docs/harness/overview"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agents + skills + memory",
+          "detail": "Configure TypeScript agents with tools, memory and skills."
+        },
+        "outcome": {
+          "label": "Goals + evaluation",
+          "detail": "Use Goals to work toward an objective with evaluation and budget controls."
+        },
+        "teamwork": {
+          "label": "Subagents + background work",
+          "detail": "Delegate tasks and run background work through harness capabilities."
+        },
+        "control": {
+          "label": "Controller + signals",
+          "detail": "Approve, stop or steer work using AgentController and signals."
+        },
+        "hosting": {
+          "label": "Your app or platform",
+          "detail": "Run the framework in your application and use Studio/platform tools."
+        },
+        "results": {
+          "label": "Workspace + results",
+          "detail": "Use workspace tools and agent/workflow outputs."
+        },
+        "connect": {
+          "label": "Tools + schedules + events",
+          "detail": "Connect tools and configure schedules or event providers."
+        }
+      }
+    },
+    {
+      "id": "letta",
+      "name": "Letta",
+      "group": "framework",
+      "positioning": "Create stateful agents with persistent memory.",
+      "url": "https://docs.letta.com/",
+      "sources": [
+        {
+          "label": "Letta · Documentation",
+          "url": "https://docs.letta.com/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Memory + skills",
+          "detail": "Reuse stateful agent memory, skills and configuration."
+        },
+        "outcome": {
+          "label": "Agent task",
+          "detail": "Supply work to the persistent agent through its interface."
+        },
+        "teamwork": {
+          "label": "Subagent patterns",
+          "detail": "Use documented subagent capabilities for delegated work."
+        },
+        "control": {
+          "label": "Persistent sessions",
+          "detail": "Continue work with stored agent context and runtime interfaces."
+        },
+        "hosting": {
+          "label": "Self-host or service",
+          "detail": "Use the documented self-hosting or service path."
+        },
+        "results": {
+          "label": "Agent responses + memory",
+          "detail": "Return results while retaining the agent memory state."
+        },
+        "connect": {
+          "label": "SDK + MCP + schedules",
+          "detail": "Connect SDKs, MCP/ACP interfaces and schedules."
+        }
+      }
+    },
+    {
+      "id": "openai-agents",
+      "name": "OpenAI Agents SDK",
+      "group": "framework",
+      "positioning": "Program agent loops, tools, handoffs and application behavior.",
+      "url": "https://openai.github.io/openai-agents-python/",
+      "sources": [
+        {
+          "label": "OpenAI Agents SDK · Openai agents python",
+          "url": "https://openai.github.io/openai-agents-python/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agent definitions",
+          "detail": "Reuse instructions, tools, skills and agent configuration in code."
+        },
+        "outcome": {
+          "label": "Inputs + output contracts",
+          "detail": "Define work and expected result types in your application."
+        },
+        "teamwork": {
+          "label": "Handoffs + agents as tools",
+          "detail": "Delegate and compose agent work using SDK mechanisms."
+        },
+        "control": {
+          "label": "Streams + approvals",
+          "detail": "Use streaming, sessions, tracing and human-in-the-loop controls."
+        },
+        "hosting": {
+          "label": "Your application",
+          "detail": "Operate the SDK in your chosen runtime; Temporal is a separate durable integration."
+        },
+        "results": {
+          "label": "Tool outputs + sandboxes",
+          "detail": "Return agent/tool outputs; sandbox integrations provide file and shell work."
+        },
+        "connect": {
+          "label": "Tools + MCP",
+          "detail": "Connect application functions, MCP servers and model providers."
+        }
+      }
+    },
+    {
+      "id": "claude-sdk",
+      "name": "Claude Agent SDK",
+      "group": "framework",
+      "positioning": "Embed the Claude Code harness in your own application.",
+      "url": "https://code.claude.com/docs/en/agent-sdk/overview",
+      "sources": [
+        {
+          "label": "Claude Agent SDK · Overview",
+          "url": "https://code.claude.com/docs/en/agent-sdk/overview"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Skills + plugins",
+          "detail": "Reuse Claude Code instructions, skills, plugins and MCP tools."
+        },
+        "outcome": {
+          "label": "Application task",
+          "detail": "Send the task and context through the SDK."
+        },
+        "teamwork": {
+          "label": "Subagents",
+          "detail": "Delegate work through configured subagents."
+        },
+        "control": {
+          "label": "Sessions + permissions",
+          "detail": "Stream progress and manage sessions, permissions, hooks and approvals."
+        },
+        "hosting": {
+          "label": "Your SDK process",
+          "detail": "Operate the application and its execution environment."
+        },
+        "results": {
+          "label": "Native working files",
+          "detail": "Use the native file and shell tools and receive results in your application."
+        },
+        "connect": {
+          "label": "SDK + MCP",
+          "detail": "Connect Python/TypeScript application code and MCP tools."
+        }
+      },
+      "nativeHarnesses": "Claude Code native loop and tools"
+    },
+    {
+      "id": "haystack",
+      "name": "Haystack",
+      "group": "framework",
+      "positioning": "Build agents and retrieval pipelines over documents and tools.",
+      "url": "https://docs.haystack.deepset.ai/docs/intro",
+      "sources": [
+        {
+          "label": "Haystack · Intro",
+          "url": "https://docs.haystack.deepset.ai/docs/intro"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Components + pipelines",
+          "detail": "Reuse agent components, retrieval pipelines and document stores."
+        },
+        "outcome": {
+          "label": "Pipeline contract",
+          "detail": "Define inputs, processing and outputs in the application pipeline."
+        },
+        "teamwork": {
+          "label": "Agent pipelines",
+          "detail": "Compose tools and components within your agent application."
+        },
+        "control": {
+          "label": "Pipeline instrumentation",
+          "detail": "Inspect configured pipeline and agent execution; platform tools add operations."
+        },
+        "hosting": {
+          "label": "Your runtime",
+          "detail": "Run the Python framework in your chosen deployment."
+        },
+        "results": {
+          "label": "Documents + outputs",
+          "detail": "Process documents and return pipeline/agent outputs."
+        },
+        "connect": {
+          "label": "Tools + HTTP deployment",
+          "detail": "Connect model integrations, tools and HTTP services."
+        }
+      }
+    },
+    {
+      "id": "llamaindex",
+      "name": "LlamaIndex",
+      "group": "framework",
+      "positioning": "Connect data and retrieval to agent workflows.",
+      "url": "https://developers.llamaindex.ai/python/framework/",
+      "sources": [
+        {
+          "label": "LlamaIndex · Framework",
+          "url": "https://developers.llamaindex.ai/python/framework/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Data + agent definitions",
+          "detail": "Reuse indexed knowledge, tools and agent configuration."
+        },
+        "outcome": {
+          "label": "Workflow + structured output",
+          "detail": "Define work through workflows and structured result requirements."
+        },
+        "teamwork": {
+          "label": "Multi-agent workflows",
+          "detail": "Compose agents and data workflows."
+        },
+        "control": {
+          "label": "Streams + human input",
+          "detail": "Use workflow state, streaming and human-in-the-loop patterns."
+        },
+        "hosting": {
+          "label": "Framework or cloud layer",
+          "detail": "Operate the framework; LlamaCloud/LlamaAgents are separate service layers."
+        },
+        "results": {
+          "label": "Data + workflow results",
+          "detail": "Return retrieval results and agent/workflow outputs."
+        },
+        "connect": {
+          "label": "Data connectors + MCP",
+          "detail": "Connect data sources, models and MCP tools."
+        }
+      }
+    },
+    {
+      "id": "ag2",
+      "name": "AG2",
+      "group": "framework",
+      "positioning": "Compose conversations and collaborative agent workflows.",
+      "url": "https://docs.ag2.ai/latest/",
+      "sources": [
+        {
+          "label": "AG2 · Latest",
+          "url": "https://docs.ag2.ai/latest/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Conversable agents",
+          "detail": "Reuse configured agents, tools and conversational roles."
+        },
+        "outcome": {
+          "label": "Task conversations",
+          "detail": "Provide tasks and completion conditions through the application."
+        },
+        "teamwork": {
+          "label": "Group chat + swarms",
+          "detail": "Use group conversations, swarm patterns and human-agent collaboration."
+        },
+        "control": {
+          "label": "Human participation",
+          "detail": "Keep humans in agent conversations and inspect interactions."
+        },
+        "hosting": {
+          "label": "Your application",
+          "detail": "Run the framework in your environment; Playground is a separate interface."
+        },
+        "results": {
+          "label": "Tool and code results",
+          "detail": "Use tool outputs, retrieval and code execution results."
+        },
+        "connect": {
+          "label": "Tools + model integration",
+          "detail": "Connect tools, retrieval and supported model integrations."
+        }
+      }
+    },
+    {
+      "id": "autogen",
+      "name": "AutoGen",
+      "group": "framework",
+      "positioning": "Historical multi-agent framework; Microsoft now directs new work to Agent Framework.",
+      "url": "https://github.com/microsoft/autogen",
+      "sources": [
+        {
+          "label": "AutoGen · Source repository",
+          "url": "https://github.com/microsoft/autogen"
+        },
+        {
+          "label": "AutoGen · Stable",
+          "url": "https://microsoft.github.io/autogen/stable/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "AgentChat definitions",
+          "detail": "Reuse agent configuration and tools in the archived framework."
+        },
+        "outcome": {
+          "label": "Conversation task",
+          "detail": "Give teams work through task input and configured termination rules."
+        },
+        "teamwork": {
+          "label": "Teams + agent messages",
+          "detail": "Compose AgentChat teams and Core message-based agents."
+        },
+        "control": {
+          "label": "AgentChat + Studio",
+          "detail": "Inspect agent conversations using code or AutoGen Studio."
+        },
+        "hosting": {
+          "label": "Own runtime, archived project",
+          "detail": "Existing code can run in your environment; the official repository is archived."
+        },
+        "results": {
+          "label": "Messages + execution results",
+          "detail": "Receive agent responses and configured tool/code outputs."
+        },
+        "connect": {
+          "label": "MCP + code tools",
+          "detail": "The retained docs cover MCP and code-execution integrations."
+        }
+      }
+    },
+    {
+      "id": "semantic-kernel",
+      "name": "Semantic Kernel",
+      "group": "framework",
+      "positioning": "Connect model reasoning to existing application functions.",
+      "url": "https://learn.microsoft.com/en-us/semantic-kernel/overview/",
+      "sources": [
+        {
+          "label": "Semantic Kernel · Overview",
+          "url": "https://learn.microsoft.com/en-us/semantic-kernel/overview/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Plugins + instructions",
+          "detail": "Reuse application functions as plugins and configure model instructions."
+        },
+        "outcome": {
+          "label": "Application-defined work",
+          "detail": "The host application defines the request and useful output."
+        },
+        "teamwork": {
+          "label": "Application composition",
+          "detail": "Compose model and plugin calls in the application."
+        },
+        "control": {
+          "label": "Application controls",
+          "detail": "Use the surrounding application to expose control and review."
+        },
+        "hosting": {
+          "label": "Your application",
+          "detail": "Integrate the SDK in C#, Python or Java applications."
+        },
+        "results": {
+          "label": "Function results",
+          "detail": "Return results from application functions and model calls."
+        },
+        "connect": {
+          "label": "Plugins + model services",
+          "detail": "Connect existing APIs/functions and model services."
+        }
+      }
+    },
+    {
+      "id": "codex",
+      "name": "Codex + App Server",
+      "group": "native",
+      "positioning": "Use the native Codex harness directly or embed its App Server.",
+      "url": "https://developers.openai.com/blog/codex-as-a-platform",
+      "sources": [
+        {
+          "label": "Codex + App Server · Codex as a platform",
+          "url": "https://developers.openai.com/blog/codex-as-a-platform"
+        },
+        {
+          "label": "Codex + App Server · App server",
+          "url": "https://learn.chatgpt.com/docs/app-server"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Skills + instructions",
+          "detail": "Specialize Codex with reusable skills and project/application instructions."
+        },
+        "outcome": {
+          "label": "Task + context",
+          "detail": "Supply a task with workspace and application context."
+        },
+        "teamwork": {
+          "label": "Threads + delegation",
+          "detail": "Use separate threads and native delegated work capabilities."
+        },
+        "control": {
+          "label": "Events + steer + approvals",
+          "detail": "App Server exposes turns, streamed events, steering, interrupts and approvals."
+        },
+        "hosting": {
+          "label": "Local harness integration",
+          "detail": "Run the open-source CLI or App Server; model access remains separate."
+        },
+        "results": {
+          "label": "Files + structured results",
+          "detail": "Work on files and return tool results or structured outputs."
+        },
+        "connect": {
+          "label": "App Server + SDK + MCP",
+          "detail": "Integrate the harness through its protocol, SDK or MCP tools."
+        }
+      },
+      "nativeHarnesses": "Codex"
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "group": "native",
+      "positioning": "Use Claude Code directly across terminal, IDE, desktop and web.",
+      "url": "https://code.claude.com/docs/en/overview",
+      "sources": [
+        {
+          "label": "Claude Code · Overview",
+          "url": "https://code.claude.com/docs/en/overview"
+        },
+        {
+          "label": "Claude Code · Overview",
+          "url": "https://code.claude.com/docs/en/agent-sdk/overview"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Skills + plugins + memory",
+          "detail": "Specialize the tool with reusable instructions, skills and plugins."
+        },
+        "outcome": {
+          "label": "Task + project context",
+          "detail": "Give a task in conversation with the relevant project."
+        },
+        "teamwork": {
+          "label": "Subagents",
+          "detail": "Use configured specialist subagents."
+        },
+        "control": {
+          "label": "Interactive sessions",
+          "detail": "Follow work, provide input and use native permission controls."
+        },
+        "hosting": {
+          "label": "Local and remote surfaces",
+          "detail": "Choose the supported execution surface and account/provider route."
+        },
+        "results": {
+          "label": "Files + commands",
+          "detail": "Read and edit workspace files and run commands."
+        },
+        "connect": {
+          "label": "MCP + integrations",
+          "detail": "Connect tools and development services; SDK supports embedding."
+        }
+      },
+      "nativeHarnesses": "Claude Code"
+    },
+    {
+      "id": "grok-build",
+      "name": "Grok Build",
+      "group": "native",
+      "positioning": "Use Grok’s native coding agent through terminal, scripts or ACP.",
+      "url": "https://docs.x.ai/build/overview",
+      "sources": [
+        {
+          "label": "Grok Build · Overview",
+          "url": "https://docs.x.ai/build/overview"
+        },
+        {
+          "label": "Grok Build · Skills plugins marketplaces",
+          "url": "https://docs.x.ai/build/features/skills-plugins-marketplaces"
+        },
+        {
+          "label": "Grok Build · Subagents",
+          "url": "https://docs.x.ai/build/features/subagents"
+        },
+        {
+          "label": "Grok Build · Sessions",
+          "url": "https://docs.x.ai/build/features/sessions"
+        },
+        {
+          "label": "Grok Build · Permissions",
+          "url": "https://docs.x.ai/build/features/permissions"
+        },
+        {
+          "label": "Grok Build · Reference",
+          "url": "https://docs.x.ai/build/cli/reference"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Skills + plugins + instructions",
+          "detail": "Reuse skills containing instructions, scripts and resources; plugins can add agents, hooks and MCP servers."
+        },
+        "outcome": {
+          "label": "Task + tracked todos",
+          "detail": "Give a task with workspace context; the session retains a structured list of planned and completed work."
+        },
+        "teamwork": {
+          "label": "Parallel subagents",
+          "detail": "Delegate to independent child sessions with their own context; children return summaries to the parent."
+        },
+        "control": {
+          "label": "Terminal + saved sessions",
+          "detail": "Use the interactive terminal, permission controls, resume, fork and rewind operations."
+        },
+        "hosting": {
+          "label": "Local native CLI",
+          "detail": "Run the native agent with browser sign-in or an API key; configure supported custom model endpoints."
+        },
+        "results": {
+          "label": "Files + saved sessions",
+          "detail": "Work on files and retain session messages, tool calls and file snapshots; export transcripts."
+        },
+        "connect": {
+          "label": "ACP + scripts + MCP",
+          "detail": "Embed through ACP, run headless scripts with JSON output, or connect MCP tools and plugins."
+        }
+      },
+      "nativeHarnesses": "Grok Build"
+    },
+    {
+      "id": "kagent",
+      "name": "kagent + agentgateway",
+      "group": "control",
+      "positioning": "Operate declarative and native agents under Kubernetes runtime policy.",
+      "url": "https://kagent.dev/docs/kagent/1.x/about/core-concepts/",
+      "sources": [
+        {
+          "label": "kagent + agentgateway · Core concepts",
+          "url": "https://kagent.dev/docs/kagent/1.x/about/core-concepts/"
+        },
+        {
+          "label": "kagent + agentgateway · Declarative agents",
+          "url": "https://kagent.dev/docs/kagent/1.x/agents/declarative-agents/"
+        },
+        {
+          "label": "kagent + agentgateway · Byo agentgateway",
+          "url": "https://kagent.dev/docs/kagent/1.x/setup/model-providers/byo-agentgateway/"
+        },
+        {
+          "label": "kagent + agentgateway · Faq",
+          "url": "https://kagent.dev/docs/kagent/1.x/reference/faq/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Templates + skills",
+          "detail": "Version agent templates containing models, prompts, tools, skills and plugins."
+        },
+        "outcome": {
+          "label": "Session + template",
+          "detail": "Give work to a session using an agent template paired with a harness."
+        },
+        "teamwork": {
+          "label": "Subagent tool bindings",
+          "detail": "Bind other templates as tools for delegated work."
+        },
+        "control": {
+          "label": "Sessions + snapshots",
+          "detail": "Suspend, resume and fork sessions from pinned checkpoints."
+        },
+        "hosting": {
+          "label": "Your Kubernetes cluster",
+          "detail": "Separate application behavior from runtime, sandbox and worker-pool policy."
+        },
+        "results": {
+          "label": "Snapshot-backed workspaces",
+          "detail": "Retain execution state through snapshots; file UI features depend on harness route."
+        },
+        "connect": {
+          "label": "MCP + agentgateway",
+          "detail": "Connect MCP tools and route model calls through governance policies."
+        }
+      },
+      "nativeHarnesses": "1.x docs: built-in Go engine · own container · Codex · Claude; prerelease"
+    },
+    {
+      "id": "openai-managed",
+      "name": "OpenAI Agents API",
+      "group": "managed",
+      "positioning": "Use a managed Codex harness through the Agents API.",
+      "url": "https://developers.openai.com/api/docs/guides/agents-api/overview",
+      "sources": [
+        {
+          "label": "OpenAI Agents API · Overview",
+          "url": "https://developers.openai.com/api/docs/guides/agents-api/overview"
+        },
+        {
+          "label": "OpenAI Agents API · Agents",
+          "url": "https://developers.openai.com/api/docs/guides/agents"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agent config + skills",
+          "detail": "Set instructions, tools, MCP servers and environment-loaded skills."
+        },
+        "outcome": {
+          "label": "Task in durable session",
+          "detail": "Send work into a session that retains its context."
+        },
+        "teamwork": {
+          "label": "Managed subagents",
+          "detail": "Delegate subtasks through the managed harness."
+        },
+        "control": {
+          "label": "Events + live steering",
+          "detail": "Stream progress, steer current work and resume sessions."
+        },
+        "hosting": {
+          "label": "Managed harness + sandbox choice",
+          "detail": "Choose OpenAI-hosted, self-hosted or no sandbox; the harness remains managed."
+        },
+        "results": {
+          "label": "Files + artifacts",
+          "detail": "Use sandbox commands and files to produce artifacts."
+        },
+        "connect": {
+          "label": "API + MCP + webhooks",
+          "detail": "Connect application tools and receive lifecycle events."
+        }
+      },
+      "nativeHarnesses": "OpenAI-managed Codex"
+    },
+    {
+      "id": "claude-managed",
+      "name": "Claude Managed Agents",
+      "group": "managed",
+      "positioning": "Use a managed Claude harness for long-running, outcome-based work.",
+      "url": "https://platform.claude.com/docs/en/managed-agents/overview",
+      "sources": [
+        {
+          "label": "Claude Managed Agents · Overview",
+          "url": "https://platform.claude.com/docs/en/managed-agents/overview"
+        },
+        {
+          "label": "Claude Managed Agents · Define outcomes",
+          "url": "https://platform.claude.com/docs/en/managed-agents/define-outcomes"
+        },
+        {
+          "label": "Claude Managed Agents · Choosing an environment",
+          "url": "https://platform.claude.com/docs/en/managed-agents/choosing-an-environment"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Agent config + skills",
+          "detail": "Configure instructions, skills and MCP tools."
+        },
+        "outcome": {
+          "label": "Outcome + grading rubric",
+          "detail": "Define a result and rubric; a separate grader drives bounded revision cycles."
+        },
+        "teamwork": {
+          "label": "Agent orchestration",
+          "detail": "Use the managed harness and its configured orchestration capabilities."
+        },
+        "control": {
+          "label": "Events + direction + interrupt",
+          "detail": "Follow progress, add direction and interrupt an active outcome."
+        },
+        "hosting": {
+          "label": "Managed or self-hosted sandbox",
+          "detail": "Choose where tools execute; Anthropic still operates the managed service."
+        },
+        "results": {
+          "label": "Persistent files + downloads",
+          "detail": "Retain session files and attach or download artifacts."
+        },
+        "connect": {
+          "label": "MCP + schedules + webhooks",
+          "detail": "Connect tools and configure scheduled deployments or lifecycle notifications."
+        }
+      }
+    },
+    {
+      "id": "agentcore",
+      "name": "AWS Bedrock AgentCore",
+      "group": "managed",
+      "positioning": "Host chosen agent code with managed sessions and AWS services.",
+      "url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html",
+      "sources": [
+        {
+          "label": "AWS Bedrock AgentCore · Agents tools runtime.html",
+          "url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html"
+        },
+        {
+          "label": "AWS Bedrock AgentCore · Runtime instances how it works.html",
+          "url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-instances-how-it-works.html"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Your framework or container",
+          "detail": "Deploy application-owned agent behavior and dependencies."
+        },
+        "outcome": {
+          "label": "Application-defined objective",
+          "detail": "The hosted agent code defines the task, output and success checks."
+        },
+        "teamwork": {
+          "label": "Multiple agents on Instances",
+          "detail": "Use supported Instance sessions for collaborating agents."
+        },
+        "control": {
+          "label": "Streams + tracing",
+          "detail": "Observe agent steps and run long-lived or asynchronous sessions."
+        },
+        "hosting": {
+          "label": "Managed AWS compute",
+          "detail": "Choose managed microVMs or managed EC2 Instances in your AWS account."
+        },
+        "results": {
+          "label": "Persistent session files",
+          "detail": "Keep filesystem state across stop/resume cycles."
+        },
+        "connect": {
+          "label": "MCP + A2A + Identity",
+          "detail": "Expose agents/tools and authenticate connections to external services."
+        }
+      }
+    },
+    {
+      "id": "foundry",
+      "name": "Microsoft Foundry Hosted Agents",
+      "group": "managed",
+      "positioning": "Host your agent code with Microsoft-managed session infrastructure.",
+      "url": "https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents",
+      "sources": [
+        {
+          "label": "Microsoft Foundry Hosted Agents · Hosted agents",
+          "url": "https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents"
+        },
+        {
+          "label": "Microsoft Foundry Hosted Agents · Hosting",
+          "url": "https://learn.microsoft.com/en-us/agent-framework/hosting/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Containerized agent code",
+          "detail": "Package your own framework, dependencies and behavior."
+        },
+        "outcome": {
+          "label": "Application-defined objective",
+          "detail": "Your agent code defines how a task reaches its desired output."
+        },
+        "teamwork": {
+          "label": "Your agent framework",
+          "detail": "Host the multi-agent logic provided by your chosen framework."
+        },
+        "control": {
+          "label": "Stream replay + resume",
+          "detail": "Resume stateful work and reconnect clients to streamed results."
+        },
+        "hosting": {
+          "label": "Microsoft-managed runtime",
+          "detail": "Foundry operates sandbox lifecycle, scaling and identity."
+        },
+        "results": {
+          "label": "Persistent session filesystem",
+          "detail": "Keep files in the session sandbox across idle/resume."
+        },
+        "connect": {
+          "label": "Responses + Invocations",
+          "detail": "Expose protocol endpoints, including custom webhook payloads."
+        }
+      }
+    },
+    {
+      "id": "google-platform",
+      "name": "Gemini Enterprise Agent Platform (Agent Runtime + Agent Gateway)",
+      "group": "managed",
+      "positioning": "Deploy and govern agents with Google Cloud’s Agent Runtime and Agent Gateway.",
+      "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/overview",
+      "sources": [
+        {
+          "label": "Gemini Enterprise Agent Platform (Agent Runtime + Agent Gateway) · Overview",
+          "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/overview"
+        },
+        {
+          "label": "Gemini Enterprise Agent Platform (Agent Runtime + Agent Gateway) · Runtime",
+          "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime"
+        },
+        {
+          "label": "Gemini Enterprise Agent Platform (Agent Runtime + Agent Gateway) · Agent gateway overview",
+          "url": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/agent-gateway-overview"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Studio or framework agents",
+          "detail": "Use visual Agent Studio or code frameworks such as ADK."
+        },
+        "outcome": {
+          "label": "Agent-defined work",
+          "detail": "The deployed agent specifies its task behavior and useful outputs."
+        },
+        "teamwork": {
+          "label": "Framework + A2A",
+          "detail": "Use framework orchestration and governed agent-to-agent connections."
+        },
+        "control": {
+          "label": "Agent observability",
+          "detail": "Inspect agent interactions through tracing and gateway telemetry."
+        },
+        "hosting": {
+          "label": "Google-managed Agent Runtime",
+          "detail": "Run agents on Gemini Enterprise Agent Platform’s managed Agent Runtime with centralized identity and access policies."
+        },
+        "results": {
+          "label": "Agent responses",
+          "detail": "Return the outputs produced by the deployed agent application."
+        },
+        "connect": {
+          "label": "Agent Gateway",
+          "detail": "Govern MCP, A2A, REST and gRPC connections. Wider deployment models have separate availability."
+        }
+      }
+    },
+    {
+      "id": "temporal",
+      "name": "Temporal integrations",
+      "group": "infrastructure",
+      "positioning": "Add durable execution to Pydantic AI or OpenAI Agents SDK.",
+      "url": "https://docs.temporal.io/develop/python/integrations/openai-agents",
+      "sources": [
+        {
+          "label": "Temporal integrations · Openai agents",
+          "url": "https://docs.temporal.io/develop/python/integrations/openai-agents"
+        },
+        {
+          "label": "Temporal integrations · Temporal",
+          "url": "https://pydantic.dev/docs/ai/capabilities/durable_execution/temporal/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Keep framework definitions",
+          "detail": "Agent expertise stays in Pydantic AI or OpenAI Agents SDK configuration."
+        },
+        "outcome": {
+          "label": "Workflow-defined completion",
+          "detail": "The agent application defines its task and completion contract."
+        },
+        "teamwork": {
+          "label": "Durable workflow orchestration",
+          "detail": "Run the agent loop and handoffs inside workflows."
+        },
+        "control": {
+          "label": "Replay + recovery",
+          "detail": "Recover after worker restarts without repeating recorded model calls."
+        },
+        "hosting": {
+          "label": "Your workers + service",
+          "detail": "Your workers run application logic against a Temporal service."
+        },
+        "results": {
+          "label": "Recorded results",
+          "detail": "Store durable activity results; application storage owns large artifacts."
+        },
+        "connect": {
+          "label": "Activity-backed tools",
+          "detail": "Put external I/O in activities and use documented framework integrations."
+        }
+      }
+    },
+    {
+      "id": "dbos",
+      "name": "DBOS + Pydantic AI",
+      "group": "infrastructure",
+      "positioning": "Add database-backed durable runs to Pydantic AI.",
+      "url": "https://pydantic.dev/docs/ai/capabilities/durable_execution/dbos/",
+      "sources": [
+        {
+          "label": "DBOS + Pydantic AI · Dbos",
+          "url": "https://pydantic.dev/docs/ai/capabilities/durable_execution/dbos/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Keep Pydantic agent specs",
+          "detail": "Reusable expertise remains in the Pydantic AI agent."
+        },
+        "outcome": {
+          "label": "Workflow-defined completion",
+          "detail": "Run the agent inside a DBOS workflow with application-defined outputs."
+        },
+        "teamwork": {
+          "label": "Durable queues",
+          "detail": "Control concurrency, rate limits, priorities and timeouts."
+        },
+        "control": {
+          "label": "Checkpoint + resume",
+          "detail": "Recover workflows from completed database-backed steps."
+        },
+        "hosting": {
+          "label": "Your app + database",
+          "detail": "Run the durable application with its system database."
+        },
+        "results": {
+          "label": "Stored step results",
+          "detail": "Persist workflow inputs and step outputs for recovery."
+        },
+        "connect": {
+          "label": "Durable model + MCP steps",
+          "detail": "Use the Pydantic integration; wrap custom external I/O in explicit steps."
+        }
+      }
+    },
+    {
+      "id": "daytona",
+      "name": "Daytona",
+      "group": "infrastructure",
+      "positioning": "Provide isolated execution environments for agent code and tools.",
+      "url": "https://www.daytona.io/docs/en/architecture/",
+      "sources": [
+        {
+          "label": "Daytona · Architecture",
+          "url": "https://www.daytona.io/docs/en/architecture/"
+        },
+        {
+          "label": "Daytona · Sandboxes",
+          "url": "https://www.daytona.io/docs/en/sandboxes/"
+        },
+        {
+          "label": "Daytona · Playground",
+          "url": "https://www.daytona.io/docs/en/playground/"
+        }
+      ],
+      "cells": {
+        "expertise": {
+          "label": "Images + snapshots",
+          "detail": "Reuse execution environments from images and snapshots; agent expertise stays in the chosen harness or application."
+        },
+        "outcome": {
+          "label": "Application-defined job",
+          "detail": "The agent application defines the job and success checks; Daytona supplies its execution environment."
+        },
+        "teamwork": {
+          "label": "Multiple sandboxes",
+          "detail": "Run separate sandbox workloads across compute runners with allocated resources."
+        },
+        "control": {
+          "label": "Dashboard + terminals",
+          "detail": "Manage sandbox lifecycle and inspect processes, logs, terminals or desktop activity."
+        },
+        "hosting": {
+          "label": "Sandbox runners",
+          "detail": "Run workloads in isolated sandboxes across shared or dedicated regions."
+        },
+        "results": {
+          "label": "Files + persistent volumes",
+          "detail": "Access sandbox files and use persistent volumes across sandboxes."
+        },
+        "connect": {
+          "label": "SDK + API + CLI + MCP",
+          "detail": "Integrate sandbox creation, code execution, filesystem operations and access to running services."
+        }
+      }
+    }
+  ],
+  "exampleStories": [
+    {
+      "title": "Finance partner",
+      "example": "Reuse a finance expert with reference files; request a board brief and an editable forecast with stated assumptions.",
+      "benefit": "Keep the expertise, working calculation and resulting brief together."
+    },
+    {
+      "title": "Research specialist",
+      "example": "Give a research expert a question, source material and evidence criteria; review the cited findings and open the result files.",
+      "benefit": "A concrete deliverable with supporting evidence that can be checked."
+    },
+    {
+      "title": "Your own expert",
+      "example": "Save a useful worker setup with instructions, knowledge and tools; start a new worker from that version for the next job.",
+      "benefit": "Reuse a person’s method without recreating the setup each time."
+    }
+  ]
+}

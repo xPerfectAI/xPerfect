@@ -13,7 +13,7 @@ and Grok, keeping each worker's files, progress and results together on your com
 
 [**Start locally**](#start-locally) · [Visual guide](https://www.xperfect.ai/docs/) ·
 [Try a complete example](docs/workshop.md) · [API and MCP](docs/developer.md) ·
-[Compare native tools](docs/capability-matrix.md#what-xperfect-adds) · [Webhooks](runtime_phase1/README.md#generic-worker-and-webhook-schedules)
+[Compare the landscape](https://www.xperfect.ai/docs/compare.html) · [Webhooks](runtime_phase1/README.md#generic-worker-and-webhook-schedules)
 
 Our vision: turn experts' knowledge and skills into reusable AI counterparts that can work
 across your channels and tools. The starting team below is one way to begin; you can create,
@@ -39,9 +39,10 @@ Starting from one creates a new worker. Reusing an existing worker continues its
 Keep the native AI tools you trust. Give their workers one place for knowledge, controls,
 schedules and results. Use xPerfect itself, connect another AI app, or build your own interface.
 
-[![14 practical outcomes: native tools alone, with xPerfect and current limits](docs/assets/capability-comparison.svg)](docs/capability-matrix.md#what-xperfect-adds)
+[![AI worker landscape: reusable expertise, clear jobs, native tools, live controls and useful results](docs/assets/capability-comparison.svg)](https://www.xperfect.ai/docs/compare.html)
 
-[Read the full, accessible comparison and current limits](docs/capability-matrix.md#what-xperfect-adds).
+[Compare 36 products by what you can do](https://www.xperfect.ai/docs/compare.html) ·
+[Read the accessible matrix and primary sources](docs/comparison.md).
 
 ## Meet your starting team
 
