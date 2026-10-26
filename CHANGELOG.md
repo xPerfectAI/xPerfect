@@ -87,7 +87,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-10-22 — Hand work over without rewriting the conversation
 
-> **Summary:** A Direct conversational AI can answer while native workers take on action work. Handoffs keep the authorized original conversation and files rather than asking the conversational AI to write a replacement brief.
+> **Summary:** Your conversational AI can answer while native workers take on action work. Handoffs keep the authorized original conversation and files rather than asking the conversational AI to write a replacement brief.
 >
 > **Example:** Ask a question while a worker prepares a report. Your conversational AI can steer that worker or start another authorized worker and bring the useful result back to the same conversation.
 >

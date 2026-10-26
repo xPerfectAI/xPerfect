@@ -109,7 +109,7 @@
           "detail": "Set the job, desired outcome and background; retain project goals and success criteria."
         },
         "teamwork": {
-          "label": "Workers + shared work",
+          "label": "Parallel + shared workers",
           "detail": "Authorized workers discover and message each other. Configure parallel work, queues and shared workspaces."
         },
         "control": {
@@ -117,15 +117,15 @@
           "detail": "Follow progress, give direction and use supported native controls from one operator surface."
         },
         "hosting": {
-          "label": "Your host",
+          "label": "Your computer or server",
           "detail": "Run the control plane on your own host, with supported accounts, models and harnesses. Hosted model calls still leave the host."
         },
         "results": {
-          "label": "Files + snapshots",
+          "label": "Reports + saved files",
           "detail": "Open and download retained results, including editable calculations. Continue a workspace or copy it for separate work."
         },
         "connect": {
-          "label": "UI + API + MCP",
+          "label": "API, MCP + scheduled webhooks",
           "detail": "Operate the same records through UI, HTTP or MCP. Schedule saved work or signed outbound webhooks."
         }
       },
@@ -213,7 +213,7 @@
       ],
       "cells": {
         "expertise": {
-          "label": "YAML agents",
+          "label": "Specialist configuration files",
           "detail": "Package prompts, tools, specialists and reviewers in reusable agent files."
         },
         "outcome": {
@@ -574,7 +574,7 @@
       ],
       "cells": {
         "expertise": {
-          "label": "Agent specs + skills",
+          "label": "Reusable agent blueprints",
           "detail": "Share YAML or JSON agent specifications, capabilities and skills."
         },
         "outcome": {
@@ -1396,7 +1396,7 @@
           "detail": "Delegate to independent child sessions with their own context; children return summaries to the parent."
         },
         "control": {
-          "label": "TUI + session controls",
+          "label": "Terminal + saved sessions",
           "detail": "Use the interactive terminal, permission controls, resume, fork and rewind operations."
         },
         "hosting": {

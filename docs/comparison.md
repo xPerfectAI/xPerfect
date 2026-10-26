@@ -34,9 +34,9 @@ Interfaces and services for operating agents, teams or visual workflows.
 
 | Product | Reuse expertise | Set the job & outcome | Work with specialists | Watch and steer | Choose where it runs | Keep useful results | Connect and repeat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Workers + shared work | Watch + steer | Your host | Files + snapshots | UI + API + MCP |
+| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Parallel + shared workers | Watch + steer | Your computer or server | Reports + saved files | API, MCP + scheduled webhooks |
 | [Scion](https://github.com/GoogleCloudPlatform/scion) | Templates + Skill Bank | Tasks + role instructions | Parallel agents | Dashboard + terminal | Local or hosted brokers | Agent workspaces | API + schedules |
-| [Omnigent](https://github.com/omnigent-ai/omnigent) | YAML agents | Session task + policies | Mixed-harness specialists | Shared live sessions | Local or cloud sandboxes | Synchronized files | Functions + MCP |
+| [Omnigent](https://github.com/omnigent-ai/omnigent) | Specialist configuration files | Session task + policies | Mixed-harness specialists | Shared live sessions | Local or cloud sandboxes | Synchronized files | Functions + MCP |
 | [Paperclip](https://github.com/PaperclipAI/paperclip) | Agents + company templates | Goals → projects → tasks | Org chart + delegation | Dashboard + approvals | Self-hosted server | Tasks + documents | Adapters + gateways |
 | [Agno + AgentOS](https://docs.agno.com/) | Agents + knowledge + tools | Agent or workflow request | Teams + workflows | Control Plane + streams | Self-hosted AgentOS | Sessions + responses | API + MCP + schedules |
 | [OpenHands Agent Canvas + SDK](https://docs.openhands.dev/overview/introduction) | Agent configurations | Conversation task | Multiple conversations | Canvas + terminals | Local or cloud runtime | Working files | SDK + automation services |
@@ -48,7 +48,7 @@ Build connected workflows and agent tools through a visual editor.
 
 | Product | Reuse expertise | Set the job & outcome | Work with specialists | Watch and steer | Choose where it runs | Keep useful results | Connect and repeat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Workers + shared work | Watch + steer | Your host | Files + snapshots | UI + API + MCP |
+| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Parallel + shared workers | Watch + steer | Your computer or server | Reports + saved files | API, MCP + scheduled webhooks |
 | [Dify](https://docs.dify.ai/en/home) | Apps + knowledge | Workflow inputs + outputs | Workflow orchestration | Visual workflow + runs | Cloud or self-hosted | Application outputs | APIs + triggers |
 | [Flowise](https://docs.flowiseai.com/) | Assistants + RAG | Visual flow outputs | Agentflow branches | Human review + resume | Cloud or self-hosted | Flow responses + state | API + SDK + MCP |
 | [n8n](https://docs.n8n.io/build/integrate-ai.md) | Workflow templates | Trigger → workflow result | Workflow orchestration | Workflow executions | Cloud or self-hosted | Node data + app actions | App nodes + schedules |
@@ -59,8 +59,8 @@ Reusable agent behavior and workflows within your application.
 
 | Product | Reuse expertise | Set the job & outcome | Work with specialists | Watch and steer | Choose where it runs | Keep useful results | Connect and repeat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Workers + shared work | Watch + steer | Your host | Files + snapshots | UI + API + MCP |
-| [Pydantic AI + Harness](https://pydantic.dev/docs/ai/overview/) | Agent specs + skills | Instructions + typed output | Subagents + workflows | Persistence + durable engines | Your application runtime | Workspaces + typed results | Tools + MCP + interfaces |
+| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Parallel + shared workers | Watch + steer | Your computer or server | Reports + saved files | API, MCP + scheduled webhooks |
+| [Pydantic AI + Harness](https://pydantic.dev/docs/ai/overview/) | Reusable agent blueprints | Instructions + typed output | Subagents + workflows | Persistence + durable engines | Your application runtime | Workspaces + typed results | Tools + MCP + interfaces |
 | [LangGraph + LangSmith Deployment](https://docs.langchain.com/oss/python/langgraph/overview) | Graphs + assistants | Graph state + outputs | Multi-agent graphs | Checkpoints + interrupts | Cloud, hybrid or self-hosted | State + run outputs | APIs + MCP + cron |
 | [Deep Agents](https://docs.langchain.com/oss/javascript/deepagents/overview) | Skills + instructions | Plans + tracked tasks | Specialist subagents | Interrupts + memory | Your chosen backend | Pluggable filesystems | Tools + model adapters |
 | [CrewAI + AMP](https://docs.crewai.com/) | Roles + capabilities | Tasks + expected outputs | Crews + flows | Persisted flows + AMP | Framework or platform | Task and flow results | Tools + app triggers |
@@ -82,10 +82,10 @@ Agent tools and protocols that can also power other products.
 
 | Product | Reuse expertise | Set the job & outcome | Work with specialists | Watch and steer | Choose where it runs | Keep useful results | Connect and repeat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Workers + shared work | Watch + steer | Your host | Files + snapshots | UI + API + MCP |
+| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Parallel + shared workers | Watch + steer | Your computer or server | Reports + saved files | API, MCP + scheduled webhooks |
 | [Codex + App Server](https://developers.openai.com/blog/codex-as-a-platform) | Skills + instructions | Task + context | Threads + delegation | Events + steer + approvals | Local harness integration | Files + structured results | App Server + SDK + MCP |
 | [Claude Code](https://code.claude.com/docs/en/overview) | Skills + plugins + memory | Task + project context | Subagents | Interactive sessions | Local and remote surfaces | Files + commands | MCP + integrations |
-| [Grok Build](https://docs.x.ai/build/overview) | Skills + plugins + instructions | Task + tracked todos | Parallel subagents | TUI + session controls | Local native CLI | Files + saved sessions | ACP + scripts + MCP |
+| [Grok Build](https://docs.x.ai/build/overview) | Skills + plugins + instructions | Task + tracked todos | Parallel subagents | Terminal + saved sessions | Local native CLI | Files + saved sessions | ACP + scripts + MCP |
 
 ### Managed runtimes
 
@@ -93,7 +93,7 @@ Cloud services that operate the harness or host your agent code.
 
 | Product | Reuse expertise | Set the job & outcome | Work with specialists | Watch and steer | Choose where it runs | Keep useful results | Connect and repeat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Workers + shared work | Watch + steer | Your host | Files + snapshots | UI + API + MCP |
+| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Parallel + shared workers | Watch + steer | Your computer or server | Reports + saved files | API, MCP + scheduled webhooks |
 | [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview) | Agent config + skills | Task in durable session | Managed subagents | Events + live steering | Managed harness + sandbox choice | Files + artifacts | API + MCP + webhooks |
 | [Claude Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview) | Agent config + skills | Outcome + grading rubric | Agent orchestration | Events + direction + interrupt | Managed or self-hosted sandbox | Persistent files + downloads | MCP + schedules + webhooks |
 | [AWS Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html) | Your framework or container | Application-defined objective | Multiple agents on Instances | Streams + tracing | Managed AWS compute | Persistent session files | MCP + A2A + Identity |
@@ -106,7 +106,7 @@ Durable execution components used with agent frameworks.
 
 | Product | Reuse expertise | Set the job & outcome | Work with specialists | Watch and steer | Choose where it runs | Keep useful results | Connect and repeat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Workers + shared work | Watch + steer | Your host | Files + snapshots | UI + API + MCP |
+| [xPerfect](https://github.com/xPerfectAI/xPerfect/blob/main/README.md) | Saved experts + Library | Job + success criteria | Parallel + shared workers | Watch + steer | Your computer or server | Reports + saved files | API, MCP + scheduled webhooks |
 | [Temporal integrations](https://docs.temporal.io/develop/python/integrations/openai-agents) | Keep framework definitions | Workflow-defined completion | Durable workflow orchestration | Replay + recovery | Your workers + service | Recorded results | Activity-backed tools |
 | [DBOS + Pydantic AI](https://pydantic.dev/docs/ai/capabilities/durable_execution/dbos/) | Keep Pydantic agent specs | Workflow-defined completion | Durable queues | Checkpoint + resume | Your app + database | Stored step results | Durable model + MCP steps |
 | [Daytona](https://www.daytona.io/docs/en/architecture/) | Images + snapshots | Application-defined job | Multiple sandboxes | Dashboard + terminals | Sandbox runners | Files + persistent volumes | SDK + API + CLI + MCP |
