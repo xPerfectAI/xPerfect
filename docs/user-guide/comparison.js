@@ -18,7 +18,7 @@ function showGroup(group) {
  filters.forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.groupFilter===group)));
  let count=0;
  rows.forEach(row=>{row.hidden=group!=='all'&&row.dataset.group!==group&&row.id!=='xperfect';if(!row.hidden)count++;});
- document.querySelector('.filter-count').textContent=`${count} products · xPerfect stays in view for comparison`;
+ document.querySelector('.filter-count').textContent=`${count} products · xPerfect included in every category`;
 }
 filters.forEach(button=>button.addEventListener('click',()=>showGroup(button.dataset.groupFilter)));
 document.getElementById('show-mechanisms').addEventListener('change',event=>document.body.classList.toggle('show-mechanisms',event.target.checked));

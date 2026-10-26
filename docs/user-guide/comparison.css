@@ -34,10 +34,10 @@
 .landscape-scroll:focus-visible { outline:3px solid var(--accent); outline-offset:5px; }
 .landscape { margin:0; table-layout:fixed; min-width:1120px; font-size:13px; }
 .landscape caption { text-align:left; color:var(--muted); padding:16px 18px; font-size:13px; }
-.landscape th,.landscape td { padding:21px 15px; width:auto; border-color:var(--line); }
+.landscape th,.landscape td { padding:17px 15px; width:auto; border-color:var(--line); }
 .landscape thead th { position:sticky; top:0; z-index:2; background:var(--soft); color:var(--ink); font-size:13px; letter-spacing:0; text-transform:none; line-height:1.4; }
 .landscape thead th:first-child { width:230px; left:0; z-index:3; }
-.column-example { display:block; color:var(--muted); font-size:11px; font-weight:400; margin-top:9px; line-height:1.5; }
+.column-example { display:none; color:var(--muted); font-size:11px; font-weight:400; margin-top:9px; line-height:1.5; }
 .landscape tbody th { text-align:left; width:230px; position:sticky; left:0; z-index:1; background:var(--surface); font-size:15px; letter-spacing:0; text-transform:none; font-weight:600; }
 .landscape tr.featured th,.landscape tr.featured td { background:var(--note); border-bottom:2px solid var(--accent); }
 .product-name { text-decoration:none; text-underline-offset:4px; }
@@ -110,3 +110,5 @@
 @media(prefers-reduced-motion:reduce) { html {scroll-behavior:auto} }
 .compatibility-strip{display:flex;align-items:center;flex-wrap:wrap;gap:10px 23px;margin:12px 0 27px;font-size:12px;color:var(--muted)}
 .compatibility-strip strong{color:var(--accent);font-size:13px}.compatibility-strip span{display:inline-flex;align-items:center;gap:7px}.compatibility-strip span::before{content:'✓';color:var(--accent);font-weight:700}
+
+.show-mechanisms .column-example{display:block}.product-sources p{font-size:12px;font-weight:400;color:var(--muted);line-height:1.6}.native-badge{line-height:1.5}

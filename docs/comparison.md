@@ -307,7 +307,7 @@ Compose agents and workflows with Microsoft Agent Framework.
 - **Keep useful results:** Return workflow results; harness capabilities include files and memory.
 - **Connect and repeat:** Connect model providers and application tools through framework interfaces.
 
-Sources: [Microsoft Agent Framework · Overview](https://learn.microsoft.com/en-us/agent-framework/overview/), [Microsoft Agent Framework · Checkpoints](https://learn.microsoft.com/agent-framework/workflows/checkpoints), [Microsoft Agent Framework · Human in the loop](https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop), [Microsoft Agent Framework · Source repository](https://github.com/microsoft/autogen)
+Sources: [Microsoft Agent Framework · Overview](https://learn.microsoft.com/en-us/agent-framework/overview/), [Microsoft Agent Framework · Checkpoints](https://learn.microsoft.com/agent-framework/workflows/checkpoints), [Microsoft Agent Framework · Human in the loop](https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop), [Microsoft Agent Framework · Source repository](https://github.com/microsoft/agent-framework)
 
 ### Google ADK
 
