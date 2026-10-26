@@ -1,4 +1,9 @@
-# xPerfect
+<h1>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/xperfect-logo-light.svg">
+  <img src="docs/assets/xperfect-logo-dark.svg" alt="xPerfect AI" width="310">
+</picture>
+</h1>
 
 **Build an AI team that knows your work.**
 
@@ -7,7 +12,8 @@ results you can open, inspect and use. xPerfect runs native AI tools such as Cod
 and Grok, keeping each worker's files, progress and results together on your computer or server.
 
 [**Start locally**](#start-locally) · [Visual guide](https://www.xperfect.ai/docs/) ·
-[Try a complete example](docs/workshop.md) · [API and MCP](docs/developer.md)
+[Try a complete example](docs/workshop.md) · [API and MCP](docs/developer.md) ·
+[Compare native tools](docs/capability-matrix.md#what-xperfect-adds) · [Webhooks](runtime_phase1/README.md#generic-worker-and-webhook-schedules)
 
 Our vision: turn experts' knowledge and skills into reusable AI counterparts that can work
 across your channels and tools. The starting team below is one way to begin; you can create,
@@ -26,7 +32,16 @@ Starting from one creates a new worker. Reusing an existing worker continues its
 
 ![Choose from five professional AI Workers, with their included knowledge and abilities](docs/assets/screens/expert-team.jpg)
 
-*Actual profession picker, recorded 24 October 2026; later portrait revisions can differ.*
+*Current expert picker, captured 25 October 2026: five starting professions and the Create card.*
+
+## What xPerfect adds
+
+Keep the native AI tools you trust. Give their workers one place for knowledge, controls,
+schedules and results. Use xPerfect itself, connect another AI app, or build your own interface.
+
+[![14 practical outcomes: native tools alone, with xPerfect and current limits](docs/assets/capability-comparison.svg)](docs/capability-matrix.md#what-xperfect-adds)
+
+[Read the full, accessible comparison and current limits](docs/capability-matrix.md#what-xperfect-adds).
 
 ## Meet your starting team
 
@@ -59,6 +74,21 @@ part of the public starter package.
 pause or stop supported work, and return to its recorded status. In **Workspaces**, reopen a
 worker or make a separate copy. **Schedules** can run a saved workspace later or send a webhook
 to your app; the receiving app decides what happens next.
+
+### Run later, or wake your app
+
+**Schedules → New schedule** offers two paths:
+
+- **Run a task:** have your saved AI Worker prepare a weekly financial review, check assay
+  exports or draft a campaign update.
+- **Send to an app:** post a team reminder, start an existing n8n or Make workflow, refresh an
+  internal dashboard, or wake your own assistant. A webhook is a scheduled HTTP request;
+  your connected app receives it and does its work. No AI account is needed just to send it.
+
+[Set up your first webhook, see common recipes and check delivery](runtime_phase1/README.md#generic-worker-and-webhook-schedules).
+Third-party recipes require that app’s receiving URL, payload and permissions; they are not
+preconnected integrations. **Received by the app** means delivery was acknowledged, not that
+the app’s job is finished.
 
 **Settings → Work pauses and spend** can hold new work for your account or a project,
 then resume the same queued work. Running work keeps going. Watch distinguishes reported

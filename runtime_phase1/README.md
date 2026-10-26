@@ -109,6 +109,77 @@ delivery stays visible as a dead letter; it is not success and is not silently r
 
 ## Generic worker and webhook schedules
 
+**Run a task** asks a saved AI Worker to do a job later. **Send to an app** sends a scheduled
+request to an app's receiving address—a webhook. Your app decides what happens next. Sending an
+app-only request needs no project, workspace, model or AI account.
+
+### Set it up in the app
+
+1. Open **Schedules → New schedule**. Choose **Run a task** or **Send to an app**.
+2. Under **Where?**, select the saved workspace or connected app. For a new app, choose
+   **Connect an app**, enter its **App name** and **App address**, then choose **Connect app**.
+   Reuse that connection for later schedules.
+3. Enter the job or optional message. For an app, the ordinary message becomes a `message` field
+   in its request data. **Extra app details** is available when the receiver needs other fields.
+4. Choose one time or a repeat, check the time zone and preview, then **Create schedule**.
+5. For a first check, choose **Run now**, then **More → View history** on its saved card.
+   Run now sends a real request. **Received by the app** means the receiver acknowledged it;
+   check that app for the completed action. Keep xPerfect and its host running for future sends.
+
+For your own receiver, copy the generated signing key into its private secret store before closing
+connection setup, then verify requests as described below. For a third-party receiver, follow its
+authentication and payload rules. Keep receiving URLs, signing keys and auth headers private.
+Advanced fields are under **Advanced connection settings**, not required choices for every schedule.
+
+### Common things to schedule
+
+| What you want | Choose | What happens |
+| --- | --- | --- |
+| Prepare Monday's financial review | Run a task | A saved Finance Director worker reads its allowed material and saves its analysis. |
+| Review new assay exports overnight | Run a task | A saved Bioanalytical Scientist worker uses its assigned files and tools to prepare the review. |
+| Prepare the weekly campaign update | Run a task | A saved Growth Marketer worker creates the requested output. |
+| Post a recurring team reminder | Send to an app | A Slack app's incoming webhook posts the supplied text to its configured channel. See the recipe below. |
+| Start an existing automation at 09:00 | Send to an app | A published n8n workflow receives the request and runs its configured steps. |
+| Start a customer follow-up workflow | Send to an app | A Make Custom Webhook starts its scenario; that scenario owns CRM/email access and actions. |
+| Refresh an internal dashboard | Send to an app | Your authenticated receiver queues its normal refresh and acknowledges the request. |
+| Send a daily briefing through your assistant | Send to an app | Your assistant loads its current context and delivers through the user's selected channels. |
+
+A self-hosted n8n on loopback or a private network is refused by default. Use verified HTTPS,
+or have the operator configure the exact local/private receiver policy described below; do not
+disable certificate checks or expose a local service just to make a test pass.
+
+These are useful connection patterns, not preconnected integrations or claims of external service
+acceptance. Worker jobs still need a ready account, allowed inputs/tools and execution capacity.
+App requests still need a reachable receiver with the right payload and authentication.
+
+### Connect Slack, n8n or Make
+
+- **Slack:** create an app's [incoming webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/)
+  for the intended channel. Use its private URL as the **App address**. In connection setup, open
+  **Advanced connection settings → Send format → App details only**. Leave the schedule's optional
+  message blank; under **Extra app details → Edit as JSON**, enter
+  `{"text":"Time for the weekly review."}`. The ordinary `message` field is not Slack's `text`
+  field. This uses Slack's app incoming webhooks, not a legacy custom integration.
+- **n8n:** add a [Webhook node](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/)
+  with method **POST**, publish the workflow and use its **Production URL** as the receiving
+  address. A Test URL is for a temporary listening test, not a saved recurring connection.
+  Keep the default schedule-event format and map its `request_data` into your workflow.
+  If the node uses Header auth, enter the matching private header under **Authentication headers**.
+  Choose **Respond → Immediately** when the workflow can accept the request before its longer work.
+- **Make:** create a [Custom Webhook](https://help.make.com/webhooks) in your scenario and connect
+  its private receiving URL. Map the incoming `request_data` into the existing scenario. Make's
+  default HTTP 200 response acknowledges its queue; inspect the scenario's execution for the result.
+  Its own processing schedule, permissions and capacity still apply.
+
+Use **App details only** when a receiver requires its own exact JSON shape. That mode sends the
+request data directly, without xPerfect's `schedule.due` envelope; the Standard Webhooks headers
+remain. A receiver that ignores them may rely on a private URL or its own auth. If it cannot
+recognize a retried event, a lost acknowledgement can cause duplicate external actions. Check its
+history before sending again. For your own receiver, use signature verification and durable dedupe
+as described below. These recipes have not connected or tested your third-party accounts.
+
+### Create through HTTP or MCP
+
 Use the same owner-authenticated HTTP session as the other control-plane operations. The generated
 OpenAPI from the running runtime is the request/response schema owner. The operator UI and MCP call
 the same service; [MCP tools](../docs/04_MCP_Publication_and_Client_Compatibility.md#scheduled-work-through-the-same-control-plane)

@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" viewBox="0 0 1300 2329" role="img" aria-labelledby="title desc">
+<title id="title">What xPerfect adds: 14 practical capabilities</title>
+<desc id="desc">Native tools alone compared with adding xPerfect, with today’s limits. The complete accessible table and limits are in the capability guide.</desc>
+<style>text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#edf0f1}.small{fill:#b9bfc8}.heading{fill:#ddc5a3;font-weight:700}</style>
+<rect width="1300" height="2329" rx="22" fill="#12151a"/>
+<text x="42" y="52" font-size="16" class="heading" letter-spacing="2">XPERFECT AI / CAPABILITY COMPARISON</text>
+<text x="42" y="106" font-size="39" font-weight="700">What changes with xPerfect?</text>
+<text x="42" y="145" font-size="19" class="small">14 useful capabilities · Native tools alone / With xPerfect / Today’s limit</text>
+<text x="42" y="212" font-size="21" font-weight="700">Outcome</text>
+<text x="292" y="212" font-size="21" font-weight="700">Native tool alone</text>
+<text x="592" y="212" font-size="21" font-weight="700">With xPerfect</text>
+<text x="957" y="212" font-size="21" font-weight="700">Today’s limit</text>
+<rect x="30" y="238" width="1240" height="48" rx="8" fill="#292d34"/>
+<text x="45" y="269" font-size="22" class="heading">01 / Choose and onboard</text>
+<rect x="580" y="286" width="365" height="142" fill="#23272e"/>
+<text x="42" y="316" font-size="20" font-weight="650">Several AI tools</text>
+<text x="42" y="343" font-size="20" font-weight="650">together</text>
+<text x="292" y="316" font-size="20">Codex, Claude Code and Grok</text>
+<text x="292" y="343" font-size="20">each provide their own</text>
+<text x="292" y="370" font-size="20">native client [1–3].</text>
+<text x="592" y="316" font-size="20" font-weight="650">Choose supported worker types,</text>
+<text x="592" y="343" font-size="20" font-weight="650">models and accounts in one app.</text>
+<text x="957" y="316" font-size="20">The exact installed tool,</text>
+<text x="957" y="343" font-size="20">account and route must be</text>
+<text x="957" y="370" font-size="20">supported; no silent model or</text>
+<text x="957" y="397" font-size="20">account swap.</text>
+<path d="M30 428H1270" stroke="#343941"/>
+<rect x="580" y="428" width="365" height="142" fill="#23272e"/>
+<text x="42" y="458" font-size="20" font-weight="650">Reusable expert setups</text>
+<text x="292" y="458" font-size="20">Claude Code supports</text>
+<text x="292" y="485" font-size="20">reusable custom subagents</text>
+<text x="292" y="512" font-size="20">and Skills [4,5].</text>
+<text x="592" y="458" font-size="20" font-weight="650">Save, version, copy, archive and</text>
+<text x="592" y="485" font-size="20" font-weight="650">restore named expert setups.</text>
+<text x="592" y="512" font-size="20" font-weight="650">Five professions are included.</text>
+<text x="957" y="458" font-size="20">Starting professions</text>
+<text x="957" y="485" font-size="20">currently use host Claude</text>
+<text x="957" y="512" font-size="20">Code Skills; a setup is not a</text>
+<text x="957" y="539" font-size="20">professional credential.</text>
+<path d="M30 570H1270" stroke="#343941"/>
+<rect x="580" y="570" width="365" height="115" fill="#23272e"/>
+<text x="42" y="600" font-size="20" font-weight="650">Reusable knowledge and</text>
+<text x="42" y="627" font-size="20" font-weight="650">abilities</text>
+<text x="292" y="600" font-size="20">Claude Skills package</text>
+<text x="292" y="627" font-size="20">instructions and files; MCP</text>
+<text x="292" y="654" font-size="20">connects its tools [1,5].</text>
+<text x="592" y="600" font-size="20" font-weight="650">Select exact Library versions</text>
+<text x="592" y="627" font-size="20" font-weight="650">and bundles for the worker or</text>
+<text x="592" y="654" font-size="20" font-weight="650">job.</text>
+<text x="957" y="600" font-size="20">Selecting a bundle does not</text>
+<text x="957" y="627" font-size="20">install or authorize every</text>
+<text x="957" y="654" font-size="20">native tool it contains.</text>
+<path d="M30 685H1270" stroke="#343941"/>
+<rect x="580" y="685" width="365" height="142" fill="#23272e"/>
+<text x="42" y="715" font-size="20" font-weight="650">Saved workplaces</text>
+<text x="292" y="715" font-size="20">Codex worktrees provide</text>
+<text x="292" y="742" font-size="20">separate Git working</text>
+<text x="292" y="769" font-size="20">directories [6].</text>
+<text x="592" y="715" font-size="20" font-weight="650">Keep named workspaces; continue,</text>
+<text x="592" y="742" font-size="20" font-weight="650">duplicate, remove and restore</text>
+<text x="592" y="769" font-size="20" font-weight="650">their saved work.</text>
+<text x="957" y="715" font-size="20">Copies exclude credentials</text>
+<text x="957" y="742" font-size="20">and native chat history.</text>
+<text x="957" y="769" font-size="20">Shared workspaces require</text>
+<text x="957" y="796" font-size="20">configured Linux.</text>
+<path d="M30 827H1270" stroke="#343941"/>
+<rect x="30" y="827" width="1240" height="48" rx="8" fill="#292d34"/>
+<text x="45" y="858" font-size="22" class="heading">02 / Run and deliver</text>
+<rect x="580" y="875" width="365" height="115" fill="#23272e"/>
+<text x="42" y="905" font-size="20" font-weight="650">Several jobs in flight</text>
+<text x="292" y="905" font-size="20">Codex worktrees and Claude</text>
+<text x="292" y="932" font-size="20">background agents support</text>
+<text x="292" y="959" font-size="20">parallel work [4,6].</text>
+<text x="592" y="905" font-size="20" font-weight="650">Queue and control selected</text>
+<text x="592" y="932" font-size="20" font-weight="650">workers across supported native</text>
+<text x="592" y="959" font-size="20" font-weight="650">tools.</text>
+<text x="957" y="905" font-size="20">Real account and machine</text>
+<text x="957" y="932" font-size="20">capacity applies. Manual host</text>
+<text x="957" y="959" font-size="20">jobs share a safety lock.</text>
+<path d="M30 990H1270" stroke="#343941"/>
+<rect x="580" y="990" width="365" height="115" fill="#23272e"/>
+<text x="42" y="1020" font-size="20" font-weight="650">Watch and give</text>
+<text x="42" y="1047" font-size="20" font-weight="650">direction</text>
+<text x="292" y="1020" font-size="20">Claude Remote Control</text>
+<text x="292" y="1047" font-size="20">continues a local session</text>
+<text x="292" y="1074" font-size="20">from browser or phone [7].</text>
+<text x="592" y="1020" font-size="20" font-weight="650">Watch brings each selected</text>
+<text x="592" y="1047" font-size="20" font-weight="650">worker&#x27;s status, Steer and</text>
+<text x="592" y="1074" font-size="20" font-weight="650">controls together.</text>
+<text x="957" y="1020" font-size="20">Controls depend on the native</text>
+<text x="957" y="1047" font-size="20">route and act on the exact</text>
+<text x="957" y="1074" font-size="20">selected worker.</text>
+<path d="M30 1105H1270" stroke="#343941"/>
+<rect x="580" y="1105" width="365" height="115" fill="#23272e"/>
+<text x="42" y="1135" font-size="20" font-weight="650">Open the delivered</text>
+<text x="42" y="1162" font-size="20" font-weight="650">result</text>
+<text x="292" y="1135" font-size="20">Native tools create and</text>
+<text x="292" y="1162" font-size="20">edit files in their working</text>
+<text x="292" y="1189" font-size="20">environment [1,2].</text>
+<text x="592" y="1135" font-size="20" font-weight="650">Open authorized results or</text>
+<text x="592" y="1162" font-size="20" font-weight="650">download the exact retained</text>
+<text x="592" y="1189" font-size="20" font-weight="650">result snapshot.</text>
+<text x="957" y="1135" font-size="20">A saved snapshot and the</text>
+<text x="957" y="1162" font-size="20">current editable workspace</text>
+<text x="957" y="1189" font-size="20">file are different versions.</text>
+<path d="M30 1220H1270" stroke="#343941"/>
+<rect x="580" y="1220" width="365" height="115" fill="#23272e"/>
+<text x="42" y="1250" font-size="20" font-weight="650">Repeat a useful job</text>
+<text x="292" y="1250" font-size="20">Claude offers CLI, Desktop</text>
+<text x="292" y="1277" font-size="20">and cloud schedules with</text>
+<text x="292" y="1304" font-size="20">different rules [8].</text>
+<text x="592" y="1250" font-size="20" font-weight="650">Schedule saved workers with</text>
+<text x="592" y="1277" font-size="20" font-weight="650">their configured identity and</text>
+<text x="592" y="1304" font-size="20" font-weight="650">inspect occurrence history.</text>
+<text x="957" y="1250" font-size="20">Worker account, input and</text>
+<text x="957" y="1277" font-size="20">permissions must be valid.</text>
+<text x="957" y="1304" font-size="20">Keep the service available.</text>
+<path d="M30 1335H1270" stroke="#343941"/>
+<rect x="30" y="1335" width="1240" height="48" rx="8" fill="#292d34"/>
+<text x="45" y="1366" font-size="22" class="heading">03 / Connect and collaborate</text>
+<rect x="580" y="1383" width="365" height="115" fill="#23272e"/>
+<text x="42" y="1413" font-size="20" font-weight="650">Wake your application</text>
+<text x="292" y="1413" font-size="20">Claude&#x27;s native scheduling</text>
+<text x="292" y="1440" font-size="20">runs its configured</text>
+<text x="292" y="1467" font-size="20">task/session [8].</text>
+<text x="592" y="1413" font-size="20" font-weight="650">Send a signed scheduled webhook,</text>
+<text x="592" y="1440" font-size="20" font-weight="650">inspect history and retry</text>
+<text x="592" y="1467" font-size="20" font-weight="650">eligible delivery without AI.</text>
+<text x="957" y="1413" font-size="20">A receiver is required. HTTP</text>
+<text x="957" y="1440" font-size="20">acceptance is not its</text>
+<text x="957" y="1467" font-size="20">completed business action.</text>
+<path d="M30 1498H1270" stroke="#343941"/>
+<rect x="580" y="1498" width="365" height="142" fill="#23272e"/>
+<text x="42" y="1528" font-size="20" font-weight="650">One API and MCP</text>
+<text x="42" y="1555" font-size="20" font-weight="650">surface</text>
+<text x="292" y="1528" font-size="20">Each native tool has its</text>
+<text x="292" y="1555" font-size="20">own client and connection</text>
+<text x="292" y="1582" font-size="20">setup [1–3].</text>
+<text x="592" y="1528" font-size="20" font-weight="650">Use the same worker, file,</text>
+<text x="592" y="1555" font-size="20" font-weight="650">status and control records from</text>
+<text x="592" y="1582" font-size="20" font-weight="650">UI, HTTP or MCP.</text>
+<text x="957" y="1528" font-size="20">Host stdio and authenticated</text>
+<text x="957" y="1555" font-size="20">HTTP use their own setup;</text>
+<text x="957" y="1582" font-size="20">supported routes remain</text>
+<text x="957" y="1609" font-size="20">explicit.</text>
+<path d="M30 1640H1270" stroke="#343941"/>
+<rect x="580" y="1640" width="365" height="169" fill="#23272e"/>
+<text x="42" y="1670" font-size="20" font-weight="650">Workers working</text>
+<text x="42" y="1697" font-size="20" font-weight="650">together</text>
+<text x="292" y="1670" font-size="20">Claude subagents have</text>
+<text x="292" y="1697" font-size="20">scoped tools and separate</text>
+<text x="292" y="1724" font-size="20">contexts [4].</text>
+<text x="592" y="1670" font-size="20" font-weight="650">Grant discovery and</text>
+<text x="592" y="1697" font-size="20" font-weight="650">communication between exact</text>
+<text x="592" y="1724" font-size="20" font-weight="650">authorized workers.</text>
+<text x="957" y="1670" font-size="20">Same ownership or shared</text>
+<text x="957" y="1697" font-size="20">files alone grant no peer</text>
+<text x="957" y="1724" font-size="20">access or merged history.</text>
+<text x="957" y="1751" font-size="20">Requires the deployment’s</text>
+<text x="957" y="1778" font-size="20">secure connection support.</text>
+<path d="M30 1809H1270" stroke="#343941"/>
+<rect x="30" y="1809" width="1240" height="48" rx="8" fill="#292d34"/>
+<text x="45" y="1840" font-size="22" class="heading">04 / Keep control</text>
+<rect x="580" y="1857" width="365" height="115" fill="#23272e"/>
+<text x="42" y="1887" font-size="20" font-weight="650">Pause new work and</text>
+<text x="42" y="1914" font-size="20" font-weight="650">track usage</text>
+<text x="292" y="1887" font-size="20">A shared multi-harness</text>
+<text x="292" y="1914" font-size="20">admission policy was not</text>
+<text x="292" y="1941" font-size="20">assessed.</text>
+<text x="592" y="1887" font-size="20" font-weight="650">Use account/project holds,</text>
+<text x="592" y="1914" font-size="20" font-weight="650">reported usage and optional</text>
+<text x="592" y="1941" font-size="20" font-weight="650">spending admission rules.</text>
+<text x="957" y="1887" font-size="20">Unknown cost stays unknown;</text>
+<text x="957" y="1914" font-size="20">these rules do not cap the</text>
+<text x="957" y="1941" font-size="20">provider&#x27;s final bill.</text>
+<path d="M30 1972H1270" stroke="#343941"/>
+<rect x="580" y="1972" width="365" height="115" fill="#23272e"/>
+<text x="42" y="2002" font-size="20" font-weight="650">Run on your</text>
+<text x="42" y="2029" font-size="20" font-weight="650">infrastructure</text>
+<text x="292" y="2002" font-size="20">Codex CLI and Claude Code</text>
+<text x="292" y="2029" font-size="20">can run on a local host</text>
+<text x="292" y="2056" font-size="20">[1,2].</text>
+<text x="592" y="2002" font-size="20" font-weight="650">Run xPerfect on your host or a</text>
+<text x="592" y="2029" font-size="20" font-weight="650">matched Linux Arm64/AMD64</text>
+<text x="592" y="2056" font-size="20" font-weight="650">package; configure team storage.</text>
+<text x="957" y="2002" font-size="20">Hosted identity/storage need</text>
+<text x="957" y="2029" font-size="20">setup. Connected providers</text>
+<text x="957" y="2056" font-size="20">can receive task content.</text>
+<path d="M30 2087H1270" stroke="#343941"/>
+<rect x="580" y="2087" width="365" height="142" fill="#23272e"/>
+<text x="42" y="2117" font-size="20" font-weight="650">Upgrade and recover</text>
+<text x="42" y="2144" font-size="20" font-weight="650">saved work</text>
+<text x="292" y="2117" font-size="20">Native tools own their</text>
+<text x="292" y="2144" font-size="20">session behavior; cross-</text>
+<text x="292" y="2171" font-size="20">tool recovery was not</text>
+<text x="292" y="2198" font-size="20">assessed.</text>
+<text x="592" y="2117" font-size="20" font-weight="650">Keep durable records and use</text>
+<text x="592" y="2144" font-size="20" font-weight="650">guarded package upgrade, commit</text>
+<text x="592" y="2171" font-size="20" font-weight="650">and rollback.</text>
+<text x="957" y="2117" font-size="20">Active work can block</text>
+<text x="957" y="2144" font-size="20">upgrade. Saved records do not</text>
+<text x="957" y="2171" font-size="20">promise arbitrary native</text>
+<text x="957" y="2198" font-size="20">auto-resume.</text>
+<path d="M30 2229H1270" stroke="#343941"/>
+<text x="42" y="2271" font-size="18" class="small">Supported routes, permissions and capacity apply. See the capability guide for full limits and sources.</text>
+<text x="42" y="2302" font-size="17" class="small">Source: docs/capability-matrix.md · Reviewed 25 October 2026 · No latency or universal-provider claim.</text>
+</svg>

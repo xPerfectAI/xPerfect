@@ -89,9 +89,16 @@ but does not guarantee that interrupted execution continues by itself.
 | Keep a useful file | In **Library → Files**, use the file menu's **Keep for reuse**. This saves the selected version privately in **My Library**. |
 | Add more material | Use **Library → Files → Add files**, or select saved Library items for the worker. A source link alone does not prove a native tool is installed. |
 | Run it later | Open **Schedules → New schedule → Run a task**, select the workspace, job and time, then **Create schedule**. |
+| Wake another app later | Open **Schedules → New schedule → Send to an app**, choose or connect its receiving address, add the request and time, then **Create schedule**. This needs no AI account. |
 
 Removing a saved Library item does not remove the workspace's copy. See
 [Library behavior](07_Minimal_Unified_Operator_UI.md#one-library-across-the-app).
+
+### Schedule work or send a request to an app
+
+**Run a task** uses a saved worker; **Send to an app** sends a scheduled request without an AI account.
+Follow the [schedule guide](../runtime_phase1/README.md#generic-worker-and-webhook-schedules) for the
+full setup, delivery check and eight useful examples, including Slack reminders, n8n, Make and your own app.
 
 ### Manage experts and workspaces
 
