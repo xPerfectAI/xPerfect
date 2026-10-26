@@ -99,6 +99,32 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Added:** A narrow coordination tool set reuses the existing authorized delegation, worker roster and active-work controls. `hand_off_to` binds original context for supported work actions; `list_workers` discovers permitted work.
 - **Improved:** Direct execution preserves full authorized context, current work and declared model configuration. Native controls keep their own process, permission and completion evidence.
 
+## 2026-10-19 — A clearer product story, on every screen
+
+> **Summary:** The website now presents one consistent xPerfect identity across Home, life-science examples and public guides. Clearer navigation, light and dark appearance, readable mobile layouts and a simpler contact flow make it easier to understand the product and take the next step.
+>
+> **Example:** An executive can understand the work an AI specialist can take on; an engineer can follow the same page into the product source, setup guide and inspectable examples.
+>
+> **Topics:** Website, Integrations
+
+- **Benefit:** Understand the value sooner: specific work examples and useful results replace general claims.
+- **Benefit:** Explore comfortably: consistent branding, mobile navigation, system appearance and readable first paint keep the experience coherent.
+
+- **Improved:** Website Home and Bio pages share the current brand symbol, favicon, visual identity and responsive navigation. Contact and footer paths explain the next step without requiring a technical background.
+
+## 2026-10-18 — Inspect the work behind the example
+
+> **Summary:** Public scientific and business demonstrations now include their synthetic inputs, original outputs and repeatable checks. Readers can inspect what went into a result and what the AI actually delivered.
+>
+> **Example:** Review the source assay exports or invoice records beside the resulting report, then inspect the included checks instead of relying on a marketing claim.
+>
+> **Topics:** Website, Results
+
+- **Benefit:** See concrete work: original example files and delivered results make the capabilities easier to assess.
+- **Benefit:** Go deeper when useful: run provenance and portable checks give technical readers the supporting detail.
+
+- **Added:** The website publishes inspectable synthetic assay-review and invoice-reconciliation demonstrations, with original inputs, unedited outputs, provenance and portable verifiers. These examples do not claim clinical efficacy or customer outcomes.
+
 ## 2026-10-17 — Continue after a failed or interrupted response
 
 > **Summary:** A failed or expired response no longer leaves a released conversation session blocking the next request. File-only messages and native continuations retain their source and completion state.
