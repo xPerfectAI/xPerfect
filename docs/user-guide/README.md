@@ -30,14 +30,15 @@ desktop and mobile. This documentation change does not require a product runtime
 
 ## Provenance and privacy
 
-The guide is maintained with the product source. The published 25 October 2026 package is
-recorded at `be743cef87c1a1a887057c2bfa9befcc638cc0d4`; its default manifest selects the
-audited `linux/arm64` service/native pair. Anonymous package startup, native Codex/Claude/Grok
-work, same-worker reuse, exact file delivery, API/MCP and saved-state recovery have recorded
-proof at their stated routes. Hosted TLS/XFS/OIDC member isolation and storage recovery,
-and one native Codex API-key setup-to-result path, have separate scoped proof. Internet/cloud
-onboarding, other native API-key providers and GPT-6.1 API access remain unverified.
-The live guide records its own documentation source pin in `/docs/source.json`.
+The guide is maintained with the product source. The current manifest selects matched
+`linux/arm64` or `linux/amd64` service/native pairs for the Docker daemon and records the runtime
+code source separately. Do not pin this guide to an obsolete package commit or infer that a guide
+publication rebuilt the runtime. The live guide records its documentation revision in `/docs/source.json`.
+
+Native package checks and anonymous startup have their recorded scopes. Hosted TLS/XFS/OIDC
+member isolation and storage recovery, and one native Codex API-key setup-to-result path,
+have separate scoped proof. Internet/cloud account onboarding, other native API-key providers,
+GPT-6.1 API access and Windows host startup remain unverified.
 
 The recommended five-profession example uses the supported host Claude Code Skill route.
 Docker remains an alternative for its offered native worker routes; the guide does not claim
@@ -47,9 +48,9 @@ The expert/Finance illustrations are byte-identical publication mirrors of the c
 under `docs/assets/screens/`. The local copies under this guide's `assets/` make its portable
 preview and existing same-origin website publication work without changing the site CSP. Update
 these mirrors only by copying the reviewed canonical files; do not edit a second image source.
-They show real synthetic work from 24 October, with dated captions rather than a claim that
-later portrait/preview revisions have identical pixels. Earlier local guide screenshots and
-stock/Skill fixtures remain marked as connectivity examples, not the professional demonstration.
+The gallery shows the current 25 October UI; the Finance report/delivery retain their real
+24 October synthetic-work scope. Dated result illustrations are not a new provider acceptance run. Unused older UI/QA captures are removed from publication. The stock/Skill fixtures remain
+clearly marked connectivity examples, separate from the professional demonstration.
 
 No raw sessions, prompts, private accounts, customer material, logs or local runtime state are
 published. The small Skill, CSV and ZIP are synthetic fixtures under the repository's license;

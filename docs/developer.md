@@ -313,6 +313,14 @@ MCP response, inspect the existing worker/runs before issuing another mutation. 
 exactly-once admission from the MCP tool's name. Optional schedule, Library and file operations
 use their own documented request keys and revision checks.
 
+### Schedule a worker or wake an app
+
+Use `POST /v1/recurring-schedules` or MCP `schedule_create` for a worker or webhook target.
+An app-only schedule needs no AI account. The existing [schedule guide](../runtime_phase1/README.md#generic-worker-and-webhook-schedules)
+shows the **What / Where / When** interface, common uses, protected destination setup, request
+examples, signatures, retries and delivery states. It also includes [Slack, n8n and Make recipes](../runtime_phase1/README.md#connect-slack-n8n-or-make).
+Owner HTTP/MCP share that service; native workers receive only their current scoped scheduling grants.
+
 ## 5. Extend what workers can do
 
 **Tools, skills and context** reach workers through the bootstrap bundle. See the

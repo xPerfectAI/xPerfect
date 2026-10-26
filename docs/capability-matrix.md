@@ -51,7 +51,7 @@ built-in tools stay available; these settings choose connections, not the harnes
 | Watch and controls | Inspect, steer, interrupt or continue the selected worker. | Controls are provider-dependent and target one worker, not its siblings. |
 | Desktop and terminal | View a workstation through noVNC or take over its terminal through the WebSocket bridge. | These surfaces require a configured workstation profile and authorized access. Use Watch / Steer for task controls. Managed shared-workspace displays stay usable while their worker is Paused; legacy DockerSandbox Pause freezes its desktop too. Anything opened or signed in on a desktop is shared with that worker. The [runtime security boundaries](../SECURITY.md#desktop-runtime-boundaries) differ. |
 | Conversation and peers | Keep conversation context and request authorized worker collaboration. | Discovery and control need explicit scope; common ownership alone does not grant access. |
-| Schedules | Run configured work later or repeatedly. | Each run still needs valid account, input and execution authority. Files attached when you schedule from **Run project → More settings → Schedule** are used at that exact version, even if the workspace copy changes later. A scheduled run that asks for approval stops if no one answers. |
+| Schedules | Run a saved worker later or repeatedly, or send a signed webhook to a connected app. [Setup and examples](../runtime_phase1/README.md#generic-worker-and-webhook-schedules). | Worker runs need valid account, input and execution authority; app-only webhooks need no AI account. Files attached when scheduling from **Run project → More settings → Schedule** keep that exact version. An unanswered approval can stop a worker run. A webhook acknowledgement means accepted delivery, not completed app work. xPerfect and its host must remain running. |
 | MCP and API | Integrate typed projects, workers, events, files and controls. | Stdio and authenticated HTTP are distinct paths. Compatibility SSE remains available. |
 | Bootstrap and extensions | Supply authorized skills, context, tools and configuration. | Preserve the user's goal, constraints and configured model. |
 | Identity projection | Use native host projection or an optional external broker for provider identity and connected tools. | Keep credential leases private. |
@@ -128,3 +128,66 @@ without changing accepted workers or retained Library references. Versions prese
 choices. The 100-active-expert limit counts lineages; revision does not consume a slot, and Archive
 or Remove frees one. Restore checks capacity. See the [runtime contract](03_Bootstrap_Auth_and_Identity_Projection.md#saved-expert-and-workspace-catalog-lifecycle)
 and [API/MCP contract](04_MCP_Publication_and_Client_Compatibility.md#catalog-crud-through-the-same-owner).
+
+## What xPerfect adds
+
+**Native tools alone, or the same tools with a shared home for your AI team.**
+
+Compare the added control plane across fourteen practical outcomes. Native facts below name
+specific products and first-party sources; they are not universal claims about every AI tool.
+The native harness still performs the work. Your optional app can supply its own context,
+business rules and output channels through API/MCP.
+
+<!-- comparison:start -->
+### Choose and onboard
+
+| Outcome | Native tool alone | With xPerfect | Today's limit |
+| --- | --- | --- | --- |
+| **Several AI tools together** | Codex, Claude Code and Grok each provide their own native client [1–3]. | Choose supported worker types, models and accounts in one app. | The exact installed tool, account and route must be supported; no silent model or account swap. |
+| **Reusable expert setups** | Claude Code supports reusable custom subagents and Skills [4,5]. | Save, version, copy, archive and restore named expert setups. Five professions are included. | Starting professions currently use host Claude Code Skills; a setup is not a professional credential. |
+| **Reusable knowledge and abilities** | Claude Skills package instructions and files; MCP connects its tools [1,5]. | Select exact Library versions and bundles for the worker or job. | Selecting a bundle does not install or authorize every native tool it contains. |
+| **Saved workplaces** | Codex worktrees provide separate Git working directories [6]. | Keep named workspaces; continue, duplicate, remove and restore their saved work. | Copies exclude credentials and native chat history. Shared workspaces require configured Linux. |
+
+### Run and deliver
+
+| Outcome | Native tool alone | With xPerfect | Today's limit |
+| --- | --- | --- | --- |
+| **Several jobs in flight** | Codex worktrees and Claude background agents support parallel work [4,6]. | Queue and control selected workers across supported native tools. | Real account and machine capacity applies. Manual host jobs share a safety lock. |
+| **Watch and give direction** | Claude Remote Control continues a local session from browser or phone [7]. | Watch brings each selected worker's status, Steer and controls together. | Controls depend on the native route and act on the exact selected worker. |
+| **Open the delivered result** | Native tools create and edit files in their working environment [1,2]. | Open authorized results or download the exact retained result snapshot. | A saved snapshot and the current editable workspace file are different versions. |
+| **Repeat a useful job** | Claude offers CLI, Desktop and cloud schedules with different rules [8]. | Schedule saved workers with their configured identity and inspect occurrence history. | Worker account, input and permissions must be valid. Keep the service available. |
+
+### Connect and collaborate
+
+| Outcome | Native tool alone | With xPerfect | Today's limit |
+| --- | --- | --- | --- |
+| **Wake your application** | Claude's native scheduling runs its configured task/session [8]. | Send a signed scheduled webhook, inspect history and retry eligible delivery without AI. | A receiver is required. HTTP acceptance is not its completed business action. |
+| **One API and MCP surface** | Each native tool has its own client and connection setup [1–3]. | Use the same worker, file, status and control records from UI, HTTP or MCP. | Host stdio and authenticated HTTP use their own setup; supported routes remain explicit. |
+| **Workers working together** | Claude subagents have scoped tools and separate contexts [4]. | Grant discovery and communication between exact authorized workers. | Same ownership or shared files alone grant no peer access or merged history. |
+
+### Keep control
+
+| Outcome | Native tool alone | With xPerfect | Today's limit |
+| --- | --- | --- | --- |
+| **Pause new work and track usage** | A shared multi-harness admission policy was not assessed. | Use account/project holds, reported usage and optional spending admission rules. | Unknown cost stays unknown; these rules do not cap the provider's final bill. |
+| **Run on your infrastructure** | Codex CLI and Claude Code can run on a local host [1,2]. | Run xPerfect on your host or a matched Linux Arm64/AMD64 package; configure team storage. | Hosted identity/storage need setup. Connected providers can receive task content. |
+| **Upgrade and recover saved work** | Native tools own their session behavior; cross-tool recovery was not assessed. | Keep durable records and use guarded package upgrade, commit and rollback. | Active work can block upgrade. Saved records do not promise arbitrary native auto-resume. |
+<!-- comparison:end -->
+
+The [capabilities above](#capabilities) own the exact xPerfect support boundaries. Applications
+keep their domain context, business actions and channels; xPerfect stays usable on its own.
+This is a capability comparison, not a latency benchmark or market ranking.
+
+Native baseline reviewed 25 October 2026:
+
+1. [Claude Code overview](https://code.claude.com/docs/en/overview).
+2. [Codex public source and clients](https://github.com/openai/codex).
+3. [Grok Build native harness](https://github.com/xai-org/grok-build).
+4. [Claude custom subagents and background work](https://code.claude.com/docs/en/sub-agents).
+5. [Claude Skills](https://code.claude.com/docs/en/skills).
+6. [Codex worktrees](https://learn.chatgpt.com/docs/environments/git-worktrees).
+7. [Claude Remote Control](https://code.claude.com/docs/en/remote-control).
+8. [Claude scheduling options](https://code.claude.com/docs/en/scheduled-tasks).
+
+The preview and portable guide table are generated from the marked table above with
+`python3 scripts/render-capability-comparison.py`. Keep this table as their one source.

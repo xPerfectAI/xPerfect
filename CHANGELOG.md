@@ -12,6 +12,9 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-10-25 — Reuse expertise, control work and recover safely
 
+- **Improved:** Public guides now show how to schedule an AI job or send a webhook, with practical app recipes and clear delivery checks. A source-linked comparison explains what xPerfect adds to native tools and its current limits.
+- **Improved:** The README and guide use the real brand mark, the current expert gallery and consistent package guidance. Obsolete UI/QA captures were removed from publication; retained result images keep their actual synthetic-work scope.
+
 - **Added:** Owner and project work pauses with explicit Resume. Optional spending policies use reported money and explicit reserves when costs are unknown. Existing active work is preserved; resuming wakes the existing queue.
 - **Improved:** Watch, HTTP and MCP retain exact-attempt usage and safe provider failure provenance. Missing usage stays unknown, reported zero stays zero, and repeated receipts do not add the same charge again.
 - **Added:** Claude Code connections can use Amazon Bedrock with their own region, protected credentials and declared model choices. Provider access still requires the owner's AWS permissions; a saved setup is not an authenticated model test.
