@@ -441,3 +441,30 @@ def test_stale_probe_keeps_only_scoped_valid_code_and_public_numeric_fields(tmp_
         capacity_detail={'capacityClass': error.capacity_class, **snapshot}).body)['error']
     assert set(public) <= {'message', 'type', 'param', 'code', 'capacityClass', 'available', 'required', 'shortage'}
     assert 'synthetic-secret' not in json.dumps(public) and 'synthetic-probe' not in json.dumps(public)
+
+
+def test_cold_conversation_capacity_uses_existing_durable_queue(tmp_path, monkeypatch, background_consumers_disabled):
+    _, provider, store, service, body = pending_direct_client(tmp_path, monkeypatch)
+    body['model'] = 'codex-cli:gpt-6.1-sol'
+    probes = []
+    monkeypatch.setattr(service.runtime, 'preflight_worker_profile', lambda *args: probes.append(args), raising=False)
+    monkeypatch.setattr(service.runtime, 'preflight_uses_cli_subprocess', True, raising=False)
+    holds = [synthetic_lease(store, service, family='codex', name=f'cold-held-{i}') for i in range(2)]
+    record = provider.start(ChatCompletionRequest.model_validate(body))
+    run = store.get_run(record['run_id'])
+    worker = store.get_worker(run['worker_id'])
+    assert record['state'] == run['state'] == 'queued'
+    assert probes == [], 'No CLI preflight can run without available native capacity'
+    with pytest.raises(HostCapacityError) as blocked:
+        service._acquire_host_run_lease(worker, run)
+    assert blocked.value.capacity_class == 'family_lane'
+    replay = provider.start(ChatCompletionRequest.model_validate(body))
+    assert replay['request_id'] == record['request_id']
+    assert replay['run_id'] == record['run_id']
+    with store._connect() as conn:
+        assert conn.execute('SELECT count(*) FROM provider_sessions').fetchone()[0] == 1
+        assert conn.execute('SELECT count(*) FROM preflight_capacity_reservations').fetchone()[0] == 0
+    store.release_host_run_lease(holds[0][2]['lease_id'], executor_id=service._executor_id, reason='synthetic_completed')
+    admitted = service._acquire_host_run_lease(worker, run)
+    assert admitted['run_id'] == record['run_id']
+    assert store.get_provider_request(record['request_id'])['admitted_instruction'] == record['admitted_instruction']

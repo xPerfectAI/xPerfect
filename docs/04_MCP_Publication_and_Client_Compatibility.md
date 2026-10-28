@@ -465,11 +465,25 @@ artifact references continue to use their existing captured-file path.
 
 Host native file selections may use the admitted workspace or the current worker's managed
 `TMPDIR`. The runtime records the true source root and relative path, then retains immutable bytes
-for replay; it does not grant the worker's whole home, another worker's temporary root, or an OS
-Downloads folder. Explicit selections keep ordinary existing files under operational input folders
+for replay. A host worker with explicit `full` access and native tools enabled can also select an
+ordinary readable file elsewhere. The same publisher stages its exact bytes into the run-owned
+snapshot; it does not depend on the model copying the file to `TMPDIR` first. Directory aliases are
+resolved before the existing no-follow reader opens the file, and the original selection stays
+private for rendering and replay after the source changes or disappears. File type, age and creation
+in the current run do not decide publication. Restricted workers and native edit discovery retain
+their existing roots.
+
+Runtime state, other workers and accounts, shared upload source roots, hidden state and reserved
+files remain excluded. Configured database files and their sidecars are private; their parent
+directory does not by itself become private. Opened filesystem identities also enforce these
+boundaries on case-insensitive filesystems.
+Deployments declare additional private application roots in `GLASSHIVE_PROTECTED_SOURCE_ROOTS`
+as an OS path-separated list; both selected and canonical outside paths must pass that boundary.
+Existing workspace and managed `TMPDIR` selections keep their admitted authority inside those roots.
+Explicit selections keep ordinary existing files under operational input folders
 legal. Automatic discovery still omits those folders. Both paths reject traversal, hidden state,
 private profiles and reserved instruction or credential files, and selected sources must be
-ordinary files without symlinks or hardlinks.
+ordinary files without file symlinks or hardlinks.
 
 Selected Markdown destinations normalize padding inside angle brackets before URL decoding,
 both when capturing the file and when rendering its immutable reference. Percent-encoded
@@ -999,3 +1013,38 @@ An owned Bedrock connection can publish exact declared model contracts in the ex
 picker. `POST /v1/coordinator/conversations` accepts `model_id` only with that selected connection
 and matching declared metadata. Readiness adds `models: [{id, native_model}]` for that account.
 An explicit configured model remains authoritative; conflicting selection refuses.
+
+## Host-native conversation capacity
+
+Preparing a new host conversation workspace starts no model process. If its native lane is full,
+reuse the existing durable queued preflight and retain the same provider request and run. A warm
+worker and a new worker must have the same capacity-wait outcome; clients must not lose a goal
+because a cold session cannot borrow a probe slot. The existing dispatcher holds native capacity
+before it runs the CLI preflight or starts compute. Measured resource pressure may still refuse
+foreground admission; provider identity, source receipts, Stop, replay, owner isolation and launch
+limits remain unchanged. This does not add a queue, relax capacity limits, or switch models.
+
+The owning regression is `test_cold_conversation_capacity_uses_existing_durable_queue` in
+`runtime_phase1/tests/test_conversation_provider_capacity.py`, alongside the existing resource-pressure,
+replay and warm-session checks. Unit proof does not certify a real channel or file delivery.
+
+### Recovering a saved native result
+
+An accepted native request keeps its original invocation, body digest and idempotency key. A client
+must recover that result after a lost reply; rebuilding a request with the same key and a different
+invocation still conflicts. Do not rerun the model to recover a completed answer.
+
+`GET /v1/requests/by-idempotency/{key}/result` recovers the original result identity when the client
+retained its idempotency key but lost its invocation receipt. Required query fields are `stream_id`,
+`message_id`, `conversation_id` and `agent_id`. They must match the authenticated owner's original
+request and session. The route reuses native key-family resolution and returns the same
+`glasshive.request.result` version 1 envelope as the by-invocation result route, including the
+original `invocation_id` and `body_sha256`. `include_tool_evidence` is optional. An absent or foreign
+owner's key returns 404; ambiguous keys or mismatched scope return 409. Pending and failed requests
+remain distinct from completed results. Restore holds and active Stop tombstones refuse recovery,
+including a previously completed answer. Lookup starts no execution, fallback or reconciliation.
+An original result is evidence, not new permission to publish: the client still checks its current
+source, work revision, deletion and delivery authority before using it.
+
+The owning checks are in `runtime_phase1/tests/test_conversation_provider_recovery.py`, including
+lost-receipt recovery, unchanged POST conflict protection, owner/scope isolation and pending states.
