@@ -9450,7 +9450,14 @@ class WorkersProjectsService:
         resource_memory_bytes = _configured_worker_resource_memory_bytes(
             clean_resource_class
         )
-        self._reserved_runtime_preflight(
+        # Preparing a linked host conversation workspace starts no compute. Reuse the
+        # durable queue when native slots are occupied; launch still holds its lease.
+        preflight = (
+            self._queued_runtime_preflight
+            if clean_trusted_lane == "conversation" and execution_mode == "host" and not start_synchronously
+            else self._reserved_runtime_preflight
+        )
+        preflight(
             profile,
             execution_mode,
             tenant_id=tenant_id,

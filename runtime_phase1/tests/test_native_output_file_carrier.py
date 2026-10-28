@@ -398,3 +398,42 @@ def test_selected_file_escapes_survive_selection_and_both_artifact_renderers(
         assert content == output
     assert _result(client, digest).json()['response'] == canonical
     assert runtime.calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_full_host_outside_selection_keeps_canonical_downloads_and_exact_replay(tmp_path, monkeypatch, stream):
+    external = tmp_path.parent / (tmp_path.name + "-outside")
+    external.mkdir()
+    paths = [external / "report.csv", external / "copy.csv"]
+    data = b"name,value\nexample,7\n"
+    for path in paths:
+        path.write_bytes(data)
+    output = "\n".join(f"[File](<{path}>)" for path in paths)
+    client, runtime, _ = prepare(tmp_path, monkeypatch, authored_output=output)
+    payload = _payload(tmp_path, stream=stream)
+    payload["metadata"]["glasshive_options"]["access"] = "full"
+    response, digest = _post_bound(client, payload)
+    assert response.status_code == 200, response.text
+    canonical = _result(client, digest).json()["response"]
+    carrier = canonical["glasshive"]["output_files"]
+    assert {file["filename"] for file in carrier["files"]} == {path.name for path in paths}
+    assert not carrier.get("rejected")
+    assert str(external) not in json.dumps(canonical)
+    for path in paths:
+        path.unlink()
+    for file in carrier["files"]:
+        assert file["sha256"] == hashlib.sha256(data).hexdigest()
+        assert client.get(file["download_url"]).content == data
+    duplicate, _ = _post_bound(client, payload)
+    assert runtime.calls == 1
+    if stream:
+        # Transient live activity is not part of the canonical replay carrier.
+        for current in (response, duplicate):
+            chunks = [json.loads(row[6:]) for row in current.text.splitlines() if row.startswith("data: {")]
+            files = [choice["delta"]["provider_specific_fields"]["viventium"]["output_files"]
+                     for row in chunks for choice in row.get("choices", [])
+                     if "output_files" in choice.get("delta", {}).get("provider_specific_fields", {}).get("viventium", {})]
+            assert files == [carrier]
+    else:
+        assert duplicate.json() == canonical
+    assert _result(client, digest).json()["response"] == canonical

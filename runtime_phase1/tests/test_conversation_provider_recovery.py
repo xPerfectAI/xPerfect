@@ -465,3 +465,94 @@ def test_capacity_no_acceptance_proof_preserves_queued_authority(tmp_path, monke
         assert retained["state"] == "queued" and retained["request_id"] == record["request_id"]
         assert not retained["run_id"]
 # VIVENTIUM END
+
+
+def _result_by_key(client, *, key="idem-a", headers=None, **params):
+    from urllib.parse import quote
+    return client.get(
+        f"/v1/requests/by-idempotency/{quote(key, safe='')}/result",
+        headers={**AUTH, **(headers or {})},
+        params={"stream_id": "stream-a", "message_id": "message-a",
+                "conversation_id": "conv-a", "agent_id": "agent-a", **params},
+    )
+
+def test_lost_native_identity_recovers_same_saved_result_without_reauthoring(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(tmp_path)
+    first, digest = _post_bound(client, payload)
+    assert first.status_code == 200
+    # Rebuilding a retry carrier must still conflict; recover its accepted result instead.
+    changed, _ = _post_bound(client, payload, invocation="invocation-rebuilt")
+    assert changed.status_code == 409
+    provider = client.app.state.conversation_provider
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("saved-result lookup attempted another author or reconciliation")
+    for method in ("start", "_sync", "_start_serial_fallback"):
+        monkeypatch.setattr(provider, method, forbidden)
+    recovered = _result_by_key(client, include_tool_evidence=True)
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json() == _result(client, digest, include_tool_evidence=True).json()
+    assert recovered.json()["invocation_id"] == "invocation-a"
+    assert recovered.json()["body_sha256"] == digest
+    assert recovered.json()["response"] == first.json()
+    assert recovered.json()["authority_sha256"]
+    assert len(client.app.state.store.list_provider_sessions(owner_id="owner-a")) == 1
+
+@pytest.mark.parametrize("field,value", [
+    ("stream_id", "foreign-stream"), ("message_id", "foreign-message"),
+    ("conversation_id", "foreign-conversation"), ("agent_id", "foreign-agent"),
+])
+def test_key_result_lookup_rejects_wrong_carrier_scope(tmp_path, monkeypatch, field, value):
+    client = _client(tmp_path, monkeypatch)
+    response, _ = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200
+    assert _result_by_key(client, **{field: value}).status_code == 409
+    assert _result_by_key(client, headers={"X-Viventium-User-Id": "owner-b"}).status_code == 404
+    assert _result_by_key(client, key="absent-key").status_code == 404
+    assert client.get("/v1/requests/by-idempotency/idem-a/result", headers=AUTH).status_code == 400
+
+def test_key_result_lookup_rejects_ambiguous_family(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    first, _ = _post_bound(client, _payload(tmp_path))
+    assert first.status_code == 200
+    store = client.app.state.store
+    original = store.get_provider_request(first.json()["id"])
+    second, _ = store.create_provider_request(
+        tenant_id=original["tenant_id"], owner_id=original["owner_id"],
+        session_id=original["session_id"],
+        idempotency_key=original["idempotency_key"] + ":graph:second",
+        message_id=original["message_id"], stream_id=original["stream_id"],
+        requested_history_count=0,
+    )
+    store.update_provider_request(second["request_id"], state="completed")
+    assert _result_by_key(client).status_code == 409
+
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "cancelled"])
+def test_key_result_lookup_preserves_pending_and_failure_states(tmp_path, monkeypatch, state):
+    client = _client(tmp_path, monkeypatch)
+    response, digest = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200
+    client.app.state.conversation_provider.shutdown()
+    client.app.state.store.update_provider_request(response.json()["id"], state=state)
+    result = _result_by_key(client)
+    assert result.status_code == 200
+    assert result.json() == _result(client, digest).json()
+    assert result.json()["state"] == state
+    assert "response" not in result.json()
+
+@pytest.mark.parametrize("guard", ["restore_hold", "stop_tombstone"])
+def test_key_result_lookup_does_not_revive_held_or_stopped_answer(tmp_path, monkeypatch, guard):
+    client = _client(tmp_path, monkeypatch)
+    first, _ = _post_bound(client, _payload(tmp_path))
+    assert first.status_code == 200
+    store = client.app.state.store
+    record = store.get_provider_request(first.json()["id"])
+    if guard == "restore_hold":
+        store.update_provider_request(record["request_id"], restore_hold=1)
+    else:
+        store.upsert_provider_stop_tombstone(
+            tenant_id=record["tenant_id"], owner_id=record["owner_id"],
+            base_idempotency_key=record["idempotency_key"], ttl_seconds=60,
+        )
+    assert _result_by_key(client).status_code == 409
+    assert store.get_provider_request(record["request_id"])["state"] == "completed"

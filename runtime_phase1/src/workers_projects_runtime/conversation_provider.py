@@ -9874,23 +9874,8 @@ def install_conversation_provider_routes(
             return {**envelope, "status": result["status"], "run_id": run_id,
                     "attempt_id": attempt_id, "message_id": control_id}
 
-    @app.get("/v1/requests/by-invocation/{invocation_id}/result")
-    def glasshive_saved_result(
-        invocation_id: str, request: Request, stream_id: str, message_id: str, body_sha256: str,
-        include_tool_evidence: bool = False,
-    ) -> dict[str, Any]:
-        # This route is strictly observational. In particular, _sync/activity polling can
-        # start an armed fallback and must never be called by a result reader.
-        auth = require_provider_auth(request)
-        record = store.get_provider_request(
-            tenant_id=auth.tenant_id, owner_id=owner_for_request(request, auth),
-            native_invocation_id=invocation_id,
-        )
-        if not record:
-            raise HTTPException(status_code=404, detail="Native invocation not found")
-        if (record["stream_id"] != stream_id or record["message_id"] != message_id
-                or record["native_body_sha256"] != body_sha256):
-            raise HTTPException(status_code=409, detail="Native result identity conflict")
+    def saved_native_result(record: dict, *, include_tool_evidence: bool = False) -> dict[str, Any]:
+        # Strictly observational: _sync/activity polling can start an armed fallback.
         try:
             decision = json.loads(record.get("replay_decision_json") or "{}")
             if not isinstance(decision, dict):
@@ -9900,13 +9885,13 @@ def install_conversation_provider_routes(
         session = store.get_provider_session_by_id(str(record["session_id"])) or {}
         result = {
             "object": "glasshive.request.result", "version": 1,
-            "state": record["state"], "invocation_id": invocation_id,
+            "state": record["state"], "invocation_id": record["native_invocation_id"],
             "request_id": record["request_id"], "run_id": record.get("run_id") or "",
             "session_id": record["session_id"], "agent_id": session.get("agent_id") or "",
             "conversation_id": session.get("conversation_id") or "",
             "idempotency_key": record["idempotency_key"],
-            "stream_id": stream_id, "message_id": message_id,
-            "body_sha256": body_sha256,
+            "stream_id": record["stream_id"], "message_id": record["message_id"],
+            "body_sha256": record["native_body_sha256"],
             "authority_sha256": decision.get("request_authority_sha256") or "",
         }
         if record["state"] in {"failed", "cancelled"} and record.get("run_id"):
@@ -9931,6 +9916,23 @@ def install_conversation_provider_routes(
         if include_tool_evidence:
             result["graph_tool_evidence"] = provider.graph_tool_evidence(record)
         return result
+
+    @app.get("/v1/requests/by-invocation/{invocation_id}/result")
+    def glasshive_saved_result(
+        invocation_id: str, request: Request, stream_id: str, message_id: str, body_sha256: str,
+        include_tool_evidence: bool = False,
+    ) -> dict[str, Any]:
+        auth = require_provider_auth(request)
+        record = store.get_provider_request(
+            tenant_id=auth.tenant_id, owner_id=owner_for_request(request, auth),
+            native_invocation_id=invocation_id,
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="Native invocation not found")
+        if (record["stream_id"] != stream_id or record["message_id"] != message_id
+                or record["native_body_sha256"] != body_sha256):
+            raise HTTPException(status_code=409, detail="Native result identity conflict")
+        return saved_native_result(record, include_tool_evidence=include_tool_evidence)
 
     @app.get("/v1/requests/{request_id}/activity")
     async def glasshive_activity(request_id: str, request: Request):
@@ -9993,6 +9995,28 @@ def install_conversation_provider_routes(
         if len(candidates) != 1:
             raise HTTPException(409, "Native invocation is ambiguous")
         return candidates[0]
+
+    @app.get("/v1/requests/by-idempotency/{idempotency_key}/result")
+    def glasshive_saved_result_by_idempotency(
+        idempotency_key: str, request: Request, stream_id: str, message_id: str,
+        conversation_id: str, agent_id: str, include_tool_evidence: bool = False,
+    ) -> dict[str, Any]:
+        record = native_input_record(idempotency_key, request)
+        session = store.get_provider_session_by_id(str(record["session_id"])) or {}
+        if (not all((stream_id, message_id, conversation_id, agent_id))
+                or record["stream_id"] != stream_id or record["message_id"] != message_id
+                or session.get("conversation_id") != conversation_id
+                or session.get("agent_id") != agent_id
+                or not record.get("native_invocation_id") or not record.get("native_body_sha256")):
+            raise HTTPException(status_code=409, detail="Native result identity conflict")
+        if bool(record.get("restore_hold")) or store.is_provider_stop_tombstone_active(
+            tenant_id=record["tenant_id"], owner_id=record["owner_id"],
+            idempotency_keys=(idempotency_key, record["idempotency_key"],
+                _versioned_idempotency_key(idempotency_key, audio_eligible=False),
+                _versioned_idempotency_key(idempotency_key, audio_eligible=True)),
+        ):
+            raise HTTPException(status_code=409, detail="Native result recovery is held or stopped")
+        return saved_native_result(record, include_tool_evidence=include_tool_evidence)
 
     @app.get("/v1/requests/by-idempotency/{idempotency_key}/native-input")
     def glasshive_native_input(idempotency_key: str, request: Request):

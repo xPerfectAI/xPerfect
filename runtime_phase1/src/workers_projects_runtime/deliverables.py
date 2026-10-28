@@ -408,7 +408,9 @@ def capture_native_media(workspace: Path, run_id: str, stdout: str) -> dict[str,
 
 
 @contextmanager
-def _native_file_reader(workspace: Path, relative: Path):
+def _native_file_reader(
+    workspace: Path, relative: Path, *, excluded_identities: frozenset[tuple[int, int]] = frozenset(),
+):
     if relative.is_absolute() or not relative.parts or any(p in {".", ".."} for p in relative.parts):
         raise ValueError("Native file path is outside the workspace")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -418,11 +420,20 @@ def _native_file_reader(workspace: Path, relative: Path):
             descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
         fd = os.open(relative.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), dir_fd=descriptors[-1])
         descriptors.append(fd)
+        if excluded_identities:
+            for descriptor in descriptors:
+                identity = os.fstat(descriptor)
+                if (identity.st_dev, identity.st_ino) in excluded_identities:
+                    raise ValueError("Native file source is private runtime state")
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError("Native file source is not a private regular file")
         with os.fdopen(os.dup(fd), "rb") as handle:
             yield handle, metadata
+        if (_file_identity(os.fstat(fd)) != _file_identity(metadata)
+                or _file_identity(os.stat(relative.name, dir_fd=descriptors[-2], follow_symlinks=False))
+                != _file_identity(metadata)):
+            raise ValueError("Native file source changed during capture")
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
@@ -517,6 +528,7 @@ def verified_native_file(root: Path, relative: Path, sha256: str, size_bytes: in
 def copy_native_file(
     root: Path, relative: Path, destination: Path, *,
     target: Path | None = None, expected: NativeFileSnapshot | None = None,
+    excluded_identities: frozenset[tuple[int, int]] = frozenset(),
 ) -> NativeFileSnapshot:
     """Atomically stream a selected file through the existing no-follow boundary.
 
@@ -526,7 +538,7 @@ def copy_native_file(
     from .bootstrap import _sandbox_parent_descriptor
 
     target = target or Path("output-files/pending")
-    with _native_file_reader(root, relative) as (source, metadata):
+    with _native_file_reader(root, relative, excluded_identities=excluded_identities) as (source, metadata):
         with _sandbox_parent_descriptor(destination, target) as (parent_fd, filename):
             temporary = ".native-file-" + uuid.uuid4().hex
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)

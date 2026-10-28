@@ -11486,7 +11486,8 @@ raise SystemExit(exit_code)
                     source_kind = item.get("source_root", "workspace")
                     source_root = (workspace if source_kind == "workspace" else
                                    self._home_dir(str(worker["worker_id"])) / ".tmp"
-                                   if source_kind == "managed_tmp" else None)
+                                   if source_kind == "managed_tmp" else
+                                   Path("/") if source_kind == "selected_host" else None)
                     relative = Path(str(item.get("root_path") or item.get("workspace_path") or ""))
                     snapshot = Path(str(item.get("snapshot_path") or ""))
                     mime_type = item.get("mime_type")
@@ -11519,6 +11520,50 @@ raise SystemExit(exit_code)
         except RuntimeErrorBase:
             return []  # Existing privacy redaction keeps unavailable local paths hidden.
 
+    def _selected_host_file_source(self, candidate: Path) -> tuple[Path, frozenset[tuple[int, int]]] | None:
+        """Resolve directory aliases, retaining the selected file's no-follow check."""
+        from .upload_projection import _upload_root_candidates
+
+        canonical = candidate.parent.resolve(strict=True) / candidate.name
+        if not is_user_deliverable_relative_path(canonical.relative_to(canonical.anchor), explicit_selection=True):
+            return None
+        # Existing runtime placement owns private state across all native profiles.
+        roots = [self.base_dir, self._source_host_codex_home(), self._source_host_claude_home()]
+        roots.extend(Path(value).expanduser() for key in (
+            "XPERFECT_CONTROL_ROOT", "XPERFECT_STORAGE_ROOT", "XPERFECT_SHARED_VOLUME_ROOT",
+            "GLASSHIVE_PROVIDER_ACCOUNT_HOME_ROOT", "CLAUDE_CONFIG_DIR", "GROK_HOME",
+            "WPR_LIBRECHAT_UPLOADS_ROOT",
+        ) if (value := os.environ.get(key)))
+        roots.extend(Path(value).expanduser() for value in
+                     os.environ.get("GLASSHIVE_PROTECTED_SOURCE_ROOTS", "").split(os.pathsep) if value)
+        roots.extend(_upload_root_candidates())
+        excluded_identities = set()
+        for root in roots:
+            root = root.absolute()
+            if candidate.is_relative_to(root) or canonical.is_relative_to(root.resolve()):
+                return None
+            try:
+                metadata = root.stat()
+                excluded_identities.add((metadata.st_dev, metadata.st_ino))
+            except FileNotFoundError:
+                pass
+        # Databases can live next to ordinary files; their paths do not own the parent directory.
+        for key in ("WPR_DB_PATH", "XPERFECT_STORAGE_REGISTRY_PATH", "GLASSHIVE_LINK_REF_STATE_PATH"):
+            value = os.environ.get(key)
+            if not value:
+                continue
+            path = Path(value).expanduser().absolute()
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                private = Path(str(path) + suffix)
+                if candidate == private or canonical == private.resolve():
+                    return None
+                try:
+                    metadata = private.stat()
+                    excluded_identities.add((metadata.st_dev, metadata.st_ino))
+                except FileNotFoundError:
+                    pass
+        return canonical, frozenset(excluded_identities)
+
     def _capture_native_output_files(
         self,
         worker: dict,
@@ -11544,6 +11589,9 @@ raise SystemExit(exit_code)
             return []
         workspace = Path(workspace_dir)
         managed_tmp = self._home_dir(str(worker["worker_id"])) / ".tmp"
+        bundle = self._bootstrap_bundle_for_worker(worker)
+        selected_host_files = (worker.get("execution_mode") == "host"
+                               and bundle.get("access_mode") == "full" and not _native_tools_disabled(bundle))
         selected: list[tuple[Path, str, NativeFileSnapshot]] = []
         records: list[dict[str, object]] = []
         rejected: list[dict[str, str]] = []
@@ -11583,6 +11631,8 @@ raise SystemExit(exit_code)
                     continue  # Public references and already-projected artifacts are not local selections.
             candidate = Path(destination)
             source_kind, source_root = "workspace", workspace
+            capture_relative = None
+            excluded_identities = frozenset()
             if candidate.is_absolute():
                 try:
                     relative = candidate.relative_to(workspace)
@@ -11591,8 +11641,24 @@ raise SystemExit(exit_code)
                         relative = candidate.relative_to(managed_tmp)
                         source_kind, source_root = "managed_tmp", managed_tmp
                     except ValueError:
-                        reject(candidate, "source_root_unsupported")
-                        continue
+                        if expected_digest is not None or not selected_host_files:
+                            reject(candidate, "source_root_unsupported")
+                            continue
+                        relative = candidate.relative_to(candidate.anchor)
+                        if not is_user_deliverable_relative_path(relative, explicit_selection=True):
+                            reject(candidate, "not_deliverable")
+                            continue
+                        try:
+                            host_source = self._selected_host_file_source(candidate)
+                        except (OSError, ValueError, RuntimeError):
+                            reject(candidate, "unreadable")
+                            continue
+                        if host_source is None:
+                            reject(candidate, "source_root_unsupported")
+                            continue
+                        canonical, excluded_identities = host_source
+                        source_kind, source_root = "selected_host", Path(candidate.anchor)
+                        capture_relative = canonical.relative_to(canonical.anchor)
             else:
                 relative = candidate
             if not is_user_deliverable_relative_path(relative, explicit_selection=expected_digest is None):
@@ -11609,7 +11675,8 @@ raise SystemExit(exit_code)
             seen.add(key)
             try:
                 run_root = self._run_root(str(worker["worker_id"]), run_id)
-                data = copy_native_file(source_root, relative, run_root)
+                data = copy_native_file(source_root, capture_relative or relative, run_root,
+                                        excluded_identities=excluded_identities)
                 image_mime = native_file_image_mime(data)
             except (OSError, ValueError):
                 reject(candidate, "unreadable")
