@@ -108,9 +108,13 @@ def _identity(parent: int, name: str):
     return value.st_dev, value.st_ino
 
 
-def _audit_tree(parent: int, name: str, relative: Path) -> None:
+def _audit_tree(parent: int, name: str, relative: Path, *, root: Path) -> None:
     """Do not move private runtime state, links, or special files inside folders."""
+    from .deliverables import is_protected_artifact_path
+
     _relative(relative.as_posix())
+    if is_protected_artifact_path(root / relative):
+        raise FileAdmissionError("File selection is unavailable", 403)
     metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if stat.S_ISREG(metadata.st_mode):
         if metadata.st_nlink != 1:
@@ -124,16 +128,20 @@ def _audit_tree(parent: int, name: str, relative: Path) -> None:
     try:
         with os.scandir(child) as entries:
             for entry in entries:
-                _audit_tree(child, entry.name, relative / entry.name)
+                _audit_tree(child, entry.name, relative / entry.name, root=root)
     finally:
         os.close(child)
 
 
-def directory_revision(parent: int, name: str) -> str:
+def directory_revision(parent: int, name: str, *, path: Path | None = None) -> str:
     """Fingerprint nested metadata without following links or reading file data."""
+    from .deliverables import is_protected_artifact_path
+
     digest = hashlib.sha256()
 
-    def visit(directory, entry_name):
+    def visit(directory, entry_name, location):
+        if location is not None and is_protected_artifact_path(location):
+            return
         before = os.stat(entry_name, dir_fd=directory, follow_symlinks=False)
         digest.update(
             json.dumps(
@@ -157,7 +165,7 @@ def directory_revision(parent: int, name: str) -> str:
             )
             try:
                 for nested in sorted(os.listdir(child)):
-                    visit(child, nested)
+                    visit(child, nested, location / nested if location is not None else None)
                 after = os.fstat(child)
                 if (
                     before.st_dev,
@@ -178,7 +186,7 @@ def directory_revision(parent: int, name: str) -> str:
         digest.update(b"\0")
 
     try:
-        visit(parent, name)
+        visit(parent, name, path)
     except OSError as exc:
         raise FileAdmissionError(
             "Folder changed; refresh before trying again", 409
@@ -288,6 +296,9 @@ class FileMutations:
                             409,
                         )
                     self._idle()
+                    if os.environ.get("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS"):
+                        public_path = target if operation["kind"] == "restore" else source
+                        _audit_tree(source_parent, source.name, public_path, root=self.root)
                     if (
                         operation.get("revision")
                         and _revision(source_parent, source.name)[0]
@@ -370,12 +381,12 @@ class FileMutations:
             entry = self.files._entry(conn, self.worker, file_id)
         source = _relative(entry["path"])
         with _directory(self.root, source.parent) as source_parent:
+            _audit_tree(source_parent, source.name, source, root=self.root)
             current, metadata = _revision(source_parent, source.name)
             if current != revision:
                 raise FileAdmissionError(
                     "File changed; refresh before trying again", 409
                 )
-            _audit_tree(source_parent, source.name, source)
             if delete:
                 trash_name = "item_" + uuid.uuid4().hex
                 target = Path(TRASH) / trash_name
@@ -457,7 +468,7 @@ class FileMutations:
                     )
                 # Audit using the public destination so internal trash is never
                 # treated as an ordinary user-editable path.
-                _audit_tree(source_parent, source.name, target)
+                _audit_tree(source_parent, source.name, target, root=self.root)
                 operation = self._prepare(
                     file_id=file_id,
                     kind="restore",

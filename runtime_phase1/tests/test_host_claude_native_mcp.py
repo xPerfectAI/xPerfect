@@ -74,6 +74,29 @@ def test_claude_does_not_replace_broker_collision_or_enable_disabled_native(sour
     assert result == {'node_repl': broker}
 
 
+@pytest.mark.parametrize('lane', ['mission', 'conversation'])
+def test_claude_honors_per_worker_native_server_disable_without_promoting_new_servers(source, tmp_path, lane):
+    runtime, home, owner = source
+    original = ('[mcp_servers.node_repl]\ncommand="/synthetic/native"\n'
+                '[mcp_servers.cua_repl]\ncommand="/synthetic/computer"\n')
+    (home / 'config.toml').write_text(original)
+    broker = {'type': 'http', 'url': 'http://127.0.0.1:9000/scoped'}
+    bundle = {'claude_project_mcp': {'scoped-broker': broker}, 'codex_config_append':
+              '[mcp_servers.node_repl]\nenabled=false\n'
+              '[mcp_servers.codex-only]\ncommand="/synthetic/not-for-claude"\n'}
+    servers = materialize(runtime, tmp_path, bundle, lane)
+    assert servers == {'scoped-broker': broker, 'cua_repl': {
+        'type': 'stdio', 'command': '/synthetic/computer', 'args': [], 'env': {'HOME': str(owner)}}}
+    assert (home / 'config.toml').read_text() == original
+
+
+def test_claude_rejects_malformed_per_worker_server_selection(source, tmp_path):
+    runtime, home, _ = source
+    (home / 'config.toml').write_text('[mcp_servers.node_repl]\ncommand="/synthetic/native"\n')
+    with pytest.raises(ValueError):
+        materialize(runtime, tmp_path, {'codex_config_append': '[mcp_servers.invalid'}, 'mission')
+
+
 @pytest.mark.parametrize('unsupported', ['cwd="/synthetic/different-cwd"'])
 def test_claude_never_discards_unrepresentable_native_restrictions(source, tmp_path, unsupported, caplog):
     runtime, home, _ = source

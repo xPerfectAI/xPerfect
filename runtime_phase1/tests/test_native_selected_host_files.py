@@ -86,6 +86,25 @@ def test_unselected_paths_and_verified_native_edit_discovery_keep_existing_autho
     assert not scope["output_files"]
 
 
+def test_workspace_relative_private_root_suppresses_name_snapshot_and_replay(tmp_path, monkeypatch):
+    runtime, worker, info, scope = full_host(tmp_path)
+    workspace = Path(info.workspace_dir)
+    private = workspace / "private"
+    private.mkdir()
+    target = private / "private-file.csv"
+    target.write_text("Private fixture")
+    raw = f"[private-file.csv]({target.relative_to(workspace).as_posix()})"
+    assert "artifact_sha256:" in project(runtime, worker, info, raw, scope)
+
+    monkeypatch.setenv("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS", str(private))
+    restored, files = runtime.provider_native_image_output(
+        worker, {"run_id": scope["run_id"], "worker_id": worker["worker_id"]}, raw,
+    )
+    assert restored == "File kept local"
+    assert not files
+    assert project(runtime, worker, info, f"[private-file.csv](<{target.as_uri()}>)", scope) == "File kept local"
+
+
 @pytest.mark.parametrize("kind", [
     "hidden", "reserved", "traversal", "symlink", "hardlink", "fifo", "directory",
     "other_profile", "other_worker", "control", "account", "database", "link_database", "link_sidecar", "declared",

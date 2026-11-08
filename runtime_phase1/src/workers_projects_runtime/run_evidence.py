@@ -22,7 +22,7 @@ from .deliverables import (
     PROFESSIONAL_ARTIFACT_EXTENSIONS,
     SUPPORT_ARTIFACT_DIR_NAMES,
     candidate_artifact_paths,
-    is_user_deliverable_relative_path,
+    is_user_deliverable_relative_path, is_protected_artifact_path,
     is_valid_professional_artifact,
     workspace_files_are_shared,
 )
@@ -1844,11 +1844,14 @@ def _coverage_compliance(
 
 
 def _iter_scan_files(workspace_dir: Path) -> Iterable[Path]:
+    if is_protected_artifact_path(workspace_dir):
+        return
     count = 0
     for path in workspace_dir.rglob("*"):
         if count >= _MAX_TEXT_SCAN_FILES:
             return
-        if not path.is_file() or path.suffix.lower() not in _TEXT_FILE_SUFFIXES:
+        if (path.suffix.lower() not in _TEXT_FILE_SUFFIXES or is_protected_artifact_path(path)
+                or not path.is_file()):
             continue
         try:
             rel = path.relative_to(workspace_dir)

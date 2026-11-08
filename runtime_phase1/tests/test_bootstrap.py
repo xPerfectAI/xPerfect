@@ -1325,6 +1325,7 @@ def test_request_upload_projection_emits_one_public_safe_text_entry(monkeypatch)
             "scope": "workspace",
             "path": "uploads/note.txt",
             "content": "Synthetic public-safe note.",
+            "input_kind": "extracted_text",
             "file_id": "public-safe-text",
             "filename": "note.txt",
             "type": "text/plain",

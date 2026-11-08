@@ -55,6 +55,15 @@ The following is a component map, not a claim that every capability is verified 
 | Outbox, retries and delivery | Existing callback methods and durable outbox | Add occurrence-scoped standard webhooks; retain worker callbacks; isolate transport capacity from long AI. |
 | Events, files, evidence and security | Existing scoped store, event, artifact and authority owners | Keep exact identities and truthful states; record stage durations without private request material. |
 
+An operator may declare local-only roots with `GLASSHIVE_PROTECTED_ARTIFACT_ROOTS`, a
+platform path-separated list of absolute paths. Managed Files and artifact surfaces omit
+protected entries and reject exports that contain them. This also applies to a previously
+issued artifact link and to a retained native file selection. The policy controls managed
+file delivery. Native filesystem access continues to follow the selected harness authority. If a
+worker's workspace is local-only, a selected, verified result originating outside that root can
+use the worker's runtime state for publication. Signed links retain their existing owner scope;
+files in the protected root remain unavailable.
+
 ## Generic contract
 
 ### Schedule targets
@@ -247,3 +256,208 @@ AI generation and client delivery remain separate costs.
   receipts or in-flight requests. Bounded payloads are checked before saving and sending.
 - App scheduling setup is lazy at the existing native handoff boundary. Ordinary fast-Queen replies
   do not prepare scheduling grants or wait for a clock lookup.
+
+## Selected files from earlier accepted work
+
+A trusted client may declare `authorized_result_files` in its signature-verified bootstrap bundle.
+Each entry contains only `run_id`, `attempt_id` and `sha256`. The client owns its domain selection
+and current accepted-result checks. A content hash grants no access by itself. Native verifies the
+source run's exact attempt, terminal state, owner, tenant, project and captured bytes, then reuses
+the existing immutable file publisher under the source run's authority. Protected roots remain
+protected. An undeclared, unreadable or unpublishable file becomes a typed rejection and a visible
+file-unavailable marker while useful reply text is retained; it never becomes an unverified link.
+Owner, tenant and run identity failures still fail closed. The committed reply replays unchanged,
+including when a publication I/O failure caused the rejection. This does not certify a requested
+file as delivered or discard its saved source bytes. Required mission outputs keep their own
+completion checks.
+
+The declaration belongs to the saved per-request completion contract. It is removed from the
+stable worker bundle. A retry uses its admitted contract. Clients import through their existing
+authenticated file route and recheck the accepted source before committing a delivered attachment.
+A file transport failure is distinct from a model failure.
+
+The registered file-delivery contract receives current artifact-root facts for host-native conversations and missions:
+workspace and managed temporary directory are each `supported`, `local_only` or `unknown`. Facts
+contain no paths and grant no additional read or publication authority. A local-only root and its
+existing contents stay local, including copies. Models can choose a supported root for a new
+requested deliverable. When the default workspace is local-only, a new requested deliverable
+originates in a supported temporary root before any optional inward private archive copy. Existing
+local-only content cannot be exported by copying or regenerating it elsewhere. Runtime path and
+byte checks remain authoritative.
+
+### Current visual input
+
+Native image blocks belong to the current accepted source messages, using the same verified
+source identities as text admission. Without explicit source selection, the final conversation
+turn owns the fresh image input. Do not reattach the whole transcript's images as one new user
+batch. Historical originals remain materialized and available through existing authorized file
+readers and retained native history. Multiple current sources preserve their image order; a
+text-only turn does not resend an older photo as current input.
+
+Historical file materialization is not an inference batch. It preserves validated, content-addressed
+originals through the existing file owner without applying the fresh image batch's aggregate item
+or byte bounds to the conversation's lifetime archive. This also applies to cold and stateless
+inline-only callers without an application upload ledger. Current input keeps its own batch and
+per-file validation. A growing photo history must not prevent a later text turn from reaching its AI.
+
+### Application-prepared native coordination
+
+An application can retain its speaking assistant while the existing native coordinator manages
+background goals. `CoordinatorConfig.application` supplies a protected Standard Webhooks
+`destination_id`, an opaque `request_ref`, and an explicit delivery expiry. The configuration is
+accepted only through the existing trusted bootstrap signature. The owner-scoped reference is
+idempotent: the same configuration returns the same conversation; changed content conflicts.
+Application configurations cannot retain a reusable bootstrap bearer or developer context.
+
+`POST /v1/coordinator/conversations/{id}/turns` first saves the original request. Existing native
+maintenance emits `coordinator.turn_due` through the same callback outbox and bounded webhook
+transport used by schedule delivery. The event contains owner identity and opaque references,
+not prompts or credentials. The application prepares its current authority and context, then
+submits an ordinary signed native completion to `/turns/{turn}/prepare`. Native coordination
+checks the exact owner, conversation, turn, model, effort, origin scope and system/worker lane,
+adds its registered role and original accepted input, and starts through the existing provider.
+An exact admitted request is recovered before another inference can start. The provider owns
+completion persistence; the coordinator retains a minimal projection without fresh bearer tokens.
+`GET /turns/{turn}` exposes compact native state and its authoritative action mask.
+
+Explicit Retry of a settled failed planning turn reuses the existing turn owner. It retains the
+failed attempt and creates one deterministic child with the exact accepted message and Library
+selection. The child resolves back to the original source for fresh application preparation and
+goal/result attribution. Duplicate clicks and lost replies recover that same child; a failed child
+can be retried explicitly without a lifetime retry ceiling. Parsed replies, accepted source goals,
+Stop, restore hold and foreign ownership fence new retries. Retry is a new explicit execution
+intent, not a claim that the failed attempt had no effects. Status links the accepted retry before
+the application retires its parent's failed card. Existing standalone provider preparation remains
+with its own turn owner.
+
+In this mode, an accepted goal selects an exact original interactive message or contiguous clause.
+`source_turn_id` can select an earlier retained interactive source. Dispatch defaults to that saved
+original goal. Separate optional specialist `guidance` does not replace the goal. Dispatch intent,
+digest and admission order are saved before `coordinator.dispatch_due` is emitted. The application
+uses `/goals/{goal}/prepare` to provide an ordinary delegation under its own opaque idempotency and
+origin identities. Native validation reserves without starting, attaches the goal, and then wakes
+the same worker admission owner. Stop and continuity hold fence reservation, attachment and start.
+Existing standalone routes retain their contract and receipt bytes.
+
+Rich user controls use `/goals/{goal}/actions?run_id={exact-control-run}` with the ordinary work-action
+body. Its receipt endpoint adds `/receipt`. Both retain native input, inherited context, file
+selection and refreshed authority through the existing action receipt owner. The coordinator
+binds any resulting run before it starts. A stable goal alias can recover the original exact
+receipt after its current run advances. Pending and self-handled goals support their existing exact
+Stop without creating a fake worker or delegation. The native action list is authoritative.
+
+Owned coordinator goal snapshots may retain the existing read-only Worker View link even after a
+completed delegation leaves the recent Active Work window. The API resolves the bound delegation
+under the current tenant and owner, then uses the same signed-link owner as ordinary work detail.
+It grants no mutation or filesystem authority. Missing, inaccessible or unsigned views remain
+unavailable; clients must not invent a link from an internal worker or path.
+
+An unlaunched application goal whose dispatch delivery was rejected or expired can expose exact
+Retry. This is a blocked launch, not a request for user input. Within the original transport
+horizon, Retry reuses its immutable outbox event. After expiry, a new authenticated Control intent
+creates one new event in the same outbox; its identity follows that exact control key. The old
+payload, expiry and history remain unchanged. The current notification reference is retained in
+the existing preparation receipt and fences delivery, preparation, reservation and late replies.
+Maintenance follows that saved reference; it cannot renew expiry. Current references are exposed
+by the dispatch reader and carried unchanged to the existing prepare endpoint.
+Only that explicit owner action permits one fresh preparation before any reservation exists.
+Original source, route and opaque application identity remain fixed. Prior preparation digests
+and generations remain retained, and current signed capabilities are validated again. A transport
+retry never renews the independently owned mission authorization horizon. Once work is reserved,
+its ordinary immutable request owner governs recovery. Stop, restore hold, withdrawn delivery,
+unavailable destinations and unrelated ownership remain fenced. Repeating a control key cannot
+repeat its retry or create another worker.
+
+Worker results keep the existing application delivery owner. The background coordinator's plain
+reply is internal; it is not another speaker or another approval gate for every result. A goal
+handled by the coordinator itself emits `coordinator.result_ready` only after its canonical native
+completion is saved. The paged goal result retains its exact publisher identity and canonical
+output-file envelope. All event kinds share existing outbox retry, destination revocation,
+source fencing, expiry and uncertainty handling. No second queue, clock, scheduler, memory store
+or worker manager is introduced.
+
+An application-backed accepted interactive turn can also finish directly, without a goal-owned
+result. Its saved canonical assistant response emits the distinct `coordinator.turn_result_ready`
+through the same observer and outbox. Re-observation backfills completed turns once; it does not
+rerun the model. The selected-turn result reader binds the actual turn, request, run, revision and
+publisher, and pages the saved canonical assistant text. Its digest covers that exact text, while
+declared file metadata comes from the same canonical response. Goal-owned replies, internal result
+wakes and failed turns retain their existing paths. Current Stop, hold and source ownership fence
+presentation; the application keeps its existing speaking assistant and delivery owner.
+An accepted goal alone records intent. It suppresses this direct turn result only when its same
+source has a durable dispatch or actual work, worker or run binding; a goal bound to this exact
+Native run also owns that result. An unstarted intent does not hide a completed canonical answer
+and is not marked complete by its delivery.
+Compact owner-authorized interactive turn status retains the exact accepted message and creation
+timestamp so work labels use the existing source instead of a generic placeholder. Internal result
+wake bodies and full response history remain outside that compact projection.
+
+The read-only `/v1/coordinator/conversations/{id}/publications` reader projects retained
+`coordinator.result_ready` and `coordinator.turn_result_ready` identities from that same callback outbox. Authenticated tenant, owner
+and conversation scope apply to every page and cursor. It returns only event identity, original
+timestamps and typed result references, without destinations, credentials or result bodies.
+Clients can drain all pages. Expired or superseded entries remain provenance; they do not renew
+delivery deadlines or authorize an old result to be presented. Current goal intent, run and restore
+hold retain their existing authority.
+
+Application-managed Queue, Message, Steer and Retry retain the same native action intent, then emit
+`coordinator.action_due`. The application prepares fresh cognition and a signed invocation bundle
+through the same `/goals/{goal}/actions` owner. Its app-only `application_bootstrap_bundle_b64`
+carrier is separate from the immutable ordinary action request; usable authority stays in the
+existing invocation-local bundle owner. A credential-free run marker prevents restart from
+falling back to old worker context. Native maintenance can request fresh context for the same
+queued effect after a restart. A complete current opaque invocation replaces prior application
+context, rather than merging old cognition, broker data or credentials. Native execution policy,
+mission authorization, source identity and callback bindings retain their existing owners. The
+mission admission owner provides its new invocation grant separately. Missing refreshed context
+fails before admission; a restart cannot execute using a stored bearer. Preflight and exact receipt reads recover completed operations
+before another capability grant is prepared; they never repeat the action. Recovery selects pending
+receipts and unsettled queued effects, rather than stopping at a fixed number of historical actions.
+
+Fresh action bundles use the same selected-upload projector as new delegations. Projection follows
+signature and authenticated tenant/owner checks, preserves stable file identity and the supplied
+original or extracted representation, and reuses existing upload-root checks and materialization.
+Explicitly foreign descriptors are rejected before an action is reserved. Receipt reads do not
+project files or repeat an effect.
+
+The selected-file ledger carries every authorized original reference, including long conversation
+history. It has no separate aggregate file-count ceiling. Each entry still requires its ordered
+schema, stable reference and authenticated owner/tenant; missing or ambiguous references fail before
+reservation. Repeated identical records do not create duplicate files. Existing transport and host
+resource owners govern capacity; the ledger does not impose an inference batch budget on stored files.
+
+Projected uploads and managed native inputs share the existing per-run input index. Its registered
+worker instruction supplies the index path on both initial launch and an existing worker's next run.
+Each projected entry retains its source file identity, actual workspace path and original or extracted
+representation. Extracted text records its exact byte count and hash; unavailable originals remain
+explicit blockers. Generic workspace files are not inferred to be selected inputs.
+
+Application mode exposes configured routes and exact continuation controls for its existing goal
+workers. It does not authorize attachment to pre-existing project experts: its worker roster is
+empty and `worker_reuse_supported` is false. Standalone project-expert reuse remains supported.
+This preserves the existing project and application grant boundaries without claiming unsupported
+capability parity. A null `max_goals` removes the historical goal-count budget; explicitly
+configured legacy budgets still apply. Originals and results remain retained. Compact acceptance
+and `include_history=false` status projection avoid copying old message bodies on the reply path.
+Generated result turns group events by their retained goal's original source, so later unrelated
+inputs cannot change a worker result's context.
+
+Goal status exposes the retained `intent_state` and an effective boolean `restore_hold` covering
+both the goal and conversation. Result pages expose `result_revision` from the exact selected
+run's terminal revision, alongside the existing full-output hash and canonical publisher identity.
+These fields let application delivery verify cancellation, restoration and result generation
+without replacing native process state or guessing a revision.
+
+
+## Integration compatibility for original-context coordination
+
+The coordinator base role remains version 3. Application coordination adds its separately
+versioned layer 1; tool schema version 4 permits an omitted dispatch instruction and keeps optional
+specialist guidance separate from the accepted original goal. Existing saved conversation prompt
+snapshots retain their exact content and source hashes.
+
+A completed run can emit its canonical `cb_terminal_` callback while its broader work still has a
+queued follow-up. Its `result_state`, `result_revision`, `result_digest` and `result_ended_at` describe
+that exact run; `work_terminal: false` means the work continues. Consumers must treat callback IDs
+as opaque, retain the typed run-result fields and use work state separately. A nonempty partial
+result from a failed run is evidence of that failure, not proof of successful completion.

@@ -137,22 +137,20 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
       const chosen = selected?.id === item.id && selected?.kind === item.kind;
       card.classList.toggle('is-selected', chosen);
       const top = node('div', 'expert-card-top');
-      const shortName = String(item.name || 'Expert').split('·')[0].trim();
       const profession = item.kind === 'starter' && item.role ? String(item.role) : '';
       const title = profession || String(item.name || 'AI expert');
       const avatar = node('span', 'expert-avatar'); avatar.setAttribute('aria-hidden', 'true');
       const fallback = node('span', 'expert-avatar-fallback');
-      fallback.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg>';
+      fallback.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="m12 3 10 5-10 5L2 8zM2 12l10 5 10-5M2 16l10 5 10-5"/></svg>';
       avatar.append(fallback);
       if (artwork) {
-        const image = node('img'); image.src = `/static/experts/${item.id}.webp?v=20261025gouache2`;
+        const image = node('img'); image.src = `/static/experts/${item.id}.webp?v=20261025tools1`;
         image.alt = ''; image.width = 88; image.height = 88; image.loading = 'lazy'; image.decoding = 'async';
         image.onerror = () => { image.hidden = true; };
         avatar.append(image);
       }
       const identity = node('div', 'expert-identity'); identity.append(node('h3', '', title));
       if (item.kind === 'template') identity.append(node('p', 'expert-name', `Version ${item.version || 1}`));
-      if (profession && shortName !== title) identity.append(node('p', 'expert-name', shortName));
       top.append(avatar, identity);
       const outcome = node('p', 'expert-outcome', item.outcome || item.description || 'Use your saved knowledge and abilities for a new job.');
       const abilities = node('ul', 'expert-abilities'); abilities.setAttribute('aria-label', 'Included knowledge and abilities');
@@ -169,7 +167,7 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
       more.append(node('p', '', 'Add your company material without publishing it. Tools and native skills keep their real setup and permissions.'));
       for (const ability of (item.abilities || []).filter(a => !a.included)) more.append(node('p', '', `Optional: ${ability.name} · set up when needed`));
       const pick = node('button', 'expert-choose', chosen ? '✓ Selected' : 'Choose expert'); pick.type = 'button';
-      pick.setAttribute('aria-label', `${chosen ? 'Selected expert' : 'Choose expert'}: ${title}${profession && shortName !== title ? ` · ${shortName}` : ''}`);
+      pick.setAttribute('aria-label', `${chosen ? 'Selected expert' : 'Choose expert'}: ${title}`);
       pick.setAttribute('aria-pressed', String(chosen)); pick.onclick = () => choose(item);
       pick.disabled = item.kind === 'template' && catalogState !== 'active';
       card.append(top, outcome, more, pick);

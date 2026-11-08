@@ -84,7 +84,7 @@ def test_terminal_native_diagnostic_is_redacted_and_bounded():
                     api_error_status=500,
                     result=(
                         "API Error: upstream failed for api_key=" + secret
-                        + " while reading /Users/private-person/Documents/brief.txt "
+                        + " while reading /Users/" "private-person/Documents/brief.txt "
                         + "bearer " + "Zz9" * 20 + " " + ("x" * 3000)
                     ),
                 ),
@@ -237,6 +237,38 @@ def test_malformed_or_non_provider_native_message_is_not_decoded_as_model_error(
                                               stderr="", runtime_name="codex-cli", exit_code=1)
         assert classification.failure_class != "model_configuration_required"
         assert classification.structured is False
+
+
+def test_codex_api_body_without_outer_http_envelope_preserves_model_code():
+    body = json.dumps({"detail": "Synthetic provider rejection", "error": {
+        "type": "invalid_request_error", "code": "model_not_found",
+        "message": "Synthetic provider rejection", "param": None,
+    }})
+    for event in ({"type": "error", "message": body},
+                  {"type": "turn.failed", "error": {"message": body}}):
+        result = classify_cli_failure(stdout=_codex_stream(event), stderr="",
+                                      runtime_name="codex-cli", exit_code=1)
+        assert result.failure_class == "model_configuration_required"
+        assert result.structured and not result.retryable
+        assert result.provider_event_source == "provider_native"
+    for event in ({"type": "item.completed", "item": {"type": "agent_message", "text": body}},
+                  {"type": "tool_result", "content": body}):
+        result = classify_cli_failure(stdout=_codex_stream(event), stderr="",
+                                      runtime_name="codex-cli", exit_code=1)
+        assert result.failure_class != "model_configuration_required"
+        assert not result.structured
+
+
+def test_codex_body_requires_exact_error_schema():
+    for body in ({"detail": "x", "error": {"code": "model_not_found"}},
+                 {"type": "notice", "detail": "x", "error": {
+                     "type": "invalid_request_error", "code": "model_not_found", "message": "x"}},
+                 {"status": 200, "detail": "x", "error": {
+                     "type": "invalid_request_error", "code": "model_not_found", "message": "x"}}):
+        result = classify_cli_failure(stdout=_codex_stream({"type": "turn.failed", "error": {
+            "message": json.dumps(body)}}), stderr="", runtime_name="codex-cli", exit_code=1)
+        assert result.failure_class != "model_configuration_required"
+        assert not result.structured
 
 
 def _native_http_failure(status, *, code=None, message="Opaque provider refusal"):

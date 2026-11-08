@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .application_boundary import launch_authority_for
+from .application_boundary import launch_authority_for, opaque_application_context
 from . import schedule_targets
 
 import base64
@@ -43,7 +43,7 @@ from .deliverables import (
     PROFESSIONAL_ARTIFACT_EXTENSIONS,
     SUPPORT_ARTIFACT_DIR_NAMES,
     deliverable_payload,
-    is_user_deliverable_relative_path,
+    is_user_deliverable_relative_path, is_protected_artifact_path,
     is_valid_professional_artifact,
     native_media_observations,
     NATIVE_MEDIA_PREFIX, NATIVE_IMAGE_SUFFIXES, _publish_native_media, _native_media_snapshot,
@@ -1769,6 +1769,53 @@ def _merge_file_entries(existing: object, incoming: object) -> object:
     return merged
 
 
+# These are existing Native execution/admission and result/source commitment carriers.
+# Compatibility names remain opaque binding data; application cognition is not parsed here.
+_APPLICATION_NATIVE_BINDING_KEYS = (
+    "execution_policy", "provider_model", "provider_capabilities", "access_mode", "run_mode",
+    "capability_authorization", "glasshive_capability_authorization", "glasshive_capability_requirement",
+    "callbacks", "viventium_delegation_identity", "viventium_delegation_context",
+    "viventium_delegation_assertion", "viventium_delegation_packet", "viventium_constraint_source",
+)
+_APPLICATION_LAUNCH_BINDING_KEYS = ("launch_authority", "viventium_launch_authority")
+
+
+def native_execution_bindings(bundle: dict | None) -> dict:
+    """Project only existing Native commitments, never reusable application credentials."""
+    value = bundle or {}
+    launch_authority_for(value)  # Existing alias conflict owner remains authoritative.
+    result = {key: value[key] for key in (*_APPLICATION_NATIVE_BINDING_KEYS, *_APPLICATION_LAUNCH_BINDING_KEYS) if key in value}
+    policy_env = {key: item for key, item in (value.get("env") or {}).items() if key in WORKER_EFFORT_ENV_VALUES}
+    if policy_env:
+        result["env"] = policy_env
+    return result
+
+
+def application_invocation_bundle(existing: dict | None, current: dict) -> dict:
+    """Replace complete caller-owned context while retaining immutable Native commitments."""
+    if not isinstance(current, dict) or not opaque_application_context(current):
+        raise ValueError("A complete opaque application invocation context is required")
+    original = native_execution_bindings(existing)
+    for key in _APPLICATION_NATIVE_BINDING_KEYS:
+        if key in current and current[key] != original.get(key):
+            raise ValueError("Application invocation changed a Native execution binding")
+    incoming_launch = launch_authority_for(current)
+    if incoming_launch is not None and incoming_launch != launch_authority_for(original):
+        raise ValueError("Application invocation changed its Native launch binding")
+    result = dict(current)
+    for key in (*_APPLICATION_NATIVE_BINDING_KEYS, *_APPLICATION_LAUNCH_BINDING_KEYS):
+        result.pop(key, None)
+    environment = dict(current.get("env") or {})
+    original_environment = original.pop("env", {})
+    for key in WORKER_EFFORT_ENV_VALUES:
+        if key in environment and environment[key] != original_environment.get(key):
+            raise ValueError("Application invocation changed its Native effort policy")
+    environment.update(original_environment)
+    result.update(original)
+    result["env"] = environment
+    return result
+
+
 def merge_bootstrap_bundle(existing: dict | None, incoming: dict | None) -> dict | None:
     if incoming is None:
         return existing
@@ -2365,6 +2412,31 @@ class WorkersProjectsService:
             self._run_local_grant_waiters.clear()
             self._run_local_grant_claimants.clear()
             self._run_local_bundles_lock.notify_all()
+        # A duplicate can transfer a queued invocation before shutdown reaches
+        # this CAS. Map membership alone does not prove execution ownership.
+        for run_id in self.store.queued_invocation_ids_for_executor(self._executor_id):
+            try:
+                run = self.store.get_run(run_id)
+                worker = self.store.get_worker(str((run or {}).get("worker_id") or ""))
+                if (not worker or not self._requires_conversation_invocation_bearer(worker)
+                        or worker.get("work_stop_id") or worker.get("compute_release_token")):
+                    continue
+                message = "The conversation capability grant must be refreshed before this queued turn can start."
+                blocked = self.store.mark_run_needs_input(
+                    run_id, expected_state="queued", error_text=message,
+                    failure_class="conversation_capability_grant_required",
+                    failure_user_message=message, require_no_active_lease=True,
+                    expected_invocation_executor_id=self._executor_id,
+                )
+                if blocked is None:
+                    continue
+                self.store.add_event(str(worker["project_id"]), str(worker["worker_id"]), run_id,
+                                     "run.needs_input", message)
+                self.run_notifications.notify(run_id)
+                if self._provider_request_reconciler is not None:
+                    self._provider_request_reconciler(run_id)
+            except Exception as exc:
+                cleanup_errors.append(("Queued conversation authority cleanup remains unconfirmed", exc))
         try:
             self.store.release_active_work_action_leases(self._executor_id)
         except Exception as exc:
@@ -3544,7 +3616,7 @@ class WorkersProjectsService:
             ).fetchone():
                 return True
             actions = conn.execute(
-                "SELECT a.conversation_id,a.goal_id,a.idempotency_key,g.work_ref,"
+                "SELECT a.conversation_id,a.goal_id,a.idempotency_key,a.application_json,g.work_ref,"
                 "g.run_id,g.intent_state,g.restore_hold,c.restore_hold AS conversation_hold,"
                 "c.tenant_id,c.owner_id,json_extract(a.payload_json,'$.action') AS action,"
                 "CASE WHEN json_valid(a.response_json) THEN json_extract(a.response_json,'$.run_id') END AS effect_run_id "
@@ -3553,14 +3625,14 @@ class WorkersProjectsService:
                 "AND g.goal_id=a.goal_id "
                 "JOIN coordinator_conversations c ON c.conversation_id=a.conversation_id "
                 "WHERE g.worker_id=? AND json_valid(a.payload_json) "
-                "AND json_extract(a.payload_json,'$.action') IN ('retry','queue','message')",
+                "AND json_extract(a.payload_json,'$.action') IN ('retry','queue','message','steer')",
                 (worker_id,),
             ).fetchall()
         for action in actions:
-            effect_key = (
+            effect_key = (action["idempotency_key"] if json.loads(action["application_json"] or "{}") else (
                 f"coordinator-{action['action']}:{action['conversation_id']}:"
                 f"{action['goal_id']}:{action['idempotency_key']}"
-            )
+            ))
             expected_id = self._idempotent_run_id(
                 worker_id,
                 self._active_work_effect_idempotency_key(
@@ -4552,16 +4624,31 @@ class WorkersProjectsService:
             path=path,
         )
 
+    def artifact_storage_root(self, worker: dict, relative: Path) -> Path:
+        """Keep selected native outputs separate from a local-only workspace."""
+        workspace = Path(str(worker.get("workspace_dir") or ""))
+        state = Path(str(worker.get("state_dir") or ""))
+        if (
+            workspace.is_absolute() and is_protected_artifact_path(workspace)
+            and relative.parent.parent == NATIVE_MEDIA_PREFIX
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", relative.parent.name)
+            and re.fullmatch(r"[0-9a-f]{64}", relative.stem)
+            and state.is_absolute() and state.is_dir() and not state.is_symlink()
+        ):
+            return state
+        return workspace
+
     def _signed_artifact_url(self, worker: dict, workspace_path: str, *, kind: str, action: str) -> str:
         base_url = self._artifact_base_url()
         worker_id = str(worker.get("worker_id") or "")
         path = str(workspace_path or "").strip().lstrip("/")
+        root = self.artifact_storage_root(worker, Path(path))
         if (
             str(worker.get("state") or "") == "terminated"
             or not base_url
             or not worker_id
             or not path
-            or not is_user_deliverable_relative_path(path)
+            or not is_user_deliverable_relative_path(path, root=root)
         ):
             return ""
         token = sign_link_token(
@@ -4584,10 +4671,51 @@ class WorkersProjectsService:
     def _signed_artifact_download_url(self, worker: dict, workspace_path: str) -> str:
         return self._signed_artifact_url(worker, workspace_path, kind="artifact_download", action="download")
 
+    def render_run_result_file(self, request: dict, source: dict, reference: str,
+                               selected_link: str, output_files: list | None) -> str | None:
+        """Reuse the immutable publisher under the source run's own authority."""
+        worker = self.store.get_worker(str(source.get("worker_id") or ""))
+        if (not worker or worker.get("owner_id") != request.get("owner_id")
+                or worker.get("tenant_id") != request.get("tenant_id")
+                or source.get("tenant_id") != request.get("tenant_id")
+                or source.get("project_id") != worker.get("project_id")
+                or source.get("state") not in {"completed", "failed", "cancelled", "interrupted"}):
+            return None
+        _, files = self.runtime.provider_native_image_output(worker, source, "")
+        if not any("artifact_sha256:" + native_output_sha256(item[2]) == reference
+                   and not is_protected_artifact_path(Path(item[0])) for item in files):
+            return None
+        # No request_id on the source request, so inherited publication cannot recurse.
+        source_request = {"run_id": source["run_id"], "owner_id": request["owner_id"],
+                          "tenant_id": request["tenant_id"]}
+        captured: list[dict] = []
+        rendered = self.render_provider_native_images(source_request, source, selected_link,
+            output_files=captured if output_files is not None else None)
+        if output_files is not None:
+            output_files.extend(item for item in captured if item not in output_files)
+        return rendered
+
+    def _render_client_result_file(self, request: dict, reference: str, selected_link: str,
+                                   output_files: list | None, scope: list[dict] | None) -> str | None:
+        if not request.get("request_id"):
+            return None
+        for grant in scope or []:
+            if reference != "artifact_sha256:" + grant["sha256"]:
+                continue
+            source = self.store.get_run(grant["run_id"], tenant_id=str(request.get("tenant_id") or ""))
+            if not source or source.get("active_attempt_id") != grant["attempt_id"]:
+                continue
+            rendered = self.render_run_result_file(request, source, reference, selected_link, output_files)
+            if rendered is not None:
+                return rendered
+        return None
+
     def render_provider_native_images(
         self, request: dict, run: dict, output: str, *, output_files: list[dict] | None = None,
         output_rejections: list[dict] | None = None,
         include_captured_files: bool = False,
+        allow_unavailable_files: bool = False,
+        authorized_result_files: list[dict[str, str]] | None = None,
     ) -> str:
         """Resolve model-selected files through the existing owner artifact boundary."""
         if "](" not in output and output_rejections is None and not include_captured_files:
@@ -4595,7 +4723,7 @@ class WorkersProjectsService:
         run_id = str(run.get("run_id") or "")
         worker = self.store.get_worker(str(run.get("worker_id") or ""))
         resolver = getattr(self.runtime, "provider_native_image_output", None)
-        if not worker or not callable(resolver):
+        if not worker or (not callable(resolver) and not allow_unavailable_files):
             if re.search(r"\]\(\s*<?artifact_sha256:", output):
                 raise NativeFilePublicationUnavailable("Selected native image is unavailable for this request")
             return output
@@ -4606,13 +4734,16 @@ class WorkersProjectsService:
             or request.get("tenant_id") != worker.get("tenant_id")
         ):
             raise NativeFilePublicationUnavailable("Native image output does not match the request owner and run")
-        projected, images = resolver(worker, run, output)
+        projected, images = resolver(worker, run, output) if callable(resolver) else (output, [])
         delivery_names = native_output_delivery_names(images)
         rejection_reader = getattr(self.runtime, "provider_native_output_file_rejections", None)
-        if output_rejections is not None and callable(rejection_reader):
+        if (output_rejections is not None and callable(rejection_reader)
+                and (include_captured_files or not allow_unavailable_files)):
             output_rejections.extend(rejection_reader(worker, run))
         authorized_groups: dict[str, list] = {}
         for item in images:
+            if is_protected_artifact_path(Path(item[0])):
+                continue
             authorized_groups.setdefault("artifact_sha256:" + native_output_sha256(item[2]), []).append(item)
         authorized = {reference: items[-1] for reference, items in authorized_groups.items()}
         selected_urls: dict[str, str] = {}
@@ -4626,7 +4757,9 @@ class WorkersProjectsService:
             key = (relative.as_posix(), mime)
             if key in published_urls:
                 return published_urls[key]
-            workspace = Path(str(worker.get("workspace_dir") or ""))
+            workspace = self.artifact_storage_root(worker, relative)
+            if is_protected_artifact_path(workspace / relative):
+                raise NativeFilePublicationUnavailable("Selected native file publication is unavailable")
             if isinstance(data, NativeFileSnapshot):
                 try:
                     verified_native_file(workspace, relative, data.sha256, data.size_bytes)
@@ -4675,6 +4808,21 @@ class WorkersProjectsService:
                         })
             return selected_urls[reference]
 
+        def note_unavailable_file() -> None:
+            rejection = {"name": "File", "code": "unreadable"}
+            if output_rejections is not None and rejection not in output_rejections:
+                output_rejections.append(rejection)
+
+        def describe_available(reference: str) -> str:
+            try:
+                return describe(reference)
+            except NativeFilePublicationUnavailable:
+                if not allow_unavailable_files:
+                    raise
+                note_unavailable_file()
+                selected_urls[reference] = ""
+                return ""
+
         def render(match: re.Match[str]) -> str:
             if match.group(2) is None:
                 return match.group(0)
@@ -4682,18 +4830,26 @@ class WorkersProjectsService:
             if not reference.startswith("artifact_sha256:"):
                 return match.group(0)
             if reference not in authorized:
+                inherited = self._render_client_result_file(
+                    request, reference, match.group(0), output_files, authorized_result_files)
+                if inherited is not None:
+                    return inherited
                 from .coordinator import render_coordinator_result_file
                 inherited = render_coordinator_result_file(
                     self, request, reference, match.group(0), output_files)
                 if inherited is not None:
                     return inherited
-                raise NativeFilePublicationUnavailable("Selected native image is unavailable for this request")
-            return f"{match.group(1)}({describe(reference)})"
+                if not allow_unavailable_files:
+                    raise NativeFilePublicationUnavailable("Selected native image is unavailable for this request")
+                note_unavailable_file()
+                return "[File unavailable]"
+            url = describe_available(reference)
+            return f"{match.group(1)}({url})" if url else "[File unavailable]"
 
         rendered = NATIVE_MARKDOWN_LINK_OR_ESCAPE.sub(render, projected)
         if include_captured_files:
             for reference in authorized:
-                describe(reference)
+                describe_available(reference)
         return rendered
 
     def _native_media_callback_observations(self, worker: dict, run: dict) -> dict[str, object]:
@@ -4941,14 +5097,14 @@ class WorkersProjectsService:
             not requested_callback_id
             and terminal_result_state
             and durable_ended_at
-            and (not delegation or delegation_work_terminal)
+            and (not delegation or delegation_work_terminal or event_type == "run.completed")
         )
         run_terminal_observation = bool(
             not requested_callback_id
             and terminal_result_state
             and durable_ended_at
             and delegation
-            and not delegation_work_terminal
+            and not terminal_generation
         )
         if terminal_generation:
             terminal_result_revision = int(
@@ -5043,7 +5199,9 @@ class WorkersProjectsService:
         capture_completed_files = (
             event_type == "run.completed" and bool(terminal_result_digest) and bool(delegation)
         )
-        if run and (capture_completed_files or "artifact_sha256:" in message or "artifact_sha256:" in full_message):
+        if run and terminal_event and (
+            capture_completed_files or "artifact_sha256:" in message or "artifact_sha256:" in full_message
+        ):
             request = {"run_id": run_id, "owner_id": worker.get("owner_id"),
                        "tenant_id": worker.get("tenant_id")}
             message = self.render_provider_native_images(
@@ -5051,9 +5209,14 @@ class WorkersProjectsService:
                 output_files=callback_output_files if capture_completed_files else None,
                 output_rejections=callback_output_rejections if capture_completed_files else None,
                 include_captured_files=capture_completed_files,
+                allow_unavailable_files=capture_completed_files,
             )
             if full_message:
-                full_message = self.render_provider_native_images(request, run, full_message)
+                full_message = self.render_provider_native_images(
+                    request, run, full_message,
+                    output_rejections=callback_output_rejections if capture_completed_files else None,
+                    allow_unavailable_files=capture_completed_files,
+                )
         operator_url = self._signed_watch_url(worker, callbacks) if link_safe else ""
         include_watch_link = link_safe and event_type in NATIVE_INPUT_CALLBACK_LINK_EVENTS
         payload = {
@@ -7843,7 +8006,8 @@ class WorkersProjectsService:
                             len(selected) == 1 and declared and declared.model == selected[0].id
                             and declared.profile == profile and declared.execution_mode == "host"
                             and command.goal_id == origin["goal_id"] and not command.worker_id
-                            and command.instruction == instruction and origin["text"] == goal
+                            and (origin["text"] if command.instruction is None else command.instruction) == instruction
+                            and origin["text"] == goal
                             and idempotency_key == origin_ref
                             and not any(origin[key] for key in ("work_ref", "worker_id", "run_id"))
                         )
@@ -8515,6 +8679,7 @@ class WorkersProjectsService:
                     origin_trace=origin_trace,
                     continuation_contract=continuation_contract,
                     file_manifest=action_files,
+                    start_processor=start_processor,
                 )
                 if str(created.get("_control_outcome") or "") == "terminal_won":
                     authoritative = dict(created.get("_control_run") or created)
@@ -12226,6 +12391,8 @@ class WorkersProjectsService:
                 continuation_context=continuation_context,
                 file_manifest=file_manifest,
                 assignment_request=assignment_request,
+                invocation_executor_id=(self._executor_id
+                    if self._requires_conversation_invocation_bearer(worker) else ""),
             )
 
         while True:
@@ -12306,6 +12473,7 @@ class WorkersProjectsService:
                     else:
                         run_id = f"run_{uuid.uuid4().hex[:10]}"
                     staged_bundle = None
+                    invocation_owner = self._executor_id if self._requires_conversation_invocation_bearer(worker) else ""
                     if run_local_bundle is not None and self.store.get_run(run_id) is None:
                         staged_bundle = dict(run_local_bundle)
                         # Release the memory condition before the queued row is
@@ -12319,6 +12487,7 @@ class WorkersProjectsService:
                                 worker_id=worker_id,
                                 project_id=str(worker["project_id"]),
                                 instruction=instruction,
+                                **({"invocation_executor_id": invocation_owner} if invocation_owner else {}),
                             )
                         elif normalized_key:
                             run, created = reserve_idempotent_run(worker, run_id)
@@ -12337,6 +12506,7 @@ class WorkersProjectsService:
                                 origin_trace=origin_trace,
                                 continuation_contract=stored_continuation,
                                 continuation_context=continuation_context,
+                                **({"invocation_executor_id": invocation_owner} if invocation_owner else {}),
                             )
                     except Exception:
                         if staged_bundle is not None:
@@ -12431,6 +12601,7 @@ class WorkersProjectsService:
         if any(
             (
                 parallel_clean_room,
+                existing_worker is not None and self._requires_conversation_invocation_bearer(existing_worker),
                 str((existing_worker or {}).get("state") or "") == "paused",
                 bool(str((existing_worker or {}).get("work_stop_id") or "")),
                 run_local_bundle is not None,
@@ -12757,6 +12928,9 @@ class WorkersProjectsService:
             raise ValueError("Run-scoped bootstrap authority is invalid") from exc
         if not isinstance(runtime_bundle, dict):
             raise ValueError("Run-scoped bootstrap authority is invalid")
+        runtime_bundle.pop("invocation_executor_id", None)
+        if not runtime_bundle:
+            return worker
         try:
             persistent_bundle = json.loads(str(worker.get("bootstrap_bundle_json") or "{}"))
         except json.JSONDecodeError:
@@ -12764,8 +12938,17 @@ class WorkersProjectsService:
         if not isinstance(persistent_bundle, dict):
             persistent_bundle = {}
         runtime_worker = dict(worker)
+        if runtime_bundle.pop("application_invocation_context_required", False):
+            runtime_worker["_requires_application_invocation_context"] = True
+            if runtime_bundle:
+                raise ValueError("Application invocation marker cannot retain application context")
+            # Admission uses only its original Native commitments. Complete current
+            # application context and the newly admitted grant join on this run later.
+            effective_bundle = native_execution_bindings(persistent_bundle)
+        else:
+            effective_bundle = merge_bootstrap_bundle(persistent_bundle, runtime_bundle) or {}
         runtime_worker["bootstrap_bundle_json"] = json.dumps(
-            merge_bootstrap_bundle(persistent_bundle, runtime_bundle) or {},
+            effective_bundle,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -12822,6 +13005,7 @@ class WorkersProjectsService:
         continuation_contract: dict[str, object] | None = None,
         file_manifest: list[dict] | None = None,
         inherited_conversation: dict[str, object] | None = None,
+        start_processor: bool = True,
     ) -> dict:
         instruction = str(_prepared_instruction or "") or self._instruction_for_steer(
             message
@@ -13032,7 +13216,8 @@ class WorkersProjectsService:
                 "_control_outcome": "terminal_won",
                 "_control_run": target_run,
             }
-        self._ensure_worker_processor(worker_id)
+        if start_processor:
+            self._ensure_worker_processor(worker_id)
         return replacement
 
     def native_worker_control(self, worker_id: str, *, run_id: str = "", attempt_id: str = "", action: str | None = None, payload: dict | None = None) -> dict:
@@ -13091,6 +13276,7 @@ class WorkersProjectsService:
         continuation_contract: dict[str, object] | None = None,
         file_manifest: list[dict] | None = None,
         inherited_conversation: dict[str, object] | None = None,
+        start_processor: bool = True,
     ) -> dict:
         if run_id or idempotency_key or action_use_id:
             return self._steer_worker_parallel(
@@ -13105,6 +13291,7 @@ class WorkersProjectsService:
                 continuation_contract=continuation_contract,
                 file_manifest=file_manifest,
                 inherited_conversation=inherited_conversation,
+                start_processor=start_processor,
             )
         worker = self.require_worker(worker_id)
         self._ensure_execution_allowed(worker)
@@ -13124,7 +13311,7 @@ class WorkersProjectsService:
                 "Active run interrupted so the workspace can follow the new steer instruction.",
             )
         instruction = self._instruction_for_steer(message)
-        return self.assign_run(worker_id, instruction, event_type="worker.steer")
+        return self.assign_run(worker_id, instruction, event_type="worker.steer", start_processor=start_processor)
 
     def desktop_action(
         self,
@@ -14209,8 +14396,11 @@ class WorkersProjectsService:
         except WorkerClosedStoreError as exc:
             raise ControlPlaneConflict(str(exc)) from exc
 
-    def terminate_worker(self, worker_id: str, *, _reclaim_existing: bool = False) -> dict:
-        self._invalidate_worker_processor(worker_id)
+    def terminate_worker(
+        self, worker_id: str, *, _reclaim_existing: bool = False, _only_if_idle: bool = False,
+    ) -> dict:
+        if not _only_if_idle:
+            self._invalidate_worker_processor(worker_id)
         observed = self.require_worker(worker_id)
         if (
             not _reclaim_existing
@@ -14225,6 +14415,7 @@ class WorkersProjectsService:
             return self._terminate_worker_with_start_fence(
                 worker_id,
                 reclaim_existing=_reclaim_existing,
+                only_if_idle=_only_if_idle,
             )
 
     def _terminate_worker_with_start_fence(
@@ -14232,18 +14423,22 @@ class WorkersProjectsService:
         worker_id: str,
         *,
         reclaim_existing: bool,
+        only_if_idle: bool = False,
         expected_catalog_revision: int | None = None,
         remove_from_catalog: bool = False,
     ) -> dict:
         worker = self.require_worker(worker_id)
-        claimed_worker, owns_termination = self.store.begin_worker_termination(worker_id,
-            **({"expected_catalog_revision": expected_catalog_revision} if expected_catalog_revision is not None else {}))
+        claimed_worker, owns_termination = self.store.begin_worker_termination(
+            worker_id, only_if_idle=only_if_idle,
+            **({"expected_catalog_revision": expected_catalog_revision}
+               if expected_catalog_revision is not None else {}),
+        )
         worker = claimed_worker or worker
         if not owns_termination and not (
-            reclaim_existing and str(worker.get("state") or "") == "terminating"
+            reclaim_existing and not only_if_idle and str(worker.get("state") or "") == "terminating"
         ):
             return worker
-        if remove_from_catalog:
+        if only_if_idle or remove_from_catalog:
             self._invalidate_worker_processor(worker_id)
         active_run = self.store.get_active_run(worker_id)
         active_run_id = str((active_run or {}).get("run_id") or "")
@@ -14830,12 +15025,12 @@ class WorkersProjectsService:
         workspace_path = Path(str(deliverable.get("workspace_path") or "").strip())
         if not workspace_path.parts:
             return False
-        if not is_user_deliverable_relative_path(workspace_path):
-            return False
         raw_root = str(worker.get("workspace_dir") or "").strip()
         if not raw_root:
             return False
         root = Path(raw_root)
+        if not is_user_deliverable_relative_path(workspace_path, root=root):
+            return False
         artifact_path = (root / workspace_path).resolve()
         try:
             artifact_path.relative_to(root.resolve())
@@ -15266,6 +15461,8 @@ class WorkersProjectsService:
             "terminated",
         } or self.store.has_active_operator_pause(worker_id):
             return
+        if not self._queued_invocation_is_local(worker, self.store.peek_next_queued_run(worker_id)):
+            return
         if (worker.get("compute_release_kind") == "needs_input"
                 and worker.get("compute_release_scope") == "compute_only"
                 and worker.get("compute_release_token")):
@@ -15408,6 +15605,8 @@ class WorkersProjectsService:
                     return
 
                 queued_run = self.store.peek_next_queued_run(worker_id)
+                if not self._queued_invocation_is_local(worker, queued_run):
+                    return
                 preclaim_reservation: dict | None = None
                 if queued_run:
                     if not self._coordinator_retry_dispatch_ready(worker, queued_run):
@@ -15491,6 +15690,8 @@ class WorkersProjectsService:
                         worker_id,
                         executor_id=self._executor_id,
                         lease_ttl_s=self._host_lease_ttl_s(),
+                        **({"expected_run_id": str(queued_run["run_id"])}
+                           if self._requires_conversation_invocation_bearer(worker) else {}),
                     )
                     if isinstance(run, dict):
                         admission_timing["run"] = run.get("run_id")
@@ -16618,6 +16819,8 @@ class WorkersProjectsService:
                     return
 
                 queued_run = self.store.peek_next_queued_run(worker_id)
+                if not self._queued_invocation_is_local(worker, queued_run):
+                    return
                 if queued_run:
                     capacity_error = self._runtime_capacity_error(worker)
                     if capacity_error:
@@ -16654,6 +16857,8 @@ class WorkersProjectsService:
                     worker_id,
                     executor_id=self._executor_id,
                     lease_ttl_s=self._host_lease_ttl_s(),
+                    **({"expected_run_id": str(queued_run["run_id"])}
+                       if self._requires_conversation_invocation_bearer(worker) else {}),
                 )
                 if not run:
                     if queued_run:
@@ -17978,15 +18183,22 @@ class WorkersProjectsService:
                     if state in {"completed", "failed"}
                     else None
                 )
-                record = self._emit_callback(
-                    worker,
-                    f"run.{state}",
-                    run=run,
-                    message=message,
-                    full_message=full_message,
-                    deliverable=deliverable,
-                    submit_delivery=False,
-                )
+                try:
+                    record = self._emit_callback(
+                        worker,
+                        f"run.{state}",
+                        run=run,
+                        message=message,
+                        full_message=full_message,
+                        deliverable=deliverable,
+                        submit_delivery=False,
+                    )
+                except Exception:
+                    logger.error(
+                        "GlassHive terminal callback remains pending after publication error",
+                        extra={"run_id": run.get("run_id"), "error_code": "transient_dependency"},
+                    )
+                    continue
                 if record is None:
                     self.store.mark_terminal_callback_reconciliation_unavailable(
                         str(run.get("run_id") or ""),
@@ -18565,9 +18777,13 @@ class WorkersProjectsService:
             return state, False
 
         latest = callback_run
-        if not latest:
-            current_run_id = str(delegation.get("current_run_id") or "")
-            latest = self.store.get_run(current_run_id) if current_run_id else None
+        current_run_id = str(delegation.get("current_run_id") or "")
+        if not latest or (callback_state == "completed" and current_run_id != callback_run_id):
+            selected = self.store.get_run(current_run_id) if current_run_id else None
+            if latest and selected and str(selected.get("ended_at") or "") > str(latest.get("ended_at") or ""):
+                state = str(selected.get("state") or "")
+                return ("cancelled" if state == "interrupted" else state), False
+            latest = latest or selected
         state = str((latest or {}).get("state") or "failed")
         if state == "interrupted":
             state = "cancelled"
@@ -22473,15 +22689,21 @@ class WorkersProjectsService:
             ):
                 return False
             if current_state == "needs_input":
+                worker = self.store.get_worker(str(current["worker_id"])) or {}
+                invocation_owner = self._executor_id if self._requires_conversation_invocation_bearer(worker) else ""
                 if str(provider_request_id or "").strip():
                     reopened = self.store.reopen_direct_provider_needs_input(
                         str(provider_request_id),
                         run_id=str(run_id),
                         response_timeout_s=response_timeout_s,
                         response_deadline_at=str(response_deadline_at or ""),
+                        invocation_executor_id=invocation_owner,
                     )
                     refreshed = (reopened or {}).get("run")
                 else:
+                    binding = self._json_object(current.get("runtime_bundle_json"))
+                    if invocation_owner:
+                        binding["invocation_executor_id"] = invocation_owner
                     refreshed = self.store.transition_run_if_state(
                         str(run_id),
                         "needs_input",
@@ -22495,9 +22717,13 @@ class WorkersProjectsService:
                         failure_user_message="",
                         failure_recommended_recovery="",
                         failure_diagnostic_summary="",
+                        **({"runtime_bundle_json": json.dumps(binding, sort_keys=True)} if invocation_owner else {}),
                     )
                 if not refreshed:
                     return False
+            worker = self.store.get_worker(str(current["worker_id"])) or {}
+            if self._requires_conversation_invocation_bearer(worker) and not self.store.bind_invocation_executor(str(run_id), self._executor_id):
+                return False
             self._run_local_bundles[str(run_id)] = dict(bundle)
             self._run_local_bundles_lock.notify_all()
             if current_state == "queued":
@@ -22518,15 +22744,23 @@ class WorkersProjectsService:
         with self._run_local_bundles_lock:
             return str(run_id) in self._run_local_bundles
 
+    def _queued_invocation_is_local(self, worker: dict, run: dict | None) -> bool:
+        # Shared durable work does not carry a different process's renewable grant.
+        # Leave it queued for the executor that received its complete invocation.
+        if not self._requires_conversation_invocation_bearer(worker):
+            return True
+        if not run:
+            return False
+        owner = self.store.invocation_executor_for_run(run)
+        return owner == self._executor_id if owner else self.has_run_local_bundle(str(run["run_id"]))
+
     def _requires_conversation_invocation_bearer(self, worker: dict) -> bool:
         bundle = self._bootstrap_bundle_for(worker) or {}
         broker = bundle.get("glasshive_capability_broker")
-        return bool(
+        return bool(worker.get("_requires_application_invocation_context") or (
             self._trusted_run_lane(worker) == "conversation"
             and isinstance(broker, dict)
-            and str(broker.get("authority_kind") or "").strip()
-            == "conversation_orchestrator"
-        )
+        ))
 
     def _mark_run_local_grant_waiter(
         self,
@@ -22612,7 +22846,8 @@ class WorkersProjectsService:
             else "persistent"
         )
         capabilities = bundle.get("provider_capabilities")
-        if isinstance(capabilities, dict) and capabilities.get("native_tools") is False:
+        if (isinstance(capabilities, dict) and capabilities.get("native_tools") is False
+                and capabilities.get("conversation_process_reuse") is not True):
             provider_session_mode = "stateless"
         exact_bundle = dict(bundle)
         exact_env = dict(exact_bundle.get("env") or {})
@@ -22630,6 +22865,25 @@ class WorkersProjectsService:
         authority_context: dict[str, str] | None = None,
         grant_waiter_owner: object = _SHARED_GRANT_WAITER_OWNER,
     ) -> dict:
+        try:
+            if self._json_object(run.get("runtime_bundle_json")).get("application_invocation_context_required") is True:
+                worker = self._runtime_worker_for_run(worker,run)
+                with self._run_local_bundles_lock:
+                    current_application_context = self._run_local_bundles.get(str(run["run_id"]))
+                if not current_application_context:
+                    raise BrokerAdmissionError("conversation_capability_grant_required",
+                        "The application invocation context must be refreshed before this queued turn can start.", needs_input=True)
+                # Current cognition replaces old application data before admission. The
+                # separate Native mission owner admits its own bounded bearer afterwards.
+                native_authorization = self._deferred_capability_authorization(worker)
+                current_frame = application_invocation_bundle(self._bootstrap_bundle_for(worker), current_application_context)
+                if native_authorization is not None:
+                    current_frame["env"] = {key: value for key, value in current_frame.get("env", {}).items()
+                                            if key != PARALLEL_CLEAN_ROOM_BROKER_TOKEN_ENV}
+                worker = {**worker, "bootstrap_bundle_json": json.dumps(current_frame, ensure_ascii=False)}
+        except Exception:
+            self._clear_run_local_grant_waiter(str(run["run_id"]), owner=grant_waiter_owner)
+            raise
         if bool(int(run.get("provider_liveness_route_locked") or 0)):
             locked_profile = str(run.get("provider_route_profile") or "").strip()
             locked_runtime = str(run.get("provider_route_runtime") or "").strip()
@@ -22694,11 +22948,8 @@ class WorkersProjectsService:
                 if isinstance(transient, dict) and isinstance(transient.get("env"), dict)
                 else {}
             )
-            has_invocation_bearer = bool(
-                str(
-                    transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or ""
-                ).strip()
-            )
+            has_invocation_bearer = (bool(transient) if run_worker.get("_requires_application_invocation_context") else bool(
+                str(transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or "").strip()))
             if requires_invocation_bearer and not has_invocation_bearer:
                 deadline = time.monotonic() + 0.5
                 with self._run_local_bundles_lock:
@@ -22715,22 +22966,15 @@ class WorkersProjectsService:
                                 and isinstance(transient.get("env"), dict)
                                 else {}
                             )
-                            if str(
-                                transient_env.get(
-                                    "GLASSHIVE_CAPABILITY_BROKER_TOKEN"
-                                )
-                                or ""
-                            ).strip():
+                            if (bool(transient) if run_worker.get("_requires_application_invocation_context") else bool(str(
+                                transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or "").strip())):
                                 break
                     finally:
                         self._discard_run_local_grant_waiter_locked(
                             run_id, grant_waiter_owner
                         )
-                has_invocation_bearer = bool(
-                    str(
-                        transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or ""
-                    ).strip()
-                )
+                has_invocation_bearer = (bool(transient) if run_worker.get("_requires_application_invocation_context") else bool(
+                    str(transient_env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or "").strip()))
             elif requires_invocation_bearer:
                 with self._run_local_bundles_lock:
                     self._discard_run_local_grant_waiter_locked(run_id, grant_waiter_owner)
@@ -22777,7 +23021,8 @@ class WorkersProjectsService:
                     continuation_projection,
                 ) or {}
             if transient:
-                run_bundle = merge_bootstrap_bundle(run_bundle, transient) or {}
+                run_bundle = (application_invocation_bundle(run_bundle, transient) if run_worker.get("_requires_application_invocation_context")
+                              else merge_bootstrap_bundle(run_bundle, transient) or {})
             run_bundle = self._exact_provider_session_bundle_for_run(run_bundle, run_id)
             # Clean-room canonicalization deliberately excludes per-run continuation
             # state and bearer material from every durable/public merge. Apply only
@@ -22795,7 +23040,9 @@ class WorkersProjectsService:
                     "version": 1,
                     "long_mission": True,
                 }
-            if admitted_bearer:
+            if run_worker.get("_requires_application_invocation_context") and run_worker.get("_run_local_capability_binding"):
+                run_bundle["glasshive_capability_broker"] = admitted_bundle["glasshive_capability_broker"]
+            if admitted_bearer and (not run_worker.get("_requires_application_invocation_context") or run_worker.get("_run_local_capability_binding")):
                 run_bundle["env"] = {
                     **(
                         run_bundle.get("env")
@@ -22808,6 +23055,7 @@ class WorkersProjectsService:
         # canonicalization, only to this invocation. Never mutate worker defaults.
         with _native_admission_timing("admission_files", worker.get("worker_id"), run.get("run_id")):
             from .workspace_files import FileAdmissionError
+            from .upload_projection import projected_upload_input_index
             try:
                 file_manifest = self.store.get_run_file_manifest(
                     run_id,
@@ -22826,10 +23074,21 @@ class WorkersProjectsService:
                             file_manifest,
                         ),
                     )
-                    # A reused workspace can contain another file with the same display
-                    # name. Give the native worker one bounded, run-local index of the
-                    # accepted paths instead of relying on filename search or expanding
-                    # an arbitrarily large file list into the prompt.
+                input_index = {
+                    item["path"]: item
+                    for item in projected_upload_input_index(run_bundle)
+                }
+                for item in file_manifest:
+                    input_index[item["path"]] = {
+                        "name": item["name"],
+                        "path": item["path"],
+                        "sha256": item["sha256"],
+                        "size_bytes": item["size_bytes"],
+                        **{key: item[key] for key in ("source_file_id", "input_kind", "media_group_index") if key in item},
+                    }
+                if input_index:
+                    # Both accepted upload transports use the same run-local index.
+                    # A reused workspace can contain another same-named input.
                     run_input_manifest_path = (
                         ".xperfect/run-inputs/"
                         + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
@@ -22842,16 +23101,7 @@ class WorkersProjectsService:
                             "path": run_input_manifest_path,
                             "content": json.dumps({
                                 "version": 1,
-                                "files": [
-                                    {
-                                        "name": item["name"],
-                                        "path": item["path"],
-                                        "sha256": item["sha256"],
-                                        "size_bytes": item["size_bytes"],
-                                        **{key: item[key] for key in ("source_file_id", "input_kind", "media_group_index") if key in item},
-                                    }
-                                    for item in file_manifest
-                                ],
+                                "files": list(input_index.values()),
                             }, ensure_ascii=False, sort_keys=True),
                             "allow_empty": False,
                         }],

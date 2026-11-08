@@ -80,7 +80,7 @@ from .control_plane_models import (
 )
 from .deliverables import (
     NATIVE_IMAGE_SUFFIXES, NATIVE_MEDIA_PREFIX, deliverable_payload,
-    is_user_deliverable_relative_path, is_unmodified_user_input, verified_native_file,
+    is_protected_artifact_path, is_user_deliverable_relative_path, is_unmodified_user_input, verified_native_file,
     native_output_delivery_names, native_output_sha256, NativeFileSnapshot,
 )
 from .failure_classification import classify_runtime_error
@@ -935,7 +935,9 @@ def create_app(
         # when no assertion is supplied; a supplied invalid assertion never falls back.
         parts = request.url.path.strip("/").split("/")
         asserted_owner_api = bool(request.headers.get(SERVICE_ASSERTION_HEADER)) and (
-            request.url.path == "/v1/file-uploads"
+            request.url.path == "/v1/coordinator/conversations"
+            or request.url.path.startswith("/v1/coordinator/conversations/")
+            or request.url.path == "/v1/file-uploads"
             or request.url.path.startswith("/v1/file-uploads/")
             or request.url.path == "/v1/webhook-destinations"
             or request.url.path.startswith("/v1/webhook-destinations/")
@@ -1652,7 +1654,7 @@ def create_app(
         if not raw_root:
             return [], False
         root = Path(raw_root)
-        if not root.exists():
+        if not root.exists() or is_protected_artifact_path(root):
             return [], False
         items: list[dict[str, object]] = []
         pending: deque[Path] = deque([root])
@@ -1669,11 +1671,13 @@ def create_app(
                     rel = path.relative_to(root)
                 except ValueError:
                     continue
-                if not is_user_deliverable_relative_path(rel) or len(rel.parts) > max_depth:
+                if not is_user_deliverable_relative_path(rel, root=root) or len(rel.parts) > max_depth:
                     continue
                 try:
                     is_dir = entry.is_dir(follow_symlinks=False)
                     stat = entry.stat(follow_symlinks=False)
+                    if not is_dir and (not entry.is_file(follow_symlinks=False) or stat.st_nlink != 1):
+                        continue
                 except OSError:
                     continue
                 items.append(
@@ -1706,7 +1710,7 @@ def create_app(
         if not raw_root:
             return None
         root = Path(raw_root)
-        if not root.exists() or root.is_symlink():
+        if not root.exists() or root.is_symlink() or is_protected_artifact_path(root):
             return None
         candidates: list[Path] = []
         for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.gif"):
@@ -1721,7 +1725,7 @@ def create_app(
                 rel = path.relative_to(root)
             except ValueError:
                 continue
-            if not is_user_deliverable_relative_path(rel):
+            if not is_user_deliverable_relative_path(rel, root=root):
                 continue
             try:
                 resolved = path.resolve(strict=True)
@@ -1741,10 +1745,12 @@ def create_app(
         raw_root = str(worker.get("workspace_dir") or "").strip()
         if not raw_root:
             raise HTTPException(status_code=404, detail="Worker workspace is not available")
-        root = Path(raw_root)
         rel = Path(relative_path.strip().lstrip("/"))
         if not rel.parts or rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
             raise HTTPException(status_code=400, detail="Artifact path is outside the worker workspace")
+        root = service.artifact_storage_root(worker, rel)
+        if is_protected_artifact_path(root / rel):
+            raise HTTPException(status_code=404, detail="Artifact not found")
         if not is_user_deliverable_relative_path(rel):
             raise HTTPException(status_code=400, detail="Artifact path is not downloadable")
         return root, rel
@@ -1769,7 +1775,7 @@ def create_app(
                 current_fd = next_fd
             file_fd = os.open(rel.name, file_flags, dir_fd=current_fd)
             metadata = os.fstat(file_fd)
-            if not stat.S_ISREG(metadata.st_mode):
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise HTTPException(status_code=400, detail="Artifact path is not a regular file")
             max_bytes = int(os.environ.get("GLASSHIVE_ARTIFACT_SNAPSHOT_MAX_BYTES", str(100 * 1024 * 1024)))
             if max_bytes < 0:
@@ -1975,7 +1981,8 @@ def create_app(
         return f"/v1/workers/{quote(worker_id)}/artifacts/{action}?path={quote(str(relative_path or ''), safe='')}"
 
     def _signed_artifact_action_url(worker: dict, relative_path: str, *, kind: str, fallback_action: str) -> str:
-        if str(worker.get("state") or "") == "terminated":
+        root = service.artifact_storage_root(worker, Path(relative_path))
+        if str(worker.get("state") or "") == "terminated" or is_protected_artifact_path(root / relative_path):
             return ""
         worker_id = str(worker.get("worker_id") or "")
         token = sign_link_token(
@@ -2018,6 +2025,9 @@ def create_app(
             return None
         payload = dict(deliverable)
         workspace_path = str(payload.get("workspace_path") or "").strip().lstrip("/")
+        root = Path(str(worker.get("workspace_dir") or ""))
+        if workspace_path and is_protected_artifact_path(root / workspace_path):
+            return None
         if payload.get("kind") == "file" and workspace_path and is_user_deliverable_relative_path(workspace_path):
             payload["open_url"] = _signed_artifact_action_url(
                 worker,
@@ -2059,7 +2069,8 @@ def create_app(
             if item.get("is_dir") or item.get("origin") == "user_input":
                 continue
             workspace_path = str(item.get("path") or "").strip().lstrip("/")
-            if not workspace_path or not is_user_deliverable_relative_path(workspace_path):
+            root = Path(str(worker.get("workspace_dir") or ""))
+            if not workspace_path or not is_user_deliverable_relative_path(workspace_path, root=root):
                 continue
             items.append(
                 {
@@ -3603,17 +3614,13 @@ def create_app(
                 payload.update(trace_detail)
         return payload
 
-    @app.post("/v1/delegations", status_code=202)
-    def create_delegation(
-        payload: CreateDelegationRequest,
-        request: Request,
-    ) -> dict[str, object]:
+    def _delegation_request_values(payload: CreateDelegationRequest, request: Request, *, preserve_source: bool = False) -> dict:
         tenant_id, owner_id = _account_scope(request)
         idempotency_key = _validated_idempotency_key(request)
         title = payload.title.strip()
-        goal = payload.goal.strip()
-        instruction = payload.instruction.strip()
-        if not title or not goal or not instruction:
+        goal = payload.goal if preserve_source else payload.goal.strip()
+        instruction = payload.instruction if preserve_source else payload.instruction.strip()
+        if not title or not goal.strip() or not instruction.strip():
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -3628,6 +3635,13 @@ def create_app(
             payload.bootstrap_bundle,
             idempotency_key=idempotency_key,
         )
+        bundle = payload.bootstrap_bundle
+        from .upload_projection import project_bootstrap_upload_files
+        try:
+            bundle = project_bootstrap_upload_files(bundle, tenant_id=tenant_id, owner_id=owner_id)
+        except ValueError as exc:
+            raise HTTPException(400, {"code": "delegation_upload_projection_invalid",
+                                      "message": "Selected upload inputs could not be projected."}) from exc
         canonical_request = {
             "title": title,
             "goal": goal,
@@ -3638,34 +3652,38 @@ def create_app(
             "workerRole": payload.worker_role.strip() or "General intelligent worker",
             "workspaceRoot": payload.workspace_root,
             "bootstrapProfile": payload.bootstrap_profile,
-            "bootstrapBundle": _delegation_digest_bundle(payload.bootstrap_bundle),
+            "bootstrapBundle": _delegation_digest_bundle(bundle),
             "originRef": origin_ref or None,
             "originSurface": payload.origin_surface,
             "resourceClass": payload.resource_class,
         }
         if payload.file_upload_ids:
             canonical_request["fileUploadIds"] = payload.file_upload_ids
+        return dict(
+            tenant_id=tenant_id, owner_id=owner_id, idempotency_key=idempotency_key,
+            request_digest=_canonical_digest(canonical_request), origin_ref=origin_ref,
+            title=title, goal=goal, instruction=instruction, origin_surface=payload.origin_surface,
+            worker_name=str(canonical_request["workerName"]), worker_role=str(canonical_request["workerRole"]),
+            profile=profile, execution_mode=execution_mode, resource_class=payload.resource_class,
+            workspace_root=payload.workspace_root, bootstrap_profile=payload.bootstrap_profile,
+            bootstrap_bundle=bundle, file_upload_ids=payload.file_upload_ids,
+        )
+
+    def _delegation_work_response(record: dict, request: Request) -> dict:
+        response = _active_work_payload(record, request)
+        response["idempotentReplay"] = bool(record.get("idempotent_replay"))
+        manifest = store.get_run_file_manifest(str(record["initial_run_id"]),
+            worker_id=str(record["worker_id"]), tenant_id=record.get("tenant_id") or "local",
+            owner_id=record["owner_id"])
+        if manifest:
+            response["acceptedFileUploadIds"] = [item["upload_id"] for item in manifest]
+        return response
+
+    @app.post("/v1/delegations", status_code=202)
+    def create_delegation(payload: CreateDelegationRequest, request: Request) -> dict[str, object]:
+        values = _delegation_request_values(payload, request)
         try:
-            record = service.reserve_delegation(
-                tenant_id=tenant_id,
-                owner_id=owner_id,
-                idempotency_key=idempotency_key,
-                request_digest=_canonical_digest(canonical_request),
-                origin_ref=origin_ref,
-                title=title,
-                goal=goal,
-                instruction=instruction,
-                origin_surface=payload.origin_surface,
-                worker_name=str(canonical_request["workerName"]),
-                worker_role=str(canonical_request["workerRole"]),
-                profile=profile,
-                execution_mode=execution_mode,
-                resource_class=payload.resource_class,
-                workspace_root=payload.workspace_root,
-                bootstrap_profile=payload.bootstrap_profile,
-                bootstrap_bundle=payload.bootstrap_bundle,
-                file_upload_ids=payload.file_upload_ids,
-            )
+            record = service.reserve_delegation(**values)
         except BackgroundWorkerConfigurationError as exc:
             raise HTTPException(
                 status_code=400,
@@ -3693,13 +3711,7 @@ def create_app(
                     **({"reason": reason_code} if reason_code else {}),
                 },
             ) from exc
-        response = _active_work_payload(record, request)
-        response["idempotentReplay"] = bool(record.get("idempotent_replay"))
-        if payload.file_upload_ids:
-            manifest = store.get_run_file_manifest(str(record["initial_run_id"]),
-                worker_id=str(record["worker_id"]), tenant_id=tenant_id, owner_id=owner_id)
-            response["acceptedFileUploadIds"] = [item["upload_id"] for item in manifest]
-        return response
+        return _delegation_work_response(record, request)
 
     @app.get("/v1/active-work")
     def list_active_work(
@@ -3811,6 +3823,8 @@ def create_app(
             "attemptId": str(association.get("active_attempt_id") or ""),
             "currentRunId": str(association.get("current_run_id") or ""),
             "currentRunState": str(association.get("current_run_state") or ""),
+            **({"sourceActionKey": association["source_action_key"]}
+               if association.get("source_action_key") else {}),
         }
 
     @app.post("/v1/callback-associations/recover")
@@ -3913,8 +3927,7 @@ def create_app(
             value["inheritedConversation"] = payload.inherited_conversation.model_dump()
         return value
 
-    @app.post("/v1/work/{work_ref}/actions/receipt", status_code=202)
-    def completed_active_work_action_receipt(
+    def _completed_active_work_action_receipt(
         work_ref: str, payload: ActiveWorkActionRequest, request: Request,
     ) -> dict[str, object]:
         tenant_id, owner_id = _account_scope(request)
@@ -3957,12 +3970,11 @@ def create_app(
                             headers={**(saved.get("headers") or {}),
                                      "X-xPerfect-Action-Receipt": "failed-v1"})
 
-    @app.post("/v1/active-work/{work_ref}/actions", status_code=202, include_in_schema=False)
-    @app.post("/v1/work/{work_ref}/actions", status_code=202)
-    def active_work_action(
+    def _execute_active_work_action(
         work_ref: str,
         payload: ActiveWorkActionRequest,
         request: Request,
+        *, start_processor: bool = True, expected_run_id: str = "", application_effect=None,
     ) -> dict[str, object]:
         tenant_id, owner_id = _account_scope(request)
         record = store.get_delegation(work_ref, tenant_id=tenant_id, owner_id=owner_id)
@@ -4176,6 +4188,8 @@ def create_app(
                         prior["resumeMode"] = str(reconciled["resume_mode"])
                     if reconciled.get("delivery_mode"):
                         prior["deliveryMode"] = str(reconciled["delivery_mode"])
+                    if not start_processor and reconciled_run_id:
+                        prior["runId"] = reconciled_run_id
                     if reconciled.get("control_outcome"):
                         prior["controlOutcome"] = str(
                             reconciled["control_outcome"]
@@ -4232,6 +4246,8 @@ def create_app(
                 action_use_id=action_use_id,
                 native_input=native_input,
                 native_human_input=native_human_input,
+                start_processor=start_processor,
+                expected_run_id=expected_run_id,
             )
             new_run_id = str(result.get("run_id") or "")
             response: dict[str, object] = {
@@ -4247,6 +4263,10 @@ def create_app(
                 response["resumeMode"] = str(result["resume_mode"])
             if result.get("delivery_mode"):
                 response["deliveryMode"] = str(result["delivery_mode"])
+            if not start_processor and new_run_id:
+                response["runId"] = new_run_id
+            if application_effect is not None:
+                application_effect({**response,"runId":new_run_id})
             if result.get("control_outcome"):
                 response["controlOutcome"] = str(result["control_outcome"])
                 response["runId"] = new_run_id
@@ -4328,6 +4348,15 @@ def create_app(
                 action_use_id, str(exc), executor_id=service.executor_id
             )
             raise
+
+    @app.post("/v1/work/{work_ref}/actions/receipt", status_code=202)
+    def completed_active_work_action_receipt(work_ref: str, payload: ActiveWorkActionRequest, request: Request):
+        return _completed_active_work_action_receipt(work_ref, payload, request)
+
+    @app.post("/v1/active-work/{work_ref}/actions", status_code=202, include_in_schema=False)
+    @app.post("/v1/work/{work_ref}/actions", status_code=202)
+    def active_work_action(work_ref: str, payload: ActiveWorkActionRequest, request: Request) -> dict[str, object]:
+        return _execute_active_work_action(work_ref, payload, request)
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -4684,10 +4713,28 @@ def create_app(
 
     service.coordinator = CoordinatorService(store, service, app.state.conversation_provider)
     app.state.coordinator = service.coordinator
+    def _coordinator_principal(request):
+        context = _auth_context(request)
+        if context.auth_mode == "service_assertion":
+            tenant, owner = _account_scope(request)
+            return coordinator_owner_scope(context, tenant, owner)
+        return coordinator_owner_scope(*_current_principal(request))
+
+    def _coordinator_work_view_ref(work_ref: str, request: Request):
+        tenant, owner = _account_scope(request)
+        record = store.get_delegation(work_ref, tenant_id=tenant, owner_id=owner)
+        return _active_work_view_ref(record, request) if record else None
+
     install_coordinator_routes(
         app, service.coordinator,
-        lambda request: coordinator_owner_scope(*_current_principal(request)),
+        _coordinator_principal,
         lambda tenant, owner, profile="": configured_coordinator(service, app.state.conversation_provider, tenant, owner, profile),
+        application_delegation_values=_delegation_request_values,
+        application_work_response=_delegation_work_response,
+        application_work_action=_execute_active_work_action,
+        application_action_receipt=_completed_active_work_action_receipt,
+        application_action_digest=lambda payload: _canonical_digest(_active_work_action_request(payload)),
+        application_work_view_ref=_coordinator_work_view_ref,
     )
     coordinator_mcp = native_coordinator_server(
         service.coordinator, service.peers,
@@ -6891,7 +6938,7 @@ def create_app(
         for file in _mission_result_file_metadata(worker, run, delegation):
             relative = file["artifact_path"]
             try:
-                verified_native_file(Path(worker["workspace_dir"]), relative, file["sha256"], file["size"])
+                verified_native_file(service.artifact_storage_root(worker, relative), relative, file["sha256"], file["size"])
             except (OSError, ValueError):
                 continue
             items.append({
@@ -6965,7 +7012,7 @@ def create_app(
             return fallback
         file = selected[0]
         try:
-            verified_native_file(Path(worker["workspace_dir"]), relative, file["sha256"], file["size"])
+            verified_native_file(service.artifact_storage_root(worker, relative), relative, file["sha256"], file["size"])
         except (OSError, ValueError):
             return fallback
         return file["path"]

@@ -507,8 +507,11 @@ class WorkerConfiguration:
                 }
             )
         retrievable = sum(s["chars"] for s in selected) - inline
-        if retrievable and native_transport.worker_route() is None:
-            issues.append({"code": CONTEXT_ROUTE_ISSUE, "message": CONTEXT_ROUTE_MESSAGE})
+        if retrievable:
+            route = (native_transport.worker_route(execution_mode="docker")
+                     if worker.get("execution_mode") == "docker" else native_transport.worker_route())
+            if route is None:
+                issues.append({"code": CONTEXT_ROUTE_ISSUE, "message": CONTEXT_ROUTE_MESSAGE})
         return (
             sources,
             selected,

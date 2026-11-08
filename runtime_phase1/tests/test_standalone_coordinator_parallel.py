@@ -366,3 +366,19 @@ def test_scope_wait_cannot_release_a_reservation_adopted_by_another_processor(st
     assert worker["worker_id"] in service._active_processors
     assert service._processor_generations[worker["worker_id"]]==2
     assert not service._run_local_grant_waiters
+
+
+@pytest.mark.parametrize("instruction", [None, "First exact work"])
+def test_standalone_dispatch_uses_exact_original_when_instruction_is_omitted(standalone, instruction):
+    store, service, core, cid, _ = standalone
+    result = core.dispatch("local", "owner", cid, Dispatch(
+        goal_id="first", route_id="code", instruction=instruction))
+    assert result["state"] == "queued"
+    run = store.get_run(result["run_id"])
+    worker = store.get_worker(result["worker_id"])
+    assert run["instruction"] == "First exact work"
+    assert worker["model"] == "gpt-6.1-sol"
+    assert service._standalone_coordinator_mutation_owner(worker, run_id=run["run_id"])
+    replay = core.dispatch("local", "owner", cid, Dispatch(
+        goal_id="first", route_id="code", instruction=instruction))
+    assert replay["run_id"] == run["run_id"]

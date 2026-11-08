@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -35,7 +36,7 @@ class CoordinatorWorkerBlocked(CoordinatorConflict):
         super().__init__(code)
 
 
-COORDINATOR_SCHEMA_VERSION = 4
+COORDINATOR_SCHEMA_VERSION = 7
 
 
 class StrictModel(BaseModel):
@@ -75,10 +76,16 @@ class CoordinatorScope(StrictModel):
             raise ValueError("Coordinator workspace scope requires a project")
 
 
+class ApplicationBinding(StrictModel):
+    destination_id: str = Field(min_length=1, max_length=200)
+    request_ref: str = Field(min_length=1, max_length=512)
+    delivery_timeout_seconds: int = Field(default=3600, gt=0, strict=True)
+
+
 class CoordinatorConfig(StrictModel):
     model: str = Field(min_length=1, max_length=200)
     effort: str = Field(min_length=1, max_length=50)
-    max_goals: int = Field(default=100, ge=10, le=1000)
+    max_goals: int | None = Field(default=100, ge=10, le=1000)
     wake_on_results: bool = True
     routes: list[Route] = Field(default_factory=list, max_length=32)
     bootstrap_bundle: dict[str, Any] = Field(default_factory=dict)
@@ -86,18 +93,28 @@ class CoordinatorConfig(StrictModel):
     developer_instructions: str = ""
     library_text_chars: int = Field(default=24000, ge=0, le=262144, strict=True)
     scope: CoordinatorScope = Field(default_factory=CoordinatorScope)
+    application: ApplicationBinding | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.application and (self.bootstrap_bundle or self.developer_instructions
+                                 or any(route.bootstrap_bundle for route in self.routes)):
+            raise ValueError("Application coordinator authority must be prepared per invocation")
 
 
 class Goal(StrictModel):
     id: str = Field(min_length=1, max_length=160)
     text: str = Field(min_length=1, max_length=262144)
+    source_turn_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 class Dispatch(StrictModel):
     goal_id: str
     route_id: str = Field(default="", max_length=100)
     worker_id: str = Field(default="", max_length=512)
-    instruction: str = Field(min_length=1, max_length=524288)
+    instruction: str | None = Field(default=None, min_length=1, max_length=524288)
+    guidance: str | None = Field(default=None, min_length=1, max_length=524288)
+
+
 
     def model_post_init(self, __context: Any) -> None:
         if bool(self.route_id) == bool(self.worker_id):
@@ -215,15 +232,24 @@ from .bootstrap import worker_prompt_layer_producer
 
 
 @worker_prompt_layer_producer("system_instructions", "tool_schemas")
-def prompt_manifest() -> dict[str, Any]:
+def prompt_manifest(application: bool = False) -> dict[str, Any]:
     source = Path(__file__).with_name("prompts") / "coordinator.md"
     content = source.read_text(encoding="utf-8")
     tools = source.with_name("coordinator-tools.json").read_bytes()
+    layers = []
+    if application:
+        background = source.with_name("coordinator-application.md")
+        body = background.read_text(encoding="utf-8")
+        layers.append({"id": "xperfect.coordinator.application", "version": 1,
+                       "source": "workers_projects_runtime/prompts/coordinator-application.md",
+                       "sha256": hashlib.sha256(body.encode()).hexdigest()})
+        content += "\n\n" + body
     return {"id": "xperfect.coordinator", "version": 3,
             "source": "workers_projects_runtime/prompts/coordinator.md",
             "sha256": hashlib.sha256(content.encode()).hexdigest(),
             "tool_schema_version": json.loads(tools)["version"],
-            "tool_schema_sha256": hashlib.sha256(tools).hexdigest(), "content": content}
+            "tool_schema_sha256": hashlib.sha256(tools).hexdigest(), "content": content,
+            **({"layers": layers} if layers else {})}
 
 
 _SCHEMA = """
@@ -231,6 +257,7 @@ CREATE TABLE IF NOT EXISTS coordinator_conversations (
  conversation_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL,
  config_json TEXT NOT NULL, prompt_json TEXT NOT NULL, created_at TEXT NOT NULL,
  scope_json TEXT NOT NULL DEFAULT '{}',
+ application_ref TEXT NOT NULL DEFAULT '', create_digest TEXT NOT NULL DEFAULT '',
  library_json TEXT NOT NULL DEFAULT '{}',
  restore_hold INTEGER NOT NULL DEFAULT 0, restore_hold_set_hash TEXT NOT NULL DEFAULT ''
 );
@@ -241,6 +268,7 @@ CREATE TABLE IF NOT EXISTS coordinator_turns (
  response_json TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL DEFAULT 'interactive', created_at TEXT NOT NULL,
  retry_after_at TEXT NOT NULL DEFAULT '', retry_attempts INTEGER NOT NULL DEFAULT 0,
  library_json TEXT NOT NULL DEFAULT '{}',
+ retry_of_turn_id TEXT NOT NULL DEFAULT '',
  restore_hold INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(conversation_id, turn_id)
 );
@@ -250,6 +278,8 @@ CREATE TABLE IF NOT EXISTS coordinator_goals (
  dispatch_json TEXT NOT NULL DEFAULT '', work_ref TEXT NOT NULL DEFAULT '',
  worker_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
  blocker TEXT NOT NULL DEFAULT '', intent_state TEXT NOT NULL DEFAULT 'accepted', created_at TEXT NOT NULL,
+ preparation_json TEXT NOT NULL DEFAULT '{}',
+ application_dispatch_digest TEXT NOT NULL DEFAULT '', application_dispatch_ordinal INTEGER NOT NULL DEFAULT 0,
  restore_hold INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(conversation_id, goal_id),
  FOREIGN KEY(conversation_id, source_turn_id) REFERENCES coordinator_turns(conversation_id, turn_id)
@@ -257,6 +287,7 @@ CREATE TABLE IF NOT EXISTS coordinator_goals (
 CREATE TABLE IF NOT EXISTS coordinator_actions (
  conversation_id TEXT NOT NULL, goal_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
  payload_json TEXT NOT NULL, response_json TEXT NOT NULL DEFAULT '',
+ application_json TEXT NOT NULL DEFAULT '{}',
  PRIMARY KEY(conversation_id,goal_id,idempotency_key),
  FOREIGN KEY(conversation_id,goal_id) REFERENCES coordinator_goals(conversation_id,goal_id)
 );
@@ -280,6 +311,12 @@ class CoordinatorService:
             execute_schema_script(conn, _SCHEMA)
             for table, column, definition in (
                 ("coordinator_conversations", "scope_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("coordinator_conversations", "application_ref", "TEXT NOT NULL DEFAULT ''"),
+                ("coordinator_conversations", "create_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("coordinator_goals", "preparation_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("coordinator_goals", "application_dispatch_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("coordinator_goals", "application_dispatch_ordinal", "INTEGER NOT NULL DEFAULT 0"),
+                ("coordinator_actions", "application_json", "TEXT NOT NULL DEFAULT '{}'"),
                 ("coordinator_conversations", "library_json", "TEXT NOT NULL DEFAULT '{}'"),
                 ("coordinator_conversations", "restore_hold", "INTEGER NOT NULL DEFAULT 0"),
                 ("coordinator_conversations", "restore_hold_set_hash", "TEXT NOT NULL DEFAULT ''"),
@@ -287,12 +324,21 @@ class CoordinatorService:
                 ("coordinator_turns", "retry_after_at", "TEXT NOT NULL DEFAULT ''"),
                 ("coordinator_turns", "retry_attempts", "INTEGER NOT NULL DEFAULT 0"),
                 ("coordinator_turns", "library_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("coordinator_turns", "retry_of_turn_id", "TEXT NOT NULL DEFAULT ''"),
                 ("coordinator_goals", "restore_hold", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if column not in columns:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_coordinator_goal_worker_run ON coordinator_goals(worker_id,run_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_coordinator_turn_retry_source ON coordinator_turns(conversation_id,retry_of_turn_id)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_coordinator_application_ref ON coordinator_conversations(tenant_id,owner_id,application_ref) WHERE application_ref<>''")
+            conn.execute("DROP TRIGGER IF EXISTS callback_coordinator_snapshot_immutable")
+            conn.execute("""CREATE TRIGGER callback_coordinator_snapshot_immutable
+                BEFORE UPDATE ON callback_outbox WHEN OLD.event_type IN ('coordinator.turn_due','coordinator.dispatch_due','coordinator.result_ready','coordinator.action_due','coordinator.turn_result_ready') AND (
+                  OLD.owner_id IS NOT NEW.owner_id OR OLD.destination_id IS NOT NEW.destination_id OR
+                  OLD.payload_json IS NOT NEW.payload_json OR OLD.expires_at IS NOT NEW.expires_at)
+                BEGIN SELECT RAISE(ABORT,'coordinator delivery snapshot is immutable'); END""")
             record_schema_version(conn, component="coordinator", version=COORDINATOR_SCHEMA_VERSION)
 
     def _conversation(self, tenant: str, owner: str, conversation_id: str) -> dict:
@@ -507,7 +553,19 @@ class CoordinatorService:
         model = self.provider._model(config.model, tenant_id=tenant, owner_id=owner)
         if config.effort not in model.effort_choices:
             raise CoordinatorConflict("Unsupported exact model effort")
-        identity = f"coordinator-{uuid.uuid4().hex}"
+        create_digest = digest(config.model_dump(mode="json")) if config.application else ""
+        application_ref = config.application.request_ref if config.application else ""
+        identity = ("coordinator-app-" + digest([tenant, owner, application_ref]) if config.application
+                    else f"coordinator-{uuid.uuid4().hex}")
+        if config.application:
+            from .coordinator_application import validate_destination
+            validate_destination(self, tenant, owner, config.application)
+            with self.store._connect() as conn:
+                existing = conn.execute("SELECT conversation_id,create_digest FROM coordinator_conversations WHERE tenant_id=? AND owner_id=? AND application_ref=?", (tenant, owner, application_ref)).fetchone()
+            if existing:
+                if existing["create_digest"] != create_digest:
+                    raise CoordinatorConflict("Application create identity changed configuration")
+                return self.snapshot(tenant, owner, existing["conversation_id"])
         created_project_id = ""
         if not config.scope.project_id:
             # A standalone conversation owns one persistent policy origin.
@@ -515,13 +573,19 @@ class CoordinatorService:
             profile = str(getattr(model, "harness_profile", "") or "")
             if not profile and config.routes:
                 profile = config.routes[0].profile
-            project = self.store.create_project(
-                owner_id=owner,
-                title="Conversation",
-                goal="Standalone conversation",
-                default_worker_profile=profile or "codex-cli",
-                tenant_id=tenant,
-            )
+            project_id = "prj_" + digest(identity)[:32] if config.application else None
+            project = self.store.get_project(project_id, tenant_id=tenant, owner_id=owner) if project_id else None
+            if project is None:
+                try:
+                    project = self.store.create_project(
+                        owner_id=owner, title="Conversation", goal="Standalone conversation",
+                        default_worker_profile=profile or "codex-cli", tenant_id=tenant,
+                        project_id=project_id,
+                    )
+                except sqlite3.IntegrityError:
+                    project = self.store.get_project(project_id, tenant_id=tenant, owner_id=owner) if project_id else None
+                    if project is None:
+                        raise
             created_project_id = project["project_id"]
             config = config.model_copy(update={
                 "scope": config.scope.model_copy(update={"project_id": project["project_id"]}),
@@ -534,6 +598,12 @@ class CoordinatorService:
                 "source_event_id": identity,
             }
         with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT conversation_id,create_digest FROM coordinator_conversations WHERE conversation_id=?", (identity,)).fetchone()
+            if existing:
+                if existing["create_digest"] != create_digest:
+                    raise CoordinatorConflict("Application create identity changed configuration")
+                return self.snapshot(tenant, owner, existing["conversation_id"])
             if created_project_id:
                 conn.execute(
                     "UPDATE projects SET origin_scope_json=? "
@@ -542,15 +612,15 @@ class CoordinatorService:
                 )
             conn.execute(
                 "INSERT INTO coordinator_conversations "
-                "(conversation_id,tenant_id,owner_id,config_json,prompt_json,scope_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                "(conversation_id,tenant_id,owner_id,config_json,prompt_json,scope_json,created_at,application_ref,create_digest) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
                     identity,
                     tenant,
                     owner,
                     canonical(config.model_dump()),
-                    canonical(prompt_manifest()),
+                    canonical(prompt_manifest(application=config.application is not None)),
                     canonical(scope),
-                    now(),
+                    now(), application_ref, create_digest,
                 ),
             )
         return self.snapshot(tenant, owner, identity)
@@ -720,21 +790,39 @@ class CoordinatorService:
                     (conversation_id, turn_id, message, canonical(selection), now()),
                 )
                 conn.execute("UPDATE coordinator_conversations SET library_json=? WHERE conversation_id=?", (canonical(selection), conversation_id))
-            self._accept_goals(conn, conversation_id, turn_id, goals, config.max_goals)
+            self._accept_goals(conn, conversation_id, turn_id, goals, config.max_goals, application=config.application is not None)
+        if config.application is not None:
+            from .coordinator_application import turn_status
+            return turn_status(self, tenant, owner, conversation_id, turn_id)
         return self.snapshot(tenant, owner, conversation_id)
 
     @staticmethod
-    def _accept_goals(conn: Any, conversation_id: str, turn_id: str, goals: list[Goal], maximum: int) -> None:
+    def _accept_goals(conn: Any, conversation_id: str, turn_id: str, goals: list[Goal], maximum: int | None, *, application: bool = False) -> None:
         existing = {r["goal_id"]: dict(r) for r in conn.execute("SELECT * FROM coordinator_goals WHERE conversation_id=?", (conversation_id,))}
         if len({g.id for g in goals}) != len(goals):
             raise CoordinatorConflict("Duplicate goal IDs in batch")
-        if len(set(existing) | {g.id for g in goals}) > maximum:
+        if maximum is not None and len(set(existing) | {g.id for g in goals}) > maximum:
             raise CoordinatorConflict("Configured goal budget exceeded; no goals in this batch were accepted")
+        sources = {}
         for goal in goals:
-            if goal.id in existing and (existing[goal.id]["text"] != goal.text or existing[goal.id]["source_turn_id"] != turn_id):
+            source_turn_id = turn_id
+            if application:
+                if goal.source_turn_id:
+                    from .coordinator_application import original_source_turn
+                    original_id = original_source_turn(conn,conversation_id,goal.source_turn_id)
+                    source = conn.execute("SELECT turn_id,message FROM coordinator_turns WHERE conversation_id=? AND turn_id=? AND origin='interactive'", (conversation_id, original_id)).fetchone()
+                else:
+                    from .coordinator_application import original_source_turn
+                    original_id = original_source_turn(conn,conversation_id,turn_id)
+                    source = conn.execute("SELECT turn_id,message FROM coordinator_turns WHERE conversation_id=? AND turn_id=? AND origin='interactive'",(conversation_id,original_id)).fetchone()
+                if not source or goal.text not in source["message"]:
+                    raise CoordinatorConflict("Application goal must select exact original source text")
+                source_turn_id = source["turn_id"]
+            sources[goal.id] = source_turn_id
+            if goal.id in existing and (existing[goal.id]["text"] != goal.text or existing[goal.id]["source_turn_id"] != source_turn_id):
                 raise CoordinatorConflict("Goal identity changed content or source")
         for goal in goals:
-            conn.execute("INSERT OR IGNORE INTO coordinator_goals(conversation_id,goal_id,source_turn_id,text,created_at) VALUES(?,?,?,?,?)", (conversation_id, goal.id, turn_id, goal.text, now()))
+            conn.execute("INSERT OR IGNORE INTO coordinator_goals(conversation_id,goal_id,source_turn_id,text,created_at) VALUES(?,?,?,?,?)", (conversation_id, goal.id, sources[goal.id], goal.text, now()))
 
     def accept_goals(self, tenant: str, owner: str, conversation_id: str, turn_id: str, goals: list[Goal]) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
@@ -748,8 +836,9 @@ class CoordinatorService:
                 raise CoordinatorConflict("Conversation is held for exact continuity resume")
             if not conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND turn_id=?", (conversation_id, turn_id)).fetchone():
                 raise CoordinatorConflict("Source turn unavailable")
-            self._accept_goals(conn, conversation_id, turn_id, goals,
-                               CoordinatorConfig.model_validate_json(conversation["config_json"]).max_goals)
+            config = CoordinatorConfig.model_validate_json(conversation["config_json"])
+            self._accept_goals(conn, conversation_id, turn_id, goals, config.max_goals,
+                               application=config.application is not None)
         return self.snapshot(tenant, owner, conversation_id)
 
     def _goal(self, conversation_id: str, goal_id: str) -> dict:
@@ -759,13 +848,20 @@ class CoordinatorService:
             raise CoordinatorConflict("Goal unavailable")
         return dict(row)
 
-    def dispatch(self, tenant: str, owner: str, conversation_id: str, dispatch: Dispatch) -> dict:
+    def dispatch(self, tenant: str, owner: str, conversation_id: str, dispatch: Dispatch, *, _recovering: bool = False) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
         self._assert_not_restore_held(conversation)
         origin_scope = self._conversation_scope(conversation)
+        config = CoordinatorConfig.model_validate_json(conversation["config_json"])
+        if config.application is not None and dispatch.worker_id:
+            raise CoordinatorScopeError("Application preparation does not authorize attachment to an existing project expert")
+        if dispatch.guidance and (dispatch.worker_id or not CoordinatorConfig.model_validate_json(conversation["config_json"]).application):
+            raise CoordinatorConflict("Separate dispatch guidance requires an application-prepared route")
         if dispatch.worker_id:
             return self._dispatch_existing_worker(tenant, owner, conversation_id, dispatch, origin_scope)
-        config = CoordinatorConfig.model_validate_json(conversation["config_json"])
+        if config.application:
+            from .coordinator_application import queue_dispatch
+            return queue_dispatch(self, tenant, owner, conversation, dispatch, explicit=not _recovering)
         route = next((r for r in config.routes if r.id == dispatch.route_id), None)
         if route is None:
             raise CoordinatorScopeError("Route outside coordinator authority")
@@ -891,7 +987,7 @@ class CoordinatorService:
                     "origin_scope": origin_scope,
                     **({"library_refs": selection["refs"]} if selection.get("refs") else {}),
                 }),
-                origin_ref=f"{conversation_id}:{goal['goal_id']}", title=goal["goal_id"], goal=goal["text"], instruction=dispatch.instruction,
+                origin_ref=f"{conversation_id}:{goal['goal_id']}", title=goal["goal_id"], goal=goal["text"], instruction=goal["text"] if dispatch.instruction is None else dispatch.instruction,
                 origin_surface="coordinator", worker_name=goal["goal_id"], worker_role="worker",
                 profile=route.profile, execution_mode=route.execution_mode, resource_class=route.resource_class,
                 bootstrap_bundle=bundle,
@@ -977,7 +1073,7 @@ class CoordinatorService:
             if self.service._unresolved_duplication_reapprovals(worker):
                 raise CoordinatorWorkerBlocked("worker_review_required")
             run = self.service.assign_run(
-                dispatch.worker_id, dispatch.instruction,
+                dispatch.worker_id, goal["text"] if dispatch.instruction is None else dispatch.instruction,
                 idempotency_key=_worker_assignment_key(conversation_id, dispatch.goal_id),
                 start_processor=False, resume_paused_worker=False,
             )
@@ -1003,6 +1099,8 @@ class CoordinatorService:
         return self.goal_snapshot(tenant, owner, conversation_id, dispatch.goal_id)
 
     def _available_workers(self, tenant: str, owner: str, conversation: dict) -> dict:
+        if CoordinatorConfig.model_validate_json(conversation["config_json"]).application is not None:
+            return {"workers": [], "workers_truncated": False, "worker_reuse_supported": False}
         # A bounded identity projection, never worker bootstrap, credentials or logs.
         scope = json.loads(str(conversation.get("scope_json") or "{}"))
         project_id = str(scope.get("project_id") or "")
@@ -1026,12 +1124,18 @@ class CoordinatorService:
     def goal_snapshot(self, tenant: str, owner: str, conversation_id: str, goal_id: str) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
         goal = self._goal(conversation_id, goal_id)
-        result = {k: goal[k] for k in ("goal_id", "source_turn_id", "text", "work_ref", "worker_id", "run_id", "blocker")}
+        result = {k: goal[k] for k in ("goal_id", "source_turn_id", "text", "work_ref", "worker_id", "run_id", "blocker", "intent_state")}
+        result["restore_hold"] = bool(conversation.get("restore_hold") or goal.get("restore_hold"))
         result["state"] = (
             "restore_held" if bool(conversation.get("restore_hold")) or bool(goal.get("restore_hold"))
             else "cancelled" if goal["intent_state"] == "cancelled"
             else "blocked" if goal["blocker"] else "accepted"
         )
+        if not goal["run_id"]:
+            result["actions"] = ["stop"] if result["state"] not in {"cancelled", "restore_held"} else []
+            from .coordinator_application import dispatch_retry_available
+            if dispatch_retry_available(self, conversation, goal):
+                result["actions"].insert(0, "retry")
         if goal["run_id"]:
             run = self.store.get_run(goal["run_id"])
             worker = self.store.get_worker(goal["worker_id"])
@@ -1039,7 +1143,8 @@ class CoordinatorService:
                 raise CoordinatorScopeError("Bound result unavailable")
             result.update({"state": result["state"] if result["state"] == "restore_held" else run["state"], "failure_class": run.get("failure_class", ""),
                            "output_text": run.get("output_text", ""), "error_text": run.get("error_text", ""),
-                           "active_attempt_id": run.get("active_attempt_id", "")})
+                           "active_attempt_id": run.get("active_attempt_id", ""),
+                           "result_revision": int(run["terminal_result_revision"])})
             result["retryable"] = (
                 result["state"] == "failed"
                 and bool(goal["work_ref"])
@@ -1051,6 +1156,10 @@ class CoordinatorService:
                     started_at=run.get("started_at", ...),
                 )
             )
+        if goal["run_id"] and not goal["work_ref"]:
+            result["control_run_id"] = goal["run_id"]
+            result["actions"] = ["stop"] if (result["state"] in {"queued", "running", "settling", "paused", "needs_input"}
+                and goal["intent_state"] != "cancelled" and not goal["restore_hold"] and not conversation["restore_hold"]) else []
         if goal["work_ref"]:
             delegation = self.store.get_delegation(goal["work_ref"], tenant_id=tenant, owner_id=owner)
             result["actions"] = []
@@ -1074,12 +1183,13 @@ class CoordinatorService:
                     result["actions"] = sorted(actions)
         return result
 
-    def snapshot(self, tenant: str, owner: str, conversation_id: str) -> dict:
+    def snapshot(self, tenant: str, owner: str, conversation_id: str, include_history: bool = True) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
         with self.store._connect() as conn:
             goals = conn.execute("SELECT goal_id FROM coordinator_goals WHERE conversation_id=? ORDER BY created_at,goal_id", (conversation_id,)).fetchall()
+            history_columns = "message,response_json," if include_history else ""
             turns = [dict(r) for r in conn.execute(
-                "SELECT conversation_id,turn_id,message,origin,request_id,blocker,response_json,created_at,restore_hold,retry_after_at,retry_attempts "
+                "SELECT conversation_id,turn_id," + history_columns + "origin,request_id,blocker,created_at,restore_hold,retry_after_at,retry_attempts,retry_of_turn_id "
                 "FROM coordinator_turns WHERE conversation_id=? ORDER BY created_at,turn_id", (conversation_id,))]
             prepared_library = conn.execute(
                 "SELECT json_extract(payload_json,'$.metadata.bootstrap_bundle.library_selection.refs') AS refs, "
@@ -1101,12 +1211,15 @@ class CoordinatorService:
                 (conversation_id, tenant, owner, tenant, tenant, owner),
             )]
         config = CoordinatorConfig.model_validate_json(conversation["config_json"])
+        if config.application is not None:
+            from .coordinator_application import turn_status
+            turns = [{**turn, **turn_status(self, tenant, owner, conversation_id, turn["turn_id"])} for turn in turns]
         selected_library = self._library_summary(json.loads(str(conversation.get("library_json") or "{}")))
         selected_library["context"] = []
         if prepared_library and json.loads(prepared_library["refs"] or "[]") == selected_library["refs"]:
             selected_library["context"] = json.loads(prepared_library["context"] or "[]")
         for turn in turns:
-            if turn["response_json"]:
+            if turn.get("response_json"):
                 try:
                     response = json.loads(turn["response_json"])
                 except (TypeError, ValueError):
@@ -1132,6 +1245,13 @@ class CoordinatorService:
     def control(self, tenant: str, owner: str, conversation_id: str, goal_id: str, control: Control) -> dict:
         self._assert_not_restore_held(self._conversation(tenant, owner, conversation_id))
         goal = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
+        if control.action == "retry" and not control.run_id:
+            from .coordinator_application import retry_dispatch
+            return retry_dispatch(self, tenant, owner, conversation_id, goal_id, control)
+        if (CoordinatorConfig.model_validate_json(self._conversation(tenant,owner,conversation_id)["config_json"]).application
+                and control.action in {"queue","message","steer","retry"} and goal.get("work_ref")):
+            from .coordinator_application import queue_action
+            return queue_action(self,tenant,owner,conversation_id,goal_id,control)
         if control.action in {"queue", "message", "steer"} and not control.message.strip():
             raise CoordinatorConflict("Guidance is required for this action")
         if control.run_id:
@@ -1334,13 +1454,14 @@ class CoordinatorService:
                     if current["run_id"] == replacement_id:
                         return
                     receipts = conn.execute(
-                        "SELECT idempotency_key,json_extract(payload_json,'$.action') AS action "
+                        "SELECT idempotency_key,application_json,json_extract(payload_json,'$.action') AS action "
                         "FROM coordinator_actions WHERE conversation_id=? AND goal_id=? "
                         "AND json_valid(payload_json) AND json_extract(payload_json,'$.action') IN ('queue','message')",
                         (conversation_id, goal_id),
                     ).fetchall()
                     owns_effect = any(current["run_id"] == self.service.active_work_effect_run_id(
-                        goal, idempotency_key=f"coordinator-{receipt['action']}:{conversation_id}:{goal_id}:{receipt['idempotency_key']}",
+                        goal, idempotency_key=(receipt["idempotency_key"] if json.loads(receipt["application_json"] or "{}")
+                            else f"coordinator-{receipt['action']}:{conversation_id}:{goal_id}:{receipt['idempotency_key']}"),
                     ) for receipt in receipts)
                     if owns_effect:
                         if datetime.fromisoformat(current["first_queued_at"]) >= datetime.fromisoformat(current["replacement_queued_at"]):
@@ -1470,6 +1591,9 @@ class CoordinatorService:
 
         conversation = self._conversation(tenant, owner, conversation_id)
         config = CoordinatorConfig.model_validate_json(conversation["config_json"])
+        if config.application:
+            from .coordinator_application import queue_turn
+            return queue_turn(self, conversation, turn_id)
         with self.store._connect() as conn:
             accepted = conn.execute(
                 "SELECT library_json,payload_json FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
@@ -1666,7 +1790,7 @@ class CoordinatorService:
                              "WHERE run_id=?", (current["run_id"],))
         return self.store.get_provider_request(record["request_id"]) or record
 
-    def refresh(self, tenant: str, owner: str, conversation_id: str) -> dict:
+    def refresh(self, tenant: str, owner: str, conversation_id: str, include_history: bool = True) -> dict:
         from .conversation_provider import ChatCompletionRequest
 
         conversation = self._conversation(tenant, owner, conversation_id)
@@ -1721,7 +1845,11 @@ class CoordinatorService:
                     if run and run["state"] in {"completed", "failed", "cancelled", "interrupted"}:
                         receipt = {"goal_id": goal["goal_id"], "run_id": run_id, "state": run["state"]}
                         conn.execute("INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)", (conversation_id, "result_available", run_id, canonical(receipt), now()))
-        return self.snapshot(tenant, owner, conversation_id)
+        if CoordinatorConfig.model_validate_json(conversation["config_json"]).application:
+            from .coordinator_application import queue_self_results, queue_turn_results
+            queue_self_results(self, conversation)
+            queue_turn_results(self, conversation)
+        return self.snapshot(tenant, owner, conversation_id, include_history)
 
     def native_identity(self, principal: dict) -> tuple[str, str, str]:
         # PeerCollaboration already authenticates the live run and exact attempt. A peer
@@ -1798,6 +1926,39 @@ class CoordinatorService:
             )
         return self.start_turn(tenant, owner, conversation_id, retry_id)
 
+    def retry_interactive_turn(self, tenant: str, owner: str, conversation_id: str, source_turn_id: str) -> dict:
+        """Explicitly retry a settled planning attempt, retaining the accepted original."""
+        from .coordinator_application import interactive_retry_available, turn_status, validate_destination
+        conversation = self._conversation(tenant, owner, conversation_id)
+        self._assert_not_restore_held(conversation)
+        config = CoordinatorConfig.model_validate_json(conversation["config_json"])
+        if config.application is not None:
+            validate_destination(self, tenant, owner, config.application)
+        retry_id = "interactive-retry-" + digest([conversation_id, source_turn_id])[:32]
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?",
+                            (conversation_id,)).fetchone()[0]:
+                raise CoordinatorConflict("Conversation is held for exact continuity resume")
+            source = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
+                                  (conversation_id, source_turn_id)).fetchone()
+            if not source or source["blocker"] == "cancelled" or source["restore_hold"]:
+                raise CoordinatorConflict("Accepted planning attempt is unavailable, held or stopped")
+            previous = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
+                                    (conversation_id, retry_id)).fetchone()
+            if previous:
+                if previous["retry_of_turn_id"] != source_turn_id or previous["message"] != source["message"]:
+                    raise CoordinatorConflict("Planning retry identity changed its source")
+            else:
+                if not interactive_retry_available(self, conversation, source, connection=conn):
+                    raise CoordinatorConflict("Failed planning attempt is not available for retry")
+                conn.execute("INSERT INTO coordinator_turns(conversation_id,turn_id,message,origin,library_json,retry_of_turn_id,created_at) "
+                             "VALUES(?,?,?,'interactive',?,?,?)",
+                             (conversation_id, retry_id, source["message"], source["library_json"], source_turn_id, now()))
+        # Maintenance and duplicate calls recover this one accepted child through the usual owner.
+        self.start_turn(tenant, owner, conversation_id, retry_id)
+        return turn_status(self, tenant, owner, conversation_id, retry_id)
+
     def queue_result_turn(self, tenant: str, owner: str, conversation_id: str) -> str | None:
         conversation = self._conversation(tenant, owner, conversation_id)
         if bool(conversation.get("restore_hold")) or not CoordinatorConfig.model_validate_json(conversation["config_json"]).wake_on_results:
@@ -1840,6 +2001,15 @@ class CoordinatorService:
                 events = [e for e in events if e not in redundant]
             if not events:
                 return None
+            if CoordinatorConfig.model_validate_json(conversation["config_json"]).application:
+                groups = {}
+                for event in events:
+                    payload = json.loads(event["payload_json"])
+                    source = conn.execute("SELECT source_turn_id FROM coordinator_goals WHERE conversation_id=? AND goal_id=?",(conversation_id,payload.get("goal_id"))).fetchone()
+                    if not source:
+                        raise CoordinatorConflict("Result event has no retained original goal source")
+                    groups.setdefault(source["source_turn_id"],[]).append(event)
+                events = next(iter(groups.values()))
             turn_id = "results-" + digest([e["sequence"] for e in events])[:32]
             # Carry the exact saved result with the notification when it fits.
             # Larger results remain available through the paged coordinator tool;
@@ -2013,9 +2183,11 @@ class CoordinatorService:
         with self.store._connect() as conn:
             rows = conn.execute(
                 "SELECT goal_id,payload_json FROM coordinator_actions "
-                "WHERE conversation_id=? AND response_json='' ORDER BY rowid LIMIT 50",
+                "WHERE conversation_id=? AND response_json='' AND application_json='{}' ORDER BY rowid LIMIT 50",
                 (conversation_id,),
             ).fetchall()
+        from .coordinator_application import recover_goal_actions
+        recover_goal_actions(self, tenant, owner, conversation_id)
         for row in rows:
             try:
                 control = Control.model_validate_json(row["payload_json"])
@@ -2043,7 +2215,7 @@ class CoordinatorService:
                 # re-dispatch; only crash recovery and capacity blockers replay here.
                 if goal["blocker"] and goal["blocker"] not in _RETRYABLE_ADMISSION_CODES:
                     continue
-                results.append(self.dispatch(tenant, owner, conversation_id, Dispatch.model_validate_json(goal["dispatch_json"])))
+                results.append(self.dispatch(tenant, owner, conversation_id, Dispatch.model_validate_json(goal["dispatch_json"]), _recovering=True))
                 continue
             # Stop can win between the service reservation and goal attachment. Recover
             # only an existing reservation; never create new work for a stopped intent.
@@ -2056,7 +2228,8 @@ class CoordinatorService:
                                and run["worker_id"] == dispatch.worker_id else None)
             else:
                 reservation = self.store.get_delegation_by_idempotency_key(
-                    tenant_id=tenant, owner_id=owner, idempotency_key=f"{conversation_id}:{goal['goal_id']}")
+                    tenant_id=tenant, owner_id=owner, idempotency_key=(json.loads(goal.get("preparation_json") or "{}").get("idempotency_key")
+                        or f"{conversation_id}:{goal['goal_id']}"))
             if reservation:
                 with self.store._connect() as conn:
                     conn.execute("UPDATE coordinator_goals SET work_ref=?,worker_id=?,run_id=? WHERE conversation_id=? AND goal_id=?", (reservation["work_ref"],reservation["worker_id"],reservation["initial_run_id"],conversation_id,goal["goal_id"]))
@@ -2155,16 +2328,39 @@ class CoordinatorService:
             if result is None:
                 raise CoordinatorScopeError("Bound result unavailable")
             goal = {**goal, "run_id": run_id, "state": result["state"],
-                    "output_text": result["output_text"], "failure_class": result["failure_class"]}
+                    "output_text": result["output_text"], "failure_class": result["failure_class"],
+                    "active_attempt_id": result.get("active_attempt_id", ""),
+                    "result_revision": int(result["terminal_result_revision"])}
         text = goal.get("output_text", "")
         if offset > len(text):
             raise CoordinatorConflict("Result offset exceeds source")
         end = min(len(text), offset + max_chars)
+        output_files = None
+        publisher = None
+        if goal["run_id"]:
+            with self.store._connect() as conn:
+                native_result = conn.execute("SELECT p.request_id,p.message_id,p.stream_id,p.response_json FROM provider_requests p JOIN provider_sessions s USING(session_id) "
+                    "WHERE p.run_id=? AND p.tenant_id=? AND p.owner_id=? AND s.tenant_id=p.tenant_id "
+                    "AND s.owner_id=p.owner_id AND s.conversation_id=? AND s.agent_id='coordinator' AND p.response_json<>''",
+                    (goal["run_id"], tenant, owner, conversation_id)).fetchone()
+            if native_result:
+                publisher = {"owner_id": owner, "conversation_id": conversation_id, "agent_id": "coordinator",
+                    "request_id": native_result["request_id"], "message_id": native_result["message_id"],
+                    "stream_id": native_result["stream_id"], "run_id": goal["run_id"],
+                    "attempt_id": goal.get("active_attempt_id", "")}
+                envelope = json.loads(native_result["response_json"]).get("glasshive", {}).get("output_files")
+                if envelope:
+                    if any(envelope.get(key) != value for key, value in publisher.items()):
+                        raise CoordinatorScopeError("Native result files target unrelated output")
+                    output_files = envelope
         with self.store._connect() as conn:
             files = coordinator_current_result_files(
                 self.service, conn, tenant, owner, conversation_id, goal_id, str(goal["run_id"]),
             )
         return {"goal_id": goal_id, "run_id": goal["run_id"], "state": goal["state"],
+                "result_revision": goal.get("result_revision"),
+                **({"output_files": output_files} if output_files else {}),
+                **({"publisher": publisher} if publisher else {}),
                 "output_text": text[offset:end], "total_chars": len(text), "offset": offset,
                 "next_offset": end if end < len(text) else None,
                 "sha256": hashlib.sha256(text.encode()).hexdigest(),
@@ -2316,6 +2512,14 @@ def project_coordinator_output(service: Any, request: dict, output: str) -> str:
     return response["choices"][0]["message"]["content"]
 
 
+
+
+
+
+
+
+
+
 def render_coordinator_result_file(service: Any, request: dict, reference: str,
                                    selected_link: str, output_files: list | None) -> str | None:
     """Publish only a terminal result bound to this request's exact Chat receipts.
@@ -2372,19 +2576,9 @@ def render_coordinator_result_file(service: Any, request: dict, reference: str,
             elif (not scope.get("project_id") or worker.get("project_id") != scope["project_id"]
                   or (scope.get("workspace_id") and worker.get("workspace_id") != scope["workspace_id"])):
                 continue
-            _, files = service.runtime.provider_native_image_output(worker, source, "")
-            if not any("artifact_sha256:" + native_output_sha256(item[2]) == reference for item in files):
-                continue
-            # No request_id on this source request: publication cannot recurse into Chat.
-            source_request = {"run_id": source["run_id"], "owner_id": request["owner_id"],
-                              "tenant_id": request["tenant_id"]}
-            captured: list[dict] = []
-            rendered = service.render_provider_native_images(
-                source_request, source, selected_link,
-                output_files=captured if output_files is not None else None)
-            if output_files is not None:
-                output_files.extend(item for item in captured if item not in output_files)
-            return rendered
+            rendered = service.render_run_result_file(request, source, reference, selected_link, output_files)
+            if rendered is not None:
+                return rendered
     return None
 
 
@@ -2421,6 +2615,16 @@ def guard_coordinator_run(conn: Any, run_id: str) -> None:
         WHERE d.initial_run_id=? AND (g.intent_state='cancelled' OR g.restore_hold=1 OR c.restore_hold=1) LIMIT 1""", (run_id,)).fetchone()
     if stopped:
         raise CoordinatorConflict("Coordinator goal is held or stopped before execution")
+
+    application_pending = conn.execute("""SELECT 1 FROM coordinator_goals g
+        JOIN coordinator_conversations c USING(conversation_id)
+        JOIN delegations d ON d.tenant_id=c.tenant_id AND d.owner_id=c.owner_id
+          AND json_valid(g.preparation_json)
+          AND d.idempotency_key=json_extract(g.preparation_json,'$.idempotency_key')
+        WHERE d.initial_run_id=? AND (g.run_id<>d.initial_run_id OR g.intent_state='cancelled'
+          OR g.restore_hold=1 OR c.restore_hold=1) LIMIT 1""", (run_id,)).fetchone()
+    if application_pending:
+        raise CoordinatorConflict("Application coordinator goal is not bound or is stopped")
 
     # Ordinary assignment has no delegation row. Its existing dispatch receipt and
     # assignment ID fence the gap before attachment, without another durable ledger.

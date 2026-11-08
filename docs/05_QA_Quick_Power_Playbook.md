@@ -236,11 +236,11 @@ research private. A working synthetic example is not professional certification.
 
 | Starting expert | Useful work to inspect | Required check |
 |---|---|---|
-| Maya, Clinical Biostatistician | Study review, analysis tables and a reproducible workbook | Recompute the planned estimates and uncertainty; identify missing responses. No unsupported efficacy claim. |
-| Theo, Bioanalytical Scientist | Assay review, QC exceptions and an editable calculation workbook | Reconcile the fitted results and approved QC limits; keep unsupported causes unknown. |
-| Priya, Regulatory Affairs Specialist | Evidence map, gaps and draft change-impact review | Follow each claim to the supplied source and revision; distinguish missing, draft and approved evidence. |
-| Alex, Growth Marketer | Campaign plan, copy, claims review and measurement workbook | Reconcile the budget and assumptions. Separate observed results from scale, audience and capacity hypotheses. |
-| Morgan, Finance Director | Variance bridges, cash scenarios and a board brief | Reconcile source totals and formulas; keep unexplained cash differences visible instead of plugging them. |
+| Clinical Biostatistician | Study review, analysis tables and a reproducible workbook | Recompute the planned estimates and uncertainty; identify missing responses. No unsupported efficacy claim. |
+| Bioanalytical Scientist | Assay review, QC exceptions and an editable calculation workbook | Reconcile the fitted results and approved QC limits; keep unsupported causes unknown. |
+| Regulatory Affairs Specialist | Evidence map, gaps and draft change-impact review | Follow each claim to the supplied source and revision; distinguish missing, draft and approved evidence. |
+| Growth Marketer | Campaign plan, copy, claims review and measurement workbook | Reconcile the budget and assumptions. Separate observed results from scale, audience and capacity hypotheses. |
+| Finance Director | Variance bridges, cash scenarios and a board brief | Reconcile source totals and formulas; keep unexplained cash differences visible instead of plugging them. |
 
 1. Choose a starter through Run Project. Supply the job, desired result and company files. Review
    the actual target's selected native Skills before execution; cancelling must keep the job and
@@ -266,3 +266,13 @@ Deterministic owners include `test_starter_templates.py`, `test_starter_pack_exa
 `test_coordinator_existing_worker.py`, `test_coordinator_result_files.py`, and the existing native
 file, provider, template and Library banks. Use only the checks selected by the agreed QA scope.
 Native jobs, real browser journeys and provider limitations remain explicit evidence gates.
+
+### Planning retry before a goal exists
+
+`test_coordinator_interactive_retry.py` owns deterministic checks for explicit retry of an accepted
+planning failure: one child per failed attempt, unchanged original source and failed history,
+fresh application preparation, duplicate/lost-response/restart recovery, standalone preparation,
+and denial for foreign ownership, Stop, restore hold, parsed responses and accepted source goals.
+For a real client, observe the failed card, repair its prerequisite, click Retry, and verify that
+one child reaches the original goal and one result reaches the original destination. Retain this
+real-client step as NOT RUN until visible controls, current configuration and delivery are proved.

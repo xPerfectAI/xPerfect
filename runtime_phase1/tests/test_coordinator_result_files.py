@@ -71,6 +71,8 @@ def result_files(existing, tmp_path, monkeypatch, request):
     router = object.__new__(profile_runtime.ProfiledWorkerRuntime)
     router._runtime_for_worker = lambda _w: runtime
     router._native_warm_adapters = lambda: ()
+    # This file-only adapter fixture has no native child processes or warm sessions.
+    router.close_native_warm = lambda: None
     service.runtime = router
     monkeypatch.setenv('GLASSHIVE_BACKGROUND_CONSUMERS_ENABLED', 'false')
     monkeypatch.setenv('GLASSHIVE_SIGNED_LINK_SECRET', 'synthetic-result-link-secret')
@@ -339,7 +341,7 @@ def test_identity_repair_cannot_reopen_unrelated_or_cancelled_work(result_files,
 
 @pytest.mark.parametrize('legacy_identity', [False, True])
 @pytest.mark.parametrize('failure', ['unowned', 'malformed', 'missing_bytes'])
-def test_unavailable_file_fails_one_reply_without_blocking_other_goals(result_files, monkeypatch, legacy_identity, failure):
+def test_unavailable_file_keeps_truthful_reply_without_blocking_other_goals(result_files, monkeypatch, legacy_identity, failure):
     from workers_projects_runtime.coordinator import Goal
     f = result_files
     provider = prepare_legacy_identity(f, monkeypatch)
@@ -361,15 +363,18 @@ def test_unavailable_file_fails_one_reply_without_blocking_other_goals(result_fi
                      (f.worker['worker_id'], other['run_id'], f.cid))
     first = f.core.refresh('local', 'owner', f.cid)
     record = f.store.get_provider_request(f.request['request_id'])
-    assert record['state'] == 'failed' and record['response_json'] == ''
-    assert f.store.get_run(f.run['run_id'])['failure_class'] == 'native_output_files_identity_unavailable'
-    assert next(t for t in first['turns'] if t['turn_id'] == 'turn')['blocker'] == 'failed'
+    assert record['state'] == 'completed'
+    response = json.loads(record['response_json'])
+    assert '[File unavailable]' in response['choices'][0]['message']['content']
+    assert response['glasshive']['output_files']['files'] == []
+    assert response['glasshive']['output_files']['rejected'] == [{'name':'File','code':'unreadable'}]
+    assert next(t for t in first['turns'] if t['turn_id'] == 'turn')['blocker'] != 'failed'
     assert next(g for g in first['goals'] if g['goal_id'] == 'independent')['state'] == 'queued'
     f.store.update_run(other['run_id'], state='completed', output_text='Independent result is ready')
     second = f.core.refresh('local', 'owner', f.cid)
     assert next(g for g in second['goals'] if g['goal_id'] == 'independent')['state'] == 'completed'
     assert f.core.read_result('local', 'owner', f.cid, 'independent')['output_text'] == 'Independent result is ready'
-    assert f.store.get_provider_request(f.request['request_id'])['response_json'] == ''
+    assert f.store.get_provider_request(f.request['request_id'])['response_json'] == record['response_json']
     provider.shutdown()
 
 

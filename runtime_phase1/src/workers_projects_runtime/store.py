@@ -229,7 +229,7 @@ def work_artifact_observation(
             not root_raw
             or relative.is_absolute()
             or ".." in relative.parts
-            or not is_user_deliverable_relative_path(relative)
+            or not is_user_deliverable_relative_path(relative, root=Path(root_raw))
         ):
             return {"available": False, "refs": [], "overflowCount": 0}
         root = Path(root_raw).resolve()
@@ -5732,6 +5732,23 @@ class Store:
             )
         return int(cursor.rowcount or 0)
 
+    def provider_session_retention_eligible(
+        self, *, session_id: str, worker_id: str, updated_before: str,
+    ) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM provider_sessions AS session
+                WHERE session.session_id = ? AND session.worker_id = ? AND session.updated_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM provider_requests AS request
+                    WHERE request.session_id = session.session_id
+                  )
+                """,
+                (session_id, worker_id, updated_before),
+            ).fetchone()
+        return row is not None
+
     def _row(self, value: sqlite3.Row | None) -> dict[str, Any] | None:
         if value is None:
             return None
@@ -8294,7 +8311,10 @@ class Store:
             fields["last_error"] = last_error
         return self.update_worker(worker_id, **fields)
 
-    def begin_worker_termination(self, worker_id: str, *, expected_catalog_revision: int | None = None) -> tuple[dict[str, Any] | None, bool]:
+    def begin_worker_termination(
+        self, worker_id: str, *, only_if_idle: bool = False,
+        expected_catalog_revision: int | None = None,
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Publish permanent close intent once before any external runtime teardown."""
 
         now = utc_now()
@@ -8312,6 +8332,24 @@ class Store:
             if str(worker["state"] or "") in {"terminating", "terminated"}:
                 conn.execute("COMMIT")
                 return self._row(worker), False
+            if only_if_idle:
+                states = sorted(NONTERMINAL_RUN_STATES)
+                placeholders = ",".join("?" for _ in states)
+                # In the same write transaction as close intent, protect work that
+                # was admitted through a different API after the retention scan.
+                busy = conn.execute(
+                    f"""
+                    SELECT EXISTS (SELECT 1 FROM runs WHERE worker_id = ? AND state IN ({placeholders}))
+                        OR EXISTS (SELECT 1 FROM scheduled_runs WHERE worker_id = ?
+                                   AND state NOT IN ('completed', 'failed', 'cancelled'))
+                        OR EXISTS (SELECT 1 FROM recurring_schedule_definitions
+                                   WHERE worker_id = ? AND active = 1)
+                    """,
+                    (worker_id, *states, worker_id, worker_id),
+                ).fetchone()[0]
+                if busy or worker["compute_release_token"] or worker["work_stop_id"]:
+                    conn.execute("COMMIT")
+                    return self._row(worker), False
             conn.execute(
                 "UPDATE workers SET state = 'terminating', last_error = '', updated_at = ? WHERE worker_id = ?",
                 (now, worker_id),
@@ -8509,6 +8547,7 @@ class Store:
         origin_trace: dict[str, Any] | None = None,
         continuation_contract: dict[str, Any] | None = None,
         continuation_context: dict[str, Any] | None = None,
+        invocation_executor_id: str = "",
     ) -> dict[str, Any]:
         # Direct callers cannot truthfully create an already-dispatched run.
         # The only running transition belongs to the exact lease/attempt
@@ -8543,6 +8582,7 @@ class Store:
             "native_capabilities_json": "{}",
             "native_child_summary_json": "{}",
             "_origin_trace": origin_trace,
+            "runtime_bundle_json": json.dumps({"invocation_executor_id": invocation_executor_id}) if invocation_executor_id else None,
             "continuation_contract_json": json.dumps(
                 continuation_contract if isinstance(continuation_contract, dict) else {},
                 ensure_ascii=False,
@@ -8587,6 +8627,7 @@ class Store:
         origin_trace: dict[str, Any] | None = None,
         continuation_contract: dict[str, Any] | None = None,
         continuation_context: dict[str, Any] | None = None,
+        invocation_executor_id: str = "",
     ) -> dict[str, Any]:
         restoration_state = (
             state if isinstance(state, RunRestorationState) else None
@@ -8606,6 +8647,7 @@ class Store:
                 origin_trace=origin_trace,
                 continuation_contract=continuation_contract,
                 continuation_context=continuation_context,
+                invocation_executor_id=invocation_executor_id,
             )
             return self._restore_queued_run_as_running(restored)
         existing_worker = self.get_worker(worker_id)
@@ -8631,6 +8673,7 @@ class Store:
                 origin_trace is not None,
                 continuation_contract is not None,
                 continuation_context is not None,
+                bool(invocation_executor_id),
             )
         ):
             return self._create_run_parallel(
@@ -8642,6 +8685,7 @@ class Store:
                 origin_trace=origin_trace,
                 continuation_contract=continuation_contract,
                 continuation_context=continuation_context,
+                invocation_executor_id=invocation_executor_id,
             )
         run_id = f"run_{uuid.uuid4().hex[:10]}"
         queued_at = utc_now()
@@ -9611,6 +9655,21 @@ class Store:
             }
         )
 
+    @staticmethod
+    def _work_stop_owns_terminal_exit(worker: sqlite3.Row | None, run: sqlite3.Row, state: str) -> bool:
+        """The exact work-stop claim settles its provider exit; a real completion can still win."""
+        return bool(
+            worker is not None
+            and state in {"failed", "interrupted", "cancelled"}
+            and str(worker["compute_release_token"] or "")
+            and str(worker["compute_release_kind"] or "") == "stop_run"
+            and str(worker["compute_release_scope"] or "") == "work"
+            and str(worker["compute_release_target_run_id"] or "") == str(run["run_id"])
+            and str(worker["compute_release_target_started_at"] or "") == str(run["started_at"] or "")
+            and str(worker["work_stop_id"] or "")
+            and str(worker["work_stop_id"]) == str(worker["compute_release_operation_id"] or "")
+        )
+
     def update_run(self, run_id: str, **fields: Any) -> dict[str, Any] | None:
         if not fields:
             return self.get_run(run_id)
@@ -9865,12 +9924,67 @@ class Store:
             return row
         return None
 
+    @staticmethod
+    def invocation_executor_for_run(run: dict) -> str:
+        try:
+            binding = json.loads(str(run.get("runtime_bundle_json") or "{}"))
+        except (TypeError, ValueError):
+            return ""
+        return str(binding.get("invocation_executor_id") or "") if isinstance(binding, dict) else ""
+
+    def queued_invocation_ids_for_executor(self, executor_id: str) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT run_id FROM runs WHERE state = 'queued' AND "
+                "json_extract(CASE WHEN json_valid(runtime_bundle_json) THEN runtime_bundle_json ELSE '{}' END, "
+                "'$.invocation_executor_id') = ?",
+                (executor_id,),
+            ).fetchall()
+        return [str(row["run_id"]) for row in rows]
+
+    def bind_invocation_executor(self, run_id: str, executor_id: str) -> bool:
+        """Bind a refreshed queued invocation without persisting its renewable authority."""
+        if not executor_id:
+            return False
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return False
+            if str(row["state"]) not in {"queued", "claimed", "admitted", "running"}:
+                conn.execute("COMMIT")
+                return False
+            owner = self.invocation_executor_for_run(dict(row))
+            if owner == executor_id:
+                conn.execute("COMMIT")
+                return True
+            lease = conn.execute(
+                "SELECT executor_id FROM host_run_leases WHERE run_id = ? AND status = 'active' LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if not (str(row["state"]) == "queued" and lease is None) and not (
+                not owner and lease is not None and str(lease["executor_id"]) == executor_id
+            ):
+                conn.execute("COMMIT")
+                return False
+            binding = json.loads(str(row["runtime_bundle_json"] or "{}"))
+            if not isinstance(binding, dict):
+                conn.execute("COMMIT")
+                return False
+            binding["invocation_executor_id"] = executor_id
+            conn.execute("UPDATE runs SET runtime_bundle_json = ? WHERE run_id = ?",
+                         (json.dumps(binding, sort_keys=True, separators=(",", ":")), run_id))
+            conn.execute("COMMIT")
+        return True
+
     def _claim_next_queued_run_parallel(
         self,
         worker_id: str,
         *,
         executor_id: str = "",
         lease_ttl_s: float = 30.0,
+        expected_run_id: str = "",
     ) -> dict[str, Any] | None:
         now_iso = utc_now()
         with self._connect() as conn:
@@ -9891,7 +10005,11 @@ class Store:
                 conn.execute("COMMIT")
                 return None
             row = self._next_ready_queued_run(conn, worker_id, now_iso)
-            if row is None:
+            if row is None or (expected_run_id and row["run_id"] != expected_run_id):
+                conn.execute("COMMIT")
+                return None
+            invocation_owner = self.invocation_executor_for_run(dict(row))
+            if invocation_owner and invocation_owner != executor_id:
                 conn.execute("COMMIT")
                 return None
             if conn.execute(
@@ -10054,6 +10172,7 @@ class Store:
         executor_id: str = "",
         lease_ttl_s: float = 30.0,
         require_schedule_principal_authority: bool = False,
+        expected_run_id: str = "",
     ) -> dict[str, Any] | None:
         clean_executor_id = str(executor_id or "").strip()
         queued = self.peek_next_queued_run(worker_id)
@@ -10081,6 +10200,7 @@ class Store:
                 worker_id,
                 executor_id=clean_executor_id,
                 lease_ttl_s=lease_ttl_s,
+                expected_run_id=expected_run_id,
             )
         now_iso = utc_now()
         with self._connect() as conn:
@@ -10098,7 +10218,11 @@ class Store:
                 return None
             while True:
                 row = self._next_ready_queued_run(conn, worker_id, now_iso)
-                if row is None:
+                if row is None or (expected_run_id and row["run_id"] != expected_run_id):
+                    conn.execute("COMMIT")
+                    return None
+                invocation_owner = self.invocation_executor_for_run(dict(row))
+                if invocation_owner and invocation_owner != clean_executor_id:
                     conn.execute("COMMIT")
                     return None
                 scheduled = conn.execute(
@@ -10175,6 +10299,7 @@ class Store:
         executor_id: str = "",
         lease_ttl_s: float = 30.0,
         require_schedule_principal_authority: bool = False,
+        expected_run_id: str = "",
     ) -> dict[str, Any] | None:
         if require_schedule_principal_authority:
             return self._claim_next_queued_run_legacy(
@@ -10182,11 +10307,13 @@ class Store:
                 executor_id=executor_id,
                 lease_ttl_s=lease_ttl_s,
                 require_schedule_principal_authority=True,
+                expected_run_id=expected_run_id,
             )
         return self._claim_next_queued_run_parallel(
             worker_id,
             executor_id=str(executor_id or "").strip(),
             lease_ttl_s=lease_ttl_s,
+            expected_run_id=expected_run_id,
         )
 
     def require_schedule_principal_authority_for_run(self, run_id: str) -> None:
@@ -10360,6 +10487,9 @@ class Store:
         run_id: str,
         expected_state: str,
         state: str,
+        *,
+        require_no_active_lease: bool = False,
+        expected_invocation_executor_id: str = "",
         **fields: Any,
     ) -> dict[str, Any] | None:
         if state == "cancelled":
@@ -10377,6 +10507,15 @@ class Store:
                 (run_id,),
             ).fetchone()
             if run is None:
+                conn.execute("COMMIT")
+                return None
+            if expected_invocation_executor_id and self.invocation_executor_for_run(dict(run)) != expected_invocation_executor_id:
+                conn.execute("COMMIT")
+                return None
+            if require_no_active_lease and conn.execute(
+                "SELECT 1 FROM host_run_leases WHERE run_id = ? AND status = 'active' LIMIT 1",
+                (run_id,),
+            ).fetchone() is not None:
                 conn.execute("COMMIT")
                 return None
             worker = conn.execute(
@@ -10465,11 +10604,15 @@ class Store:
         error_text: str,
         failure_class: str,
         failure_user_message: str,
+        require_no_active_lease: bool = False,
+        expected_invocation_executor_id: str = "",
     ) -> dict[str, Any] | None:
         return self.transition_run_if_state(
             run_id,
             expected_state,
             "needs_input",
+            require_no_active_lease=require_no_active_lease,
+            expected_invocation_executor_id=expected_invocation_executor_id,
             ended_at=None,
             error_text=error_text,
             retry_after=None,
@@ -10498,8 +10641,9 @@ class Store:
     ) -> list[dict[str, Any]]:
         """Return terminal generations with no durable callback sink.
 
-        Canonical origin-only recovery requires an exact worker owner. The
-        global legacy scan must not revive old origin-only conversation work.
+        Origin-only recovery requires the exact worker owner and a retained
+        completion marker, except for existing worker-scoped cancellation recovery.
+        A global legacy scan must not revive old origin-only conversation work.
         """
 
         origin_callback_sql = (
@@ -10522,7 +10666,7 @@ class Store:
               AND NOT (runs.state = 'cancelled' AND workers.state IN ('terminating', 'termination_failed'))
               AND workers.bootstrap_bundle_json IS NOT NULL
               AND json_valid(workers.bootstrap_bundle_json)
-              AND COALESCE(
+              AND (COALESCE(
                     json_extract(
                         workers.bootstrap_bundle_json,
                         '$.callbacks.events_webhook_url'
@@ -10533,7 +10677,18 @@ class Store:
                     ),
                     {origin_callback_sql},
                     ''
-                  ) != ''
+                  ) != '' OR EXISTS (
+                  SELECT 1 FROM terminal_callback_reconciliations AS pending
+                  WHERE pending.run_id = runs.run_id
+                    AND pending.state = runs.state
+                    AND pending.ended_at = runs.ended_at
+                    AND pending.attempt_number = COALESCE(
+                        (SELECT MAX(attempt_number) FROM run_attempts WHERE run_id = runs.run_id), 0
+                    )
+                    AND pending.callback_contract_digest =
+                        glasshive_sha256(COALESCE(workers.bootstrap_bundle_json, ''))
+                    AND pending.status = 'pending'
+              ))
               AND NOT EXISTS (
                   SELECT 1
                   FROM callback_outbox
@@ -12276,6 +12431,9 @@ class Store:
             worker = conn.execute(
                 "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
             ).fetchone()
+            if self._work_stop_owns_terminal_exit(worker, run, state):
+                conn.execute("COMMIT")
+                return None
             if cancellation_claim is not None and not self._cancellation_claim_owns_run(
                 worker, run, cancellation_claim, state
             ):
@@ -12373,6 +12531,36 @@ class Store:
                     artifact_refs=terminal_artifact_refs,
                     observed_at=str(update_fields["ended_at"]),
                 )
+                if state == "completed" and attempt_id and worker is not None:
+                    # Retain the obligation even if the process stops before it
+                    # can render and enqueue the callback. Legacy runs get no marker.
+                    conn.execute(
+                        """
+                        INSERT INTO terminal_callback_reconciliations (
+                            run_id, state, ended_at, attempt_number,
+                            callback_contract_digest, status, reason_code, updated_at
+                        )
+                        SELECT :run_id, :state, :ended_at, :attempt_number,
+                               glasshive_sha256(:bundle), 'pending', '', :ended_at
+                        FROM delegations
+                        WHERE tenant_id = :tenant AND owner_id = :owner AND origin_ref <> ''
+                          AND origin_ref = CASE WHEN json_valid(:bundle)
+                              THEN json_extract(:bundle, '$.callbacks.origin_ref') END
+                          AND CASE WHEN json_valid(:bundle) THEN COALESCE(
+                              NULLIF(json_extract(:bundle, '$.callbacks.events_webhook_url'), ''),
+                              NULLIF(json_extract(:bundle, '$.callbacks.url'), ''), ''
+                          ) END = ''
+                          AND worker_id = :worker AND project_id = :project
+                        ON CONFLICT DO NOTHING
+                        """,
+                        {
+                            "run_id": run_id, "state": state, "ended_at": update_fields["ended_at"],
+                            "attempt_number": self._callback_attempt_number_conn(conn, run_id),
+                            "bundle": worker["bootstrap_bundle_json"] or "",
+                            "tenant": worker["tenant_id"], "owner": worker["owner_id"],
+                            "worker": worker["worker_id"], "project": worker["project_id"],
+                        },
+                    )
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             if cur.rowcount and state in TERMINAL_RUN_STATES:
                 self._note_provider_account_outcome_conn(conn, row, worker)
@@ -12471,6 +12659,9 @@ class Store:
             worker = conn.execute(
                 "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
             ).fetchone()
+            if self._work_stop_owns_terminal_exit(worker, run, state):
+                conn.execute("COMMIT")
+                return None
             if cancellation_claim is not None and not self._cancellation_claim_owns_run(
                 worker, run, cancellation_claim, state
             ):
@@ -15438,7 +15629,7 @@ class Store:
                     FROM callback_outbox cb
                     LEFT JOIN workers worker ON worker.worker_id = cb.worker_id
                       AND worker.tenant_id = cb.tenant_id
-                    WHERE cb.status = 'pending' AND cb.event_type <> 'schedule.due'
+                    WHERE cb.status = 'pending' AND cb.event_type NOT IN ('schedule.due','coordinator.turn_due','coordinator.dispatch_due','coordinator.result_ready','coordinator.action_due','coordinator.turn_result_ready')
                       AND (cb.next_attempt_at IS NULL OR cb.next_attempt_at <= ?)
                     {created_clause}
                 ) ORDER BY owner_order, updated_at, callback_id LIMIT ?
@@ -19908,7 +20099,17 @@ class Store:
                 SELECT current_work.origin_ref, current_work.work_ref,
                        current_work.run_id AS current_run_id,
                        current_work.run_state AS current_run_state,
-                       callback_run.run_id, callback_run.active_attempt_id
+                       callback_run.run_id, callback_run.active_attempt_id,
+                       (
+                           SELECT action.idempotency_key
+                           FROM active_work_action_uses AS action
+                           WHERE action.tenant_id = current_work.tenant_id
+                             AND action.owner_id = current_work.owner_id
+                             AND action.work_ref = current_work.work_ref
+                             AND json_extract(action.source_context_json, '$.source_event_id') =
+                                 json_extract(callback_run.continuation_contract_json, '$.source.source_event_id')
+                           LIMIT 1
+                       ) AS source_action_key
                 FROM current_work
                 JOIN runs AS callback_run
                   ON callback_run.run_id = ?
@@ -22338,7 +22539,12 @@ class Store:
                     """,
                     (now, request_id),
                 )
-                if run_id:
+                worker = conn.execute(
+                    "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
+                ).fetchone() if run else None
+                # The caller's response deadline can expire while the exact Stop still owns
+                # physical termination. It must not overwrite that run's terminal owner.
+                if run_id and not self._work_stop_owns_terminal_exit(worker, run, "failed"):
                     run_cursor = conn.execute(
                         """
                         UPDATE runs
@@ -22547,6 +22753,7 @@ class Store:
         run_id: str,
         response_timeout_s: float | None,
         response_deadline_at: str,
+        invocation_executor_id: str = "",
     ) -> dict[str, dict[str, Any]] | None:
         """Atomically reopen one exact direct conversation authorization retry."""
 
@@ -22599,8 +22806,11 @@ class Store:
                     str(worker["state"] or "") == "needs_input"
                     or (
                         str(worker["state"] or "") in {"ready", "starting", "running"}
-                        and json.loads(str(request["replay_decision_json"] or "{}")).get(
-                            "provider_session_mode") == "stateless"
+                        and (
+                            not attempt_id
+                            or json.loads(str(request["replay_decision_json"] or "{}")).get(
+                                "provider_session_mode") == "stateless"
+                        )
                     )
                 )
                 and not str(worker["compute_release_token"] or "")
@@ -22628,6 +22838,11 @@ class Store:
                 return None
             self._require_worker_work_admission(worker)
             generation = max(1, int(run["queue_wait_generation"] or 0)) + 1
+            runtime_binding = str(run["runtime_bundle_json"] or "{}")
+            if invocation_executor_id:
+                binding = json.loads(runtime_binding)
+                binding["invocation_executor_id"] = invocation_executor_id
+                runtime_binding = json.dumps(binding, sort_keys=True, separators=(",", ":"))
             queue_deadline = (
                 _parse_utc(now) + timedelta(seconds=_queue_wait_timeout_seconds())
             ).isoformat()
@@ -22639,6 +22854,7 @@ class Store:
                 """
                 UPDATE runs
                 SET state = 'queued', claimed_at = NULL, admitted_at = NULL,
+                    runtime_bundle_json = ?,
                     runtime_invoked_at = NULL, active_attempt_id = '', ended_at = NULL,
                     retry_after = NULL, error_text = '', failure_class = '',
                     failure_retryable = 0, failure_structured = 0,
@@ -22656,6 +22872,7 @@ class Store:
                   AND failure_retryable = 0 AND failure_structured = 1
                 """,
                 (
+                    runtime_binding,
                     generation,
                     generation,
                     now,
@@ -26578,6 +26795,7 @@ class Store:
             "allowed_ai_admission_json": "{}",
             "allowed_ai_connection_receipt_json": "{}",
             "execution_binding_json": "{}",
+            "runtime_bundle_json": None,
             "origin_scope_json": "{}",
             "continuation_contract_json": "{}",
             "continuation_context_json": "{}",
@@ -26615,7 +26833,7 @@ class Store:
                 failure_diagnostic_summary, retry_after, retry_attempts, last_retry_class,
                 native_session_id, native_capabilities_json, native_child_summary_json,
                 allowed_ai_admission_json, allowed_ai_connection_receipt_json,
-                execution_binding_json, origin_scope_json,
+                execution_binding_json, origin_scope_json, runtime_bundle_json,
                 capacity_class,
                 capacity_available_json, capacity_required_json,
                 capacity_shortage_json, capacity_reservation_json,
@@ -26644,7 +26862,7 @@ class Store:
                 :retry_after, :retry_attempts, :last_retry_class,
                 :native_session_id, :native_capabilities_json, :native_child_summary_json,
                 :allowed_ai_admission_json, :allowed_ai_connection_receipt_json,
-                :execution_binding_json, :origin_scope_json,
+                :execution_binding_json, :origin_scope_json, :runtime_bundle_json,
                 :capacity_class,
                 :capacity_available_json, :capacity_required_json,
                 :capacity_shortage_json, :capacity_reservation_json,
@@ -26678,6 +26896,7 @@ class Store:
         worker_id: str,
         project_id: str,
         instruction: str,
+        invocation_executor_id: str = "",
     ) -> tuple[dict[str, Any], bool]:
         """Atomically create one queued native run and attach it to its provider request."""
 
@@ -26745,6 +26964,7 @@ class Store:
                 "native_session_id": "",
                 "native_capabilities_json": "{}",
                 "native_child_summary_json": "{}",
+                "runtime_bundle_json": json.dumps({"invocation_executor_id": invocation_executor_id}) if invocation_executor_id else None,
             }
             existing = conn.execute(
                 "SELECT * FROM runs WHERE run_id = ?", (run_id,)
@@ -26831,6 +27051,7 @@ class Store:
         continuation_contract: dict[str, Any] | None = None,
         continuation_context: dict[str, Any] | None = None,
         file_manifest: list[dict[str, Any]] | None = None,
+        invocation_executor_id: str = "",
         assignment_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Return an existing reservation or atomically guard and create it."""
@@ -26901,6 +27122,7 @@ class Store:
                 "native_capabilities_json": "{}",
                 "native_child_summary_json": "{}",
                 "_origin_trace": origin_trace,
+                "runtime_bundle_json": json.dumps({"invocation_executor_id": invocation_executor_id}) if invocation_executor_id else None,
                 "continuation_contract_json": json.dumps(
                     continuation_contract if isinstance(continuation_contract, dict) else {},
                     ensure_ascii=False,
@@ -29599,6 +29821,14 @@ class Store:
                     "result_digest": clean_result_digest,
                 },
                 now=now,
+            )
+            conn.execute(
+                """
+                DELETE FROM terminal_callback_reconciliations
+                WHERE run_id = ? AND state = ? AND ended_at = ? AND attempt_number = ?
+                  AND status = 'pending'
+                """,
+                (run_id, clean_state, clean_ended_at, clean_attempt_number),
             )
             conn.execute("COMMIT")
         return {**dict(row), "_inserted": existing is None}

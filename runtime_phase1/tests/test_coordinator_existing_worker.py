@@ -60,6 +60,23 @@ def test_dispatch_target_schema_and_legacy_receipt_are_exact():
             Dispatch(goal_id='goal', instruction='Exact', **target)
 
 
+def test_default_dispatch_preserves_original_goal_and_replays_one_assignment(existing):
+    core, cid, worker_id, _ = existing
+    command = Dispatch(goal_id='followup', worker_id=worker_id)
+    before = core.store.get_worker(worker_id)
+    first = core.dispatch('local', 'owner', cid, command)
+    assert first['state'] == 'queued'
+    assert core.store.get_run(first['run_id'])['instruction'] == 'Use the existing expert'
+    assert core.dispatch('local', 'owner', cid, command)['run_id'] == first['run_id']
+    assert core.store.get_worker(worker_id)['bootstrap_bundle_json'] == before['bootstrap_bundle_json']
+    with core.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 1
+        saved = json.loads(conn.execute('SELECT dispatch_json FROM coordinator_goals WHERE conversation_id=?', (cid,)).fetchone()[0])
+    assert saved == {'goal_id':'followup','worker_id':worker_id}
+    with pytest.raises(CoordinatorConflict):
+        core.dispatch('local', 'owner', cid, Dispatch(goal_id='followup', worker_id=worker_id, instruction='Replacement brief'))
+
+
 def test_identity_context_result_and_idempotency(existing):
     core, cid, worker_id, command = existing
     before = core.store.get_worker(worker_id)
@@ -220,8 +237,11 @@ def test_exact_library_version_bind_precedes_start(existing):
     assert core.store.get_worker(worker_id)['bootstrap_bundle_json']==before
 
 
-def test_http_and_mcp_share_exact_branch(existing):
+@pytest.mark.parametrize("explicit_instruction", [True, False])
+def test_http_and_mcp_share_exact_branch(existing, explicit_instruction):
     core,cid,worker_id,command=existing
+    if not explicit_instruction:
+        command = Dispatch(goal_id=command.goal_id, worker_id=worker_id)
     app=FastAPI()
     install_coordinator_routes(app,core,lambda request:('local',request.headers.get('x-owner','owner')),lambda *args:None)
     client=TestClient(app)
@@ -236,11 +256,12 @@ def test_http_and_mcp_share_exact_branch(existing):
     peers=SimpleNamespace(native_principal=lambda token:{'worker_id':'foreground'})
     server=native_coordinator_server(core,peers,'http://127.0.0.1:8766/v1/native/coordinator/')
     schema=next(tool for tool in asyncio.run(server.list_tools()) if tool.name=='coordinator_dispatch').inputSchema
-    assert set(schema['required'])=={'goal_id','instruction'}
+    assert set(schema['required'])=={'goal_id'}
     assert {'worker_id','route_id'}<=schema['properties'].keys()
     tool=server._tool_manager.get_tool('coordinator_dispatch')
     context=SimpleNamespace(request_context=SimpleNamespace(request=SimpleNamespace(headers={'authorization':'Bearer exact'})))
-    replay=tool.fn(goal_id=command.goal_id,instruction=command.instruction,worker_id=worker_id,ctx=context)
+    replay=tool.fn(goal_id=command.goal_id,worker_id=worker_id,ctx=context,
+                   **({'instruction':command.instruction} if explicit_instruction else {}))
     assert replay['run_id']==result.json()['run_id']
 
 

@@ -401,3 +401,40 @@ def test_coordinator_projection_uses_the_box_socket_bridge_when_bound_that_way()
     codex = tomllib.loads(projected["codex_config_append"])["mcp_servers"]["xperfect-coordinator"]
     assert codex["args"][2] == url and "url" not in codex
     assert "synthetic-token" not in projected["codex_config_append"]
+
+
+def test_docker_route_never_inherits_the_host_loopback_route(monkeypatch):
+    monkeypatch.delenv("XPERFECT_EXECUTION_PROFILE", raising=False)
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
+    monkeypatch.delenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", raising=False)
+    assert native_transport.worker_route() == "http://127.0.0.1:8766"
+    assert native_transport.worker_route(execution_mode="docker") is None
+    monkeypatch.setenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", "http://host.docker.internal:8080")
+    assert native_transport.worker_route(execution_mode="docker") == "http://host.docker.internal:8080"
+    assert native_transport.worker_route() == "http://127.0.0.1:8766"
+    monkeypatch.setenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", "http://outside.example:8080")
+    assert native_transport.worker_route(execution_mode="docker") is None
+
+
+def test_docker_context_binding_uses_scoped_route_before_minting(monkeypatch):
+    from unittest.mock import Mock
+    from workers_projects_runtime.worker_context_mcp import bind_native_tool_projection
+    from workers_projects_runtime.worker_configuration import ConfigurationError
+    monkeypatch.delenv("XPERFECT_EXECUTION_PROFILE", raising=False)
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
+    monkeypatch.delenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", raising=False)
+    peers = Mock()
+    peers.mint_native_session.return_value = "synthetic-scoped-context-token"
+    worker = {"worker_id": "worker", "execution_mode": "docker", "bootstrap_bundle_json": "{}"}
+    with pytest.raises(ConfigurationError):
+        bind_native_tool_projection(peers, dict(worker), {"run_id": "run"}, name="xperfect-context",
+            purpose="context", token_env="GLASSHIVE_CONTEXT_TOKEN", endpoint_path="/v1/native/context/")
+    peers.mint_native_session.assert_not_called()
+    monkeypatch.setenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", "http://host.docker.internal:8080")
+    projected = bind_native_tool_projection(peers, worker, {"run_id": "run"}, name="xperfect-context",
+        purpose="context", token_env="GLASSHIVE_CONTEXT_TOKEN", endpoint_path="/v1/native/context/")
+    bundle = json.loads(projected["bootstrap_bundle_json"])
+    entry = bundle["claude_project_mcp"]["mcpServers"]["xperfect-context"]
+    assert entry["url"] == "http://host.docker.internal:8080/v1/native/context/"
+    assert "127.0.0.1" not in bundle["codex_config_append"]
+    assert bundle["env"]["GLASSHIVE_CONTEXT_TOKEN"] == "synthetic-scoped-context-token"

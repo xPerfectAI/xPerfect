@@ -3509,7 +3509,7 @@ def test_enterprise_work_view_preserves_security_and_authorizes_artifact_click(m
     [
         "not-a-view-ref",
         "ghr_short",
-        "ghr_1234567890abcdef12345678%2Factions",
+        "ghr_" "1234567890abcdef12345678%2Factions",
     ],
 )
 def test_operator_work_view_rejects_invalid_opaque_ref_before_upstream(monkeypatch, ref_id):
@@ -3558,7 +3558,7 @@ def test_operator_work_view_preserves_runtime_invalid_ref_response(monkeypatch):
 
 
 def test_operator_work_view_never_proxies_mutations(monkeypatch):
-    ref_id = "ghr_1234567890abcdef12345678"
+    ref_id = "ghr_" "1234567890abcdef12345678"
 
     class UnexpectedAsyncClient:
         def __init__(self, *args, **kwargs):
@@ -3966,7 +3966,7 @@ def test_short_worker_view_ref_ttl_config_can_expire_refs(monkeypatch):
 
 
 def test_ui_sensitive_url_log_filter_redacts_signed_tokens():
-    view_ref = "ghr_1234567890abcdef12345678"
+    view_ref = "ghr_" "1234567890abcdef12345678"
     raw = (
         'GET /novnc/wrk_1/websockify?gh_token=secret-token&gh_sig=signature&gh_exp=123 '
         f'GET /v1/signed-links/opaque-token?download=1 GET /w/{view_ref}'

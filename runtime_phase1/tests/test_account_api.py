@@ -286,7 +286,7 @@ def conversation_orchestrator_payload(*, title: str = "Isolated parallel mission
 
 
 @pytest.fixture
-def account_client(tmp_path, monkeypatch):
+def account_client(tmp_path, monkeypatch, background_consumers_disabled):
     monkeypatch.setenv("WPR_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("VIVENTIUM_GLASSHIVE_SERVICE_ASSERTION_SECRET", ASSERTION_SECRET)
     monkeypatch.setenv("WPR_HOST_MISSION_SLOTS_PER_CLI", "8")
@@ -1336,8 +1336,16 @@ def test_work_detail_exposes_bounded_redacted_immutable_trace_and_artifact_refs(
     assert body["traceability"]["runtimeInvocations"] == []
     assert body["traceability"]["providerAuthorizationPreflights"] == []
     assert body["traceability"]["integrity"]["algorithm"] == "sha256-chain-v1"
-    assert body["traceability"]["integrity"]["eventCount"] >= 36
-    assert body["traceability"]["integrity"]["headSha256"].startswith("sha256:")
+    with store._connect() as conn:
+        trace_counts = dict(conn.execute(
+            "SELECT event_type,COUNT(*) FROM work_trace_events WHERE run_id=? GROUP BY event_type",
+            (run_id,),
+        ).fetchall())
+    assert trace_counts == {
+        "work.origin": 1, "lifecycle.attempt": 30, "capacity.observed": 1,
+        "callback.delivery": 2, "artifact.observed": 1,
+    }
+    assert body["traceability"]["integrity"]["eventCount"] == sum(trace_counts.values())
     assert body["traceability"]["integrity"]["headSha256"].startswith("sha256:")
     assert body["runRef"] == "run_sha256:" + hashlib.sha256(
         run_id.encode("utf-8")
@@ -4070,12 +4078,27 @@ def test_run_terminal_callback_marks_work_nonterminal_while_followup_is_queued(
         accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a"
     )
     source = store.get_run(record["current_run_id"])
-    followup = service.assign_run(
-        record["worker_id"],
-        "Queued sibling",
-        start_processor=False,
-        idempotency_key="callback-followup-sibling",
+    action_key = "callback-followup-sibling"
+    queued = account_client.post(
+        f"/v1/work/{accepted['workRef']}/actions", headers=account_headers(),
+        json={
+            "action": "queue", "instruction": "Queued sibling", "idempotencyKey": action_key,
+            "sourceContext": {
+                "version": 1, "originRef": record["origin_ref"],
+                "sourceEventId": "synthetic_queue_source", "sourceRevision": 1,
+                "surface": "telegram", "outputContract": {"mode": "inherit"},
+            },
+        },
     )
+    assert queued.status_code == 202, queued.text
+    followup = store.get_run(service.active_work_effect_run_id(record, idempotency_key=action_key))
+    association = account_client.post(
+        "/v1/callback-associations/verify", headers=account_headers(),
+        json={"originRef": record["origin_ref"], "workRef": accepted["workRef"],
+              "workerId": record["worker_id"], "runId": followup["run_id"]},
+    )
+    assert association.status_code == 200
+    assert association.json()["sourceActionKey"] == action_key
     completed = store.finalize_run(source["run_id"], "completed", output_text="First done")
     worker = store.get_worker(record["worker_id"])
     service._emit_callback(worker, "run.completed", run=completed, message="First done")
@@ -4089,11 +4112,11 @@ def test_run_terminal_callback_marks_work_nonterminal_while_followup_is_queued(
     assert payload["work_ref"] == accepted["workRef"]
     assert payload["work_state"] == "queued"
     assert payload["work_terminal"] is False
-    assert payload["callback_id"].startswith("cb_run_terminal_")
-    assert "result_state" not in payload
-    assert "result_revision" not in payload
-    assert "result_digest" not in payload
-    assert "result_ended_at" not in payload
+    assert payload["callback_id"].startswith("cb_terminal_")
+    assert payload["result_state"] == "completed"
+    assert payload["result_revision"] >= 1
+    assert payload["result_digest"].startswith("sha256:")
+    assert payload["result_ended_at"] == completed["ended_at"]
     assert source["run_id"] not in {
         row["run_id"] for row in store.list_terminal_runs_missing_callback_intent()
     }
@@ -4113,6 +4136,8 @@ def test_run_terminal_callback_marks_work_nonterminal_while_followup_is_queued(
     assert final_payload["result_state"] == "completed"
     assert final_payload["result_revision"] >= 1
     assert final_payload["result_digest"].startswith("sha256:")
+    replay = service._emit_callback(worker, "run.completed", run=completed, message="First done")
+    assert json.loads(replay["payload_json"]) == payload
 
 
 def test_active_work_dismiss_hides_terminal_card_without_deleting_history(account_client):
@@ -7591,3 +7616,247 @@ def test_action_projection_preserves_pending_native_input_restrictions(account_c
     assert actual.status_code == 200
     assert actual.json() == {"workRef": accepted.json()["workRef"],
         "state": "needs_input", "actions": ["resume", "stop"]}
+
+
+@pytest.mark.parametrize("processor_state", ["failed", "interrupted", "cancelled"])
+def test_work_stop_owns_processor_exit_before_stop_settlement(account_client, processor_state):
+    """A stopped provider exit cannot beat the stop owner's terminal transaction."""
+    accepted = account_client.post(
+        "/v1/delegations",
+        headers=account_headers(idempotency_key=f"stop-exit-{processor_state}"),
+        json=delegation_payload(title="Stop owns provider exit"),
+    ).json()
+    service = account_client.app.state.service
+    store = account_client.app.state.store
+    source = store.get_delegation(
+        accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a"
+    )
+    run_id = source["current_run_id"]
+    _truthfully_invoke_run(store, run_id, suffix=f"stop-exit-{processor_state}")
+    original = service.runtime.interrupt_worker
+    observed = []
+
+    def exit_before_settlement(*args, **kwargs):
+        observed.append(service._finalize_run_if_state(
+            run_id, "running", processor_state,
+            error_text="Provider process exited during its accepted stop",
+            **_exact_terminal_generation(store, run_id),
+        ))
+        return original(*args, **kwargs)
+
+    service.runtime.interrupt_worker = exit_before_settlement
+    response = account_client.post(
+        f"/v1/work/{accepted['workRef']}/actions",
+        headers=account_headers(),
+        json={"action": "stop", "idempotencyKey": f"stop-exit-action-{processor_state}"},
+    )
+    assert response.status_code == 202, response.text
+    assert observed == [None]
+    assert response.json()["state"] == "cancelled"
+    assert response.json().get("controlOutcome") != "terminal_won"
+    assert store.get_run(run_id)["state"] == "cancelled"
+    events = store.list_events(worker_id=source["worker_id"])
+    assert any(event["event_type"] == "run.cancelled" for event in events)
+    assert not any(event["event_type"] == "work.stop_completion_won" for event in events)
+
+
+def test_work_stop_keeps_other_worker_terminal_owner(account_client):
+    accepted = []
+    service = account_client.app.state.service
+    store = account_client.app.state.store
+    for label in ("stop-target", "independent"):
+        receipt = account_client.post(
+            "/v1/delegations", headers=account_headers(idempotency_key=label),
+            json=delegation_payload(title=label),
+        ).json()
+        source = store.get_delegation(receipt["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+        _truthfully_invoke_run(store, source["current_run_id"], suffix=label)
+        accepted.append((receipt, source))
+    target, other = accepted
+    original = service.runtime.interrupt_worker
+    observed = []
+
+    def independent_exit_during_stop(*args, **kwargs):
+        run_id = other[1]["current_run_id"]
+        observed.append(service._finalize_run_if_state(
+            run_id, "running", "failed", error_text="Independent provider failure",
+            **_exact_terminal_generation(store, run_id),
+        ))
+        return original(*args, **kwargs)
+
+    service.runtime.interrupt_worker = independent_exit_during_stop
+    response = account_client.post(
+        f"/v1/work/{target[0]['workRef']}/actions", headers=account_headers(),
+        json={"action": "stop", "idempotencyKey": "stop-only-target"},
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["state"] == "cancelled"
+    assert observed[0]["state"] == "failed"
+    assert store.get_run(other[1]["current_run_id"])["state"] == "failed"
+
+
+@pytest.mark.parametrize("claim_patch", [
+    {"compute_release_target_run_id": "unrelated-run"},
+    {"compute_release_target_started_at": "2000-01-01T00:00:00+00:00"},
+    {"compute_release_operation_id": "superseded-stop"},
+    {"compute_release_scope": "run"},
+    {"compute_release_kind": "cancel_run"},
+    {"compute_release_token": ""},
+])
+def test_work_stop_does_not_capture_exit_without_its_exact_claim(account_client, claim_patch):
+    accepted = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="stop-claim-mismatch"),
+        json=delegation_payload(title="Unowned exit remains independent"),
+    ).json()
+    service, store = account_client.app.state.service, account_client.app.state.store
+    source = store.get_delegation(accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    run_id = source["current_run_id"]
+    _truthfully_invoke_run(store, run_id, suffix="claim-mismatch")
+    original = service.runtime.interrupt_worker
+    observed = []
+
+    def exit_without_matching_stop(*args, **kwargs):
+        store.update_worker(source["worker_id"], **claim_patch)
+        observed.append(service._finalize_run_if_state(
+            run_id, "running", "failed", error_text="Independent provider exit",
+            **_exact_terminal_generation(store, run_id),
+        ))
+        return original(*args, **kwargs)
+
+    service.runtime.interrupt_worker = exit_without_matching_stop
+    service.stop_run(source["worker_id"], run_id)
+    assert observed[0]["state"] == "failed"
+    assert store.get_run(run_id)["state"] == "failed"
+
+
+def test_work_stop_recovers_deferred_exit_after_settlement_crash(account_client, monkeypatch):
+    accepted = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="stop-settlement-crash"),
+        json=delegation_payload(title="Stop recovery after provider exit"),
+    ).json()
+    service, store = account_client.app.state.service, account_client.app.state.store
+    source = store.get_delegation(accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    run_id = source["current_run_id"]
+    _truthfully_invoke_run(store, run_id, suffix="settlement-crash")
+    original_interrupt = service.runtime.interrupt_worker
+    original_finalize = store.finalize_worker_work_stop_claim
+
+    def interrupted(*args, **kwargs):
+        assert service._finalize_run_if_state(
+            run_id, "running", "failed", error_text="Stopped provider exited",
+            **_exact_terminal_generation(store, run_id),
+        ) is None
+        return original_interrupt(*args, **kwargs)
+
+    def crash_before_settlement(*args, **kwargs):
+        raise RuntimeError("Synthetic stop owner crash before settlement")
+
+    monkeypatch.setattr(service.runtime, "interrupt_worker", interrupted)
+    monkeypatch.setattr(store, "finalize_worker_work_stop_claim", crash_before_settlement)
+    pending = service.stop_run(source["worker_id"], run_id)
+    assert pending["confirmation_pending"] is True
+    assert store.get_run(run_id)["state"] == "running"
+    monkeypatch.setattr(store, "finalize_worker_work_stop_claim", original_finalize)
+    store.update_worker(source["worker_id"], compute_release_expires_at="2000-01-01T00:00:00+00:00")
+    recovered = service._recover_stop_run_claim(store.get_worker(source["worker_id"]), run_id)
+    assert recovered and recovered["target_transitioned"] is True
+    assert store.get_run(run_id)["state"] == "cancelled"
+    assert not store.get_worker(source["worker_id"])["compute_release_token"]
+    events = store.list_events(worker_id=source["worker_id"])
+    assert sum(e["event_type"] == "run.cancelled" for e in events) == 1
+
+
+@pytest.mark.parametrize("completed_late", [False, True])
+def test_provider_deadline_keeps_held_work_stop_terminal_owner(account_client, completed_late):
+    accepted = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="stop-provider-deadline"),
+        json=delegation_payload(title="Deadline during stop"),
+    ).json()
+    service, store = account_client.app.state.service, account_client.app.state.store
+    source = store.get_delegation(accepted["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    run_id = source["current_run_id"]
+    _truthfully_invoke_run(store, run_id, suffix="stop-deadline")
+    session = store.upsert_provider_session(
+        tenant_id="tenant-a", owner_id="owner-a", conversation_id="synthetic-conversation",
+        agent_id="synthetic-agent", model_id="codex-cli:synthetic-model",
+        project_id=source["project_id"], worker_id=source["worker_id"],
+        workspace_dir="synthetic-workspace", access_mode="workspace",
+    )
+    request, _ = store.create_provider_request(
+        tenant_id="tenant-a", owner_id="owner-a", session_id=session["session_id"],
+        idempotency_key="deadline", message_id="synthetic-message", stream_id="synthetic-stream",
+        requested_history_count=0, response_timeout_s=1,
+        response_deadline_at="2000-01-01T00:00:00+00:00",
+    )
+    store.update_provider_request(request["request_id"], run_id=run_id, state="running")
+    original = service.runtime.interrupt_worker
+    observations = []
+
+    def deadline_during_stop(*args, **kwargs):
+        if completed_late:
+            assert service._finalize_run_if_state(
+                run_id, "running", "completed", output_text="Completed during Stop",
+                **_exact_terminal_generation(store, run_id),
+            )["state"] == "completed"
+            store.update_provider_request(request["request_id"], state="completed")
+        observations.append(store.arbitrate_provider_request_deadline(
+            request["request_id"], default_timeout_s=1, failure_class="provider_response_deadline_exceeded",
+            failure_user_message="Response deadline", failure_recommended_recovery="retry",
+            failure_diagnostic_summary="Synthetic deadline during exact stop",
+        ))
+        return original(*args, **kwargs)
+
+    service.runtime.interrupt_worker = deadline_during_stop
+    stopped = service.stop_run(source["worker_id"], run_id)
+    assert observations[0]["deadline_exceeded"] is True
+    assert observations[0]["request"]["state"] == "failed"
+    assert observations[0]["run"]["state"] == ("completed" if completed_late else "running")
+    assert stopped["run"]["state"] == ("completed" if completed_late else "cancelled")
+    assert stopped["work_stop_outcome"] == ("completion_won" if completed_late else "cancelled")
+    if completed_late:
+        assert stopped["run"]["output_text"] == "Completed during Stop"
+        events = store.list_events(worker_id=source["worker_id"])
+        assert any(event["event_type"] == "work.stop_completion_won" for event in events)
+
+
+def test_coordinator_retained_goal_view_reuses_owned_read_only_link_after_roster_window(account_client, monkeypatch):
+    monkeypatch.setenv("GLASSHIVE_ACTIVE_WORK_TERMINAL_RECENT_PER_STATE", "1")
+    created = []
+    store = account_client.app.state.store
+    for index in range(2):
+        accepted = account_client.post("/v1/delegations", headers=account_headers(
+            idempotency_key=f"coordinator-retained-view-{index}"),
+            json=delegation_payload(title=f"Retained result {index}"))
+        assert accepted.status_code == 202
+        work_ref = accepted.json()["workRef"]
+        created.append(work_ref)
+        record = store.get_delegation(work_ref, tenant_id="tenant-a", owner_id="owner-a")
+        store.finalize_run(record["current_run_id"], "completed", output_text="Synthetic completed result")
+    foreign = account_client.post("/v1/delegations", headers=account_headers(
+        owner_id="owner-b", idempotency_key="coordinator-foreign-view"),
+        json=delegation_payload(title="Foreign result")).json()["workRef"]
+    roster = account_client.get("/v1/active-work", headers=account_headers()).json()
+    assert created[0] not in {row["workRef"] for row in roster["work"]}
+
+    def retained_snapshot(tenant, owner, cid, include_history):
+        assert (tenant, owner) == ("tenant-a", "owner-a")
+        return {"conversation_id": cid, "goals": [
+            {"goal_id": "retained", "work_ref": created[0]},
+            {"goal_id": "foreign", "work_ref": foreign},
+            {"goal_id": "self-handled", "work_ref": ""},
+        ]}
+
+    monkeypatch.setattr(account_client.app.state.coordinator, "refresh", retained_snapshot)
+    response = account_client.get("/v1/coordinator/conversations/owned-conversation?include_history=false",
+                                  headers=account_headers())
+    assert response.status_code == 200
+    retained, denied, self_handled = response.json()["goals"]
+    assert retained["view_ref"].startswith("http://testserver/w/ghr_")
+    assert "view_ref" not in denied and "view_ref" not in self_handled
+    view_path = urlsplit(retained["view_ref"]).path
+    assert account_client.get(view_path).status_code == 200
+    assert account_client.post(view_path + "/actions/terminate").status_code == 403
+    monkeypatch.setattr(api_module, "sign_link_token", lambda **kwargs: None)
+    unavailable = account_client.get("/v1/coordinator/conversations/owned-conversation?include_history=false",
+                                     headers=account_headers()).json()
+    assert all("view_ref" not in goal for goal in unavailable["goals"])

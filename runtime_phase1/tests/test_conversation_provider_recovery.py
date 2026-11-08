@@ -113,6 +113,42 @@ def test_result_lookup_is_read_only_and_owner_scoped(tmp_path, monkeypatch):
     assert _result(client, "0" * 64).status_code == 409
 
 
+def test_result_lookup_exposes_current_budget_without_mutation(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload(tmp_path)
+    payload['metadata'].update({
+        'main_context_protocol': 'main_context_v1', 'main_context_owner': 'core',
+        'stable_authority_sha256': 'a' * 64, 'main_context_epoch': 'c' * 64,
+        'main_context_snapshot_sha256': 'b' * 64, 'continuity_domain_id': 'd' * 64,
+        'continuity_agent_id': 'agent-main', 'logical_turn_id': 'turn-a',
+        'visible_message_chain': [{'id': 'source-a', 'role': 'user',
+            'sha256': hashlib.sha256(b'Hello from LIFE.').hexdigest(),
+            'accepted_source': True, 'current_input': True}],
+    })
+    response, digest = _post_bound(client, payload)
+    assert response.status_code == 200, response.text
+    store = client.app.state.store
+    record = store.get_provider_request(response.json()['id'])
+    session = store.get_provider_session_by_id(record['session_id'])
+    manifest = json.loads(session['context_manifest_json'])
+    decision = json.loads(record['replay_decision_json'])
+    assert decision['context_epoch'] == 'c' * 64
+    assert manifest['stable_authority_sha256'] == 'a' * 64
+    before = dict(session)
+    result = _result(client, digest)
+    assert result.status_code == 200
+    budget = result.json()['native_history_budget_v1']
+    assert budget['model_id'] == session['model_id']
+    assert budget['stable_authority_sha256'] == 'a' * 64
+    from workers_projects_runtime.conversation_provider import _native_history_budget_receipt
+    model = client.app.state.conversation_provider._model(session['model_id'],
+        tenant_id=record['tenant_id'], owner_id=record['owner_id'])
+    assert budget == _native_history_budget_receipt(model, manifest)
+    assert budget['replay_budget_bytes'] > 0
+    assert store.get_provider_session_by_id(record['session_id']) == before
+    assert _result(client, digest, headers={'X-Viventium-User-Id': 'foreign'}).status_code == 404
+
+
 @pytest.mark.parametrize("state", ["queued", "running", "failed", "cancelled"])
 def test_unsuccessful_or_pending_result_never_contains_answer(tmp_path, monkeypatch, state):
     # This is a deliberately corrupt receipt snapshot, not a queued-work

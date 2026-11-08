@@ -196,12 +196,31 @@ Conversation broker bearer authority is run-local memory, not persisted worker b
 metadata. Initial admission attaches the durable provider request and run atomically before starting
 compute. An exact retry can refresh the lost bearer only after the stored request authority matches;
 changed authority requires a new logical turn. Refresh keeps the accepted run and instructions.
+Broker and catalog grant IDs and expiry are renewable identity, so request equality excludes those
+fields only. Catalog tools, schemas, descriptions, server names, URLs and scope remain authoritative.
+Native launch still rejects expired or mismatched grants independently of request equality.
 The exact invocation bundle is staged in memory before a new queued run is published, including
 provider-request and idempotent run identities. The memory condition is released before store
 publication. Failed creation removes only its staged bundle; a consumed bundle is not reattached.
 Existing reservations use the current-state grant attachment gate, so an active provider invocation
 cannot have its authority replaced by a duplicate assignment. Assignment does not reopen a current
 `needs_input` run; explicit authorization retries retain their existing reopen policy.
+Every broker-backed conversation uses this rule, including normal descriptors without an
+`authority_kind` field and both full-access and coordination-only native execution. Before
+reserving capacity or claiming the queued row, each consumer verifies the invocation's executor.
+One credential-free executor ID uses the existing run-scoped execution-context field; it is bound
+atomically with queue publication and is removed before bootstrap or model input. Grants remain
+process-local memory. The claim also binds the inspected run ID, so a competing claim cannot
+advance it to another unowned turn. An exact authorized retry may transfer a queued, unleased
+invocation to the API process that receives its fresh bundle. An accepted turn without a grant
+uses the existing bounded authorization wait and cannot execute. A legacy unbound row requires
+a complete local invocation; a missing owner alone does not prove that a run is orphaned.
+During graceful shutdown, only this executor's still-bound, still-queued broker invocations without
+an active lease become `conversation_capability_grant_required`. The existing provider receipt
+owner records the recoverable failure. A fresh authenticated replay must match the original source
+and authority before restoring that exact never-started run, including persistent sessions.
+Claimed, running and foreign queued work stay untouched by this cleanup. An abrupt crash does not
+provide that ownership proof; it still requires exact replay or the existing request deadline.
 
 Parallel clean-room runs carry the required capability broker grant and optional native peer and
 context grants through the same exact-generation tmpfs files. The launcher uses the shared
@@ -210,6 +229,15 @@ effect, and records every projected key for the existing exit/cancellation scrub
 binders still own each grant's worker/run identity, scope, expiration and revocation; transport
 does not mint authority or persist bearer values. A partial write or failed post-write attestation
 uses the same exact-generation cleanup; a replacement generation is never cleared.
+
+Native context and schedule tool projection selects its transport by execution mode. Host workers
+keep `GLASSHIVE_PEER_RUNTIME_BASE_URL`; desktop Docker workers require the separately configured
+`GLASSHIVE_DOCKER_RUNTIME_BASE_URL`. They never inherit host loopback. Packaged workers retain their
+private socket transport. A missing Docker route fails before minting a native session. A client's
+existing scoped broker may relay only the exact native context and schedule paths; the runtime
+still validates each attempt's bearer and lifecycle. Model errors encoded as a native provider
+control message retain their typed code, including the Codex API-body envelope without an outer
+HTTP status. Model access failures remain non-retryable and do not enable automatic failover.
 
 Restricted Codex setup renders its broker descriptor without a bearer. The existing launch policy
 check requires the current run's bearer and an exact match to the restricted configuration before
@@ -422,12 +450,28 @@ Preopen inventory notifications are retained in a bounded buffer keyed by the na
 The selected model and effort remain unchanged. Ordinary unrestricted conversations retain their
 existing session and tool behavior.
 
-Claude restrictions use the advertised safe mode, an empty native tool list and strict empty MCP
-configuration. The selected account, model, effort and explicit developer authority stay intact.
-Private native context placement and saved selectors are neither materialized nor applied to this
-restricted command. Automatic workspace instructions, skills, hooks, memory and browser access are disabled. Native
-structured output may expose its `StructuredOutput` formatter; it grants no general action or file
-tool. The fresh private workspace and stateless execution remain required.
+Claude restrictions disable built-in action tools, workspace instructions, skills, hooks,
+automatic memory and browser access. Without a declared broker they use advertised safe mode
+and strict empty MCP. A declared broker keeps only its signed, current, metadata-bound catalog;
+its tools receive explicit native allow rules. Safe mode cannot be used for that case because it
+also disables explicitly admitted MCP. No unrelated MCP server is inherited. Stable workspace
+preparation contains descriptors and environment references, never a run bearer; the actual
+invocation must supply its fresh bearer. Model, effort and developer authority stay explicit.
+The default remains a fresh private workspace and stateless execution.
+
+An explicitly signed `provider_capabilities.conversation_process_reuse: true` supports retained
+host Claude conversations with `native_tools: false` and persistent provider sessions. Other
+harnesses, unrestricted tools and stateless requests reject this opt-in. The installed native
+account is supported; selected Connected Accounts with per-run leases reject reuse before
+acquiring that lease. A retained process never extends or bypasses a credential lease.
+Its existing admission owner sends only unaccepted conversation sources after the first turn;
+the action-tool restriction alone does not force another full replay. Native epoch changes,
+source revisions, policy changes and unaccepted attempts retain their existing replay fences.
+The application controls the private project source: its `.claude` tree may contain only the
+explicit application output style. Settings files, extra styles and symlinks are rejected.
+This preserves the existing native-sign-in no-file-settings invariant even though native style
+discovery requires the project source. Managed policy remains effective.
+Native structured output may expose its `StructuredOutput` formatter; that formatter grants no general action or file tool.
 
 Codex restrictions without a declared broker use strict configuration, empty MCP, a fresh private
 workspace, ephemeral execution and disabled native action features and goals. Its native

@@ -1289,12 +1289,22 @@ def _decoded_native_provider_error(value: object) -> dict[str, Any] | None:
         decoded = json.loads(value)
     except (json.JSONDecodeError, RecursionError):
         return None
-    if not isinstance(decoded, dict) or decoded.get("type") != "error":
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("error"), dict):
         return None
     status = _safe_http_status(decoded.get("status"))
-    if status is None or status < 400 or not isinstance(decoded.get("error"), dict):
-        return None
-    return {**decoded, "api_error_status": status}
+    if decoded.get("type") == "error" and status is not None and status >= 400:
+        return {**decoded, "api_error_status": status}
+    # Codex also wraps the API error body without an outer type or HTTP status.
+    error = decoded["error"]
+    if (
+        "type" not in decoded and "status" not in decoded
+        and isinstance(decoded.get("detail"), str)
+        and isinstance(error.get("message"), str)
+        and error.get("type") == "invalid_request_error"
+        and _normalized_structured_code(error.get("code")) in _STRUCTURED_PROVIDER_MODEL_CODES
+    ):
+        return decoded
+    return None
 
 
 def _structured_provider_signals(*texts: str) -> tuple[set[int], set[str]]:

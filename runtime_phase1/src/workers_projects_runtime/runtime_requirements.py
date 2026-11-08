@@ -166,7 +166,7 @@ def host_runtime_requirements_for(profile: str, runtime_name: str) -> list[dict[
     payload = _load_requirements_payload()
     requirements: list[dict[str, Any]] = []
     if isinstance(payload, dict):
-        for key in (profile, runtime_name, "*"):
+        for key in dict.fromkeys((profile, runtime_name, "*")):
             value = payload.get(key)
             if isinstance(value, dict):
                 requirements.append(value)

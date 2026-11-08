@@ -59,36 +59,36 @@ clear user need requires a change; keep the shared shell and control behavior co
 
 **xPerfect Editorial Gouache v1** (`xperfect-editorial-gouache-v1`) is the approved artwork
 direction: painterly editorial illustration with expressive gouache-like brushwork and bold
-colour blocking. The [approved visual reference](assets/editorial-gouache-v1-reference.webp)
-is an original generated illustration of a fictional AI persona. It does not depict an employee
-or imply credentials or endorsement. The complete five-character bundled set uses this style;
-runtime portraits are separately optimized assets verified in their actual cards. Future
+colour blocking. The [five bundled painted-tool illustrations and their provenance](../frontends/glass-drive-ui/src/glass_drive_ui/static/experts/README.md)
+are the approved subject direction. Each uses recognizable tools or working objects to express
+its role, without human faces, bodies or invented people. The complete set uses this style;
+runtime artwork uses separately optimized assets verified in the actual cards. Future
 replacements use normal asset delivery and affected UI checks. This baseline governs bundled expert artwork;
 preserve user-supplied branding and identity rather than replacing it automatically.
 
 Keep these properties consistent across subjects:
 
-- Opaque painted colour planes, visible brush texture and subtle paper grain. Facial forms stay
+- Opaque painted colour planes, visible brush texture and subtle paper grain. Objects stay
   visibly illustrated at small sizes; avoid photographic rendering or a texture over a photo.
-- A mature, expressive treatment with natural proportions and a clear silhouette. Avoid mascot
-  proportions, toy-like gloss and unnecessary props.
+- A mature, expressive treatment with recognizable tools and a clear silhouette. Avoid mascots,
+  toy-like gloss, anthropomorphic faces and unnecessary objects.
 - Use a coherent colour family with graphite, warm ivory and restrained gold, plus muted warm
   or cool accents. Vary the dominant hue, colour balance, background geometry and clear space
-  across the set. Each portrait can use a different subset of the family. Artwork colours do
+  across the set. Each illustration can use a different subset of the family. Artwork colours do
   not replace semantic UI tokens.
-- A square head-and-shoulders crop with clear margins, readable at 88 px and 80 px. Keep labels,
+- A square still-life composition with clear margins, readable at 88 px and 80 px. Keep labels,
   capabilities and text in the UI rather than painting them into an asset.
 
-The reference governs medium, brushwork, texture, abstraction and finish. Colour balance and
-background arrangement vary within the family. Keep the shared square portrait framing and
+The style governs medium, brushwork, texture, abstraction and finish. Colour balance and
+background arrangement vary within the family. Keep the shared square framing and
 readable small crops.
 
-Keep the subject description separate from the style specification. The reference does not
-prescribe the person's identity, hair, clothing, pose, gaze or expression. Specify those choices
-separately for each subject.
+Keep the subject description separate from the style specification. Select the role's tools,
+their arrangement and the dominant colour separately for each subject. Bundled titles use the
+role alone; do not add a fictional person's name.
 Use a style reference and a subject reference for their distinct purposes when both are supplied.
-Judge new assets against the reference in the actual card crops and both themes, then assess the
-whole set: distinct people that look painted by the same hand. A style name
+Judge new assets against the approved set in the actual card crops and both themes, then assess the
+whole set: distinct tools that look painted by the same hand. A style name
 alone does not guarantee matching output. Record generation settings when exposed, keep working
 prompts private, and introduce a new style version when the approved direction changes.
 
@@ -1171,6 +1171,7 @@ Files downloads bind the selected revision and abort if the open file changes du
 Unlimited logical-storage admission does not scan retained work for an unused total. Upload reservation, transfer checks, and accepted-input copy reservation still validate the storage adapter and owner policy. Finite logical limits and native hard quotas retain their existing accounting and guards. The storage display always computes actual usage; canonical root ancestry prevents double counting without comparing every prior workspace.
 
 
+
 ## Run and Watch status readback
 
 Run shows the worker and its account beside the workspace choice before Advanced settings. A
@@ -1278,12 +1279,12 @@ failure notice. Finished work stays result-first, with its technical log availab
 ## Starting with a professional AI Worker
 
 Run Project presents **Experts** and **My experts** before the job form. Lead each bundled expert
-card with the profession or function; show its optional human name as secondary information. Keep one short
+card with the profession or function alone, including its accessible selection label. Keep one short
 outcome sentence visible. Included knowledge and abilities belong inside the existing **What’s
 included** disclosure, with setup and optional tools, so the gallery stays easy to scan.
 
-The five bundled portraits are generated fictional AI personas, not employees, credentials or
-endorsements. Their assets and factual provenance belong in
+The five bundled illustrations use painted tools and working objects, with no human faces or
+fictional person names. Their assets and factual provenance belong in
 `frontends/glass-drive-ui/src/glass_drive_ui/static/experts/README.md`. Keep the displayed crops
 clear at 88 px on desktop and 80 px on narrow screens, in both themes, with dimensions reserved
 before loading. Keep the five optimized local assets together below 100 KB. Text stays on the
@@ -1293,11 +1294,11 @@ focus remain distinct from decorative accents.
 Stable catalog IDs map presentation assets only; names, list order and request wording must not
 assign an asset or change execution. Custom saved experts keep their supplied name as the title;
 their free-form worker role stays inside details. If no known asset exists or an image fails, use
-the neutral non-letter fallback without guessing a profession or inventing an identity. Creative
+the neutral ability-pack symbol without guessing a profession or inventing a person. Creative
 working records and detailed generation instructions remain private.
 
 Keep clear space between shared navigation and the gallery: about 44 px on desktop and 30 px on
-narrow screens. Portraits reserve their dimensions before loading. Avoid large decorative banners,
+narrow screens. Illustrations reserve their dimensions before loading. Avoid large decorative banners,
 extra frameworks or persistent skill lists that push the job form farther away.
 
 **My experts** uses the existing saved worker setup records. **Save as expert** and **Start from

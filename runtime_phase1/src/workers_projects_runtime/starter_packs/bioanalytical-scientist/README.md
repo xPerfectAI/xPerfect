@@ -1,4 +1,4 @@
-# Theo · Bioanalytical Scientist
+# Bioanalytical Scientist
 
 Turn lab exports and company methods into a traceable assay-quality report.
 

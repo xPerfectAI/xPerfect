@@ -39,9 +39,9 @@ def native_coordinator_server(coordinator, peers, endpoint: str):
         return coordinator.accept_native_goals(principal(ctx), goals)
 
     @server.tool(name="coordinator_dispatch", description=descriptions["coordinator_dispatch"])
-    def dispatch(goal_id: str, instruction: str, ctx: Context, route_id: str = "", worker_id: str = ""):
+    def dispatch(goal_id: str, ctx: Context, route_id: str = "", worker_id: str = "", instruction: str | None = None, guidance: str | None = None):
         return coordinator.dispatch(*identity(ctx), Dispatch(goal_id=goal_id, route_id=route_id,
-                                                            worker_id=worker_id, instruction=instruction))
+                                                            worker_id=worker_id, instruction=instruction, guidance=guidance))
 
     @server.tool(name="coordinator_status", description=descriptions["coordinator_status"])
     def status(ctx: Context):

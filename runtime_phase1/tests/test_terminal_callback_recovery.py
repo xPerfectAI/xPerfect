@@ -13,11 +13,14 @@ from test_account_api import (
 
 
 @pytest.fixture(autouse=True)
-def manual_transport_owner(monkeypatch):
+def manual_transport_owner(monkeypatch, account_client):
     # These recovery-CAS tests dispatch explicitly. Periodic startup/replay must
     # not race the synthetic retained rows or use a real callback receiver.
     from workers_projects_runtime.service import WorkersProjectsService
     monkeypatch.setattr(WorkersProjectsService, "start_background_consumers", lambda self: None)
+    # Admit only the explicit sends below; the shared API fixture has already
+    # disabled startup consumers, and each send uses a captured executor.
+    account_client.app.state.service._background_consumers_enabled = True
 
 
 def retained_result(client):

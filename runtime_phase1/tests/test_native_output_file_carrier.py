@@ -10,7 +10,10 @@ from workers_projects_runtime import profile_runtime
 from workers_projects_runtime.openclaw_runtime import StubRuntime
 from test_conversation_provider import AUTH, _client, _payload, lifecycle_owned_test_clients
 from test_conversation_provider_recovery import _post_bound, _result
-from test_account_api import account_client, account_headers, delegation_payload_with_origin, _truthfully_invoke_run
+from test_account_api import (
+    _exact_terminal_generation, _truthfully_invoke_run, account_client, account_headers,
+    delegation_payload_with_origin,
+)
 from test_native_media import JPEG
 
 
@@ -149,6 +152,188 @@ def test_canonical_native_files_keep_selected_names_verified_bytes_and_exact_rec
     assert _result(client, digest).json()['response'] == canonical
     duplicate, _ = _post_bound(client, payload)
     assert duplicate.json() == canonical and runtime.calls == 1
+
+
+@pytest.mark.parametrize("keep_valid_file", [True, False])
+def test_unavailable_selected_file_does_not_drop_completed_mission(
+    account_client, tmp_path, monkeypatch, keep_valid_file,
+):
+    service = account_client.app.state.service
+    service.executor.submit = lambda *_a, **_k: None
+    store = account_client.app.state.store
+    monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "synthetic-completion-secret")
+    monkeypatch.setenv("GLASSHIVE_LINK_REF_STATE_PATH", str(tmp_path / "links.sqlite3"))
+    monkeypatch.setenv("GLASSHIVE_ARTIFACT_BASE_URL", "http://testserver")
+    response = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="unavailable-mission-file"),
+        json=delegation_payload_with_origin(),
+    )
+    assert response.status_code == 202, response.text
+    work = store.get_delegation(response.json()["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    run = _truthfully_invoke_run(store, work["current_run_id"], suffix="unavailable-mission-file")
+    workspace = tmp_path / "mission-workspace"
+    workspace.mkdir()
+    worker = store.update_worker(work["worker_id"], workspace_dir=str(workspace))
+    native = profile_runtime.HostCodexCliRuntime(base_dir=str(tmp_path / "native"))
+    service.runtime = native
+    valid = b"item,value\nAster,10\n"
+    blocked = b"synthetic rejected publication"
+    (workspace / "result.csv").write_bytes(valid)
+    (workspace / "blocked.txt").write_bytes(blocked)
+    scope = {
+        "run_id": run["run_id"], "worker_id": worker["worker_id"], "owner_id": worker["owner_id"],
+        "workspace_dir": str(workspace), "attempt_id": run["active_attempt_id"],
+        "file_output_transport": "artifact_sha256",
+    }
+    native._capture_native_output_files(
+        {**worker, "_run_attempt_id": run["active_attempt_id"]},
+        str(workspace), scope, run["run_id"],
+        "[Blocked](blocked.txt)\n[Result](result.csv)" if keep_valid_file else "[Blocked](blocked.txt)",
+    )
+    unavailable_digest = hashlib.sha256(blocked).hexdigest()
+    valid_digest = hashlib.sha256(valid).hexdigest()
+    sign = service._signed_artifact_download_url
+    monkeypatch.setattr(service, "_signed_artifact_download_url", lambda worker, path:
+        "" if unavailable_digest in path else sign(worker, path))
+    output = (
+        f"Completed the work.\n[Missing](artifact_sha256:{'a' * 64})\n"
+        f"[Blocked](artifact_sha256:{unavailable_digest})"
+    )
+    if keep_valid_file:
+        output += f"\n[Result](artifact_sha256:{valid_digest})"
+    run = store.finalize_run(run["run_id"], "completed", output_text=output)
+
+    intent = service._emit_callback(worker, "run.completed", run=run, submit_delivery=False)
+    body = json.loads(intent["payload_json"])
+    assert body["result_state"] == "completed"
+    assert body["output_files"]["rejected"] == [{"name": "File", "code": "unreadable"}]
+    assert "Completed the work." in body["message"]
+    assert "File unavailable" in body["message"]
+    assert "artifact_sha256:" not in body["message"]
+    assert str(workspace) not in intent["payload_json"]
+    files = body["output_files"]["files"]
+    assert [file["filename"] for file in files] == (["result.csv"] if keep_valid_file else [])
+    if files:
+        assert account_client.get(files[0]["download_url"]).content == valid
+    assert store.get_run(run["run_id"])["output_text"] == output
+    assert service._emit_callback(worker, "run.completed", run=run, submit_delivery=False)["payload_json"] == intent["payload_json"]
+
+
+def test_recovery_enqueues_new_origin_only_completion_and_leaves_legacy_run_alone(
+    account_client, monkeypatch,
+):
+    from workers_projects_runtime.store import Store
+
+    service = account_client.app.state.service
+    service.executor.submit = lambda *_a, **_k: None
+    store = account_client.app.state.store
+    monkeypatch.setenv("GLASSHIVE_EVENTS_WEBHOOK_URL", "https://callback.example.invalid/events")
+    monkeypatch.setenv("GLASSHIVE_EVENTS_HMAC_SECRET", "synthetic-recovery-secret")
+    runs = {}
+    for kind in ("retained", "legacy"):
+        origin = f"ghi_synthetic_origin_{kind}"
+        payload = delegation_payload_with_origin(origin_ref=origin)
+        payload["bootstrapBundle"]["callbacks"] = {"origin_ref": origin}
+        accepted = account_client.post(
+            "/v1/delegations", headers=account_headers(idempotency_key=f"callback-recovery-{kind}"),
+            json=payload,
+        )
+        assert accepted.status_code == 202, accepted.text
+        work = store.get_delegation(accepted.json()["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+        run = _truthfully_invoke_run(store, work["current_run_id"], suffix=kind)
+        if kind == "retained":
+            runs[kind] = service._finalize_run_if_state(
+                run["run_id"], "running", "completed", output_text="Stored result.",
+                **_exact_terminal_generation(store, run["run_id"]),
+            )
+        else:
+            runs[kind] = store.finalize_run(run["run_id"], "completed", output_text="Legacy result.")
+    retained = runs["retained"]
+    assert retained is not None
+    reopened = Store(store.db_path)
+    assert [row["run_id"] for row in reopened.list_terminal_runs_missing_callback_intent()] == [retained["run_id"]]
+
+    def terminal_callbacks(run):
+        return [
+            row for row in store.list_callback_outbox_for_run(
+                run["run_id"], tenant_id="tenant-a", owner_id="owner-a",
+            )
+            if row["event_type"] == "run.completed"
+        ]
+
+    assert not terminal_callbacks(retained)
+    with monkeypatch.context() as failure:
+        def temporary_error(*_args, **_kwargs):
+            raise OSError("temporary publisher error")
+
+        failure.setattr(service, "_emit_callback", temporary_error)
+        assert service._reconcile_terminal_callback_intents() == 0
+    assert service._reconcile_terminal_callback_intents() == 1
+    assert service._reconcile_terminal_callback_intents() == 0
+    rows = terminal_callbacks(retained)
+    assert len(rows) == 1
+    body = json.loads(rows[0]["payload_json"])
+    assert body["result_revision"] == retained["terminal_result_revision"]
+    assert body["result_digest"] == Store.terminal_result_digest(retained)
+    assert body["message"] == "Stored result."
+    assert not terminal_callbacks(runs["legacy"])
+
+
+def test_delegation_accepts_original_input_that_quotes_an_artifact_reference(account_client):
+    payload = delegation_payload_with_origin()
+    original = f"Explain this example link: [Example](artifact_sha256:{'b' * 64})."
+    payload["instruction"] = original
+    response = account_client.post(
+        "/v1/delegations", headers=account_headers(idempotency_key="artifact-reference-in-original"),
+        json=payload,
+    )
+    assert response.status_code == 202, response.text
+    store = account_client.app.state.store
+    work = store.get_delegation(response.json()["workRef"], tenant_id="tenant-a", owner_id="owner-a")
+    assert store.get_run(work["initial_run_id"])["instruction"] == original
+    callbacks = store.list_callback_outbox_for_run(
+        work["initial_run_id"], tenant_id="tenant-a", owner_id="owner-a",
+    )
+    assert [row["event_type"] for row in callbacks] == ["run.queued"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_full_host_outside_selection_keeps_canonical_downloads_and_exact_replay(tmp_path, monkeypatch, stream):
+    external = tmp_path.parent / (tmp_path.name + "-outside")
+    external.mkdir()
+    paths = [external / "report.csv", external / "copy.csv"]
+    data = b"name,value\nexample,7\n"
+    for path in paths:
+        path.write_bytes(data)
+    output = "\n".join(f"[File](<{path}>)" for path in paths)
+    client, runtime, _ = prepare(tmp_path, monkeypatch, authored_output=output)
+    payload = _payload(tmp_path, stream=stream)
+    payload["metadata"]["glasshive_options"]["access"] = "full"
+    response, digest = _post_bound(client, payload)
+    assert response.status_code == 200, response.text
+    canonical = _result(client, digest).json()["response"]
+    carrier = canonical["glasshive"]["output_files"]
+    assert {file["filename"] for file in carrier["files"]} == {path.name for path in paths}
+    assert not carrier.get("rejected")
+    assert str(external) not in json.dumps(canonical)
+    for path in paths:
+        path.unlink()
+    for file in carrier["files"]:
+        assert file["sha256"] == hashlib.sha256(data).hexdigest()
+        assert client.get(file["download_url"]).content == data
+    duplicate, _ = _post_bound(client, payload)
+    assert runtime.calls == 1
+    if stream:
+        # Transient live activity is not part of the canonical replay carrier.
+        for current in (response, duplicate):
+            chunks = [json.loads(row[6:]) for row in current.text.splitlines() if row.startswith("data: {")]
+            files = [choice["delta"]["provider_specific_fields"]["viventium"]["output_files"]
+                     for row in chunks for choice in row.get("choices", [])
+                     if "output_files" in choice.get("delta", {}).get("provider_specific_fields", {}).get("viventium", {})]
+            assert files == [carrier]
+    else:
+        assert duplicate.json() == canonical
+    assert _result(client, digest).json()["response"] == canonical
 
 
 def test_recognized_image_names_remain_distinct_and_replay_exactly(tmp_path, monkeypatch):
@@ -316,6 +501,25 @@ def test_rejected_selected_file_keeps_answer_terminal_carrier_and_exact_recovery
     assert runtime.calls == 1
 
 
+@pytest.mark.parametrize("callback_author", [True, False])
+def test_missing_file_reference_keeps_authored_answer_and_typed_rejection(
+    tmp_path, monkeypatch, callback_author,
+):
+    client, runtime, _ = prepare(
+        tmp_path, monkeypatch,
+        authored_output=f"Result verified. [Missing](artifact_sha256:{'c' * 64})",
+    )
+    headers = {"X-Viventium-Actor-Kind": "system", "X-Viventium-Origin": "callback"} if callback_author else {}
+    response, digest = _post_bound(client, _payload(tmp_path), headers=headers)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["choices"][0]["message"]["content"] == "Result verified. [File unavailable]"
+    assert result["glasshive"]["output_files"]["files"] == []
+    assert result["glasshive"]["output_files"]["rejected"] == [{"name": "File", "code": "unreadable"}]
+    assert _result(client, digest, headers=headers).json()["response"] == result
+    assert runtime.calls == 1
+
+
 @pytest.mark.parametrize('stream', [False, True])
 @pytest.mark.parametrize('missing', [('message_id',), ('stream_id',), ('message_id', 'stream_id')])
 def test_identityless_selected_transfer_preserves_consultant_without_export(
@@ -400,40 +604,28 @@ def test_selected_file_escapes_survive_selection_and_both_artifact_renderers(
     assert runtime.calls == 1
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_full_host_outside_selection_keeps_canonical_downloads_and_exact_replay(tmp_path, monkeypatch, stream):
-    external = tmp_path.parent / (tmp_path.name + "-outside")
-    external.mkdir()
-    paths = [external / "report.csv", external / "copy.csv"]
-    data = b"name,value\nexample,7\n"
-    for path in paths:
-        path.write_bytes(data)
-    output = "\n".join(f"[File](<{path}>)" for path in paths)
-    client, runtime, _ = prepare(tmp_path, monkeypatch, authored_output=output)
-    payload = _payload(tmp_path, stream=stream)
-    payload["metadata"]["glasshive_options"]["access"] = "full"
-    response, digest = _post_bound(client, payload)
-    assert response.status_code == 200, response.text
-    canonical = _result(client, digest).json()["response"]
-    carrier = canonical["glasshive"]["output_files"]
-    assert {file["filename"] for file in carrier["files"]} == {path.name for path in paths}
-    assert not carrier.get("rejected")
-    assert str(external) not in json.dumps(canonical)
-    for path in paths:
-        path.unlink()
-    for file in carrier["files"]:
-        assert file["sha256"] == hashlib.sha256(data).hexdigest()
-        assert client.get(file["download_url"]).content == data
-    duplicate, _ = _post_bound(client, payload)
-    assert runtime.calls == 1
-    if stream:
-        # Transient live activity is not part of the canonical replay carrier.
-        for current in (response, duplicate):
-            chunks = [json.loads(row[6:]) for row in current.text.splitlines() if row.startswith("data: {")]
-            files = [choice["delta"]["provider_specific_fields"]["viventium"]["output_files"]
-                     for row in chunks for choice in row.get("choices", [])
-                     if "output_files" in choice.get("delta", {}).get("provider_specific_fields", {}).get("viventium", {})]
-            assert files == [carrier]
+@pytest.mark.parametrize('failure', ['link_unavailable', 'storage_io'])
+def test_publication_failure_keeps_answer_and_captured_source_without_claiming_delivery(tmp_path, monkeypatch, failure):
+    client, runtime, data = prepare(tmp_path, monkeypatch, authored_output='Useful findings. [CSV](result.csv)')
+    if failure == 'link_unavailable':
+        monkeypatch.setattr(client.app.state.service, '_signed_artifact_download_url', lambda *_args: '')
     else:
-        assert duplicate.json() == canonical
-    assert _result(client, digest).json()["response"] == canonical
+        def missing(*_args, **_kwargs): raise FileNotFoundError('Synthetic absent publication')
+        def storage_full(*_args, **_kwargs): raise OSError('Synthetic publication storage full')
+        monkeypatch.setattr('workers_projects_runtime.service.verified_native_file', missing)
+        monkeypatch.setattr('workers_projects_runtime.service.copy_native_file', storage_full)
+    response, digest = _post_bound(client, _payload(tmp_path))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['choices'][0]['message']['content'] == 'Useful findings. [File unavailable]'
+    assert result['glasshive']['output_files']['files'] == []
+    assert result['glasshive']['output_files']['rejected'] == [{'name':'File','code':'unreadable'}]
+    assert (tmp_path/'result.csv').read_bytes() == data
+    record = client.app.state.store.get_provider_request(result['id'])
+    run = client.app.state.store.get_run(record['run_id'])
+    worker = client.app.state.store.get_worker(run['worker_id'])
+    _, captured = runtime.provider_native_image_output(worker, run, '')
+    assert len(captured)==1 and (captured[0][2].root/captured[0][2].relative).read_bytes()==data
+    assert _result(client, digest).json()['response'] == result
+    duplicate, _ = _post_bound(client, _payload(tmp_path))
+    assert duplicate.json()==result and runtime.calls==1

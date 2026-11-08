@@ -836,6 +836,12 @@ receipts, so a stale snapshot cannot discard newer guidance. Recovery keeps newe
 bindings; equal reservation times preserve the already bound result. The exact effect receipt is durable before native admission wakes. Stop intent fences new admission; visible state follows the actual run until native termination
 proof. Cancelled intent limits the native action mask to available Stop recovery or Dismiss.
 Stop confirms the exact controlled run and cancels only that goal's owned pending effects.
+While a work-scoped Stop holds that exact generation's durable claim, its provider exit cannot
+commit failure, interruption or cancellation ahead of the Stop settlement. The existing Stop
+owner proves termination and commits the cancellation; recovery retains that owner if settlement
+is interrupted. A real completed result can still win. Other runs and generations keep their own
+terminal authority.
+
 A native host Pause uses the same exact-run control owner as an explicit run Pause. A queued
 run can be durably paused before launch. If a run is starting and its exact process identity
 is not confirmed yet, the API returns retryable `409 runtime_control_not_ready`: no control
@@ -862,10 +868,13 @@ the user asks. Conversation replies use plain language about the work and explai
 job blockers. A roster worker's paused or idle compute is not proof that its accepted job needs
 the user to Resume. Queued helpers still end the foreground turn without polling, so they can use
 the same account. New conversations capture the current prompt manifest; saved conversations keep
-their approved prompt snapshot. The six tool schemas and their authority are unchanged.
+their approved prompt snapshot. The base coordinator prompt remains version 3; applications add
+a separately versioned background-coordination layer.
 
-Native coordinator tool schema version 3 lets `coordinator_dispatch` accept exactly one of
-`worker_id` (an existing worker) or `route_id` (a new helper), alongside `goal_id` and `instruction`.
+Native coordinator tool schema version 4 keeps exactly one `coordinator_dispatch` target:
+`worker_id` (an existing worker) or `route_id` (a new helper), alongside `goal_id`. Omit
+`instruction` to use the retained original goal. Explicit instructions from version 3 remain
+compatible. Optional specialist `guidance` stays separate on application-prepared routes.
 `coordinator_status` lists at most 100 available workers in the selected owned project and reports
 truncation. A narrower workspace scope stays narrow. Foreground conversation workers, closed workers, ephemeral workers and delegated helpers are
 excluded; dispatch rechecks the same typed eligibility, ownership and scope. The existing worker's saved account

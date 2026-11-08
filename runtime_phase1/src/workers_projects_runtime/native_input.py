@@ -74,6 +74,14 @@ def read_object(path: Path) -> dict:
     raise NativeInputError("native_input_invalid")
 
 
+def claude_user_frame(content, *, identity=None):
+    """One native stream envelope for both single-turn and retained transports."""
+    import uuid
+    return {"type": "user", "session_id": "", "parent_tool_use_id": None,
+            "uuid": identity or str(uuid.uuid4()),
+            "message": {"role": "user", "content": content}}
+
+
 def read_response(path: Path) -> dict:
     # The atomic link may briefly have two names until its temporary name is removed.
     # Wait only for that publication window; permanent extra links remain invalid.
@@ -231,8 +239,7 @@ def relay(context_path: Path, command: list[str]) -> int:
             publish(request_path(root, request_id), {**item, "state": state})
 
     send({"type": "control_request", "request_id": "glasshive_initialize", "request": {"subtype": "initialize", "hooks": {}}})
-    send({"type": "user", "session_id": "", "parent_tool_use_id": None, "uuid": context["nativeTurnId"],
-          "message": {"role": "user", "content": instruction}})
+    send(claude_user_frame(instruction, identity=context["nativeTurnId"]))
     try:
         while selector.get_map():
             for key, _ in selector.select(timeout=0.05):
