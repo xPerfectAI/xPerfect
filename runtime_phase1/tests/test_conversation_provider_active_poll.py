@@ -1,6 +1,7 @@
 """Real request-store clocks and irreversible boundaries during active polling."""
 
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from types import SimpleNamespace
 
 import pytest
@@ -137,15 +138,13 @@ def test_poll_does_not_extend_explicit_deadline(active_request):
     observation["state"] = "running"
     deadline = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     before = prepared("running", response_timeout_s=30, response_deadline_at=deadline)
-    provider._sync_locked(before)
-    result = store.arbitrate_provider_request_deadline(
-        before["request_id"], default_timeout_s=30, failure_class="provider_response_deadline_exceeded",
-        failure_user_message="Synthetic deadline.", failure_recommended_recovery="retry",
-        failure_diagnostic_summary="Synthetic elapsed deadline.",
-    )
-    assert result["request"]["state"] == "failed"
-    assert result["request"]["fallback_state"] == "deadline_exceeded"
-    assert result["request"]["response_deadline_at"] == deadline
+    provider._sync_lock = RLock()
+    provider._start_lock = RLock()
+    result = provider._sync(before)
+    assert result["state"] == "failed"
+    assert result["fallback_state"] == "deadline_exceeded"
+    assert result["response_deadline_at"] == deadline
+    assert store.get_provider_request(before["request_id"])["state"] == "failed"
 
 
 def test_restore_hold_does_not_touch_request_clock(active_request):
@@ -155,3 +154,64 @@ def test_restore_hold_does_not_touch_request_clock(active_request):
     assert result["restore_hold"] == 1
     assert result["updated_at"] == STAMP
     assert calls == []
+
+
+@pytest.mark.parametrize("observer", ["sync", "wait"])
+def test_unbounded_observer_never_invents_a_response_deadline(active_request, monkeypatch, observer):
+    store, provider, _, _, prepared = active_request
+    monkeypatch.delenv("GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S", raising=False)
+    provider._sync_lock = RLock()
+    provider._start_lock = RLock()
+    before = prepared(response_timeout_s=None, response_deadline_at="")
+    if observer == "sync":
+        result = provider._sync(before)
+    else:
+        result, _ = provider._sync_for_wait(before, timeout_seconds=3)
+    assert result["state"] == "queued"
+    assert result["response_timeout_s"] is None
+    assert result["response_deadline_at"] == ""
+    assert store.get_provider_request(before["request_id"])["response_deadline_at"] == ""
+
+
+@pytest.mark.parametrize("source", ["stored", "configured"])
+def test_poll_retains_a_real_positive_response_budget(active_request, monkeypatch, source):
+    store, provider, _, _, prepared = active_request
+    monkeypatch.delenv("GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S", raising=False)
+    provider._sync_lock = RLock()
+    provider._start_lock = RLock()
+    if source == "configured":
+        monkeypatch.setenv("GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S", "120")
+    before = prepared(response_timeout_s=120 if source == "stored" else None, response_deadline_at="")
+    result = provider._sync(before)
+    assert result["state"] == "queued"
+    assert result["response_timeout_s"] == 120
+    assert result["response_deadline_at"]
+    assert store.get_provider_request(before["request_id"])["response_deadline_at"] == result["response_deadline_at"]
+
+
+@pytest.mark.parametrize("reader_timeout", [None, 3])
+def test_unbounded_wait_survives_the_former_implicit_reader_limit(active_request, monkeypatch, reader_timeout):
+    store, provider, _, _, prepared = active_request
+    monkeypatch.delenv("GLASSHIVE_PROVIDER_RESPONSE_TIMEOUT_S", raising=False)
+    before = prepared(response_timeout_s=None, response_deadline_at="")
+    ticks = iter([0.0, 661.0, 662.0, 663.0])
+    monkeypatch.setattr("workers_projects_runtime.conversation_provider.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("workers_projects_runtime.conversation_provider.time.sleep", lambda _: None)
+    observed = []
+
+    def observe(record, *, timeout_seconds):
+        observed.append(timeout_seconds)
+        return ({**record, "state": "completed"} if len(observed) == 3 else record), {}
+
+    monkeypatch.setattr(provider, "_sync_for_wait", observe)
+    if reader_timeout is None:
+        result, _ = provider.wait(before["request_id"])
+        assert result["state"] == "completed"
+        assert observed == [None, None, None]
+    else:
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as caught:
+            provider.wait(before["request_id"], timeout=reader_timeout)
+        assert caught.value.status_code == 504
+        assert observed == [reader_timeout, reader_timeout]
+        assert store.get_provider_request(before["request_id"])["state"] == "queued"

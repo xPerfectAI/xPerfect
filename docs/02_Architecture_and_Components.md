@@ -63,8 +63,9 @@ Successful Chat Completions and Responses HTTP replies expose `X-GlassHive-Respo
 alongside the request ID. It is the valid timezone-aware absolute deadline stored by admission,
 shared by the primary attempt and any serial fallback. Signed private-machine-state requests with
 no explicit or configured budget persist the existing effective 660-second default at admission.
-Public requests keep their existing implicit deadline/admission behavior; explicit request budgets
-and configured upper bounds keep their existing precedence. Reconnection does not renew this deadline.
+Ordinary requests with no explicit or configured budget have no automatic foreground deadline;
+polling and reader wait budgets must not invent one. Explicit request budgets and configured upper
+bounds keep their existing precedence. Reconnection does not renew this deadline.
 Clients may use this owner-authored header instead of duplicating the provider timeout. Old records
 without a valid stored deadline omit the header; invalid/non-finite request budgets are rejected.
 
