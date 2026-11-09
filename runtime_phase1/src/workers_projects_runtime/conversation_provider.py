@@ -5177,6 +5177,11 @@ class ConversationProvider:
         existing_worker = (
             self.store.get_worker(str(existing["worker_id"])) if existing else None
         )
+        if (existing and existing_worker and existing_worker.get("state") in {"needs_input", "failed"}
+                and self.service.settle_unstarted_provider_invocations(
+            str(existing["session_id"]), tenant_id=tenant_id, owner_id=metadata.owner_id,
+        )):
+            existing_worker = self.store.get_worker(str(existing["worker_id"]))
         if existing_worker and existing_worker.get("state") == "failed":
             try:
                 recovered = self.service.release_provider_deadline_compute(
@@ -6128,7 +6133,7 @@ class ConversationProvider:
         before = dict(request_record)
         timeout = self._request_timeout_seconds(request_record)
         if timeout is None or timeout <= 0:
-            timeout = self._configured_response_timeout_seconds() or 660.0
+            timeout = self._configured_response_timeout_seconds()
         request_record, _, _ = self._arbitrate_deadline_if_needed(
             request_record,
             timeout_seconds=timeout,
@@ -7040,10 +7045,8 @@ class ConversationProvider:
             effective_timeout = self._request_timeout_seconds(record)
         if effective_timeout is None:
             effective_timeout = self._configured_response_timeout_seconds()
-        if effective_timeout is None:
-            effective_timeout = 660.0
-        effective_timeout = max(0.0, float(effective_timeout))
-        deadline = time.monotonic() + effective_timeout
+        deadline = (time.monotonic() + max(0.0, float(effective_timeout))
+                    if effective_timeout is not None else None)
         while True:
             record = self.store.get_provider_request(request_id)
             if not record:
@@ -7052,10 +7055,10 @@ class ConversationProvider:
             if record["state"] in TERMINAL_REQUEST_STATES:
                 run = self.store.get_run(str(record.get("run_id") or "")) or arbitrated_run
                 return record, run
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
                 break
-            time.sleep(min(0.2, remaining))
+            time.sleep(min(0.2, remaining) if remaining is not None else 0.2)
         record = self.store.get_provider_request(request_id)
         if not record:
             raise HTTPException(status_code=404, detail="GlassHive request not found")
@@ -7069,12 +7072,13 @@ class ConversationProvider:
         self,
         record: dict[str, Any],
         *,
-        timeout_seconds: float,
+        timeout_seconds: float | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         synced = self._sync(record)
         record, arbitrated_run, _ = self._arbitrate_deadline_if_needed(
             synced,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=(self._request_timeout_seconds(synced)
+                             or self._configured_response_timeout_seconds()),
         )
         if record["state"] == "completed" and synced["state"] != "completed":
             # Deadline arbitration reads outside the sync lock, which the run processor
@@ -8304,7 +8308,7 @@ class ConversationProvider:
         self,
         request_record: dict[str, Any],
         *,
-        timeout_seconds: float,
+        timeout_seconds: float | None,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
         if self._deadline_arbitration_needed(
             request_record,

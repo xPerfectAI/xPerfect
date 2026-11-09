@@ -12689,6 +12689,28 @@ class WorkersProjectsService:
             self._ensure_worker_processor(worker_id)
         return run
 
+    def settle_unstarted_provider_invocations(
+        self, session_id: str, *, tenant_id: str, owner_id: str,
+    ) -> list[dict]:
+        """Settle failed transport attempts without cancelling their logical work."""
+
+        session = self.store.get_provider_session_by_id(session_id) or {}
+        worker_id = str(session.get("worker_id") or "")
+        if not worker_id or session.get("tenant_id") != tenant_id or session.get("owner_id") != owner_id:
+            return []
+        try:
+            with self._worker_compute_release_lock(worker_id):
+                if not self.store.worker_native_compute_is_released(worker_id):
+                    return []
+                settled = self.store.settle_unstarted_provider_invocations(
+                    session_id, tenant_id=tenant_id, owner_id=owner_id,
+                )
+        except RuntimeErrorBase:
+            return []
+        for run in settled:
+            self.run_notifications.notify(str(run["run_id"]))
+        return settled
+
     def reconcile_restart_authority_backlog_once(self) -> list[str]:
         """Unblock only restart-orphaned conversation turns and their siblings."""
 
@@ -13930,6 +13952,7 @@ class WorkersProjectsService:
                 )
 
         if cancelled:
+            self.discard_run_local_bundle(run_id, settled_only=True)
             self.store.finalize_schedule_for_run(
                 run_id,
                 state="cancelled",
@@ -19488,6 +19511,7 @@ class WorkersProjectsService:
         worker: dict,
         run: dict,
     ) -> dict[str, object] | None:
+        self.discard_run_local_bundle(str(run.get("run_id") or ""), settled_only=True)
         try:
             return self._release_worker_compute(
                 worker,
@@ -21285,6 +21309,7 @@ class WorkersProjectsService:
                 "The exact run startup reservation changed before confirmation.",
                 termination_confirmed=False,
             )
+        self.discard_run_local_bundle(run_id)
         with self._pending_run_starts_lock:
             current = self._pending_run_starts.get(run_id)
             if current is not None:
@@ -22404,6 +22429,7 @@ class WorkersProjectsService:
             **fields,
         )
         if finalized is not None:
+            self.discard_run_local_bundle(str(run_id), settled_only=True)
             # Durable terminal state is enough to wake readers; projection still owns truth.
             self.run_notifications.notify(str(run_id))
         if (
@@ -22633,8 +22659,12 @@ class WorkersProjectsService:
             dispatched.append(worker_id)
         return dispatched
 
-    def discard_run_local_bundle(self, run_id: str) -> None:
+    def discard_run_local_bundle(self, run_id: str, *, settled_only: bool = False) -> None:
         with self._run_local_bundles_lock:
+            if settled_only and str((self.store.get_run(str(run_id)) or {}).get("state") or "") not in (
+                TERMINAL_RUN_STATES | {"needs_input"}
+            ):
+                return
             self._run_local_bundles.pop(str(run_id), None)
 
     def attach_run_local_bundle(
@@ -22942,7 +22972,7 @@ class WorkersProjectsService:
                     self._run_local_grant_waiters.setdefault(run_id, set()).add(
                         grant_waiter_owner
                     )
-                transient = self._run_local_bundles.pop(run_id, None)
+                transient = self._run_local_bundles.get(run_id)
             transient_env = (
                 transient.get("env")
                 if isinstance(transient, dict) and isinstance(transient.get("env"), dict)
@@ -22959,7 +22989,7 @@ class WorkersProjectsService:
                             if remaining <= 0:
                                 break
                             self._run_local_bundles_lock.wait(timeout=remaining)
-                            transient = self._run_local_bundles.pop(run_id, None)
+                            transient = self._run_local_bundles.get(run_id)
                             transient_env = (
                                 transient.get("env")
                                 if isinstance(transient, dict)

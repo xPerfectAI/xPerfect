@@ -63,8 +63,9 @@ Successful Chat Completions and Responses HTTP replies expose `X-GlassHive-Respo
 alongside the request ID. It is the valid timezone-aware absolute deadline stored by admission,
 shared by the primary attempt and any serial fallback. Signed private-machine-state requests with
 no explicit or configured budget persist the existing effective 660-second default at admission.
-Public requests keep their existing implicit deadline/admission behavior; explicit request budgets
-and configured upper bounds keep their existing precedence. Reconnection does not renew this deadline.
+Ordinary requests with no explicit or configured budget have no automatic foreground deadline;
+polling and reader wait budgets must not invent one. Explicit request budgets and configured upper
+bounds keep their existing precedence. Reconnection does not renew this deadline.
 Clients may use this owner-authored header instead of duplicating the provider timeout. Old records
 without a valid stored deadline omit the header; invalid/non-finite request budgets are rejected.
 
@@ -123,7 +124,17 @@ failed-stateless source predicate; real authority changes keep their existing co
 Branch selection checks retained runs, not worker reactivation eligibility: a successful successor
 does not turn an unchanged released failure into active work. Live, persistent or foreign source
 remains blocking; worker lifecycle and native admission checks are unchanged.
-The old failed requests and needs-input runs remain unchanged.
+This stateless reuse check leaves the old failed requests and needs-input runs unchanged.
+Before a distinct conversation turn, the lifecycle owner can settle an unstarted execution
+attempt whose provider request already failed for a missing invocation grant. It retains the
+failed request, original input and logical work; only the released execution becomes retryable
+failed. Exact same-key grant refresh remains available before this session boundary. The atomic
+check requires matching ownership, no response, output, native session, confirmed start, process,
+tool activity or live lease, and no Pause/Stop or restore hold. Earlier capacity-only attempts
+must have ended before native startup; other invocation history keeps the normal conflict.
+Invocation-local context stays in the existing memory owner until native startup is confirmed,
+so a pre-start capacity retry keeps the same exact authority. Confirmed startup and terminal
+or needs-input settlement forget it; credentials are never persisted for recovery.
 An invoked deadline uses the existing exact-run lifecycle claim and native orphan cleanup,
 then proves all recorded supervisor and child generations stopped before publishing compute release.
 An expired cleanup claim or a normal same-session retry repeats that proof; failed history and

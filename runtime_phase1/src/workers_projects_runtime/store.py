@@ -9836,6 +9836,88 @@ class Store:
             ).fetchone()
         return bool(row)
 
+    def settle_unstarted_provider_invocations(
+        self, session_id: str, *, tenant_id: str, owner_id: str,
+    ) -> list[dict[str, Any]]:
+        """Retire failed authorization attempts before a distinct conversation turn."""
+
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT DISTINCT run.* FROM runs AS run
+                JOIN provider_requests AS request ON request.run_id = run.run_id
+                JOIN provider_sessions AS session ON session.session_id = request.session_id
+                JOIN workers AS worker ON worker.worker_id = session.worker_id
+                WHERE session.session_id = ? AND session.tenant_id = ? AND session.owner_id = ?
+                  AND request.tenant_id = session.tenant_id AND request.owner_id = session.owner_id
+                  AND worker.tenant_id = session.tenant_id AND worker.owner_id = session.owner_id
+                  AND run.worker_id = worker.worker_id AND run.tenant_id = worker.tenant_id
+                  AND worker.trusted_run_lane = 'conversation' AND worker.execution_mode = 'host'
+                  AND worker.state IN ('needs_input', 'failed') AND worker.pid IS NULL
+                  AND worker.compute_release_token = '' AND worker.work_stop_id = ''
+                  AND julianday(worker.compute_released_at) IS NOT NULL
+                  AND request.state = 'failed' AND request.restore_hold = 0
+                  AND COALESCE(request.fallback_state, '') = ''
+                  AND COALESCE(request.response_json, '') = ''
+                  AND run.state = 'needs_input' AND run.failure_structured = 1
+                  AND run.failure_class = 'conversation_capability_grant_required'
+                  AND COALESCE(run.runtime_invoked_at, '') = ''
+                  AND COALESCE(run.native_session_id, '') = '' AND run.output_text = ''
+                  AND NOT EXISTS (SELECT 1 FROM provider_requests AS active
+                      WHERE active.session_id = session.session_id AND active.state IN ('queued', 'running'))
+                  AND NOT EXISTS (SELECT 1 FROM host_run_leases AS lease
+                      WHERE lease.worker_id = worker.worker_id AND (
+                          lease.status = 'active' OR (lease.run_id = run.run_id AND (
+                              lease.startup_confirmed_at IS NOT NULL OR lease.pid IS NOT NULL
+                              OR lease.process_group IS NOT NULL
+                              OR COALESCE(lease.startup_identity_kind, '') != ''
+                              OR COALESCE(lease.process_start_identity, '') != ''
+                              OR COALESCE(lease.startup_session_id, '') != ''
+                              OR COALESCE(lease.startup_container_id, '') != ''))))
+                  AND NOT EXISTS (SELECT 1 FROM run_attempts AS attempt WHERE attempt.run_id = run.run_id AND (
+                      attempt.ended_at IS NULL OR (COALESCE(attempt.runtime_invoked_at, '') != '' AND NOT (
+                          attempt.state = 'retry_queued' AND attempt.terminal_reason IN ('host_capacity', 'host_worker_busy')))))
+                  AND NOT EXISTS (SELECT 1 FROM events WHERE events.run_id = run.run_id AND event_type = 'run.started')
+                  AND NOT EXISTS (SELECT 1 FROM provider_activity WHERE provider_activity.request_id = request.request_id
+                      AND event_type NOT IN ('queued', 'waiting', 'started', 'failed'))
+                  AND COALESCE((SELECT event_type FROM events WHERE events.worker_id = worker.worker_id
+                      AND event_type IN ('worker.paused', 'worker.resumed', 'worker.resumed_by_alias')
+                      ORDER BY rowid DESC LIMIT 1), '') != 'worker.paused'
+                """, (session_id, tenant_id, owner_id),
+            ).fetchall()
+            if not rows:
+                conn.execute("COMMIT")
+                return []
+            worker_id = str(rows[0]["worker_id"])
+            blockers = conn.execute(
+                "SELECT run_id FROM runs WHERE worker_id = ? AND state IN "
+                "('queued','claimed','admitted','running','settling','paused','needs_input')", (worker_id,),
+            ).fetchall()
+            if {row["run_id"] for row in blockers} != {row["run_id"] for row in rows}:
+                conn.execute("COMMIT")
+                return []
+            for run in rows:
+                conn.execute(
+                    "UPDATE runs SET state = 'failed', ended_at = ?, failure_retryable = 1 "
+                    "WHERE run_id = ? AND state = 'needs_input'", (now, run["run_id"]),
+                )
+                self._record_terminal_artifact_trace_conn(
+                    conn, run_id=str(run["run_id"]),
+                    artifact_refs={"available": False, "refs": [], "overflowCount": 0}, observed_at=now,
+                )
+                self._finalize_linked_schedule_for_terminal_run_conn(
+                    conn, run_id=str(run["run_id"]), run_state="failed",
+                    error_text=str(run["error_text"] or ""), terminal_at=now,
+                )
+            conn.execute("UPDATE workers SET state = 'ready', last_error = '', updated_at = ? WHERE worker_id = ?",
+                         (now, worker_id))
+            settled = [self._row(conn.execute("SELECT * FROM runs WHERE run_id = ?", (run["run_id"],)).fetchone())
+                       for run in rows]
+            conn.execute("COMMIT")
+        return settled
+
     def can_reactivate_released_stateless_provider_session(
         self, session_id: str, *, tenant_id: str, owner_id: str,
     ) -> bool:
