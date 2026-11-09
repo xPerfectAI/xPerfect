@@ -5953,9 +5953,9 @@ def test_claude_stream_events_expose_tool_categories_without_tool_inputs_or_thin
 
     events = _normalized_harness_activity("claude-code", stdout)
 
-    assert [event["event_type"] for event in events] == ["file", "tool"]
-    assert events[0]["payload"]["tool"] == "file"
-    assert events[1]["payload"]["tool"] == "web_search"
+    assert [event["event_type"] for event in events] == ["reasoning-summary", "file", "tool"]
+    assert events[1]["payload"]["tool"] == "file"
+    assert events[2]["payload"]["tool"] == "web_search"
     serialized = json.dumps(events)
     assert "hidden internal reasoning" not in serialized
     assert "private-person" not in serialized
