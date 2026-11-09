@@ -2732,6 +2732,8 @@ def _native_authored_preview(profile: str, stdout: str, graph_control: Any,
             if isinstance(item, dict) and item.get("type") == "agent_message":
                 text = item.get("text")
         elif profile == "claude-code" and event.get("type") == "assistant":
+            if event.get("is_api_error_message") is True or event.get("is_error") is True:
+                continue
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
             if isinstance(blocks, list):
@@ -3030,6 +3032,8 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
                 codex_terminal_text = codex_last_item_text
             continue
         if profile != "claude-code":
+            continue
+        if event.get("is_api_error_message") is True or event.get("is_error") is True:
             continue
         if event.get("type") == "stream_event":
             continue
@@ -3533,10 +3537,25 @@ def _normalized_harness_activity(profile: str, stdout: str) -> list[dict[str, An
 
         if profile != "claude-code" or str(event.get("type") or "") != "assistant":
             continue
+        if event.get("is_api_error_message") is True or event.get("is_error") is True:
+            continue
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         content = message.get("content") if isinstance(message.get("content"), list) else []
         for content_index, block in enumerate(content):
-            if not isinstance(block, dict) or str(block.get("type") or "") != "tool_use":
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type in {"text", "thinking"}:
+                value = block.get(block_type)
+                if isinstance(value, str) and value.strip():
+                    normalized.append({
+                        "event_type": "authored-response" if block_type == "text" else "reasoning-summary",
+                        "summary": "The harness authored response text." if block_type == "text"
+                            else "The harness completed a reasoning step.",
+                        "payload": {"source_event_id": f"claude-code:{source_line_id}:{content_index}"},
+                    })
+                continue
+            if block_type != "tool_use":
                 continue
             tool_name = str(block.get("name") or "").strip().lower()
             if tool_name in {"edit", "multiedit", "write", "notebookedit", "read", "glob", "grep"}:

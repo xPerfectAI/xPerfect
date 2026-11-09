@@ -55,6 +55,10 @@ A canonical completed response also seals its remaining eligible terminal text w
 bound public-part control. This applies after full output validation, including native transports
 that expose no incremental public envelopes. Failed, cancelled, empty, skipped or unbound results
 create no such control. Exact model decisions and mixed audio ranges remain unchanged.
+Claude API-error assistant messages and failed result events are diagnostics, not authored
+output, even when the result subtype says `success`. Their typed error flags take precedence
+for previews, terminal output and activity. Genuine text, reasoning and tool activity retain
+the existing authoring fence; a quota failure cannot replay an already authored turn.
 Successful Chat Completions and Responses HTTP replies expose `X-GlassHive-Response-Deadline-At`
 alongside the request ID. It is the valid timezone-aware absolute deadline stored by admission,
 shared by the primary attempt and any serial fallback. Signed private-machine-state requests with
