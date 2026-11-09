@@ -70,7 +70,7 @@ from .deliverables import (
     capture_native_media, _native_media_snapshot, _native_file_reader, NATIVE_IMAGE_SUFFIXES,
     NATIVE_MEDIA_MAX_ITEMS, NATIVE_MEDIA_MAX_BYTES, NATIVE_MEDIA_MAX_TOTAL_BYTES,
     NativeFileSnapshot, copy_native_file, verified_native_file, native_output_sha256, native_file_image_mime,
-    is_user_deliverable_relative_path, NATIVE_MARKDOWN_LINK_OR_ESCAPE,
+    is_protected_artifact_path, is_user_deliverable_relative_path, NATIVE_MARKDOWN_LINK_OR_ESCAPE,
 )
 from .failure_classification import (
     FailureClassification,
@@ -1652,6 +1652,15 @@ def _render_toml_table(path: list[str], table: dict[str, object]) -> list[str]:
     return blocks
 
 
+def _overlay_toml_tables(base: dict, current: dict) -> dict:
+    merged = dict(base)
+    for key, value in current.items():
+        previous = merged.get(key)
+        merged[key] = (_overlay_toml_tables(previous, value)
+                       if isinstance(previous, dict) and isinstance(value, dict) else value)
+    return merged
+
+
 def _sanitize_codex_source_config(config_text: str, preserve_names: set[str], append_names: set[str]) -> str:
     if not config_text.strip():
         return ""
@@ -1711,7 +1720,7 @@ Operational requirements:
 - Keep source publication/evidence dates distinct from retrieval/access timestamps; an access date must not widen or replace a user-limited source window.
 - Use the current run’s supplied admitted request, context, and typed authority as input; the completion contract below governs recovery of missing context. Interpret the user’s goals and constraints yourself; the runtime does not extract semantic requirements from prose.
 - `glasshive-run/` is internal harness evidence, not a user-facing artifact directory.
-- For host browser or desktop tasks, first use the user's existing local app/session when the task asks for the main computer, Chrome, browser profile, local files, or installed OS tools. Do not claim host control is unavailable until you have checked the available local shell/desktop/browser automation paths.
+- Discover the available browser, computer, app, plugin and shell capabilities when they are relevant. Use the existing signed-in session when the task needs it. Prefer background browser and app operations without bringing windows forward, changing the user's selected tab, or taking the mouse and keyboard. Use shared desktop control when the task needs it or the user asks to see it; minimize disruption and preserve the user's work. Complete already-authorized work without asking for the same permission again; the safety boundary below still applies. Verify the live capabilities before reporting that host control is unavailable.
 
 {GLASSHIVE_NATIVE_CAPABILITY_INVENTORY}
 
@@ -2016,6 +2025,10 @@ class ProfiledWorkerRuntime:
 
     def close_native_warm(self) -> None:
         errors = []
+        try:
+            self.host_claude.close_persistent_conversations()
+        except Exception as exc:
+            errors.append(exc)
         for adapter in self._native_warm_adapters():
             try:
                 adapter.close_native_warm()
@@ -2790,6 +2803,12 @@ class ProfiledWorkerRuntime:
         instruction = contextual_instruction(instruction, worker)
         runtime = self._runtime_for_worker(worker)
         selection = mission_provider_account_selection(worker)
+        from .claude_conversation import enabled as retained_claude_enabled
+        if selection is not None and retained_claude_enabled(bootstrap_bundle_for(worker)):
+            raise RuntimeErrorBase(
+                "Retained native conversations require the installed native account; "
+                "the selected connected account has a run-scoped lease"
+            )
         if selection is None:
             bundle = bootstrap_bundle_for(worker)
             if (
@@ -3363,6 +3382,10 @@ class ProfiledWorkerRuntime:
             return {}
         projection = resolver(worker)
         return dict(projection) if isinstance(projection, dict) else {}
+
+    def provider_file_delivery_roots(self, worker: dict) -> dict[str, str] | None:
+        resolver = getattr(self._runtime_for_worker(worker), "provider_file_delivery_roots", None)
+        return resolver(worker) if callable(resolver) else None
 
     def provider_native_image_output(self, worker: dict, run: dict, output: str):
         runtime = self._runtime_for_worker(worker)
@@ -4689,6 +4712,9 @@ class BaseCliWorkerRuntime:
             return None
         return {
             "session_name": session_name,
+            "process_lifetime": str(data.get("process_lifetime") or ""),
+            "phase": str(data.get("phase") or ""),
+            "last_run_id": str(data.get("last_run_id") or ""),
             "run_id": str(data.get("run_id") or "").strip(),
             "attempt_id": str(data.get("attempt_id") or "").strip(),
             "stdout_path": str(data.get("stdout_path") or "").strip(),
@@ -6501,29 +6527,6 @@ class BaseCliWorkerRuntime:
         try:
             sandbox_identity = self.sandbox.inspect(worker_for_run["worker_id"])
         except Exception:
-            sandbox_identity = None
-        container_id = str(
-            (getattr(sandbox_identity, "container_id", None) if sandbox_identity else None)
-            or ""
-        ).strip()
-        try:
-            screen_pid = int(process_pid or 0)
-            container_pid = int(
-                (getattr(sandbox_identity, "pid", None) if sandbox_identity else None)
-                or 0
-            )
-        except (TypeError, ValueError):
-            screen_pid = 0
-            container_pid = 0
-        lease_process_identity = (
-            f"docker:{container_id}:{session_name}:"
-            f"{effective_run_id}:{screen_pid}"
-            if container_id and screen_pid > 0
-            else ""
-        )
-        try:
-            sandbox_identity = self.sandbox.inspect(worker_for_run["worker_id"])
-        except Exception:
             # The owning executor still heartbeats the lease. A transient
             # Docker inspect failure must not abandon an already-started run;
             # restart reconciliation will fail closed unless it can prove the
@@ -7638,6 +7641,8 @@ class BaseCliWorkerRuntime:
             str(session.get("run_id") or ""),
             str(session.get("attempt_id") or ""),
             str(session.get("session_name") or ""),
+            str(session.get("process_lifetime") or ""),
+            str(session.get("phase") or ""),
             str(session.get("exit_path") or ""),
             session.get("process_pid"),
             session.get("process_group"),
@@ -11431,7 +11436,14 @@ raise SystemExit(exit_code)
         return lanes
 
     def _host_capacity_lane(self, worker: dict | None) -> str:
-        return "conversation" if self._conversation_mode_from_worker(worker) else "mission"
+        if not self._conversation_mode_from_worker(worker):
+            return "mission"
+        origin = self._bootstrap_bundle_for_worker(worker).get("conversation_origin")
+        # Result presentation belongs beside live conversation; maintenance does not.
+        if (isinstance(origin, dict) and origin.get("origin") != "callback"
+                and (origin.get("actor_kind"), origin.get("origin")) != ("external_user", "interactive")):
+            return "mission"
+        return "conversation"
 
     def _instruction_with_completion_contract(self, instruction: str) -> str:
         return _instruction_with_completion_contract(instruction)
@@ -11442,14 +11454,24 @@ raise SystemExit(exit_code)
             return str(instruction or "").strip()
         return self._instruction_with_completion_contract(instruction)
 
+    def provider_file_delivery_roots(self, worker: dict, *, workspace: str | None = None) -> dict[str, str]:
+        workspace = str(workspace or self._host_workspace_dir(worker))
+        return {
+            "workspace": ("local_only" if is_protected_artifact_path(Path(workspace)) else "supported")
+                         if workspace and Path(workspace).is_absolute() else "unknown",
+            "tmpdir": "local_only" if is_protected_artifact_path(
+                self._home_dir(str(worker["worker_id"])) / ".tmp") else "supported",
+        }
+
     def _host_mission_instruction(self, worker: dict, instruction: str, output_scope: dict) -> str:
         """Compose the registered file contract only for its declared native transport."""
         if (output_scope.get("file_output_transport") != "artifact_sha256"
                 or self._host_native_mission_placement(worker) is None
                 or _native_tools_disabled(self._bootstrap_bundle_for_worker(worker))):
             return instruction
+        roots = self.provider_file_delivery_roots(worker, workspace=output_scope.get("workspace_dir"))
         return "\n\n".join(part for part in (
-            str(instruction or "").strip(), conversation_file_delivery_instructions(),
+            str(instruction or "").strip(), conversation_file_delivery_instructions(roots),
         ) if part)
 
     def _native_image_output_files(self, worker: dict, workspace_dir: str, scope: object, run_id: str):
@@ -11506,6 +11528,8 @@ raise SystemExit(exit_code)
                         or item["bytes"] < 0
                     ):
                         raise ValueError("Invalid output artifact identity")
+                    if is_protected_artifact_path(source_root / relative):
+                        continue
                     data = verified_native_file(run_root, snapshot, digest, item["bytes"])
                     result.append((source_root / relative, mime_type, data))
                 except (OSError, ValueError, TypeError):
@@ -11618,6 +11642,8 @@ raise SystemExit(exit_code)
                 if destination.startswith("<") and destination.endswith(">"):
                     destination = destination[1:-1].strip()
                 destination = unquote(destination)
+                if destination.startswith("artifact_sha256:"):
+                    continue
                 try:
                     parsed = urlsplit(destination)
                 except ValueError:
@@ -11630,6 +11656,8 @@ raise SystemExit(exit_code)
                 elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
                     continue  # Public references and already-projected artifacts are not local selections.
             candidate = Path(destination)
+            if is_protected_artifact_path(workspace / candidate):
+                continue
             source_kind, source_root = "workspace", workspace
             capture_relative = None
             excluded_identities = frozenset()
@@ -11816,6 +11844,8 @@ raise SystemExit(exit_code)
                 destination = parsed.path
             elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
                 return match.group(0)
+            if is_protected_artifact_path(workspace / destination):
+                return "File kept local"
             reference = references.get(destination)
             if reference:
                 return f"{match.group(1)}({reference})"
@@ -12434,9 +12464,19 @@ raise SystemExit(exit_code)
             })
         append = codex_config_append.strip()
         append_names = _codex_mcp_server_names(append)
+        append_payload = tomllib.loads(append) if append else {}
+        append_servers = append_payload.get("mcp_servers", {})
+        # Codex validates transport even for disabled servers. A selection-only overlay
+        # must retain its existing allowlisted transport, never invent a new one.
+        disabled_selections = {
+            name for name, server in append_servers.items()
+            if isinstance(server, dict) and server.get("enabled") is False
+            and not server.get("command") and not server.get("url")
+        } if isinstance(append_servers, dict) else set()
         native_web_locked = _host_native_web_access() == "disabled"
         preserve_names = (
-            set() if native_web_locked else self._host_codex_native_mcp_allowlist() - append_names
+            set() if native_web_locked else self._host_codex_native_mcp_allowlist()
+            - (append_names - disabled_selections)
         )
         source_config_path = self._source_host_codex_home() / "config.toml"
         preserved = ""
@@ -12450,7 +12490,9 @@ raise SystemExit(exit_code)
                 source_config = source_config_path.read_text()
             except OSError:
                 source_config = ""
-            preserved = _sanitize_codex_source_config(source_config, preserve_names, append_names)
+            preserved = _sanitize_codex_source_config(
+                source_config, preserve_names, append_names - disabled_selections
+            )
         preserved_names = _codex_mcp_server_names(preserved)
         plugin_preserved = self._host_codex_bundled_mcp_config(
             preserve_names - preserved_names, source_config
@@ -12468,6 +12510,15 @@ raise SystemExit(exit_code)
             if not isinstance(server, dict) or not server.get("command") or server.get("enabled") is False:
                 continue
             server.setdefault("env", {}).setdefault("HOME", str(Path.home()))
+        if disabled_selections:
+            for name in disabled_selections:
+                inherited = native_servers.get(name)
+                if isinstance(inherited, dict) and (inherited.get("command") or inherited.get("url")):
+                    append_servers[name] = {**inherited, **append_servers[name]}
+                else:
+                    # No inherited capability exists. Omitting its inert declaration keeps
+                    # the isolated config valid and cannot enable the absent server.
+                    append_servers.pop(name, None)
         native = _render_toml_document(native_payload) if native_payload else ""
         personality = self._host_codex_personality()
         native = _apply_codex_personality(native, personality)
@@ -12476,7 +12527,9 @@ raise SystemExit(exit_code)
         native = _apply_codex_plugin_denylist(native, denied_plugins)
         if append_names:
             native = _strip_codex_mcp_server_blocks(native, append_names)
-        config = "\n\n".join(part for part in (native, append) if part.strip()).strip()
+        config = _render_toml_document(_overlay_toml_tables(
+            tomllib.loads(native) if native else {}, append_payload
+        ))
         _assert_codex_worker_policy(
             config,
             plugin_ids=denied_plugins,
@@ -12541,17 +12594,34 @@ raise SystemExit(exit_code)
         from .native_mcp_tool_filter import selected_filter
 
         if _native_tools_disabled(bundle):
-            return {"mcpServers": {}}, {}
+            broker = bundle.get("glasshive_capability_broker")
+            if not isinstance(broker, dict):
+                return {"mcpServers": {}}, {}
+            from .bootstrap import _current_native_tool_catalog
+            payload = claude_project_mcp_payload_for_bundle(bundle, project_mcp)
+            name = broker.get("name")
+            server = payload.get("mcpServers", {}).get(name)
+            declaration = {**server, "name": name} if isinstance(server, dict) else {}
+            if _current_native_tool_catalog(bundle, [declaration]) == "[]":
+                raise RuntimeErrorBase("The restricted Claude capability broker grant is unavailable or stale")
+            return {"mcpServers": {name: server}}, {}
         payload = claude_project_mcp_payload_for_bundle(bundle, project_mcp)
         filters: dict[str, object] = {}
         if (_native_tools_disabled(bundle)
             or str(bundle.get("access_mode") or "full").strip().lower() != "full"):
             return payload, filters
         native = tomllib.loads(self._host_codex_worker_config(""))
+        # The shared Worker bundle already carries per-server Native selection.
+        # Narrow inherited servers with that overlay without importing new Codex-only servers.
+        overrides = tomllib.loads(str(bundle.get("codex_config_append") or "")).get("mcp_servers", {})
+        if not isinstance(overrides, dict):
+            raise RuntimeErrorBase("Native MCP server selection is invalid")
         servers = payload.setdefault("mcpServers", {})
         for name, server in native.get("mcp_servers", {}).items():
+            selected = overrides.get(name)
             if (name in servers or not isinstance(server, dict)
-                or server.get("enabled") is False or not server.get("command")):
+                or server.get("enabled") is False or not server.get("command")
+                or isinstance(selected, dict) and selected.get("enabled") is False):
                 continue
             # Claude has no per-server cwd selector. Tool restrictions are enforced
             # separately on the selected MCP child's stdio transport.
@@ -14638,7 +14708,7 @@ raise SystemExit(exit_code)
         timeout_sec: float | None = None,
         run_id: str | None = None,
     ) -> str:
-        """Run a natural harness turn without mission scaffolding or LIFE-side runtime files."""
+        """Run a natural harness turn without mission scaffolding or user-workspace runtime files."""
         effective_run_id = (run_id or secrets.token_hex(8)).strip()
         worker = {**worker, "_active_run_id": effective_run_id, "_glasshive_conversation_run": True}
         info = self.ensure_worker_ready(worker)
@@ -14665,7 +14735,12 @@ raise SystemExit(exit_code)
         env["GLASSHIVE_RUN_MODE"] = "conversation"
         workspace = Path(str(info.workspace_dir or self._host_workspace_dir(worker)))
         workspace_side_effect_state = self._conversation_workspace_side_effect_state(workspace)
-        host_slot_token = self._acquire_host_slot(worker)
+        from .claude_conversation import enabled as persistent_claude_enabled
+        persistent = self.runtime_name == "claude-code" and persistent_claude_enabled(native_image_bundle)
+        if self.runtime_name == "claude-code" and not persistent:
+            from .claude_conversation import release_cached_conversation
+            release_cached_conversation(self, str(worker["worker_id"]))
+        host_slot_token = "" if persistent else self._acquire_host_slot(worker)
 
         run_root = self._run_root(str(worker["worker_id"]), effective_run_id)
         run_root.mkdir(parents=True, exist_ok=True)
@@ -14698,153 +14773,182 @@ raise SystemExit(exit_code)
         startup_cleanup_unconfirmed = False
         native_session_stop = Event()
         native_session_thread: Thread | None = None
-        try:
+        if persistent:
+            from .claude_conversation import run_turn
             self._release_run_transcript(run_root)
-            with raw_stdout.open("w") as stdout_handle, raw_stderr.open("w") as stderr_handle:
-                raw_stdout.chmod(0o600)
-                raw_stderr.chmod(0o600)
-                # Only the fresh transcript is this launch's; its attempt may read it from here.
-                self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
-                prepared_command = self._prepare_native_authority_command(
-                    worker, command, run_root=run_root, timeout_sec=run_timeout_sec,
-                )
-                process_command = self._durable_host_process_command(
-                    prepared_command,
-                    run_root=run_root,
-                    exit_path=exit_path,
-                    timeout_sec=run_timeout_sec,
-                    stdin_path=host_stdin if stdin_text is not None else None,
-                    response_deadline_at=str(worker.get("_provider_response_deadline_at") or ""),
-                    external_native_lease_path=worker.get("_external_native_lease_path"),
-                    child_record_path=self._native_child_record_path(
-                        run_root, str(worker.get("_run_attempt_id") or "")
-                    ),
-                )
-                process = subprocess.Popen(
-                    process_command,
-                    cwd=str(workspace),
-                    env=env,
-                    text=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout_handle,
-                    stderr=stderr_handle,
-                    start_new_session=True,
-                )
-                self._register_process(str(worker["worker_id"]), process)
-                self._wait_for_durable_host_supervisor(process, run_root=run_root)
-                self._write_active_session(
-                    str(worker["worker_id"]),
-                    {
-                        "session_name": f"conversation-{effective_run_id[:12]}",
-                        "run_id": effective_run_id,
-                        "attempt_id": str(worker.get("_run_attempt_id") or ""),
-                        "host_slot_token": host_slot_token,
-                        "workspace_dir": str(workspace),
-                        "stdout_path": str(raw_stdout),
-                        "stderr_path": str(raw_stderr),
-                        "exit_path": str(exit_path),
-                        "model": str(info.model or ""),
-                        "argv_for_evidence_json": json.dumps([_redact_command_arg(part) for part in command]),
-                        "started_at": _utc_iso(),
-                        "process_pid": process.pid,
-                        "external_native_lease_path": worker.get("_external_native_lease_path"),
-                        "timeout_seconds": run_timeout_sec,
-                        "instruction": instruction,
-                        "run_mode": "conversation",
-                        "native_image_scope": native_image_scope,
-                    },
-                    publish_run_start=callable(self._run_start_observer),
-                    worker=worker,
-                    spawned_process=process,
-                )
-                active_session = self._read_active_session(str(worker["worker_id"]))
-                owned_session = dict(active_session) if active_session else None
-                if not active_session:
-                    self._stop_active_process(
+            self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
+            native_session_thread = Thread(
+                target=self._observe_native_session_events,
+                args=(str(worker["worker_id"]), raw_stdout, native_session_stop,
+                      effective_run_id, str(worker.get("_run_attempt_id") or ""), 0, worker),
+                daemon=True,
+            )
+            native_session_thread.start()
+            try:
+                exit_code = run_turn(self, worker, command, env, workspace, run_root,
+                                     instruction, run_timeout_sec, authority_receipt,
+                                     native_image_scope=native_image_scope)
+                owned_session = self._read_active_session(str(worker["worker_id"]))
+            finally:
+                native_session_stop.set()
+                native_session_thread.join(timeout=1)
+                try:
+                    self._record_run_metrics(
+                        worker["worker_id"], effective_run_id,
+                        raw_stdout.read_text() if raw_stdout.exists() else "",
+                        **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}),
+                    )
+                except (OSError, ValueError):
+                    logger.warning("Native conversation usage could not be persisted",
+                                   extra={"error_code": "usage_reconciliation_failed"})
+        else:
+            try:
+                self._release_run_transcript(run_root)
+                with raw_stdout.open("w") as stdout_handle, raw_stderr.open("w") as stderr_handle:
+                    raw_stdout.chmod(0o600)
+                    raw_stderr.chmod(0o600)
+                    # Only the fresh transcript is this launch's; its attempt may read it from here.
+                    self._claim_run_transcript(run_root, str(worker.get("_run_attempt_id") or ""))
+                    prepared_command = self._prepare_native_authority_command(
+                        worker, command, run_root=run_root, timeout_sec=run_timeout_sec,
+                    )
+                    process_command = self._durable_host_process_command(
+                        prepared_command,
+                        run_root=run_root,
+                        exit_path=exit_path,
+                        timeout_sec=run_timeout_sec,
+                        stdin_path=host_stdin if stdin_text is not None else None,
+                        response_deadline_at=str(worker.get("_provider_response_deadline_at") or ""),
+                        external_native_lease_path=worker.get("_external_native_lease_path"),
+                        child_record_path=self._native_child_record_path(
+                            run_root, str(worker.get("_run_attempt_id") or "")
+                        ),
+                    )
+                    process = subprocess.Popen(
+                        process_command,
+                        cwd=str(workspace),
+                        env=env,
+                        text=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout_handle,
+                        stderr=stderr_handle,
+                        start_new_session=True,
+                    )
+                    self._register_process(str(worker["worker_id"]), process)
+                    self._wait_for_durable_host_supervisor(process, run_root=run_root)
+                    self._write_active_session(
                         str(worker["worker_id"]),
-                        worker=worker,
-                        run_id=effective_run_id,
-                    )
-                    raise RuntimeErrorBase(
-                        "Host-native process metadata was not durably recorded before launch"
-                    )
-                native_session_thread = Thread(
-                    target=self._observe_native_session_events,
-                    args=(
-                        str(worker["worker_id"]), raw_stdout, native_session_stop,
-                        effective_run_id, str(worker.get("_run_attempt_id") or ""), 0, worker,
-                    ),
-                    name=f"glasshive-conversation-session-{effective_run_id[:12]}",
-                    daemon=True,
-                )
-                native_session_thread.start()
-                if authority_receipt is not None:
-                    _atomic_write_private_text(
-                        run_root / "native-provider-authority-receipt.json",
-                        json.dumps(authority_receipt, sort_keys=True),
-                    )
-                    self._write_action_audit(
-                        worker,
                         {
-                            "kind": "conversation.provider_invoked",
+                            "session_name": f"conversation-{effective_run_id[:12]}",
                             "run_id": effective_run_id,
+                            "attempt_id": str(worker.get("_run_attempt_id") or ""),
+                            "host_slot_token": host_slot_token,
+                            "workspace_dir": str(workspace),
+                            "stdout_path": str(raw_stdout),
+                            "stderr_path": str(raw_stderr),
+                            "exit_path": str(exit_path),
+                            "model": str(info.model or ""),
+                            "argv_for_evidence_json": json.dumps([_redact_command_arg(part) for part in command]),
+                            "started_at": _utc_iso(),
                             "process_pid": process.pid,
-                            "native_provider_authority_receipt": authority_receipt,
+                            "external_native_lease_path": worker.get("_external_native_lease_path"),
+                            "timeout_seconds": run_timeout_sec,
+                            "instruction": instruction,
+                            "run_mode": "conversation",
+                            "native_image_scope": native_image_scope,
+                        },
+                        publish_run_start=callable(self._run_start_observer),
+                        worker=worker,
+                        spawned_process=process,
+                    )
+                    active_session = self._read_active_session(str(worker["worker_id"]))
+                    owned_session = dict(active_session) if active_session else None
+                    if not active_session:
+                        self._stop_active_process(
+                            str(worker["worker_id"]),
+                            worker=worker,
+                            run_id=effective_run_id,
+                        )
+                        raise RuntimeErrorBase(
+                            "Host-native process metadata was not durably recorded before launch"
+                        )
+                    native_session_thread = Thread(
+                        target=self._observe_native_session_events,
+                        args=(
+                            str(worker["worker_id"]), raw_stdout, native_session_stop,
+                            effective_run_id, str(worker.get("_run_attempt_id") or ""), 0, worker,
+                        ),
+                        name=f"glasshive-conversation-session-{effective_run_id[:12]}",
+                        daemon=True,
+                    )
+                    native_session_thread.start()
+                    if authority_receipt is not None:
+                        _atomic_write_private_text(
+                            run_root / "native-provider-authority-receipt.json",
+                            json.dumps(authority_receipt, sort_keys=True),
+                        )
+                        self._write_action_audit(
+                            worker,
+                            {
+                                "kind": "conversation.provider_invoked",
+                                "run_id": effective_run_id,
+                                "process_pid": process.pid,
+                                "native_provider_authority_receipt": authority_receipt,
+                            },
+                        )
+                    with runtime_start_boundary(worker):
+                        self._release_durable_host_process(active_session)
+                        notify_runtime_started(worker)
+                    try:
+                        exit_code = process.wait()
+                    except subprocess.TimeoutExpired as exc:
+                        if not self._stop_active_process(
+                            str(worker["worker_id"]), worker=worker, run_id=effective_run_id,
+                            expected_session=owned_session, control_session=owned_session,
+                        ):
+                            raise RuntimeErrorBase("Host conversation ownership changed during timeout cleanup") from exc
+                        raise RuntimeErrorBase(f"{self.runtime_name} timed out after {run_timeout_sec:g}s") from exc
+            except RunStartupRejectedError as exc:
+                startup_cleanup_unconfirmed = not exc.termination_confirmed
+                raise
+            finally:
+                native_session_stop.set()
+                if native_session_thread:
+                    native_session_thread.join(timeout=1)
+                if not startup_cleanup_unconfirmed and not self._finish_host_run_generation(
+                    worker, effective_run_id, process, owned_session, host_slot_token,
+                    clear_session=True,
+                ):
+                    raise RuntimeErrorBase("Host conversation ownership changed during cleanup")
+                try:
+                    self._record_run_metrics(
+                        worker["worker_id"], effective_run_id,
+                        raw_stdout.read_text() if raw_stdout.exists() else "",
+                        **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}),
+                    )
+                except (OSError, ValueError):
+                    logger.warning("Native conversation usage could not be persisted",
+                                   extra={"error_code": "usage_reconciliation_failed"})
+                try:
+                    self._cleanup_conversation_workspace_side_effects(
+                        workspace,
+                        workspace_side_effect_state,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to clean harness conversation workspace side effect",
+                        extra={
+                            "worker_id": str(worker.get("worker_id") or ""),
+                            "workspace": str(workspace),
+                            "error": str(exc),
                         },
                     )
-                with runtime_start_boundary(worker):
-                    self._release_durable_host_process(active_session)
-                    notify_runtime_started(worker)
-                try:
-                    exit_code = process.wait()
-                except subprocess.TimeoutExpired as exc:
-                    if not self._stop_active_process(
-                        str(worker["worker_id"]), worker=worker, run_id=effective_run_id,
-                        expected_session=owned_session, control_session=owned_session,
-                    ):
-                        raise RuntimeErrorBase("Host conversation ownership changed during timeout cleanup") from exc
-                    raise RuntimeErrorBase(f"{self.runtime_name} timed out after {run_timeout_sec:g}s") from exc
-        except RunStartupRejectedError as exc:
-            startup_cleanup_unconfirmed = not exc.termination_confirmed
-            raise
-        finally:
-            native_session_stop.set()
-            if native_session_thread:
-                native_session_thread.join(timeout=1)
-            if not startup_cleanup_unconfirmed and not self._finish_host_run_generation(
-                worker, effective_run_id, process, owned_session, host_slot_token,
-                clear_session=True,
-            ):
-                raise RuntimeErrorBase("Host conversation ownership changed during cleanup")
-            try:
-                self._record_run_metrics(
-                    worker["worker_id"], effective_run_id,
-                    raw_stdout.read_text() if raw_stdout.exists() else "",
-                    **({"attempt_id": str(worker["_run_attempt_id"])} if worker.get("_run_attempt_id") else {}),
-                )
-            except (OSError, ValueError):
-                logger.warning("Native conversation usage could not be persisted",
-                               extra={"error_code": "usage_reconciliation_failed"})
-            try:
-                self._cleanup_conversation_workspace_side_effects(
-                    workspace,
-                    workspace_side_effect_state,
-                )
-            except OSError as exc:
-                logger.warning(
-                    "Failed to clean harness conversation workspace side effect",
-                    extra={
-                        "worker_id": str(worker.get("worker_id") or ""),
-                        "workspace": str(workspace),
-                        "error": str(exc),
-                    },
-                )
 
         exit_code = self._final_host_exit_code(exit_path, exit_code)
         stdout = raw_stdout.read_text() if raw_stdout.exists() else ""
         stderr = raw_stderr.read_text() if raw_stderr.exists() else ""
         self._finalize_stop_reason(str(worker["worker_id"]), run_id=effective_run_id,
-                                   attempt_id=str((owned_session or {}).get("attempt_id") or ""))
+                                   attempt_id=str(worker.get("_run_attempt_id") or (owned_session or {}).get("attempt_id") or ""))
         if exit_code != 0:
             detail = (_redact_text(stderr, max_chars=2000) or _redact_text(stdout, max_chars=2000)).strip()
             self._write_action_audit(
@@ -16604,6 +16708,50 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
 class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
     worker_root_name = "host_claude_code_runtime"
 
+    def _stop_active_process(self, worker_id, **kwargs):
+        captured = self._read_active_session(worker_id) or {}
+        with self._process_lock:
+            process = self._active_processes.get(worker_id)
+        conversation = getattr(process, "_native_conversation", None)
+        confirmed = super()._stop_active_process(worker_id, **kwargs)
+        if confirmed and captured.get("process_lifetime") == "conversation":
+            if conversation is not None and conversation.idle_expiry is not None:
+                conversation.idle_expiry.cancel()
+            # A newer admitted generation owns its own freshly materialized authority.
+            with self._active_session_file_lock(worker_id):
+                if self._read_active_session(worker_id) is None:
+                    from .claude_conversation import STYLE_NAME
+                    style = self._state_dir(worker_id) / "conversation-workspace" / ".claude" / "output-styles" / (STYLE_NAME + ".md")
+                    style.unlink(missing_ok=True)
+        return confirmed
+
+    def close_persistent_conversations(self):
+        with self._process_lock:
+            retained = [(key, process) for key, process in self._active_processes.items()
+                        if getattr(process, "_native_conversation", None) is not None]
+        for worker_id, process in retained:
+            if not self._stop_active_process(worker_id,
+                    expected_session=self._read_active_session(worker_id)):
+                raise RuntimeErrorBase("Retained native conversation cleanup is unconfirmed")
+
+    def terminate_worker(self, worker):
+        worker_id = str(worker["worker_id"])
+        active = self._read_active_session(worker_id) or {}
+        if (active.get("process_lifetime") == "conversation" and active.get("phase") == "idle"
+                and not worker.get("_active_run_id")):
+            if not self._stop_active_process(worker_id, expected_session=active):
+                raise RuntimeErrorBase("Retained native conversation cleanup is unconfirmed")
+            return self._host_runtime_info(worker)
+        return super().terminate_worker(worker)
+
+    def host_active_process_status(self, worker):
+        active = self._read_active_session(str(worker["worker_id"])) or {}
+        if (active.get("process_lifetime") == "conversation"
+                and active.get("phase") == "idle"):
+            return {"state": "absent", "retained_conversation_process": True,
+                    "process_pid": active.get("process_pid")}
+        return super().host_active_process_status(worker)
+
     def _native_context_hooks_supported(self):
         from .claude_native_hooks import REVIEWED_VERSION
         binary = shutil.which(self.binary) or self.binary
@@ -16675,6 +16823,9 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         return context
 
     def supports_native_control(self, worker, action, *, run_id="", attempt_id=""):
+        from .claude_conversation import enabled, current_session
+        if enabled(self._bootstrap_bundle_for_worker(worker)):
+            return action == "cancel" and current_session(self, worker, run_id, attempt_id) is not None
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
         return self._native_control_capabilities(context).get(action, False)
 
@@ -16682,6 +16833,14 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         return {"interject": bool(context)}
 
     def native_control_state(self, worker, *, run_id, attempt_id):
+        from .claude_conversation import enabled, current_session
+        if enabled(self._bootstrap_bundle_for_worker(worker)):
+            session = current_session(self, worker, run_id, attempt_id)
+            if session is None:
+                raise RuntimeErrorBase("Native control targets an ended run attempt")
+            return {"run_id": run_id, "attempt_id": attempt_id,
+                    "session_id": session.session_id, "pending_requests": [],
+                    "capabilities": {"cancel": True, "interject": False}}
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
         if not context:
             raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
@@ -16690,6 +16849,26 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             "capabilities": self._native_control_capabilities(context)}
 
     def native_control(self, worker, *, run_id, attempt_id, action, payload=None):
+        from .claude_conversation import enabled, current_session
+        if enabled(self._bootstrap_bundle_for_worker(worker)):
+            session = current_session(self, worker, run_id, attempt_id)
+            if action != "cancel" or session is None:
+                raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
+            with self._active_session_file_lock(str(worker["worker_id"])):
+                session = current_session(self, worker, run_id, attempt_id)
+                if session is None:
+                    raise RuntimeErrorBase("Native control targets an ended run attempt")
+                session.interrupt_requested = True
+                self._note_stop_reason(str(worker["worker_id"]), "interrupted",
+                                       run_id=run_id, attempt_id=attempt_id)
+                try:
+                    session.control({"subtype": "interrupt"})
+                except Exception:
+                    session.interrupt_requested = False
+                    self._pop_stop_reason(str(worker["worker_id"]), run_id=run_id, attempt_id=attempt_id)
+                    raise
+            return {"status": "accepted", "action": action, "run_id": run_id,
+                    "attempt_id": attempt_id, "session_id": session.session_id}
         context = self._native_midstream_context(worker, run_id=run_id, attempt_id=attempt_id)
         if not context or self._native_control_capabilities(context).get(action) is not True:
             raise RuntimeErrorBase("Native control targets an ended or unsupported run attempt")
@@ -16990,6 +17169,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
     def _build_command(self, worker: dict, instruction: str, info: RuntimeInfo) -> tuple[list[str], dict[str, str]]:
         bundle = self._bootstrap_bundle_for_worker(worker)
         restricted = _native_tools_disabled(bundle)
+        broker = bundle.get("glasshive_capability_broker") if restricted else None
         session_key = (
             None
             if restricted or self._provider_session_starts_fresh(worker)
@@ -17039,9 +17219,11 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             # Safe mode suppresses automatic context and customizations without
             # changing the selected native account, model, or explicit authority.
             command.extend([
-                "--tools", "", "--setting-sources", "", "--safe-mode",
+                "--tools", "", "--setting-sources", "",
                 "--disable-slash-commands", "--no-session-persistence",
             ])
+            if not broker:
+                command.append("--safe-mode")
         elif read_only:
             tools = ["Read", "Glob", "Grep"]
             if not native_web_locked:
@@ -17060,6 +17242,15 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
              "permissions": {"defaultMode": "dontAsk"}}
             if restricted else json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
         )
+        if restricted and broker:
+            # Explicit signed MCP authority is separate from disabled native action tools.
+            # Safe mode disables even this admitted broker, so retain native isolation
+            # with the private workspace, exact MCP config and explicit native settings.
+            settings["claudeMdExcludes"] = ["**"]
+            settings["permissions"]["allow"] = [
+                f"mcp__{broker['name']}__{item['name']}"
+                for item in broker.get("tool_catalog", {}).get("tools", [])
+            ]
         if read_only and not restricted:
             permissions = settings.setdefault("permissions", {})
             if not isinstance(permissions, dict):
@@ -17198,6 +17389,8 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         if session_key and not session_key.startswith("claude-worker:"):
             command.extend(["--resume", session_key])
         env = self._host_env(worker)
+        if broker and not str(env.get("GLASSHIVE_CAPABILITY_BROKER_TOKEN") or "").strip():
+            raise RuntimeErrorBase("The restricted Claude capability broker grant is unavailable or stale")
         env.pop("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", None)
         use_api_key = os.environ.get("WPR_CLAUDE_CODE_USE_API_KEY", "0").strip().lower() in {"1", "true", "yes", "on"}
         if not use_api_key:

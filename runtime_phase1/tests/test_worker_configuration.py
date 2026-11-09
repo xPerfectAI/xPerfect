@@ -533,6 +533,7 @@ def test_runtime_context_endpoint_supersedes_owner_name_collision(
     )
     core.peers.mint_native_session = lambda *args, **kwargs: "synthetic-context-token"
     monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8876")
+    monkeypatch.setenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", "http://host.docker.internal:8876")
     projected = enforce_context_tools(bind_context_projection(
         core, core.store.get_worker(worker["worker_id"]),
         {"run_id": "run", "active_attempt_id": "attempt"},
@@ -542,10 +543,10 @@ def test_runtime_context_endpoint_supersedes_owner_name_collision(
     assert "xperfect-context" not in effective.get("_configured_removed_mcp_servers", [])
     assert all(item["name"] != "xperfect-context" for item in effective["grok_mcp_servers"])
     assert tomllib.loads(effective["codex_config_append"])["mcp_servers"]["xperfect-context"]["url"] == (
-        "http://127.0.0.1:8876/v1/native/context/"
+        "http://host.docker.internal:8876/v1/native/context/"
     )
     servers = {item["name"]: item for item in mcp_servers_for_bundle(effective, effective["env"])}
-    assert servers["xperfect-context"]["url"] == "http://127.0.0.1:8876/v1/native/context/"
+    assert servers["xperfect-context"]["url"] == "http://host.docker.internal:8876/v1/native/context/"
     assert "https://example.test/owner" not in json.dumps(servers)
     assert core.store.get_worker(worker["worker_id"])["bootstrap_bundle_json"] == json.dumps(bundle)
 
@@ -909,3 +910,17 @@ def test_inherited_source_lone_surrogate_preserves_decoded_fields_through_native
     assert json.loads(source['text'])==original
     read=core.native_read('synthetic',source['id'],0,10000)
     assert json.loads(read['text'])==original
+
+
+def test_docker_context_readiness_uses_the_same_route_as_run_projection(configured, monkeypatch):
+    core, worker = configured
+    monkeypatch.delenv("XPERFECT_EXECUTION_PROFILE", raising=False)
+    monkeypatch.setenv("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
+    monkeypatch.delenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", raising=False)
+    with core.store._connect() as db:
+        db.execute("UPDATE workers SET execution_mode='docker' WHERE worker_id=?", (worker['worker_id'],))
+    missing = core.get("local", "owner", worker['worker_id'])['effective']
+    assert any(issue['code'] == 'context_retrieval_unavailable' for issue in missing['issues'])
+    monkeypatch.setenv("GLASSHIVE_DOCKER_RUNTIME_BASE_URL", "http://host.docker.internal:8080")
+    ready = core.get("local", "owner", worker['worker_id'])['effective']
+    assert not any(issue['code'] == 'context_retrieval_unavailable' for issue in ready['issues'])

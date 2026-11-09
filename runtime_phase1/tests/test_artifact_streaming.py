@@ -10,7 +10,9 @@ import pytest
 
 from workers_projects_runtime.api import create_app
 from workers_projects_runtime.openclaw_runtime import StubRuntime
-from workers_projects_runtime.workspace_file_exports import CHUNK_BYTES
+from workers_projects_runtime.signed_links import create_signed_link_ref, sign_link_token
+from workers_projects_runtime.workspace_file_exports import CHUNK_BYTES, WorkspaceFileExport
+from workers_projects_runtime.workspace_files import FileAdmissionError
 
 
 @pytest.fixture
@@ -165,6 +167,57 @@ def test_download_rejects_nonordinary_files_without_blocking(artifacts, kind):
     assert (
         client.get(base + "/download", params={"path": "unsafe.txt"}).status_code == 400
     )
+
+
+def test_configured_private_root_is_not_listed_signed_or_served(artifacts, monkeypatch):
+    app, client, root, base = artifacts
+    folder = root / "parent"
+    private = folder / "private"
+    private.mkdir(parents=True)
+    (private / "secret.html").write_text("private fixture")
+    (folder / "ordinary.txt").write_text("ordinary fixture")
+    (root / "alias").symlink_to(private, target_is_directory=True)
+    worker_id = base.split("/")[-2]
+    files = app.state.service.files
+    owner_id = app.state.service.store.get_worker(worker_id)["owner_id"]
+    parent_item, = files.list_files(worker_id, "local", owner_id)["items"]
+    private_item = next(
+        item for item in files.list_files(worker_id, "local", owner_id, directory="parent")["items"]
+        if item["name"] == "private"
+    )
+    monkeypatch.setenv("GLASSHIVE_SIGNED_LINK_SECRET", "synthetic-test-secret")
+    monkeypatch.setenv("GLASSHIVE_LINK_REF_STATE_PATH", str(root.parent / "test-refs.sqlite3"))
+    monkeypatch.setenv("WPR_DB_PATH", str(root.parent.parent / "runtime.db"))
+    token = sign_link_token(
+        kind="artifact_download", worker_id=worker_id, tenant_id="local",
+        owner_id=owner_id, path="parent/private/secret.html",
+    )
+    ref = create_signed_link_ref(token=token)
+    assert client.get(f"/v1/link-refs/{ref}").content == b"private fixture"
+
+    monkeypatch.setenv("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS", str(private))
+    listing = client.get(base)
+    assert listing.status_code == 200
+    assert "parent/private" not in listing.text and "secret.html" not in listing.text
+    assert "ordinary.txt" in listing.text
+    assert client.get(base + "/download", params={"path": "parent/private/secret.html"}).status_code == 404
+    assert client.get(base + "/open", params={"path": "alias/secret.html"}).status_code == 404
+    case_alias = folder / "PRIVATE"
+    if case_alias.exists() and case_alias.samefile(private):
+        assert client.get(base + "/download", params={"path": "parent/PRIVATE/secret.html"}).status_code == 404
+    assert client.get(f"/v1/link-refs/{ref}").status_code == 404
+    assert client.get(base + "/download", params={"path": "parent/ordinary.txt"}).content == b"ordinary fixture"
+    revision = files.get_file(worker_id, "local", owner_id, parent_item["file_id"])["revision"]
+    (private / "secret.html").write_text("updated private fixture")
+    assert files.get_file(worker_id, "local", owner_id, parent_item["file_id"])["revision"] == revision
+    with pytest.raises(FileAdmissionError, match="File selection is unavailable"):
+        files.mutate(worker_id, "local", owner_id, parent_item["file_id"], revision=revision, path="renamed")
+    with pytest.raises(FileAdmissionError, match="Folder not found"):
+        files.list_files(worker_id, "local", owner_id, directory="parent/private")
+    with pytest.raises(FileAdmissionError, match="File not found"):
+        files.get_file(worker_id, "local", owner_id, private_item["file_id"])
+    with pytest.raises(FileAdmissionError, match="Export selection is unavailable"):
+        WorkspaceFileExport(files, worker_id, "local", owner_id, [parent_item["file_id"]])
 
 
 def test_concurrent_edit_aborts_download(artifacts):

@@ -1,4 +1,4 @@
-# Maya · Clinical Biostatistician
+# Clinical Biostatistician
 
 Turn a study plan and data into a reproducible analysis with clear uncertainty.
 

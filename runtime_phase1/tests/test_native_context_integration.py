@@ -200,13 +200,13 @@ def test_same_owner_dispatch_shares_exact_main_background_only(tmp_path):
                 conversation,
             ),
         )
-    worker = {**worker, "_context_run_id": run["run_id"]}
-    sources = authorized_sources(store, None, worker)
+    source_worker = worker | {"_context_run_id": run["run_id"]}
+    sources = authorized_sources(store, None, source_worker)
     assert {s["text"] for s in sources} == {
         "Exact Main background\nwith whitespace  é",
         "Visible Main reply",
     }
-    assert authorized_sources(store, None, worker | {"owner_id": "other"}) == []
+    assert authorized_sources(store, None, source_worker | {"owner_id": "other"}) == []
     assert "must not appear" not in json.dumps(sources)
     assert "Unrelated same-owner content" not in json.dumps(sources)
     store.close()

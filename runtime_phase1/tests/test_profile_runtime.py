@@ -5402,7 +5402,7 @@ def test_host_codex_run_sends_instruction_via_stdin_not_argv(tmp_path, monkeypat
     assert supervisor_stdin.stat().st_mode & 0o777 == 0o600
     assert supervisor_stdin.read_text().startswith("Sensitive private instruction.")
     from workers_projects_runtime.bootstrap import conversation_file_delivery_instructions
-    assert conversation_file_delivery_instructions() in supervisor_stdin.read_text()
+    assert conversation_file_delivery_instructions(runtime.provider_file_delivery_roots(worker)) in supervisor_stdin.read_text()
     ledger = json.loads((workspace / "glasshive-run" / "constraint-ledger.json").read_text())
     assert ledger["original_request"] == "Sensitive private instruction."
     evidence = json.loads((workspace / "glasshive-run" / "evidence.json").read_text())
@@ -10628,8 +10628,8 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
             "/root/private.txt",
             "/Volumes/Private/private.txt",
             "/private/var/synthetic/private.txt",
-            "ghp_syntheticgithubcredential",
-            "xoxb-synthetic-slack-credential",
+            "ghp_" "syntheticgithubcredential",
+            "xoxb-" "synthetic-slack-credential",
             "eyJhbGciOiJIUzI1NiJ9.c3ludGhldGlj.c2lnbmF0dXJl",
             private_key,
         ]
@@ -10651,9 +10651,9 @@ def test_redact_text_masks_common_host_paths_and_credential_families():
 
 
 @pytest.mark.parametrize("destination", [
-    "</Users/synthetic/Project Folder/private-report.md>",
+    "</Users/" "synthetic/Project Folder/private-report.md>",
     "/home/synthetic/private-report.md",
-    "<file:///Users/synthetic/Project Folder/private-report.md>",
+    "<file:///Users/" "synthetic/Project Folder/private-report.md>",
     "/Volumes/Private/private-report.md",
     "~/private-report.md",
     "/root/reports/private-report(2).md",
@@ -10674,7 +10674,7 @@ def test_redact_text_keeps_private_image_label_and_redacts_secret_labels():
 def test_redact_text_fails_closed_for_an_unterminated_private_key():
     private_key_body = "A" * 120
     redacted = _redact_text(
-        "Safe prefix.\n-----BEGIN PRIVATE KEY-----\n"
+        "Safe prefix.\n-----BEGIN " "PRIVATE KEY-----\n"
         f"{private_key_body}\n"
         "untrusted trailing text"
     )

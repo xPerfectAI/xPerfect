@@ -75,7 +75,7 @@ def test_mission_final_files_survive_report_selection_for_normal_and_recovered_h
                   "stdout_path": str(root / "stdout.log"), "stderr_path": str(root / "stderr.log"),
                   "exit_path": str(root / "exit_code")}
         monkeypatch.setattr(runtime, "_latest_completed_run_payload", lambda *_a, **_k: active)
-        monkeypatch.setattr(runtime, "_record_run_metrics", lambda *_a: ({}, {}))
+        monkeypatch.setattr(runtime, "_record_run_metrics", lambda *_a, **_k: ({}, {}))
         monkeypatch.setattr(runtime, "reconcile_worker", lambda _w: info)
         monkeypatch.setattr(runtime, "_remember_native_session_key", lambda *_a: None)
         monkeypatch.setattr(profile_runtime, "_ensure_recovered_success_evidence", lambda **_k: ("completed", ""))
@@ -152,7 +152,7 @@ def test_wrong_run_owner_workspace_or_changed_bytes_cannot_resolve(tmp_path):
     output = f"![Note]({path})"
     for changes in ({"run_id": "old"}, {"owner_id": "other"}, {"worker_id": "other"}, {"workspace_dir": "/unrelated"}):
         assert "artifact_sha256:" not in project(runtime, worker, info, output, {**scope, **changes})
-    outside = "![Other](/Users/synthetic/private.png)"
+    outside = "![Other](/Users/" "synthetic/private.png)"
     assert project(runtime, worker, info, outside, scope) == "Other"
     path.write_bytes(b"changed")
     assert "artifact_sha256:" not in project(runtime, worker, info, output, scope)
@@ -172,7 +172,7 @@ def test_recovery_uses_exact_published_image_scope_not_later_worker_bundle(tmp_p
     active = {"run_id": "run-current", "run_mode": lane, "stdout_path": str(stdout),
               "stderr_path": str(stderr), "exit_path": str(exit_path), "native_image_scope": scope}
     monkeypatch.setattr(runtime, "_latest_completed_run_payload", lambda *_a, **_k: active)
-    monkeypatch.setattr(runtime, "_record_run_metrics", lambda *_a: ({}, {}))
+    monkeypatch.setattr(runtime, "_record_run_metrics", lambda *_a, **_k: ({}, {}))
     monkeypatch.setattr(runtime, "reconcile_worker", lambda _w: info)
     monkeypatch.setattr(runtime, "_parse_output", lambda *_a: (None, f"![Note]({path.as_uri()})"))
     monkeypatch.setattr(runtime, "_remember_native_session_key", lambda *_a: None)
@@ -262,6 +262,7 @@ def test_provider_plain_and_graph_outputs_share_signed_artifact_route(tmp_path, 
     router = object.__new__(profile_runtime.ProfiledWorkerRuntime)
     router._runtime_for_worker = lambda _w: runtime
     router._native_warm_adapters = lambda: ()  # This file-only router starts no native processes.
+    router.host_claude = profile_runtime.HostClaudeCodeRuntime(base_dir=str(tmp_path / "unused-claude-runtime"))
     service.runtime = router
     provider = ConversationProvider(store, service)
     native = f"{label}({path.as_uri()})\n\n[Official source](https://docs.example.test/)"

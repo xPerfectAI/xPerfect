@@ -469,7 +469,7 @@ def due_callback_records(store,now,limit=32):
     # bounded batch ahead of another owner with one ready destination.
     with store._connect() as conn:
         rows=conn.execute("""SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY tenant_id,owner_id ORDER BY next_attempt_at,created_at) AS owner_order
-          FROM callback_outbox WHERE event_type='schedule.due' AND status='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?))
+          FROM callback_outbox WHERE event_type IN ('schedule.due','coordinator.turn_due','coordinator.dispatch_due','coordinator.result_ready','coordinator.action_due','coordinator.turn_result_ready') AND status='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?))
           ORDER BY owner_order,next_attempt_at,callback_id LIMIT ?""",(now,limit)).fetchall()
     return [dict(r) for r in rows]
 
@@ -489,6 +489,9 @@ def fence_callback(service,record):
         row=conn.execute("SELECT * FROM callback_outbox WHERE callback_id=? AND status='delivering' AND delivery_lease_token=? AND delivery_generation=?",(record["callback_id"],record["delivery_lease_token"],record["delivery_generation"])).fetchone()
         if row is None:return "superseded"
         if row["cancel_requested_at"]:return "cancelled"
+        if row["event_type"] in {"coordinator.turn_due", "coordinator.dispatch_due", "coordinator.result_ready", "coordinator.action_due", "coordinator.turn_result_ready"}:
+            from .coordinator_application import notification_fence
+            return notification_fence(service, dict(row))
         definition=conn.execute("SELECT version,retired_at FROM recurring_schedule_definitions WHERE definition_id=?",(row["definition_id"],)).fetchone()
         if not definition or definition["version"]!=row["schedule_version"] or definition["retired_at"]:return "superseded"
         try:_authority(conn,row["tenant_id"],row["owner_id"])
@@ -497,6 +500,10 @@ def fence_callback(service,record):
 
 
 def finish_callback(store,record,*,state,error="",timings=None,http_status=None,retryable=False,attempt_started=True):
+    if record["event_type"] in {"coordinator.turn_due", "coordinator.dispatch_due", "coordinator.result_ready", "coordinator.action_due", "coordinator.turn_result_ready"}:
+        from .coordinator_application import finish_notification
+        return finish_notification(store, record, state=state, error=error, timings=timings,
+                                   http_status=http_status, retryable=retryable, attempt_started=attempt_started)
     now=datetime.now(timezone.utc);attempts=int(record["attempts"])+int(attempt_started)
     expired=now>=parsed(record["expires_at"])
     with store._connect() as conn:
@@ -557,11 +564,13 @@ def deliver(service,record):
         # Persisted metadata can be corrupt too. Its decoding belongs inside the
         # same reservation cleanup as the network attempt.
         timings["executor_queue_ms"] = max(0, (started-record.get("_submitted_monotonic",started))*1000)
-        timings["clock_lateness_ms"] = max(0, (parsed(record["created_at"])-parsed(json.loads(record["payload_json"])["scheduled_at"])).total_seconds()*1000)
+        payload = json.loads(record["payload_json"])
+        source_time = payload["scheduled_at"] if record["event_type"] == "schedule.due" else payload["created_at"]
+        timings["clock_lateness_ms"] = max(0, (parsed(record["created_at"])-parsed(source_time)).total_seconds()*1000)
         timings["outbox_wait_ms"] = max(0, (datetime.now(timezone.utc)-parsed(record["created_at"])).total_seconds()*1000)
         reason=fence_callback(service,record)
         if reason:
-            finish_callback(service.store,record,state="unacknowledged" if record["attempts"] else "cancelled" if reason=="cancelled" else "rejected",error=reason,attempt_started=False);return
+            finish_callback(service.store,record,state="superseded" if reason == "source_prepared" else "unacknowledged" if record["attempts"] else "cancelled" if reason=="cancelled" else "rejected",error=reason,attempt_started=False);return
         destination=service.webhook_destinations.get(record["tenant_id"],record["owner_id"],record["destination_id"])
         if not destination or not destination["enabled"]:
             finish_callback(service.store,record,state="unacknowledged" if record["attempts"] else "rejected",error="destination_unavailable",attempt_started=False);return
@@ -578,6 +587,9 @@ def deliver(service,record):
         timings.update(outcome.timings_ms)
         current_destination=service.webhook_destinations.get(record["tenant_id"],record["owner_id"],record["destination_id"])
         record["_destination_revoked"] = not current_destination or not current_destination["enabled"]
+        if record["event_type"] in {"coordinator.turn_due", "coordinator.dispatch_due", "coordinator.result_ready", "coordinator.action_due", "coordinator.turn_result_ready"}:
+            from .coordinator_application import notification_fence
+            record["_source_withdrawn"] = notification_fence(service, record) not in {"", "source_prepared"}
         finish_callback(service.store,record,state=outcome.state,error=outcome.error_code or "",timings=timings,http_status=outcome.http_status,retryable=outcome.retryable)
     except Exception:
         # No exception text: HTTP/private configuration errors can contain URLs or credentials.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -40,6 +41,11 @@ def test_pack_import_is_an_ordinary_exact_template_not_a_running_worker(environm
     pack = next(p for p in published.json()["items"] if p["id"] == starter_id)
     from workers_projects_runtime.starter_templates import PACK_ROOT
     declared = json.loads((PACK_ROOT / starter_id / "template.json").read_text())
+    assert pack["name"] == pack["role"] == declared["name"]
+    assert declared["project_definition"].split("\n\n", 1)[0] == (
+        "You are a reusable AI Worker specializing as a " + pack["role"] + "."
+    )
+    assert (PACK_ROOT / starter_id / "README.md").read_text().splitlines()[0] == "# " + pack["role"]
     expected_count = len(declared["library_items"])
     selected_count = sum(entry.get("selected", True) for entry in declared["library_items"])
     assert len(pack["abilities"]) == expected_count
@@ -49,10 +55,13 @@ def test_pack_import_is_an_ordinary_exact_template_not_a_running_worker(environm
     result = client.post(f"/v1/workspace-starters/{starter_id}/import", json=payload)
     assert result.status_code == 201, result.text
     template = result.json()["template"]
+    assert template["name"] == pack["role"]
     assert template["profile"] == "claude-code"
     assert len(template["personal_library_refs"]) == selected_count
     private = service.control_plane_store.get_workspace_template(tenant_id="local", owner_id="demo-owner", template_id=template["template_id"])
     assert private["content"]["worker"]["bootstrap_bundle"]["env"] == {"WPR_CLAUDE_CODE_EFFORT": "high"}
+    assert private["content"]["worker"]["name"] == pack["role"]
+    assert private["content"]["worker"]["bootstrap_bundle"]["project_definition"] == declared["project_definition"]
     assert not private["content"]["worker"].get("provider_account_ref")
     with service.store._connect() as conn:
         assert conn.execute("SELECT count(*) FROM workers").fetchone()[0] == 0
@@ -65,6 +74,7 @@ def test_pack_import_is_an_ordinary_exact_template_not_a_running_worker(environm
     created = client.post(f"/v1/workspace-templates/{template['template_id']}/instantiate", json={"idempotency_key": "starter-instance-" + starter_id})
     assert created.status_code == 201, created.text
     worker = created.json()["workspace"]
+    assert worker["name"] == pack["role"]
     assert worker["state"] == "paused" and worker["last_run_id"] is None
     # Native skills require this exact new worker's review, never an import-time grant.
     assert created.json()["approvals_required"]
@@ -95,19 +105,48 @@ def test_completed_import_replays_its_exact_template_after_catalog_upgrade(envir
     """A retry resumes the selected version; it is not a silent package upgrade."""
     import workers_projects_runtime.starter_templates as module
     _, client, service = environment
+    current_root = module.PACK_ROOT
+    current_pack = catalog()["items"][0]
+    historical_root = tmp_path / "historical-catalog"
+    historical_pack = historical_root / current_pack["id"]
+    shutil.copytree(current_root / current_pack["id"], historical_pack)
+    declared = json.loads((historical_pack / "template.json").read_text())
+    declared["name"] = "Theo · " + declared["role"]
+    declared["project_definition"] = declared["project_definition"].replace(
+        "You are a reusable AI Worker", "You are Theo, a reusable AI Worker", 1
+    )
+    (historical_pack / "template.json").write_text(json.dumps(declared))
+    monkeypatch.setattr(module, "PACK_ROOT", historical_root)
     pack = catalog()["items"][0]
     route = f"/v1/workspace-starters/{pack['id']}/import"
     payload = {"idempotency_key": "keep-completed-version", "content_hash": pack["content_hash"]}
     original = client.post(route, json=payload)
     assert original.status_code == 201, original.text
-    # The packaged revision is no longer present. Its completed receipt must
-    # still replay the original private template without touching the catalog.
-    monkeypatch.setattr(module, "PACK_ROOT", tmp_path / "upgraded-catalog")
+    original_template = service.control_plane_store.get_workspace_template(
+        tenant_id="local", owner_id="demo-owner", template_id=original.json()["template"]["template_id"]
+    )
+    # The role-only catalog replaces the historical package. Existing private
+    # identity, instructions and exact knowledge versions remain unchanged.
+    monkeypatch.setattr(module, "PACK_ROOT", current_root)
+    assert catalog()["items"][0]["name"] == current_pack["role"]
+    assert current_pack["content_hash"] != pack["content_hash"]
     replay = client.post(route, json=payload)
     assert replay.status_code == 201, replay.text
     assert replay.json()["idempotent_replay"] is True
     assert replay.json()["template"]["template_id"] == original.json()["template"]["template_id"]
     assert replay.json()["template"]["personal_library_refs"] == original.json()["template"]["personal_library_refs"]
+    assert replay.json()["template"]["name"] == declared["name"]
+    retained_template = service.control_plane_store.get_workspace_template(
+        tenant_id="local", owner_id="demo-owner", template_id=original_template["template_id"]
+    )
+    assert retained_template["content"] == original_template["content"]
+    instance_route = f"/v1/workspace-templates/{original_template['template_id']}/instantiate"
+    historical = client.post(instance_route, json={"idempotency_key": "keep-historical-name"})
+    assert historical.status_code == 201, historical.text
+    assert historical.json()["workspace"]["name"] == declared["name"]
+    custom = client.post(instance_route, json={"idempotency_key": "keep-custom-name", "name": "My laboratory guide"})
+    assert custom.status_code == 201, custom.text
+    assert custom.json()["workspace"]["name"] == "My laboratory guide"
     with service.store._connect() as conn:
         assert conn.execute("SELECT count(*) FROM workspace_templates").fetchone()[0] == 1
 

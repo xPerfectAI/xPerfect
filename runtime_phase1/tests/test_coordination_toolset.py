@@ -31,6 +31,22 @@ class Source:
         return {name: ToolsetTool(toolset=self, tool_def=ToolDefinition(name=name, parameters_json_schema={'type':'object',**schema}), max_retries=0,args_validator=TypeAdapter(dict[str, object]).validator) for name,schema in schemas.items()}
 
 @run_async
+async def test_native_canonical_mcp_contract_passes_through_without_a_second_translation():
+    source = Source()
+    original = await source.get_tools(Context())
+    canonical = {'hand_off_to': original[START], 'list_workers': original[ROSTER],
+                 'unrelated_action': original['web_search']}
+    source.get_tools = AsyncMock(return_value=canonical)
+    facade = CoordinationToolset(source)
+    tools = await facade.get_tools(Context())
+    assert set(tools) == {'hand_off_to', 'list_workers'}
+    args = {'action': 'start', 'sourceOrdinals': [2], 'fileIds': []}
+    await facade.call_tool('hand_off_to', args, Context(), tools['hand_off_to'])
+    assert source.call_tool.call_args.args[:2] == ('hand_off_to', args)
+    with pytest.raises(ValueError):
+        await facade.call_tool('unrelated_action', {}, Context(), original['web_search'])
+
+@run_async
 async def test_only_two_tools_and_no_brief_generation():
     source=Source(); facade=CoordinationToolset(source); tools=await facade.get_tools(Context())
     assert set(tools)=={'hand_off_to','list_workers'}
@@ -147,13 +163,90 @@ async def test_start_file_choice_description_follows_exact_typed_required_metada
     tools = await CoordinationToolset(ActualRequiredSource()).get_tools(Context())
     schema = tools['hand_off_to'].tool_def.parameters_json_schema
     description = schema['properties']['fileIds']['description']
-    assert description.startswith('Required for start. ') is required
-    assert ('fileIds' in schema['allOf'][0]['then']['required']) is required
-    assert schema['required'] == ['action']
+    assert 'omit for no added historical files' in description
+    assert 'fileIds' not in schema['allOf'][0]['then']['required']
+    assert schema['required'] == []
     validate({'action': 'start', 'sourceOrdinals': [1], 'fileIds': []}, schema)
     validate({'action': 'steer', 'workRef': 'work', 'sourceOrdinals': [1]}, schema)
-    if required:
-        with pytest.raises(ValidationError):
-            validate({'action': 'start', 'sourceOrdinals': [1]}, schema)
+    validate({'sourceOrdinals': [1]}, schema)
+    validate({'action': 'start', 'sourceOrdinals': [1]}, schema)
+
+
+@run_async
+async def test_canonical_existing_work_control_retains_only_its_declared_schema_and_authority():
+    source=Source();declared=await source.get_tools(Context())
+    source.get_tools=AsyncMock(return_value={'hand_off_to':declared[START],
+        'list_workers':declared[ROSTER],CONTROL:declared[CONTROL],
+        'schedule_create':declared['schedule_create'],'web_search':declared['web_search']})
+    facade=CoordinationToolset(source);tools=await facade.get_tools(Context())
+    assert set(tools)=={'hand_off_to','list_workers',CONTROL}
+    assert tools[CONTROL].tool_def.parameters_json_schema is declared[CONTROL].tool_def.parameters_json_schema
+    assert tools[CONTROL].args_validator is declared[CONTROL].args_validator
+    original={'action':'steer','workRef':'owned-work','instruction':'Keep the exact original guidance.',
+              'sourceOrdinals':[2],'nativeInput':{'requestId':'owned-question'}}
+    await facade.call_tool(CONTROL,original,Context(),tools[CONTROL])
+    assert source.call_tool.call_args.args[:2]==(CONTROL,original)
+    assert source.call_tool.call_args.args[3] is declared[CONTROL]
+    for name in ('schedule_create','web_search'):
+        with pytest.raises(ValueError,match='coordination_tool_unavailable'):
+            await facade.call_tool(name,{},Context(),declared[name])
+
+
+@run_async
+async def test_canonical_control_is_not_invented_when_not_granted_or_filtered_out():
+    source=Source();declared=await source.get_tools(Context())
+    # This is the wrapped view after the Direct runner's existing enabled/disabled filter.
+    source.get_tools=AsyncMock(return_value={'hand_off_to':declared[START],'list_workers':declared[ROSTER]})
+    facade=CoordinationToolset(source);tools=await facade.get_tools(Context())
+    assert CONTROL not in tools
+    with pytest.raises(ValueError,match='coordination_tool_unavailable'):
+        await facade.call_tool(CONTROL,{'action':'stop','workRef':'ungranted-work'},Context(),declared[CONTROL])
+    source.call_tool.assert_not_called()
+
+
+@run_async
+async def test_canonical_roster_and_control_do_not_gain_a_new_handoff_grant():
+    source=Source();declared=await source.get_tools(Context())
+    source.get_tools=AsyncMock(return_value={'list_workers':declared[ROSTER],CONTROL:declared[CONTROL]})
+    facade=CoordinationToolset(source);tools=await facade.get_tools(Context())
+    assert set(tools)=={'list_workers',CONTROL}
+    await facade.call_tool(CONTROL,{'action':'stop','workRef':'owned-existing-work'},Context(),tools[CONTROL])
+    assert source.call_tool.call_args.args[:2]==(CONTROL,{'action':'stop','workRef':'owned-existing-work'})
+    with pytest.raises(ValueError,match='coordination_tool_unavailable'):
+        await facade.call_tool('hand_off_to',{},Context(),declared[START])
+
+
+@run_async
+@pytest.mark.parametrize('marker,granted', [('original-context-v1',True),('wrong-contract',True),(None,True),('original-context-v1',False)])
+async def test_actual_mcp_metadata_preserves_granted_control_only_contract(marker,granted):
+    from fastmcp import FastMCP,Client
+    from pydantic_ai import Agent
+    from pydantic_ai.mcp import MCPToolset
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.messages import ModelResponse,ToolCallPart,TextPart
+    from workers_projects_runtime.coordination_toolset import COORDINATION_CONTRACT_META_KEY
+    server=FastMCP('Synthetic canonical control');calls=[];seen=[]
+    @server.tool(name=CONTROL,meta={COORDINATION_CONTRACT_META_KEY:marker} if marker else {})
+    async def control(action:str,workRef:str):
+        calls.append({'action':action,'workRef':workRef});return {'status':'accepted'}
+    backend=MCPToolset(Client(server),max_retries=0)
+    filtered=backend.filtered(lambda ctx,tool:granted)
+    facade=CoordinationToolset(filtered)
+    def model(messages,info):
+        seen.append(info.function_tools)
+        if granted and not calls:
+            return ModelResponse(parts=[ToolCallPart(CONTROL,{'action':'stop','workRef':'owned-original-goal'})])
+        return ModelResponse(parts=[TextPart('Done.')])
+    agent=Agent(FunctionModel(model),toolsets=[facade])
+    if granted and marker!='original-context-v1':
+        with pytest.raises(ValueError,match='coordination_source_binding_unavailable'):
+            await agent.run('Synthetic exact existing-work control.')
+        assert calls==[]
     else:
-        validate({'action': 'start', 'sourceOrdinals': [1]}, schema)
+        await agent.run('Synthetic exact existing-work control.')
+        if granted:
+            assert seen[0][0].metadata['meta'][COORDINATION_CONTRACT_META_KEY]==marker
+            assert [tool.name for tool in seen[0]]==[CONTROL]
+            assert calls==[{'action':'stop','workRef':'owned-original-goal'}]
+        else:
+            assert all(not tools for tools in seen) and calls==[]

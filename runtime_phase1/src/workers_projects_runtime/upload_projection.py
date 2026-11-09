@@ -13,8 +13,8 @@ from .bootstrap import (
 )
 
 
-def project_inline_image_files(messages: Iterable[Any]) -> list[dict[str, Any]]:
-    """Project typed inline image bytes into the existing request file owner."""
+def project_inline_image_files(messages: Iterable[Any], *, archive: bool = False) -> list[dict[str, Any]]:
+    """Preserve validated files; inference batch bounds do not limit the archive."""
     from .deliverables import _native_image_bytes, NATIVE_MEDIA_MAX_ITEMS, NATIVE_MEDIA_MAX_TOTAL_BYTES
 
     files = []
@@ -40,7 +40,10 @@ def project_inline_image_files(messages: Iterable[Any]) -> list[dict[str, Any]]:
             digest = hashlib.sha256(data).hexdigest()
             if digest in seen:
                 continue
-            if len(files) >= NATIVE_MEDIA_MAX_ITEMS or total_bytes + len(data) > NATIVE_MEDIA_MAX_TOTAL_BYTES:
+            if not archive and (
+                len(files) >= NATIVE_MEDIA_MAX_ITEMS
+                or total_bytes + len(data) > NATIVE_MEDIA_MAX_TOTAL_BYTES
+            ):
                 raise ValueError("Inline image input exceeds the native media limit")
             seen.add(digest)
             total_bytes += len(data)
@@ -240,7 +243,7 @@ def trusted_selected_files(bundle: dict[str, Any] | None) -> list[dict[str, str]
     if not isinstance(packet, dict):
         return None
     raw = packet.get("selected_files", [])
-    if not isinstance(raw, list) or len(raw) > 64:
+    if not isinstance(raw, list):
         raise ValueError("viventium_delegation_packet selected_files is invalid")
     selected: list[dict[str, str]] = []
     for ordinal, item in enumerate(raw):
@@ -467,6 +470,7 @@ def project_upload_files(
         if declared_text and isinstance(text, str):
             result.append({
                 "scope": "workspace", "path": path, "content": text,
+                "input_kind": "extracted_text",
                 **({"allow_empty": True} if text == "" else {}), **metadata,
             })
             continue
@@ -490,13 +494,15 @@ def project_upload_files(
                     "scope": "workspace",
                     "path": path,
                     "source_path": source,
+                    "input_kind": "original",
                     **({BOOTSTRAP_SOURCE_TOKEN_KEY: token} if token else {}),
                     **metadata,
                 }
             )
             continue
         if isinstance(text, str) and text.strip() and filename.lower().endswith(_TEXT_UPLOAD_EXTENSIONS):
-            result.append({"scope": "workspace", "path": path, "content": text, **metadata})
+            result.append({"scope": "workspace", "path": path, "content": text,
+                           "input_kind": "extracted_text", **metadata})
             continue
         if metadata:
             blocker = (
@@ -517,9 +523,38 @@ def project_upload_files(
                     "path": f"{path}.metadata.json",
                     "content": json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                     "upload_blocker": blocker,
+                    "input_kind": "extracted_text" if declared_text else "original",
                     **metadata,
                 }
             )
+    return result
+
+
+def projected_upload_input_index(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    """Describe only current projected input entries for the existing per-run index."""
+    from .workspace_files import _relative
+
+    result = []
+    for entry in bundle.get("files") or []:
+        if (not isinstance(entry, dict) or entry.get("scope", "workspace") != "workspace"
+                or entry.get("input_kind") not in {"original", "extracted_text"}
+                or not entry.get("file_id")):
+            continue
+        path = _relative(str(entry.get("path") or "")).as_posix()
+        item = {"name": str(entry.get("filename") or Path(path).name), "path": path,
+                "source_file_id": str(entry["file_id"]), "input_kind": entry["input_kind"]}
+        if isinstance(entry.get("media_group_index"), int) and not isinstance(entry["media_group_index"], bool):
+            item["media_group_index"] = entry["media_group_index"]
+        if entry.get("upload_blocker"):
+            item.update({"available": False, "blocker": str(entry["upload_blocker"])})
+        elif isinstance(entry.get("content"), str):
+            data = entry["content"].encode("utf-8")
+            item.update({"sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)})
+        else:
+            for source, target in (("sha256", "sha256"), ("bytes", "size_bytes")):
+                if source in entry:
+                    item[target] = entry[source]
+        result.append(item)
     return result
 
 
@@ -619,3 +654,22 @@ def merge_projected_upload_files(existing: Any, projected: list[dict[str, Any]])
         if item_identity:
             seen_identities.add(item_identity)
     return files
+
+
+def project_bootstrap_upload_files(
+    bundle: dict[str, Any] | None, *, tenant_id: str, owner_id: str,
+) -> dict[str, Any] | None:
+    """Project the existing trusted selected upload ledger through its normal owner."""
+    context = (bundle or {}).get("glasshive_upload_context")
+    if not isinstance(context, dict) or not context.get("tool_uploaded_files"):
+        return bundle
+    selected = trusted_selected_files(bundle)
+    records = intersect_upload_records(context["tool_uploaded_files"], selected, require_all=selected is not None)
+    for record in records:
+        declared_owner = record.get("user") or record.get("owner_id")
+        declared_tenant = record.get("tenant_id")
+        if ((declared_owner and str(declared_owner) != owner_id)
+                or (declared_tenant and str(declared_tenant) != tenant_id)):
+            raise ValueError("Selected upload identity does not match the authenticated owner")
+    projected = project_upload_files({"tool_uploaded_files": records}, tenant_id=tenant_id, owner_id=owner_id)
+    return {**bundle, "files": merge_projected_upload_files(bundle.get("files"), projected)}

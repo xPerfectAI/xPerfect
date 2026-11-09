@@ -1,4 +1,4 @@
-"""Two names over existing owner-authorized work tools; no scheduler or execution loop."""
+"""Project declared owner-authorized coordination tools; no scheduler or execution loop."""
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import hashlib
@@ -10,6 +10,8 @@ from pydantic_ai.toolsets.wrapper import WrapperToolset
 START = 'worker_delegate_once_mcp_glasshive-workers-projects'
 CONTROL = 'active_work_action'
 ROSTER = 'active_work_list'
+COORDINATION_CONTRACT_META_KEY = 'xperfect.coordination/contract'
+COORDINATION_CONTRACT_META_VALUE = 'original-context-v1'
 ACTIONS = {'start', 'queue', 'message', 'steer', 'pause', 'resume', 'stop', 'retry', 'dismiss'}
 
 
@@ -25,9 +27,17 @@ def coordination_tool_manifest():
 @dataclass
 class CoordinationToolset(WrapperToolset):
     _original: dict = field(default_factory=dict, init=False)
+    _canonical: bool = field(default=False, init=False)
 
     async def get_tools(self, ctx):
         available = await self.wrapped.get_tools(ctx)
+        control = available.get(CONTROL)
+        metadata = (control.tool_def.metadata or {}).get('meta') if control else None
+        canonical_control = isinstance(metadata, dict) and metadata.get(COORDINATION_CONTRACT_META_KEY) == COORDINATION_CONTRACT_META_VALUE
+        self._canonical = canonical_control or any(name in available for name in ('hand_off_to', 'list_workers'))
+        if self._canonical:
+            self._original = {name: available[name] for name in ('hand_off_to', 'list_workers', CONTROL) if name in available}
+            return {name: replace(tool, toolset=self) for name, tool in self._original.items()}
         self._original = {name: available[name] for name in (START, CONTROL, ROSTER) if name in available}
         result = {}
         if ROSTER in self._original:
@@ -47,8 +57,10 @@ class CoordinationToolset(WrapperToolset):
         control_schema = control.tool_def.parameters_json_schema if control else {}
         start_properties = start_schema.get('properties', {})
         control_properties = control_schema.get('properties', {})
-        permitted = {'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput', 'instruction'}
+        permitted = {'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput', 'instruction', 'requiresHostAccess'}
         properties = {key: value for key, value in control_properties.items() if key in permitted}
+        if 'requiresHostAccess' in start_properties:
+            properties['requiresHostAccess'] = start_properties['requiresHostAccess']
         # Current input bounds are common; historical-file choices are start-only.
         if start:
             if 'sourceOrdinals' in start_properties:
@@ -56,24 +68,25 @@ class CoordinationToolset(WrapperToolset):
                     'Select the exact current input segments for start, queue, message, steer or retry. Required when there is more than one current input.'}
             if 'fileIds' in start_properties:
                 properties['fileIds'] = {**(control_properties.get('fileIds') or start_properties['fileIds']),
-                    'description': ('Required for start. ' if 'fileIds' in start_schema.get('required', []) else '') +
-                        'For start, select the listed historical files or [] for none; current uploads remain included. For queue/message/steer, select authorized files for that exact work.'}
+                    'description': 'For start, omit for no added historical files, or select listed files; current uploads remain included. For queue/message/steer, select authorized files for that exact work.'}
         manifest = coordination_tool_manifest()
         instruction_schema = (start_properties.get('instruction') or control_properties.get('instruction'))
         if instruction_schema:
             properties['instruction'] = {**instruction_schema, 'description': manifest['instruction_selection']}
         actions = sorted(({'start'} if start else set()) | (ACTIONS - {'start'} if control else set()))
-        properties['action'] = {'type': 'string', 'enum': actions}
+        properties['action'] = {'type': 'string', 'enum': actions,
+            **({'default': 'start'} if start else {}), 'description':
+            'Defaults to start for new work without a workRef. For existing work, supply its exact workRef and an offered action.'}
         schema = {'type': 'object', 'properties': properties,
-                  'required': ['action'], 'additionalProperties': False}
+                  'required': [] if start else ['action'], 'additionalProperties': False}
         conditions = []
         if start:
-            required = [name for name in start_schema.get('required', []) if name in permitted]
+            required = [name for name in start_schema.get('required', []) if name in permitted and name != 'fileIds']
             start_fields = {key: start_properties[key] for key in ('fileIds', 'sourceOrdinals') if key in start_properties}
             conditions.append({'if': {'properties': {'action': {'const': 'start'}}},
                                'then': {'properties': start_fields, 'required': required}})
         if control:
-            conditions.append({'if': {'properties': {'action': {'enum': [action for action in actions if action != 'start']}}},
+            conditions.append({'if': {'required': ['action'], 'properties': {'action': {'enum': [action for action in actions if action != 'start']}}},
                                'then': {'required': ['workRef']}})
         if conditions:
             schema['allOf'] = conditions
@@ -85,12 +98,17 @@ class CoordinationToolset(WrapperToolset):
         return result
 
     async def call_tool(self, name, tool_args, ctx, tool):
+        if self._canonical:
+            original = self._original.get(name)
+            if original is None:
+                raise ValueError('coordination_tool_unavailable')
+            return await self.wrapped.call_tool(name, tool_args, ctx, original)
         if name == 'list_workers':
             target, args = ROSTER, tool_args
         elif name == 'hand_off_to':
-            if set(tool_args) - {'action', 'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput', 'instruction'}:
+            if set(tool_args) - {'action', 'workRef', 'sourceOrdinals', 'fileIds', 'nativeInput', 'instruction', 'requiresHostAccess'}:
                 raise ValueError('coordination_arguments_invalid')
-            action = tool_args.get('action')
+            action = tool_args.get('action', 'start' if 'workRef' not in tool_args else None)
             if action not in ACTIONS:
                 raise ValueError('coordination_action_invalid')
             target = START if action == 'start' else CONTROL
@@ -105,7 +123,10 @@ class CoordinationToolset(WrapperToolset):
                 if 'workRef' in args or 'nativeInput' in args:
                     raise ValueError('coordination_start_arguments_invalid')
                 args['inheritContext'] = True
+                args.setdefault('fileIds', [])
             else:
+                if 'requiresHostAccess' in args:
+                    raise ValueError('requiresHostAccess is available only for action start')
                 if not args.get('workRef'):
                     raise ValueError('coordination_work_identity_required')
                 args['action'] = action

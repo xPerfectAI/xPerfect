@@ -15,6 +15,7 @@ import stat
 from typing import Iterator
 import zipfile
 
+from .deliverables import is_protected_artifact_path
 from .workspace_files import FileAdmissionError, WorkspaceFiles, _directory, _relative
 
 CHUNK_BYTES = 256 * 1024
@@ -71,6 +72,8 @@ def _changed() -> FileAdmissionError:
 def _inspect(root: Path, path: Path) -> ExportEntry:
     # All descendants must pass policy; never silently omit a private child.
     _relative(path.as_posix())
+    if is_protected_artifact_path(root / path):
+        raise FileAdmissionError("Export selection is unavailable", 403)
     with _directory(root, path.parent) as parent:
         try:
             metadata = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
@@ -153,6 +156,8 @@ class WorkspaceFileExport:
             if _identity(os.fstat(root_fd))[:2] != self.root_identity:
                 raise _changed()
         for entry in self.entries:
+            if is_protected_artifact_path(self.root / entry.path):
+                raise FileAdmissionError("Export selection is unavailable", 403)
             with _directory(self.root, entry.path.parent) as parent:
                 try:
                     current = os.stat(

@@ -289,17 +289,16 @@ class WorkspaceContinuationContextRequest(BaseModel):
 
     version: Literal[1]
     base_instruction: str = Field(
-        alias="baseInstruction", min_length=1, max_length=131072
+        alias="baseInstruction", min_length=1
     )
-    guidance: list[str] = Field(default_factory=list, max_length=128)
+    guidance: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_guidance(self) -> "WorkspaceContinuationContextRequest":
         if any(
             not item.strip()
-            or len(item.encode("utf-8")) > 100 * 1024
             for item in self.guidance
-        ) or sum(len(item.encode("utf-8")) for item in self.guidance) > 512 * 1024:
+        ):
             raise ValueError("Workspace continuation context is invalid")
         return self
 
@@ -321,8 +320,8 @@ class CreateDelegationRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     title: str = Field(min_length=1, max_length=200)
-    goal: str = Field(min_length=1, max_length=10000)
-    instruction: str = Field(min_length=1, max_length=100000)
+    goal: str = Field(min_length=1)
+    instruction: str = Field(min_length=1)
     profile: str = Field(default="", max_length=100)
     execution_mode: str = Field(default="", alias="executionMode", max_length=20)
     worker_name: str = Field(default="", alias="workerName", max_length=200)
@@ -524,7 +523,7 @@ class ActiveWorkActionRequest(BaseModel):
     runtime_bundle: ActiveWorkRuntimeBundle | None = Field(default=None, alias="runtimeBundle")
     native_input: NativeInputResponseRequest | None = Field(default=None, alias="nativeInput")
     native_human_input: NativeHumanInputRequest | None = Field(default=None, alias="nativeHumanInput")
-    instruction: str | None = Field(default=None, max_length=100000)
+    instruction: str | None = Field(default=None)
     capability_reauthorization: CapabilityReauthorizationRequest | None = Field(
         default=None, alias="capabilityReauthorization"
     )

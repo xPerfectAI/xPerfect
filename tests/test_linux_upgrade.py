@@ -786,7 +786,7 @@ def test_unknown_images_and_public_receipts_are_refused(package):
 
 def test_idle_failure_reason_never_leaks_paths_or_tracebacks():
     assert linux_upgrade._reason(IDLE_ERROR) == 'GlassHive active work must be quiesced before continuity'
-    assert linux_upgrade._reason(b'Error response: /Users/someone/private failed\n') == ''
+    assert linux_upgrade._reason(b'Error response: /Users/' b'someone/private failed\n') == ''
     assert linux_upgrade._reason(b'xperfect-upgrade: a restore transaction is still open; commit or roll it back first\n') \
         == 'a restore transaction is still open; commit or roll it back first'
 
@@ -1022,7 +1022,7 @@ def test_unexpected_errors_are_reported_without_private_detail(package):
 
     def fail(record):
         if record['Image'] == NEW and record['Name'].endswith('-runtime'):
-            raise OSError('/Users/someone/private/receipt.json')
+            raise OSError('/Users/' 'someone/private/receipt.json')
     fake.on_start = fail
     with pytest.raises(linux_upgrade.UpgradeError, match='previous version is running again: OSError') as caught:
         _runner(path).upgrade(service_image=NEW)

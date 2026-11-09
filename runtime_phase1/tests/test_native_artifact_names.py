@@ -1,7 +1,9 @@
 """Use exact completed-file metadata for presentation, without changing file authority."""
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 import hashlib
 import json
+import os
 from pathlib import Path
 from urllib.parse import quote
 
@@ -13,6 +15,27 @@ from test_account_api import (
     account_client, account_headers, delegation_payload_with_origin, _truthfully_invoke_run,
 )
 from test_native_media import JPEG, PNG
+
+
+class Preview(HTMLParser):
+    def __init__(self, content):
+        super().__init__()
+        self.headings, self.images, self.heading = [], [], False
+        self.feed(content)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "h1":
+            self.heading = True
+        if tag == "img":
+            self.images.append(dict(attrs)["src"])
+
+    def handle_endtag(self, tag):
+        if tag == "h1":
+            self.heading = False
+
+    def handle_data(self, data):
+        if self.heading:
+            self.headings.append(data)
 
 
 @pytest.fixture
@@ -32,13 +55,24 @@ def completed_file(account_client, tmp_path, monkeypatch, request):
     workspace.mkdir()
     worker = store.update_worker(work["worker_id"], workspace_dir=str(workspace))
     native = profile_runtime.HostCodexCliRuntime(base_dir=str(tmp_path / "native"))
-    name, data = getattr(request, "param", ("trip-modes.csv", b"mode,cost\nWalking,low\nCycling,low\nBus,fare\n"))
+    name, data, *options = getattr(request, "param", ("trip-modes.csv", b"mode,cost\nWalking,low\nCycling,low\nBus,fare\n"))
+    selected = workspace / name
+    link = name
+    if options == ["protected"]:
+        monkeypatch.setenv("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS", str(workspace))
+        state = tmp_path / "runtime-state"
+        state.mkdir()
+        worker = store.update_worker(worker["worker_id"], state_dir=str(state))
+        selected = native._home_dir(worker["worker_id"]) / ".tmp" / name
+        selected.parent.mkdir(parents=True)
+        (workspace / "private-source.png").write_bytes(JPEG)
+        link = f"<{selected}>"
     scope = {"run_id": run["run_id"], "worker_id": worker["worker_id"], "owner_id": worker["owner_id"],
              "workspace_dir": str(workspace), "attempt_id": run["active_attempt_id"],
              "file_output_transport": "artifact_sha256"}
-    (workspace / name).write_bytes(data)
+    selected.write_bytes(data)
     native._capture_native_output_files({**worker, "_run_attempt_id": run["active_attempt_id"]},
-        str(workspace), scope, run["run_id"], f"[CSV]({name})")
+        str(workspace), scope, run["run_id"], f"[Result]({link})")
     service.runtime = native
     run = store.update_run(run["run_id"], state="completed", output_text="File verified.",
                            ended_at=datetime.now(timezone.utc).isoformat())
@@ -75,8 +109,12 @@ def test_selected_image_download_uses_captured_type_and_correct_name(
     assert ranged.status_code == 206 and ranged.content == case['data'][2:10]
     assert ranged.headers['content-type'] == expected_mime
     opened = case['client'].get(artifact_url(case, 'artifact_open'))
-    assert f'data:{expected_mime};base64,' in opened.text
-    assert f'<h1>{expected_name}</h1>' in opened.text
+    assert opened.status_code == 200
+    preview = Preview(opened.text)
+    assert preview.headings == [expected_name] and len(preview.images) == 1
+    image = case['client'].get(preview.images[0])
+    assert image.status_code == 200 and image.content == case['data']
+    assert image.headers['content-type'] == expected_mime
 
 
 def artifact_url(case, kind):
@@ -85,6 +123,26 @@ def artifact_url(case, kind):
                            tenant_id=worker["tenant_id"], owner_id=worker["owner_id"], path=case["relative"])
     return f"/v1/signed-links/{token}"
 
+
+
+@pytest.mark.parametrize("completed_file", [("result.png", PNG, "protected")], indirect=True)
+def test_selected_output_is_delivered_without_exposing_a_protected_workspace(completed_file, monkeypatch):
+    case = completed_file
+    workspace = Path(case["worker"]["workspace_dir"])
+    state = Path(case["worker"]["state_dir"])
+    descriptor = case["payload"]["output_files"]["files"][0]
+    assert not (workspace / "artifacts").exists()
+    assert (state / case["relative"]).read_bytes() == PNG
+    download = case["client"].get(descriptor["download_url"])
+    assert download.status_code == 200 and download.content == PNG
+    assert 'filename="result.png"' in download.headers["content-disposition"]
+    assert case["client"].get(artifact_url(case, "artifact_open")).status_code == 200
+    private = dict(case, relative="private-source.png")
+    assert case["client"].get(artifact_url(private, "artifact_download")).status_code == 404
+    other_owner = dict(case, worker={**case["worker"], "owner_id": "other-owner"})
+    assert case["client"].get(artifact_url(other_owner, "artifact_download")).status_code == 401
+    monkeypatch.setenv("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS", os.pathsep.join(map(str, (workspace, state))))
+    assert case["client"].get(descriptor["download_url"]).status_code == 404
 
 def replace_metadata(case, monkeypatch, change):
     original = case["store"].list_callback_outbox_for_run
@@ -106,8 +164,8 @@ def test_native_preview_and_download_use_exact_selected_name(completed_file, mon
     monkeypatch.setattr(api, "verified_native_file", selected_only)
     opened = case["client"].get(artifact_url(case, "artifact_open"))
     assert opened.status_code == 200
-    assert f"<h1>{case['name']}</h1>" in opened.text
-    assert f"<title>xPerfect file - {case['name']}</title>" in opened.text
+    assert Preview(opened.text).headings == [case['name']]
+    assert f"<title>{case['name']} · xPerfect</title>" in opened.text
     downloaded = case["client"].get(case["payload"]["output_files"]["files"][0]["download_url"])
     assert downloaded.status_code == 200 and downloaded.content == case["data"]
     assert f'filename="{case["name"]}"' in downloaded.headers["content-disposition"]
@@ -135,7 +193,7 @@ def test_missing_or_invalid_name_metadata_keeps_hash_basename(completed_file, mo
     assert downloaded.status_code == 200 and downloaded.content == case["data"]
     assert f'filename="{Path(case["relative"]).name}"' in downloaded.headers["content-disposition"]
     opened = case["client"].get(artifact_url(case, "artifact_open"))
-    assert f"<h1>{Path(case['relative']).name}</h1>" in opened.text
+    assert Preview(opened.text).headings == [Path(case['relative']).name]
 
 
 def test_name_lookup_ignores_unrelated_files_and_preserves_range_and_auth(completed_file, monkeypatch):
@@ -174,7 +232,7 @@ def test_selected_utf8_name_uses_existing_safe_content_disposition(completed_fil
     assert 'filename="r_sum_ _table_.csv"' in response.headers["content-disposition"]
     assert f"filename*=UTF-8''{quote(name)}" in response.headers["content-disposition"]
     opened = case["client"].get(artifact_url(case, "artifact_open"))
-    assert '<h1>résumé &quot;table&quot;.csv</h1>' in opened.text
+    assert Preview(opened.text).headings == ['résumé "table".csv']
 
 
 def test_stale_mission_selection_keeps_hash_basename(completed_file, monkeypatch):

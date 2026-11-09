@@ -149,7 +149,6 @@ HTTP_REQUEST_HEAD_MAX_BYTES = 512 * 1024
 BOOTSTRAP_SIGNATURE_MAX_AGE_SEC = 300
 
 CONVERSATION_REPLAY_MAX_BYTES_DEFAULT = 192 * 1024
-CONVERSATION_REPLAY_MAX_BYTES = 512 * 1024
 
 CONVERSATION_COMPACTION_MAX_BYTES = 32 * 1024
 
@@ -883,7 +882,7 @@ class CompletionMetadata(BaseModel):
 
     memory_eligible: bool = True
 
-    turn_context: str = Field(default="", max_length=CONVERSATION_REPLAY_MAX_BYTES)
+    turn_context: str = ""
 
     fallback_model: str = ""
 
@@ -1290,7 +1289,7 @@ def _bootstrap_developer_instructions(
 
 
 def _conversation_file_delivery_instructions(
-    bundle: dict[str, Any], origin_scope: Any,
+    bundle: dict[str, Any], origin_scope: Any, delivery_roots: dict[str, str] | None = None,
 ) -> str:
     capabilities = bundle.get("provider_capabilities")
     if isinstance(capabilities, dict) and capabilities.get("native_tools") is False:
@@ -1305,7 +1304,7 @@ def _conversation_file_delivery_instructions(
         and str(origin_scope.get("execution_mode") or "").strip().lower() == "docker"
     ):
         return ""
-    return conversation_file_delivery_instructions()
+    return conversation_file_delivery_instructions(delivery_roots)
 
 
 def _merge_developer_instructions(*parts: str) -> str:
@@ -1510,14 +1509,32 @@ def _conversation_replay_budget_bytes(
     configured = str(os.environ.get("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES") or "").strip()
     if configured:
         try:
-            return min(max(32 * 1024, int(configured)), CONVERSATION_REPLAY_MAX_BYTES, calibrated_limit)
+            requested = int(configured)
+            if requested > 0:
+                return min(requested, calibrated_limit)
         except ValueError:
             pass
-    return min(
-        CONVERSATION_REPLAY_MAX_BYTES,
-        max(32 * 1024, window * 2),
-        calibrated_limit,
-    )
+    return calibrated_limit
+
+def _native_history_budget_receipt(
+    model: HarnessModel, manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Observe the same current session budget used by admission, without reserving work."""
+    authority = str(manifest.get("stable_authority_sha256") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", authority):
+        return None
+    window, _ = _effective_native_context_window(model, manifest)
+    return {
+        "version": 1,
+        "model_id": model.id,
+        "stable_authority_sha256": authority,
+        "native_context_epoch": str(manifest.get("native_context_epoch") or ""),
+        "replay_budget_bytes": _conversation_replay_budget_bytes(
+            model, observed_chars_per_token=_normalized_chars_per_token(
+                manifest.get("observed_chars_per_token")), context_window=window,
+        ),
+    }
+
 
 def _owner_main_context_text(
     record: dict[str, Any] | None,
@@ -1681,6 +1698,18 @@ def _message_delivery_indices(payload: ChatCompletionRequest, keys: dict[int, st
                     and hashlib.sha256(_visible_authored_text(payload.messages[index].content).encode()).hexdigest() == item["sha256"]):
                 deliveries[index] = item["delivery"]
     return deliveries
+
+
+def _current_image_messages(payload: ChatCompletionRequest) -> list[ChatMessage]:
+    """Use the accepted-source boundary for invocation-local visual input."""
+    keys = _visible_message_keys(payload.messages, payload.metadata.visible_message_chain)
+    indices = _protected_source_indices(payload, keys, current_input=True)
+    if indices:
+        return [message for index, message in enumerate(payload.messages) if index in indices]
+    visible = [(index, message) for index, message in enumerate(payload.messages)
+               if str(message.role or "").strip().lower() not in {"system", "developer"}]
+    groups = _conversation_turn_groups(visible)
+    return [message for _, message in groups[-1]] if groups else []
 
 
 def _admit_conversation_history(
@@ -2169,6 +2198,24 @@ def _decode_bootstrap_bundle(request: Request, encoded_body: str = "") -> dict[s
     return payload
 
 
+def _authorized_result_files(bundle: dict[str, Any]) -> list[dict[str, str]]:
+    """A verified client grant names source runs and bytes, never arbitrary paths."""
+    values = bundle.get("authorized_result_files", [])
+    if not isinstance(values, list):
+        raise HTTPException(status_code=400, detail="Invalid result file access scope")
+    clean = []
+    for item in values:
+        if (not isinstance(item, dict) or set(item) != {"run_id", "attempt_id", "sha256"}
+                or any(not isinstance(item.get(key), str) for key in item)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", item["run_id"])
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", item["attempt_id"])
+                or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"])):
+            raise HTTPException(status_code=400, detail="Invalid result file access scope")
+        if item not in clean:
+            clean.append(dict(item))
+    return clean
+
+
 def _decode_turn_context(request: Request) -> str:
     encoded = _header(request, "x-glasshive-turn-context-b64")
     if not encoded:
@@ -2342,7 +2389,8 @@ def _hydrate_metadata(
     if isinstance(selection, dict) and selection.get("reference_message") is not None:
         raise HTTPException(status_code=403, detail="Transient Library references are authored by the conversation owner")
     capabilities = metadata["bootstrap_bundle"].get("provider_capabilities")
-    if isinstance(capabilities, dict) and capabilities.get("native_tools") is False:
+    if (isinstance(capabilities, dict) and capabilities.get("native_tools") is False
+            and capabilities.get("conversation_process_reuse") is not True):
         metadata["provider_session_mode"] = "stateless"
 
     for field, header in {
@@ -3046,6 +3094,36 @@ def _provider_log_worker(worker: dict[str, Any], run: dict[str, Any]) -> dict[st
     return {**worker, "_provider_activity_attempt_id": attempt_id} if attempt_id else worker
 
 
+def _claude_usage_totals(value: Any) -> dict[str, int] | None:
+    """Normalize one Claude usage object; cache creation buckets are alternatives, not sums."""
+    if not isinstance(value, dict):
+        return None
+    def count(item: Any) -> int | None:
+        if isinstance(item, bool) or not isinstance(item, (int, str)):
+            return None
+        try:
+            result = int(item)
+        except ValueError:
+            return None
+        return result if result >= 0 else None
+    if "prompt_tokens" in value:
+        prompt = count(value["prompt_tokens"])
+    elif any(key in value for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation")):
+        creation = value.get("cache_creation_input_tokens", 0)
+        if "cache_creation_input_tokens" not in value and isinstance(value.get("cache_creation"), dict):
+            nested = value["cache_creation"]
+            buckets = [count(nested.get(key, 0)) for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")]
+            creation = sum(buckets) if all(item is not None for item in buckets) else None
+        buckets = [count(value.get("input_tokens", 0)), count(value.get("cache_read_input_tokens", 0)), count(creation)]
+        prompt = sum(buckets) if all(item is not None for item in buckets) else None
+    else:
+        return None
+    output = count(value.get("output_tokens", value.get("completion_tokens", 0)))
+    if prompt is None or output is None or not (prompt or output):
+        return None
+    return {"prompt_tokens": prompt, "completion_tokens": output, "total_tokens": prompt + output}
+
+
 def _native_usage(profile: str, stdout: str) -> dict[str, int] | None:
     profile = _native_event_profile(profile)
     if profile == "codex-cli":
@@ -3074,6 +3152,8 @@ def _native_usage(profile: str, stdout: str) -> dict[str, int] | None:
             latest = candidate
     if not latest:
         return None
+    if profile == "claude-code":
+        return _claude_usage_totals(latest)
     prompt_tokens = int(
         latest.get("input_tokens")
         or latest.get("prompt_tokens")
@@ -3096,6 +3176,40 @@ def _native_usage(profile: str, stdout: str) -> dict[str, int] | None:
 def _native_context_usage(
     profile: str, stdout: str, billing_usage: dict[str, int] | None, *, context_window: int,
 ) -> tuple[dict[str, int] | None, str]:
+    if profile == "claude-code":
+        assistant_usage = None
+        terminal_usage = None
+        for line in str(stdout or "").splitlines():
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "assistant" and isinstance(event.get("message"), dict):
+                assistant_usage = event["message"].get("usage")
+            elif event.get("type") == "result" and isinstance(event.get("usage"), dict):
+                terminal_usage = event["usage"]
+        iterations = terminal_usage.get("iterations") if isinstance(terminal_usage, dict) else None
+        last_iteration = next((item for item in reversed(iterations) if isinstance(item, dict)
+            and item.get("type", "message") == "message"), None) if isinstance(iterations, list) else None
+        cached_run = isinstance(terminal_usage, dict) and any(
+            key in terminal_usage for key in ("cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation"))
+        for response_usage in (last_iteration, assistant_usage):
+            # A legacy partial snapshot cannot disprove cache usage measured for the run.
+            partial_cache = (cached_run and isinstance(response_usage, dict)
+                and "prompt_tokens" not in response_usage and not any(key in response_usage
+                    for key in ("cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation")))
+            measured = None if partial_cache else _claude_usage_totals(response_usage)
+            if (measured and measured["prompt_tokens"] > 0 and (billing_usage is None or
+                    (measured["prompt_tokens"] <= billing_usage["prompt_tokens"] and
+                     measured["completion_tokens"] <= billing_usage["completion_tokens"]))):
+                return measured, "native_prompt_tokens"
+        # Aggregate accounting sums requests. It bounds context but is not the last prompt.
+        bound = billing_usage if billing_usage and billing_usage.get("prompt_tokens", 0) > 0 else (
+            {"prompt_tokens": context_window, "completion_tokens": 0, "total_tokens": context_window}
+            if context_window > 0 else None)
+        return bound, "native_prompt_tokens_upper_bound"
     if profile not in DIRECT_PROFILES:
         if profile == "codex-cli" and billing_usage:
             for line in reversed(str(stdout or "").splitlines()):
@@ -3767,6 +3881,7 @@ class ConversationProvider:
         self._detached_reconciliations: set[str] = set()
         self._detached_reconciliation_thread: threading.Thread | None = None
         self._detached_reconciliation_stop = threading.Event()
+        self._retention_thread: threading.Thread | None = None
         self._last_retention_monotonic = 0.0
         self.service.set_provider_request_reconciler(
             self._reconcile_terminal_provider_requests
@@ -3893,19 +4008,37 @@ class ConversationProvider:
         try:
             self.store.prune_terminal_provider_requests(updated_before=request_cutoff)
             stale_sessions = self.store.list_stale_provider_sessions(updated_before=session_cutoff)
-            removable: list[str] = []
             for session in stale_sessions:
-                worker_id = str(session.get("worker_id") or "").strip()
-                worker = self.store.get_worker(worker_id) if worker_id else None
-                if worker and str(worker.get("state") or "") != "terminated":
-                    self.service.terminate_worker(worker_id)
-                removable.append(str(session["session_id"]))
-            self.store.delete_provider_sessions(removable)
-        except (OSError, RuntimeError, ValueError):
+                if self._detached_reconciliation_stop.is_set():
+                    break
+                self._prune_idle_session(session, session_cutoff)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             # Retention is housekeeping and must not make the authenticated provider unavailable.
-            pass
+            LOGGER.warning("provider_retention_failed error_type=%s", type(exc).__name__)
         finally:
             self._last_retention_monotonic = time.monotonic()
+
+    def _prune_idle_session(self, session: dict[str, Any], cutoff: str) -> None:
+        key = tuple(str(session.get(field) or "") for field in (
+            "tenant_id", "owner_id", "conversation_id", "agent_id", "actor_kind", "origin",
+        ))
+        lock = self._session_identity_lock(key)
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            session_id, worker_id = str(session["session_id"]), str(session["worker_id"])
+            # A request may have reused this session since the sweep took its snapshot.
+            if not self.store.provider_session_retention_eligible(
+                session_id=session_id, worker_id=worker_id, updated_before=cutoff,
+            ):
+                return
+            worker = self.store.get_worker(worker_id)
+            if worker and worker.get("state") != "terminated":
+                if self.service.terminate_worker(worker_id, _only_if_idle=True).get("state") != "terminated":
+                    return
+            self.store.delete_provider_sessions([session_id])
+        finally:
+            lock.release()
 
     def _maybe_apply_retention_policy(self) -> None:
         try:
@@ -3915,8 +4048,25 @@ class ConversationProvider:
             )
         except ValueError:
             interval = 3600
-        if time.monotonic() - self._last_retention_monotonic >= interval:
-            self._apply_retention_policy()
+        if time.monotonic() - self._last_retention_monotonic < interval:
+            return
+        with self._detached_reconciliation_lock:
+            if (
+                self._detached_reconciliation_stop.is_set()
+                or (self._retention_thread is not None and self._retention_thread.is_alive())
+                or time.monotonic() - self._last_retention_monotonic < interval
+            ):
+                return
+            # Coalesce requests without using the native execution pool or delaying admission.
+            self._retention_thread = threading.Thread(
+                target=self._apply_retention_policy, daemon=True, name="glasshive-provider-retention",
+            )
+            try:
+                self._retention_thread.start()
+            except RuntimeError as exc:
+                self._retention_thread = None
+                self._last_retention_monotonic = time.monotonic()
+                LOGGER.warning("provider_retention_start_failed error_type=%s", type(exc).__name__)
 
     def _selected_grok_model(self, tenant_id: str = "local", owner_id: str = "") -> HarnessModel | None:
         try:
@@ -4025,6 +4175,25 @@ class ConversationProvider:
                 detail="The request authority changed; use a new logical turn",
             )
 
+    def _worker_file_delivery_bundle(self, bundle: dict[str, Any], worker: dict[str, Any]) -> dict[str, Any]:
+        resolver = getattr(self.service.runtime, "provider_file_delivery_roots", None)
+        if (str(worker.get("execution_mode") or "host") != "host"
+                or _native_tools_disabled(bundle) or not callable(resolver)):
+            return bundle
+        roots = resolver(worker)
+        if roots is None:
+            return bundle
+        bundle = dict(bundle)
+        bundle["developer_instructions"] = _pin_developer_instruction_tail(
+            _merge_developer_instructions(
+                str(bundle.get("application_developer_instructions") or ""),
+                _bootstrap_developer_instructions(bundle, str(worker.get("profile") or "")),
+                _conversation_file_delivery_instructions(bundle, None, roots),
+            ),
+            str(bundle.get("declared_developer_instruction_tail") or ""),
+        )
+        return bundle
+
     def _native_bundle(
         self,
         payload: ChatCompletionRequest,
@@ -4091,11 +4260,16 @@ class ConversationProvider:
         )
         if not native_tools and model.harness_profile not in {"codex-cli", "grok-build", "claude-code", *DIRECT_PROFILES}:
             raise HTTPException(status_code=400, detail="Native tool restriction is unsupported by this harness")
-        if not native_tools:
+        reuse_process = isinstance(incoming_capabilities, dict) and incoming_capabilities.get("conversation_process_reuse") is True
+        if reuse_process and (native_tools or model.harness_profile != "claude-code"
+                              or payload.metadata.provider_session_mode != "persistent"):
+            raise HTTPException(status_code=400, detail="Retained native conversations require a supported coordination-only persistent route")
+        if not native_tools and not reuse_process:
             incoming_env[GLASSHIVE_PROVIDER_SESSION_MODE_ENV] = "stateless"
         provider_capabilities = {
             "self_delegation": False,
             "native_tools": native_tools,
+            **({"conversation_process_reuse": True} if reuse_process else {}),
         }
         private_contract = _private_machine_state_response_contract(payload.metadata)
         if private_machine_state_output_schema(private_contract) is not None:
@@ -4118,6 +4292,9 @@ class ConversationProvider:
             **incoming,
             "run_mode": "conversation",
             "surface": payload.metadata.surface,
+            # Capacity follows authenticated invocation identity, not prompt/model labels.
+            "conversation_origin": {"actor_kind": payload.metadata.actor_kind,
+                                    "origin": payload.metadata.origin},
             "provider_model": model.native_model,
             "access_mode": payload.metadata.glasshive_options.access,
             # Mutable application authority stays in Codex's native developer role. It must never
@@ -4127,6 +4304,8 @@ class ConversationProvider:
             "env": {**incoming_env, **effort_env},
             "provider_capabilities": provider_capabilities,
         }
+        # Per-invocation file authority lives only in the saved request contract.
+        bundle.pop("authorized_result_files", None)
         bundle.pop("direct_core_state", None)
         state_projection = _direct_core_state_projection(payload, model)
         if state_projection is not None:
@@ -4210,7 +4389,8 @@ class ConversationProvider:
         # A caller-supplied bootstrap path never grants a native image read.
         bundle.pop("native_input_images", None)
         try:
-            inline_images = project_inline_image_files(payload.messages)
+            inline_images = project_inline_image_files(payload.messages, archive=True)
+            current_images = project_inline_image_files(_current_image_messages(payload))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         existing_files = bundle.get("files") if isinstance(bundle.get("files"), list) else []
@@ -4222,7 +4402,7 @@ class ConversationProvider:
             bundle["files"] = [*existing_files, *inline_images]
             bundle["native_input_images"] = [
                 {key: item[key] for key in ("path", "type", "sha256", "bytes")}
-                for item in inline_images
+                for item in current_images
             ]
         elif "files" in bundle:
             bundle["files"] = existing_files
@@ -4339,12 +4519,15 @@ class ConversationProvider:
         *,
         project_completed_graph: bool = True,
     ) -> dict[str, Any] | None:
-        return graph_transfer_control(
+        # Coordinators use their signed work controls. A host's legacy synchronous
+        # graph must not add a second action menu beside that role's MCP catalog.
+        coordination = (payload.metadata.bootstrap_bundle or {}).get("conversation_tool_mode") == "coordination"
+        tools = [] if coordination else (
             self._graph_transfer_tools(payload)
             if project_completed_graph
-            else payload.tools,
-            payload.tool_choice,
+            else payload.tools
         )
+        return graph_transfer_control(tools, payload.tool_choice)
 
     @staticmethod
     def _session_manifest(session: dict[str, Any] | None) -> dict[str, Any]:
@@ -4631,6 +4814,9 @@ class ConversationProvider:
             ).encode()
         ).hexdigest()
         bundle = self._native_bundle(payload, model, effort)
+        bound_worker = self.store.get_worker(str(session["worker_id"]))
+        if bound_worker:
+            bundle = self._worker_file_delivery_bundle(bundle, bound_worker)
         replay = None
         if model.harness_profile in DIRECT_PROFILES:
             try:
@@ -4795,6 +4981,9 @@ class ConversationProvider:
             str(worker["worker_id"]), model=model.native_model,
             **({"workspace_dir": str(workspace)} if execution_mode == "host" else {}),
         ) or worker
+        bundle = self._worker_file_delivery_bundle(bundle, worker)
+        worker = self.store.update_worker(str(worker["worker_id"]),
+            bootstrap_bundle_json=json.dumps(bundle, sort_keys=True)) or worker
         session = self.store.upsert_provider_session(
             tenant_id=tenant_id,
             owner_id=metadata.owner_id,
@@ -5049,6 +5238,14 @@ class ConversationProvider:
                 _, previous_capsules = _split_viventium_feeling_capsules(previous_tail)
                 _, current_capsules = _split_viventium_feeling_capsules(current_tail)
                 authority_removed = authority_removed or bool(previous_capsules and not current_capsules)
+        # Retained native sessions replace application authority on every admitted turn.
+        # Identity, access, model and native policy changes still rebind normally.
+        from .claude_conversation import enabled as retained_claude_enabled
+        if (model.harness_profile == "claude-code"
+                and retained_claude_enabled(requested_bundle)
+                and retained_claude_enabled(previous_bundle)):
+            system_state_changed = False
+
         released_failure_reuse = bool(
             existing and existing_worker and existing_worker.get("state") == "failed"
             and metadata.provider_session_mode == "stateless"
@@ -5169,6 +5366,7 @@ class ConversationProvider:
                     bundle["developer_instructions"], declared_tail
                 )
                 bundle["declared_developer_instruction_tail"] = declared_tail
+            bundle = self._worker_file_delivery_bundle(bundle, existing_worker)
             self.store.update_worker(
                 str(existing["worker_id"]),
                 bootstrap_bundle_json=json.dumps(bundle, sort_keys=True),
@@ -5511,6 +5709,7 @@ class ConversationProvider:
                         model,
                         effort,
                         saved_graph_control,
+                        worker_id=str((run or {}).get("worker_id") or ""),
                     )
                     if run and self.service.attach_run_local_bundle(
                         run_id, bundle, provider_request_id=str(duplicate["request_id"]),
@@ -5656,6 +5855,7 @@ class ConversationProvider:
                     or (
                         isinstance(payload.metadata.bootstrap_bundle.get("provider_capabilities"), dict)
                         and payload.metadata.bootstrap_bundle["provider_capabilities"].get("native_tools") is False
+                        and payload.metadata.bootstrap_bundle["provider_capabilities"].get("conversation_process_reuse") is not True
                     )
                 )
                 if force_bootstrap:
@@ -5879,7 +6079,8 @@ class ConversationProvider:
                 ACTIVITY_SUMMARIES["queued"],
                 {"surface": payload.metadata.surface, "input_mode": payload.metadata.input_mode},
             )
-            run_local_bundle = self._run_local_native_bundle(payload, model, effort)
+            run_local_bundle = self._run_local_native_bundle(
+                payload, model, effort, worker_id=str(session["worker_id"]))
             if model.harness_profile == "codex-cli" and source_coverage_proven:
                 # Only the authenticated complete source can seed a fresh session after
                 # authority preflight failed. Retain it in the existing ephemeral exact-run
@@ -6360,21 +6561,28 @@ class ConversationProvider:
                 thread_to_start.start()
 
     def shutdown(self, *, timeout_seconds: float = 10.0) -> None:
-        """Stop detached reconciliation before its Store and service dependencies close."""
+        """Stop provider background work before its Store and service dependencies close."""
 
         with self._detached_reconciliation_lock:
             self._detached_reconciliation_stop.set()
             thread = self._detached_reconciliation_thread
-        if thread is not None:
-            if thread is threading.current_thread():
-                raise RuntimeError("GlassHive detached reconciliation cannot join itself")
-            thread.join(timeout=max(0.0, float(timeout_seconds)))
-            if thread.is_alive():
-                raise RuntimeError("GlassHive detached reconciliation did not stop")
+            retention_thread = self._retention_thread
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        for owned_thread, label in (
+            (thread, "detached reconciliation"), (retention_thread, "provider retention"),
+        ):
+            if owned_thread is None:
+                continue
+            if owned_thread is threading.current_thread():
+                raise RuntimeError(f"GlassHive {label} cannot join itself")
+            owned_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if owned_thread.is_alive():
+                raise RuntimeError(f"GlassHive {label} did not stop")
         with self._detached_reconciliation_lock:
             self._detached_reconciliations.clear()
             if self._detached_reconciliation_thread is thread:
                 self._detached_reconciliation_thread = None
+            self._retention_thread = None
 
     def _sync_native_activity(self, request_record: dict[str, Any], run: dict[str, Any]) -> None:
         collector = getattr(self.service.runtime, "provider_activity_log", None)
@@ -6772,6 +6980,8 @@ class ConversationProvider:
         run: dict[str, Any],
         *, output_files: list[dict] | None = None,
         output_rejections: list[dict] | None = None,
+        allow_unavailable_files: bool = False,
+        authorized_result_files: list[dict[str, str]] | None = None,
     ) -> str:
         native = self._native_output_snapshot(request_record, run)
         output = native if callable(getattr(self.service.runtime, "provider_activity_log", None)) else str(run.get("output_text") or "")
@@ -6785,7 +6995,9 @@ class ConversationProvider:
         from .coordinator import project_coordinator_output
         rendered = self.service.render_provider_native_images(
             request_record, run, output, output_files=output_files, output_rejections=output_rejections,
-            include_captured_files=output_files is not None)
+            include_captured_files=output_files is not None,
+            allow_unavailable_files=allow_unavailable_files,
+            authorized_result_files=authorized_result_files)
         return _redact_provider_output(project_coordinator_output(self.service, request_record, rendered), sources)
 
     def _completion_usage(
@@ -6895,6 +7107,8 @@ class ConversationProvider:
         private_contract = _private_machine_state_response_contract(payload.metadata)
         return {
             "version": 1, "model": payload.model,
+            "authorized_result_files": _authorized_result_files(
+                payload.metadata.bootstrap_bundle if payload.metadata else {}),
             **({"response_contract": private_contract} if private_contract else {}),
             "reasoning_effort": payload.reasoning_effort,
             "surface": payload.metadata.surface if payload.metadata else "web",
@@ -6936,8 +7150,8 @@ class ConversationProvider:
     ) -> dict[str, Any]:
         output_files: list[dict] = []
         output_rejections: list[dict] = []
+        session = self.store.get_provider_session_by_id(str(request_record["session_id"])) or {}
         if contract.get("response_contract") == _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT:
-            session = self.store.get_provider_session_by_id(str(request_record["session_id"])) or {}
             worker = self.store.get_worker(str(run.get("worker_id") or "")) or {}
             if (not request_record.get("owner_id") or not request_record.get("tenant_id")
                     or not request_record.get("run_id")
@@ -6967,8 +7181,11 @@ class ConversationProvider:
                 raise HTTPException(status_code=502, detail="Native private machine state is not a complete JSON object") from exc
         else:
             try:
-                output = self._conversation_output(request_record, run, output_files=output_files,
-                                                   output_rejections=output_rejections)
+                output = self._conversation_output(
+                    request_record, run, output_files=output_files, output_rejections=output_rejections,
+                    authorized_result_files=contract.get("authorized_result_files"),
+                    allow_unavailable_files=True,
+                )
             except NativeFilePublicationUnavailable as exc:
                 raise HTTPException(status_code=409, detail={
                     "code": "native_output_files_identity_unavailable",
@@ -6987,7 +7204,6 @@ class ConversationProvider:
             ) from exc
         visible_output = str(decision.get("content") or "")
         disposition = decision.get("delivery_disposition")
-        session = self.store.get_provider_session_by_id(str(request_record["session_id"])) or {}
         if (session.get("actor_kind") == "external_user" and session.get("origin") == "interactive"
                 and decision["type"] == "assistant_response" and not visible_output.strip()
                 and not (isinstance(disposition, dict) and disposition.get("valid") is True
@@ -7531,6 +7747,24 @@ class ConversationProvider:
                                 return
                             terminal_delta = "\n\n[The harness corrected its final response after terminal reconciliation.]\n" + output
                     if terminal_delta:
+                        terminal_completion = None
+                        if (not private_machine_state and audio_eligible
+                                and payload.metadata.actor_kind == "external_user"
+                                and payload.metadata.origin == "interactive"
+                                and record.get("message_id") and record.get("stream_id")
+                                and str(run.get("run_id") or "") == str(record.get("run_id") or "")
+                                and isinstance(delivery_disposition, dict)
+                                and delivery_disposition.get("audio") == "eligible"
+                                and delivery_disposition.get("valid") is True
+                                and delivery_disposition.get("source") == "model"):
+                            terminal_part_index = 1 + max(
+                                (index for part_run, index in emitted_public_parts
+                                 if part_run == str(run["run_id"])), default=-1)
+                            terminal_completion = {"version": 1, "complete": True,
+                                "request_id": request_id, "run_id": str(run["run_id"]),
+                                "part_id": f"{run['run_id']}:{terminal_part_index}",
+                                "message_id": str(record["message_id"]),
+                                "stream_id": str(record["stream_id"])}
                         yield "data: " + json.dumps({
                             "id": request_id, "object": "chat.completion.chunk", "created": created,
                             **model_metadata,
@@ -7538,6 +7772,7 @@ class ConversationProvider:
                                 "delta": {"content": terminal_delta, **({
                                     "provider_specific_fields": {"viventium": {
                                         "delivery_disposition": delivery_disposition,
+                                        **({"public_part_complete": terminal_completion} if terminal_completion else {}),
                                         **({"deliveryDispositionRanges": message["provider_specific_fields"]["viventium"]["deliveryDispositionRanges"],
                                             "delivery_range_text": output}
                                            if "deliveryDispositionRanges" in message.get("provider_specific_fields", {}).get("viventium", {}) else {})}}
@@ -8341,6 +8576,7 @@ class ConversationProvider:
         graph_control: Any = _GRAPH_CONTROL_UNSET,
         *,
         project_completed_graph: bool = True,
+        worker_id: str = "",
     ) -> dict[str, Any]:
         incoming = payload.metadata.bootstrap_bundle or {}
         incoming_env = incoming.get("env") if isinstance(incoming.get("env"), dict) else {}
@@ -8352,6 +8588,10 @@ class ConversationProvider:
             graph_control=graph_control,
             project_completed_graph=project_completed_graph,
         )
+        if worker_id and not _native_tools_disabled(bundle):
+            worker = self.store.get_worker(worker_id)
+            if worker:
+                bundle = self._worker_file_delivery_bundle(bundle, worker)
         if bearer:
             bundle["env"] = {
                 **(bundle.get("env") if isinstance(bundle.get("env"), dict) else {}),
@@ -8374,6 +8614,12 @@ class ConversationProvider:
             broker = dict(broker)
             for key in ("grant", "grant_id", "grant_expires_at", "grant_token"):
                 broker.pop(key, None)
+            catalog = broker.get("tool_catalog")
+            if isinstance(catalog, dict):
+                catalog = dict(catalog)
+                for key in ("grant_id", "expires_at"):
+                    catalog.pop(key, None)
+                broker["tool_catalog"] = catalog
             descriptor["glasshive_capability_broker"] = broker
         authorization = descriptor.get("glasshive_capability_authorization")
         if isinstance(authorization, dict):
@@ -8538,11 +8784,7 @@ class ConversationProvider:
         except json.JSONDecodeError:
             return False
         broker = bundle.get("glasshive_capability_broker") if isinstance(bundle, dict) else None
-        return bool(
-            isinstance(broker, dict)
-            and str(broker.get("authority_kind") or "").strip()
-            == "conversation_orchestrator"
-        )
+        return isinstance(broker, dict)
 
     @classmethod
     def _fallback_run_local_bundle(
@@ -8800,6 +9042,9 @@ class ConversationProvider:
                 **({"workspace_dir": str(session["workspace_dir"])}
                    if execution_mode == "host" else {}),
             ) or new_worker
+            bundle = self._worker_file_delivery_bundle(bundle, new_worker)
+            new_worker = self.store.update_worker(str(new_worker["worker_id"]),
+                bootstrap_bundle_json=json.dumps(bundle, sort_keys=True)) or new_worker
             context_generation = max(
                 1, int(current_manifest.get("context_generation") or 1)
             ) + 1
@@ -9048,6 +9293,9 @@ class ConversationProvider:
                 **({"workspace_dir": str(session["workspace_dir"])}
                    if execution_mode == "host" else {}),
             ) or new_worker
+            bundle = self._worker_file_delivery_bundle(bundle, new_worker)
+            new_worker = self.store.update_worker(str(new_worker["worker_id"]),
+                bootstrap_bundle_json=json.dumps(bundle, sort_keys=True)) or new_worker
             fallback_session = self.store.upsert_provider_session(
                 tenant_id=str(session.get("tenant_id") or "local"),
                 owner_id=str(session["owner_id"]),
@@ -9710,6 +9958,17 @@ def install_conversation_provider_routes(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         return owner_id
 
+    def hydrate_application_request(payload, request, *, tenant_id, owner_id):
+        if not auth_context.trust_identity_headers:
+            raise HTTPException(status_code=403, detail="Application coordinator preparation requires a trusted host")
+        delegated = ProviderAuthContext(
+            tenant_id=tenant_id, principal_id=owner_id, trust_identity_headers=True,
+            allow_full_access=auth_context.allow_full_access, default_access=auth_context.default_access,
+        )
+        return _hydrate_metadata(payload, request, delegated)
+
+    provider.hydrate_application_request = hydrate_application_request
+
     @app.get("/v1/models")
     def glasshive_models(request: Request, check_readiness: bool = False) -> dict[str, Any]:
         auth = require_provider_auth(request)
@@ -9894,6 +10153,18 @@ def install_conversation_provider_routes(
             "body_sha256": record["native_body_sha256"],
             "authority_sha256": decision.get("request_authority_sha256") or "",
         }
+        if (decision.get("main_context_protocol") == "main_context_v1"
+                and session.get("tenant_id") == record.get("tenant_id")
+                and session.get("owner_id") == record.get("owner_id")):
+            try:
+                model = provider._model(str(session.get("model_id") or ""),
+                    tenant_id=str(record["tenant_id"]), owner_id=str(record["owner_id"]))
+                history_budget = _native_history_budget_receipt(model,
+                    provider._session_manifest(session))
+                if history_budget:
+                    result["native_history_budget_v1"] = history_budget
+            except (HTTPException, TypeError, ValueError):
+                pass
         if record["state"] in {"failed", "cancelled"} and record.get("run_id"):
             run = store.get_run(str(record["run_id"])) or {}
             failure_class = str(run.get("failure_class") or "")

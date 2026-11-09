@@ -77,7 +77,8 @@ def bind_native_tool_projection(peers, projected, run, *, name, purpose, token_e
     # A packaged box reaches the runtime only through its own socket, and a
     # hosted network contains several owners. Without a route, fail before
     # minting the scoped bearer.
-    base = native_transport.worker_route()
+    base = (native_transport.worker_route(execution_mode="docker")
+            if worker.get("execution_mode") == "docker" else native_transport.worker_route())
     if not base:
         raise context_route_unavailable()
     token = peers.mint_native_session(

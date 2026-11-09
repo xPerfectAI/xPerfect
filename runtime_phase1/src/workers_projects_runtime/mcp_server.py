@@ -43,7 +43,7 @@ from .bootstrap import (
     sign_bootstrap_source_path,
     worker_prompt_layer_producer,
 )
-from .deliverables import is_user_deliverable_relative_path
+from .deliverables import is_protected_artifact_path, is_user_deliverable_relative_path
 from .operator_urls import operator_base_url, surface_aware_watch_url, surface_can_open_operator_url
 from .mcp_oauth import McpOAuthConfigurationError, oauth_authentication_error, oauth_from_env
 from .mcp_internal_assertions import McpInternalAssertionError, signed_runtime_assertion
@@ -2065,7 +2065,8 @@ def _signed_artifact_url(worker: dict[str, Any], path: str, *, kind: str, action
         return None
     worker_id = str(worker.get("worker_id") or "").strip()
     clean_path = _clean_artifact_relative_path(path)
-    if not worker_id or not clean_path:
+    root = Path(str(worker.get("workspace_dir") or ""))
+    if not worker_id or not clean_path or is_protected_artifact_path(root / clean_path):
         return None
     token = sign_link_token(
         kind=kind,
@@ -2101,13 +2102,14 @@ def _artifact_listing_payload(
     include_download_links: bool = True,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
+    root = Path(str(worker.get("workspace_dir") or ""))
     raw_items = artifacts.get("items", []) if isinstance(artifacts, dict) else []
     for raw in raw_items:
         if not isinstance(raw, dict):
             continue
         item = dict(raw)
         path = _clean_artifact_relative_path(str(item.get("path") or ""))
-        if not path:
+        if not path or is_protected_artifact_path(root / path):
             continue
         open_url = _signed_artifact_open_url(worker, path) if include_open_links else None
         download_url = _signed_artifact_download_url(worker, path) if include_download_links else None
@@ -2821,19 +2823,18 @@ def _delegation_packet_block(
     ):
         raise ValueError("viventium_delegation_packet is invalid")
     task_text: dict[str, str] = {}
-    for key, limit in (("title", 10_000), ("instruction", 100_000), ("goal", 100_000)):
+    for key in ("title", "instruction", "goal"):
         value = task.get(key)
         if value is None:
             continue
-        if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > limit:
+        if not isinstance(value, str) or not value.strip():
             raise ValueError("viventium_delegation_packet is invalid")
         task_text[key] = value.strip()
 
     packet_segments = task.get("source_segments", [])
-    if not isinstance(packet_segments, list) or len(packet_segments) > 32:
+    if not isinstance(packet_segments, list):
         raise ValueError("viventium_delegation_packet is invalid")
     normalized_packet_segments: list[tuple[int, str, bool, str]] = []
-    packet_source_bytes = 0
     for expected_ordinal, segment in enumerate(packet_segments):
         if not isinstance(segment, dict) or not set(segment).issubset(
             {"ordinal", "text", "truncated", "original_sha256"}
@@ -2847,14 +2848,10 @@ def _delegation_packet_block(
             isinstance(ordinal, bool)
             or ordinal != expected_ordinal
             or not isinstance(text, str)
-            or len(text.encode("utf-8")) > 32 * 1024
             or ("truncated" in segment and segment.get("truncated") is not True)
             or (truncated and not re.fullmatch(r"[0-9a-f]{64}", original_sha256))
             or (not truncated and "original_sha256" in segment)
         ):
-            raise ValueError("viventium_delegation_packet is invalid")
-        packet_source_bytes += len(text.encode("utf-8"))
-        if packet_source_bytes > 64 * 1024:
             raise ValueError("viventium_delegation_packet is invalid")
         normalized_packet_segments.append(
             (expected_ordinal, text, truncated, original_sha256)
@@ -2867,10 +2864,9 @@ def _delegation_packet_block(
         raise ValueError("viventium_delegation_packet is invalid")
 
     constraints = packet.get("explicit_constraints", [])
-    if not isinstance(constraints, list) or len(constraints) > 8:
+    if not isinstance(constraints, list):
         raise ValueError("viventium_delegation_packet is invalid")
     normalized_constraints: list[tuple[str, str]] = []
-    constraint_bytes = 0
     for constraint in constraints:
         if not isinstance(constraint, dict) or set(constraint) != {"kind", "text"}:
             raise ValueError("viventium_delegation_packet is invalid")
@@ -2880,13 +2876,10 @@ def _delegation_packet_block(
             raise ValueError("viventium_delegation_packet is invalid")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("viventium_delegation_packet is invalid")
-        constraint_bytes += len(text.encode("utf-8"))
-        if constraint_bytes > 128 * 1024:
-            raise ValueError("viventium_delegation_packet is invalid")
         normalized_constraints.append((kind, text.strip()))
 
     selected_files = packet.get("selected_files", [])
-    if not isinstance(selected_files, list) or len(selected_files) > 64:
+    if not isinstance(selected_files, list):
         raise ValueError("viventium_delegation_packet is invalid")
     normalized_files: list[str] = []
     for expected_ordinal, selected in enumerate(selected_files):
@@ -2936,8 +2929,6 @@ def _delegation_packet_block(
             or status not in {"active", "available", "pending_admission", "ready", "unavailable"}
             or not isinstance(servers, list)
             or not isinstance(host_tools, list)
-            or len(servers) > 64
-            or len(host_tools) > 64
             or not isinstance(content_read, bool)
         ):
             raise ValueError("viventium_delegation_packet is invalid")
@@ -3056,9 +3047,8 @@ def _trusted_triggering_source_block(bundle: dict[str, Any]) -> str:
     }:
         raise ValueError("viventium_delegation_context is invalid")
     segments = context.get("triggering_source_segments")
-    if not isinstance(segments, list) or len(segments) > 32:
+    if not isinstance(segments, list):
         raise ValueError("viventium_delegation_context is invalid")
-    total_chars = 0
     normalized: list[tuple[int, str, bool, str]] = []
     source_identities: set[tuple[str, int]] = set()
     for expected_ordinal, segment in enumerate(segments):
@@ -3096,7 +3086,6 @@ def _trusted_triggering_source_block(bundle: dict[str, Any]) -> str:
             or source_index > 1_000_000
             or source_identity in source_identities
             or not isinstance(text, str)
-            or len(text.encode("utf-8")) > 32 * 1024
             or ("truncated" in segment and segment.get("truncated") is not True)
             or (
                 truncated
@@ -3107,9 +3096,6 @@ def _trusted_triggering_source_block(bundle: dict[str, Any]) -> str:
             )
             or (not truncated and "original_sha256" in segment)
         ):
-            raise ValueError("viventium_delegation_context is invalid")
-        total_chars += len(text.encode("utf-8"))
-        if total_chars > 64 * 1024:
             raise ValueError("viventium_delegation_context is invalid")
         source_identities.add(source_identity)
         normalized.append((expected_ordinal, text, truncated, str(original_sha256 or "")))

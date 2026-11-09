@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import stat
+import unicodedata
 import uuid
 import zipfile
 from pathlib import Path
@@ -109,8 +110,44 @@ OLE_ARTIFACT_EXTENSIONS = {".doc", ".ppt", ".xls"}
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
+def _same_protected_root(candidate: Path, root: Path) -> bool:
+    """Recognize alternate case and Unicode spellings on filesystems that accept them."""
+    prefix = Path(*candidate.parts[:len(root.parts)])
+    folded_prefix = unicodedata.normalize("NFC", str(prefix)).casefold()
+    folded_root = unicodedata.normalize("NFC", str(root)).casefold()
+    if folded_prefix != folded_root:
+        return False
+    try:
+        return prefix.samefile(root)
+    except FileNotFoundError:
+        return False
+
+
+def is_protected_artifact_path(path: Path) -> bool:
+    """Keep operator-configured local roots outside managed artifact surfaces."""
+    configured = os.environ.get("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS", "")
+    if not configured:
+        return False
+    try:
+        roots = [Path(value).expanduser() for value in configured.split(os.pathsep) if value]
+        if any(not root.is_absolute() for root in roots):
+            return True
+        absolute = Path(os.path.abspath(path))
+        resolved = absolute.resolve()
+        for root in roots:
+            canonical = root.resolve()
+            if (absolute.is_relative_to(Path(os.path.abspath(root)))
+                    or resolved.is_relative_to(canonical)
+                    or _same_protected_root(resolved, canonical)):
+                return True
+        return False
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
 def is_user_deliverable_relative_path(
-    relative_path: Path | str, *, is_directory: bool = False, explicit_selection: bool = False
+    relative_path: Path | str, *, is_directory: bool = False, explicit_selection: bool = False,
+    root: Path | None = None,
 ) -> bool:
     try:
         rel = Path(str(relative_path))
@@ -130,7 +167,9 @@ def is_user_deliverable_relative_path(
         return False
     if any(part.startswith(".") for part in lowered_parts):
         return False
-    return is_directory or rel.name.lower() not in NON_DELIVERABLE_FILE_NAMES
+    return (is_directory or rel.name.lower() not in NON_DELIVERABLE_FILE_NAMES) and (
+        root is None or not is_protected_artifact_path(root / rel)
+    )
 
 
 def _input_versions(worker: dict) -> dict[str, dict]:
@@ -211,7 +250,7 @@ def candidate_html_paths(worker: dict, max_entries: int = 20, *, latest_run: dic
     if not raw_root:
         return []
     root = Path(raw_root)
-    if not root.exists():
+    if not root.exists() or is_protected_artifact_path(root):
         return []
     candidates: list[Path] = []
     for path in sorted(root.rglob("*.html")):
@@ -219,12 +258,13 @@ def candidate_html_paths(worker: dict, max_entries: int = 20, *, latest_run: dic
             rel = path.relative_to(root)
         except ValueError:
             continue
+        if not is_user_deliverable_relative_path(rel, root=root):
+            continue
         try:
-            if path.stat().st_size <= 0:
+            metadata = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size <= 0:
                 continue
         except OSError:
-            continue
-        if not is_user_deliverable_relative_path(rel):
             continue
         if is_unmodified_user_input(worker, path) or not _file_changed_during_run(path, latest_run):
             continue
@@ -242,7 +282,7 @@ def candidate_artifact_paths(worker: dict, max_entries: int = 50, *, latest_run:
     if not raw_root:
         return []
     root = Path(raw_root)
-    if not root.exists():
+    if not root.exists() or is_protected_artifact_path(root):
         return []
     input_versions = _input_versions(worker)
     candidates: list[Path] = []
@@ -250,16 +290,17 @@ def candidate_artifact_paths(worker: dict, max_entries: int = 50, *, latest_run:
         relative_directory = Path(directory).relative_to(root)
         subdirectories[:] = [
             name for name in subdirectories
-            if is_user_deliverable_relative_path(relative_directory / name, is_directory=True)
+            if is_user_deliverable_relative_path(relative_directory / name, is_directory=True, root=root)
             and relative_directory / name != NATIVE_MEDIA_PREFIX
         ]
         for name in filenames:
             rel = relative_directory / name
-            if not is_user_deliverable_relative_path(rel):
+            if not is_user_deliverable_relative_path(rel, root=root):
                 continue
             path = root / rel
             try:
-                if not path.is_file() or path.stat().st_size <= 0:
+                metadata = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size <= 0:
                     continue
             except OSError:
                 continue
@@ -355,6 +396,8 @@ def _native_image_bytes(mime_type: object, encoded: object) -> tuple[bytes, str]
 
 
 def _publish_native_media(workspace: Path, relative: Path, data: bytes) -> None:
+    if is_protected_artifact_path(workspace / relative):
+        raise ValueError("Artifact publication is unavailable for this path")
     # Reuse the existing no-follow workspace directory owner. Publish a complete new
     # inode, so a worker-created symlink/hardlink is never followed or truncated.
     from .bootstrap import _sandbox_parent_descriptor
@@ -568,6 +611,8 @@ def native_media_observations(worker: dict, run: dict) -> dict[str, object]:
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", run_id) or not worker.get("workspace_dir"):
         return empty
     workspace = Path(worker["workspace_dir"])
+    if is_protected_artifact_path(workspace):
+        return empty
     try:
         evidence = json.loads(_native_media_snapshot(workspace, Path("glasshive-run/runs") / run_id / "evidence.json", 4 * 1024 * 1024))
         if evidence.get("run_id") != run_id or evidence.get("schema") != "glasshive.run.evidence.v1" or evidence.get("worker", {}).get("worker_id") != worker.get("worker_id"):
@@ -600,6 +645,8 @@ def native_media_observations(worker: dict, run: dict) -> dict[str, object]:
                     or not isinstance(item.get("bytes"), int) or isinstance(item.get("bytes"), bool)
                 ):
                     raise ValueError("Invalid native media artifact identity")
+                if is_protected_artifact_path(workspace / relative):
+                    continue
                 data = _native_media_snapshot(workspace, relative, NATIVE_MEDIA_MAX_BYTES)
                 if len(data) != item.get("bytes") or hashlib.sha256(data).hexdigest() != digest:
                     raise ValueError("Native media artifact changed")

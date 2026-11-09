@@ -1420,3 +1420,44 @@ def test_official_sdk_error_transport_retains_declared_recovery_class(tmp_path, 
         stdout="\n".join(json.dumps(event) for event in events), stderr="", exit_code=1)
     assert failure.failure_class == expected
     assert failure.upstream_request_id == safe_id
+
+
+@pytest.mark.parametrize('grant_control', [False, True])
+def test_coordination_sdk_preserves_only_granted_canonical_existing_work_control(monkeypatch,tmp_path,grant_control):
+    import asyncio
+    import pydantic_ai.mcp
+    import fastmcp
+    from pydantic_ai.toolsets import FunctionToolset
+    from pydantic_ai.models.function import FunctionModel,DeltaToolCall
+    from pydantic_ai.models import openai as openai_model
+    from workers_projects_runtime import direct_runner
+    catalog=[];calls=[]
+    async def handoff():return 'accepted'
+    async def roster():return 'owned roster'
+    async def control(action:str,workRef:str):
+        calls.append({'action':action,'workRef':workRef});return 'accepted exact control'
+    async def unrelated():raise AssertionError('Ungrantable unrelated tool was invoked')
+    def toolset(*_,**__):
+        result=FunctionToolset()
+        for name,function in [('hand_off_to',handoff),('list_workers',roster),('active_work_action',control),('web_search',unrelated)]:
+            result.add_function(function,name=name)
+        return result
+    async def model_stream(messages,info):
+        catalog.append([tool.name for tool in info.function_tools])
+        if grant_control and not calls:
+            yield {0:DeltaToolCall(name='active_work_action',json_args=json.dumps({'action':'stop','workRef':'owned-native-goal'}),tool_call_id='exact-native-control')}
+        else:yield 'Done.'
+    monkeypatch.setattr(pydantic_ai.mcp,'MCPToolset',toolset)
+    monkeypatch.setattr(fastmcp,'Client',lambda _:object())
+    monkeypatch.setattr(openai_model,'OpenAIResponsesModel',lambda *_,**__:FunctionModel(stream_function=model_stream))
+    monkeypatch.setattr(direct_runner,'emit',lambda _:None)
+    monkeypatch.setenv('XAI_API_KEY','synthetic-not-used')
+    asyncio.run(direct_runner.execute({'provider':'xai','model':'grok-4.7','effort':'low',
+        'instructions':'Use only current owner-granted tools.','instruction':'Synthetic exact existing-work control.',
+        'history_enabled':False,'history_path':str(tmp_path/'history.json'),'history_scope':{'worker':'fixture'},
+        'session_id':'direct:fixture','run_id':'synthetic-canonical-control','conversation_tool_mode':'coordination',
+        'mcp_servers':[{'name':'signed-fixture','url':'https://example.test/broker','preserve_tool_names':True,
+            'enabled_tools':['hand_off_to','list_workers','active_work_action','web_search'],
+            'disabled_tools':[] if grant_control else ['active_work_action']}]}))
+    assert catalog and all(set(names)==({'hand_off_to','list_workers','active_work_action'} if grant_control else {'hand_off_to','list_workers'}) for names in catalog)
+    assert calls==([{'action':'stop','workRef':'owned-native-goal'}] if grant_control else [])

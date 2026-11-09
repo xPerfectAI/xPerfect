@@ -5539,6 +5539,14 @@ screen -ls | awk -v target="$target" '
                     "VIVENTIUM_PARALLEL_PROXY_PORT": "8080",
                 }
             )
+            if (role == PARALLEL_CLEAN_ROOM_BROKER_PROXY_ROLE
+                    and os.environ.get("GLASSHIVE_DOCKER_RUNTIME_BASE_URL")):
+                expected_environment["GLASSHIVE_NATIVE_RUNTIME_UPSTREAM"] = (
+                    "http://host.docker.internal:"
+                    + str(os.environ.get("GLASSHIVE_RUNTIME_PORT") or urlparse(
+                        os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
+                    ).port or 8766)
+                )
             tmpfs_valid, tmpfs_options = _docker_tmpfs_records(
                 host_config.get("Tmpfs") if isinstance(host_config, dict) else None
             )

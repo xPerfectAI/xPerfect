@@ -60,6 +60,7 @@ function walk(e) { return [e, ...e.children.flatMap(walk)]; }
   const firstImport = calls.find(([path]) => path.endsWith('/import'))[1].body;
   const firstInstance = calls.find(([path]) => path.endsWith('/instantiate'))[1].body;
   assert.deepEqual(firstImport.provider_account, settings.providerAccount); assert.equal(firstImport.effort, 'high');
+  assert.equal(firstInstance.name, settings.name, 'keep an explicit user name when starting from an expert');
   consent = true;
   const worker = await picker.prepare(settings);
   assert.equal(worker.worker_id, 'wrk_exact');
@@ -230,20 +231,24 @@ const walk=e=>[e,...e.children.flatMap(walk)];
  assert(create.innerHTML.includes('aria-hidden="true"'));assert.equal(create.attrs['aria-pressed'],undefined,'Create is an action, not a preselected expert');
  assert(!walk(form).some(e=>e.textContent==='Create my own'),'do not duplicate the creation action above the cards');
  assert.equal(walk(cards[0]).find(e=>e.tag==='h3').textContent,known.role);
- assert.equal(walk(cards[0]).find(e=>e.className==='expert-name').textContent,known.name);
- const image=walk(cards[0]).find(e=>e.tag==='img');assert.equal(image.src,'/static/experts/bioanalytical-scientist.webp?v=20261025gouache2');
+ assert(!walk(cards[0]).some(e=>e.className==='expert-name'),'bundled experts have no person subtitle');
+ assert(!walk(cards[0]).some(e=>e.textContent===known.name),'a bundled catalog name must not add a person identity');
+ const image=walk(cards[0]).find(e=>e.tag==='img');assert.equal(image.src,'/static/experts/bioanalytical-scientist.webp?v=20261025tools1');
  assert.equal(image.width,88);assert.equal(image.height,88);assert.equal(image.alt,'');image.onerror();assert.equal(image.hidden,true);
- assert(walk(cards[0]).some(e=>e.className==='expert-avatar-fallback'&&e.innerHTML.includes('<svg')));
+ const fallback=walk(cards[0]).find(e=>e.className==='expert-avatar-fallback');
+ assert(fallback.innerHTML.includes('m12 3 10 5-10 5L2 8z'));
+ assert(!fallback.innerHTML.includes('<circle'),'the fallback must not depict a person');
  assert.equal(walk(cards[1]).filter(e=>e.tag==='img').length,0,'a matching name or role must not assign another expert portrait');
  const disclosure=cards[0].children.find(e=>e.tag==='details');assert(walk(disclosure).some(e=>e.textContent==='Exact methods'));
  assert(!cards[0].children.some(e=>e.className==='expert-abilities'),'ability lists must be behind the existing disclosure');
- const pick=walk(cards[0]).find(e=>e.className==='expert-choose');assert(pick.attrs['aria-label'].startsWith('Choose expert: Bioanalytical Scientist'));
+ const pick=walk(cards[0]).find(e=>e.className==='expert-choose');assert.equal(pick.attrs['aria-label'],'Choose expert: Bioanalytical Scientist');
  pick.onclick();assert.deepEqual(picker.selection(),{...known,kind:'starter'});assert.equal(reads,1,'selection must not import or launch');
  create.onclick();assert.equal(picker.selection(),null);assert.equal(reads,1,'Create opens local setup, without importing or running work');
  assert.equal(grid.children.at(-1),create,'Create survives rerender and stays last');
  pick.onclick();
  walk(form).find(e=>e.textContent==='My experts').onclick();cards=walk(form).filter(e=>e.className==='expert-card');
  assert.equal(walk(cards[0]).find(e=>e.tag==='h3').textContent,'Theo');
+ assert.equal(walk(cards[0]).find(e=>e.className==='expert-choose').attrs['aria-label'],'Choose expert: Theo','saved names remain accessible');
  assert.notEqual(walk(cards[0]).find(e=>e.tag==='h3').textContent,saved.role,'a saved instruction is not a profession');
  const savedDetails=cards[0].children.find(e=>e.tag==='details');
  assert(walk(savedDetails).some(e=>e.textContent==='Role and focus: '+saved.role),'keep supplied role available without promoting it into a title');
@@ -254,6 +259,7 @@ const walk=e=>[e,...e.children.flatMap(walk)];
  const restored=createExpertPicker({form:restoredForm,request:async()=>({items})});
  await restored.update({draft_owner_scope:'owner-one',workspace_templates:[saved]});
  assert.equal(restored.selection().kind,'template','the same public ID must not change a saved selection into a starter');
+ assert.equal(restored.selection().name,'Theo','reload keeps the supplied saved expert name');
  assert.equal(walk(restoredForm).find(e=>e.textContent==='My experts').attrs['aria-pressed'],'true');
  assert(walk(restoredForm).some(e=>e.className==='expert-choose'&&e.attrs['aria-pressed']==='true'),'restore the selected card in its own collection');
 })().catch(error=>{console.error(error);process.exit(1);});
@@ -262,7 +268,7 @@ const walk=e=>[e,...e.children.flatMap(walk)];
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_generated_portrait_assets_are_small_local_files_for_the_public_catalog():
+def test_generated_expert_artwork_is_small_local_files_for_the_public_catalog():
     static = SOURCE.parent
     names = ['bioanalytical-scientist','clinical-biostatistician','finance-director','growth-marketer','regulatory-affairs-specialist']
     sizes = []

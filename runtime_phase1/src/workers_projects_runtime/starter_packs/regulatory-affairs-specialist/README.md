@@ -1,4 +1,4 @@
-# Priya · Regulatory Affairs Specialist
+# Regulatory Affairs Specialist
 
 Find evidence gaps and explain what a technical change affects before review.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -141,3 +142,53 @@ def test_restricted_claude_does_not_apply_preexisting_native_selectors(runtime, 
     assert json.loads(command[command.index('--settings') + 1]) == {
         'autoMemoryEnabled': False, 'disableAllHooks': True, 'permissions': {'defaultMode': 'dontAsk'}}
     assert env['CLAUDE_CONFIG_DIR'].startswith(str(tmp_path / 'private-state'))
+
+
+def admitted_broker(candidate):
+    bundle = json.loads(candidate['bootstrap_bundle_json'])
+    expiry = int(time.time()) + 3600
+    broker = {'version': 1, 'name': 'app', 'url': 'http://127.0.0.1:12345/mcp',
+              'grant_id': 'synthetic-current-grant', 'grant_expires_at': expiry}
+    broker['tool_catalog'] = {'version': 1, 'grant_id': broker['grant_id'],
+        'expires_at': expiry, 'server_name': broker['name'], 'broker_url': broker['url'],
+        'tools': [{'name': 'hand_off_to', 'description': 'Inherit current original input.',
+                   'inputSchema': {'type': 'object', 'properties': {}}}]}
+    bundle['glasshive_capability_broker'] = broker
+    bundle['env']['GLASSHIVE_CAPABILITY_BROKER_TOKEN'] = 'synthetic-access-only-grant'
+    bundle['claude_project_mcp']['app'] = {'type': 'http', 'url': broker['url'],
+        'headers': {'Authorization': 'Bearer synthetic-access-only-grant'}}
+    candidate['bootstrap_bundle_json'] = json.dumps(bundle)
+    return bundle
+
+
+def test_restricted_claude_keeps_only_its_admitted_broker(runtime, tmp_path):
+    candidate = worker(tmp_path)
+    bundle = admitted_broker(candidate)
+    runtime._write_conversation_runtime_files(candidate, bundle)
+    command, _ = runtime._build_command(candidate, 'Use the original input.', runtime._host_runtime_info(candidate))
+    payload = json.loads(Path(command[command.index('--mcp-config') + 1]).read_text())
+    assert set(payload['mcpServers']) == {'app'}
+    assert payload['mcpServers']['app']['headers']['Authorization'] == 'Bearer ${GLASSHIVE_CAPABILITY_BROKER_TOKEN}'
+    assert '--safe-mode' not in command
+    assert command[command.index('--tools') + 1] == ''
+    assert '--no-chrome' in command and '--disable-slash-commands' in command
+    settings = json.loads(command[command.index('--settings') + 1])
+    assert settings['permissions'] == {'defaultMode': 'dontAsk', 'allow': ['mcp__app__hand_off_to']}
+    assert settings['disableAllHooks'] and not settings['autoMemoryEnabled']
+    assert settings['claudeMdExcludes'] == ['**']
+
+
+@pytest.mark.parametrize('defect', ['expired', 'wrong_url', 'missing_token'])
+def test_restricted_claude_refuses_an_invalid_declared_broker(runtime, tmp_path, defect):
+    candidate = worker(tmp_path)
+    bundle = admitted_broker(candidate)
+    if defect == 'expired':
+        bundle['glasshive_capability_broker']['grant_expires_at'] = 1
+    elif defect == 'wrong_url':
+        bundle['claude_project_mcp']['app']['url'] = 'http://127.0.0.1:23456/other'
+    else:
+        bundle['env'].pop('GLASSHIVE_CAPABILITY_BROKER_TOKEN')
+    candidate['bootstrap_bundle_json'] = json.dumps(bundle)
+    with pytest.raises(RuntimeErrorBase, match='grant is unavailable or stale'):
+        runtime._write_conversation_runtime_files(candidate, bundle)
+        runtime._build_command(candidate, 'Current original input.', runtime._host_runtime_info(candidate))

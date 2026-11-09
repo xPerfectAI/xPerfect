@@ -11,7 +11,7 @@ from test_conversation_provider import _client, _payload, lifecycle_owned_test_c
 def _truthfully_invoke_conversation_run(
     store: Store, worker: dict, run: dict
 ) -> dict:
-    executor_id = "conversation-test-running-fixture"
+    executor_id = store.invocation_executor_for_run(run) or "conversation-test-running-fixture"
     claimed = store.claim_next_queued_run(
         worker["worker_id"], executor_id=executor_id
     )
@@ -113,7 +113,7 @@ def test_restart_settles_lost_authority_backlog_and_fresh_stateless_turn_runs(
     assert old_lease is not None
     assert first_store.release_host_run_lease(
         str(old_lease["lease_id"]),
-        executor_id="conversation-test-running-fixture",
+        executor_id=str(old_lease["executor_id"]),
         reason="synthetic_full_stack_restart",
     )
     assert first_store.reconcile_invalid_running_runs() == 1

@@ -1,24 +1,31 @@
-# Expert portrait assets
+# Bundled expert artwork
 
-These five portraits depict fictional AI experts. They were generated with OpenAI image generation
-for xPerfect, then encoded as small 320 × 320 WebP assets. They do not depict employees or imply
-professional credentials or endorsement.
+The five built-in experts use nonhuman painted tools, paired with their professional role titles.
+Their images were generated with OpenAI image generation for xPerfect, then encoded as small
+320 × 320 WebP assets. They do not depict people or imply professional credentials or endorsement.
 
-The complete bundled set follows the approved Editorial Gouache v1 medium and style, with varied
-dominant accents and background geometry. The approved reference governs medium, brushwork,
-texture, abstraction and finish; colour balance and background arrangement vary within the
-coherent graphite, ivory and gold family with muted warm or cool accents. Keep each subject
-separate from the shared style. Verify the complete set before replacing its delivered assets.
+| File | Role | Artwork |
+|---|---|---|
+| bioanalytical-scientist.webp | Bioanalytical Scientist | Pipette and amber sample vial |
+| clinical-biostatistician.webp | Clinical Biostatistician | Distribution chart and data points |
+| finance-director.webp | Finance Director | Open ledger and three coin stacks |
+| growth-marketer.webp | Growth Marketer | Megaphone and outward painted bands |
+| regulatory-affairs-specialist.webp | Regulatory Affairs Specialist | Tabbed dossier and check mark |
 
-This directory owns the bundled presentation assets and their factual provenance. The
-[operator UI contract](../../../../../../docs/07_Minimal_Unified_Operator_UI.md#starting-with-a-professional-ai-worker)
-owns their product role, shared palette and gallery layout. Keep the five optimized assets
-together below 100 KB, reserve their display dimensions, and check the actual 88 px desktop and
-80 px narrow-screen crops in both themes. Source images, generation prompts and creative working
-records remain outside the public source tree.
+The approved Painted tools direction retains xPerfect Editorial Gouache v1: expressive opaque
+paint, visible brushwork, subtle grain and distinct silhouettes. Teal, cobalt, ochre, coral and
+violet accents vary with the composition, within the shared graphite, ivory and restrained gold
+family. Avoid faces, supplied human names, mascots and repeated badge layouts in built-in examples.
+Users remain free to choose their own expert names and artwork.
 
-The expert picker maps these assets only to the five stable public starter IDs. The mapping
-affects appearance, not worker identity, model, account, skills, authority or catalog content
-hashes. Custom saved experts keep their supplied name and role, with the neutral non-letter
-fallback when no known asset exists or an image fails. Do not infer a profession or presentation
-asset from a person's name or request wording.
+This directory owns the bundled presentation assets and factual provenance. The
+[operator UI contract](../../../../../../docs/07_Minimal_Unified_Operator_UI.md#expert-artwork-style)
+owns the shared style and product rules. Keep the five optimized assets together below 100 KB,
+reserve display dimensions, and check actual card crops in both themes and narrow layouts.
+Source images, generation prompts, prior portrait revisions and creative working records stay
+outside the public source tree.
+
+The picker maps artwork to stable public starter IDs. Presentation must not change worker IDs,
+models, accounts, skills, permissions or saved user identities. Custom saved experts keep their
+supplied name and role. Missing bundled images use a neutral nonhuman fallback. Never infer an
+art asset from a person's name or request wording.

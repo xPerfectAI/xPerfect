@@ -48,6 +48,28 @@ def test_explicit_empty_requirements_remain_supported(monkeypatch):
     assert host_runtime_requirements_for("codex-cli", "codex") == []
 
 
+@pytest.mark.parametrize('profile,runtime_name,expected', [
+    ('shared', 'shared', ['shared-cli', 'global-cli', 'list-cli']),
+    ('first', 'second', ['first-cli', 'second-cli', 'global-cli', 'list-cli']),
+])
+def test_each_distinct_requirement_source_is_evaluated_once(monkeypatch, profile, runtime_name, expected):
+    import workers_projects_runtime.runtime_requirements as requirements
+
+    monkeypatch.setattr(requirements, '_load_requirements_payload', lambda: {
+        'shared': [{'binary': 'shared-cli'}],
+        'first': [{'binary': 'first-cli'}],
+        'second': [{'binary': 'second-cli'}],
+        '*': [{'binary': 'global-cli'}],
+        'requirements': [{'binary': 'list-cli'}],
+    })
+    observed = []
+    monkeypatch.setattr(requirements, '_evaluate_requirement',
+                        lambda requirement, **_kwargs: observed.append(requirement['binary']))
+
+    assert requirements.host_runtime_requirement_issue(profile, runtime_name) is None
+    assert observed == expected
+
+
 def _short_flush_cli(tmp_path, *, flags="--effort --chrome --tools --permission-mode dontAsk --no-chrome --strict-mcp-config --setting-sources --json-schema", exit_code=0):
     """A native CLI may exit after a partial nonblocking pipe write."""
     import sys

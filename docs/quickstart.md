@@ -42,7 +42,7 @@ and an external MCP client's connection are separate things.
 Open **Run Project**.
 
 1. In **Experts**, choose a profession. **What's included** shows its starting knowledge and
-   abilities. **My experts** holds your saved setups; **Create my own** opens the normal worker
+   abilities. **My experts** holds your saved setups; **Create** opens the normal worker
    choices without changing your defaults.
 2. In **What's the Job?**, explain the work. **What's the required outcome?** is optional; use
    it for anything the result must include.

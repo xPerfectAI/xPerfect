@@ -1,4 +1,4 @@
-# Morgan · Finance Director
+# Finance Director
 
 Explain financial performance and cash choices with working, traceable files.
 

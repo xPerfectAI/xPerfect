@@ -82,7 +82,7 @@ def test_native_mission_reuses_file_module_only_on_existing_supported_transport(
     original = 'Use the supplied result and answer the user.'
     composed = runtime._host_mission_instruction(worker, original, {'file_output_transport': transport})
     eligible = profile != 'opencode' and transport == 'artifact_sha256' and native_tools
-    assert (conversation_file_delivery_instructions() in composed) is eligible
+    assert (conversation_file_delivery_instructions(runtime.provider_file_delivery_roots(worker)) in composed) is eligible
     assert composed.startswith(original)
     if not eligible: assert composed == original
     worker['trusted_run_lane'] = 'conversation'

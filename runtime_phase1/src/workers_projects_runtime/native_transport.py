@@ -77,7 +77,7 @@ def socket_route(value: str) -> str | None:
     return value
 
 
-def worker_route() -> str | None:
+def worker_route(*, execution_mode: str = "host") -> str | None:
     """The runtime origin a worker can reach for native context, or None when this
     installation gives workers no route.
 
@@ -91,7 +91,9 @@ def worker_route() -> str | None:
         return socket_base
     if packaged_profile() or os.environ.get("XPERFECT_EXECUTION_PROFILE") == "hosted-xfs":
         return None
-    base = os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "").rstrip("/")
+    setting = ("GLASSHIVE_DOCKER_RUNTIME_BASE_URL" if execution_mode == "docker"
+               else "GLASSHIVE_PEER_RUNTIME_BASE_URL")
+    base = os.environ.get(setting, "").rstrip("/")
     if base.startswith("http+unix:"):
         return socket_route(base)
     endpoint = urlparse(base)

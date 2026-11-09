@@ -42,16 +42,12 @@ def _validated_continuation_context(value: object) -> dict[str, Any] | None:
         value.get("version") != 1
         or not isinstance(base_instruction, str)
         or not base_instruction.strip()
-        or len(base_instruction.encode("utf-8")) > 128 * 1024
         or not isinstance(guidance, list)
-        or len(guidance) > 128
         or any(
             not isinstance(item, str)
             or not item.strip()
-            or len(item.encode("utf-8")) > 100 * 1024
             for item in guidance
         )
-        or sum(len(item.encode("utf-8")) for item in guidance) > 512 * 1024
     ):
         raise ValueError("Invalid workspace continuation context")
     inherited = value.get("inherited_conversation")

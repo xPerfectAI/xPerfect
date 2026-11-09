@@ -1,4 +1,4 @@
-# Alex · Growth Marketer
+# Growth Marketer
 
 Create coherent campaign assets grounded in the company’s brand and evidence.
 

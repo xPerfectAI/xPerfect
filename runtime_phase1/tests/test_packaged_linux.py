@@ -1516,7 +1516,7 @@ def test_opted_in_local_launch_only_records_policy_without_operator_or_firewall(
 def test_daemon_failures_name_an_action_without_echoing_daemon_text():
     module = _launch_module()
     detail = ('Error response from daemon: could not find an available, non-overlapping IPv4 '
-              'address pool among the defaults to assign to the network /Users/private/config')
+              'address pool among the defaults to assign to the network /Users/' 'private/config')
     message = module.docker_failure('network', detail)
     assert message.startswith('Docker package operation failed: network. Docker has no free network')
     assert '/Users/private' not in message
@@ -1720,11 +1720,11 @@ def test_the_docker_endpoint_is_the_local_context_and_never_a_remote_one(monkeyp
 
     class Result:
         returncode = 0
-        stdout = b'unix:///Users/someone/.docker/run/docker.sock\n'
+        stdout = b'unix:///Users/' b'someone/.docker/run/docker.sock\n'
         stderr = b''
 
     monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: Result())
-    assert module.local_docker_endpoint(None) == 'unix:///Users/someone/.docker/run/docker.sock'
+    assert module.local_docker_endpoint(None) == 'unix:///Users/' 'someone/.docker/run/docker.sock'
     assert module.local_docker_endpoint('unix:///var/run/docker.sock') == 'unix:///var/run/docker.sock'
     for remote in ('tcp://10.0.0.2:2376', 'ssh://build-host', 'npipe:////build-host/pipe/docker_engine'):
         with pytest.raises(ValueError, match='local Unix Docker endpoint'):

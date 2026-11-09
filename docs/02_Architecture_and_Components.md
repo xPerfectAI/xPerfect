@@ -51,6 +51,10 @@ before public cursors, redactor state, or bytes advance; contention leaves those
 so exact prefixes and public-part completion markers are emitted once. They use the existing heartbeat, pending
 observer and original absolute deadline; observation does not replay inference or revoke
 the author. Other database failures retain their existing error behavior.
+A canonical completed response also seals its remaining eligible terminal text with the same
+bound public-part control. This applies after full output validation, including native transports
+that expose no incremental public envelopes. Failed, cancelled, empty, skipped or unbound results
+create no such control. Exact model decisions and mixed audio ranges remain unchanged.
 Successful Chat Completions and Responses HTTP replies expose `X-GlassHive-Response-Deadline-At`
 alongside the request ID. It is the valid timezone-aware absolute deadline stored by admission,
 shared by the primary attempt and any serial fallback. Signed private-machine-state requests with
@@ -61,8 +65,9 @@ Clients may use this owner-authored header instead of duplicating the provider t
 without a valid stored deadline omit the header; invalid/non-finite request budgets are rejected.
 
 Conversation admission keeps complete protected inputs within the selected native model's effective
-half-window, calibrated by observed bytes per token, and the existing 512 KiB hard ceiling. An
-explicit `GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES` cap remains authoritative. A smaller reported
+half-window, calibrated by observed bytes per token. An explicit positive
+`GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES` cap remains authoritative, including values below 32 KiB;
+admission rejects protected source that cannot fit instead of raising that operator maximum. A smaller reported
 window applies only to the matching model and native epoch; admission and pressure use the same
 owner. Native Codex GPT-6.1 Sol reports an effective 475,000-token window; Direct API metadata is
 separate. Discovery advertises the same model/config budget at minimum bytes-per-token
@@ -124,6 +129,13 @@ session, history and context epoch; it does not force a cold rebind. A failed re
 error class and keeps the normal admission conflict. Stop cannot replace a different unresolved
 lifecycle claim; it can complete through the normal control path after exact cleanup settles.
 No provider-wide admission lock is held during native cleanup.
+
+Provider retention at startup keeps the existing cleanup policy. In a running service, due
+retention runs once in the background, outside request admission and the native execution pool.
+A sweep skips a session whose admission lock is occupied and checks its current binding, age and
+requests again before retiring its idle worker. The existing worker close transaction rejects idle
+retirement when a run, schedule, Stop or release claim owns the worker. Shutdown joins retention and detached reconciliation
+before closing the store. Retention ages and the trigger interval stay unchanged.
 A newer queued turn that has never invoked or confirmed native startup does not own the retained
 failed generation. Deadline cleanup may stop that exact old generation while preserving the queued
 turn, request, latest-run pointer and native history. The shared eligibility check runs before the
@@ -314,6 +326,55 @@ worker is sufficient. More idle servers consume memory; they do not create more 
 | Host Codex, current native file account and supported app-server schema | Initialized native stdio; fresh thread authority binds after lease |
 | Codex named account, startup-only override or unsupported environment binding | Unavailable; exact normal startup remains available |
 | Claude or container | No adapter; normal native startup remains available |
+
+
+### Retained host Claude conversations
+
+This is a provider conversation transport, separate from the startup-only warm pool above.
+An explicit signed capability enables native streaming-input reuse for a restricted coordinator.
+The native CLI owns conversation history. Each admitted turn retains the original user input,
+replaces current application authority through an explicit private output-style refresh, and
+binds only that turn's admitted MCP grants through native controls. It removes those connections
+at idle. No rewritten brief, additional model or orchestration store is introduced.
+
+The reviewed CLI protocol is version 2.1.285, shared with the native control build gate. Other
+builds reject reuse until their control and semantic checks pass. The authority receipt records
+the materialized source hash and native refresh acknowledgment, not a model-derived proof of
+hidden prompt contents. Exact-model current-state evals remain necessary evidence.
+
+Existing host session records, PID birth identity, run/attempt startup fences and per-run logs
+own execution. Phase transitions participate in CAS. Completed runs relinquish the cached
+process to the provider conversation; stale run controls cannot affect a later turn. Native
+interrupt targets the current attempt. An acknowledged interrupt with an aborted-stream result
+is cancellation, not task success. Model refusals remain failures and are not silently retried.
+
+The installed native account route supports reuse. Explicit Connected Accounts retain their
+existing run-scoped credential leases and reject the opt-in; no authenticated idle process may
+outlive one of those leases. Model, account, access, origin or policy changes still rebind. A
+branch change starts a new native history. A changed per-turn output schema (including a surface
+or audio-delivery contract change) relaunches with native resume; it is a cold transition, not a
+warm latency sample. That preserves the exact output contract until native per-turn schema
+mutation is supported and tested. Disabling reuse reconciles the cached process before the
+ordinary transport can replace its registry entry. Process death reconciles its exact identity
+before native resume. The startup pool performs no inference for this feature.
+
+Cached processes are one per provider worker. Authenticated external-user interactive turns use
+the existing host conversation capacity. Trusted callback-origin result presentation uses that
+same conversation lane, so ready results are not queued behind maintenance. Other system,
+assistant, tool and worker-origin conversations use the existing mission capacity.
+The provider writes this typed origin from normalized request identity; incoming bundle metadata
+cannot choose it. Provider session identity includes actor kind and origin: a background wake
+and a human turn use distinct workers, not one mutable cross-origin worker. Missing origin
+retains legacy foreground behavior. Applications must declare their trusted background scope.
+Existing per-CLI defaults remain two conversation slots and three mission slots, configurable
+through the existing host capacity settings. Foreground contention uses the existing durable
+capacity retry and wake-up path. Background cognition shares mission capacity with same-CLI
+Workers; another CLI has its own lane book. Idle caches release their slot. `GLASSHIVE_CLAUDE_CONVERSATION_IDLE_SECONDS` defaults to
+120 and controls cache lifetime, not task duration or conversation length. Idle expiry and turn
+admission serialize on the same turn lock; a message arriving during expiry relaunches normally.
+Shutdown and whole-worker close must confirm exact process death. Current authority style files
+are removed at stop. Native transcripts remain in the existing private worker home for native
+resume; they follow that worker's retained state and deletion lifecycle, never public artifacts.
 
 
 Codex prepares the selected executable with its existing authenticated native account and
@@ -1240,6 +1301,14 @@ selected-window bound instead of the aggregate. Internal output-tool acknowledge
 existing reserve behavior. The
 existing store permits measured/bound scope changes only within its epoch, time-order and request
 fences. Billing output and original protocol journals remain unchanged.
+
+Claude Code follows the same accounting distinction. Run usage includes uncached input, cache
+reads and cache creation once. Resident context uses the last message iteration or assistant
+response, including its cache buckets; it never uses the sum of tool rounds or cumulative session
+model usage. An inclusive `prompt_tokens` alias is not added to cache buckets again. Missing,
+partial or inconsistent response counters retain the existing aggregate or selected-window upper
+bound. Bounds do not calibrate bytes per token. Context epoch, request order and model-window
+fences remain unchanged.
 
 The signed capability broker already declares globally unique canonical tool names. Direct keeps
 those names so the executable catalog agrees with admitted authority. Other MCP servers retain

@@ -7947,7 +7947,7 @@ def test_file_only_delegation_packet_preserves_strict_source_equality(mutation):
         mcp_server._trusted_triggering_source_block(bundle)
 
 
-@pytest.mark.parametrize("instruction_kind", ["exact-clause", "multiple-inputs", "model-brief"])
+@pytest.mark.parametrize("instruction_kind", ["exact-clause", "long-clause", "multiple-inputs", "model-brief"])
 def test_delegation_packet_explicit_assignment_keeps_original_source_role(monkeypatch, instruction_kind):
     monkeypatch.setenv("WPR_DEFAULT_EXECUTION_MODE", "docker")
     monkeypatch.setattr(mcp_server, "get_http_headers", lambda: {
@@ -7962,6 +7962,9 @@ def test_delegation_packet_explicit_assignment_keeps_original_source_role(monkey
         instruction = "\n\n".join(originals)
     elif instruction_kind == "model-brief":
         instruction = "Complete the browser check and revise the travel deliverables."
+    elif instruction_kind == "long-clause":
+        instruction = "x" * 110_000 + " Keep the final condition."
+        originals = ["Original context. " + instruction]
     sources = [{"ordinal": index, "source_event_id": f"synthetic-source-{index}",
                 "source_index": 0, "text": text} for index, text in enumerate(originals)]
     bundle = {
@@ -8058,6 +8061,27 @@ def test_delegation_packet_without_explicit_instruction_retains_source_task_fall
     assert "Selected user task segments:" in block
     assert "--- BEGIN USER TASK SEGMENT 0 ---\nOriginal whole task." in block
     assert "context only" not in block
+
+
+def test_signed_source_projection_keeps_complete_large_task_and_all_segments():
+    text = "Original task. " + "x" * 110_000 + " Keep the last condition."
+    sources = [{"ordinal": n, "source_event_id": f"source-{n}", "source_index": 0,
+                "text": text} for n in range(40)]
+    bundle = {
+        "viventium_delegation_identity": {"source_event_id": "source-0"},
+        "viventium_delegation_context": {"version": 1, "source_event_id": "source-0",
+                                         "triggering_source_segments": sources},
+        "viventium_delegation_packet": {"version": 1,
+            "task": {"instruction": text,
+                     "source_segments": [{"ordinal": s["ordinal"], "text": text} for s in sources]},
+            "explicit_constraints": [], "selected_files": []},
+    }
+    block = mcp_server._trusted_triggering_source_block(bundle)
+    assert f"Task:\n{text}" in block
+    assert f"--- BEGIN SOURCE EVIDENCE 39 ---\n{text}" in block
+    bundle["viventium_delegation_packet"]["task"]["source_segments"][-1]["text"] += "foreign"
+    with pytest.raises(ValueError):
+        mcp_server._trusted_triggering_source_block(bundle)
 
 
 @pytest.mark.parametrize("as_json", [False, True])

@@ -17,6 +17,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import AsyncIterable
 
+from .deliverables import is_protected_artifact_path
+
 
 DEFAULT_OWNER_STORAGE_BYTES = 5_000_000_000
 
@@ -63,7 +65,7 @@ def native_workspace_relative_path(runtime, worker: dict, reference: str) -> str
         except ValueError:
             return None
     relative = path.as_posix()
-    return relative if is_user_deliverable_relative_path(relative) else None
+    return relative if is_user_deliverable_relative_path(relative, root=Path(root)) else None
 
 
 class FileAdmissionError(ValueError):
@@ -1482,11 +1484,11 @@ class WorkspaceFiles:
         """
         from .deliverables import is_unmodified_user_input, is_user_deliverable_relative_path
 
-        if not is_user_deliverable_relative_path(relative_path):
-            raise FileAdmissionError("File not found", 404)
         worker = self.artifact_worker(worker)
         root = self._root(worker)
         relative = _relative(relative_path)
+        if not is_user_deliverable_relative_path(relative, root=root):
+            raise FileAdmissionError("File not found", 404)
         with _directory(root, relative.parent) as parent:
             descriptor = _ordinary_file_fd(parent, relative.name)
             try:
@@ -1536,6 +1538,8 @@ class WorkspaceFiles:
         relative = _relative(directory, directory=True)
         if cursor < 0 or not 1 <= limit <= 500:
             raise FileAdmissionError("File page is invalid", 422)
+        if is_protected_artifact_path(root / relative):
+            raise FileAdmissionError("Folder not found", 404)
         items = []
         directory_display_name = ""
         with _directory(root, relative) as parent:
@@ -1545,6 +1549,8 @@ class WorkspaceFiles:
                 try:
                     _relative(path)
                 except FileAdmissionError:
+                    continue
+                if is_protected_artifact_path(root / path):
                     continue
                 metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 if stat.S_ISLNK(metadata.st_mode) or not (
@@ -1578,7 +1584,7 @@ class WorkspaceFiles:
                 for name, path, metadata in page:
                     is_dir = stat.S_ISDIR(metadata.st_mode)
                     if is_dir:
-                        revision = directory_revision(parent, name)
+                        revision = directory_revision(parent, name, path=root / path)
                         size = 0
                     else:
                         descriptor, revision, size = _snapshot_fd(parent, name)
@@ -1648,7 +1654,10 @@ class WorkspaceFiles:
                 self._workspace_key(worker),
             ),
         ).fetchone()
-        if row is None:
+        if row is None or (
+            os.environ.get("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS")
+            and is_protected_artifact_path(self._root(worker) / _relative(row["path"]))
+        ):
             raise FileAdmissionError("File not found", 404)
         return dict(row)
 
@@ -1659,14 +1668,15 @@ class WorkspaceFiles:
         with self.store._connect() as conn:
             entry = self._entry(conn, worker, file_id)
         relative = _relative(entry["path"])
-        with _directory(self._root(worker), relative.parent) as parent:
+        root = self._root(worker)
+        with _directory(root, relative.parent) as parent:
             try:
                 metadata = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
             except OSError as exc:
                 raise FileAdmissionError("File changed; refresh Files and retry", 409) from exc
             is_dir = stat.S_ISDIR(metadata.st_mode)
             if is_dir:
-                current, size = directory_revision(parent, relative.name), 0
+                current, size = directory_revision(parent, relative.name, path=root / relative), 0
             else:
                 descriptor, current, size = _snapshot_fd(parent, relative.name)
                 os.close(descriptor)

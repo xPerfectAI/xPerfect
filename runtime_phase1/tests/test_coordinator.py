@@ -1144,9 +1144,9 @@ def test_each_conversation_renders_its_saved_prompt_snapshot(coordinator, monkey
     earlier = {**current, 'version': current['version'] - 1,
                'content': 'Earlier approved conversation instructions.'}
     earlier['sha256'] = hashlib.sha256(earlier['content'].encode()).hexdigest()
-    monkeypatch.setattr(module, 'prompt_manifest', lambda: earlier)
+    monkeypatch.setattr(module, 'prompt_manifest', lambda application=False: earlier)
     previous_id = create(coordinator)
-    monkeypatch.setattr(module, 'prompt_manifest', lambda: current)
+    monkeypatch.setattr(module, 'prompt_manifest', lambda application=False: current)
     current_id = create(coordinator)
 
     class CapturingProvider(Provider):
@@ -1171,7 +1171,8 @@ def test_each_conversation_renders_its_saved_prompt_snapshot(coordinator, monkey
         coordinator._conversation('local', 'owner', current_id)['prompt_json']
 
 
-def test_real_store_reservation_replays_after_lost_attachment(tmp_path, monkeypatch):
+@pytest.mark.parametrize("instruction", ["Exact goal", None])
+def test_real_store_reservation_replays_after_lost_attachment(tmp_path, monkeypatch, instruction):
     from workers_projects_runtime.openclaw_runtime import StubRuntime
     from workers_projects_runtime.service import WorkersProjectsService
 
@@ -1188,12 +1189,13 @@ def test_real_store_reservation_replays_after_lost_attachment(tmp_path, monkeypa
     core = CoordinatorService(store, service, Provider())
     try:
         cid = core.create('local', 'owner', CoordinatorConfig(model='exact-native-model', effort='high', routes=[Route(id='route',profile='codex-cli',model='codex-cli:gpt-5.6-sol',effort='high',execution_mode='docker')]))['conversation_id']
-        core.accept_turn('local','owner',cid,'turn','raw',[Goal(id='a',text='a')])
+        core.accept_turn('local','owner',cid,'turn','raw',[Goal(id='a',text='Original goal\nwith  spaces and Unicode é.')])
         assert service.orchestration_capabilities()['isolatedParallelReady'], service.orchestration_capabilities()
-        command = Dispatch(goal_id='a',route_id='route',instruction='Exact goal')
+        command = Dispatch(goal_id='a',route_id='route',instruction=instruction)
         result = core.dispatch('local','owner',cid,command)
         assert result['state'] == 'queued', result['blocker']
         original = result['run_id']
+        assert store.get_run(original)['instruction'] == (instruction if instruction is not None else 'Original goal\nwith  spaces and Unicode é.')
         # Simulate crash after service reservation but before coordinator attachment.
         with store._connect() as conn:
             conn.execute("UPDATE coordinator_goals SET work_ref='',worker_id='',run_id='' WHERE conversation_id=?", (cid,))
@@ -1671,6 +1673,8 @@ def test_native_tools_all_have_canonical_descriptions(coordinator):
     assert {tool.name:tool.description for tool in tools} == expected
     assert 'goal_ids' in next(t for t in tools if t.name=='coordinator_handle').inputSchema['properties']
     assert 'run_id' in next(t for t in tools if t.name=='coordinator_result').inputSchema['properties']
+    dispatch_schema = next(t for t in tools if t.name=='coordinator_dispatch').inputSchema
+    assert dispatch_schema['required'] == ['goal_id']
     accept_schema = next(t for t in tools if t.name=='coordinator_accept_goals').inputSchema
     assert set(accept_schema['properties']) == {'goals'}
     assert accept_schema['required'] == ['goals']
@@ -2179,13 +2183,11 @@ def test_native_queen_pending_older_receipt_never_rewinds_later_success(
         if crash_after_attachment:
             bind(*args, **kwargs)
         raise RuntimeError('Synthetic receipt crash')
-    later_key = f'coordinator-queue:{cid}:child:later-success'
-    later_id = core.service.active_work_effect_run_id(work, idempotency_key=later_key)
-    for ordinal in range(100):
-        key = f'pending-older-{ordinal}'
-        effect_id = core.service.active_work_effect_run_id(work, idempotency_key=f'coordinator-queue:{cid}:child:{key}')
-        if effect_id > later_id:
-            break
+    candidates = sorted((core.service.active_work_effect_run_id(
+        work, idempotency_key=f'coordinator-queue:{cid}:child:{candidate}'), candidate)
+        for candidate in ('ordering-first', 'ordering-second'))
+    later_id, later_control_key = candidates[0]
+    effect_id, key = candidates[1]
     assert effect_id > later_id  # Hash lexical order must never become action order.
     request = Control(action='queue', run_id=work['run_id'], idempotency_key=key, message='First')
     monkeypatch.setattr(core, '_bind_goal_replacement', crash)
@@ -2193,7 +2195,7 @@ def test_native_queen_pending_older_receipt_never_rewinds_later_success(
         core.control('local', 'owner', cid, 'child', request)
     monkeypatch.setattr(core, '_bind_goal_replacement', bind)
     later = core.control('local', 'owner', cid, 'child', Control(
-        action='queue', run_id=work['run_id'], idempotency_key='later-success', message='Second'))
+        action='queue', run_id=work['run_id'], idempotency_key=later_control_key, message='Second'))
     if same_reservation_time:
         with core.store._connect() as conn:
             conn.execute('UPDATE runs SET first_queued_at=? WHERE run_id=?',
