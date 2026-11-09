@@ -5177,6 +5177,11 @@ class ConversationProvider:
         existing_worker = (
             self.store.get_worker(str(existing["worker_id"])) if existing else None
         )
+        if (existing and existing_worker and existing_worker.get("state") in {"needs_input", "failed"}
+                and self.service.settle_unstarted_provider_invocations(
+            str(existing["session_id"]), tenant_id=tenant_id, owner_id=metadata.owner_id,
+        )):
+            existing_worker = self.store.get_worker(str(existing["worker_id"]))
         if existing_worker and existing_worker.get("state") == "failed":
             try:
                 recovered = self.service.release_provider_deadline_compute(

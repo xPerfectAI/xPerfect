@@ -9526,8 +9526,8 @@ def test_normal_host_conversation_waits_for_bundle_published_after_queued_run(tm
     original_record = service._record_run_allowed_ai_admission
 
     class ObservedBundles(dict):
-        def pop(self, key, default=None):
-            value = super().pop(key, default)
+        def get(self, key, default=None):
+            value = super().get(key, default)
             if key == target["run_id"]:
                 consumed_empty.set()
             return value
