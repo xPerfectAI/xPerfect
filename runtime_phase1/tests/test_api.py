@@ -6856,6 +6856,7 @@ def test_enterprise_startup_requeues_durable_first_run_after_restart(tmp_path, m
     service = WorkersProjectsService(store, RestartRuntime())
     try:
         wait_until(lambda: store.get_run(run["run_id"])["state"] == "completed")
+        wait_until(lambda: store.get_worker(worker["worker_id"])["state"] == "ready")
     finally:
         service.shutdown()
 
@@ -14802,7 +14803,7 @@ def test_scheduled_workbench_callback_scope_does_not_change_ordinary_parent(monk
 @pytest.mark.parametrize("event_type", ["run.queued", "run.started", "run.waiting_on_capacity", "run.needs_input"])
 def test_scheduled_workbench_callback_scope_covers_native_lifecycle_intents(tmp_path, event_type):
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False)
     project = service.create_project("synthetic-owner", "Scheduled callback scope", "Retain one declared scheduled origin.", "codex-cli")
     try:
         worker = service.create_worker(
@@ -14840,7 +14841,7 @@ def test_scheduled_workbench_callback_scope_preserves_legacy_outbox_transport(tm
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_ATTEMPTS", "1")
     monkeypatch.setenv("GLASSHIVE_CALLBACK_RETRY_BASE_DELAY_S", "0")
     store = Store(str(tmp_path / "runtime.db"))
-    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False)
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False)
     try:
         project = store.create_project("synthetic-owner", "Legacy callback", "Preserve accepted callback bytes.", "codex-cli")
         worker = store.create_worker(

@@ -6388,7 +6388,7 @@ class BaseCliWorkerRuntime:
                 ),
                 (
                     "scrub_run_secrets() { "
-                    "unset native_key CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY XAI_API_KEY "
+                    "unset native_key CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN XAI_API_KEY "
                     "GLASSHIVE_NATIVE_API_KEY_FILE GLASSHIVE_NATIVE_API_KEY_PROVIDER; "
                     'if [ -f "$GLASSHIVE_SECRET_ENV_KEYS_FILE" ]; then '
                     'while IFS= read -r key; do [ -n "$key" ] && unset "$key"; done '
@@ -9492,11 +9492,167 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
 
 
+def claude_code_custom_route() -> dict[str, str]:
+    """An explicit Anthropic-compatible endpoint for Claude Code Workers, from xPerfect's own config.
+
+    Reads the instance's WPR_* configuration. Existing explicitly projected Docker
+    provider environments keep their own route and credential contract.
+    """
+    url = os.environ.get("WPR_CLAUDE_CODE_BASE_URL", "").strip()
+    token = os.environ.get("WPR_CLAUDE_CODE_AUTH_TOKEN", "").strip()
+    if not url:
+        return {}
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeErrorBase("WPR_CLAUDE_CODE_BASE_URL must be an HTTP(S) endpoint without embedded credentials")
+    # The endpoint model's real context window: Claude Code compacts before it instead of assuming its
+    # own default for an unrecognized model (a longer prompt is cut by the server, instructions first).
+    window = os.environ.get("WPR_CLAUDE_CODE_MAX_CONTEXT_TOKENS", "").strip()
+    if window and (not window.isascii() or not window.isdecimal() or int(window) <= 0):
+        raise RuntimeErrorBase("WPR_CLAUDE_CODE_MAX_CONTEXT_TOKENS must be a positive integer")
+    return {"ANTHROPIC_BASE_URL": url, **({"ANTHROPIC_AUTH_TOKEN": token} if token else {}),
+            **({"CLAUDE_CODE_MAX_CONTEXT_TOKENS": window} if window else {})}
+
+
+def _apply_claude_code_owner_denies(settings: dict) -> None:
+    raw = os.environ.get("WPR_CLAUDE_CODE_DENY", "").strip()
+    if not raw:
+        return
+    try:
+        rules = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeErrorBase("WPR_CLAUDE_CODE_DENY must be a JSON list of nonempty strings") from exc
+    if not isinstance(rules, list) or any(not isinstance(rule, str) or not rule.strip() for rule in rules):
+        raise RuntimeErrorBase("WPR_CLAUDE_CODE_DENY must be a JSON list of nonempty strings")
+    permissions = settings.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise RuntimeErrorBase("Claude Code permissions must be an object")
+    existing = permissions.get("deny", [])
+    if not isinstance(existing, list) or any(not isinstance(rule, str) for rule in existing):
+        raise RuntimeErrorBase("Claude Code deny rules must be a list of strings")
+    permissions["deny"] = list(dict.fromkeys([*existing, *rules]))
+
+
+def _claude_code_command_settings(command: list[str], fallback: dict | None = None) -> tuple[list[str], dict, int]:
+    command = list(command)
+    if "--settings" in command:
+        position = command.index("--settings") + 1
+        value = command[position]
+        try:
+            settings = json.loads(value if value.lstrip().startswith("{") else Path(value).read_text())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeErrorBase("Claude Code settings could not be read for instance controls") from exc
+        if not isinstance(settings, dict):
+            raise RuntimeErrorBase("Claude Code settings must be an object")
+    else:
+        settings = json.loads(json.dumps(fallback or {}))
+        command.extend(["--settings", "{}"])
+        position = len(command) - 1
+    return command, settings, position
+
+
+def _with_claude_code_owner_denies(command: list[str]) -> list[str]:
+    if not os.environ.get("WPR_CLAUDE_CODE_DENY", "").strip():
+        return command
+    command, settings, position = _claude_code_command_settings(command)
+    _apply_claude_code_owner_denies(settings)
+    command[position] = json.dumps(settings, separators=(",", ":"))
+    return command
+
+
+_CLAUDE_INSTANCE_TRANSPORT_ENV = frozenset({
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "CLAUDE_CODE_CLIENT_CERT", "CLAUDE_CODE_CLIENT_KEY", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "SSLKEYLOGFILE",
+})
+
+
+def _claude_instance_route_conflicts(environment: dict) -> bool:
+    from .mission_provider_accounts import _CLAUDE_CONFLICTING_ENV
+    from .current_native_account import _CURRENT_NATIVE_AUTH_ENV, _CURRENT_NATIVE_OWNER_ENV
+    owned = _CLAUDE_CONFLICTING_ENV | _CURRENT_NATIVE_AUTH_ENV | _CURRENT_NATIVE_OWNER_ENV | {
+        "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "GLASSHIVE_NATIVE_API_KEY_FILE", "GLASSHIVE_NATIVE_API_KEY_PROVIDER",
+    }
+    return any(key in owned or str(key).startswith("ANTHROPIC_")
+               or str(key).upper() in _CLAUDE_INSTANCE_TRANSPORT_ENV for key in environment)
+
+
+def _validate_claude_instance_route_settings(settings: dict) -> None:
+    from .current_native_account import _CURRENT_NATIVE_AUTH_SETTINGS
+    if not isinstance(settings, dict):
+        raise RuntimeErrorBase("Claude Code settings must be an object")
+    environment = settings.get("env", {})
+    if not isinstance(environment, dict):
+        raise RuntimeErrorBase("Claude Code environment settings must be an object")
+    if _CURRENT_NATIVE_AUTH_SETTINGS.intersection(settings) or _claude_instance_route_conflicts(environment):
+        raise RuntimeErrorBase("An instance Claude Code endpoint cannot be combined with bootstrap provider settings")
+
+
 class ClaudeCodeRuntime(BaseCliWorkerRuntime):
     runtime_name = "claude-code"
     worker_root_name = "claude_code_runtime"
     binary_name = "claude"
     _workspace_effort_support_cache: dict[tuple[str, str, str], bool] = {}
+
+    def _owner_custom_route(self, worker: dict) -> dict[str, str]:
+        from .current_native_account import MARKER
+        selection = mission_provider_account_selection(worker)
+        if MARKER in worker or self._uses_parallel_clean_room(worker) or (selection is not None and not (
+            selection.policy == "personal_preferred"
+            and worker.get("_glasshive_provider_account_preferred_fallback")
+        )):
+            return {}
+        return claude_code_custom_route()
+
+    def _with_owner_route_settings(self, worker: dict, command: list[str]) -> list[str]:
+        if not self._owner_custom_route(worker):
+            return command
+        supplied = bootstrap_bundle_for(worker).get("claude_settings_local", {})
+        _validate_claude_instance_route_settings(supplied)
+        command, settings, position = _claude_code_command_settings(command, supplied)
+        _validate_claude_instance_route_settings(settings)
+        _apply_claude_code_owner_denies(settings)
+        command[position] = json.dumps(settings, separators=(",", ":"))
+        # Only validated explicit settings may select this instance's route.
+        # Files in the workspace must not redirect its authority afterwards.
+        if "--setting-sources" in command:
+            command[command.index("--setting-sources") + 1] = ""
+        else:
+            command.extend(["--setting-sources", ""])
+        return command
+
+    def _apply_owner_custom_route(self, worker: dict, env: dict[str, str], *, execution_mode: str) -> bool:
+        route = self._owner_custom_route(worker)
+        if not route:
+            return False
+        projected = bootstrap_env_for(worker, self.runtime_name)
+        if self._bedrock_enabled() or any(
+            str(source.get("CLAUDE_CODE_USE_BEDROCK") or "").lower() in {"1", "true", "yes", "on"}
+            for source in (env, projected)
+        ):
+            raise RuntimeErrorBase("A custom Claude Code endpoint conflicts with the selected Bedrock route")
+        if not route.get("ANTHROPIC_AUTH_TOKEN"):
+            raise ProviderAuthenticationMissingError(
+                "A custom Claude Code endpoint needs its own token.",
+                binary=self.binary, runtime_name=self.runtime_name,
+                profile=str(worker.get("profile") or "claude-code"), execution_mode=execution_mode,
+                dependency_label="Claude Code authentication",
+                recovery_hint="Set WPR_CLAUDE_CODE_AUTH_TOKEN for that endpoint, then retry the same request.",
+            )
+        # Docker sources these files after its exec environment. Reject competing
+        # authority instead of clearing a dict that those files could overwrite.
+        if _claude_instance_route_conflicts(projected):
+            raise RuntimeErrorBase("An instance Claude Code endpoint cannot be combined with bootstrap provider settings")
+        from .mission_provider_accounts import _CLAUDE_CONFLICTING_ENV
+        from .current_native_account import _CURRENT_NATIVE_AUTH_ENV
+        for key in list(env):
+            if key in _CLAUDE_CONFLICTING_ENV | _CURRENT_NATIVE_AUTH_ENV or key.startswith("ANTHROPIC_"):
+                env.pop(key, None)
+        env.update(route)
+        return True
 
     def resolve_model(self, profile: str) -> str:
         return os.environ.get("WPR_MODEL_CLAUDE_CODE", "opus")
@@ -9695,6 +9851,7 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
             command = apply_claude_context(command, selectors)
             if native_authority is not None:
                 command[command.index("--append-system-prompt-file") + 1] = native_authority
+        command = _with_claude_code_owner_denies(self._with_owner_route_settings(worker, command))
         if session_key and not session_key.startswith("claude-worker:"):
             resume_command = [*command, "--resume", session_key]
             if native_authority is not None:
@@ -9735,6 +9892,11 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
             "SSL_CERT_FILE",
             "SSL_CERT_DIR",
         )
+        if not self._apply_owner_custom_route(worker, env, execution_mode="docker"):
+            # These keys were not delivered by the historical exec allowlist.
+            # Enabling their routed transport must not widen ordinary runs.
+            env.pop("ANTHROPIC_AUTH_TOKEN", None)
+            env.pop("CLAUDE_CODE_MAX_CONTEXT_TOKENS", None)
         use_api_key = os.environ.get("WPR_CLAUDE_CODE_USE_API_KEY", "0").strip().lower() in {"1", "true", "yes", "on"}
         if not use_api_key:
             env.pop("ANTHROPIC_API_KEY", None)
@@ -12462,10 +12624,33 @@ raise SystemExit(exit_code)
                     "bearer_token_env_var": "GLASSHIVE_CAPABILITY_BROKER_TOKEN",
                 }} if has_broker else {},
             })
-        append = codex_config_append.strip()
-        append_names = _codex_mcp_server_names(append)
-        append_payload = tomllib.loads(append) if append else {}
+        # The owner's own tool servers for every host Worker (TOML with [mcp_servers.*] only), such as one
+        # long-lived connection to their browser that all Workers share. Like the owner's Codex config, it is
+        # owner-trusted host configuration; a same-named server copied from that config gives way to it.
+        owner_append = (os.environ.get("GLASSHIVE_HOST_CODEX_MCP_APPEND", "").strip()
+                        if _host_native_web_access() != "disabled" else "")
+        owner_servers = {}
+        if owner_append:
+            try:
+                owner_payload = tomllib.loads(owner_append)
+            except tomllib.TOMLDecodeError as exc:
+                raise RuntimeErrorBase("GLASSHIVE_HOST_CODEX_MCP_APPEND must be valid TOML") from exc
+            if set(owner_payload) != {"mcp_servers"} or not isinstance(owner_payload["mcp_servers"], dict):
+                raise RuntimeErrorBase("GLASSHIVE_HOST_CODEX_MCP_APPEND may declare only mcp_servers")
+            owner_servers = owner_payload["mcp_servers"]
+        try:
+            append_payload = tomllib.loads(codex_config_append) if codex_config_append.strip() else {}
+        except tomllib.TOMLDecodeError as exc:
+            raise RuntimeErrorBase("Run Codex settings must be valid TOML") from exc
         append_servers = append_payload.get("mcp_servers", {})
+        if not isinstance(append_servers, dict):
+            raise RuntimeErrorBase("Run Codex mcp_servers must be a table")
+        if set(owner_servers) & set(append_servers):
+            raise RuntimeErrorBase("Run and owner Codex MCP declarations must not redefine the same server")
+        if owner_servers:
+            append_servers = {**append_servers, **owner_servers}
+            append_payload["mcp_servers"] = append_servers
+        append_names = set(append_servers)
         # Codex validates transport even for disabled servers. A selection-only overlay
         # must retain its existing allowlisted transport, never invent a new one.
         disabled_selections = {
@@ -17059,7 +17244,9 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                     "host Claude Chrome support only when that locked-down mode is intended."
                 ),
             )
-        if not enterprise_authentication_enabled():
+        if claude_code_custom_route():
+            self._apply_owner_custom_route({"profile": profile}, {}, execution_mode=execution_mode)
+        elif not enterprise_authentication_enabled():
             # Fail before a provider session, worker, or run is reserved. The
             # command builder repeats this check at execution time because
             # credentials can still be revoked after admission.
@@ -17358,6 +17545,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         from .current_native_account import MARKER, project_current_settings
         if MARKER in worker:
             project_current_settings(worker, settings)
+        _apply_claude_code_owner_denies(settings)
         if settings:
             command.extend(
                 ["--settings", json.dumps(settings, separators=(",", ":"))]
@@ -17409,8 +17597,24 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             selection.policy == "personal_preferred"
             and worker.get("_glasshive_provider_account_preferred_fallback")
         )
+        self._apply_owner_custom_route(worker, env, execution_mode="host")
         env.pop("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", None)
-        if use_host_auth and not self._bedrock_enabled():
+        custom_route = bool(str(env.get("ANTHROPIC_BASE_URL") or "").strip())
+        if custom_route and not (  # a credential provided for this endpoint, never the owner's sign-in
+            str(env.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+            or (use_api_key and str(env.get("ANTHROPIC_API_KEY") or "").strip())
+        ):
+            raise ProviderAuthenticationMissingError(
+                "A custom Claude Code endpoint needs its own token.",
+                binary=self.binary,
+                runtime_name=self.runtime_name,
+                profile=str(worker.get("profile") or "claude-code"),
+                execution_mode="host",
+                dependency_label="Claude Code authentication",
+                recovery_hint="Set WPR_CLAUDE_CODE_AUTH_TOKEN for that endpoint, then retry the same request.",
+            )
+        # The owner's claude.ai sign-in is for Anthropic only; never send it to another endpoint.
+        if use_host_auth and not custom_route and not self._bedrock_enabled():
             if native_current_account_allowed(worker) and not (
                 use_api_key and str(env.get("ANTHROPIC_API_KEY") or "").strip()
             ):
@@ -17471,7 +17675,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                     command.extend(["--setting-sources", ""])
                 for directory in skills:
                     command.extend(["--plugin-dir", str(directory)])
-        return command, env
+        return self._with_owner_route_settings(worker, command), env
 
 
     def _agent_builder_output_schema(self, worker: dict) -> dict[str, object] | None:

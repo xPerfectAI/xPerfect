@@ -5077,6 +5077,93 @@ def test_exception_recovery_and_restart_record_one_provider_health_generation(
     assert health["failure_generation"] == 1
 
 
+def test_closed_exact_route_lets_one_probe_per_interval(tmp_path):
+    """A route closed until its provider's exact reset time lets one run try it per interval: a limit can lift
+    early, and only a completed run clears a route. A failed probe restarts the interval; a completed one clears."""
+    store = Store(str(tmp_path / "provider-health-probe.sqlite3"))
+    failed_at = datetime(2026, 11, 12, 0, 32, tzinfo=timezone.utc)
+    route = dict(tenant_id="local", owner_id="owner-a", profile="codex-cli", runtime="codex-cli", model="gpt-6.1-sol")
+    reset_at = failed_at + timedelta(days=2, hours=18)
+    health = store.record_provider_route_failure(
+        **route,
+        failure_class="provider_rate_limited",
+        failure_structured=True,
+        retry_at=reset_at.isoformat(),
+        default_cooldown_s=300,
+        run_id="run-limited",
+        now=failed_at,
+    )
+    assert health["cooldown_source"] == "provider_exact"
+    seen = dict(expected_last_failed_at=health["last_failed_at"], expected_generation=health["failure_generation"])
+
+    # Not before the interval has passed, and only one of the runs held behind it once it has.
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=failed_at + timedelta(minutes=10)) is False
+    later = failed_at + timedelta(hours=27)
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=later) is True
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=later + timedelta(seconds=1)) is False
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=later + timedelta(minutes=16)) is True
+
+    # A probe that fails again restarts the interval from its own failure (the route stays closed until the reset).
+    again = store.record_provider_route_failure(
+        **route,
+        failure_class="provider_rate_limited",
+        failure_structured=True,
+        retry_at=reset_at.isoformat(),
+        default_cooldown_s=300,
+        run_id="run-probe-failed",
+        now=later + timedelta(minutes=17),
+    )
+    assert again["failure_generation"] == 2
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=later + timedelta(minutes=40)) is False
+    fresh = dict(expected_last_failed_at=again["last_failed_at"], expected_generation=again["failure_generation"])
+    assert store.claim_provider_route_probe(**route, **fresh, interval_s=900, now=later + timedelta(minutes=25)) is False
+    assert store.claim_provider_route_probe(**route, **fresh, interval_s=900, now=later + timedelta(minutes=33)) is True
+
+    # A probe that completes clears the route, with the observation its attempt made before it ran.
+    assert store.clear_provider_route_health(**route, **fresh) is True
+    assert store.get_provider_route_health(**route, now=later + timedelta(minutes=34)) is None
+
+    # A default (short) cooldown is never probed, and neither is a route whose reset time has passed.
+    short = store.record_provider_route_failure(
+        **{**route, "profile": "claude-code", "runtime": "claude-code", "model": "opus"},
+        failure_class="provider_rate_limited",
+        failure_structured=True,
+        default_cooldown_s=300,
+        run_id="run-short",
+        now=failed_at,
+    )
+    assert short["cooldown_source"] == "default"
+    assert store.claim_provider_route_probe(
+        **{**route, "profile": "claude-code", "runtime": "claude-code", "model": "opus"},
+        expected_last_failed_at=short["last_failed_at"],
+        expected_generation=short["failure_generation"],
+        interval_s=60,
+        now=failed_at + timedelta(minutes=2),
+    ) is False
+
+
+def test_provider_route_recovery_probes_require_explicit_operator_opt_in(tmp_path, monkeypatch):
+    monkeypatch.delenv("GLASSHIVE_PROVIDER_HEALTH_PROBE_INTERVAL_S", raising=False)
+    store = Store(str(tmp_path / "synthetic-probe-opt-in.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False, start_background_consumers=False)
+    route = dict(tenant_id="local", owner_id="synthetic-owner", profile="codex-cli", runtime="codex-cli", model="synthetic-model")
+    now = datetime.now(timezone.utc)
+    health = store.record_provider_route_failure(
+        **route, failure_class="provider_rate_limited", failure_structured=True,
+        retry_at=(now + timedelta(days=1)).isoformat(), default_cooldown_s=300,
+        run_id="synthetic-failed-run", now=now - timedelta(minutes=30),
+    )
+    try:
+        assert service._claim_provider_route_probe(route, health) is False
+        assert store.get_provider_route_health(**route)["updated_at"] == health["updated_at"]
+        monkeypatch.setenv("GLASSHIVE_PROVIDER_HEALTH_PROBE_INTERVAL_S", "900")
+        assert service._claim_provider_route_probe(route, health) is True
+        assert service._claim_provider_route_probe(route, health) is False
+    finally:
+        service.shutdown()
+        store.close()
+
+
 def test_success_clears_provider_route_health(tmp_path):
     store = Store(str(tmp_path / "provider-health-success.sqlite3"))
     observed = store.record_provider_route_failure(
@@ -9676,16 +9763,17 @@ def test_existing_queued_invocation_claim_cannot_restore_a_consumed_grant(tmp_pa
         worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-claimed",
         run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "accepted-synthetic-grant"}},
     )
-    consumed = Event()
+    invoked = Event()
+    finish_invocation = Event()
     done = Event()
-    class ObservedBundles(dict):
-        def pop(self, key, default=None):
-            value = super().pop(key, default)
-            if key == first["run_id"]:
-                consumed.set()
-            return value
-    service._run_local_bundles = ObservedBundles(service._run_local_bundles)
-    original = store.create_idempotent_run
+    original_task = runtime.run_task
+    def observed_task(worker, instruction, timeout_sec=None, run_id=None):
+        # Observe the invocation boundary, independent of how long its grant is
+        # retained for a pre-start capacity retry.
+        invoked.set()
+        assert finish_invocation.wait(timeout=5)
+        return original_task(worker, instruction, timeout_sec=timeout_sec, run_id=run_id)
+    monkeypatch.setattr(runtime, "run_task", observed_task)
     with service._processors_lock:
         service._active_processors.add(worker_id)
         service._processor_generations[worker_id] = 1
@@ -9694,18 +9782,35 @@ def test_existing_queued_invocation_claim_cannot_restore_a_consumed_grant(tmp_pa
             service._process_worker_queue(worker_id, 1)
         finally:
             done.set()
-    def existing(*args, **kwargs):
-        result = original(*args, **kwargs)
+    try:
         consumer = Thread(target=process, daemon=True)
         consumer.start()
-        assert consumed.wait(timeout=5)
-        return result
-    monkeypatch.setattr(store, "create_idempotent_run", existing)
-    try:
-        same = service.assign_run(
-            worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-claimed",
-            run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "late-synthetic-replacement"}},
-        )
+        assert invoked.wait(timeout=5)
+        assert not done.is_set()
+        assert service.attach_run_local_bundle(
+            first["run_id"],
+            {"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "in-flight-synthetic-replacement"}},
+        ) is False
+        def assert_admitted_grant_unchanged():
+            assert service._run_local_bundles[first["run_id"]]["env"]["GLASSHIVE_CAPABILITY_BROKER_TOKEN"] == "accepted-synthetic-grant"
+        assert_admitted_grant_unchanged()
+        with ThreadPoolExecutor(max_workers=1) as producer:
+            replay = producer.submit(
+                service.assign_run,
+                worker_id, "Synthetic queued turn.", start_processor=False, idempotency_key="synthetic-claimed",
+                run_local_bundle={"env": {"GLASSHIVE_CAPABILITY_BROKER_TOKEN": "late-synthetic-replacement"}},
+            )
+            try:
+                # An implementation may serialize the replay with invocation
+                # startup. Either ordering must preserve the admitted grant.
+                same = replay.result(timeout=0.1)
+            except TimeoutError:
+                assert_admitted_grant_unchanged()
+                finish_invocation.set()
+                same = replay.result(timeout=5)
+            else:
+                assert_admitted_grant_unchanged()
+                finish_invocation.set()
         assert done.wait(timeout=5)
         assert same["run_id"] == first["run_id"]
         assert runtime.bearers == ["accepted-synthetic-grant"]
@@ -9713,7 +9818,7 @@ def test_existing_queued_invocation_claim_cannot_restore_a_consumed_grant(tmp_pa
         assert first["run_id"] not in service._run_local_bundles
         assert json.loads(store.get_worker(worker_id)["bootstrap_bundle_json"]) == stable
     finally:
-        consumed.set()
+        finish_invocation.set()
         service.shutdown()
         store.close()
 
@@ -9792,15 +9897,15 @@ def test_assignment_keeps_existing_claimed_legacy_grant_waiter_refresh(tmp_path,
     first = service.assign_run(
         worker_id, "Synthetic waiting turn.", start_processor=False, idempotency_key="synthetic-legacy-refresh",
     )
-    consumed = Event()
+    waiting_for_grant = Event()
     done = Event()
-    class ObservedBundles(dict):
-        def pop(self, key, default=None):
-            value = super().pop(key, default)
-            if key == first["run_id"]:
-                consumed.set()
-            return value
-    service._run_local_bundles = ObservedBundles(service._run_local_bundles)
+    original_wait = service._run_local_bundles_lock.wait
+    def observed_wait(timeout=None):
+        # Release the producer only when this invocation is actually waiting
+        # for authority. Reading a dict is not proof that it reached the wait.
+        waiting_for_grant.set()
+        return original_wait(timeout=timeout)
+    monkeypatch.setattr(service._run_local_bundles_lock, "wait", observed_wait)
     original = store.create_idempotent_run
     with service._processors_lock:
         service._active_processors.add(worker_id)
@@ -9813,7 +9918,7 @@ def test_assignment_keeps_existing_claimed_legacy_grant_waiter_refresh(tmp_path,
     def existing(*args, **kwargs):
         result = original(*args, **kwargs)
         Thread(target=process, daemon=True).start()
-        assert consumed.wait(timeout=5)
+        assert waiting_for_grant.wait(timeout=5)
         return result
     monkeypatch.setattr(store, "create_idempotent_run", existing)
     try:
@@ -9827,7 +9932,6 @@ def test_assignment_keeps_existing_claimed_legacy_grant_waiter_refresh(tmp_path,
         assert store.get_run(first["run_id"])["state"] == "completed"
         assert not service._run_local_bundles
     finally:
-        consumed.set()
         service.shutdown()
         store.close()
 

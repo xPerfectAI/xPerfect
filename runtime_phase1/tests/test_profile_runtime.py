@@ -5844,6 +5844,22 @@ def test_host_codex_projects_enabled_modern_native_cua_without_reenabling_legacy
 
 
 
+def test_host_codex_owner_mcp_append_reaches_every_worker(tmp_path, monkeypatch):
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
+    source_home = tmp_path / "source-home"
+    source_home.mkdir()
+    (source_home / "config.toml").write_text('[mcp_servers.chrome-devtools]\ncommand = "/own/chrome-devtools-mcp"\n')
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setenv("GLASSHIVE_HOST_CODEX_NATIVE_MCP_ALLOWLIST", "chrome-devtools")
+    shared = '[mcp_servers.chrome-devtools]\nurl = "http://127.0.0.1:18443/mcp"\ntool_timeout_sec = 300\n'
+    monkeypatch.setenv("GLASSHIVE_HOST_CODEX_MCP_APPEND", shared)
+    config = tomllib.loads(runtime._host_codex_worker_config(""))
+    assert config["mcp_servers"]["chrome-devtools"] == {"url": "http://127.0.0.1:18443/mcp", "tool_timeout_sec": 300}
+    monkeypatch.setenv("GLASSHIVE_HOST_CODEX_MCP_APPEND", 'model = "elsewhere"\n')
+    with pytest.raises(RuntimeErrorBase, match="only mcp_servers"):
+        runtime._host_codex_worker_config("")
+
+
 def test_host_codex_preserves_native_skill_selections(tmp_path, monkeypatch):
     runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
     source_home = tmp_path / "source-home"
@@ -9256,7 +9272,8 @@ def test_claude_code_runtime_passes_gateway_headers(tmp_path, monkeypatch):
     assert env["ANTHROPIC_API_KEY"] == "anthropic-test"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "claude-oauth-test"
     assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example"
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "gateway-token"
+    # Main's exec allowlist did not deliver this token to ordinary workers.
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert env["ANTHROPIC_CUSTOM_HEADERS"] == "x-portkey-provider: anthropic"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-sonnet-test"
 
@@ -13370,3 +13387,342 @@ def test_settling_native_run_shows_saved_root_output_without_starting_compute(tm
     if has_output: assert "another native child is still finishing" in output
     else: assert "settling" in output and "No terminal output was kept" in output
     assert run["state"] == "settling"
+
+
+def _host_claude_fixture(tmp_path):
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"--help\" ]]; then echo 'Usage: claude [options] --effort --chrome'; exit 0; fi\n"
+        "echo '2.1.223 (Claude Code)'\n"
+    )
+    fake_claude.chmod(0o755)
+    runtime = HostClaudeCodeRuntime(base_dir=str(tmp_path / "data"))
+    runtime.binary = str(fake_claude)
+    worker = {
+        "worker_id": "wrk_host_claude_route",
+        "name": "Local Claude Worker",
+        "profile": "claude-code",
+        "execution_mode": "host",
+        "model": "example-model",
+        "workspace_root": str(tmp_path / "workspaces"),
+    }
+    return runtime, worker
+
+
+def test_host_claude_custom_endpoint_uses_its_own_token_not_the_owner_sign_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-owner-sign-in")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "http://127.0.0.1:18444")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-gateway-token")
+    runtime, worker = _host_claude_fixture(tmp_path)
+
+    command, env = runtime._build_command(worker, "do the work", runtime._host_runtime_info(worker))
+
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18444"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "synthetic-gateway-token"
+    assert "synthetic-owner-sign-in" not in env.values()
+    assert command[command.index("--model") + 1] == "example-model"
+
+
+def test_host_claude_custom_endpoint_without_its_own_token_is_a_typed_auth_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-owner-sign-in")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "http://127.0.0.1:18444")
+    monkeypatch.delenv("WPR_CLAUDE_CODE_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("WPR_CLAUDE_CODE_USE_API_KEY", raising=False)
+    from workers_projects_runtime.profile_runtime import ProviderAuthenticationMissingError
+    runtime, worker = _host_claude_fixture(tmp_path)
+
+    with pytest.raises(ProviderAuthenticationMissingError):
+        runtime._build_command(worker, "do the work", runtime._host_runtime_info(worker))
+
+
+def test_host_claude_ignores_an_endpoint_in_the_ambient_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-owner-sign-in")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example.invalid")
+    monkeypatch.delenv("WPR_CLAUDE_CODE_BASE_URL", raising=False)
+    runtime, worker = _host_claude_fixture(tmp_path)
+
+    _, env = runtime._build_command(worker, "do the work", runtime._host_runtime_info(worker))
+
+    assert "ANTHROPIC_BASE_URL" not in env
+
+
+def test_custom_claude_preflight_does_not_require_an_unrelated_subscription(tmp_path, monkeypatch):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "0")
+    monkeypatch.setattr(profile_runtime_module.HostNativeCliMixin, "preflight_worker_profile", lambda *_args: None)
+    runtime, _ = _host_claude_fixture(tmp_path)
+    monkeypatch.setattr(runtime, "_inject_private_subscription_auth", lambda *_args: pytest.fail("The instance endpoint must not consult the owner's subscription"))
+    runtime.preflight_worker_profile("claude-code", "host")
+
+
+def test_nonrouted_claude_docker_keeps_the_existing_exec_credential_boundary(tmp_path, monkeypatch):
+    from workers_projects_runtime.docker_sandbox import _safe_docker_exec_env
+    monkeypatch.delenv("WPR_CLAUDE_CODE_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-unrelated-authority")
+    monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "65536")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, "docker")
+    _, environment = runtime._build_command(worker, "Perform the synthetic task.", info)
+    effective = _safe_docker_exec_env(environment)
+    assert "ANTHROPIC_AUTH_TOKEN" not in effective
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in effective
+
+
+def _owner_policy_claude_command(tmp_path, execution_mode):
+    runtime, worker = _host_claude_fixture(tmp_path)
+    if execution_mode == "docker":
+        docker_runtime = ClaudeCodeRuntime(base_dir=str(tmp_path / "docker-data"))
+        docker_runtime.binary = runtime.binary
+        runtime = docker_runtime
+        worker["execution_mode"] = "docker"
+    runtime._ensure_dirs(worker["worker_id"])
+    info = (runtime._host_runtime_info(worker) if execution_mode == "host"
+            else runtime._runtime_info(worker))
+    return runtime, worker, info
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+def test_custom_claude_route_never_receives_another_routes_credentials(tmp_path, monkeypatch, execution_mode):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_USE_API_KEY", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-unrelated-api-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-unrelated-sign-in")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Authorization: synthetic-unrelated-header")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    _, env = runtime._build_command(worker, "Perform the synthetic task.", info)
+    assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example.invalid"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "synthetic-endpoint-authority"
+    for key in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS"):
+        assert key not in env
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("key", ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "GLASSHIVE_NATIVE_API_KEY_FILE", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
+def test_custom_claude_route_rejects_bootstrap_provider_overrides(tmp_path, monkeypatch, execution_mode, key):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    worker["bootstrap_bundle_json"] = json.dumps({"env": {key: "synthetic-conflicting-provider-setting"}})
+    with pytest.raises(RuntimeErrorBase, match="bootstrap provider settings"):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("settings", [
+    {"env": {"ANTHROPIC_BASE_URL": "https://redirect.example.invalid"}},
+    {"env": {"ANTHROPIC_AUTH_TOKEN": "synthetic-other-authority"}},
+    {"env": {"CLAUDE_CODE_USE_VERTEX": "1"}},
+    {"env": {"CLAUDE_CONFIG_DIR": "/synthetic/other-config"}},
+    {"apiKeyHelper": "synthetic-helper"},
+    {"awsAuthRefresh": "synthetic-helper"},
+    {"awsCredentialExport": "synthetic-helper"},
+])
+def test_custom_claude_route_rejects_native_settings_authority_overrides(tmp_path, monkeypatch, execution_mode, settings):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    worker["bootstrap_bundle_json"] = json.dumps({"claude_settings_local": settings})
+    with pytest.raises(RuntimeErrorBase, match="bootstrap provider settings"):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("source", ["bootstrap", "settings"])
+@pytest.mark.parametrize("key", [
+    "HTTP_PROXY", "https_proxy", "ALL_PROXY", "no_proxy", "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE", "CLAUDE_CODE_CLIENT_CERT", "CLAUDE_CODE_CLIENT_KEY",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE", "SSLKEYLOGFILE",
+])
+def test_custom_claude_route_rejects_supplied_proxy_and_tls_redirects(tmp_path, monkeypatch, execution_mode, source, key):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    environment = {key: "http://synthetic-proxy.example.invalid:18445"}
+    bundle = {"env": environment} if source == "bootstrap" else {"claude_settings_local": {"env": environment}}
+    worker["bootstrap_bundle_json"] = json.dumps(bundle)
+    with pytest.raises(RuntimeErrorBase, match="bootstrap provider settings"):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("owner_denies", [False, True])
+def test_custom_claude_route_uses_only_validated_explicit_settings(tmp_path, monkeypatch, execution_mode, owner_denies):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    if owner_denies:
+        monkeypatch.setenv("WPR_CLAUDE_CODE_DENY", '["Read(synthetic-private)"]')
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    worker["bootstrap_bundle_json"] = json.dumps({"claude_settings_local": {
+        "autoMemoryEnabled": False, "permissions": {"deny": ["Bash(synthetic-command)"]},
+        "env": {"SYNTHETIC_APP_SETTING": "preserved"},
+    }})
+    command, _ = runtime._build_command(worker, "Perform the synthetic task.", info)
+    assert command[command.index("--setting-sources") + 1] == ""
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings["env"] == {"SYNTHETIC_APP_SETTING": "preserved"}
+    assert settings["autoMemoryEnabled"] is False
+    assert "Bash(synthetic-command)" in settings["permissions"]["deny"]
+    if owner_denies:
+        assert "Read(synthetic-private)" in settings["permissions"]["deny"]
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+def test_custom_claude_route_cannot_borrow_bootstrap_authentication(tmp_path, monkeypatch, execution_mode):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.delenv("WPR_CLAUDE_CODE_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-service-sign-in")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    worker["bootstrap_bundle_json"] = json.dumps({"env": {
+        "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-bootstrap-sign-in",
+    }})
+    with pytest.raises(profile_runtime_module.ProviderAuthenticationMissingError):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+
+
+def test_custom_claude_route_effective_environment_after_docker_script_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_MAX_CONTEXT_TOKENS", "65536")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-unrelated-api-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-unrelated-sign-in")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Authorization: synthetic-unrelated-header")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "0")
+    runtime, worker, _ = _owner_policy_claude_command(tmp_path, "docker")
+    receipt = tmp_path / "effective-environment.json"
+    worker["bootstrap_bundle_json"] = json.dumps({"env": {"SYNTHETIC_ENV_RECEIPT": str(receipt)}})
+    native = tmp_path / "synthetic-claude"
+    native.write_text(
+        "#!/usr/bin/env python3\nimport json,os\nfrom pathlib import Path\n"
+        "Path(os.environ['SYNTHETIC_ENV_RECEIPT']).write_text(json.dumps(dict(os.environ)))\n"
+        "print(json.dumps({'type':'result','subtype':'success','result':'Synthetic route completed.'}))\n"
+    )
+    native.chmod(0o755)
+    runtime.binary = str(native)
+    runtime.set_run_start_observer(lambda _payload: None)
+    monkeypatch.setattr(runtime, "ensure_worker_ready", lambda w: runtime._runtime_info(w))
+    monkeypatch.setattr(runtime.sandbox, "inspect", lambda *_args: None)
+    monkeypatch.setattr(runtime.sandbox, "list_screen_sessions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runtime.sandbox, "ensure_container_writable_paths", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime.sandbox, "screen_session_pid", lambda *_args, **_kwargs: 4321)
+    sandbox = SimpleNamespace(container_name="synthetic-route-container", execution_policy="")
+    monkeypatch.setattr(runtime.sandbox, "ensure_ready", lambda *_args, **_kwargs: sandbox)
+    monkeypatch.setattr(runtime.sandbox, "_ensure_screen_runtime_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime.sandbox, "stop_screen_session", lambda *_args, **_kwargs: None)
+    observed_exec_files = []
+
+    def execute_docker(args, **_kwargs):
+        # Keep start_screen_session, its safe-env filter and _docker_exec real.
+        # Fake only the Docker CLI; emulate screen and translate mount paths.
+        assert args[0] == "exec" and "screen" in args
+        assert "synthetic-endpoint-authority" not in " ".join(args)
+        env_path = Path(args[args.index("--env-file") + 1])
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+        observed_exec_files.append(env_path)
+        env = dict(line.split("=", 1) for line in env_path.read_text().splitlines())
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "synthetic-endpoint-authority"
+        assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+        worker_id = worker["worker_id"]
+        path = runtime._run_root(worker_id, "run_effective_route") / "run.sh"
+        script = path.read_text().replace(runtime.sandbox.home_mount, str(runtime._home_dir(worker_id)))
+        script = script.replace(runtime.sandbox.workspace_mount, str(runtime._workspace_dir(worker_id)))
+        script = script.replace("exec bash --noprofile --norc", 'exit "$status"')
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", script],
+            env={**env, "HOME": str(runtime._home_dir(worker_id))},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(runtime.sandbox, "_docker", execute_docker)
+    assert runtime.run_task(worker, "Perform the synthetic task.", run_id="run_effective_route") == "Synthetic route completed."
+    effective = json.loads(receipt.read_text())
+    assert effective["ANTHROPIC_BASE_URL"] == "https://gateway.example.invalid"
+    assert effective["ANTHROPIC_AUTH_TOKEN"] == "synthetic-endpoint-authority"
+    assert effective["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
+    assert observed_exec_files and all(not path.exists() for path in observed_exec_files)
+    for key in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS"):
+        assert key not in effective
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("rules", ["broken-json", '"Bash(example)"', '{"Bash(example)": true}', "null", "[42]", '[""]'])
+def test_claude_owner_deny_configuration_fails_closed_on_invalid_schema(tmp_path, monkeypatch, execution_mode, rules):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-test-sign-in")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_DENY", rules)
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    with pytest.raises(RuntimeErrorBase, match="JSON list of nonempty strings"):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+@pytest.mark.parametrize("source", ["service", "bootstrap"])
+def test_custom_claude_route_rejects_a_conflicting_bedrock_route(tmp_path, monkeypatch, execution_mode, source):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    if source == "service":
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    else:
+        worker["bootstrap_bundle_json"] = json.dumps({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}})
+    with pytest.raises(RuntimeErrorBase, match="conflicts with the selected Bedrock route"):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+
+
+@pytest.mark.parametrize("execution_mode", ["host", "docker"])
+def test_claude_owner_denies_reach_both_execution_paths(tmp_path, monkeypatch, execution_mode):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-test-sign-in")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_DENY", '["Bash(example-command)", "Read(example.private)"]')
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, execution_mode)
+    command, _ = runtime._build_command(worker, "Perform the synthetic task.", info)
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings["permissions"]["deny"] == ["Bash(example-command)", "Read(example.private)"]
+
+
+def test_owner_codex_mcp_configuration_cannot_override_native_web_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("WPR_HOST_NATIVE_WEB_ACCESS", "disabled")
+    monkeypatch.setenv("GLASSHIVE_HOST_CODEX_MCP_APPEND", '[mcp_servers.synthetic-browser]\nurl="https://browser.example.invalid/mcp"\n')
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
+    settings = tomllib.loads(runtime._host_codex_worker_config(
+        '[mcp_servers.synthetic-broker]\nurl="https://broker.example.invalid/mcp"\n'))
+    assert "synthetic-browser" not in settings.get("mcp_servers", {})
+    assert settings["mcp_servers"]["synthetic-broker"]["url"] == "https://broker.example.invalid/mcp"
+
+
+@pytest.mark.parametrize("owner_toml", [
+    '[mcp_servers.synthetic]\nurl="https://owner.example.invalid/mcp"\n',
+    'mcp_servers.synthetic.url="https://owner.example.invalid/mcp"\n',
+])
+def test_owner_codex_mcp_collision_does_not_silently_replace_run_authority(tmp_path, monkeypatch, owner_toml):
+    monkeypatch.delenv("WPR_HOST_NATIVE_WEB_ACCESS", raising=False)
+    monkeypatch.delenv("GLASSHIVE_HOST_NATIVE_WEB_ACCESS", raising=False)
+    monkeypatch.setenv("GLASSHIVE_HOST_CODEX_MCP_APPEND", owner_toml)
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
+    with pytest.raises(RuntimeErrorBase, match="must not redefine"):
+        runtime._host_codex_worker_config('[mcp_servers.synthetic]\nurl="https://run.example.invalid/mcp"\n')
+
+
+def test_owner_codex_dotted_mcp_settings_are_merged_as_separate_servers(tmp_path, monkeypatch):
+    monkeypatch.delenv("WPR_HOST_NATIVE_WEB_ACCESS", raising=False)
+    monkeypatch.delenv("GLASSHIVE_HOST_NATIVE_WEB_ACCESS", raising=False)
+    monkeypatch.setenv("GLASSHIVE_HOST_CODEX_MCP_APPEND", 'mcp_servers.owner_browser.url="https://owner.example.invalid/mcp"\n')
+    runtime = HostCodexCliRuntime(base_dir=str(tmp_path / "data"))
+    settings = tomllib.loads(runtime._host_codex_worker_config('[mcp_servers.run_broker]\nurl="https://run.example.invalid/mcp"\n'))
+    assert settings["mcp_servers"] == {
+        "owner_browser": {"url": "https://owner.example.invalid/mcp"},
+        "run_broker": {"url": "https://run.example.invalid/mcp"},
+    }
+
+
+@pytest.mark.parametrize("context", ["0", "-1", "not-an-integer"])
+def test_custom_claude_context_configuration_rejects_invalid_capacity(tmp_path, monkeypatch, context):
+    monkeypatch.setenv("WPR_CLAUDE_CODE_BASE_URL", "https://gateway.example.invalid")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_AUTH_TOKEN", "synthetic-endpoint-authority")
+    monkeypatch.setenv("WPR_CLAUDE_CODE_MAX_CONTEXT_TOKENS", context)
+    runtime, worker, info = _owner_policy_claude_command(tmp_path, "host")
+    with pytest.raises(RuntimeErrorBase, match="positive integer"):
+        runtime._build_command(worker, "Perform the synthetic task.", info)
+

@@ -23222,6 +23222,85 @@ class Store:
             ).fetchall()
         return self._rows(rows)
 
+    def claim_provider_route_probe(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        profile: str,
+        runtime: str,
+        model: str,
+        expected_last_failed_at: str,
+        expected_generation: int,
+        interval_s: float,
+        now: datetime | None = None,
+    ) -> bool:
+        """Let one run try a route closed until its provider's exact reset time, at most once per interval.
+
+        A provider's limit can lift before the time it gave (more credits bought, a plan changed). Only a
+        completed run clears a route, and no run is tried while it is closed, so without a probe the route stays
+        closed until that time even when it works again. A probe that fails records its failure as any run does
+        (which also restarts the interval); one that completes clears the route. The claim is a compare-and-swap
+        on ``updated_at``, so of the runs held behind one closed route only one probes per interval.
+        """
+
+        expected = str(expected_last_failed_at or "").strip()
+        if (
+            not expected
+            or isinstance(expected_generation, bool)
+            or int(expected_generation) < 1
+            or not math.isfinite(float(interval_s))
+        ):
+            return False
+        route = {
+            "tenant_id": str(tenant_id or "local").strip() or "local",
+            "owner_id": str(owner_id or "").strip(),
+            "profile": str(profile or "").strip(),
+            "runtime": str(runtime or "").strip(),
+            "model": str(model or "").strip(),
+        }
+        current = self._provider_health_now(now)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM provider_route_health
+                WHERE tenant_id = :tenant_id AND owner_id = :owner_id
+                  AND profile = :profile AND runtime = :runtime AND model = :model
+                """,
+                route,
+            ).fetchone()
+            health = self._row(row) or {}
+            last_touched = self._provider_health_timestamp(health.get("updated_at"))
+            cooldown_until = self._provider_health_timestamp(health.get("cooldown_until"))
+            if (
+                not health
+                or str(health.get("cooldown_source") or "") != "provider_exact"
+                or str(health.get("last_failed_at") or "") != expected
+                or int(health.get("failure_generation") or 0) != int(expected_generation)
+                or last_touched is None
+                or cooldown_until is None
+                or cooldown_until <= current
+                or current - last_touched < timedelta(seconds=max(0.0, float(interval_s)))
+            ):
+                conn.execute("COMMIT")
+                return False
+            cursor = conn.execute(
+                """
+                UPDATE provider_route_health SET updated_at = :claimed_at
+                WHERE tenant_id = :tenant_id AND owner_id = :owner_id
+                  AND profile = :profile AND runtime = :runtime AND model = :model
+                  AND updated_at = :seen_updated_at
+                """,
+                {
+                    **route,
+                    "claimed_at": current.isoformat(),
+                    "seen_updated_at": str(health.get("updated_at") or ""),
+                },
+            )
+            conn.execute("COMMIT")
+        return int(cursor.rowcount or 0) == 1
+
     def clear_provider_route_health(
         self,
         *,

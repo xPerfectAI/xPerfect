@@ -955,6 +955,51 @@ schema 13 and control-plane schema 6 add these fields transactionally. Existing 
 with their IDs/content hashes unchanged. Older runtimes must not open the upgraded database; use the
 supported upgrade backup/rollback owner. Recoverable removal is not a permanent storage purge.
 
+### Explicit instance runtime controls
+
+Configure these options on the runtime service. They contain no application instructions.
+
+- `WPR_CLAUDE_CODE_BASE_URL` selects an HTTP(S) endpoint without embedded credentials.
+  `WPR_CLAUDE_CODE_AUTH_TOKEN` must provide that endpoint's own authority. Both host and Docker
+  launches remove unrelated subscription credentials, API keys and custom authentication headers
+  before applying this route. Competing bootstrap provider settings fail before launch, including
+  settings that Docker would source from its runtime environment files. An explicitly selected
+  provider account, current native account or clean-room broker retains precedence.
+  A selected Bedrock route conflicts with this option and fails before launch.
+  This route also owns provider selection, Claude credential-home selection and its context-window
+  setting. Competing values in bootstrap environment or native settings, including authentication
+  helpers, are rejected. Only validated explicit native settings are loaded; workspace/user settings
+  files cannot redirect this instance authority. Unrelated explicit application settings are retained.
+  Bootstrap/settings proxy, TLS-trust, client-certificate and TLS-key-log overrides are also
+  rejected, including lowercase proxy variables. The operator owns the service's connection,
+  trust and client identity configuration. This mode does
+  not inherit auxiliary model aliases, user/project settings or plugins enabled only in those files.
+  Bootstrap AWS credential keys are incompatible even when application tools would use them.
+  This binds native configuration; worker code and tools still receive the endpoint authority under
+  their normal permissions.
+- `WPR_CLAUDE_CODE_MAX_CONTEXT_TOKENS`, when supplied with that endpoint, is a positive integer
+  projected through Claude Code's native context-window setting. The operator owns the endpoint's
+  actual model capacity; xPerfect does not infer it from a model name.
+- `WPR_CLAUDE_CODE_DENY` is a JSON list of nonempty native permission rules. Both execution paths
+  merge it with existing deny rules. Invalid JSON, invalid list members and conflicting settings
+  shapes fail before launch. Native permission semantics remain owned by
+  [Claude Code](https://code.claude.com/docs/en/permissions).
+- `GLASSHIVE_HOST_CODEX_MCP_APPEND` contains TOML with only `mcp_servers` declarations. It can replace
+  an allowed transport copied from the owner's home. A duplicate declaration in the invocation
+  bundle fails closed instead of silently changing its authority. Owner additions are omitted
+  when native web access is disabled; the invocation's declared broker remains available.
+- `GLASSHIVE_PROVIDER_HEALTH_PROBE_INTERVAL_S` defaults to `0`, which disables recovery probes.
+  An explicit positive interval permits one already queued run to try a route held until an exact
+  provider reset time, at intervals of at least 60 seconds. Existing admission and spending rules
+  still apply. This can incur ordinary provider charges. A failed probe retains the route failure;
+  only a matching successful observation can clear it. This routing option is independent of
+  read-only health reporting.
+
+Compatibility: host Claude endpoints supplied through a bootstrap environment must now provide
+their own authentication token or explicit API-key authority. They cannot borrow the owner's
+subscription sign-in. Operators who used subscription credentials with a custom gateway must
+configure that gateway's own supported authority before upgrading.
+
 ### Reported usage and provider failure provenance
 
 Runtime-store schema 14 and control-plane schema 7 retain exact-attempt usage receipts and account
