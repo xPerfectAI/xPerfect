@@ -583,3 +583,28 @@ rejection family retains that transport distinction. Owning checks:
 `tests/test_direct_media_projection.py`, the Direct runtime/current-state/archive tests and
 native-media authority tests. Actual provider acceptance and client delivery remain separate
 release evidence.
+
+## Workstation document tools
+
+The managed image includes `pypdf` and `defusedxml` for PDF text and guarded XML
+reading. Its document tools use PyMuPDF 2.1 and Pillow 13.0.0. The committed
+hash-locked requirements also update certifi, Soup Sieve and urllib3 for published
+security fixes. PyMuPDF 2.x includes vendor layout dependencies; ordinary PDF
+reading does not request layout analysis. `Page.find_tables()` now uses ONNX
+layout analysis by default; pass `use_layout=False` to retain the previous detector.
+The managed image sets `ORT_DISABLE_TELEMETRY=1` before Python starts to disable
+ONNX Runtime's uploader, events and persistent device identifier. Image checks
+require both matching provenance labels and this environment setting. Images
+without them must be rebuilt. The lock targets the managed worker's Python 3.14
+interpreter. Soup Sieve 4 also changes
+`:has()`, custom selectors, and template/iframe queries; validate affected selectors.
+
+The obsolete `PyPDF2` package is removed. Existing worker scripts that import it
+must migrate to `pypdf` and check their own reader/writer calls against the
+[pypdf migration guide](https://pypdf.readthedocs.io/en/stable/user/migration-1-to-2.html).
+The runtime does not provide a compatibility shim. PyMuPDF's legacy `fitz` import
+remains available but is deprecated and emits a warning; new scripts should use `pymupdf`.
+
+These are image dependencies, not host runtime dependencies. Rebuild the managed
+image to use the new lock. An existing worker generation is not upgraded in place.
+Validate application documents and output before selecting the replacement image.
