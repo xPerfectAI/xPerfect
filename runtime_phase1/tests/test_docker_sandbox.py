@@ -281,8 +281,8 @@ def test_seed_bootstrap_writes_default_worker_contract_without_bundle(tmp_path):
     assert GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS in agents_text
     assert GLASSHIVE_SAFETY_CHECKPOINT_RULE in agents_text
     assert GLASSHIVE_NATIVE_CAPABILITY_INVENTORY in agents_text
-    assert "WebDriver/Selenium endpoint" in agents_text
-    assert "Use the visible workstation surface" in agents_text
+    assert "Inspect what is actually available" in agents_text
+    assert "verify the package/tool is available" in agents_text
     assert "Less is more" in agents_text
     assert "Do not force a download" in agents_text
     assert "@AGENTS.md" in (workspace_dir / "CLAUDE.md").read_text()

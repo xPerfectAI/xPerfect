@@ -6967,6 +6967,26 @@ class WorkersProjectsService:
             max_value=86_400.0,
         )
 
+    def _provider_health_probe_interval_s(self) -> float:
+        return _bounded_float_env(
+            "GLASSHIVE_PROVIDER_HEALTH_PROBE_INTERVAL_S",
+            0.0,
+            min_value=0.0,
+            max_value=86_400.0,
+        )
+
+    def _claim_provider_route_probe(self, route: dict[str, str], health: dict) -> bool:
+        """One run may try a route closed until its provider's exact reset time, once per interval."""
+        interval = self._provider_health_probe_interval_s()
+        if interval <= 0 or str(health.get("cooldown_source") or "") != "provider_exact":
+            return False
+        return self.store.claim_provider_route_probe(
+            **route,
+            expected_last_failed_at=str(health.get("last_failed_at") or ""),
+            expected_generation=int(health.get("failure_generation") or 0),
+            interval_s=max(60.0, interval),
+        )
+
     def _provider_route(self, worker: dict) -> dict[str, str]:
         profile = str(worker.get("profile") or "").strip()
         execution_mode = str(worker.get("execution_mode") or "docker").strip()
@@ -7169,6 +7189,23 @@ class WorkersProjectsService:
                 ),
             )
         if not health:
+            return False
+        if self._claim_provider_route_probe(route, health):
+            # This run tries the closed route (its observation above lets a completion clear it).
+            self.store.add_event(
+                str(worker.get("project_id") or ""),
+                str(worker["worker_id"]),
+                str(run["run_id"]),
+                "run.provider_route_probe",
+                "GlassHive let one run try a route closed until its provider's reset time, in case the limit lifted early.",
+                payload={
+                    "profile": route["profile"],
+                    "runtime": route["runtime"],
+                    "model": route["model"],
+                    "failureClass": str(health.get("failure_class") or ""),
+                    "cooldownUntil": str(health.get("cooldown_until") or ""),
+                },
+            )
             return False
 
         cooldown_until = str(health.get("cooldown_until") or "")
