@@ -187,6 +187,14 @@ current running run with an exact pending native permission or question binding.
 transaction checks the accepted run input, current run and native attempt identity. Existing
 outbox payloads keep their original bytes on retry; an upgrade does not retrofit old callbacks.
 
+Continuation input preserves accepted indentation, newlines and ordered guidance. When a
+durable continuation carries inherited conversation evidence, new `run_input` projections
+include that evidence too; its existing source roles and assignment flags remain authoritative.
+This adds no execution authority. Existing outbox records keep their earlier projection and
+full payload bytes, with the same owner, run, attempt, result and destination checks.
+Active-work actions retain their existing canonical idempotency identity: a replay returns
+the first accepted instruction and does not create a second run.
+
 ### Worker callback receiver response
 
 Before using a signed worker callback, verify `X-GlassHive-Signature` against the **raw request

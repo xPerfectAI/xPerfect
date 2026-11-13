@@ -23,8 +23,8 @@ DEFAULT_CONTINUATION_REQUEST = (
 def _strip_instruction_note(instruction: str, note: str) -> str:
     clean_note = str(note or "").strip()
     if not clean_note:
-        return str(instruction or "").strip()
-    return re.sub(r"\n{0,2}" + re.escape(clean_note), "", str(instruction or "")).strip()
+        return str(instruction or "")
+    return re.sub(r"\n{0,2}" + re.escape(clean_note), "", str(instruction or ""))
 
 
 def _validated_continuation_context(value: object) -> dict[str, Any] | None:
@@ -58,8 +58,8 @@ def _validated_continuation_context(value: object) -> dict[str, Any] | None:
     return {
         **({"inherited_conversation": inherited} if inherited is not None else {}),
         "version": 1,
-        "base_instruction": base_instruction.strip(),
-        "guidance": [str(item).strip() for item in guidance],
+        "base_instruction": base_instruction,
+        "guidance": list(guidance),
     }
 
 
@@ -85,6 +85,8 @@ def accepted_run_input(run: dict[str, Any]) -> dict[str, Any]:
         # Validation shares the admission contract; preserve accepted bytes,
         # including whitespace and the ordered guidance, in the wire projection.
         result["continuation_context"] = {
+            **({"inherited_conversation": raw_context["inherited_conversation"]}
+               if "inherited_conversation" in raw_context else {}),
             "version": 1,
             "base_instruction": raw_context["base_instruction"],
             "guidance": list(raw_context["guidance"]),
@@ -113,15 +115,15 @@ def build_workspace_continuation_context(
             str(previous_run.get("instruction") or ""),
             CONNECTED_ACCOUNT_NO_BROKER_NOTE,
         )
-        if not base_instruction:
+        if not base_instruction.strip():
             raise ValueError("Workspace continuation requires prior task context")
         stored = {
             "version": 1,
             "base_instruction": base_instruction,
             "guidance": [],
         }
-    clean_goal = str(continuation_goal or "").strip()
-    if clean_goal:
+    clean_goal = str(continuation_goal or "")
+    if clean_goal.strip():
         stored = {
             **stored,
             "guidance": [*stored["guidance"], clean_goal],
