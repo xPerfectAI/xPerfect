@@ -8587,8 +8587,9 @@ class WorkersProjectsService:
             worker = self._refresh_active_work_runtime_grant(worker, action_record)
 
         if action in {"queue", "message", "steer"}:
-            clean_instruction = str(instruction or "").strip()
-            if not clean_instruction:
+            # Validate blank input without rewriting accepted indentation or newlines.
+            clean_instruction = str(instruction or "")
+            if not clean_instruction.strip():
                 raise ValueError("active_work_instruction_required")
             effect_idempotency_key = self._active_work_effect_idempotency_key(
                 str(delegation.get("work_ref") or ""),

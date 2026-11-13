@@ -3988,8 +3988,8 @@ def create_app(
             claims = getattr(request.state, "service_assertion_claims", {})
             if not claims.get("native_input_digest") or claims["native_input_digest"] != getattr(request.state, "native_input_body_digest", None):
                 raise HTTPException(status_code=403, detail={"code": "native_input_owner_control_required", "message": "Native input requires an authenticated owner control."})
-        instruction = str(payload.instruction or "").strip()
-        if payload.action in {"queue", "message", "steer"} and not instruction:
+        instruction = str(payload.instruction or "")
+        if payload.action in {"queue", "message", "steer"} and not instruction.strip():
             raise HTTPException(
                 status_code=400,
                 detail={

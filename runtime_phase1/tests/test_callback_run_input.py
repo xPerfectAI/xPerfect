@@ -61,6 +61,48 @@ def test_callback_ignores_caller_forged_input_and_rejects_stale_terminal(account
     assert emit_terminal(service, store, record, supplied={**exact, 'active_attempt_id': 'stale-attempt'}) is None
 
 
+@pytest.mark.parametrize('action', ['queue', 'message', 'steer'])
+def test_callback_keeps_literal_followup_text_through_real_admission(account_client, action):
+    service, store, record = accepted_run(account_client)
+    prior = store.get_run(record['current_run_id'])
+    if action != 'steer':
+        store.finalize_run(prior['run_id'], 'completed', output_text='Prior observation')
+        store.update_worker_state(record['worker_id'], 'ready')
+    instruction = '  Keep this indentation.\n\nCafé.\n  '
+    response = account_client.post(f"/v1/work/{record['work_ref']}/actions", headers=account_headers(), json={
+        'action': action, 'instruction': instruction, 'idempotencyKey': 'literal-follow-up',
+    })
+    assert response.status_code == 202, response.text
+    current = store.get_delegation(record['work_ref'], tenant_id='tenant-a', owner_id='owner-a')
+    run = store.get_run(current['current_run_id'])
+    context = json.loads(run['continuation_context_json'])
+    assert context['guidance'][-1] == instruction
+    callback = emit_terminal(service, store, current)
+    assert json.loads(callback['payload_json'])['run_input']['continuation_context'] == context
+
+
+def test_literal_followup_keeps_existing_canonical_idempotency(account_client):
+    service, store, record = accepted_run(account_client)
+    prior = store.get_run(record['current_run_id'])
+    store.finalize_run(prior['run_id'], 'completed', output_text='Prior observation')
+    store.update_worker_state(record['worker_id'], 'ready')
+    instruction = '\n  Keep this exact first accepted text.\n'
+    body = {'action': 'queue', 'instruction': instruction, 'idempotencyKey': 'stable-follow-up'}
+    path = f"/v1/work/{record['work_ref']}/actions"
+    first = account_client.post(path, headers=account_headers(), json=body)
+    assert first.status_code == 202, first.text
+    current = store.get_delegation(record['work_ref'], tenant_id='tenant-a', owner_id='owner-a')
+    run_id = current['current_run_id']
+    with store._connect() as conn:
+        count = conn.execute('SELECT count(*) FROM runs WHERE worker_id=?', (record['worker_id'],)).fetchone()[0]
+    replay = account_client.post(path, headers=account_headers(), json={**body, 'instruction': instruction.strip()})
+    assert replay.status_code == 202, replay.text
+    assert store.get_delegation(record['work_ref'], tenant_id='tenant-a', owner_id='owner-a')['current_run_id'] == run_id
+    assert json.loads(store.get_run(run_id)['continuation_context_json'])['guidance'][-1] == instruction
+    with store._connect() as conn:
+        assert conn.execute('SELECT count(*) FROM runs WHERE worker_id=?', (record['worker_id'],)).fetchone()[0] == count
+
+
 @pytest.mark.parametrize('field', ['run_id', 'instruction', 'continuation_context'])
 def test_store_rejects_forged_or_stale_input_before_outbox_insert(account_client, field):
     service, store, record = accepted_run(account_client)
@@ -96,6 +138,43 @@ def test_existing_callback_without_run_input_remains_byte_exact(account_client):
     replay = emit_terminal(service, store, record)
     assert replay['payload_json'] == old['payload_json']
     assert 'run_input' not in json.loads(replay['payload_json'])
+
+
+def test_retained_callback_keeps_older_continuation_projection(account_client, monkeypatch):
+    import workers_projects_runtime.service as service_module
+    import workers_projects_runtime.store as store_module
+
+    service, store, record = accepted_run(account_client)
+    run = store.get_run(record['current_run_id'])
+    context = {
+        'version': 1, 'base_instruction': 'Original task', 'guidance': ['Accepted correction'],
+        'inherited_conversation': {'version': 1, 'conversation_id': 'example-conversation',
+            'sources': [{'id': 'source', 'role': 'user', 'text': 'Earlier evidence'}]},
+    }
+    with store._connect() as conn:
+        conn.execute('UPDATE runs SET continuation_context_json=? WHERE run_id=?', (json.dumps(context), run['run_id']))
+    legacy_context = {key: context[key] for key in ('version', 'base_instruction', 'guidance')}
+    legacy_input = {'version': 1, 'run_id': run['run_id'], 'instruction': run['instruction'], 'continuation_context': legacy_context}
+    # Persist an actual old-format outbox using its former projection owner.
+    with monkeypatch.context() as legacy:
+        legacy.setattr(service_module, 'accepted_run_input', lambda _: legacy_input)
+        legacy.setattr(store_module, 'accepted_run_input', lambda _: legacy_input)
+        old = emit_terminal(service, store, record)
+    replay = emit_terminal(service, store, record)
+    assert replay['payload_json'] == old['payload_json']
+    assert json.loads(replay['payload_json'])['run_input'] == legacy_input
+    intent = emit_terminal(service, store, record, persist=False)
+    forged = json.loads(intent['payload_json'])
+    forged['run_input']['continuation_context']['guidance'] = ['Forged replacement']
+    exact = store.get_run(run['run_id'])
+    with pytest.raises(CallbackIntentGenerationConflictError, match='accepted run input'):
+        store.insert_terminal_callback_outbox_if_current(
+            **{key: value for key, value in intent.items() if key not in {'tenant_id', 'payload_json'}},
+            payload_json=json.dumps(forged), expected_state=exact['state'], expected_ended_at=exact['ended_at'],
+            expected_attempt_id=exact['active_attempt_id'] or '', expected_result_revision=exact['terminal_result_revision'],
+            expected_result_digest=store.terminal_result_digest(exact),
+        )
+    assert store.get_callback_outbox(old['callback_id'])['payload_json'] == old['payload_json']
 
 
 def emit_needs_input(service, store, record, *, supplied=None, persist=True, callback_id=""):

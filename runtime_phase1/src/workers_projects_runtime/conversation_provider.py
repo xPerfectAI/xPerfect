@@ -4545,7 +4545,8 @@ class ConversationProvider:
     ) -> dict[str, Any] | None:
         # Coordinators use their signed work controls. A host's legacy synchronous
         # graph must not add a second action menu beside that role's MCP catalog.
-        coordination = (payload.metadata.bootstrap_bundle or {}).get("conversation_tool_mode") == "coordination"
+        bootstrap_bundle = payload.metadata.bootstrap_bundle if payload.metadata else None
+        coordination = (bootstrap_bundle or {}).get("conversation_tool_mode") == "coordination"
         tools = [] if coordination else (
             self._graph_transfer_tools(payload)
             if project_completed_graph

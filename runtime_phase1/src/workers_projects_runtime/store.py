@@ -27912,6 +27912,17 @@ class Store:
         if "run_input" in payload:
             # Bind accepted input to this exact terminal result or current
             # non-terminal attention run inside the same outbox transaction.
+            retained = conn.execute(
+                "SELECT payload_json FROM callback_outbox WHERE callback_id = ?",
+                (callback_id,),
+            ).fetchone()
+            retained_input = json.loads(retained["payload_json"]).get("run_input") if retained else None
+            # An already accepted outbox keeps its original projection across
+            # upgrades. The immutable identity check below still binds the full
+            # payload, URL, owner, run, attempt and result to that exact record.
+            retained_input_matches = isinstance(retained_input, dict) and (
+                payload["run_input"] == retained_input
+            )
             terminal_input = (
                 str(exact_run["state"] or "") in TERMINAL_RUN_STATES
                 and bool(str(exact_run["ended_at"] or ""))
@@ -27940,8 +27951,9 @@ class Store:
             )
             if (
                 not (terminal_input or attention_input)
-                or json.dumps(payload["run_input"], sort_keys=True, ensure_ascii=False)
-                != json.dumps(accepted_run_input(dict(exact_run)), sort_keys=True, ensure_ascii=False)
+                or (not retained_input_matches
+                    and json.dumps(payload["run_input"], sort_keys=True, ensure_ascii=False)
+                    != json.dumps(accepted_run_input(dict(exact_run)), sort_keys=True, ensure_ascii=False))
             ):
                 raise CallbackIntentGenerationConflictError(
                     "Callback accepted run input is not exact"
