@@ -53,7 +53,7 @@ def test_reviewed_openclaw_contract_rejects_version_drift(reported):
 
 def test_committed_openclaw_lock_contains_reviewed_tarball_and_override():
     runtime_phase1 = Path(__file__).resolve().parents[1]
-    lock_root = runtime_phase1 / "runtime_locks" / "openclaw"
+    lock_root = runtime_phase1 / "src/workers_projects_runtime/resources/openclaw"
     package = json.loads((lock_root / "package.json").read_text())
     lock = json.loads((lock_root / "package-lock.json").read_text())
 
@@ -83,7 +83,7 @@ def test_reviewed_openclaw_lock_staging_can_refresh_read_only_prior_output(tmp_p
     stage_reviewed_openclaw_lock(destination)
 
     runtime_phase1 = Path(__file__).resolve().parents[1]
-    source = runtime_phase1 / "runtime_locks" / "openclaw"
+    source = runtime_phase1 / "src/workers_projects_runtime/resources/openclaw"
     for name in ("package.json", "package-lock.json"):
         assert (destination / name).read_bytes() == (source / name).read_bytes()
 

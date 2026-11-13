@@ -423,7 +423,7 @@ def test_bound_provider_account_mount_grants_and_verifies_only_worker_user_acces
         "/workspace/.provider-account",
         "codex",
         "/workspace/.wpr-home",
-        "seluser",
+        "1200:1201",
     ]
     assert "os.O_NOFOLLOW" in calls[0][1][2]
     assert "metadata.st_nlink != 1" in calls[0][1][2]
@@ -431,8 +431,8 @@ def test_bound_provider_account_mount_grants_and_verifies_only_worker_user_acces
     assert calls[1][0] == "root"
     grant_script = calls[1][1][-1]
     assert "command -v setfacl" in grant_script
-    assert "setfacl -m u:seluser:x /workspace/.provider-account" in grant_script
-    assert "setfacl -m u:seluser:rw /workspace/.provider-account/codex/auth.json" in grant_script
+    assert "setfacl -m u:1200:x /workspace/.provider-account" in grant_script
+    assert "setfacl -m u:1200:rw /workspace/.provider-account/codex/auth.json" in grant_script
     assert "setfacl -R" not in grant_script
     assert calls[2][0] == "seluser"
     verify_script = calls[2][1][-1]
@@ -940,7 +940,7 @@ def test_parallel_clean_room_container_command_is_hardened_and_internal_network_
     )
     assert command[command.index("--network") + 1] == mission_network
     assert mission_network.startswith("glasshive-parallel-clean-room-m-")
-    assert command[command.index("--user") + 1] == manager.user
+    assert command[command.index("--user") + 1] == "1200:1201"
     assert "--pid" not in command
     assert not any(item.startswith("--pid=") for item in command)
     assert "--ipc=private" in command
@@ -1911,7 +1911,7 @@ def test_parallel_clean_room_accepts_null_aliases_for_exact_worker_endpoint(
         network_name
     )
 
-def test_legacy_container_command_does_not_force_clean_room_identity_or_namespaces(
+def test_ordinary_container_pins_identity_and_retains_ordinary_namespaces(
     tmp_path
 ):
     manager = DockerSandboxManager(base_dir=str(tmp_path))
@@ -1930,7 +1930,8 @@ def test_legacy_container_command_does_not_force_clean_room_identity_or_namespac
     )
 
     command = captured[-1]
-    assert "--user" not in command
+    assert command[command.index("--user") + 1] == "1200:1201"
+    assert command[command.index("--group-add") + 1] == "27"
     assert "--pid=private" not in command
     assert "--ipc=private" not in command
 
@@ -2923,11 +2924,11 @@ def _attested_clean_room_sandbox(
         execution_policy=PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
         image_id="sha256:" + ("a" * 64),
         image_reference=manager.image,
-        runtime_user=manager.user,
+        runtime_user="1200:1201",
         entrypoint=None,
         command=("/opt/bin/entry_point.sh",),
         expected_image_id="sha256:" + ("a" * 64),
-        expected_runtime_user=manager.user,
+        expected_runtime_user="1200:1201",
         expected_entrypoint=None,
         expected_command=("/opt/bin/entry_point.sh",),
         network_mode=mission_network,
@@ -3032,7 +3033,7 @@ def _clean_room_inspect_payload(
             },
             "Config": {
                 "Image": manager.image,
-                "User": manager.user,
+                "User": "1200:1201",
                 "Entrypoint": None,
                 "Cmd": ["/opt/bin/entry_point.sh"],
                 "Env": [
@@ -4519,7 +4520,7 @@ def test_parallel_clean_room_run_grant_is_projected_only_to_exact_generation_tmp
     assert grant not in json.dumps(calls)
     assert all(any(container_id in part for part in call) for call in calls)
     assert any(
-        call[:5] == ["exec", "-u", manager.user, container_id, "bash"]
+        call[:5] == ["exec", "-u", "1200:1201", container_id, "bash"]
         and "mkdir -p" in " ".join(call)
         for call in calls
     )
@@ -4538,7 +4539,7 @@ def test_parallel_clean_room_run_grant_is_projected_only_to_exact_generation_tmp
     )
 
     assert any(
-        call[:4] == ["exec", "-u", manager.user, container_id]
+        call[:4] == ["exec", "-u", "1200:1201", container_id]
         and f"/run/glasshive/{run_id}" in " ".join(call)
         for call in calls
     )
@@ -4713,7 +4714,7 @@ def test_docker_exec_detach_uses_popen_without_waiting(tmp_path, monkeypatch):
         time.sleep(0.01)
     assert len(calls) == 1
     assert calls[0][:2] == ["sh", "-lc"]
-    assert "sleep 0.1; docker exec -d -u seluser" in calls[0][2]
+    assert "sleep 0.1; docker exec -d -u 1200:1201" in calls[0][2]
     assert "--env-file" in calls[0][2]
     assert "HOME=/workspace/.wpr-home" not in calls[0][2]
     assert "wpr-test bash -lc 'sleep 60'" in calls[0][2]
@@ -4750,7 +4751,7 @@ def test_docker_exec_monitors_visible_provider_session_until_window_closes(
 
     assert result.returncode == 0
     assert len(calls) == 1
-    assert "docker exec -u seluser" in calls[0][2]
+    assert "docker exec -u 1200:1201" in calls[0][2]
     assert "docker exec -d" not in calls[0][2]
     assert not callback_called.is_set()
 
@@ -5841,7 +5842,7 @@ def test_start_screen_session_prepares_runtime_dir_and_detaches(tmp_path):
     )
 
     assert calls[0][0] == "root"
-    assert "mkdir -p /run/screen" in calls[0][1][-1]
+    assert json.loads(calls[0][1][-1])["operation"] == "screen"
     assert calls[1][1][:2] == ["screen", "-DmS"]
     assert calls[1][2] is True
     assert calls[1][3]["PATH"] == "/usr/bin:/bin"
@@ -5902,7 +5903,7 @@ def test_screen_session_pid_reads_matching_screen_socket(tmp_path):
     manager._docker_exec = fake_docker_exec  # type: ignore[method-assign]
 
     assert manager.screen_session_pid("wrk_test", "codex-cli", "job-run_123456") == 12345
-    assert any("mkdir -p /run/screen" in command[-1] for command in calls)
+    assert any(command[:3] == ["/usr/bin/python3", "-I", "-c"] and json.loads(command[-1])["operation"] == "screen" for command in calls)
 
 
 def test_screen_session_pid_survives_refused_runtime_dir_preparation(tmp_path):
@@ -5994,7 +5995,7 @@ def test_start_screen_session_revalidates_projected_worker_without_container_evi
 
     assert calls[0] == ("ensure", [], False, False)
     assert calls[1][0] == "wpr-wrk-test"
-    assert "mkdir -p /run/screen" in calls[1][1][-1]
+    assert json.loads(calls[1][1][-1])["path"] == "/run/screen/S-seluser"
     assert calls[2] == ("wpr-wrk-test", ["screen", "-DmS", "job-run_fast", "echo", "ok"], True, False)
 
 
@@ -6276,12 +6277,11 @@ def test_ensure_ready_repairs_bind_mount_ownership_before_prime(tmp_path):
     assert calls[1].startswith("root:")
     assert "chown -R" not in calls[1]
     assert "chmod -R" not in calls[1]
-    assert (
-        "find /workspace/project /workspace/.wpr-home /workspace/.wpr-home/tmp "
-        "/workspace/.wpr-home/.cache /workspace/.wpr-home/.config -type d -exec setfacl"
-    ) in calls[1]
-    assert calls[2].startswith("root:set -e; runtime_uid=$(id -u seluser)")
-    assert calls[3].startswith("root:set -e; for file in /workspace/.wpr-home/.glasshive/secret-runtime.env")
+    writable = json.loads(calls[1].removeprefix("root:"))
+    assert writable["operation"] == "writable"
+    assert writable["paths"] == manager._default_writable_container_paths()
+    assert json.loads(calls[2].removeprefix("root:"))["operation"] == "temporary"
+    assert json.loads(calls[3].removeprefix("root:"))["operation"] == "secrets"
     assert calls[4:] == ["background", "prime"]
 
 
@@ -6343,20 +6343,12 @@ def test_ensure_container_writable_paths_repairs_specific_run_dir(tmp_path):
         ["/workspace/.wpr-home/.glasshive-runs/run_123"],
     )
 
-    assert calls == [
-        (
-            "root",
-            [
-                    "bash",
-                    "-c",
-                    "set -e; mkdir -p /workspace/.wpr-home/.glasshive-runs/run_123; "
-                    "find /workspace/.wpr-home/.glasshive-runs/run_123 -xdev ! -type s ! -type l "
-                    "! -user seluser -exec chown -h seluser {} +; "
-                    "find /workspace/.wpr-home/.glasshive-runs/run_123 -xdev ! -type s "
-                    "! -type l -exec chmod u+rwX,go-rwx {} +",
-            ],
-        )
-    ]
+    assert len(calls) == 1 and calls[0][0] == "root"
+    assert calls[0][1][:3] == ["/usr/bin/python3", "-I", "-c"]
+    request = json.loads(calls[0][1][-1])
+    assert request["operation"] == "writable"
+    assert request["paths"] == ["/workspace/.wpr-home/.glasshive-runs/run_123"]
+    assert request["host_uid"] == os.getuid()
 
 
 @pytest.mark.parametrize(
@@ -6392,13 +6384,11 @@ def test_enterprise_writable_path_repair_fails_closed_without_posix_acl(
         )
 
     assert len(calls) == 1
-    repair_script = calls[0][-1]
-    assert "command -v setfacl" in repair_script
-    assert "u:root:rwX" in repair_script
-    assert "g::---,o::---,m::rwX" in repair_script
-    assert "d:u:root:rwX" in repair_script
-    assert "d:g::---,d:o::---,d:m::rwX" in repair_script
-    assert "chmod -R a+rwX" not in repair_script
+    request = json.loads(calls[0][-1])
+    assert request["operation"] == "writable"
+    assert request["require_acl"] is True
+    assert request["preserve_owner"] is True
+    assert request["local_world_fallback"] is False
 
 
 def test_explicit_single_user_security_mode_keeps_local_acl_compatibility(tmp_path, monkeypatch):
@@ -6418,7 +6408,9 @@ def test_explicit_single_user_security_mode_keeps_local_acl_compatibility(tmp_pa
         ["/workspace/.wpr-home/.glasshive-runs/run_123"],
     )
 
-    assert "chmod -R a+rwX" in calls[0][-1]
+    request = json.loads(calls[0][-1])
+    assert request["local_world_fallback"] is True
+    assert request["require_acl"] is False
 
 
 def test_repair_provider_temp_ownership_restores_claude_runtime_directory(tmp_path):
@@ -6435,53 +6427,28 @@ def test_repair_provider_temp_ownership_restores_claude_runtime_directory(tmp_pa
 
     assert len(calls) == 1
     assert calls[0][0] == "root"
-    script = calls[0][1][-1]
-    assert "provider_tmp=/workspace/.wpr-home/tmp/claude-${runtime_uid}" in script
-    assert 'chown -R "${runtime_uid}:${runtime_gid}" "$provider_tmp"' in script
-    assert 'chmod 700 "$provider_tmp"' in script
+    request = json.loads(calls[0][1][-1])
+    assert request["operation"] == "temporary"
+    assert request["path"] == "/workspace/.wpr-home/tmp"
+    assert request["provider_subdirectory"] is True
 
 
-def test_ensure_container_writable_paths_skips_pulse_runtime_symlink_on_fakeowner_mount(
-    tmp_path,
-):
-    manager = DockerSandboxManager(base_dir=str(tmp_path))
-    pulse_runtime = (
-        "/workspace/.wpr-home/.config/pulse/"
-        "synthetic-machine-runtime"
-    )
-
-    def fake_docker_exec(
-        container_name,
-        command,
-        *,
-        env=None,
-        cwd=None,
-        detach=False,
-        fire_and_forget=False,
-        user=None,
-    ):
-        script = command[-1]
-        chown_repair = script.split(";", 3)[2]
-        if "! -user seluser" not in chown_repair or "! -type l" not in chown_repair:
-            return subprocess.CompletedProcess(
-                ["docker"],
-                returncode=1,
-                stdout="",
-                stderr=(
-                    "chown: changing ownership of "
-                    f"'{pulse_runtime}': Permission denied"
-                ),
-            )
-        return subprocess.CompletedProcess(
-            ["docker"], returncode=0, stdout="", stderr=""
-        )
-
-    manager._docker_exec = fake_docker_exec  # type: ignore[method-assign]
-
-    manager._ensure_container_writable_paths(
-        "wpr-test",
-        ["/workspace/.wpr-home/.config"],
-    )
+def test_ensure_container_writable_paths_skips_pulse_runtime_symlink_on_fakeowner_mount(tmp_path):
+    from workers_projects_runtime import runtime_permissions
+    root = tmp_path / "config"
+    root.mkdir()
+    outside = tmp_path / "outside-runtime"
+    outside.mkdir(mode=0o755)
+    canary = outside / "preserved.txt"
+    canary.write_text("synthetic canary")
+    canary.chmod(0o644)
+    (root / "pulse-runtime").symlink_to(outside, target_is_directory=True)
+    before = (canary.stat().st_mode, canary.stat().st_uid, canary.read_bytes())
+    runtime_permissions.writable({"paths": [str(root)], "excluded": [], "require_acl": False,
+                                  "preserve_owner": True, "host_uid": os.getuid(),
+                                  "local_world_fallback": False}, os.getuid())
+    assert (canary.stat().st_mode, canary.stat().st_uid, canary.read_bytes()) == before
+    assert (root / "pulse-runtime").is_symlink()
 
 def test_create_container_applies_default_resource_caps(tmp_path):
     manager = DockerSandboxManager(base_dir=str(tmp_path))

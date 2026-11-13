@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .bootstrap import (
     bootstrap_bundle_for,
+    sandbox_setup_for,
     PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
     _strip_codex_mcp_server_blocks,
     _source_path_from_entry,
@@ -615,6 +616,9 @@ class WorkerConfiguration:
         return self._page(source, offset, max_chars)
 
     def prepare_run(self, worker, run):
+        from .provider_network import configured_proxy
+
+        provider_only = configured_proxy() is not None
         with self.store._connect() as conn:
             fresh = _worker(
                 conn, worker["worker_id"], worker["tenant_id"], worker["owner_id"]
@@ -623,6 +627,12 @@ class WorkerConfiguration:
             revision = self._context_revision(conn, worker["worker_id"])
         # Transient scoped broker/peer MCP projection is trusted, but context must stay fresh.
         projected = dict(worker)
+        # The service captures saved setup before projecting any run authority.
+        # A concurrent saved edit cannot label a stale seed as current setup.
+        setup = sandbox_setup_for(worker)
+        if provider_only and setup != sandbox_setup_for(fresh):
+            raise ConfigurationError("configuration_changed")
+        projected["_sandbox_setup"] = setup
         source_worker = _run_context_worker(dict(fresh), run)
         sources, selected, _, effective = self._effective(source_worker, config)
         # The route belongs to the transport; its binder refuses a run that needs one.
@@ -658,6 +668,10 @@ class WorkerConfiguration:
             raise ConfigurationError("context_attempt_unavailable")
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if provider_only:
+                current = _worker(conn, worker["worker_id"], worker["tenant_id"], worker["owner_id"])
+                if setup != sandbox_setup_for(current):
+                    raise ConfigurationError("configuration_changed")
             if self._context_revision(conn, worker["worker_id"]) != revision:
                 raise ConfigurationError("configuration_changed")
             for source in selected:

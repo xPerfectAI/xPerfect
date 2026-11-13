@@ -7,6 +7,89 @@ import os
 import pytest
 import workers_projects_runtime.bootstrap as bootstrap_module
 
+def test_codex_settings_survive_bootstrap_and_repeated_run_refresh(tmp_path):
+    import tomllib
+
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    settings = (
+        'model_auto_compact_token_limit = 180000\nweb_search = "disabled"\n'
+        '[features]\ndefer_mailbox_preemption = true\n'
+        '[model_providers.example_provider]\nstream_idle_timeout_ms = 900000\n'
+    )
+    worker = {"bootstrap_profile": "clean-room", "bootstrap_bundle_json": json.dumps({
+        "codex_config_append": settings,
+    })}
+    apply_bootstrap(home_dir=home, workspace_dir=workspace, runtime_name="codex-cli",
+                    worker=worker, copy_file=lambda *_: None, copy_tree=lambda *_: None)
+    target = home / ".codex" / "config.toml"
+    original = tomllib.loads(target.read_text())
+    for _ in range(3):
+        refresh_project_runtime_files_for_worker(home, workspace, worker)
+        assert tomllib.loads(target.read_text()) == original
+
+
+def test_codex_settings_refresh_replaces_named_server_preserves_other_settings(tmp_path):
+    import tomllib
+
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    target = home / ".codex" / "config.toml"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'personality = "pragmatic"\n[features]\nmulti_agent = true\n'
+        '[mcp_servers.selected]\ncommand = "old"\nargs = ["stale"]\n'
+        '[mcp_servers.other]\ncommand = "retained"\n'
+    )
+    # A root dotted key is used intentionally: it must stay at the root,
+    # independent of any table in the existing document.
+    worker = {"bootstrap_bundle_json": json.dumps({"codex_config_append":
+        'web_search = "disabled"\nmcp_servers.selected.url = "http://example.invalid/mcp"\n'
+        '[features]\ndefer_mailbox_preemption = true\n'
+    })}
+    refresh_project_runtime_files_for_worker(home, workspace, worker)
+    data = tomllib.loads(target.read_text())
+    assert data["personality"] == "pragmatic"
+    assert data["web_search"] == "disabled"
+    assert data["features"] == {"multi_agent": True, "defer_mailbox_preemption": True}
+    assert data["mcp_servers"] == {
+        "selected": {"url": "http://example.invalid/mcp"},
+        "other": {"command": "retained"},
+    }
+
+
+def test_codex_refresh_preserves_unrelated_toml_values(tmp_path):
+    import tomllib
+
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    target = home / ".codex" / "config.toml"
+    target.parent.mkdir(parents=True)
+    original = (
+        '" spaced key " = "retained"\n"" = "empty quoted key"\n'
+        'timestamp = 2026-01-02T03:04:05Z\ndate = 2026-01-02\ntime = 03:04:05\n'
+        'choices = [{name = "example", enabled = true}]\n[empty_table]\n'
+    )
+    target.write_text(original)
+    worker = {"bootstrap_bundle_json": json.dumps({
+        "codex_config_append": 'web_search = "disabled"',
+    })}
+    refresh_project_runtime_files_for_worker(home, workspace, worker)
+    assert tomllib.loads(target.read_text()) == {
+        **tomllib.loads(original), "web_search": "disabled",
+    }
+
+
+def test_codex_refresh_does_not_clobber_malformed_existing_config(tmp_path):
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    target = home / ".codex" / "config.toml"
+    target.parent.mkdir(parents=True)
+    original = '[features]\nx = true\n[features]\nx = false\n'
+    target.write_text(original)
+    worker = {"bootstrap_bundle_json": json.dumps({
+        "codex_config_append": 'web_search = "disabled"',
+    })}
+    with pytest.raises(ValueError, match="valid TOML"):
+        refresh_project_runtime_files_for_worker(home, workspace, worker)
+    assert target.read_text() == original
+
 from workers_projects_runtime.bootstrap import (
     GLASSHIVE_CRITICAL_OPERATING_INSTRUCTIONS,
     GLASSHIVE_SAFETY_CHECKPOINT_RULE,
@@ -2181,3 +2264,58 @@ def test_container_claude_home_receives_only_signin_settings_and_shared_capabili
     assert not (worker_claude / "projects").exists()
     assert not (worker_claude / "history.jsonl").exists()
     assert not (worker_claude / "debug").exists()
+@pytest.mark.parametrize("target_kind", ["directory_link", "file_link", "hardlink"])
+def test_ordinary_codex_refresh_cannot_rewrite_a_linked_host_file(tmp_path, target_kind):
+    from workers_projects_runtime.bootstrap import refresh_project_runtime_files_for_worker
+    home = tmp_path / "home"; home.mkdir()
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    target = outside / "config.toml"; target.write_text('owner_setting = "host"\n'); target.chmod(0o644)
+    before = (target.read_bytes(), target.stat().st_mode)
+    if target_kind == "directory_link":
+        (home / ".codex").symlink_to(outside, target_is_directory=True)
+    else:
+        (home / ".codex").mkdir()
+        if target_kind == "file_link": (home / ".codex/config.toml").symlink_to(target)
+        else: os.link(target, home / ".codex/config.toml")
+    worker = {"bootstrap_bundle_json": json.dumps({"codex_config_append": 'web_search = "disabled"\n'})}
+    with pytest.raises(PermissionError):
+        refresh_project_runtime_files_for_worker(home, workspace, worker)
+    assert (target.read_bytes(), target.stat().st_mode) == before
+
+
+def test_codex_toml_renderer_round_trips_del_in_keys_and_values():
+    import tomllib
+    from workers_projects_runtime.toml_config import _render_toml_document
+    for codepoint in [*range(32), 127, 0x2028, 0x2029]:
+        character = chr(codepoint)
+        document = {"key" + character: {"value": "before" + character + "after"}}
+        assert tomllib.loads(_render_toml_document(document)) == document
+
+
+@pytest.mark.parametrize("relative", [".claude/settings.local.json", ".mcp.json", "AGENTS.md"])
+def test_ordinary_project_refresh_cannot_rewrite_a_linked_host_file(tmp_path, relative):
+    from workers_projects_runtime.bootstrap import refresh_project_runtime_files_for_worker
+    home = tmp_path / "home"; home.mkdir()
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    target = tmp_path / "host-owned"; target.write_text("synthetic host data"); target.chmod(0o640)
+    before = (target.read_bytes(), target.stat().st_mode)
+    link = workspace / relative; link.parent.mkdir(parents=True, exist_ok=True); link.symlink_to(target)
+    worker = {"bootstrap_bundle_json": json.dumps({"claude_settings_local": {}, "claude_project_mcp": {}, "agents_md": "synthetic"})}
+    with pytest.raises(PermissionError):
+        refresh_project_runtime_files_for_worker(home, workspace, worker)
+    assert (target.read_bytes(), target.stat().st_mode) == before
+
+
+@pytest.mark.parametrize("relative", [".glasshive", ".bashrc"])
+def test_ordinary_environment_refresh_cannot_rewrite_a_linked_host_file(tmp_path, relative):
+    from workers_projects_runtime.bootstrap import _write_runtime_env
+    home = tmp_path / "home"; home.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    target = outside / "runtime.env"; target.write_text("synthetic host data"); target.chmod(0o640)
+    before = (target.read_bytes(), target.stat().st_mode)
+    if relative == ".glasshive": (home / relative).symlink_to(outside, target_is_directory=True)
+    else: (home / relative).symlink_to(target)
+    with pytest.raises(PermissionError):
+        _write_runtime_env(home, {"SYNTHETIC_SETTING": "value"})
+    assert (target.read_bytes(), target.stat().st_mode) == before

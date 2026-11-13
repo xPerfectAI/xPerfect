@@ -32,7 +32,7 @@ OPENCLAW_RUNTIME_OVERRIDES = {
     "tar": "7.5.22",
 }
 OPENCLAW_RUNTIME_FAST_URI_VERSION = OPENCLAW_RUNTIME_OVERRIDES["fast-uri"]
-OPENCLAW_RUNTIME_LOCK_DIR = Path(__file__).resolve().parents[2] / "runtime_locks" / "openclaw"
+OPENCLAW_RUNTIME_LOCK_DIR = Path(__file__).with_name("resources") / "openclaw"
 
 
 def reviewed_openclaw_env(env: Mapping[str, str] | None = None) -> dict[str, str]:

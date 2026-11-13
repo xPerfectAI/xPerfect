@@ -173,6 +173,8 @@ def test_exact_overflow_durable_and_revocation(configured):
 
 
 def test_exact_tool_subset_retains_runtime_tools(configured):
+    from workers_projects_runtime.bootstrap import sandbox_setup_for
+
     core, worker = configured
     core.put(
         "local",
@@ -192,7 +194,7 @@ def test_exact_tool_subset_retains_runtime_tools(configured):
         '[mcp_servers.other]\nurl="https://example.test/other"\n[mcp_servers.allowed]\nurl="https://example.test/mcp"'
     )
     projected = core.prepare_run(
-        worker | {"bootstrap_bundle_json": bundle},
+        worker | {"bootstrap_bundle_json": bundle, "_sandbox_setup": sandbox_setup_for(worker)},
         {"run_id": "run", "active_attempt_id": "attempt"},
     )
     projected_bundle = json.loads(projected["bootstrap_bundle_json"])
@@ -203,6 +205,76 @@ def test_exact_tool_subset_retains_runtime_tools(configured):
     assert (
         "mcp_servers.other" not in projected_bundle["codex_config_append"]
     )
+
+
+def test_saved_sandbox_setup_survives_actual_run_projection(configured, monkeypatch):
+    from workers_projects_runtime.service import WorkersProjectsService
+    from workers_projects_runtime.docker_sandbox import DockerSandboxManager
+
+    monkeypatch.setenv("WPR_SANDBOX_PROVIDER_PROXY", '{"container":"proxy","hostname":"model-proxy"}')
+    core, worker = configured
+    generation = DockerSandboxManager._provider_only_generation
+    core.put("local", "owner", worker["worker_id"], ConfigurationUpdate(
+        expected_revision=1,
+        tools={"mode": "selected", "mcp_server_ids": ["allowed"]},
+        performance={"native_warm_servers": 2},
+    ))
+    for index in (1, 2):
+        bundle = json.loads(worker["bootstrap_bundle_json"])
+        bundle["claude_project_mcp"]["runtime-control"] = {
+            "type": "http", "url": "https://example.test/control",
+            "headers": {"Authorization": f"Bearer synthetic-attempt-{index}"},
+        }
+        # A bundle cannot choose the internal authoritative saved setup.
+        bundle["_sandbox_setup"] = {"bootstrap_bundle_json": {"forged": True}}
+        admitted = WorkersProjectsService._runtime_worker_for_run(worker, {})
+        projected = core.prepare_run(
+            admitted | {"bootstrap_bundle_json": bundle},
+            {"run_id": f"run-{index}", "active_attempt_id": f"attempt-{index}"},
+        )
+        effective = json.loads(projected["bootstrap_bundle_json"])
+        assert effective["runtime_performance"]["native_warm_servers"] == 2
+        assert f"synthetic-attempt-{index}" in json.dumps(effective)
+        assert "other" not in effective["claude_project_mcp"]["mcpServers"]
+        assert generation(projected) == generation(worker)
+
+    changed = json.loads(worker["bootstrap_bundle_json"])
+    changed["project_definition"] = "Changed saved setup"
+    core.store.update_worker(worker["worker_id"], bootstrap_bundle_json=json.dumps(changed))
+    # Refuse before a stale caller can seed an empty reservation under a new label.
+    with pytest.raises(ConfigurationError, match="configuration_changed"):
+        core.prepare_run(worker, {"run_id": "run-3", "active_attempt_id": "attempt-3"})
+    fresh = core.store.get_worker(worker["worker_id"])
+    projected = core.prepare_run(fresh, {"run_id": "run-4", "active_attempt_id": "attempt-4"})
+    assert generation(projected) != generation(worker)
+    assert generation(projected) == generation(fresh)
+
+
+def test_saved_setup_edit_during_context_preparation_is_fenced(configured, monkeypatch):
+    monkeypatch.setenv("WPR_SANDBOX_PROVIDER_PROXY", '{"container":"proxy","hostname":"model-proxy"}')
+    core, worker = configured
+    effective = core._effective
+
+    def edited(*args, **kwargs):
+        result = effective(*args, **kwargs)
+        core.store.update_worker(worker["worker_id"], bootstrap_bundle_json='{"project_definition":"New setup"}')
+        return result
+
+    monkeypatch.setattr(core, "_effective", edited)
+    with pytest.raises(ConfigurationError, match="configuration_changed"):
+        core.prepare_run(worker, {"run_id": "run", "active_attempt_id": "attempt"})
+    with core.store._connect() as conn:
+        assert conn.execute("SELECT count(*) FROM worker_context_snapshots").fetchone()[0] == 0
+
+
+def test_ordinary_context_preparation_retains_existing_saved_edit_behavior(configured, monkeypatch):
+    monkeypatch.delenv("WPR_SANDBOX_PROVIDER_PROXY", raising=False)
+    core, worker = configured
+    core.store.update_worker(worker["worker_id"], bootstrap_bundle_json='{"project_definition":"Fresh source"}')
+    projected = core.prepare_run(worker, {"run_id": "run", "active_attempt_id": "attempt"})
+    assert projected["_context_projection"]["inline"] == [
+        {"id": "bootstrap:project_definition", "text": "Fresh source"},
+    ]
 
 
 def test_effective_tool_catalog_includes_declared_grok_servers(configured):

@@ -14,6 +14,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+from .toml_config import _overlay_toml_tables, _render_toml_document
 from .application_boundary import opaque_application_context
 from .auth import DEFAULT_TENANT_ID, enterprise_authentication_enabled, multi_user_security_enabled
 from .codex_plugins import provision_codex_official_marketplace
@@ -965,6 +971,22 @@ def bootstrap_bundle_for(worker: dict[str, Any]) -> JsonDict:
     return project_coordinator_bootstrap(worker, project_peer_bootstrap(worker, parsed if isinstance(parsed, dict) else {}))
 
 
+def sandbox_setup_for(worker: dict[str, Any]) -> JsonDict:
+    """Saved sandbox setup, separate from the internal per-run projection."""
+    setup = worker.get("_sandbox_setup", worker)
+    return {
+        "bootstrap_profile": setup.get("bootstrap_profile"),
+        "bootstrap_bundle_json": bootstrap_bundle_for(
+            {"bootstrap_bundle_json": setup.get("bootstrap_bundle_json")}
+        ),
+    }
+
+
+def deployment_provider_env_projection_enabled() -> bool:
+    """The existing service-to-bootstrap projection policy, shared by checks."""
+    return _env_flag("GLASSHIVE_PROJECT_PROVIDER_ENV", default=_enterprise_mode_enabled())
+
+
 def bootstrap_env_for(
     worker: dict[str, Any], runtime_name: str | None = None
 ) -> dict[str, str]:
@@ -998,7 +1020,7 @@ def bootstrap_env_for(
             if allowed is not None and env_key not in allowed:
                 continue
             env[env_key] = str(value)
-    if not clean_room and _env_flag("GLASSHIVE_PROJECT_PROVIDER_ENV", default=enterprise):
+    if not clean_room and deployment_provider_env_projection_enabled():
         for key in _worker_env_allowlist():
             value = os.environ.get(key)
             if value and key not in env:
@@ -1498,33 +1520,12 @@ def _purge_clean_room_authority(
     for relative_path in CLEAN_ROOM_WORKSPACE_AUTHORITY_PATHS:
         _remove_sandbox_authority_path(workspace_dir, relative_path)
 
-def _atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(text)
-    tmp_path.chmod(mode)
-    tmp_path.replace(path)
-
-
-def _write_env_file(path: Path, env: dict[str, str], *, mode: int = 0o644) -> None:
-    if env:
-        lines = [f"export {key}={shlex.quote(value)}" for key, value in sorted(env.items())]
-        _atomic_write_text(path, "\n".join(lines) + "\n", mode=mode)
-        return
-    if path.exists():
-        path.unlink()
-
-
 def _write_runtime_env(
     home_dir: Path,
     env: dict[str, str],
     *,
     force_run_only_secrets: bool = False,
 ) -> None:
-    glasshive_dir = home_dir / ".glasshive"
-    glasshive_dir.mkdir(parents=True, exist_ok=True)
-    runtime_env = glasshive_dir / "runtime.env"
-    secret_env = glasshive_dir / "secret-runtime.env"
-    secret_keys_path = glasshive_dir / "secret-runtime.keys"
     secret_env_values: dict[str, str] = {}
     shell_env_values = dict(env)
     if (
@@ -1564,18 +1565,26 @@ def _write_runtime_env(
                 Path(".glasshive/secret-runtime.keys"),
             )
         return
-    _write_env_file(runtime_env, shell_env_values, mode=runtime_env_mode)
-    _write_env_file(secret_env, secret_env_values, mode=0o600)
+    for relative, values, mode in (
+        (".glasshive/runtime.env", shell_env_values, runtime_env_mode),
+        (".glasshive/secret-runtime.env", secret_env_values, 0o600),
+    ):
+        if values:
+            content = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in sorted(values.items())) + "\n"
+            _write_private_native_file(home_dir, Path(relative), content.encode("utf-8"), mode=mode)
+        else:
+            _unlink_clean_room_file(home_dir, Path(relative))
     if secret_env_values:
-        _atomic_write_text(secret_keys_path, "\n".join(sorted(secret_env_values)) + "\n", mode=0o600)
-    elif secret_keys_path.exists():
-        secret_keys_path.unlink()
-    bashrc = home_dir / ".bashrc"
+        _write_private_native_file(home_dir, Path(".glasshive/secret-runtime.keys"),
+            ("\n".join(sorted(secret_env_values)) + "\n").encode("utf-8"), mode=0o600)
+    else:
+        _unlink_clean_room_file(home_dir, Path(".glasshive/secret-runtime.keys"))
     source_line = 'if [ -f "$HOME/.glasshive/runtime.env" ]; then source "$HOME/.glasshive/runtime.env"; fi'
-    existing = bashrc.read_text() if bashrc.exists() else ""
+    existing = _read_private_native_file(home_dir, Path(".bashrc"))
     if source_line not in existing:
         prefix = existing.rstrip() + ("\n" if existing.strip() else "")
-        bashrc.write_text(prefix + source_line + "\n")
+        _write_private_native_file(home_dir, Path(".bashrc"),
+            (prefix + source_line + "\n").encode("utf-8"), mode=0o644)
 
 
 def _safe_relative_path(raw_path: str) -> Path:
@@ -2063,22 +2072,12 @@ def _write_claude_project_files(
                     continue
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise PermissionError("Private configuration targets must be regular, unlinked files")
-    write_file = _write_private_native_file if private else _write_clean_room_file
+    write_file = _write_private_native_file if private or not clean_room else _write_clean_room_file
     workspace_dir.mkdir(parents=True, exist_ok=True)
     settings_local = bundle.get("claude_settings_local")
     if isinstance(settings_local, dict):
         content = json.dumps(settings_local, indent=2, sort_keys=True) + "\n"
-        if clean_room:
-            write_file(
-                workspace_dir,
-                Path(".claude/settings.local.json"),
-                content.encode("utf-8"),
-            )
-        else:
-            target = workspace_dir / ".claude" / "settings.local.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content)
-            target.chmod(0o600)
+        write_file(workspace_dir, Path(".claude/settings.local.json"), content.encode("utf-8"))
 
     # Grok receives selected servers through ACP session/new. Its disabled
     # Claude-compatibility importer also uses .mcp.json to reject duplicate
@@ -2088,16 +2087,7 @@ def _write_claude_project_files(
     if isinstance(project_mcp, dict):
         payload = _claude_project_mcp_payload(bundle, project_mcp)
         content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        if clean_room:
-            write_file(
-                workspace_dir,
-                Path(".mcp.json"),
-                content.encode("utf-8"),
-            )
-        else:
-            target = workspace_dir / ".mcp.json"
-            target.write_text(content)
-            target.chmod(0o600)
+        write_file(workspace_dir, Path(".mcp.json"), content.encode("utf-8"))
 
     agents_md = glasshive_project_agents_md(bundle)
     claude_md = glasshive_project_claude_md(bundle)
@@ -2110,15 +2100,7 @@ def _write_claude_project_files(
         ("codex.md", codex_md),
         ("CODEX.md", codex_md),
     ):
-        if clean_room:
-            write_file(
-                workspace_dir,
-                Path(filename),
-                content.encode("utf-8"),
-                mode=0o644,
-            )
-        else:
-            (workspace_dir / filename).write_text(content)
+        write_file(workspace_dir, Path(filename), content.encode("utf-8"), mode=0o644)
 
 
 def _claude_project_mcp_payload(bundle: JsonDict, project_mcp: dict[str, Any]) -> JsonDict:
@@ -2162,7 +2144,7 @@ def claude_project_mcp_payload_for_bundle(bundle: JsonDict, project_mcp: dict[st
 
 
 def _write_codex_config(home_dir: Path, bundle: JsonDict, *, private: bool = False) -> None:
-    """Append/refresh worker-local Codex MCP config without duplicating old server blocks."""
+    """Refresh declared settings without duplicate TOML or stale server transports."""
     append = bundle.get("codex_config_append")
     if not isinstance(append, str) or not append.strip():
         return
@@ -2211,16 +2193,25 @@ def _write_codex_config(home_dir: Path, bundle: JsonDict, *, private: bool = Fal
                 append += "\n" + native_transport.codex_stdio_block(
                     "xperfect-schedules", args[2], "GLASSHIVE_SCHEDULE_TOKEN", schedule_mcp["command"],
                 )
-    target = home_dir / ".codex" / "config.toml"
-    if not clean_room and not private:
-        target.parent.mkdir(parents=True, exist_ok=True)
-    existing = "" if clean_room else (_read_private_native_file(home_dir, Path(".codex/config.toml")) if private else (target.read_text() if target.exists() else ""))
-    mcp_names = _codex_mcp_server_names(append)
-    if mcp_names:
-        existing = _strip_codex_mcp_server_blocks(existing, mcp_names)
-    prefix = existing.rstrip() + ("\n\n" if existing.strip() else "")
-    content = prefix + append.strip() + "\n"
-    if private:
+    existing = "" if clean_room else _read_private_native_file(home_dir, Path(".codex/config.toml"))
+    try:
+        previous = tomllib.loads(existing) if existing.strip() else {}
+        current = tomllib.loads(append)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError("Worker Codex settings must be valid TOML") from exc
+    # A declared server replaces the whole prior transport, as the old block
+    # refresh did. Other settings merge recursively through the same owner as
+    # Host configuration. Parsing also handles dotted keys and quoted names.
+    servers = current.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("Worker Codex mcp_servers must be a table")
+    if servers and isinstance(previous.get("mcp_servers"), dict):
+        previous["mcp_servers"] = {
+            name: value for name, value in previous["mcp_servers"].items()
+            if name not in servers
+        }
+    content = _render_toml_document(_overlay_toml_tables(previous, current)) + "\n"
+    if private or not clean_room:
         _write_private_native_file(home_dir, Path(".codex/config.toml"), content.encode("utf-8"))
     elif clean_room:
         _write_clean_room_file(
@@ -2228,9 +2219,6 @@ def _write_codex_config(home_dir: Path, bundle: JsonDict, *, private: bool = Fal
             Path(".codex/config.toml"),
             content.encode("utf-8"),
         )
-    else:
-        target.write_text(content)
-        target.chmod(0o600)
 
 
 def _codex_mcp_server_names(config_text: str) -> set[str]:

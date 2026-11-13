@@ -1,5 +1,8 @@
 # xPerfect OpenClaw reviewed runtime lock
 
+The two lock files are packaged under `src/workers_projects_runtime/resources/openclaw/`
+so installed runtimes can prepare the same reviewed image inputs. Their bytes and hashes are unchanged.
+
 This npm lock freezes the dependency graph selected for OpenClaw `2026.7.1-2`. The root package is
 an exact integrity-pinned tarball. Exact root overrides keep the reviewed graph on patched releases
 of `@hono/node-server`, `@modelcontextprotocol/sdk`, `brace-expansion`, `fast-uri`, and `tar`.

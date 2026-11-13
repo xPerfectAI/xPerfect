@@ -8173,7 +8173,8 @@ def test_docker_cli_runtime_sources_runtime_and_openclaw_env_files(tmp_path):
 
     assert runtime.run_task(worker, "do it", run_id=run_id) == "FINAL REPORT:\nok"
     assert writable_repairs == [
-        [f"{runtime.sandbox.home_mount}/.glasshive-runs/{run_id}"],
+        [f"{runtime.sandbox.home_mount}/.glasshive-runs/{run_id}",
+         runtime.sandbox.home_mount, runtime.sandbox.workspace_mount],
         [runtime.sandbox.workspace_mount, f"{runtime.sandbox.home_mount}/.glasshive-runs/{run_id}"]
     ]
     workspace = runtime._workspace_dir(worker["worker_id"])
@@ -12767,6 +12768,7 @@ def test_host_claude_bound_account_is_resolved_before_owner_auth(tmp_path, monke
 
 @pytest.mark.parametrize("authority", ["missing", "access_token", "api_key"])
 def test_host_claude_enterprise_conversation_never_consults_owner_auth(tmp_path, monkeypatch, authority):
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("WPR_CLAUDE_CODE_ENABLE_CHROME", "0")
     monkeypatch.setenv("GLASSHIVE_ENTERPRISE_MODE", "1")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_SCOPES", "synthetic:unselected-parent")

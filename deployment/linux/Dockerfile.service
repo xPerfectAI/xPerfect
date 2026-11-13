@@ -12,7 +12,6 @@ COPY frontends/glass-drive-ui/pyproject.toml frontends/glass-drive-ui/uv.lock fr
 RUN UV_PROJECT_ENVIRONMENT=/opt/xperfect/venvs/runtime uv sync --frozen --no-dev --no-install-project --python /usr/bin/python3 --project runtime_phase1 \
  && UV_PROJECT_ENVIRONMENT=/opt/xperfect/venvs/ui uv sync --frozen --no-dev --no-install-project --python /usr/bin/python3 --project frontends/glass-drive-ui
 COPY runtime_phase1/src ./runtime_phase1/src
-COPY runtime_phase1/workstation-requirements.lock ./runtime_phase1/workstation-requirements.lock
 COPY frontends/glass-drive-ui/src ./frontends/glass-drive-ui/src
 COPY deployment/linux/service.py ./deployment/linux/service.py
 RUN UV_PROJECT_ENVIRONMENT=/opt/xperfect/venvs/runtime uv sync --frozen --no-dev --python /usr/bin/python3 --project runtime_phase1 \
