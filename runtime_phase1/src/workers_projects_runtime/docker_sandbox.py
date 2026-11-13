@@ -3658,7 +3658,7 @@ screen -ls | awk -v target="$target" '
             return
         if inspected.returncode == 0 and not self._managed_image:
             raise RuntimeError(
-                "Configured worker image is missing the reviewed GlassHive provenance labels"
+                "Configured worker image is missing the reviewed GlassHive provenance labels or privacy environment"
             )
         with self._build_lock:
             now = time.monotonic()
@@ -3675,7 +3675,7 @@ screen -ls | awk -v target="$target" '
                 return
             if inspected.returncode == 0 and not self._managed_image:
                 raise RuntimeError(
-                    "Configured worker image is missing the reviewed GlassHive provenance labels"
+                    "Configured worker image is missing the reviewed GlassHive provenance labels or privacy environment"
                 )
             if "@sha256:" not in self.base_image:
                 raise RuntimeError(
@@ -3779,6 +3779,8 @@ screen -ls | awk -v target="$target" '
                         "ENV DISPLAY=:99.0",
                         "ENV TERM=xterm-256color",
                         "ENV OPENCLAW_DISABLE_BONJOUR=1",
+                        "ENV ORT_DISABLE_TELEMETRY=1",
+                        "LABEL com.glasshive.workstation.onnx-telemetry=disabled-v1",
                         "",
                     ]
                 )
@@ -3807,15 +3809,27 @@ screen -ls | awk -v target="$target" '
             "com.glasshive.workstation.python-lock-sha256": AI_WORKER_PYTHON_LOCK_SHA256,
             "com.glasshive.workstation.provider-account-acl": "required-v1",
             "com.glasshive.workstation.worker-identity": "numeric-v1",
+            "com.glasshive.workstation.onnx-telemetry": "disabled-v1",
         }
 
     def _image_has_reviewed_provenance(self, raw_inspect: str) -> bool:
         try:
             payload = json.loads(raw_inspect or "[]")
-            labels = payload[0]["Config"]["Labels"]
+            config = payload[0]["Config"]
+            labels = config["Labels"]
+            environment = config["Env"]
         except (json.JSONDecodeError, IndexError, KeyError, TypeError):
             return False
         if not isinstance(labels, dict):
+            return False
+        if not isinstance(environment, list) or not all(isinstance(item, str) for item in environment):
+            return False
+        telemetry_values = [
+            item.partition("=")[2]
+            for item in environment
+            if item.partition("=")[0] == "ORT_DISABLE_TELEMETRY"
+        ]
+        if telemetry_values != ["1"]:
             return False
         return all(
             str(labels.get(key) or "") == value

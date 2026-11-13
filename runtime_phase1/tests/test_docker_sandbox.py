@@ -5402,7 +5402,10 @@ def test_ensure_image_uses_short_probe_and_caches_success(tmp_path):
 
     def fake_docker(args: list[str], *, check: bool = True, capture_output: bool = False, timeout_sec=None):
         calls.append((args, timeout_sec))
-        payload = [{"Config": {"Labels": manager._expected_image_provenance()}}]
+        payload = [{"Config": {
+            "Labels": manager._expected_image_provenance(),
+            "Env": ["ORT_DISABLE_TELEMETRY=1"],
+        }}]
         return subprocess.CompletedProcess(
             ["docker", *args], returncode=0, stdout=json.dumps(payload), stderr=""
         )
@@ -5458,6 +5461,9 @@ def test_ensure_image_includes_document_delivery_toolchain(tmp_path):
     assert "reportlab==" in requirements_lock
     assert "requests==" in requirements_lock
     assert "pymupdf==" in requirements_lock
+    assert "pypdf==" in requirements_lock
+    assert "defusedxml==" in requirements_lock
+    assert "ENV ORT_DISABLE_TELEMETRY=1" in dockerfile
     assert "--require-hashes --no-deps" in dockerfile
     assert "/usr/bin/locale-check" in dockerfile
 
@@ -5528,6 +5534,33 @@ def test_ensure_image_defaults_to_no_forced_ai_worker_browser_extensions(tmp_pat
     assert "glasshive-browser-native-host-bootstrap" in dockerfile
 
 
+def test_ensure_image_rebuilds_without_onnx_privacy_provenance(tmp_path):
+    manager = DockerSandboxManager(base_dir=str(tmp_path))
+    legacy_labels = manager._expected_image_provenance()
+    legacy_labels.pop("com.glasshive.workstation.onnx-telemetry", None)
+    builds = []
+
+    def fake_docker(args, **kwargs):
+        if args[:2] == ["image", "inspect"]:
+            payload = [{"Config": {
+                "Labels": legacy_labels,
+                "Env": ["ORT_DISABLE_TELEMETRY=1"],
+            }}]
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+        if args[0] == "build":
+            builds.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    manager._docker = fake_docker
+    manager._ensure_image()
+
+    assert len(builds) == 1
+    assert manager._expected_image_provenance()[
+        "com.glasshive.workstation.onnx-telemetry"
+    ] == "disabled-v1"
+
+
 def test_custom_worker_image_without_reviewed_provenance_fails_closed(
     tmp_path, monkeypatch
 ):
@@ -5544,6 +5577,45 @@ def test_custom_worker_image_without_reviewed_provenance_fails_closed(
 
     with pytest.raises(RuntimeError, match="provenance labels"):
         manager._ensure_image()
+
+
+@pytest.mark.parametrize("environment", [
+    None,
+    [],
+    ["ORT_DISABLE_TELEMETRY=0"],
+    ["ORT_DISABLE_TELEMETRY=1", "ORT_DISABLE_TELEMETRY=0"],
+    ["ORT_DISABLE_TELEMETRY=0", "ORT_DISABLE_TELEMETRY=1"],
+    ["ORT_DISABLE_TELEMETRY=1", "ORT_DISABLE_TELEMETRY=1"],
+])
+@pytest.mark.parametrize("custom_image", [False, True])
+def test_image_privacy_environment_cannot_be_replaced_by_labels(
+    tmp_path, monkeypatch, environment, custom_image
+):
+    if custom_image:
+        monkeypatch.setenv("WPR_SANDBOX_IMAGE", "example.invalid/custom-worker:test")
+    manager = DockerSandboxManager(base_dir=str(tmp_path))
+    builds = []
+
+    def fake_docker(args, **kwargs):
+        if args[:2] == ["image", "inspect"]:
+            payload = [{"Config": {
+                "Labels": manager._expected_image_provenance(),
+                "Env": environment,
+            }}]
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+        if args[0] == "build":
+            builds.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    manager._docker = fake_docker
+    if custom_image:
+        with pytest.raises(RuntimeError, match="provenance labels"):
+            manager._ensure_image()
+        assert builds == []
+    else:
+        manager._ensure_image()
+        assert len(builds) == 1
 
 
 def test_ensure_image_consumes_reviewed_openclaw_lock_and_disables_bonjour(tmp_path):

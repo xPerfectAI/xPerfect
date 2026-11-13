@@ -1,11 +1,12 @@
 beautifulsoup4
+defusedxml
 markdown
 matplotlib
 openpyxl
 pdf2image
-pillow
-PyMuPDF
-PyPDF2
+pillow>=13,<14
+PyMuPDF>=2.1,<3
+pypdf>=6,<7
 python-docx
 python-pptx
 reportlab
