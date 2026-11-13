@@ -274,9 +274,6 @@ from .store import (
 )
 
 
-load_viventium_runtime_env()
-install_sensitive_url_log_filter()
-
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "runtime_phase1.db"
 logger = logging.getLogger(__name__)
 
@@ -361,6 +358,11 @@ def create_app(
     reconcile_on_startup: bool | None = None,
 ) -> FastAPI:
     load_viventium_runtime_env()
+    install_sensitive_url_log_filter()
+    from .native_route import codex_route_contract
+    codex_route_contract()  # Reject unsafe configured projection before opening state.
+    from .provider_network import configured_proxy
+    configured_proxy()
     resolved_db_path = db_path or os.environ.get("WPR_DB_PATH", str(DEFAULT_DB_PATH))
     resolved_runtime_backend = (runtime_backend or os.environ.get("WPR_RUNTIME_BACKEND", "openclaw")).strip().lower()
     data_root = Path(resolved_db_path).resolve().parent
@@ -6281,6 +6283,43 @@ def create_app(
     def get_run(run_id: str, request: Request) -> RunResponse:
         run = require_run(run_id, request)
         return RunResponse(**run)
+
+    @app.get("/v1/runs/{run_id}/process-log")
+    def run_process_log(
+        run_id: str, request: Request, stream: str = "stdout", cursor: int = 0,
+        limit: int = 32768, version: str = "", download: bool = False, attempt_id: str = "",
+    ) -> dict:
+        from .process_log import ProcessLogChanged
+
+        ctx = _auth_context(request)
+        if (not api_token and not ctx.enterprise) or not _can_show_internal_details(ctx):
+            raise HTTPException(status_code=403, detail="Operator access required")
+        run = require_run(run_id, request)
+        # Diagnostics read stored ownership without healing or dispatching work.
+        worker = store.get_worker(str(run.get("worker_id") or ""))
+        if (not worker or worker.get("project_id") != run.get("project_id")
+                or worker.get("tenant_id") != run.get("tenant_id")):
+            raise HTTPException(status_code=404, detail="Retained run worker is unavailable")
+        selected_attempt = attempt_id or str(run.get("active_attempt_id") or "")
+        if selected_attempt:
+            attempt = store.get_run_attempt(selected_attempt)
+            if not attempt or attempt.get("run_id") != run_id:
+                raise HTTPException(status_code=404, detail="Retained run attempt is unavailable")
+        reader = getattr(runtime_impl, "read_run_process_log", None)
+        if not callable(reader):
+            raise HTTPException(status_code=404, detail="Retained process log is unavailable")
+        try:
+            result = reader(worker, run_id, attempt_id=selected_attempt, stream=stream,
+                            cursor=cursor, limit=limit, version=version, download=download)
+        except ProcessLogChanged as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Retained process log is unavailable") from exc
+        except OverflowError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail="Retained process log selection was rejected") from exc
+        return {**result, "worker_id": worker["worker_id"], "attempt_id": selected_attempt}
 
     @app.get("/v1/schedules/{schedule_id}", response_model=ScheduleResponse)
     def get_schedule(schedule_id: str, request: Request) -> ScheduleResponse:

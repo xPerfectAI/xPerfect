@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from .toml_config import (
+    _toml_string, _toml_value, _toml_table_name, _render_toml_document,
+    _render_toml_table, _overlay_toml_tables,
+)
+
 from .native_log_notifications import NativeLogNotifications
 
 from .native_context_projection import apply_claude_context, prepare_private_command
@@ -1234,8 +1239,6 @@ def _sanitize_malformed_codex_source_config(
     return "\n".join(output).rstrip()
 
 
-def _toml_string(value: object) -> str:
-    return json.dumps(str(value), ensure_ascii=False)
 
 
 def _path_entries(value: str) -> list[Path]:
@@ -1366,37 +1369,8 @@ def _project_workspace_dependency_env(env: dict[str, str]) -> None:
         env["GLASSHIVE_WORKSPACE_BIN_DIRS"] = os.pathsep.join(str(path) for path in paths["bin_dirs"])
 
 
-def _toml_value(value: object, *, manifest_dir: Path | None = None, key: str = "") -> str | None:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        return str(value)
-    if isinstance(value, str):
-        rendered = str(manifest_dir) if key == "cwd" and value == "." and manifest_dir else value
-        return _toml_string(rendered)
-    if isinstance(value, dict):
-        # TOML arrays of tables (for example native skill selections) arrive as
-        # lists of dicts. Preserve them as equivalent inline tables.
-        fields: list[str] = []
-        for field, item in value.items():
-            rendered = _toml_value(item)
-            if rendered is None:
-                return None
-            fields.append(f"{_toml_table_name(str(field))} = {rendered}")
-        return "{ " + ", ".join(fields) + " }"
-    if isinstance(value, list):
-        rendered_items: list[str] = []
-        for item in value:
-            item_rendered = _toml_value(item)
-            if item_rendered is None:
-                return None
-            rendered_items.append(item_rendered)
-        return "[" + ", ".join(rendered_items) + "]"
-    return None
 
 
-def _toml_table_name(name: str) -> str:
-    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else _toml_string(name)
 
 
 _PLUGIN_ID_RE = re.compile(
@@ -1496,24 +1470,6 @@ def _render_codex_mcp_server_from_json(name: str, config: object, manifest_dir: 
     return "\n\n".join(_render_toml_table(["mcp_servers", name], projected)).strip()
 
 
-def _render_toml_document(data: dict[str, object]) -> str:
-    root_lines: list[str] = []
-    table_blocks: list[str] = []
-    for key, value in data.items():
-        key_text = str(key).strip()
-        if not key_text:
-            continue
-        if isinstance(value, dict):
-            table_blocks.extend(_render_toml_table([key_text], value))
-            continue
-        rendered = _toml_value(value)
-        if rendered is not None:
-            root_lines.append(f"{_toml_table_name(key_text)} = {rendered}")
-    blocks: list[str] = []
-    if root_lines:
-        blocks.append("\n".join(root_lines))
-    blocks.extend(table_blocks)
-    return "\n\n".join(block for block in blocks if block.strip()).strip()
 
 
 _PLUGIN_ID_RE = re.compile(
@@ -1631,34 +1587,8 @@ def _assert_codex_worker_policy(
         )
 
 
-def _render_toml_table(path: list[str], table: dict[str, object]) -> list[str]:
-    scalar_lines: list[str] = []
-    nested_blocks: list[str] = []
-    for key, value in table.items():
-        key_text = str(key).strip()
-        if not key_text:
-            continue
-        if isinstance(value, dict):
-            nested_blocks.extend(_render_toml_table([*path, key_text], value))
-            continue
-        rendered = _toml_value(value)
-        if rendered is not None:
-            scalar_lines.append(f"{_toml_table_name(key_text)} = {rendered}")
-    blocks: list[str] = []
-    if scalar_lines:
-        table_name = ".".join(_toml_table_name(part) for part in path)
-        blocks.append("\n".join([f"[{table_name}]", *scalar_lines]))
-    blocks.extend(nested_blocks)
-    return blocks
 
 
-def _overlay_toml_tables(base: dict, current: dict) -> dict:
-    merged = dict(base)
-    for key, value in current.items():
-        previous = merged.get(key)
-        merged[key] = (_overlay_toml_tables(previous, value)
-                       if isinstance(previous, dict) and isinstance(value, dict) else value)
-    return merged
 
 
 def _sanitize_codex_source_config(config_text: str, preserve_names: set[str], append_names: set[str]) -> str:
@@ -2994,6 +2924,13 @@ class ProfiledWorkerRuntime:
         reader = getattr(runtime, "run_usage_observation", None)
         return dict(reader(worker, run_id)) if callable(reader) else self.run_usage(worker, run_id)
 
+    def read_run_process_log(self, worker: dict, run_id: str, **options) -> dict:
+        runtime = self._runtime_for_worker(worker)
+        reader = getattr(runtime, "read_run_process_log", None)
+        if not callable(reader):
+            raise FileNotFoundError("Retained process log is unavailable for this profile")
+        return reader(worker, run_id, **options)
+
     def run_telemetry(self, worker: dict, run_id: str) -> dict[str, object]:
         runtime = self._runtime_for_worker(worker)
         reader = getattr(runtime, "run_telemetry", None)
@@ -4078,6 +4015,17 @@ class BaseCliWorkerRuntime:
     def _run_root(self, worker_id: str, run_id: str) -> Path:
         return self._home_dir(worker_id) / ".glasshive-runs" / run_id
 
+    def read_run_process_log(self, worker: dict, run_id: str, *, attempt_id: str = "", **options) -> dict:
+        from .process_log import read_process_log
+
+        if self.runtime_name != "codex-cli":
+            raise FileNotFoundError("Retained process log is unavailable for this profile")
+        return read_process_log(
+            self._home_dir(str(worker["worker_id"])), run_id,
+            attempt_ref=self._run_attempt_ref(attempt_id) if attempt_id else "",
+            redact=_redact_text, **options,
+        )
+
     def _container_run_root(self, run_id: str) -> str:
         return f"{self.sandbox.home_mount}/.glasshive-runs/{run_id}"
 
@@ -4247,6 +4195,37 @@ class BaseCliWorkerRuntime:
             mode=0o600,
         )
         return str(target)
+
+    def _check_native_route_contract(self, worker: dict, command: list[str], env: dict[str, str]) -> None:
+        if self.runtime_name != "codex-cli":
+            return
+        from .native_route import (
+            codex_route_contract, validate_codex_route, NativeRouteContractError,
+            protected_provider_environment_keys,
+        )
+
+        contract = codex_route_contract()
+        if contract is None:
+            return
+        if (self._uses_parallel_clean_room(worker)
+                or worker.get("_glasshive_provider_account_bound")
+                or worker.get("_glasshive_inference_broker_bound")):
+            raise NativeRouteContractError("The service-owned route contract cannot replace selected account or broker authority")
+        if str(worker.get("model") or "") != contract["model"]:
+            raise NativeRouteContractError("The stored worker model differs from its native route contract")
+        if str(worker.get("execution_mode") or "docker") == "docker":
+            from .docker_sandbox import _safe_docker_exec_env
+            if contract["env_key"] not in _safe_docker_exec_env(env):
+                raise NativeRouteContractError("The native route credential has no supported Docker exec transport")
+        bundle = bootstrap_bundle_for(worker)
+        validate_codex_route(
+            contract, command=command, environment=env,
+            bootstrap_environment=bootstrap_env_for(worker, self.runtime_name),
+            bootstrap_settings=str(bundle.get("codex_config_append") or ""),
+            execution_mode=str(worker.get("execution_mode") or "docker"),
+            stateless=self._provider_session_is_stateless(worker),
+            protected_provider_keys=protected_provider_environment_keys(),
+        )
 
     def _native_provider_authority_receipt(
         self,
@@ -5765,7 +5744,7 @@ class BaseCliWorkerRuntime:
 
     def _container_env(self, *keys: str) -> dict[str, str]:
         env: dict[str, str] = {
-            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH": "/home/seluser/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "SHELL": "/bin/bash",
             "USER": "worker",
             "LOGNAME": "worker",
@@ -6279,6 +6258,7 @@ class BaseCliWorkerRuntime:
             env,
             runtime_name=self.runtime_name,
         )
+        self._check_native_route_contract(worker_for_run, command, env)
         authority_receipt = self._native_provider_authority_receipt(
             worker_for_run,
             command=command,
@@ -6461,7 +6441,12 @@ class BaseCliWorkerRuntime:
         host_script.write_text(script + "\n")
         host_script.chmod(0o755)
         container_writable_paths = [container_run_root]
-        if authority_receipt is not None:
+        if not clean_room:
+            # Refresh atomically replaces generated configuration in both
+            # managed roots. Reapply the existing worker ACL/ownership policy
+            # before launch, excluding every declared immutable input.
+            container_writable_paths.extend([self.sandbox.home_mount, self.sandbox.workspace_mount])
+        elif authority_receipt is not None:
             authority_directory = (
                 ".glasshive" if self.runtime_name == "claude-code" else ".codex"
             )
@@ -9319,6 +9304,10 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def _parse_output(self, worker: dict, stdout: str, stderr: str, info: RuntimeInfo) -> tuple[str | None, str]:
         session_key = self._read_provider_session_key(worker) or info.session_key
+        from .native_route import codex_route_contract, require_completed_codex_turn
+        contract = codex_route_contract()
+        if contract is not None and contract["require_completed_turn"]:
+            require_completed_codex_turn(stdout)
         output_parts: list[str] = []
         for line in stdout.splitlines():
             line = line.strip()
@@ -9560,13 +9549,7 @@ def _with_claude_code_owner_denies(command: list[str]) -> list[str]:
     return command
 
 
-_CLAUDE_INSTANCE_TRANSPORT_ENV = frozenset({
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-    "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE", "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    "CLAUDE_CODE_CLIENT_CERT", "CLAUDE_CODE_CLIENT_KEY", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
-    "SSLKEYLOGFILE",
-})
+from .native_route import NATIVE_TRANSPORT_ENV_KEYS as _CLAUDE_INSTANCE_TRANSPORT_ENV
 
 
 def _claude_instance_route_conflicts(environment: dict) -> bool:
@@ -13088,6 +13071,9 @@ raise SystemExit(exit_code)
                 "native_private_project": str(private_project)}
 
     def _materialize_workspace(self, worker: dict, workspace: Path) -> None:
+        from .read_only_workspace import declared_paths
+        if declared_paths(bootstrap_bundle_for(worker)):
+            raise RuntimeErrorBase("Declared read-only workspace inputs require Docker execution")
         root = self._host_workspace_root(worker)
         root.mkdir(parents=True, exist_ok=True)
         if not os.access(root, os.W_OK):
@@ -14900,6 +14886,7 @@ raise SystemExit(exit_code)
         worker = {**worker, "workspace_dir": info.workspace_dir}
         command, env = self._build_command(worker, instruction, info)
         native_image_bundle = self._bootstrap_bundle_for_worker(worker)
+        self._check_native_route_contract(worker, command, env)
         native_output_capabilities = native_image_bundle.get("provider_capabilities")
         native_image_scope = {
             "run_id": effective_run_id, "worker_id": worker["worker_id"],
@@ -15228,6 +15215,7 @@ raise SystemExit(exit_code)
         }
         native_instruction = self._host_mission_instruction(worker, instruction, native_image_scope)
         command, env = self._build_command(worker, native_instruction, info)
+        self._check_native_route_contract(worker, command, env)
         stdin_text = self._command_stdin_text(worker, native_instruction, info)
         env["GLASSHIVE_RUN_ID"] = effective_run_id
         constraint_ledger, constraint_ledger_path = _write_constraint_ledger_for_run(
@@ -16795,7 +16783,9 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
                 command.extend(["-m", model])
         if not restricted:
             self._append_codex_user_config_policy(command, worker)
-        if validated_codex_broker_projection(worker) is not None:
+        from .native_route import codex_route_contract
+        route_contract = codex_route_contract()
+        if validated_codex_broker_projection(worker) is not None or route_contract is not None:
             self._append_codex_compatible_provider_config(
                 command,
                 worker,
@@ -16868,6 +16858,10 @@ class HostCodexCliRuntime(CodexNativeWarmMixin, HostNativeCliMixin, CodexCliRunt
             command.append(existing_session)
         command.append("-")
         env = self._host_env(worker)
+        if route_contract is not None and not worker.get("_glasshive_provider_account_bound"):
+            selected_key = route_contract["env_key"]
+            if os.environ.get(selected_key):
+                env[selected_key] = os.environ[selected_key]
         codex_home = self._host_codex_home(worker)
         if conversation_mode or (codex_home / "config.toml").exists():
             env["CODEX_HOME"] = str(codex_home)

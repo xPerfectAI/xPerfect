@@ -477,8 +477,8 @@ uv run python -m workers_projects_runtime.mcp_server --transport streamable-http
 ## OpenClaw Runtime Release Contract
 
 xPerfect's workstation image installs OpenClaw `2026.7.1-2` through the committed
-`runtime_locks/openclaw/package-lock.json`, not through a mutable global package spec. The reviewed
-lock pins the npm tarball integrity and applies the production `fast-uri@3.1.3` override. Image
+`src/workers_projects_runtime/resources/openclaw/package-lock.json`, included in the installed
+package. The reviewed lock pins the npm tarball integrity and applies the production `fast-uri@3.1.4` override. Image
 generation validates the lock checksum before Docker starts, uses `npm ci --omit=dev`, verifies the
 installed OpenClaw and `fast-uri` versions, and then exposes the locked CLI.
 

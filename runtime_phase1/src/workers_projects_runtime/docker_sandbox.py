@@ -34,6 +34,13 @@ from .codex_plugins import (
     OPENAI_PLUGIN_MARKETPLACE_ORIGIN,
 )
 from .mission_provider_accounts import apply_bound_provider_account_environment
+from . import provider_network
+from .read_only_workspace import (
+    POLICY_LABEL as READ_ONLY_WORKSPACE_POLICY_LABEL,
+    declared_paths as read_only_workspace_paths,
+    policy_fingerprint as read_only_workspace_fingerprint,
+    prepare_paths as prepare_read_only_workspace_paths,
+)
 from .openclaw_release import (
     OPENCLAW_RUNTIME_FAST_URI_VERSION,
     OPENCLAW_RUNTIME_LOCK_SHA256,
@@ -452,7 +459,7 @@ AI_WORKER_BASE_IMAGE = os.environ.get(
 # curl/libcurl build already present in the pinned Selenium base image.
 AI_WORKER_APT_SNAPSHOT = "20260801T000000Z"
 AI_WORKER_PYTHON_LOCK_PATH = (
-    Path(__file__).resolve().parents[2] / "workstation-requirements.lock"
+    Path(__file__).resolve().parent / "resources" / "workstation-requirements.lock"
 )
 AI_WORKER_PYTHON_LOCK_SHA256 = hashlib.sha256(
     AI_WORKER_PYTHON_LOCK_PATH.read_bytes()
@@ -807,6 +814,10 @@ class SandboxInfo:
 
     bind_mount_options: tuple[tuple[str, str, bool, str, str], ...] = ()
 
+    read_only_workspace_policy: str = ""
+
+    provider_only_generation: str = ""
+
     tmpfs_targets: tuple[str, ...] = ()
 
     tmpfs_options: tuple[tuple[str, tuple[str, ...]], ...] = ()
@@ -943,6 +954,7 @@ class DockerSandboxManager:
         self._managed_image = not bool(str(os.environ.get("WPR_SANDBOX_IMAGE") or "").strip())
         self.base_image = AI_WORKER_BASE_IMAGE
         self.user = os.environ.get("WPR_SANDBOX_USER", "seluser")
+        self._image_user_identities: dict[tuple[str, str], tuple[int, int, tuple[int, ...]]] = {}
         self.home_mount = os.environ.get("WPR_SANDBOX_HOME", "/workspace/.wpr-home")
         self.workspace_mount = os.environ.get("WPR_SANDBOX_WORKSPACE", "/workspace/project")
         self.service_tmp_dir = os.environ.get("WPR_SANDBOX_SERVICE_TMPDIR", "/tmp").strip() or "/tmp"
@@ -1016,6 +1028,14 @@ class DockerSandboxManager:
             bootstrap_bundle_for(worker).get("execution_policy") or ""
         ).strip()
         clean_room = execution_policy == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
+        provider_only = provider_network.configured_proxy() is not None
+        if clean_room and provider_only:
+            raise ValueError("Provider-only networking cannot replace the parallel clean-room policy")
+        if provider_only:
+            provider_network.validate_worker(worker)
+        read_only_paths = read_only_workspace_paths(bootstrap_bundle_for(worker))
+        if clean_room and read_only_paths:
+            raise ValueError("Additional read-only workspace mounts are not part of the parallel clean-room policy")
         paths = self._paths(worker["worker_id"])
         container_paths: dict[str, Path | int] = dict(paths)
         resource_memory_bytes = self._resource_memory_bytes_from_worker(worker)
@@ -1029,6 +1049,13 @@ class DockerSandboxManager:
         needs_path_repair = False
         clean_room_image_prepared = False
         clean_room_container_id = ""
+
+        if read_only_paths:
+            inspection = self.inspect_fresh(worker["worker_id"], require_configured_image=False)
+            if inspection.status == "unavailable":
+                raise RuntimeError("Read-only workspace mount inspection is unavailable")
+            if inspection.sandbox is not None:
+                self._require_read_only_workspace_mounts(worker, inspection.sandbox)
 
         if clean_room:
             # First-run image preparation may build the configured workstation,
@@ -1181,7 +1208,36 @@ class DockerSandboxManager:
             if boundary_sandbox is not None:
                 sandbox = boundary_sandbox
 
-        if runtime_name == "codex-cli" and not clean_room:
+        provider_container_id = ""
+        seed_provider_generation = True
+        if provider_only:
+            # Reserve an inert, freshly inspected generation before any bootstrap
+            # authority is written into its home. Running generations are immutable;
+            # a changed bundle requires a new worker rather than live restaging.
+            self._ensure_image()
+            clean_room_image_prepared = True
+            self._ensure_provider_only_network(container_name)
+            inspection = self.inspect_fresh(worker["worker_id"])
+            if inspection.status == "confirmed_absent":
+                for relative in read_only_paths:
+                    (paths["workspace_dir"] / relative).mkdir(mode=0o700, exist_ok=True)
+                self._create_container(container_name, container_paths, worker=worker)
+                inspection = self.inspect_fresh(worker["worker_id"])
+                needs_path_repair = True
+            if inspection.status != "present" or inspection.sandbox is None:
+                raise RuntimeError("Provider-only sandbox reservation is unavailable")
+            sandbox = inspection.sandbox
+            self._require_provider_only_sandbox(worker, sandbox)
+            provider_container_id = str(sandbox.container_id or "")
+            seed_provider_generation = sandbox.state == "created"
+            self._ensure_provider_only_network(container_name)
+            confirmed = self.inspect_fresh(worker["worker_id"])
+            if confirmed.status != "present" or confirmed.sandbox is None:
+                raise RuntimeError("Provider-only sandbox boundary is unavailable")
+            self._require_provider_only_sandbox(worker, confirmed.sandbox, expected_id=provider_container_id)
+            sandbox = confirmed.sandbox
+
+        if runtime_name == "codex-cli" and not clean_room and not provider_only:
             private_dir = paths["worker_root"] / ".private"
             if self._provider_account_mount(worker) is None:
                 self._restore_workspace_codex_auth(paths["home_dir"], private_dir)
@@ -1190,13 +1246,14 @@ class DockerSandboxManager:
                     paths["home_dir"], private_dir
                 )
 
-        self._seed_bootstrap(
-            paths["home_dir"],
-            paths["workspace_dir"],
-            runtime_name,
-            worker,
-            trusted_state_dir=paths["state_dir"],
-        )
+        if not provider_only or seed_provider_generation:
+            self._seed_bootstrap(
+                paths["home_dir"],
+                paths["workspace_dir"],
+                runtime_name,
+                worker,
+                trusted_state_dir=paths["state_dir"],
+            )
         if clean_room:
             clean_room_container_id = str(sandbox.container_id or "").strip()
             post_seed_inspection = self.inspect_fresh(worker["worker_id"])
@@ -1224,7 +1281,14 @@ class DockerSandboxManager:
         ):
             self._ensure_worker_permissions_migrated(paths["worker_root"])
         if not clean_room:
-            sandbox = self.inspect(worker["worker_id"])
+            prepare_read_only_workspace_paths(self.runtime_root, paths["workspace_dir"], read_only_paths)
+            sandbox = (self.inspect_fresh(worker["worker_id"]).sandbox if provider_only else self.inspect(worker["worker_id"]))
+            if provider_only:
+                if sandbox is None:
+                    raise RuntimeError("Provider-only sandbox vanished after bootstrap")
+                self._require_provider_only_sandbox(worker, sandbox, expected_id=provider_container_id)
+            if sandbox is not None:
+                self._require_read_only_workspace_mounts(worker, sandbox)
         if (
             sandbox is not None
             and not clean_room
@@ -1232,7 +1296,7 @@ class DockerSandboxManager:
                 self._sandbox_needs_chromium_userns_recreate(sandbox)
                 or self._sandbox_needs_network_recreate(worker["worker_id"], sandbox)
                 or self._sandbox_needs_provider_mount_recreate(worker, sandbox)
-                or self._sandbox_needs_desktop_auth_recreate(worker["worker_id"], sandbox)
+                or (not provider_only and self._sandbox_needs_desktop_auth_recreate(worker["worker_id"], sandbox))
             )
             and self._worker_state_allows_substrate_recreate(worker)
         ):
@@ -1272,12 +1336,22 @@ class DockerSandboxManager:
                 needs_path_repair = True
         if sandbox is None:
             raise RuntimeError("Failed to create worker sandbox")
+        read_only_container_id = ""
+        if read_only_paths:
+            inspection = self.inspect_fresh(worker["worker_id"], require_configured_image=False)
+            if inspection.status != "present" or inspection.sandbox is None:
+                raise RuntimeError("Read-only workspace sandbox generation could not be inspected")
+            sandbox = inspection.sandbox
+            self._require_read_only_workspace_mounts(worker, sandbox)
+            read_only_container_id = str(sandbox.container_id or "")
+            if not read_only_container_id:
+                raise RuntimeError("Read-only workspace sandbox has no exact container identity")
         if sandbox.state == "paused" and start_if_paused:
             self._invalidate_inspect_cache(worker["worker_id"])
             self._docker(
                 [
                     "unpause",
-                    clean_room_container_id if clean_room else container_name,
+                    clean_room_container_id if clean_room else provider_container_id or read_only_container_id or container_name,
                 ]
             )
             self._invalidate_inspect_cache(worker["worker_id"])
@@ -1289,7 +1363,7 @@ class DockerSandboxManager:
         elif sandbox.state in {"created", "exited", "dead"}:
             self._invalidate_inspect_cache(worker["worker_id"])
             self._docker(
-                ["start", clean_room_container_id if clean_room else container_name]
+                ["start", clean_room_container_id if clean_room else provider_container_id or read_only_container_id or container_name]
             )
             self._invalidate_inspect_cache(worker["worker_id"])
             sandbox = (
@@ -1309,6 +1383,20 @@ class DockerSandboxManager:
             )
         if sandbox is None:
             raise RuntimeError("Failed to start worker sandbox")
+        if provider_only:
+            self._ensure_provider_only_network(container_name)
+            inspection = self.inspect_fresh(worker["worker_id"])
+            if inspection.status != "present" or inspection.sandbox is None:
+                raise RuntimeError("Provider-only sandbox startup is unavailable")
+            self._require_provider_only_sandbox(worker, inspection.sandbox, expected_id=provider_container_id)
+            sandbox = inspection.sandbox
+        if read_only_paths:
+            inspection = self.inspect_fresh(worker["worker_id"], require_configured_image=False)
+            if (inspection.status != "present" or inspection.sandbox is None
+                    or inspection.sandbox.container_id != read_only_container_id):
+                raise RuntimeError("Read-only workspace sandbox generation changed during startup")
+            sandbox = inspection.sandbox
+            self._require_read_only_workspace_mounts(worker, sandbox)
         if (
             private_acl_required
             or needs_path_repair
@@ -1317,15 +1405,18 @@ class DockerSandboxManager:
                 and self._env_flag("WPR_REPAIR_RUNNING_CONTAINER_ROOTS", False)
             )
         ):
-            self._ensure_container_writable_paths(sandbox.container_name, self._default_writable_container_paths())
+            self._ensure_container_writable_paths(
+                sandbox.container_name, self._default_writable_container_paths(),
+                **({"read_only_paths": read_only_paths} if read_only_paths else {}),
+            )
         if not clean_room and self._provider_account_mount(worker) is not None:
             self._grant_provider_account_access(sandbox.container_name, worker)
         if not clean_room:
             self._repair_provider_temp_ownership(sandbox.container_name)
         self._harden_secret_runtime_files(sandbox.container_name)
-        if needs_idle_prime:
+        if needs_idle_prime and not provider_only:
             self._set_plain_background(sandbox.container_name)
-        if needs_idle_prime and self._env_flag("WPR_IDLE_DESKTOP_PRIME_BROWSER", True):
+        if needs_idle_prime and not provider_only and self._env_flag("WPR_IDLE_DESKTOP_PRIME_BROWSER", True):
             try:
                 self._prime_idle_desktop(sandbox.container_name)
             except Exception as exc:
@@ -1489,8 +1580,8 @@ class DockerSandboxManager:
         ):
             return None, "docker_image_inspect_malformed"
         if (
-            self.user != "seluser"
-            or runtime_user != self.user
+            self.user not in {"seluser", "1200:1201"}
+            or runtime_user not in {"seluser", "1200:1201"}
             or _docker_user_is_root(runtime_user)
             or _docker_user_is_root(self.user)
         ):
@@ -1498,7 +1589,7 @@ class DockerSandboxManager:
         return (
             ConfiguredSandboxImage(
                 image_id=image_id,
-                runtime_user=runtime_user,
+                runtime_user=self._numeric_user(),
                 entrypoint=entrypoint,
                 command=command,
                 environment=environment,
@@ -1612,8 +1703,9 @@ class DockerSandboxManager:
             isinstance(mount, dict)
             and isinstance(mount.get("Type"), str)
             and bool(str(mount.get("Type") or ""))
-            and isinstance(mount.get("Source"), str)
-            and bool(str(mount.get("Source") or ""))
+            and (mount.get("Type") == "tmpfs" or (
+                isinstance(mount.get("Source"), str) and bool(mount.get("Source"))
+            ))
             and isinstance(mount.get("Destination"), str)
             and bool(str(mount.get("Destination") or ""))
             and (
@@ -1628,6 +1720,25 @@ class DockerSandboxManager:
         )
         if not isinstance(mounts, list):
             mounts = []
+        requested_mounts = host_config.get("Mounts") or []
+        requested_mounts_valid = isinstance(requested_mounts, list) and all(
+            isinstance(mount, dict) and isinstance(mount.get("Type"), str) and mount.get("Type")
+            and isinstance(mount.get("Target"), str) and mount.get("Target")
+            and (mount.get("Type") == "tmpfs" or isinstance(mount.get("Source"), str) and mount.get("Source"))
+            for mount in requested_mounts
+        )
+        if not requested_mounts_valid:
+            requested_mounts = []
+        mount_records = [
+            (str(mount.get("Type") or ""), str(mount.get("Source") or ""), str(mount.get("Destination") or ""))
+            for mount in mounts if isinstance(mount, dict) and mount.get("Type") and mount.get("Destination")
+        ]
+        for mount in requested_mounts:
+            record = (mount["Type"], str(mount.get("Source") or ""), mount["Target"])
+            if record not in mount_records:
+                mount_records.append(record)
+        unique_mount_targets = (len({mount.get("Destination") for mount in mounts if isinstance(mount, dict)}) == len(mounts)
+                                and len({mount["Target"] for mount in requested_mounts}) == len(requested_mounts))
         tmpfs = host_config.get("Tmpfs") or {}
         tmpfs_valid, tmpfs_options = _docker_tmpfs_records(tmpfs)
         image_reference = config.get("Image")
@@ -1662,6 +1773,8 @@ class DockerSandboxManager:
             or not environment_valid
             or not ports_valid
             or not mounts_valid
+            or not requested_mounts_valid
+            or not unique_mount_targets
             or not tmpfs_valid
         ):
             return None
@@ -1748,20 +1861,7 @@ class DockerSandboxManager:
                     and mount.get("Destination")
                 )
             ),
-            mount_records=tuple(
-                sorted(
-                    (
-                        str(mount.get("Type") or ""),
-                        str(mount.get("Source") or ""),
-                        str(mount.get("Destination") or ""),
-                    )
-                    for mount in mounts
-                    if isinstance(mount, dict)
-                    and mount.get("Type")
-                    and mount.get("Source")
-                    and mount.get("Destination")
-                )
-            ),
+            mount_records=tuple(sorted(mount_records)),
             bind_mount_options=tuple(
                 sorted(
                     (
@@ -1776,6 +1876,8 @@ class DockerSandboxManager:
                     and str(mount.get("Type") or "") == "bind"
                 )
             ),
+            read_only_workspace_policy=str(labels.get(READ_ONLY_WORKSPACE_POLICY_LABEL) or "") if isinstance(labels, dict) else "",
+            provider_only_generation=str(labels.get(provider_network.POLICY_LABEL) or "") if isinstance(labels, dict) else "",
             tmpfs_targets=tuple(
                 sorted(str(target) for target in tmpfs)
                 if isinstance(tmpfs, dict)
@@ -2101,7 +2203,7 @@ class DockerSandboxManager:
             "exec",
             "-i",
             "-u",
-            self.user,
+            self._numeric_user(),
             "-w",
             self.workspace_mount,
             "-e",
@@ -2143,7 +2245,7 @@ class DockerSandboxManager:
             "exec",
             "-it",
             "-u",
-            self.user,
+            self._numeric_user(),
             "-w",
             self.workspace_mount,
             "-e",
@@ -2297,12 +2399,19 @@ screen -ls | awk -v target="$target" '
         if not container_paths:
             return
         resolved_worker = worker or {"worker_id": worker_id}
-        sandbox = (
+        read_only_paths = read_only_workspace_paths(bootstrap_bundle_for(resolved_worker))
+        sandbox = self.ensure_ready(resolved_worker, runtime_name=runtime_name) if read_only_paths else (
             self.fast_sandbox_from_worker(resolved_worker)
             or self.inspect(worker_id)
             or self.ensure_ready(resolved_worker, runtime_name=runtime_name)
         )
-        self._ensure_container_writable_paths(sandbox.container_name, container_paths)
+        self._ensure_container_writable_paths(
+            sandbox.container_name, container_paths,
+            **({"read_only_paths": read_only_paths} if read_only_paths else {}),
+        )
+        if self.home_mount in container_paths:
+            # Whole-home ACL repair must retain the tighter secret-file policy.
+            self._harden_secret_runtime_files(sandbox.container_name)
 
     def harden_worker_host_tree(self, worker_id: str) -> None:
         """Reassert host-side owner-only modes without following worker links."""
@@ -2903,6 +3012,8 @@ screen -ls | awk -v target="$target" '
         )
 
     def _sandbox_needs_chromium_userns_recreate(self, sandbox: SandboxInfo) -> bool:
+        if provider_network.configured_proxy() is not None:
+            return False
         if not self._env_flag("WPR_SANDBOX_ALLOW_CHROMIUM_USERNS", True):
             return False
         security_options = getattr(sandbox, "security_options", None)
@@ -2911,6 +3022,8 @@ screen -ls | awk -v target="$target" '
         return self.chromium_userns_security_opt not in security_options
 
     def _network_name_for_container(self, container_name: str) -> str:
+        if provider_network.configured_proxy() is not None:
+            return provider_network.network_name(self.runtime_root, container_name)
         clean = "".join(
             character if character.isalnum() or character in {"-", "_"} else "-"
             for character in str(container_name or "")
@@ -3238,7 +3351,7 @@ screen -ls | awk -v target="$target" '
         runtime_home = Path(str(runtime_home_value or "").strip())
         quoted_mount = shlex.quote(str(mount_target))
         quoted_home = shlex.quote(str(runtime_home))
-        container_user_name = self.user.split(":", 1)[0] or self.user
+        container_user_name = str(self._worker_identity()[0])
         container_user = shlex.quote(container_user_name)
         if is_codex_home:
             expected_codex_home = Path(self.home_mount) / ".codex"
@@ -3258,7 +3371,7 @@ screen -ls | awk -v target="$target" '
                     str(mount_target),
                     "codex",
                     self.home_mount,
-                    self.user,
+                    self._numeric_user(),
                 ],
                 cwd=self.workspace_mount,
                 user="root",
@@ -3408,6 +3521,9 @@ screen -ls | awk -v target="$target" '
     def fast_sandbox_from_worker(self, worker: dict | None) -> SandboxInfo | None:
         if not worker or not self._worker_state_allows_fast_exec(worker):
             return None
+        if provider_network.configured_proxy() is not None or read_only_workspace_paths(bootstrap_bundle_for(worker)):
+            # A cached container ID cannot attest mount or network policy.
+            return None
         worker_id = str(worker.get("worker_id") or "").strip()
         if not worker_id:
             return None
@@ -3418,6 +3534,8 @@ screen -ls | awk -v target="$target" '
         if not str(worker.get("container_id") or "").strip():
             return None
         sandbox = self.inspect(worker_id)
+        if sandbox is not None and getattr(sandbox, "read_only_workspace_policy", ""):
+            return None
         if (
             sandbox is not None
             and (
@@ -3428,6 +3546,26 @@ screen -ls | awk -v target="$target" '
         ):
             return None
         return sandbox
+
+    def _require_read_only_workspace_mounts(self, worker: dict, sandbox: SandboxInfo) -> None:
+        paths = read_only_workspace_paths(bootstrap_bundle_for(worker))
+        if getattr(sandbox, "read_only_workspace_policy", "") != read_only_workspace_fingerprint(paths):
+            raise RuntimeError("Read-only workspace policy changed; create a fresh worker")
+        if not paths:
+            return
+        if (sandbox.privileged is not False or _docker_user_is_root(sandbox.runtime_user)
+                or any(capability.upper().removeprefix("CAP_") in {"ALL", "SYS_ADMIN"}
+                       for capability in (sandbox.cap_add or ()))):
+            raise RuntimeError("Read-only workspace mounts require an unprivileged non-root sandbox")
+        workspace = self._paths(worker["worker_id"])["workspace_dir"]
+        expected = {f"{self.workspace_mount}/{relative}": str(workspace / relative) for relative in paths}
+        observed = {destination: (source, writable) for source, destination, writable, _, _ in sandbox.bind_mount_options}
+        for destination, source in expected.items():
+            if observed.get(destination) != (source, False):
+                raise RuntimeError("Read-only workspace bind mount could not be attested")
+            targets = {target for _, _, target in sandbox.mount_records} | set(sandbox.tmpfs_targets)
+            if any(target.startswith(destination + "/") for target in targets):
+                raise RuntimeError("Read-only workspace mount contains an unexpected nested mount")
 
     def paths(self, worker_id: str) -> dict[str, Path]:
         worker_root = self.runtime_root / "workers" / worker_id
@@ -3633,7 +3771,9 @@ screen -ls | awk -v target="$target" '
                         f"RUN printf '%s\\n' {extension_check_script_lines} > /usr/local/bin/glasshive-browser-extension-check && chmod +x /usr/local/bin/glasshive-browser-extension-check && glasshive-browser-extension-check",
                         f"RUN printf '%s\\n' {native_host_bootstrap_script_lines} > /usr/local/bin/glasshive-browser-native-host-bootstrap && chmod +x /usr/local/bin/glasshive-browser-native-host-bootstrap",
                         "RUN mkdir -p /workspace/project /workspace/.wpr-home",
-                        "USER seluser",
+                        "RUN test \"$(id -u seluser)\" = 1200 && test \"$(id -g seluser)\" = 1201 && chown 0:0 /etc/passwd /etc/group && chmod 0644 /etc/passwd /etc/group && chown -R 0:0 /opt/bin && chmod -R go-w /opt/bin",
+                        "LABEL com.glasshive.workstation.worker-identity=numeric-v1",
+                        "USER 1200:1201",
                         "WORKDIR /workspace/project",
                         "ENV SHELL=/bin/bash",
                         "ENV DISPLAY=:99.0",
@@ -3666,6 +3806,7 @@ screen -ls | awk -v target="$target" '
             "com.glasshive.workstation.openclaw-lock-sha256": OPENCLAW_RUNTIME_LOCK_SHA256,
             "com.glasshive.workstation.python-lock-sha256": AI_WORKER_PYTHON_LOCK_SHA256,
             "com.glasshive.workstation.provider-account-acl": "required-v1",
+            "com.glasshive.workstation.worker-identity": "numeric-v1",
         }
 
     def _image_has_reviewed_provenance(self, raw_inspect: str) -> bool:
@@ -3697,12 +3838,17 @@ screen -ls | awk -v target="$target" '
             if raw_resource_memory is not None:
                 resource_memory_bytes = int(raw_resource_memory)
         clean_room = execution_policy == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
+        provider_only = provider_network.configured_proxy() is not None
+        if provider_only and (clean_room or worker is None or self.user not in {"seluser", "1200:1201"}):
+            raise RuntimeError("Provider-only execution requires an ordinary non-root worker")
+        if provider_only:
+            provider_network.validate_worker(worker)
         if execution_policy and not clean_room:
             raise RuntimeError(
                 f"Unsupported Docker execution policy: {execution_policy}"
             )
         if clean_room and (
-            self.user != "seluser" or _docker_user_is_root(self.user)
+            self.user not in {"seluser", "1200:1201"} or _docker_user_is_root(self.user)
         ):
             raise RuntimeError(
                 "Parallel clean-room execution requires the canonical "
@@ -3729,11 +3875,15 @@ screen -ls | awk -v target="$target" '
                     container_name
                 ),
             }
-        network_name = None if clean_room else self._ensure_isolated_network(container_name)
+        network_name = None if clean_room else (self._ensure_provider_only_network(container_name) if provider_only else self._ensure_isolated_network(container_name))
         provider_mount = None if clean_room else self._provider_account_mount(worker)
+        read_only_paths = read_only_workspace_paths(bootstrap_bundle_for(worker or {}))
+        if clean_room and read_only_paths:
+            raise ValueError("Additional read-only workspace mounts are not part of the parallel clean-room policy")
+        prepare_read_only_workspace_paths(self.runtime_root, paths["workspace_dir"], read_only_paths)
         desktop_credentials: dict[str, str] | None = None
         secret_env_path: Path | None = None
-        if not clean_room:
+        if not clean_room and not provider_only:
             worker_id = str((worker or {}).get("worker_id") or container_name).strip()
             desktop_credentials = self._desktop_credentials(worker_id, paths=paths)  # type: ignore[arg-type]
             secret_dir = paths.get("state_dir") or paths["home_dir"].parent  # type: ignore[union-attr]
@@ -3754,7 +3904,7 @@ screen -ls | awk -v target="$target" '
             if os.name != "nt":
                 secret_env_path.chmod(0o600)
         command = [
-            *(["create"] if clean_room else ["run", "-d"]),
+            *(["create"] if clean_room or provider_only or read_only_paths else ["run", "-d"]),
             "--init",
             "--name",
             container_name,
@@ -3762,6 +3912,10 @@ screen -ls | awk -v target="$target" '
             container_name,
             "--workdir",
             self.workspace_mount,
+            "--user",
+            self._numeric_user(),
+            *([part for group in self._worker_identity()[2] for part in ("--group-add", str(group))]
+              if not clean_room and not provider_only else []),
             "-e",
             f"HOME={self.home_mount}",
             "-e",
@@ -3800,8 +3954,6 @@ screen -ls | awk -v target="$target" '
                         f"{clean_room_configuration['provider_proxy_hostname']},"
                         f"{PARALLEL_CLEAN_ROOM_BROKER_ALIAS},localhost,127.0.0.1"
                     ),
-                    "--user",
-                    self.user,
                     "--ipc=private",
                     "--cgroupns=private",
                     "--network",
@@ -3826,13 +3978,19 @@ screen -ls | awk -v target="$target" '
                 else [
                     "--network",
                     str(network_name),
-                    *self._host_gateway_args(),
-                    *self._chromium_sandbox_args(),
+                    *(
+                        ["--ipc=private", "--cgroupns=private",
+                         "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                         *[part for cap in sorted(provider_network.MAINTENANCE_CAPABILITIES) for part in ("--cap-add", cap)],
+                         "--label", f"{provider_network.POLICY_LABEL}={self._provider_only_generation(worker or {})}",
+                         "--entrypoint", provider_network.ENTRYPOINT[0]]
+                        if provider_only else [*self._host_gateway_args(), *self._chromium_sandbox_args()]
+                    ),
                 ]
             ),
             *(
                 []
-                if clean_room
+                if clean_room or provider_only
                 else [
                     "-p",
                     f"127.0.0.1::{self.novnc_container_port}",
@@ -3868,12 +4026,18 @@ screen -ls | awk -v target="$target" '
             self.image,
         ]
         try:
+            if read_only_paths:
+                command[-1:-1] = ["--label", f"{READ_ONLY_WORKSPACE_POLICY_LABEL}={read_only_workspace_fingerprint(read_only_paths)}"]
+                for relative in read_only_paths:
+                    command[-1:-1] = ["--mount", f"type=bind,src={paths['workspace_dir'] / relative},dst={self.workspace_mount}/{relative},readonly,bind-propagation=rprivate"]
             if provider_mount is not None:
                 command[-1:-1] = ["-v", f"{provider_mount[0]}:{provider_mount[1]}"]
             self._insert_resource_limits(
                 command,
                 resource_memory_bytes=resource_memory_bytes,
             )
+            if provider_only:
+                command.extend(provider_network.COMMAND)
             result = self._docker(command, check=False, capture_output=True)
         finally:
             if secret_env_path is not None:
@@ -4089,6 +4253,56 @@ screen -ls | awk -v target="$target" '
                 if stream is not None:
                     stream.close()
 
+    def _worker_identity(self, selected: str | None = None) -> tuple[int, int, tuple[int, ...]]:
+        """Resolve identities from configuration or an immutable fresh image.
+
+        Never ask the running worker's mutable account database who should run
+        a control-plane command. The canonical base has a pinned uid and gid.
+        """
+        selected = selected or self.user
+        if selected == "seluser":
+            return 1200, 1201, (27,)
+        if selected in {"root", "0", "0:0"}:
+            return 0, 0, ()
+        if re.fullmatch(r"[0-9]+:[0-9]+", selected):
+            uid, gid = (int(value) for value in selected.split(":"))
+            if max(uid, gid) >= 2**32 - 1:
+                raise ValueError("Configured worker numeric identity is invalid")
+            return uid, gid, ()
+        inspected = self._docker(["image", "inspect", self.image], check=False, capture_output=True, timeout_sec=5)
+        try:
+            image_id = json.loads(inspected.stdout)[0]["Id"]
+        except (ValueError, IndexError, KeyError, TypeError) as error:
+            raise RuntimeError("Configured worker identity image is unavailable") from error
+        if inspected.returncode or not isinstance(image_id, str) or not _DOCKER_IMAGE_ID.fullmatch(image_id):
+            raise RuntimeError("Configured worker identity image is unavailable")
+        key = image_id, selected
+        if key not in self._image_user_identities:
+            # No worker mounts, credentials, network or capabilities are present.
+            source = (
+                "import grp,json,os,pwd,sys;user,sep,group=sys.argv[1].partition(':');"
+                "account=pwd.getpwuid(int(user)) if user.isdecimal() else pwd.getpwnam(user);"
+                "gid=(int(group) if group.isdecimal() else grp.getgrnam(group).gr_gid) if sep else account.pw_gid;"
+                "print(json.dumps([account.pw_uid,gid,[] if sep else sorted(set(os.getgrouplist(account.pw_name,gid))-{gid})]))"
+            )
+            result = self._docker(["run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                "--memory", "128m", "--pids-limit", "32",
+                "--security-opt", "no-new-privileges:true", "--user", "0:0", "--entrypoint", "/usr/bin/python3",
+                image_id, "-I", "-c", source, selected], check=False, capture_output=True, timeout_sec=20)
+            try:
+                uid, gid, groups = json.loads(result.stdout)
+                if (result.returncode or not isinstance(groups, list)
+                        or any(type(value) is not int or not 0 <= value < 2**32 - 1 for value in (uid, gid, *groups))):
+                    raise ValueError("Invalid image identity")
+            except (ValueError, TypeError) as error:
+                raise RuntimeError("Configured worker identity cannot be resolved from its image") from error
+            self._image_user_identities[key] = uid, gid, tuple(groups)
+        return self._image_user_identities[key]
+
+    def _numeric_user(self, selected: str | None = None) -> str:
+        uid, gid, _ = self._worker_identity(selected)
+        return f"{uid}:{gid}"
+
     def _docker_exec(
         self,
         container_name: str,
@@ -4103,6 +4317,20 @@ screen -ls | awk -v target="$target" '
         max_runtime_seconds: float | None = None,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        numeric_user = self._numeric_user(user)
+        if numeric_user.split(":", 1)[0] == "0":
+            env = {**(env or {}), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                   "BASH_ENV": "", "ENV": "", "LD_PRELOAD": "", "LD_LIBRARY_PATH": "", "LD_AUDIT": "",
+                   "PYTHONPATH": "", "PYTHONHOME": "", "PYTHONSAFEPATH": "1", "PYTHONNOUSERSITE": "1"}
+            command = list(command)
+            if command and command[0] in {"bash", "/bin/bash", "/usr/bin/bash"}:
+                command[0] = "/bin/bash"
+                if len(command) > 1 and command[1] in {"-c", "-lc"}:
+                    command[1:2] = ["--noprofile", "--norc", "-c"]
+            elif command and command[0] == "python3":
+                command[0] = "/usr/bin/python3"
+                if "-I" not in command[1:]:
+                    command.insert(1, "-I")
         args = ["exec"]
         if input_text is not None:
             args.append("-i")
@@ -4110,7 +4338,7 @@ screen -ls | awk -v target="$target" '
             args.append("-d")
         if input_text is not None:
             args.append("-i")
-        args.extend(["-u", user or self.user])
+        args.extend(["-u", numeric_user])
         if cwd:
             args.extend(["-w", cwd])
         env_file: Path | None = None
@@ -4314,163 +4542,48 @@ screen -ls | awk -v target="$target" '
             ).start()
         return True
 
-    def _ensure_container_writable_paths(self, container_name: str, container_paths: list[str]) -> None:
+    def _runtime_permission_operation(self, container_name: str, operation: str, **arguments) -> None:
+        source = Path(__file__).with_name("runtime_permissions.py").read_text(encoding="utf-8")
+        uid, gid, _ = self._worker_identity()
+        payload = {"operation": operation, "uid": uid, "gid": gid, **arguments}
+        result = self._docker_exec(
+            container_name, ["/usr/bin/python3", "-I", "-c", source, json.dumps(payload, separators=(",", ":"))],
+            env={"HOME": "/"}, cwd="/", user="root",
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Managed runtime permission repair failed (POSIX ACL or path safety)")
+
+    def _ensure_writable_paths_around_read_only_inputs(
+        self, container_name: str, paths: list[str], read_only_paths: tuple[str, ...]
+    ) -> None:
+        self._ensure_container_writable_paths(container_name, paths, read_only_paths=read_only_paths)
+
+    def _ensure_container_writable_paths(self, container_name: str, container_paths: list[str], *, read_only_paths: tuple[str, ...] = ()) -> None:
         safe_paths = [path for path in container_paths if path and path.startswith("/")]
         if not safe_paths:
             return
-        quoted_paths = " ".join(shlex.quote(path) for path in safe_paths)
-        container_user = shlex.quote(self.user.split(":", 1)[0] or self.user)
-        host_uid = shlex.quote(str(os.getuid()))
-        private_acl_required = self._private_acl_required()
-        symlink_sensitive = any("/.config" in path for path in safe_paths)
-        if symlink_sensitive:
-            access_acl = (
-                f"u:{container_user}:rwX,u:root:rwX,u:{host_uid}:rwX,"
-                "g::---,o::---,m::rwX"
-                if private_acl_required
-                else f"u:{container_user}:rwX,u:{host_uid}:rwX"
-            )
-            default_acl = (
-                f"d:u:{container_user}:rwX,d:u:root:rwX,d:u:{host_uid}:rwX,"
-                "d:g::---,d:o::---,d:m::rwX"
-                if private_acl_required
-                else f"d:u:{container_user}:rwX,d:u:{host_uid}:rwX"
-            )
-            fallback = (
-                "exit 1"
-                if private_acl_required
-                else (
-                    f"find {quoted_paths} -xdev ! -type s ! -type l "
-                    "-exec chmod u+rwX,go-rwx {} +"
-                )
-            )
-            script = (
-                "set -e; "
-                f"mkdir -p {quoted_paths}; "
-                f"find {quoted_paths} -xdev ! -type s ! -type l ! -user {container_user} "
-                f"-exec chown -h {container_user} {{}} +; "
-                "if command -v setfacl >/dev/null 2>&1 "
-                f"&& setfacl -R -m {access_acl} -P {quoted_paths} 2>/dev/null; then "
-                f"find {quoted_paths} -type d -exec setfacl -m {default_acl} {{}} + 2>/dev/null || true; "
-                f"else {fallback}; fi"
-            )
-        elif private_acl_required:
-            access_acl = (
-                f"u:{container_user}:rwX,u:root:rwX,u:{host_uid}:rwX,"
-                "g::---,o::---,m::rwX"
-            )
-            default_acl = (
-                f"d:u:{container_user}:rwX,d:u:root:rwX,d:u:{host_uid}:rwX,"
-                "d:g::---,d:o::---,d:m::rwX"
-            )
-            script = (
-                "set -e; "
-                f"mkdir -p {quoted_paths}; "
-                "command -v setfacl >/dev/null 2>&1; "
-                f"setfacl -R -m {access_acl} {quoted_paths}; "
-                f"find {quoted_paths} -type d -exec setfacl -m {default_acl} {{}} +"
-            )
-        else:
-            explicit_local_compatibility = (
-                str(os.environ.get("GLASSHIVE_SECURITY_MODE") or "")
-                .strip()
-                .lower()
-                == "local"
-            )
-            if explicit_local_compatibility:
-                script = (
-                    "set -e; "
-                    f"mkdir -p {quoted_paths}; "
-                    "if command -v setfacl >/dev/null 2>&1 "
-                    f"&& setfacl -R -m u:{container_user}:rwX,u:{host_uid}:rwX {quoted_paths} 2>/dev/null; then "
-                    f"find {quoted_paths} -type d -exec setfacl -m d:u:{container_user}:rwX,d:u:{host_uid}:rwX {{}} + 2>/dev/null || true; "
-                    "else "
-                    f"chmod -R a+rwX {quoted_paths} 2>/dev/null || true; "
-                    "fi"
-                )
-            else:
-            # A local bind mount still contains worker-private state. Repair
-            # ownership for ordinary entries and keep group/other access closed;
-            # a world-writable fallback would expose that state on Linux hosts.
-                operations: list[str] = ["set -e"]
-                for path in safe_paths:
-                    quoted_path = shlex.quote(path)
-                    operations.extend(
-                        [
-                            f"mkdir -p {quoted_path}",
-                            f"find {quoted_path} -xdev ! -type s ! -type l "
-                            f"! -user {container_user} -exec chown -h {container_user} {{}} +",
-                            f"find {quoted_path} -xdev ! -type s ! -type l "
-                            "-exec chmod u+rwX,go-rwx {} +",
-                        ]
-                    )
-                script = "; ".join(operations)
-        result = self._docker_exec(
-            container_name,
-            ["bash", "-c", script],
-            env={
-                "HOME": self.home_mount,
-                "TERM": self.term_value,
-            },
-            cwd=self.workspace_mount,
-            user="root",
+        allowed = self._default_writable_container_paths()
+        if any(not any(path == root or path.startswith(root.rstrip("/") + "/") for root in allowed) for path in safe_paths):
+            raise RuntimeError("Runtime permission paths must remain inside managed writable roots")
+        excluded = [f"{self.workspace_mount}/{relative}" for relative in read_only_paths]
+        if any(path == target or path.startswith(target + "/") for path in safe_paths for target in excluded):
+            raise RuntimeError("A declared read-only input cannot be made writable")
+        strict = bool(read_only_paths or provider_network.configured_proxy() is not None or self._private_acl_required())
+        local = str(os.environ.get("GLASSHIVE_SECURITY_MODE") or "").strip().lower() == "local" and not strict
+        preserve_owner = bool(read_only_paths or provider_network.configured_proxy() is not None or self._private_acl_required() or local)
+        self._runtime_permission_operation(
+            container_name, "writable", paths=safe_paths, excluded=excluded,
+            host_uid=os.getuid(), require_acl=strict, preserve_owner=preserve_owner,
+            local_world_fallback=local,
         )
-        if result.returncode != 0:
-            if private_acl_required:
-                raise RuntimeError(
-                    "Enterprise GlassHive requires POSIX ACL support for private worker paths"
-                )
-            detail = (result.stderr or result.stdout or "").strip()[-1200:]
-            raise RuntimeError(f"Failed to prepare writable sandbox paths in {container_name}: {detail}")
 
     def _repair_provider_temp_ownership(self, container_name: str) -> None:
-        runtime_user = shlex.quote(self.user.split(":", 1)[0] or self.user)
-        temp_root = shlex.quote(self._browser_tmp_dir())
-        script = (
-            "set -e; "
-            f"runtime_uid=$(id -u {runtime_user}); "
-            f"runtime_gid=$(id -g {runtime_user}); "
-            f"provider_tmp={temp_root}/claude-${{runtime_uid}}; "
-            'if [ -d "$provider_tmp" ]; then '
-            'chown -R "${runtime_uid}:${runtime_gid}" "$provider_tmp"; '
-            'chmod 700 "$provider_tmp"; '
-            "fi"
-        )
-        result = self._docker_exec(
-            container_name,
-            ["bash", "-c", script],
-            env={
-                "HOME": self.home_mount,
-                "TERM": self.term_value,
-            },
-            cwd=self.workspace_mount,
-            user="root",
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()[-1200:]
-            raise RuntimeError(f"Failed to repair provider temp ownership in {container_name}: {detail}")
+        # Resolve the configured image account inside the trusted helper. No
+        # worker-controlled path, executable or shell expansion chooses a target.
+        self._runtime_permission_operation(container_name, "temporary", path=self._browser_tmp_dir(), provider_subdirectory=True)
 
     def _harden_secret_runtime_files(self, container_name: str) -> None:
-        user = shlex.quote(self.user)
-        secret_dir = shlex.quote(f"{self.home_mount}/.glasshive")
-        script = (
-            "set -e; "
-            f"for file in {secret_dir}/secret-runtime.env {secret_dir}/secret-runtime.keys; do "
-            '[ -e "$file" ] || continue; '
-            f"chown {user} \"$file\" 2>/dev/null || true; "
-            'chmod 600 "$file" 2>/dev/null || true; '
-            "done"
-        )
-        self._docker_exec(
-            container_name,
-            ["bash", "-c", script],
-            env={
-                "HOME": self.home_mount,
-                "TERM": self.term_value,
-            },
-            cwd=self.workspace_mount,
-            user="root",
-        )
+        self._runtime_permission_operation(container_name, "secrets", path=f"{self.home_mount}/.glasshive")
 
     def _ensure_screen_runtime_dir(
         self,
@@ -4492,15 +4605,8 @@ screen -ls | awk -v target="$target" '
             )
             exec_user = self.user
         else:
-            script = (
-                "set -e; "
-                "mkdir -p /run/screen "
-                f"{shlex.quote(screen_dir)}; "
-                "chmod 1777 /run/screen; "
-                f"chown {shlex.quote(self.user)} {shlex.quote(screen_dir)} 2>/dev/null || true; "
-                f"chmod 700 {shlex.quote(screen_dir)}"
-            )
-            exec_user = "root"
+            self._runtime_permission_operation(container_name, "screen", path=screen_dir)
+            return
         result = self._docker_exec(
             container_name,
             ["bash", "-c", script],
@@ -4834,6 +4940,119 @@ screen -ls | awk -v target="$target" '
         return configuration, ""
 
     @staticmethod
+    def _provider_only_generation(worker: dict) -> str:
+        from .bootstrap import sandbox_setup_for
+
+        proxy = provider_network.configured_proxy()
+        setup = sandbox_setup_for(worker)
+        return hashlib.sha256(json.dumps({
+            "policy": provider_network.POLICY,
+            "proxy": vars(proxy) if proxy else None,
+            "bundle": bootstrap_bundle_for({"bootstrap_bundle_json": setup.get("bootstrap_bundle_json")}),
+            "bootstrap_profile": setup.get("bootstrap_profile"),
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def _require_provider_only_sandbox(
+        self, worker: dict, sandbox: SandboxInfo, *, expected_id: str = ""
+    ) -> None:
+        expected_network = provider_network.network_name(self.runtime_root, self._container_name(worker["worker_id"]))
+        security = {value.lower() for value in sandbox.security_options}
+        capabilities = {value.upper().removeprefix("CAP_") for value in (sandbox.cap_add or ())}
+        paths = self._paths(worker["worker_id"])
+        allowed_mounts = {
+            ("bind", str(paths["workspace_dir"]), self.workspace_mount),
+            ("bind", str(paths["home_dir"]), self.home_mount),
+            *[("bind", str(paths["workspace_dir"] / relative), f"{self.workspace_mount}/{relative}")
+              for relative in read_only_workspace_paths(bootstrap_bundle_for(worker))],
+        }
+        if (
+            not sandbox.container_id or (expected_id and sandbox.container_id != expected_id)
+            or not sandbox.expected_image_id or sandbox.image_id != sandbox.expected_image_id
+            or sandbox.image_reference != self.image
+            or sandbox.runtime_user != self._numeric_user() or sandbox.expected_runtime_user != self._numeric_user()
+            or sandbox.entrypoint != provider_network.ENTRYPOINT or sandbox.command != provider_network.COMMAND
+            or sandbox.network_mode != expected_network or set(sandbox.attached_networks) != {expected_network}
+            or sandbox.privileged is not False or sandbox.extra_hosts or sandbox.port_bindings
+            or {value.upper() for value in sandbox.cap_drop} != {"ALL"}
+            or capabilities != provider_network.MAINTENANCE_CAPABILITIES
+            or not security or not security.issubset({"no-new-privileges", "no-new-privileges:true"})
+            or sandbox.pid_mode not in {"", "private"} or sandbox.uts_mode not in {"", "private"}
+            or sandbox.userns_mode not in {"", "private"} or sandbox.ipc_mode != "private"
+            or sandbox.cgroupns_mode != "private"
+            or set(sandbox.mount_records) != allowed_mounts or len(sandbox.mount_records) != len(allowed_mounts) or sandbox.tmpfs_targets
+            or self._provider_account_mount(worker) is not None
+        ):
+            raise RuntimeError("Provider-only sandbox generation does not attest its execution policy")
+        if sandbox.provider_only_generation != self._provider_only_generation(worker):
+            raise provider_network.ProviderOnlySetupChangedError()
+        self._require_read_only_workspace_mounts(worker, sandbox)
+
+    def _provider_only_proxy_id(self) -> str:
+        proxy = provider_network.configured_proxy()
+        if proxy is None:
+            raise RuntimeError("Provider-only proxy is unconfigured")
+        result = self._docker(["inspect", proxy.container], check=False, capture_output=True, timeout_sec=2)
+        entry = self._docker_inspect_entry(result)
+        if (not isinstance(entry, dict) or entry.get("Name") != "/" + proxy.container
+                or not _DOCKER_CONTAINER_ID.fullmatch(str(entry.get("Id") or ""))
+                or not isinstance(entry.get("State"), dict) or entry["State"].get("Running") is not True):
+            raise RuntimeError("Provider-only proxy generation is unavailable")
+        return entry["Id"]
+
+    def _ensure_provider_only_network(self, container_name: str) -> str:
+        proxy = provider_network.configured_proxy()
+        if proxy is None:
+            raise RuntimeError("Provider-only proxy is unconfigured")
+        version = self._docker(["version", "--format", "{{.Server.Version}}"], check=False, capture_output=True, timeout_sec=2)
+        match = re.fullmatch(r"([0-9]+)\.[0-9]+(?:\.[0-9]+)?(?:[-+][A-Za-z0-9_.-]+)?", (version.stdout or "").strip())
+        if version.returncode != 0 or match is None or int(match[1]) < 28:
+            raise RuntimeError("Provider-only isolated gateway requires Docker Engine 28 or later")
+        proxy_id = self._provider_only_proxy_id()
+        return self._ensure_mission_network(
+            container_name, provider_network.network_name(self.runtime_root, container_name),
+            proxies={proxy.container: proxy.hostname},
+            expected_labels=provider_network.labels(self.runtime_root, container_name),
+            expected_options=provider_network.OPTIONS,
+            expected_proxy_ids={proxy.container: proxy_id}, policy_name="Provider-only",
+            repair_capacity=self.repair_provider_only_networks,
+        )
+
+    def repair_provider_only_networks(self) -> tuple[str, ...]:
+        """Repair attachments and reclaim only exact, empty owned worker generations."""
+        proxy = provider_network.configured_proxy()
+        if proxy is None:
+            raise RuntimeError("Provider-only proxy is unconfigured")
+        result = self._docker([
+            "network", "ls", "--filter", f"label={provider_network.DEPLOYMENT_LABEL}={provider_network.deployment_id(self.runtime_root)}",
+            "--filter", f"label={provider_network.POLICY_LABEL}={provider_network.POLICY}", "--format", "{{.Name}}",
+        ], check=False, capture_output=True, timeout_sec=5)
+        if result.returncode != 0:
+            raise RuntimeError("Provider-only network inventory is unavailable")
+        repaired = []
+        for name in sorted(set((result.stdout or "").splitlines())):
+            network = self._docker_inspect_entry(self._docker(["network", "inspect", name], check=False, capture_output=True, timeout_sec=2))
+            labels = network.get("Labels") if isinstance(network, dict) else None
+            worker_container = labels.get(provider_network.WORKER_LABEL) if isinstance(labels, dict) else None
+            if (not isinstance(worker_container, str) or name != provider_network.network_name(self.runtime_root, worker_container)
+                    or any(labels.get(key) != value for key, value in provider_network.labels(self.runtime_root, worker_container).items())):
+                raise RuntimeError("Provider-only network ownership could not be attested")
+            # This shared path attests options, members, aliases and exact proxy ID.
+            self._ensure_provider_only_network(worker_container)
+            worker = self._docker(["inspect", worker_container], check=False, capture_output=True, timeout_sec=2)
+            if worker.returncode == 1 and any(text in (worker.stderr or "").lower() for text in ("no such object", "no such container")):
+                network = self._docker_inspect_entry(self._docker(["network", "inspect", name], check=False, capture_output=True, timeout_sec=2))
+                members = network.get("Containers") if isinstance(network, dict) else None
+                if not isinstance(members, dict) or set(members) != {self._provider_only_proxy_id()}:
+                    raise RuntimeError("Provider-only orphan network membership changed")
+                self._docker(["network", "disconnect", name, next(iter(members))], capture_output=True, timeout_sec=5)
+                self._docker(["network", "rm", name], capture_output=True, timeout_sec=5)
+            elif worker.returncode != 0:
+                raise RuntimeError("Provider-only worker presence is unavailable")
+            else:
+                repaired.append(name)
+        return tuple(repaired)
+
+    @staticmethod
     def _parallel_clean_room_mission_network_name(container_name: str) -> str:
         configuration, reason = DockerSandboxManager._parallel_clean_room_configuration(
             require_proxy_containers=False
@@ -4868,6 +5087,26 @@ screen -ls | awk -v target="$target" '
         provider = configuration["provider_proxy_container"]
         broker = configuration["broker_proxy_container"]
 
+        return self._ensure_mission_network(
+            container_name, network_name,
+            proxies={provider: configuration["provider_proxy_hostname"], broker: PARALLEL_CLEAN_ROOM_BROKER_ALIAS},
+            expected_labels={
+                PARALLEL_CLEAN_ROOM_POLICY_LABEL: PARALLEL_CLEAN_ROOM_EXECUTION_POLICY,
+                PARALLEL_CLEAN_ROOM_ROLE_LABEL: PARALLEL_CLEAN_ROOM_MISSION_NETWORK_ROLE,
+                PARALLEL_CLEAN_ROOM_WORKER_CONTAINER_LABEL: container_name,
+            },
+            policy_name="Parallel clean-room",
+            repair_capacity=self.repair_parallel_clean_room_mission_networks,
+        )
+
+    def _ensure_mission_network(
+        self, container_name: str, network_name: str, *, proxies: dict[str, str],
+        expected_labels: dict[str, str], policy_name: str,
+        expected_options: dict[str, str] | None = None,
+        expected_proxy_ids: dict[str, str] | None = None,
+        repair_capacity: Callable[[], object] | None = None,
+    ) -> str:
+        """One create/attest/reattach path for explicitly owned internal bridges."""
         def inspect_network() -> dict | None:
             result = self._docker(
                 ["network", "inspect", network_name],
@@ -4886,16 +5125,16 @@ screen -ls | awk -v target="$target" '
                 or network.get("Driver") != "bridge"
                 or network.get("Internal") is not True
                 or not isinstance(labels, dict)
-                or labels.get(PARALLEL_CLEAN_ROOM_POLICY_LABEL)
-                != PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
-                or labels.get(PARALLEL_CLEAN_ROOM_ROLE_LABEL)
-                != PARALLEL_CLEAN_ROOM_MISSION_NETWORK_ROLE
-                or labels.get(PARALLEL_CLEAN_ROOM_WORKER_CONTAINER_LABEL)
-                != container_name
+                or any(labels.get(key) != value for key, value in expected_labels.items())
+                or (expected_options is not None and (
+                    network.get("EnableIPv6") is not False
+                    or not isinstance(network.get("Options"), dict)
+                    or any(network["Options"].get(key) != value for key, value in expected_options.items())
+                ))
                 or not isinstance(members, dict)
             ):
                 raise RuntimeError(
-                    "Parallel clean-room mission network policy could not be attested"
+                    f"{policy_name} mission network policy could not be attested"
                 )
             member_names: set[str] = set()
             member_ids: dict[str, str] = {}
@@ -4907,7 +5146,7 @@ screen -ls | awk -v target="$target" '
                     or not isinstance(member.get("Name"), str)
                 ):
                     raise RuntimeError(
-                        "Parallel clean-room mission network membership is unavailable"
+                        f"{policy_name} mission network membership is unavailable"
                     )
                 member_name = str(member["Name"])
                 member_names.add(member_name)
@@ -4920,18 +5159,8 @@ screen -ls | awk -v target="$target" '
             "--driver",
             "bridge",
             "--internal",
-            "--label",
-            (
-                f"{PARALLEL_CLEAN_ROOM_POLICY_LABEL}="
-                f"{PARALLEL_CLEAN_ROOM_EXECUTION_POLICY}"
-            ),
-            "--label",
-            (
-                f"{PARALLEL_CLEAN_ROOM_ROLE_LABEL}="
-                f"{PARALLEL_CLEAN_ROOM_MISSION_NETWORK_ROLE}"
-            ),
-            "--label",
-            f"{PARALLEL_CLEAN_ROOM_WORKER_CONTAINER_LABEL}={container_name}",
+            *[part for key, value in expected_labels.items() for part in ("--label", f"{key}={value}")],
+            *[part for key, value in (expected_options or {}).items() for part in ("--opt", f"{key}={value}")],
             network_name,
         ]
 
@@ -4956,7 +5185,7 @@ screen -ls | awk -v target="$target" '
                 network = inspect_network()
                 if network is None:
                     try:
-                        self.repair_parallel_clean_room_mission_networks()
+                        repair_capacity() if repair_capacity is not None else None
                     except Exception:
                         # The capacity result below remains the public truth;
                         # cleanup itself is fail-closed and never broad-prunes
@@ -4966,23 +5195,20 @@ screen -ls | awk -v target="$target" '
                     network = inspect_network()
                 if create.returncode != 0 and network is None:
                     raise HostCapacityError(
-                        "Parallel clean-room mission network capacity is temporarily unavailable.",
+                        f"{policy_name} mission network capacity is temporarily unavailable.",
                         capacity_class="docker_network",
                     )
             else:
                 network = inspect_network()
-        required = {provider, broker}
+        required = set(proxies)
         allowed = required | {container_name}
         member_names, member_ids = attest_members(network)
         if not member_names.issubset(allowed):
             raise RuntimeError(
-                "Parallel clean-room mission network contains a foreign endpoint"
+                f"{policy_name} mission network contains a foreign endpoint"
             )
         missing_proxies = required - member_names
-        for proxy, alias in (
-            (provider, configuration["provider_proxy_hostname"]),
-            (broker, PARALLEL_CLEAN_ROOM_BROKER_ALIAS),
-        ):
+        for proxy, alias in proxies.items():
             if proxy not in missing_proxies:
                 continue
             connected = self._docker(
@@ -5000,23 +5226,20 @@ screen -ls | awk -v target="$target" '
             )
             if connected.returncode != 0:
                 raise RuntimeError(
-                    "Parallel clean-room proxy could not join the mission network"
+                    f"{policy_name} proxy could not join the mission network"
                 )
         if missing_proxies:
             network = inspect_network()
             member_names, member_ids = attest_members(network)
             if not member_names.issubset(allowed):
                 raise RuntimeError(
-                    "Parallel clean-room mission network contains a foreign endpoint"
+                    f"{policy_name} mission network contains a foreign endpoint"
                 )
         if not required.issubset(member_names):
             raise RuntimeError(
-                "Parallel clean-room mission network is missing its proxies"
+                f"{policy_name} mission network is missing its proxies"
             )
-        critical_aliases = {
-            configuration["provider_proxy_hostname"],
-            PARALLEL_CLEAN_ROOM_BROKER_ALIAS,
-        }
+        critical_aliases = set(proxies.values())
         for member_name in sorted(member_names):
             result = self._docker(
                 ["inspect", member_name],
@@ -5036,15 +5259,7 @@ screen -ls | awk -v target="$target" '
                 if isinstance(endpoint_networks, dict)
                 else None
             )
-            required_alias = (
-                configuration["provider_proxy_hostname"]
-                if member_name == provider
-                else (
-                    PARALLEL_CLEAN_ROOM_BROKER_ALIAS
-                    if member_name == broker
-                    else ""
-                )
-            )
+            required_alias = proxies.get(member_name, "")
             raw_aliases = (
                 attachment.get("Aliases") if isinstance(attachment, dict) else None
             )
@@ -5056,11 +5271,13 @@ screen -ls | awk -v target="$target" '
             if (
                 endpoint is None
                 or endpoint.get("Id") != member_ids[member_name]
+                or (expected_proxy_ids is not None and member_name in proxies
+                    and endpoint.get("Id") != expected_proxy_ids.get(member_name))
                 or not isinstance(aliases, list)
                 or not all(isinstance(alias, str) for alias in aliases)
             ):
                 raise RuntimeError(
-                    "Parallel clean-room mission network endpoint could not be attested"
+                    f"{policy_name} mission network endpoint could not be attested"
                 )
             if (
                 required_alias
@@ -5072,7 +5289,7 @@ screen -ls | awk -v target="$target" '
                 not required_alias and bool(critical_aliases.intersection(aliases))
             ):
                 raise RuntimeError(
-                    "Parallel clean-room mission network proxy alias could not be attested"
+                    f"{policy_name} mission network proxy alias could not be attested"
                 )
         return network_name
 
@@ -6160,7 +6377,7 @@ screen -ls | awk -v target="$target" '
             and sandbox.execution_policy == PARALLEL_CLEAN_ROOM_EXECUTION_POLICY
             and sandbox.image_id == sandbox.expected_image_id
             and sandbox.image_reference == self.image
-            and sandbox.runtime_user == self.user
+            and sandbox.runtime_user == self._numeric_user()
             and sandbox.runtime_user == sandbox.expected_runtime_user
             and not _docker_user_is_root(sandbox.runtime_user)
             and sandbox.entrypoint == sandbox.expected_entrypoint

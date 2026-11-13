@@ -8116,6 +8116,27 @@ class Store:
             row = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
         return self._row(row)
 
+    def reconcile_queued_worker_start(self, observed: dict[str, Any]) -> dict[str, Any] | None:
+        """Project queued recovery only while its exact idle observation is current."""
+        states = ",".join("'" + state + "'" for state in sorted(NONTERMINAL_RUN_STATES - {"queued"}))
+        with self._connect() as conn:
+            changed = conn.execute(
+                f"""UPDATE workers SET state = 'starting', last_error = '', updated_at = ?
+                WHERE worker_id = ? AND updated_at = ? AND state = ?
+                  AND state NOT IN ('stopping', 'terminating', 'termination_failed', 'terminated', 'gc_claimed')
+                  AND COALESCE(last_run_id, '') = ?
+                  AND compute_release_token = '' AND work_stop_id = ''
+                  AND EXISTS (SELECT 1 FROM runs WHERE runs.worker_id = workers.worker_id AND runs.state = 'queued')
+                  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.worker_id = workers.worker_id AND runs.state IN ({states}))
+                  AND NOT EXISTS (SELECT 1 FROM workspace_gc_tombstones
+                      WHERE workspace_gc_tombstones.worker_id = workers.worker_id AND phase IN ('claimed', 'cleanup_pending'))
+                """,
+                (utc_now(), observed["worker_id"], observed["updated_at"], observed["state"],
+                 str(observed.get("last_run_id") or "")),
+            )
+            row = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (observed["worker_id"],)).fetchone()
+        return self._row(row) if changed.rowcount else None
+
     def reconcile_idle_worker_runtime(
         self, worker_id: str, *, expected_updated_at: str,
         expected_last_run_id: str, **fields: Any,

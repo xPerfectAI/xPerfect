@@ -2055,7 +2055,12 @@ def _responses_input_messages(payload: ResponsesRequest) -> list[ChatMessage]:
 
 def _canonical_life_dir() -> Path:
     configured = str(os.environ.get("VIVENTIUM_LIFE_DIR") or "").strip()
-    return Path(configured or "~/Documents/Viventium/Life").expanduser().resolve()
+    if not configured:
+        raise HTTPException(status_code=400, detail={
+            "code": "workspace_configuration_required",
+            "message": "Legacy workspace mode requires an explicitly configured directory",
+        })
+    return Path(configured).expanduser().resolve()
 
 
 def _default_workspace_dir() -> Path:

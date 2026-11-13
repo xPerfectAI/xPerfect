@@ -647,6 +647,21 @@ def classify_runtime_error(
     recovery_hint = str(getattr(exc, "recovery_hint", "") or "").strip()
 
     structured_failure_class = str(getattr(exc, "failure_class", "") or "")
+    if structured_failure_class in {"native_route_contract_mismatch", "native_turn_incomplete"}:
+        return FailureClassification(
+            failure_class=structured_failure_class,
+            retryable=False,
+            user_message=(
+                "The selected native runtime did not match its configured launch contract."
+                if structured_failure_class == "native_route_contract_mismatch" else
+                "The native process ended without a completed turn and an agent response."
+            ),
+            recommended_recovery=(
+                "Review the configured runtime route and retained run evidence before retrying."
+            ),
+            diagnostic_summary=message,
+            structured=True,
+        )
     if structured_failure_class == "host_capacity":
         capacity_class = str(getattr(exc, "capacity_class", "host") or "host")
         return FailureClassification(

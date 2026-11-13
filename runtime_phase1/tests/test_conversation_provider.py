@@ -10780,9 +10780,11 @@ def test_default_public_successor_old_logical_start_keeps_existing_admission_sem
     response = client.post('/v1/chat/completions', headers=AUTH, json=payload)
     assert response.status_code == 200, response.text
     record = client.app.state.store.get_provider_request(response.headers['X-GlassHive-Request-Id'])
-    # The existing Store deadline owner starts its implicit budget at actual
-    # record creation, not a newly imposed pre-admission logical-start cap.
-    assert datetime.fromisoformat(record['response_deadline_at']) > datetime.now(UTC)
+    # Ordinary public turns retain the existing unbounded default. Only an
+    # explicit/configured budget or the private-state contract creates a cap.
+    assert record["response_timeout_s"] is None
+    assert not record["response_deadline_at"]
+    assert "X-GlassHive-Response-Deadline-At" not in response.headers
 
 
 @pytest.mark.parametrize('stream', [False, True])

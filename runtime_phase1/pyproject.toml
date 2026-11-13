@@ -43,4 +43,7 @@ pythonpath = ["src"]
 addopts = "-q"
 
 [tool.setuptools.package-data]
-workers_projects_runtime = ["prompts/*.md", "prompts/*.json", "starter_packs/**/*", "desktop_chromium_seccomp.json"]
+workers_projects_runtime = ["prompts/*.md", "prompts/*.json", "starter_packs/**/*", "resources/*.lock", "resources/openclaw/*.json", "desktop_chromium_seccomp.json"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "*.pyo", "**/__pycache__/*", "**/*.pyc", "**/*.pyo"]

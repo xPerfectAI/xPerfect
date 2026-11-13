@@ -955,6 +955,104 @@ schema 13 and control-plane schema 6 add these fields transactionally. Existing 
 with their IDs/content hashes unchanged. Older runtimes must not open the upgraded database; use the
 supported upgrade backup/rollback owner. Recoverable removal is not a permanent storage purge.
 
+### Optional native Codex route contract
+
+`WPR_CODEX_CLI_ROUTE_CONTRACT` is a service-owned JSON declaration. It is absent by default.
+It checks the existing builders' generated native command at the launch boundary, for host
+missions, host conversations and Docker runs. It does not resolve a second route or provide
+credentials. The contract applies to every Codex launch in that service; use a dedicated
+service when clients need different fixed routes. Selected personal accounts, run brokers
+and Parallel clean-room authority cannot be combined with this service-owned contract.
+Set the existing `GLASSHIVE_PROJECT_PROVIDER_ENV=false` explicitly. Otherwise deployment
+credentials can be written to `runtime.env` and re-sourced after exec filtering. The factory
+rejects that combination before opening state. This is also required in enterprise mode,
+where deployment projection is normally enabled by default.
+
+```json
+{
+  "version": 1,
+  "execution_mode": "docker",
+  "model": "example-model",
+  "effort": "high",
+  "provider_id": "example_provider",
+  "base_url": "https://provider.example.invalid/v1",
+  "env_key": "OPENAI_API_KEY",
+  "wire_api": "responses",
+  "session_mode": "stateless",
+  "max_capacity_retries": 0,
+  "require_completed_turn": true
+}
+```
+
+All fields are required; unknown or duplicate fields are rejected. Configure the matching
+route through the existing `WPR_CODEX_CLI_*` settings and its credential on the service.
+The worker declares `GLASSHIVE_PROVIDER_SESSION_MODE=stateless` through its existing bootstrap
+environment. The contract requires that declaration and rejects resume commands. The generated
+model, effort, provider, base URL, env key and wire API must match exactly, as must the stored
+worker model and capacity retry setting. A Docker credential must have supported exec transport.
+
+Invocation settings cannot redefine the provider, and projected bootstrap environments cannot
+override provider authority, proxies or TLS configuration. Only the selected provider credential
+remains in the exec environment; unrelated application variables retain their existing owner.
+An invocation can retain a positive integer `stream_idle_timeout_ms` for that same provider;
+other provider-table fields remain service-owned.
+Bootstrap Codex settings are parsed and merged as TOML on initial setup and each run refresh.
+Repeated refreshes retain one declaration per setting. A named MCP server replaces its prior
+transport; unrelated settings and servers remain. Host and Docker share the same serializer.
+The generated file preserves values, rather than comments or original formatting. Malformed
+settings fail before the file is replaced.
+Service connection and trust settings remain operator-owned. These checks bind launch
+configuration; authorized worker tools still receive and can use the selected credential.
+
+When `require_completed_turn` is true, Codex output must end with one `turn.completed` and
+contain a nonempty agent message. Failed, truncated, malformed or ambiguous streams cannot
+be accepted as a successful result. Contract mismatch and incomplete native turns retain distinct,
+structured failure classes and do not trigger an automatic retry.
+
+### Retained process logs
+
+An authenticated operator can read `GET /v1/runs/{run_id}/process-log` for a stored, owned
+Codex run without starting, healing or preparing its worker. Signed workspace viewers and
+unauthenticated local instances cannot read it. Other native log formats return unavailable.
+The current retained attempt is selected by default; `attempt_id` can select another attempt
+of that same run. Legacy runs without an attempt retain their original root log layout.
+A missing attempt log never falls back to another attempt or the workspace's current output.
+
+`stream` selects `stdout` or `stderr`. `cursor`, `limit` (maximum 131072 characters) and
+`version` page the filtered text. `download=true` returns the whole filtered log, subject to
+the same 64 MiB source limit. Changed source or attempt identity returns 409; missing retained
+evidence returns 404; oversized source returns 413. Reload from the start after a 409.
+Filtering precedes paging. The response retains saved record order and omission counts,
+while omitting unsupported events, reasoning, instructions, sensitive tool reads and patches.
+Known service credentials and host paths are redacted. Task content can remain sensitive;
+this operator API does not make a process log safe for public distribution.
+The worker can write its retained log. These records are diagnostic claims, not authenticated
+audit evidence; filtering does not establish that a tool ran or that its output is truthful.
+
+Importing the API module does not load service environments or construct an application.
+Use `workers_projects_runtime.api:create_app --factory` with Uvicorn; deliberate application
+creation owns environment loading, log redaction and startup.
+
+### Immutable Docker input directories
+
+An invocation may declare `read_only_paths`, a list of up to 32 **top-level workspace
+directory names**, such as `["input", ".agents"]`. Stage the complete directory before
+starting a fresh worker. Nested declarations and individual files are refused: a writable
+ancestor could otherwise be renamed around the protected mount. Protecting `.agents`
+keeps the ordinary nested Skill locations readable without leaving such an ancestor.
+
+The service validates ownership and every component without following links, rejects hard
+links and special files, and keeps its runtime root private. Docker receives read-only bind
+mounts. The container is created inert, inspected, then started by exact ID and inspected
+again. Reuse requires the same declared mount policy, sources and read-only flags, no nested
+mounts of any type, a non-root unprivileged container and no added mount-administration
+capability. Writable siblings use POSIX ACLs that retain service ownership; missing ACL
+support fails closed. Host execution and the separate Parallel clean-room policy do not
+support these additional mounts.
+
+These are service-owned copies. Do not re-stage or replace their host directories in a
+running generation; use a fresh worker. Host and Docker administrators remain trusted.
+
 ### Explicit instance runtime controls
 
 Configure these options on the runtime service. They contain no application instructions.
@@ -1023,3 +1121,72 @@ Optional `model_contracts` map an exact declared ID to `context_window`, `effort
 catalog and bind the same connection; bare IDs remain available to workers. No context/capability
 values are invented. Workload identity requires `XPERFECT_BEDROCK_WORKLOAD_IDENTITY_ENABLED` and
 host execution; Docker uses an owner-protected credential file.
+
+### Optional provider-only Docker service
+
+A dedicated service can set `WPR_SANDBOX_PROVIDER_PROXY` to a JSON object such as
+`{"container":"example-provider-proxy","hostname":"model-proxy"}`. This is a
+service setting; a worker bundle cannot enable it. It requires Docker Engine28
+or later and a running, trusted proxy. It cannot be combined with the parallel
+clean-room execution policy or a personal provider-account mount. Workers must explicitly select the
+`clean-room` or `none` bootstrap, which does not copy host sign-ins.
+
+Each worker receives its own labeled internal bridge with IPv6 disabled,
+`enable_icc=true` and `gateway_mode_ipv4=isolated`. Only that worker and the
+selected proxy may be attached. The existing mission-network owner creates,
+attests and repairs these networks; the ordinary networking default and the
+parallel clean-room wrapper retain their existing behavior. A proxy recreation
+is repaired against its current container ID. Capacity repair removes only
+attested orphan networks owned by this service. It never prunes foreign objects.
+
+Ordinary Docker workers retain the canonical image's passwordless sudo policy and can
+become root inside their container. Their security boundary is the container. The
+uid separation and capability restrictions described below apply to provider-only
+and parallel clean-room workers. This release preserves that ordinary-mode behavior.
+
+Public conversation requests without a configured or explicit response budget
+retain their existing unbounded runtime deadline. Explicit budgets and the private
+machine-state contract retain their existing limits. No new 660-second cap is imposed
+on ordinary unbudgeted turns.
+
+The worker is headless: no published ports, host-gateway entries, Chromium
+sandbox extension or background desktop priming. It runs as numeric uid/gid `1200:1201` (`seluser`), with
+private IPC/cgroup namespaces and `no-new-privileges`. All capabilities are
+dropped, then only `CHOWN`, `DAC_OVERRIDE` and `FOWNER` are retained in the
+bounding set for trusted control-plane root execs that repair bind-mount
+permissions. Writable-path, temporary-directory, secret-file and screen-directory
+maintenance use the absolute image system Python in isolated mode, open every
+path component without following links, and change ownership, modes and ACLs
+through open descriptors. Workspace traversal is iterative; special files are
+skipped. Hardlinks are repaired only when already owned by the worker and on
+the managed root's filesystem; other linked inodes are left unchanged. Secret
+files must remain single regular inodes. Root execs also clear worker PATH, shell-hook,
+interpreter and dynamic-loader overrides. Normal worker processes have zero effective, permitted,
+inheritable and ambient capabilities; they cannot gain these through setuid
+programs. This is not a privileged worker or a mount-administration grant.
+
+An inert generation is reserved and freshly inspected before bootstrap authority
+is written. Image, command, mount, capability, network and generation drift fail
+closed. The generation fingerprint covers stored setup, not changing per-run
+tokens. Reusing a generation does not repeat initial bootstrap seeding; the
+existing runtime owner still refreshes per-run environment and instruction
+files after boundary checks. Changed stored bundle or proxy settings require a
+fresh worker, including changes that persist renewed grants in the saved bundle.
+Active-work grant renewal therefore requires replacing this worker; it does not
+silently recreate it. Changed setup returns `provider_only_setup_changed` with
+that recovery instruction. Initial inline `files` are immutable too: a run that
+adds, removes or changes one refuses before seeding or execution. Use managed
+uploads for per-turn files; their existing authorization and refresh owner still
+applies. Ordinary workers retain their current file-refresh behavior.
+Run admission captures saved setup before projecting transient authority; the
+configuration owner refuses a concurrent saved-setup edit before dispatch. This
+extra immutable-setup fence applies only to provider-only services.
+Protected top-level input directories
+may be staged only by the trusted service before start, never rewritten beneath
+a running generation. Keep host and Docker administrative access trusted.
+
+The worker can reach every listener on the proxy. The proxy must deny its
+administrative, metrics and user interfaces to worker credentials and must not
+serve as a general forwarding proxy. The bridge does not enforce per-port
+filtering. Exact native provider routes remain owned by the separate native
+route contract. Operator diagnostics and history remain on the service API.

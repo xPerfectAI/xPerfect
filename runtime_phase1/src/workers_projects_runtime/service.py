@@ -12978,6 +12978,9 @@ class WorkersProjectsService:
     def _runtime_worker_for_run(worker: dict, run: dict) -> dict:
         """Overlay one run's ephemeral authority without mutating the reusable workspace."""
 
+        from .bootstrap import sandbox_setup_for
+
+        worker = {**worker, "_sandbox_setup": sandbox_setup_for(worker)}
         raw_bundle = str(run.get("runtime_bundle_json") or "").strip()
         if not raw_bundle:
             return worker
@@ -14695,17 +14698,24 @@ class WorkersProjectsService:
             if worker["state"] == "paused":
                 with self._worker_compute_release_lock(worker["worker_id"]):
                     current = self.require_worker(worker["worker_id"])
-                    if not self._can_restart_released_idle_worker(current):
+                    while self._can_restart_released_idle_worker(current):
+                        starting = self.store.reconcile_queued_worker_start(current)
+                        if starting is not None:
+                            break
+                        fresh = self.require_worker(worker["worker_id"])
+                        if fresh["updated_at"] == current["updated_at"]:
+                            return  # A durable dispatch fence, not a stale observation.
+                        current = fresh
+                    else:
                         return
-                    self.store.update_worker_state(
-                        worker["worker_id"], "starting", last_error=""
-                    )
                 self._ensure_worker_processor(worker["worker_id"])
                 return
-            self.store.update_worker_state(
-                worker["worker_id"], "starting", last_error=""
-            )
-            self._ensure_worker_processor(worker["worker_id"])
+            starting = self.store.reconcile_queued_worker_start(worker)
+            if starting is not None or self.store.has_queued_runs(worker["worker_id"]):
+                # A benign row update may invalidate only the observation. The
+                # existing processor owner rechecks Pause, Close, grants and
+                # dispatch fences without writing a stale starting projection.
+                self._ensure_worker_processor(worker["worker_id"])
             return
         if worker["state"] == "paused":
             if (
@@ -22932,6 +22942,9 @@ class WorkersProjectsService:
         authority_context: dict[str, str] | None = None,
         grant_waiter_owner: object = _SHARED_GRANT_WAITER_OWNER,
     ) -> dict:
+        from .bootstrap import sandbox_setup_for
+
+        worker = {**worker, "_sandbox_setup": sandbox_setup_for(worker)}
         try:
             if self._json_object(run.get("runtime_bundle_json")).get("application_invocation_context_required") is True:
                 worker = self._runtime_worker_for_run(worker,run)
