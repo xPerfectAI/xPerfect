@@ -12,11 +12,18 @@ from contextlib import ExitStack
 MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_PAGE_CHARS = 131072
 _ID = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
+_COMMAND_BOUNDARY = r"(?:^['\"]?|[\s;&|(`]['\"]?)"
+_ENVIRONMENT_READ = (
+    _COMMAND_BOUNDARY + r"(?:(?:/usr)?/bin/)?(?:env|printenv)(?=$|[\s;&|)'\"`])"
+    r"|" + _COMMAND_BOUNDARY + r"(?:export|declare|typeset|readonly|set)(?=\s*(?:$|[;&|)'\"`\n]))"
+    r"|" + _COMMAND_BOUNDARY + r"(?:export|declare|typeset|readonly)\s+-[A-Za-z]*p[A-Za-z]*(?=$|[\s;&|)'\"`])"
+    r"|" + _COMMAND_BOUNDARY + r"(?:declare|typeset)\s+-[A-Za-z]*x[A-Za-z]*(?=\s*(?:$|[;&|)'\"`\n]))"
+)
 _SENSITIVE_COMMAND = re.compile(
     r"(?i)(?:\.codex|\.env\b|auth\.json|credentials|private[-_ ]?key|"
     r"\b(?:SKILL|AGENTS|CLAUDE|CODEX)\.md|\.agents/skills/[^\n]*references|"
     r"(?:instruction|prompt|project-definition|processing-background|operator-policy-context|constraint-ledger)|"
-    r"\b(?:env|printenv|export|declare|set)\b|/proc/(?:self|thread-self|[0-9]+)/environ\b)"
+    + _ENVIRONMENT_READ + r"|/proc/(?:self|thread-self|[0-9]+)/environ\b)"
 )
 _SECRETS = (
     re.compile(r"(?i)([?&](?:amp;)?tempauth=)[^&#\s'\"<>]+"),

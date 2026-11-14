@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 import pytest
 from workers_projects_runtime import process_log as logs
@@ -103,6 +104,52 @@ def test_quoted_environment_reads_are_omitted_with_their_output(tmp_path, comman
     result = logs.read_process_log(home, "old-run", download=True)
     assert result["omitted_records"] == 1
     assert "unknown historical credential value" not in result["text"]
+
+
+@pytest.mark.parametrize("command", [
+    "env | sort", "sudo env", "export", "set | grep X",
+    "declare -p NAME", "readonly -p", "typeset -x",
+])
+def test_environment_dump_commands_hide_their_output(tmp_path, command):
+    home, _ = log_home(tmp_path, event("", "command_execution", command=command,
+                                     aggregated_output="unknown historical credential value"))
+    result = logs.read_process_log(home, "old-run", download=True)
+    assert result["omitted_records"] == 1
+    assert "unknown historical credential value" not in result["text"]
+
+
+@pytest.mark.parametrize("command", [
+    "set -euo pipefail; python3 tool.py",
+    "python3 - <<'PY'\nseen = set()\nprint(seen)\nPY",
+    "python3 -c \"import subprocess; subprocess.run(['true'], env={})\"",
+    "python3 export_rows.py --out rows.csv",
+    "export PYTHONPATH=src && python3 -m tool",
+])
+def test_commands_that_do_not_dump_environment_keep_diagnostics(tmp_path, command):
+    home, _ = log_home(tmp_path, event("", "command_execution", command=command,
+                                     aggregated_output="useful processing diagnostic"))
+    result = logs.read_process_log(home, "old-run", download=True)
+    assert result["omitted_records"] == 0
+    assert command in result["text"]
+    assert "useful processing diagnostic" in result["text"]
+
+
+def test_environment_word_inside_diagnostic_label_remains_visible(tmp_path, monkeypatch):
+    command = "bash -c \"python3 - <<'PY'\nprint('diagnostic-env:')\nPY\""
+    output = "SYNTHETIC_FIELD=sample\nSYNTHETIC_STATUS=ready"
+    home, _ = log_home(tmp_path, event("", "command_execution", command=command,
+                                     aggregated_output=output))
+    result = logs.read_process_log(home, "old-run", download=True)
+    assert result["omitted_records"] == 0
+    assert output in result["text"]
+
+    previous_pattern = logs._SENSITIVE_COMMAND.pattern.replace(
+        logs._ENVIRONMENT_READ, r"\b(?:env|printenv|export|declare|set)\b"
+    )
+    monkeypatch.setattr(logs, "_SENSITIVE_COMMAND", re.compile(previous_pattern))
+    previous = logs.read_process_log(home, "old-run", download=True)
+    assert previous["omitted_records"] == 1
+    assert output not in previous["text"]
 
 
 @pytest.mark.parametrize("part", ["home", "runs", "run", "file"])
