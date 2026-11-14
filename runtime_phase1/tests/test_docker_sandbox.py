@@ -5561,6 +5561,28 @@ def test_ensure_image_rebuilds_without_onnx_privacy_provenance(tmp_path):
     ] == "disabled-v1"
 
 
+@pytest.mark.parametrize("reference", ["sha256:" + "a" * 64, "example.invalid/custom-worker:test"])
+@pytest.mark.parametrize("inspect_status", [1, 125])
+def test_explicit_worker_image_is_never_built_when_unavailable(
+    tmp_path, monkeypatch, reference, inspect_status
+):
+    monkeypatch.setenv("WPR_SANDBOX_IMAGE", reference)
+    manager = DockerSandboxManager(base_dir=str(tmp_path))
+    calls = []
+
+    def fake_docker(args, **kwargs):
+        calls.append(args)
+        status = inspect_status if args[:2] == ["image", "inspect"] else 0
+        return subprocess.CompletedProcess(args, status, "", "")
+
+    manager._docker = fake_docker
+    with pytest.raises(RuntimeError, match="Configured worker image is unavailable"):
+        manager._ensure_image()
+    assert calls == [["image", "inspect", reference]]
+    assert not (manager.build_root / "Dockerfile").exists()
+    assert manager._image_checked_at == 0
+
+
 def test_custom_worker_image_without_reviewed_provenance_fails_closed(
     tmp_path, monkeypatch
 ):
