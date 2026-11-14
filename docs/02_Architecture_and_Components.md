@@ -26,6 +26,14 @@ Current implementation:
 - SQLite store
 - project-first web UI
 
+Standard worker memory is persisted with the worker. `WPR_DOCKER_MEMORY_RESERVATION_MB`
+sets its trusted default (3072 MiB when unset). When creating the workers table or adding
+its resource column, the store captures that validated reservation in the SQL default as
+well as the backfill. An older writer that omits the added column then retains the same
+allocation. Reopening an existing resource column rewrites neither its default nor saved
+allocations; a changed deployment policy or cross-version rollback needs a separate
+resource-compatibility check.
+
 Enterprise VM mode adds an `AuthContext` before API/MCP handlers. When
 `GLASSHIVE_ENTERPRISE_MODE=true`, the control plane requires a service-authenticated LibreChat user
 assertion, derives `tenant_id` and `owner_id` server-side, and scopes project, worker, run, event,
