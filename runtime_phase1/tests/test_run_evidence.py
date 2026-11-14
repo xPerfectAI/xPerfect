@@ -1287,7 +1287,7 @@ def test_run_evidence_classifies_structured_provider_auth_missing(tmp_path):
     assert "api_error_status: 401" in classification["diagnostic_summary"]
 
 
-def test_run_evidence_still_classifies_structured_provider_403_auth_missing(tmp_path):
+def test_run_evidence_classifies_structured_provider_403_access_denied(tmp_path):
     stdout_text = json.dumps(
         {
             "type": "result",
@@ -1318,8 +1318,9 @@ def test_run_evidence_still_classifies_structured_provider_403_auth_missing(tmp_
     )
 
     classification = evidence["failure_classification"]
-    assert classification["failure_class"] == "provider_auth_missing"
+    assert classification["failure_class"] == "provider_request_rejected"
     assert classification["retryable"] is False
+    assert "project permissions" in classification["recommended_recovery"]
     assert "api_error_status: 403" in classification["diagnostic_summary"]
 
 

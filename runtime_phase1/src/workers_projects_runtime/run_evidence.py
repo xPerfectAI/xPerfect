@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 import time
 from pathlib import Path
 from threading import Lock
@@ -1150,44 +1151,64 @@ def write_constraint_ledger(workspace_dir: Path | str, ledger: dict[str, object]
     run_dir = Path(workspace_dir) / RUN_EVIDENCE_DIR_NAME
     latest_path = run_dir / "constraint-ledger.json"
     per_run_path = run_dir / "runs" / run_id / "constraint-ledger.json"
-    latest_path.parent.mkdir(parents=True, exist_ok=True)
-    per_run_path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(ledger, indent=2, sort_keys=True)
     with _EVIDENCE_WRITE_LOCK:
         if publish_latest:
-            _atomic_write_text(latest_path, body + "\n")
-        _atomic_write_text(per_run_path, body + "\n")
+            _atomic_write_text(latest_path, body + "\n", workspace_dir=workspace_dir)
+        _atomic_write_text(per_run_path, body + "\n", workspace_dir=workspace_dir)
     return per_run_path
 
 
-def _atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
-    """Replace one evidence file without exposing concurrent partial writes."""
+def _atomic_write_text(path: Path, text: str, *, workspace_dir: Path | str, mode: int = 0o644) -> None:
+    """Replace evidence through pinned directories, never worker-planted links.
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        dir=str(path.parent),
-    )
+    The control plane owns the workspace location. Its contents are untrusted,
+    including parent directories of files published by the runtime.
+    """
+    workspace = Path(workspace_dir)
+    relative = path.relative_to(workspace)
+    if not relative.parts or ".." in relative.parts:
+        raise ValueError("Evidence path must stay within its workspace")
+    workspace.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent = os.open(workspace, flags)
+    temporary_name = None
+    descriptor = -1
     try:
+        for part in relative.parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=parent)
+            except FileExistsError:
+                pass
+            child = os.open(part, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        temporary_name = f".{relative.name}.{uuid.uuid4().hex}.tmp"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=parent,
+        )
         os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             descriptor = -1
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-        directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
+        os.replace(temporary_name, relative.name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
         try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(parent)
 
 def _walk_values(value: object, prefix: str = "") -> Iterable[tuple[str, str]]:
     if isinstance(value, dict):
@@ -2696,11 +2717,9 @@ def write_run_evidence(workspace_dir: Path | str, evidence: dict[str, object], r
     run_dir = Path(workspace_dir) / RUN_EVIDENCE_DIR_NAME
     latest_path = run_dir / "evidence.json"
     per_run_path = run_dir / "runs" / run_id / "evidence.json"
-    latest_path.parent.mkdir(parents=True, exist_ok=True)
-    per_run_path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(evidence, indent=2, sort_keys=True)
     # Completion consumers need immutable run identity, not the mutable latest alias.
     with _EVIDENCE_WRITE_LOCK:
-        _atomic_write_text(per_run_path, body + "\n")
-        _atomic_write_text(latest_path, body + "\n")
+        _atomic_write_text(per_run_path, body + "\n", workspace_dir=workspace_dir)
+        _atomic_write_text(latest_path, body + "\n", workspace_dir=workspace_dir)
     return per_run_path
