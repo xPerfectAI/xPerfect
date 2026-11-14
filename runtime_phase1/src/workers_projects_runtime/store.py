@@ -2051,6 +2051,9 @@ class Store:
                 raise sqlite3.DatabaseError("Runtime schema is unavailable")
 
     def _init_db(self) -> None:
+        # Older writers omit the resource columns, so their SQL default must
+        # agree with the configured standard reservation at schema creation.
+        standard_memory_default = _worker_resource_values("standard", None)[1]
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             session_columns = {row["name"] for row in conn.execute("PRAGMA table_info(provider_sessions)")}
@@ -2149,7 +2152,7 @@ class Store:
                     execution_mode TEXT NOT NULL DEFAULT 'docker',
                     trusted_run_lane TEXT NOT NULL DEFAULT 'mission',
                     resource_class TEXT NOT NULL DEFAULT 'standard',
-                    resource_memory_bytes INTEGER NOT NULL DEFAULT 3221225472,
+                    resource_memory_bytes INTEGER NOT NULL DEFAULT STANDARD_WORKER_MEMORY_BYTES,
                     alias TEXT,
                     runtime TEXT NOT NULL,
                     model TEXT NOT NULL,
@@ -3013,7 +3016,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_provider_route_health_events_attempt
                     ON provider_route_health_events(run_id, attempt_id);
                 CREATE INDEX IF NOT EXISTS idx_provider_stop_tombstones_expiry ON provider_stop_tombstones(expires_at);
-                """
+                """.replace("STANDARD_WORKER_MEMORY_BYTES", str(standard_memory_default))
             )
             self._reconcile_provider_session_scope_indexes(conn)
             conn.execute(
@@ -3067,15 +3070,12 @@ class Store:
                 )
             if "resource_memory_bytes" not in worker_columns:
                 conn.execute(
-                    "ALTER TABLE workers ADD COLUMN resource_memory_bytes INTEGER NOT NULL DEFAULT 3221225472"
+                    "ALTER TABLE workers ADD COLUMN resource_memory_bytes INTEGER NOT NULL DEFAULT "
+                    + str(standard_memory_default)
                 )
-                configured_standard_memory = _worker_resource_values(
-                    "standard",
-                    None,
-                )[1]
                 conn.execute(
                     "UPDATE workers SET resource_memory_bytes = ?",
-                    (configured_standard_memory,),
+                    (standard_memory_default,),
                 )
             # Provider sessions are created only by the trusted conversation
             # provider. Backfill that durable linkage when upgrading a runtime
