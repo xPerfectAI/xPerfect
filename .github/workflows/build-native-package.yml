@@ -28,8 +28,7 @@ jobs:
     permissions:
       contents: write  # read and append only public-code images to a draft release
     env:
-      GH_TOKEN: ${{ github.token }}
-      SKOPEO: quay.io/skopeo/stable@sha256:24940638e4abb0edfedc78a680554f316069d0212a00159276759421a059e611
+      SKOPEO: quay.io/skopeo/stable@sha256:5ebc1bc255081aa74153cc65868e1c625cf4c649071e7fcb4e6bdc4f2de3d62a
     steps:
       - name: Obtain this exact public source
         run: |
@@ -38,16 +37,41 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz" \
             | tar -xz --strip-components=1 -C "$RUNNER_TEMP/source"
           test "$(docker info --format '{{.Architecture}}')" = x86_64
-      - name: Verify and load the reviewed workstation base
+          df -B1 "$RUNNER_TEMP"
+      - name: Build the canonical workstation on this native runner
         run: |
           cd "$RUNNER_TEMP/source"
-          manifest=deployment/linux/native-build-inputs.json
-          gh release download "$(jq -r .staging_release "$manifest")" --repo "$GITHUB_REPOSITORY" \
-            --pattern "$(jq -r .archive "$manifest")" --dir "$RUNNER_TEMP"
-          echo "$(jq -r .archive_sha256 "$manifest")  $RUNNER_TEMP/$(jq -r .archive "$manifest")" | sha256sum --check --strict
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/work" "$SKOPEO" copy \
-            --override-arch amd64 "oci-archive:/work/$(jq -r .archive "$manifest"):$(jq -r .archive_ref "$manifest")" \
-            docker-daemon:xperfect-native-base:build
+          # Reuse the service image's pinned build tool instead of a second tool pin.
+          uv_image=$(python3 - <<'PY_UV'
+          import re
+          from pathlib import Path
+          rows = [line.split() for line in Path('deployment/linux/Dockerfile.service').read_text().splitlines()]
+          refs = [row[1] for row in rows if len(row) == 4 and row[0] == 'FROM' and row[2:] == ['AS', 'uv']]
+          assert len(refs) == 1
+          assert re.fullmatch(r'ghcr.io/astral-sh/uv:[0-9.]+@sha256:[0-9a-f]{64}', refs[0])
+          print(refs[0])
+          PY_UV
+          )
+          docker create --name xperfect-build-uv "$uv_image"
+          docker cp xperfect-build-uv:/uv "$RUNNER_TEMP/uv"
+          docker rm xperfect-build-uv
+          native_build_venv="$RUNNER_TEMP/workstation-build-venv"
+          UV_PROJECT_ENVIRONMENT="$native_build_venv" "$RUNNER_TEMP/uv" sync \
+            --frozen --no-dev --no-install-project --python /usr/bin/python3 --project runtime_phase1
+          WPR_DB_PATH="$RUNNER_TEMP/workstation-build/runtime.sqlite3" \
+            WPR_DOCKER_IMAGE_BUILD_TIMEOUT_SEC=1200 PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONPATH=runtime_phase1/src "$native_build_venv/bin/python" - <<'PY_BASE'
+          import os, subprocess
+          from pathlib import Path
+          from workers_projects_runtime import prepare_worker_image
+          from workers_projects_runtime.docker_sandbox import DockerSandboxManager
+          assert not os.environ.get('WPR_SANDBOX_IMAGE')
+          assert prepare_worker_image.main() == 0
+          manager = DockerSandboxManager(base_dir=str(Path(os.environ['WPR_DB_PATH']).parent))
+          subprocess.run(['docker', 'tag', manager.image, 'xperfect-native-base:build'], check=True)
+          print('Canonical workstation built on native amd64 from this exact source')
+          PY_BASE
+          df -B1 "$RUNNER_TEMP"
       - name: Build the matched package with its real kernel guard
         run: |
           cd "$RUNNER_TEMP/source"
@@ -61,6 +85,42 @@ jobs:
             test "$actual" = "$expected"
             echo "Verified $client version"
           done
+      - name: Check the native document toolchain without network access
+        run: |
+          docker run --rm -i --network none --entrypoint python3 xperfect-native:build -I - <<'PY_DOCUMENTS'
+          import io, os
+          from importlib.metadata import version
+          import onnxruntime, openpyxl, pymupdf
+          from PIL import Image
+          from pypdf import PdfReader
+          assert os.getuid() == 65534
+          assert os.environ.get('ORT_DISABLE_TELEMETRY') == '1'
+          assert version('PyMuPDF') == '2.1'
+          assert 'CPUExecutionProvider' in onnxruntime.get_available_providers()
+          document = pymupdf.open()
+          page = document.new_page()
+          page.insert_text((72, 72), 'Synthetic document check')
+          pdf = document.tobytes()
+          document.close()
+          with pymupdf.open(stream=pdf, filetype='pdf') as readback:
+              assert 'Synthetic document check' in readback[0].get_text()
+              assert readback[0].get_pixmap().width > 0
+          assert len(PdfReader(io.BytesIO(pdf)).pages) == 1
+          png = io.BytesIO()
+          Image.new('RGB', (4, 4), 'white').save(png, format='PNG')
+          png.seek(0)
+          assert Image.open(png).size == (4, 4)
+          workbook = openpyxl.Workbook()
+          workbook.active['A1'] = 'Synthetic document check'
+          data = io.BytesIO()
+          workbook.save(data)
+          workbook.close()
+          data.seek(0)
+          readback = openpyxl.load_workbook(data)
+          assert readback.active['A1'].value == 'Synthetic document check'
+          readback.close()
+          print('Native document imports and PDF, PNG and workbook round trips passed')
+          PY_DOCUMENTS
       - name: Qualify the native worker policy through the package entry point
         run: |
           cd "$RUNNER_TEMP/source"
@@ -92,6 +152,8 @@ jobs:
           sudo python3 tests/check_worker_network_live.py --native-image "$native" \
             --package-receipt "$RUNNER_TEMP/policy-state/receipt.json" --package-policy "$RUNNER_TEMP/worker-policy.json"
       - name: Export exact images for review and existing publication
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd "$RUNNER_TEMP/source"
           mkdir "$RUNNER_TEMP/package"
@@ -99,7 +161,11 @@ jobs:
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/package:/work" "$SKOPEO" copy \
               "docker-daemon:xperfect-$role:build" "oci:/work/layout:$role-amd64"
           done
+          df -B1 "$RUNNER_TEMP"
           tar -C "$RUNNER_TEMP/package/layout" -cf "$RUNNER_TEMP/package-amd64.tar" .
+          stat -c 'Package bytes: %s' "$RUNNER_TEMP/package-amd64.tar"
+          test "$(stat -c %s "$RUNNER_TEMP/package-amd64.tar")" -lt 2147483648
+          df -B1 "$RUNNER_TEMP"
           cd "$RUNNER_TEMP"
           mv package-amd64.tar "package-amd64-$GITHUB_SHA.tar"
           sha256sum "package-amd64-$GITHUB_SHA.tar" > "package-amd64-$GITHUB_SHA.sha256"
