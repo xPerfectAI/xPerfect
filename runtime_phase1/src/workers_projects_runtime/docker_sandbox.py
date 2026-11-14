@@ -3656,7 +3656,9 @@ screen -ls | awk -v target="$target" '
         if inspected.returncode == 0 and self._image_has_reviewed_provenance(inspected.stdout):
             self._image_checked_at = now
             return
-        if inspected.returncode == 0 and not self._managed_image:
+        if not self._managed_image:
+            if inspected.returncode != 0:
+                raise RuntimeError("Configured worker image is unavailable; stage it before starting workers")
             raise RuntimeError(
                 "Configured worker image is missing the reviewed GlassHive provenance labels or privacy environment"
             )

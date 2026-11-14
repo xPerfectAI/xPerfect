@@ -489,7 +489,10 @@ fail closed with recovery guidance. Both workstation and host launch environment
 advertising.
 
 The 2026-07-21 reviewed production graph reports 0 critical, 0 high, and 6 moderate npm audit
-findings. A custom workstation image is supported only when it contains the same reviewed OpenClaw
+findings. An explicit `WPR_SANDBOX_IMAGE` selects a pre-staged image. If Docker cannot inspect it,
+worker startup fails before staging or building an image. The default managed-image path can still
+build its reviewed recipe. A custom workstation image is supported only when it contains the same
+reviewed OpenClaw
 runtime; xPerfect checks it before starting a worker.
 
 ## Link Lifetime Defaults
