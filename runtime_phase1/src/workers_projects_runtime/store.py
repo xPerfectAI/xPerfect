@@ -2050,6 +2050,62 @@ class Store:
             if row is None or int(row[0]) < 1:
                 raise sqlite3.DatabaseError("Runtime schema is unavailable")
 
+    def processing_health(
+        self, *, tenant_id: str | None = None, owner_id: str | None = None,
+        profile: str | None = None, runtime: str | None = None, model: str | None = None,
+    ) -> dict:
+        """Project retained outcomes without mutating cooldown or run state."""
+        from .processing_health import summarize
+
+        where, parameters = [], []
+        for column, value in (("r.tenant_id", tenant_id), ("w.owner_id", owner_id)):
+            if value is not None:
+                where.append(column + " = ?")
+                parameters.append(value)
+        query = """
+            SELECT r.run_id, r.tenant_id, w.owner_id, w.profile, w.runtime, w.model,
+                   r.execution_binding_json, r.provider_route_profile,
+                   r.provider_route_runtime, r.provider_route_model,
+                   r.state, r.started_at, r.runtime_invoked_at, r.ended_at,
+                   r.failure_class
+            FROM runs r JOIN workers w ON w.worker_id = r.worker_id
+        """ + (" WHERE " + " AND ".join(where) if where else "")
+        outcomes = []
+        with self._connect() as conn:
+            rows = conn.execute(query, parameters).fetchall()
+            for row in rows:
+                record = dict(row)
+                try:
+                    binding = json.loads(record["execution_binding_json"] or "{}")
+                    route = binding.get("route", {}) if isinstance(binding, dict) else {}
+                    if not isinstance(route, dict):
+                        route = {}
+                except (ValueError, TypeError):
+                    route = {}
+                scope = (
+                    record["tenant_id"], record["owner_id"],
+                    record["provider_route_profile"] or route.get("profile") or record["profile"],
+                    record["provider_route_runtime"] or route.get("runtime") or record["runtime"],
+                    record["provider_route_model"] or route.get("native_model") or record["model"],
+                )
+                if any(wanted is not None and wanted != actual for wanted, actual in
+                       zip((profile, runtime, model), scope[2:])):
+                    continue
+                attempts = conn.execute(
+                    "SELECT state,runtime_invoked_at,ended_at,terminal_reason "
+                    "FROM run_attempts WHERE run_id=?", (record["run_id"],)
+                ).fetchall()
+                for attempt in attempts:
+                    outcomes.append({"scope": scope, "state": attempt["state"],
+                                     "started_at": attempt["runtime_invoked_at"],
+                                     "ended_at": attempt["ended_at"],
+                                     "failure_class": attempt["terminal_reason"]})
+                outcomes.append({"scope": scope, "state": record["state"],
+                                 "started_at": record["runtime_invoked_at"] or record["started_at"],
+                                 "ended_at": record["ended_at"],
+                                 "failure_class": record["failure_class"]})
+        return summarize(outcomes)
+
     def _init_db(self) -> None:
         # Older writers omit the resource columns, so their SQL default must
         # agree with the configured standard reservation at schema creation.

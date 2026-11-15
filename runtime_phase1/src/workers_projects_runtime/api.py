@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -7422,6 +7422,25 @@ def create_app(
     def metrics(request: Request) -> MetricsSummary:
         ctx = _auth_context(request)
         return MetricsSummary(**store.metrics(_tenant_filter(ctx), _owner_filter(ctx)))
+
+    @app.get("/v1/health/processing")
+    def processing_health(
+        request: Request, profile: str = Query(min_length=1, max_length=100),
+        runtime: str = Query(min_length=1, max_length=100),
+        model: str = Query(min_length=1, max_length=200),
+        owner_id: str = Query(default="", max_length=200),
+    ) -> dict[str, object]:
+        ctx = _auth_context(request)
+        if ctx.enterprise and not ctx.is_user_scoped:
+            raise HTTPException(status_code=401, detail="Missing authenticated user assertion")
+        try:
+            return store.processing_health(
+                tenant_id=ctx.tenant_id,
+                owner_id=_request_owner(ctx, owner_id) or _preference_owner(ctx),
+                profile=profile, runtime=runtime, model=model,
+            )
+        except sqlite3.Error as exc:
+            raise HTTPException(status_code=503, detail="Runtime data store is unavailable") from exc
 
     @app.post("/v1/admin/reconcile")
     def reconcile(request: Request) -> dict[str, object]:
