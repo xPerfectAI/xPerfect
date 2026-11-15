@@ -107,6 +107,22 @@ events use the same recovery while their original attempt remains current. A ret
 original callback/result identity and never re-runs native work. Exhausted or terminally rejected
 delivery stays visible as a dead letter; it is not success and is not silently revived.
 
+### Scoped processing readiness
+
+`GET /v1/health/processing?owner_id=...&profile=...&runtime=...&model=...`
+uses the existing API authentication. Enterprise callers remain bound to their
+signed tenant and owner. It returns content-free `up`, `down` or `unknown` status
+from retained run and attempt outcomes for that exact route. It does not invoke
+workers or change routing, retry, pause or spending state.
+
+A platform failure remains unresolved until a successful invocation in the same
+scope starts after that failure ends. A pause, restart, empty queue, elapsed time,
+unrelated success or a success already running at failure time cannot clear it.
+No successful evidence means `unknown`. This is observed processing readiness,
+not a claim that an idle provider has just been contacted. Application adapters
+combine it with their own input, publication and storage checks. Existing
+`/health` behavior is unchanged.
+
 ## Generic worker and webhook schedules
 
 **Run a task** asks a saved AI Worker to do a job later. **Send to an app** sends a scheduled
