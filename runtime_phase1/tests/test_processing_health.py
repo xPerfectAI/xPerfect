@@ -93,6 +93,13 @@ def test_real_service_failure_and_recovery_feed_projection_without_provider_call
     class Fixture(StubRuntime):
         fail = True
 
+        def resolve_model(self, profile):
+            return "model"
+
+        def _runtime_info(self, worker, *, pid):
+            from dataclasses import replace
+            return replace(super()._runtime_info(worker, pid=pid), runtime="codex-cli", model="model")
+
         def run_task(self, worker, instruction, timeout_sec=None, run_id=None):
             with runtime_start_boundary(worker):
                 notify_runtime_started(worker)
@@ -116,7 +123,7 @@ def test_real_service_failure_and_recovery_feed_projection_without_provider_call
                     break
                 time.sleep(.01)
             assert current['state'] == ('failed' if failed else 'completed')
-            assert store.processing_health(owner_id='alice')['status'] == ('down' if failed else 'up')
+            assert store.processing_health(owner_id='alice', profile='codex-cli', runtime='codex-cli', model='model')['status'] == ('down' if failed else 'up')
             if failed:
                 assert current['failure_class'] == 'provider_auth_missing'
     finally:
