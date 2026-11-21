@@ -408,6 +408,37 @@ def test_self_result_waits_for_canonical_files_and_keeps_exact_publisher(app_cor
     with pytest.raises(CoordinatorScopeError):core.read_result("local","owner",cid,"goal")
 
 
+@pytest.mark.parametrize("terminal", ["failed", "cancelled"])
+def test_self_result_without_a_response_still_reaches_the_application(app_core, terminal):
+    from workers_projects_runtime.coordinator_application import queue_self_results
+    core,cid,_=app_core
+    accept(core,cid)
+    prepared=prepare_turn(core,"local","owner",cid,"source",packet(cid))
+    request=core.store.get_provider_request(prepared["request_id"])
+    session=core.store.get_provider_session_by_id(request["session_id"])
+    run=core.store.create_run(session["worker_id"],session["project_id"],"Self-handled original",state="running")
+    core.store.update_provider_request(request["request_id"],run_id=run["run_id"],state="running")
+    core.accept_goals("local","owner",cid,"source",[Goal(id="goal",text="Make a tiny local page.")])
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET worker_id=?,run_id=? WHERE conversation_id=? AND goal_id='goal'",
+                     (session["worker_id"],run["run_id"],cid))
+    # While the request is still open nothing is owed yet.
+    queue_self_results(core,core._conversation("local","owner",cid))
+    with core.store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM callback_outbox WHERE event_type='coordinator.result_ready'").fetchone()[0]==0
+    # A failed or cancelled request never receives a response body; its outcome is still owed once.
+    core.store.update_run(run["run_id"],state=terminal,error_text="interrupted",terminal_result_revision=1)
+    core.store.update_provider_request(request["request_id"],state=terminal)
+    assert core.store.get_provider_request(request["request_id"])["response_json"] in ("", None)
+    for _ in range(2):queue_self_results(core,core._conversation("local","owner",cid))
+    with core.store._connect() as conn:
+        callbacks=conn.execute("SELECT * FROM callback_outbox WHERE event_type='coordinator.result_ready'").fetchall()
+    assert len(callbacks)==1
+    assert json.loads(callbacks[0]["payload_json"])["data"]["run_id"]==run["run_id"]
+    assert notification_fence(core.service,dict(callbacks[0]))==""
+    assert core.read_result("local","owner",cid,"goal")["state"]==terminal
+
+
 def test_generated_result_wake_keeps_authoritative_original_context_reference_after_restart(app_core):
     core,cid,_=app_core
     accept(core,cid)

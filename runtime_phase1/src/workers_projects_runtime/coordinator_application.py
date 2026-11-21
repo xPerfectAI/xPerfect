@@ -6,13 +6,13 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .coordinator import CoordinatorConfig, CoordinatorConflict, CoordinatorScopeError, StrictModel, canonical, digest, now
 
 
 EVENTS = ("coordinator.turn_due", "coordinator.dispatch_due", "coordinator.result_ready", "coordinator.action_due",
-          "coordinator.turn_result_ready")
+          "coordinator.turn_result_ready", "coordinator.progress_ready")
 
 
 class ResultPublicationData(StrictModel):
@@ -52,12 +52,45 @@ class TurnResultPublication(StrictModel):
     data: TurnResultPublicationData
 
 
+class ProgressPublicationData(StrictModel):
+    conversation_id: str = Field(min_length=1)
+    request_ref: str = Field(min_length=1)
+    source_turn_id: str = Field(min_length=1)
+    goal_id: str | None = Field(default=None, min_length=1)
+    turn_id: str | None = Field(default=None, min_length=1)
+    request_id: str | None = Field(default=None, min_length=1)
+    run_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    progress_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    progress_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    progress_text: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def source_variant(self):
+        if bool(self.goal_id) == bool(self.turn_id and self.request_id) or bool(self.turn_id) != bool(self.request_id):
+            raise ValueError("Progress requires one exact goal or turn source")
+        if self.goal_id and (self.turn_id or self.request_id):
+            raise ValueError("Progress source is ambiguous")
+        if "sha256:" + hashlib.sha256(self.progress_text.encode()).hexdigest() != self.progress_digest:
+            raise ValueError("Progress digest mismatch")
+        return self
+
+
+class ProgressPublication(StrictModel):
+    event_id: str = Field(min_length=1)
+    type: Literal["coordinator.progress_ready"]
+    created_at: str = Field(min_length=1)
+    expires_at: str = Field(min_length=1)
+    source_turn_id: str = Field(min_length=1)
+    data: ProgressPublicationData
+
+
 def application(conversation):
     return CoordinatorConfig.model_validate_json(conversation["config_json"]).application
 
 
 def publications(core, tenant, owner, conversation_id, cursor="", limit=100):
-    """Read retained result identity from the existing outbox, without admitting delivery."""
+    """Read retained publication identity from the existing outbox, without admitting delivery."""
     conversation = core._conversation(tenant, owner, conversation_id)
     binding = application(conversation)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
@@ -73,8 +106,10 @@ def publications(core, tenant, owner, conversation_id, cursor="", limit=100):
         try:
             payload = json.loads(record["payload_json"])
             is_turn = record["event_type"] == EVENTS[4]
-            model = TurnResultPublication if is_turn else ResultPublication
-            source_turn_id = (original_source_turn(connection, conversation_id, record["result_turn_id"])
+            is_progress = record["event_type"] == EVENTS[5]
+            model = ProgressPublication if is_progress else TurnResultPublication if is_turn else ResultPublication
+            source_turn_id = (payload["data"]["source_turn_id"] if is_progress else
+                              original_source_turn(connection, conversation_id, record["result_turn_id"])
                               if is_turn else record["source_turn_id"])
             value = model.model_validate({
                 **{key: payload[key] for key in ("event_id", "type", "created_at", "expires_at", "data")},
@@ -87,7 +122,7 @@ def publications(core, tenant, owner, conversation_id, cursor="", limit=100):
                 raise ValueError("Publication identity mismatch")
             datetime.fromisoformat(value.created_at.replace("Z", "+00:00"))
             datetime.fromisoformat(value.expires_at.replace("Z", "+00:00"))
-            return value.model_dump()
+            return value.model_dump(exclude_none=True) if is_progress else value.model_dump()
         except (KeyError, TypeError, ValueError) as exc:
             raise CoordinatorConflict("Retained publication identity is invalid") from exc
 
@@ -100,10 +135,10 @@ def publications(core, tenant, owner, conversation_id, cursor="", limit=100):
               "AND g.goal_id=json_extract(cb.payload_json,'$.data.goal_id') "
               "LEFT JOIN coordinator_turns t ON t.conversation_id=json_extract(cb.payload_json,'$.data.conversation_id') "
               "AND t.turn_id=json_extract(cb.payload_json,'$.data.turn_id') "
-              "WHERE cb.tenant_id=? AND cb.owner_id=? AND cb.event_type IN (?,?) "
+              "WHERE cb.tenant_id=? AND cb.owner_id=? AND cb.event_type IN (?,?,?) "
               "AND json_valid(cb.payload_json) "
               "AND json_extract(cb.payload_json,'$.data.conversation_id')=?")
-    parameters = (tenant, owner, EVENTS[2], EVENTS[4], conversation_id)
+    parameters = (tenant, owner, EVENTS[2], EVENTS[4], EVENTS[5], conversation_id)
     with core.store._connect() as conn:
         after = None
         if cursor:
@@ -616,7 +651,10 @@ def queue_self_results(core, conversation):
                             "JOIN runs r ON r.run_id=g.run_id JOIN provider_requests p ON p.run_id=r.run_id "
                             "JOIN provider_sessions s ON s.session_id=p.session_id "
                             "WHERE g.conversation_id=? AND g.work_ref='' AND s.conversation_id=g.conversation_id "
-                            "AND s.agent_id='coordinator' AND p.response_json<>'' AND p.state IN ('completed','failed','cancelled') "
+                            "AND s.agent_id='coordinator' "
+                            # A completed result waits for its canonical response. A failed or cancelled
+                            # request never gets one, and its goal's outcome is owed to the application too.
+                            "AND ((p.state='completed' AND p.response_json<>'') OR p.state IN ('failed','cancelled')) "
                             "AND r.state IN ('completed','failed','cancelled','interrupted')",
                             (conversation["conversation_id"],)).fetchall()
     for row in rows:
@@ -624,6 +662,31 @@ def queue_self_results(core, conversation):
                 "result_revision": int(row["terminal_result_revision"] or 0),
                 "result_digest": "sha256:" + hashlib.sha256(str(row["output_text"] or "").encode()).hexdigest()}
         notify(core, conversation, EVENTS[2], canonical(data), data)
+
+
+def _turn_result_has_execution(core, conn, conversation, source_id, run_id):
+    """A rejected unreserved dispatch is intent, not an independently published worker result."""
+    cid, tenant, owner = conversation["conversation_id"], conversation["tenant_id"], conversation["owner_id"]
+    goals = conn.execute("SELECT * FROM coordinator_goals WHERE conversation_id=? "
+                         "AND (run_id=? OR source_turn_id=?)", (cid, run_id, source_id)).fetchall()
+    for row in goals:
+        goal = dict(row)
+        if goal["run_id"] and core._owned_goal_result_run(conn, tenant, owner, cid, goal["goal_id"], goal["run_id"]):
+            return True
+        if not goal["dispatch_json"]:
+            continue
+        receipt = conn.execute("SELECT * FROM callback_outbox WHERE callback_id=?",
+                               (dispatch_notification_ref(cid, goal),)).fetchone()
+        if (not receipt or receipt["status"] not in {"pending", "delivering"}
+                or receipt["cancel_requested_at"]):
+            continue
+        try:
+            if (datetime.fromisoformat(receipt["expires_at"].replace("Z", "+00:00")) > datetime.now(UTC)
+                    and notification_fence(core.service, dict(receipt)) == ""):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def completed_turn_result(core, tenant, owner, cid, tid):
@@ -653,12 +716,7 @@ def completed_turn_result(core, tenant, owner, cid, tid):
         source_id = original_source_turn(conn, cid, tid)
         source = conn.execute("SELECT blocker,restore_hold FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
                               (cid, source_id)).fetchone()
-        represented = conn.execute(
-            "SELECT 1 FROM coordinator_goals WHERE conversation_id=? AND (run_id=? OR "
-            "(source_turn_id=? AND (COALESCE(dispatch_json,'')<>'' OR COALESCE(work_ref,'')<>'' "
-            "OR COALESCE(worker_id,'')<>'' OR COALESCE(run_id,'')<>''))) LIMIT 1",
-            (cid, row["run_id"], source_id),
-        ).fetchone() is not None
+        represented = _turn_result_has_execution(core, conn, conversation, source_id, row["run_id"])
     try:
         response = json.loads(row["response_json"])
         saved = json.loads(row["provider_response"])
@@ -723,6 +781,103 @@ def queue_turn_results(core, conversation):
         notify(core, conversation, EVENTS[4], canonical(data), data)
 
 
+def _progress_source(core, conversation, data):
+    """Reuse current goal/turn ownership, never native text or client assertions."""
+    cid, tenant, owner = conversation["conversation_id"], conversation["tenant_id"], conversation["owner_id"]
+    if conversation.get("restore_hold"):
+        raise CoordinatorScopeError("Progress source is held")
+    with core.store._connect() as conn:
+        if data.get("goal_id") and not data.get("turn_id") and not data.get("request_id"):
+            goal = core._goal(cid, data["goal_id"])
+            if (goal["intent_state"] != "accepted" or goal["restore_hold"]
+                    or goal["run_id"] != data["run_id"] or goal["source_turn_id"] != data["source_turn_id"]):
+                raise CoordinatorScopeError("Progress goal changed")
+            run = core._owned_goal_result_run(conn, tenant, owner, cid, goal["goal_id"], data["run_id"])
+            source_id = goal["source_turn_id"]
+        elif data.get("turn_id") and data.get("request_id") and not data.get("goal_id"):
+            row = conn.execute(
+                "SELECT r.* FROM coordinator_turns t JOIN provider_requests p ON p.request_id=t.request_id "
+                "JOIN provider_sessions s ON s.session_id=p.session_id JOIN runs r ON r.run_id=p.run_id "
+                "JOIN workers w ON w.worker_id=r.worker_id WHERE t.conversation_id=? AND t.turn_id=? "
+                "AND t.request_id=? AND p.run_id=? AND t.restore_hold=0 AND t.blocker<>'cancelled' "
+                "AND p.restore_hold=0 AND p.state='running' AND p.tenant_id=? AND p.owner_id=? "
+                "AND s.tenant_id=p.tenant_id AND s.owner_id=p.owner_id AND s.conversation_id=t.conversation_id "
+                "AND s.agent_id='coordinator' AND s.worker_id=r.worker_id AND r.tenant_id=p.tenant_id "
+                "AND w.tenant_id=p.tenant_id AND w.owner_id=p.owner_id AND w.project_id=r.project_id "
+                "AND p.message_id=t.turn_id AND p.stream_id=t.turn_id",
+                (cid, data["turn_id"], data["request_id"], data["run_id"], tenant, owner)).fetchone()
+            run = dict(row) if row else None
+            source_id = original_source_turn(conn, cid, data["turn_id"])
+            if source_id != data["source_turn_id"]:
+                raise CoordinatorScopeError("Progress turn changed")
+        else:
+            raise CoordinatorScopeError("Progress source is ambiguous")
+        source = conn.execute("SELECT restore_hold,blocker FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
+                              (cid, source_id)).fetchone()
+        if (not source or source["restore_hold"] or source["blocker"] == "cancelled"
+                or not run or run["state"] != "running" or run.get("active_attempt_id") != data["attempt_id"]):
+            raise CoordinatorScopeError("Progress source is no longer current")
+    return run
+
+
+def _progress_events(core, run, *, sync=False):
+    from .conversation_provider import _native_commentary_events, _provider_log_worker
+    record = core.store.get_provider_request_for_run(run["run_id"])
+    if record:
+        collector = getattr(core.provider, "_sync_native_activity", None)
+        if sync and callable(collector):
+            collector(record, run)
+        result = []
+        for activity in core.store.list_provider_activity(record["request_id"]):
+            if activity["event_type"] != "public-commentary":
+                continue
+            try:
+                event = json.loads(activity["payload_json"])
+                if event["run_id"] == run["run_id"] and event["attempt_id"] == run["active_attempt_id"]:
+                    result.append(event)
+            except (KeyError, TypeError, ValueError):
+                continue
+        return result
+    collector = getattr(getattr(core.service, "runtime", None), "provider_commentary_log", None)
+    worker = core.store.get_worker(run["worker_id"])
+    if not callable(collector) or not worker:
+        return []
+    try:
+        _, log = collector(_provider_log_worker(worker, run), run["run_id"],
+            instruction_sha256=hashlib.sha256(run["instruction"].encode()).hexdigest())
+        return _native_commentary_events(log, run)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return []
+
+
+def queue_progress(core, conversation):
+    if application(conversation) is None or conversation.get("restore_hold"):
+        return
+    cid = conversation["conversation_id"]
+    with core.store._connect() as conn:
+        goals = [dict(row) for row in conn.execute(
+            "SELECT g.goal_id,g.source_turn_id,r.run_id,r.active_attempt_id AS attempt_id "
+            "FROM coordinator_goals g JOIN runs r ON r.run_id=g.run_id "
+            "WHERE g.conversation_id=? AND r.state='running'", (cid,))]
+        represented = {row["run_id"] for row in goals}
+        turns = [dict(row) for row in conn.execute(
+            "SELECT t.turn_id,t.request_id,r.run_id,r.active_attempt_id AS attempt_id "
+            "FROM coordinator_turns t JOIN provider_requests p ON p.request_id=t.request_id "
+            "JOIN runs r ON r.run_id=p.run_id WHERE t.conversation_id=? AND p.state='running' "
+            "AND r.state='running' AND t.origin='interactive'", (cid,)) if row["run_id"] not in represented]
+        for turn in turns:
+            turn["source_turn_id"] = original_source_turn(conn, cid, turn["turn_id"])
+    for source in [*goals, *turns]:
+        try:
+            run = _progress_source(core, conversation, source)
+            for event in _progress_events(core, run, sync=True):
+                data = {**source, **{key: event[key] for key in ("progress_id", "progress_digest", "progress_text")}}
+                _progress_source(core, conversation, data)
+                notify(core, conversation, EVENTS[5], event["progress_id"], data)
+        except (CoordinatorScopeError, KeyError, TypeError, ValueError):
+            continue
+
+
 def notification_fence(service, record):
     core = getattr(service, "coordinator", None)
     try:
@@ -736,6 +891,18 @@ def notification_fence(service, record):
             return "source_changed"
         if conversation.get("restore_hold"):
             return "continuity_restore_hold"
+        if record["event_type"] == EVENTS[5]:
+            progress = ProgressPublicationData.model_validate(data)
+            if payload.get("principal") != {"tenant_id": record["tenant_id"], "owner_id": record["owner_id"]}:
+                return "source_changed"
+            if "sha256:" + hashlib.sha256(progress.progress_text.encode()).hexdigest() != progress.progress_digest:
+                return "source_changed"
+            try:
+                run = _progress_source(core, conversation, data)
+            except CoordinatorScopeError:
+                return "source_prepared"
+            return "" if any(all(event.get(key) == data[key] for key in
+                ("progress_id", "progress_digest", "progress_text")) for event in _progress_events(core, run)) else "source_changed"
         if record["event_type"] == EVENTS[0]:
             state = turn_status(core, record["tenant_id"], record["owner_id"], data["conversation_id"], data["turn_id"])
             return ("continuity_restore_hold" if state["state"] == "restore_held" else
@@ -821,7 +988,8 @@ def finish_notification(store, record, *, state, error="", timings=None, http_st
                                 stamp.isoformat(), stamp.isoformat() if state == "accepted" else None, next_at,
                                 canonical(timings or {}), http_status, record["callback_id"],
                                 record["delivery_lease_token"], record["delivery_generation"])).rowcount
-        if changed and not pending and status not in {"http_accepted", "superseded"}:
+        if (changed and not pending and status not in {"http_accepted", "superseded"}
+                and record["event_type"] != EVENTS[5]):
             data = json.loads(record["payload_json"])["data"]
             table, key = (("coordinator_turns", "turn_id") if record["event_type"] in {EVENTS[0], EVENTS[4]}
                           else ("coordinator_goals", "goal_id"))

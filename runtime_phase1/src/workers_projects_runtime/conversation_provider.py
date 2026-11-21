@@ -47,6 +47,9 @@ from .agent_builder_control import (
     public_conversation_prefix,
     _unique_json_object,
     NativeConversationParts,
+    native_text_delivery_tool_name,
+    native_text_envelope,
+    native_text_envelope_open,
 )
 from .auth import GlassHiveAuthError, NativeOwnerUnavailableError, require_native_installed_owner
 from .application_boundary import opaque_application_context
@@ -129,6 +132,11 @@ logger = logging.getLogger(__name__)
 LOGGER = logging.getLogger(__name__)
 
 TERMINAL_RUN_STATES = {"completed", "failed", "cancelled", "interrupted"}
+# The failure classes whose open cooldown already continues a turn on its armed fallback.
+_PRESELECTABLE_ROUTE_FAILURES = frozenset({"provider_rate_limited", "provider_quota_exhausted"})
+# "trial" computes and validates the fallback admission beside the unchanged primary admission and
+# logs the outcome; "enforce" admits the turn on it.
+_ADMISSION_ROUTE_MODE = "enforce"
 TERMINAL_REQUEST_STATES = {"completed", "failed", "cancelled"}
 SERIAL_FALLBACK_CLAIM_TIMEOUT_SEC = 120
 
@@ -172,8 +180,6 @@ def _private_machine_state_response_contract(metadata: CompletionMetadata | None
     capabilities = metadata.bootstrap_bundle.get("provider_capabilities")
     contract = capabilities.get("response_contract") if isinstance(capabilities, dict) else None
     return dict(contract) if isinstance(contract, dict) else None
-
-CONVERSATION_BOOTSTRAP_MAX_RATIO = 0.50
 
 CONVERSATION_COMPACTION_TRIGGER_RATIO = 0.70
 
@@ -1499,22 +1505,23 @@ def _effective_native_context_window(
     return (min(model.context_window, reported), True) if valid else (model.context_window, False)
 
 
+def _configured_conversation_replay_max_bytes() -> int | None:
+    try:
+        value = int(os.environ.get("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES") or "")
+        return value if value > 0 else None
+    except ValueError:
+        return None
+
+
 def _conversation_replay_budget_bytes(
     model: HarnessModel, *, observed_chars_per_token: float,
     context_window: int | None = None,
 ) -> int:
     window = min(model.context_window, context_window) if type(context_window) is int and context_window > 0 else model.context_window
-    input_budget_tokens = int(window * CONVERSATION_BOOTSTRAP_MAX_RATIO)
+    input_budget_tokens = max(1, window - _conversation_output_reserve_tokens(model))
     calibrated_limit = int(input_budget_tokens * observed_chars_per_token)
-    configured = str(os.environ.get("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES") or "").strip()
-    if configured:
-        try:
-            requested = int(configured)
-            if requested > 0:
-                return min(requested, calibrated_limit)
-        except ValueError:
-            pass
-    return calibrated_limit
+    configured = _configured_conversation_replay_max_bytes()
+    return min(configured, calibrated_limit) if configured is not None else calibrated_limit
 
 def _native_history_budget_receipt(
     model: HarnessModel, manifest: dict[str, Any],
@@ -1770,6 +1777,10 @@ def _admit_conversation_history(
     budget_bytes = _conversation_replay_budget_bytes(
         model, observed_chars_per_token=chars_per_token, context_window=effective_window,
     )
+    # CLI harnesses own their actual context admission and native compaction. A byte/token
+    # estimate is sizing evidence, not authority to reject intact source before that harness.
+    operator_capped = _configured_conversation_replay_max_bytes() is not None
+    enforce_budget = model.harness_profile in DIRECT_PROFILES or operator_capped
 
     def render(selected: list[tuple[int, ChatMessage]], compacted: list[tuple[int, ChatMessage]]):
         lines = [
@@ -1887,7 +1898,7 @@ def _admit_conversation_history(
         return "\n\n".join(lines).strip(), legacy_excerpt, tool_payloads_pruned
 
     instruction, compaction, tool_payloads_pruned = render(admitted, omitted)
-    while len(instruction.encode("utf-8")) > budget_bytes and len(admitted_groups) > 1:
+    while enforce_budget and len(instruction.encode("utf-8")) > budget_bytes and len(admitted_groups) > 1:
         removable = next((position for position, group in enumerate(admitted_groups[:-1])
                           if not any(index in protected_indices for index, _ in group)), None)
         if removable is None:
@@ -1898,7 +1909,7 @@ def _admit_conversation_history(
         admitted = [item for group in admitted_groups for item in group]
         instruction, compaction, tool_payloads_pruned = render(admitted, omitted)
 
-    if len(instruction.encode("utf-8")) > budget_bytes:
+    if enforce_budget and len(instruction.encode("utf-8")) > budget_bytes:
         raise HTTPException(
             status_code=413,
             detail=(
@@ -1934,13 +1945,16 @@ def _admit_conversation_history(
             ).strip()
             if call_id:
                 tool_result_ids.add(call_id)
-    input_budget_tokens = int(effective_window * CONVERSATION_BOOTSTRAP_MAX_RATIO)
+    input_budget_tokens = max(1, effective_window - _conversation_output_reserve_tokens(model))
     output_reserve_tokens = _conversation_output_reserve_tokens(model)
     compaction_trigger_tokens = int(
         effective_window * CONVERSATION_COMPACTION_TRIGGER_RATIO
     )
     decision = {
         "version": 1,
+        "context_budget_owner": "operator" if operator_capped else (
+            "control_plane" if enforce_budget else "native_harness"
+        ),
         "mode": "delta" if start_at > 0 or include_indices is not None else "bootstrap",
         "base_cursor": max(0, start_at),
         "requested_message_count": len(all_messages),
@@ -2811,7 +2825,8 @@ def _mutable_native_file_link_start(text: str, *, incomplete: bool) -> int | Non
         literals = [match.span() for match in re.finditer(r"(`+)(?!`)(.*?)\1(?!`)", line)]
         links = [match for match in NATIVE_MARKDOWN_LINK_OR_ESCAPE.finditer(line)
                  if match.group(2) is not None]
-        if incomplete:
+        # Only the unterminated tail can still become a link; a finished line cannot.
+        if incomplete and offset + len(line) == len(text):
             pending = re.search(r"\[[^\]\n]*$|\[[^\]\n]*\](?:\([^\)\n]*$)?$", line)
             if pending is not None:
                 links.append(pending)
@@ -2831,9 +2846,108 @@ def _mutable_native_file_link_start(text: str, *, incomplete: bool) -> int | Non
     return None
 
 
+def _claude_native_text_updates(stdout: str) -> list[tuple[int, dict, Any]] | None:
+    """Project a live call's native Claude text onto the existing public envelope.
+
+    Authored text is voice-eligible speech, framed as it streams. The declared
+    text-only tool carries a complete unspoken reply, so text after it in the same
+    turn is not a second reply. Returns None unless this process declared that tool.
+    """
+    delivery_tool = native_text_delivery_tool_name()
+    declared = False
+    updates: list[tuple[int, dict, Any]] = []
+    blocks: dict[Any, dict[str, Any]] = {}
+    envelope_open = False
+    pending_part = False
+    text_only = False
+
+    def chunk(sequence: int, text: str) -> None:
+        updates.append((sequence, {"sessionUpdate": "agent_message_chunk",
+                                  "content": {"type": "text", "text": text}}, None))
+
+    def close(sequence: int) -> None:
+        nonlocal envelope_open
+        if envelope_open:
+            chunk(sequence, '"}')
+            envelope_open = False
+
+    def separate(sequence: int) -> None:
+        nonlocal pending_part
+        if pending_part:
+            updates.append((sequence, {"sessionUpdate": "tool_call"}, None))
+            pending_part = False
+
+    for sequence, line in enumerate(str(stdout or "").splitlines(), 1):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            tools = event.get("tools")
+            declared = isinstance(tools, list) and delivery_tool in tools
+            continue
+        if not declared:
+            continue
+        if kind == "result":
+            close(sequence)
+            continue
+        if kind != "stream_event" or event.get("parent_tool_use_id"):
+            continue
+        inner = event.get("event")
+        if not isinstance(inner, dict):
+            continue
+        step, index = inner.get("type"), inner.get("index")
+        if step == "content_block_start":
+            block = inner.get("content_block")
+            block = block if isinstance(block, dict) else {}
+            if block.get("type") == "text":
+                blocks[index] = {"kind": "text"}
+            elif block.get("type") == "tool_use":
+                close(sequence)
+                if block.get("name") == delivery_tool:
+                    blocks[index] = {"kind": "delivery", "json": []}
+                else:
+                    blocks[index] = {"kind": "tool"}
+                    separate(sequence)
+        elif step == "content_block_delta":
+            delta = inner.get("delta")
+            delta = delta if isinstance(delta, dict) else {}
+            state = blocks.get(index) or {}
+            if delta.get("type") == "text_delta" and state.get("kind") == "text":
+                text = delta.get("text")
+                if not isinstance(text, str) or not text or text_only:
+                    continue
+                if not envelope_open:
+                    separate(sequence)
+                    chunk(sequence, native_text_envelope_open("eligible"))
+                    envelope_open = pending_part = True
+                chunk(sequence, json.dumps(text, ensure_ascii=False)[1:-1])
+            elif delta.get("type") == "input_json_delta" and state.get("kind") == "delivery":
+                state["json"].append(str(delta.get("partial_json") or ""))
+        elif step == "content_block_stop":
+            state = blocks.pop(index, None) or {}
+            if state.get("kind") != "delivery":
+                continue
+            try:
+                content = json.loads("".join(state["json"]) or "{}").get("content")
+            except (TypeError, ValueError, AttributeError):
+                content = None
+            if not isinstance(content, str):
+                continue
+            separate(sequence)
+            chunk(sequence, native_text_envelope(content, "skip"))
+            pending_part = text_only = True
+    return updates if declared else None
+
+
 def _native_public_updates(profile: str, stdout: str) -> list[tuple[int, dict, Any]] | None:
     """Normalize declared native message identities, never commentary or prose."""
     profile = _native_event_profile(profile)
+    if profile == "claude-code":
+        return _claude_native_text_updates(stdout)
     session_id = ""
     turn_id = ""
     items: dict[str, dict] = {}
@@ -2912,7 +3026,7 @@ def _native_spoken_content(profile: str, stdout: str, graph_control: Any,
                            delivery_control: Any) -> dict[str, Any] | None:
     """Use the same public envelope owner for bound ACP and Codex final items."""
     profile = _native_event_profile(profile)
-    if profile not in {"grok-build", "codex-cli"} or not delivery_control:
+    if profile not in {"grok-build", "codex-cli", "claude-code"} or not delivery_control:
         return None
     updates = _native_public_updates(profile, stdout)
     if updates is None:
@@ -2993,6 +3107,7 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
     codex_authored_parts: list[str] = []
     grok_session_id = ""
     grok_results: list[str] = []
+    claude_result_seen = False
     for raw_line in str(stdout or "").splitlines():
         try:
             event = json.loads(raw_line)
@@ -3043,6 +3158,7 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
         if event.get("type") == "stream_event":
             continue
         if event.get("type") == "result":
+            claude_result_seen = True
             text = str(event.get("result") or "")
             if text.strip():
                 result_parts.append(text)
@@ -3060,6 +3176,19 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
             assistant_parts.append(text)
     # Every harness answers with its user-facing report, as worker results do: the narration
     # before a FINAL REPORT section, and the marker itself, are not part of the reply.
+    if profile == "claude-code" and normalized_messaging_delivery_control(delivery_control):
+        updates = _claude_native_text_updates(stdout)
+        if updates is not None:
+            # Native text delivery: the same projection that streamed the speech owns the terminal.
+            if not claude_result_seen:
+                return None
+            authored = NativeConversationParts(graph_control, delivery_control)
+            try:
+                for _sequence, update, meta in updates:
+                    authored.update(update, meta)
+                return authored.finish() or native_text_envelope("", "skip")
+            except ValueError:
+                return None
     if profile == "claude-code":
         # Each Claude `result` ends one authored turn. A later turn (one a finished background
         # task starts, for example) may refer to an earlier one, so the reply carries every turn.
@@ -3095,6 +3224,38 @@ def _native_visible_text(profile: str, stdout: str) -> str:
     """Extract only user-visible assistant text from complete native JSONL events."""
 
     return _native_terminal_text(profile, stdout) or ""
+
+
+def _native_commentary_events(log: str, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project complete public commentary separately from final/voice output."""
+    run_id, attempt_id = str(run.get("run_id") or ""), str(run.get("active_attempt_id") or "")
+    if not run_id or not attempt_id:
+        return []
+    events = []
+    for line in log.splitlines():
+        try:
+            event = json.loads(line)
+            payload = event["payload"]
+            parts = payload["content"]
+            if (event.get("type") != "response_item" or payload.get("type") != "message"
+                    or payload.get("role") != "assistant" or payload.get("phase") != "commentary"
+                    or not event.get("native_turn_id") or not event.get("native_item_id")
+                    or not isinstance(parts, list) or not parts
+                    or not all(isinstance(part, dict) and part.get("type") == "output_text"
+                               and isinstance(part.get("text"), str) for part in parts)):
+                continue
+            text = "".join(part["text"] for part in parts)
+            if not text.strip():
+                continue
+            identity = json.dumps([run_id, attempt_id, event["native_turn_id"], event["native_item_id"]],
+                                  ensure_ascii=False, separators=(",", ":"))
+            progress_id = hashlib.sha256(identity.encode()).hexdigest()
+            events.append({"source_event_id": progress_id, "run_id": run_id, "attempt_id": attempt_id,
+                           "progress_id": progress_id, "progress_digest": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
+                           "progress_text": text})
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return events
 
 
 def _provider_log_worker(worker: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
@@ -5662,7 +5823,186 @@ class ConversationProvider:
             lock_started = time.monotonic_ns() if native_timing_enabled() else None
             with self._session_start_lock(payload, tenant_id):
                 _provider_admission_event(payload, "session_lock_acquired", lock_started)
-                return self._start_impl(payload, tenant_id=tenant_id, received_at=received_at)
+                if _ADMISSION_ROUTE_MODE == "enforce":
+                    admitted, route_skip = self._admission_route(payload, tenant_id=tenant_id)
+                else:
+                    admitted, route_skip = payload, None
+                    try:  # the trial observes a turn and must never fail it
+                        candidate, trial_skip = self._admission_route(payload, tenant_id=tenant_id)
+                        if trial_skip:
+                            self._trial_admission_route(candidate, tenant_id=tenant_id)
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "admission_route_trial outcome=error detail=%s", type(exc).__name__
+                        )
+                record = self._start_impl(
+                    admitted, tenant_id=tenant_id, received_at=received_at,
+                    # Provenance comes from this route decision, never metadata extras.
+                    requested_model=payload.model if admitted.model != payload.model else "",
+                )
+                if route_skip and isinstance(record, dict) and record.get("request_id"):
+                    self.store.add_provider_activity_once(
+                        str(record["request_id"]),
+                        "route-skipped",
+                        "Skipped a known-unhealthy provider route before invocation.",
+                        route_skip,
+                    )
+                return record
+
+    def _accepted_admission_request(
+        self,
+        variants: tuple[ChatCompletionRequest, ...],
+        *,
+        tenant_id: str,
+    ) -> dict[str, Any] | None:
+        """Find the already accepted request for this turn under either admission route."""
+        metadata = variants[0].metadata
+        owner_id = str(metadata.owner_id or "")
+        if metadata.native_invocation_id:
+            accepted = self.store.get_provider_request(
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                native_invocation_id=metadata.native_invocation_id,
+            )
+            if accepted:
+                return accepted
+        if not str(metadata.idempotency_key or metadata.message_id or "").strip():
+            return None
+        for variant in variants:
+            for key in (_idempotency_key(variant), *_legacy_idempotency_keys(variant)):
+                accepted = self.store.get_provider_request(
+                    tenant_id=tenant_id, owner_id=owner_id, idempotency_key=key,
+                )
+                if accepted:
+                    return accepted
+        return None
+
+    @staticmethod
+    def _route_portable_bootstrap_bundle(bundle: Any, model: HarnessModel) -> Any:
+        """Drop the retained-process declaration that only the claude-code harness can honor.
+
+        The application declares it only for a claude-code target; a turn admitted on another
+        harness carries the bundle the application sends for that harness.
+        """
+        capabilities = bundle.get("provider_capabilities") if isinstance(bundle, dict) else None
+        if (
+            model.harness_profile == "claude-code"
+            or not isinstance(capabilities, dict)
+            or "conversation_process_reuse" not in capabilities
+        ):
+            return bundle
+        portable = copy.deepcopy(bundle)
+        portable["provider_capabilities"].pop("conversation_process_reuse", None)
+        return portable
+
+    def _trial_admission_route(
+        self,
+        candidate: ChatCompletionRequest,
+        *,
+        tenant_id: str,
+    ) -> None:
+        """Validate the fallback admission of a real request without admitting anything on it."""
+        outcome, detail = "ok", ""
+        try:
+            model = self._model(
+                candidate.model, tenant_id=tenant_id, owner_id=candidate.metadata.owner_id
+            )
+            effort = self._effort(candidate, model)
+            self._native_bundle(candidate, model, effort)
+            self._native_bundle(candidate, model, effort, project_completed_graph=False)
+            _idempotency_key(candidate)
+            self._completion_contract(candidate)
+        except HTTPException as exc:
+            outcome, detail = f"rejected_{exc.status_code}", str(exc.detail)[:200]
+        except Exception as exc:  # the trial must never fail the turn it observes
+            outcome, detail = "error", type(exc).__name__
+        LOGGER.warning(
+            "admission_route_trial outcome=%s model=%s agent=%s surface=%s origin=%s detail=%s",
+            outcome, candidate.model, candidate.metadata.agent_id, candidate.metadata.surface,
+            candidate.metadata.origin, detail,
+        )
+
+    def _admission_route(
+        self,
+        payload: ChatCompletionRequest,
+        *,
+        tenant_id: str = "local",
+    ) -> tuple[ChatCompletionRequest, dict[str, Any] | None]:
+        """Admit a turn on its armed fallback while the primary route's cooldown is open.
+
+        A claimed run on a route in quota or rate-limit cooldown is skipped and the turn continues
+        on the armed fallback. Deciding that here, before the session is rebound, reaches the same
+        route without provisioning a primary worker that cannot run. An accepted turn keeps the
+        route it was admitted on, so a duplicate reproduces the same authoring input.
+        """
+        metadata = getattr(payload, "metadata", None)
+        if not str(getattr(metadata, "fallback_model", "") or "").strip():
+            return payload, None
+        origin_scope = metadata.allowed_ai_origin_scope
+        if (
+            isinstance(origin_scope, dict)
+            and str(origin_scope.get("execution_mode") or "").strip().lower() == "docker"
+        ) or str(os.environ.get("GLASSHIVE_SECURITY_MODE") or "").strip().lower() == "multi_user":
+            return payload, None
+        try:
+            model = self._model(payload.model, tenant_id=tenant_id, owner_id=metadata.owner_id)
+            fallback_model, fallback_effort = self._fallback_selection(
+                payload, model, tenant_id=tenant_id
+            )
+            if fallback_model is None:
+                return payload, None
+            fallback_payload = payload.model_copy(update={
+                "model": fallback_model.id,
+                "reasoning_effort": fallback_effort,
+                "service_tier": None,
+                "metadata": metadata.model_copy(update={
+                    "fallback_model": "",
+                    "fallback_reasoning_effort": "",
+                    "bootstrap_bundle": self._route_portable_bootstrap_bundle(
+                        metadata.bootstrap_bundle, fallback_model
+                    ),
+                }),
+            })
+            accepted = self._accepted_admission_request(
+                (fallback_payload, payload), tenant_id=tenant_id
+            )
+        except (HTTPException, ModelConfigurationRequired, ValueError):
+            # Request validation belongs to the ordinary start path and its own status codes.
+            return payload, None
+        if accepted is not None:
+            contract = self._saved_completion_contract(accepted) or {}
+            if str(contract.get("model") or "") == fallback_model.id:
+                return fallback_payload, None
+            return payload, None
+
+        def open_cooldown(candidate: HarnessModel) -> dict[str, Any] | None:
+            return self.store.get_provider_route_health(
+                tenant_id=tenant_id,
+                owner_id=str(metadata.owner_id or ""),
+                profile=candidate.harness_profile,
+                runtime=self.service._initial_runtime_label(candidate.harness_profile, "host"),
+                model=candidate.native_model,
+            )
+
+        health = open_cooldown(model)
+        if (
+            not health
+            or str(health.get("failure_class") or "") not in _PRESELECTABLE_ROUTE_FAILURES
+            or open_cooldown(fallback_model)
+        ):
+            return payload, None
+        return fallback_payload, {
+            "profile": model.harness_profile,
+            "runtime": str(health.get("runtime") or ""),
+            "model": model.native_model,
+            "failureClass": str(health.get("failure_class") or ""),
+            "cooldownUntil": str(health.get("cooldown_until") or ""),
+            "fallbackEligible": True,
+            "fallbackProfile": fallback_model.harness_profile,
+            "fallbackModel": fallback_model.native_model,
+            "requestedModel": model.id,
+            "decidedBeforeAdmission": True,
+        }
 
     def _start_impl(
         self,
@@ -5670,6 +6010,7 @@ class ConversationProvider:
         *,
         tenant_id: str = "local",
         received_at: datetime,
+        requested_model: str = "",
     ) -> dict[str, Any]:
         # Deadline/cancel paths retain their narrow lock below. Request start
         # uses the per-session guard above plus durable Store uniqueness, so one
@@ -6002,7 +6343,9 @@ class ConversationProvider:
                         if native_tool_evidence_coverage_proven
                         else "unproven"
                     ),
-                    "completion_contract_v1": self._completion_contract(payload),
+                    "completion_contract_v1": self._completion_contract(
+                        payload, requested_model=requested_model,
+                    ),
                     "request_authority_sha256": self._request_authority_sha256(
                         payload, model, effort, session_id=str(session["session_id"]),
                     ),
@@ -6662,6 +7005,19 @@ class ConversationProvider:
                 dict(event["payload"]),
             )
             existing_source_ids.add(source_event_id)
+        commentary = getattr(self.service.runtime, "provider_commentary_log", None)
+        if callable(commentary) and run.get("state") == "running":
+            try:
+                admission = json.loads(request_record.get("replay_decision_json") or "{}")
+                _, public_log = commentary(_provider_log_worker(worker, run), str(run["run_id"]),
+                    instruction_sha256=str(admission.get("instruction_sha256") or ""))
+                for event in _native_commentary_events(public_log, run):
+                    if event["source_event_id"] not in existing_source_ids:
+                        self.store.add_provider_activity(str(request_record["request_id"]),
+                            "public-commentary", "Native public progress", event)
+                        existing_source_ids.add(event["source_event_id"])
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
 
     def _native_output_snapshot(
         self,
@@ -7132,10 +7488,13 @@ class ConversationProvider:
             str(request_record.get("owner_id") or ""), str(request_record["request_id"]),
             json.loads(winner["response_json"]))
 
-    def _completion_contract(self, payload: ChatCompletionRequest) -> dict[str, Any]:
+    def _completion_contract(
+        self, payload: ChatCompletionRequest, *, requested_model: str = "",
+    ) -> dict[str, Any]:
         private_contract = _private_machine_state_response_contract(payload.metadata)
         return {
             "version": 1, "model": payload.model,
+            **({"requested_model": requested_model} if requested_model else {}),
             "authorized_result_files": _authorized_result_files(
                 payload.metadata.bootstrap_bundle if payload.metadata else {}),
             **({"response_contract": private_contract} if private_contract else {}),
@@ -7579,8 +7938,9 @@ class ConversationProvider:
             effective_model = selected_model or str(
                 record["fallback_model_id"] if record.get("fallback_state") == "started"
                 else model_contract["model"])
-            model_metadata = ({"glasshive": {"requested_model": model_contract["model"]}}
-                              if effective_model != model_contract["model"] else {})
+            requested_model = str(model_contract.get("requested_model") or model_contract["model"])
+            model_metadata = ({"glasshive": {"requested_model": requested_model}}
+                              if effective_model != requested_model else {})
             private_machine_state = model_contract.get("response_contract") == _PRIVATE_MACHINE_STATE_RESPONSE_CONTRACT
             # Keep pre-open lifecycle/heartbeat visibility. Public bytes require the
             # native requested/effective selection from this exact invocation.

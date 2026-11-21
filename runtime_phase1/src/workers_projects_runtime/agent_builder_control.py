@@ -166,6 +166,57 @@ def normalized_messaging_delivery_control(value: Any) -> dict[str, Any] | None:
     }
 
 
+# A live call on a native text harness speaks authored text as it streams. Declining
+# voice stays a typed choice: one declared tool carries the reply instead of text.
+NATIVE_TEXT_DELIVERY_SERVER = "xperfect-delivery"
+NATIVE_TEXT_DELIVERY_TOOL = "reply_without_voice"
+NATIVE_TEXT_DELIVERY_TOOL_RESULT = (
+    "Delivered as text, not spoken. This reply is complete: end your turn now "
+    "without writing anything else."
+)
+
+
+def native_text_delivery(graph_control: Any, delivery_control: Any, surface: Any) -> bool:
+    """Whether authored native text, not a structured envelope, carries this turn's speech."""
+    return (
+        surface == "voice"
+        and normalized_messaging_delivery_control(delivery_control) is not None
+        and normalized_graph_transfer_control(graph_control) is None
+    )
+
+
+def native_text_delivery_tool_name() -> str:
+    return f"mcp__{NATIVE_TEXT_DELIVERY_SERVER}__{NATIVE_TEXT_DELIVERY_TOOL}"
+
+
+def native_text_delivery_tools() -> list[dict[str, Any]]:
+    return [{
+        "name": NATIVE_TEXT_DELIVERY_TOOL,
+        "description": (
+            "Deliver this reply as text without speaking it. In a live call, text you write "
+            "normally is spoken. Call this instead of writing your reply only when the user "
+            "explicitly asks for text-only or silent delivery; put the complete reply in content."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"content": {"type": "string"}},
+            "required": ["content"],
+        },
+    }]
+
+
+def native_text_envelope_open(voice: str) -> str:
+    """The canonical public envelope up to its content string, controls first."""
+    if voice not in {"eligible", "skip"}:
+        raise ValueError("Invalid native text delivery choice")
+    return '{"type":"assistant_response","tool_name":null,"voice":"' + voice + '","content":"'
+
+
+def native_text_envelope(content: str, voice: str) -> str:
+    return native_text_envelope_open(voice) + json.dumps(content, ensure_ascii=False)[1:] + "}"
+
+
 def _fail_closed_delivery_result(content: str, source: str) -> dict[str, Any]:
     return {
         "type": "assistant_response",

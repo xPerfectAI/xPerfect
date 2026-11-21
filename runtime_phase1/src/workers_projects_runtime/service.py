@@ -116,6 +116,7 @@ from .signed_links import (
     sign_link_token,
 )
 from .store import (
+    INVOCATION_OWNER_LOST_FAILURE_CLASS,
     MANAGED_SHUTDOWN_LEASE_RELEASE_REASON,
     ProviderAccountBusyStoreError,
     SchedulePrincipalAuthorityStoreError,
@@ -1952,6 +1953,13 @@ class WorkersProjectsService:
                 "WPR_HOST_TENANT_ACTIVE_LIMIT", 12, min_value=1, max_value=1024
             ),
         }
+        # Half of each conversation lane stays free of system maintenance by default,
+        # so a live turn or its result never queues behind background upkeep.
+        self._conversation_live_reserve = _bounded_int_env(
+            "WPR_HOST_CONVERSATION_LIVE_RESERVE",
+            self._configured_host_capacity["conversation_limit"] // 2,
+            min_value=0, max_value=63,
+        )
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="wpr-runner")
         # Interactive provider turns have a separate dispatch lane so autonomous mission workers
         # cannot occupy every service thread before a conversation reaches the host CLI's own
@@ -3927,9 +3935,10 @@ class WorkersProjectsService:
             )
         else:
             isolated_parallel_reason = isolated_runtime_reason
+        native_storage = self._native_storage_capacity(storage_pressure)
         native_parallel_ready = bool(
             native_parallel_policy_enabled()
-            and bool(storage_pressure.get("healthy"))
+            and bool(native_storage["healthy"])
             and prompt_layers_ready
         )
         native_parallel_reason = (
@@ -3938,9 +3947,9 @@ class WorkersProjectsService:
             else "native_parallel_not_authorized"
             if not native_parallel_policy_enabled()
             else "storage_pressure_unavailable"
-            if storage_pressure.get("errorCode")
-            else "storage_pressure_critical"
-            if not storage_pressure.get("healthy")
+            if native_storage.get("errorCode")
+            else "host_capacity"
+            if not native_storage["healthy"]
             else "prompt_layer_capability_invalid"
         )
         return {
@@ -3958,6 +3967,7 @@ class WorkersProjectsService:
             "hostMissionsAllowed": not policy_enabled,
             "hostMissionsActive": active_host_missions,
             "storagePressure": storage_pressure,
+            "nativeStorage": native_storage,
             "promptLayers": prompt_layers,
             "workTraceContract": self.work_trace_contract_capability(),
         }
@@ -4035,6 +4045,18 @@ class WorkersProjectsService:
             "availableBytes": available,
             "thresholdPercent": float(threshold),
         }
+
+    def _native_storage_capacity(self, storage_pressure: dict | None = None) -> dict[str, object]:
+        """Keep the control database's existing byte reserve independent of runtime volume."""
+        pressure = self._storage_pressure_v1() if storage_pressure is None else storage_pressure
+        required = _bounded_int_env(
+            "WPR_HOST_MIN_AVAILABLE_DISK_MB", 4096, min_value=0, max_value=1048576,
+        ) * 1024**2
+        available = pressure.get("availableBytes")
+        known = (not pressure.get("errorCode") and type(available) is int and available >= 0)
+        return {"version": 1, "healthy": bool(known and available >= required),
+                "availableBytes": available if known else None, "requiredBytes": required,
+                **({"errorCode": "storage_probe_unavailable"} if not known else {})}
 
     def _ensure_profile_allowed(self, profile: str) -> None:
         allowed = allowed_worker_profiles()
@@ -20457,6 +20479,12 @@ class WorkersProjectsService:
         process_probe_ok = usage.process_probe_ok and not unknown_lease_worker
         memory_probe_ok = usage.memory_probe_ok
         disk_probe_ok = usage.disk_probe_ok
+        if isinstance(prospective_worker, dict) and prospective_worker.get("execution_mode") == "host":
+            database_available = self._native_storage_capacity()["availableBytes"]
+            disk_probe_ok = disk_probe_ok and database_available is not None
+            if database_available is not None:
+                available_disk = min(available_disk, database_available)
+        host_available_disk = available_disk
         host_probe_healthy = process_probe_ok and memory_probe_ok and disk_probe_ok
         workspace_pressure = False
         docker_probe_error_code = ""
@@ -20756,7 +20784,7 @@ class WorkersProjectsService:
                 "childProcesses": max(0, process_limit - usage.child_processes),
                 "threads": max(0, thread_limit - usage.threads),
                 "memoryBytes": max(0, usage.available_memory_bytes),
-                "diskBytes": max(0, usage.available_disk_bytes),
+                "diskBytes": max(0, host_available_disk),
             }
             proven_host_shortage = any(
                 host_available[key] < required_headroom[key] for key in required_headroom
@@ -21265,6 +21293,8 @@ class WorkersProjectsService:
                     capacity_snapshot.get("observedLeaseIds") or []
                 ),
                 capacity_next_retry_at=capacity_next_retry_at,
+                system_maintenance=self._system_maintenance_run(worker),
+                conversation_live_reserve=self._conversation_live_reserve,
             )
         except HostRunLeaseCapacityError as exc:
             error = HostCapacityError(
@@ -21280,6 +21310,21 @@ class WorkersProjectsService:
             error.reservation = dict(exc.reservation)
             error.next_retry_at = str(exc.next_retry_at or capacity_next_retry_at)
             raise error from exc
+
+    # Turns the system starts for itself: upkeep, scheduled turns and worker-started turns. A result
+    # coming back to the person (origin "callback") is not one of them.
+    _BACKGROUND_CONVERSATION_ORIGINS = frozenset({"system", "scheduler", "worker"})
+
+    def _system_maintenance_run(self, worker: dict) -> bool:
+        """Background conversation work, by authenticated invocation identity.
+
+        These runs share the conversation lane with live turns but may not take the part of it
+        kept for a person who is waiting on a reply.
+        """
+        origin = (self._bootstrap_bundle_for(worker) or {}).get("conversation_origin")
+        return (isinstance(origin, dict)
+                and origin.get("actor_kind") == "system"
+                and origin.get("origin") in self._BACKGROUND_CONVERSATION_ORIGINS)
 
     def _observe_host_process(self, payload: dict[str, object]) -> None:
         run_id = str(payload.get("run_id") or "")
@@ -22703,9 +22748,86 @@ class WorkersProjectsService:
         for worker_id in worker_ids:
             if self._shutdown_event.is_set():
                 break
+            try:
+                if self._fail_forfeited_invocation_retry(worker_id):
+                    # A sibling queued behind it is due on the next scheduler pass.
+                    self._scheduler_wake_event.set()
+                    continue
+            except Exception:
+                logger.exception(
+                    "Forfeited invocation settlement failed for worker %s", worker_id
+                )
             self._ensure_worker_processor(worker_id)
             dispatched.append(worker_id)
         return dispatched
+
+    def _fail_forfeited_invocation_retry(self, worker_id: str) -> bool:
+        """Fail the due requeue that no executor can start, instead of parking it.
+
+        A turn that needs its invocation-local grant waits for the executor that received
+        it. After that executor is gone the wait cannot end, so the requeued run held its
+        worker and conversation until the queue deadline. Pause and control fences keep
+        their existing owners.
+        """
+
+        worker = self.store.get_worker(worker_id) or {}
+        if not worker or not self._requires_conversation_invocation_bearer(worker):
+            return False
+        queued = self.store.peek_next_queued_run(worker_id)
+        if (
+            not queued
+            or self._queued_invocation_is_local(worker, queued)
+            or self.store.has_active_operator_pause(worker_id)
+        ):
+            return False
+        run_id = str(queued["run_id"])
+        message = (
+            "This turn was interrupted when the service running it stopped, and it "
+            "could not be resumed. Some actions may already have completed. "
+            "Check the retained results and action status before deciding whether to start a new turn."
+        )
+        failed = self.store.fail_forfeited_invocation_retry(
+            run_id,
+            executor_id=self._executor_id,
+            failure_user_message=message,
+            failure_recommended_recovery=(
+                "Inspect retained results and verify prior actions before starting a new turn. "
+                "Do not repeat actions whose outcome is unknown."
+            ),
+            failure_diagnostic_summary=(
+                "The executor that held this run's invocation-local grant lost its "
+                "dispatch lease, so the requeued run had no claimant."
+            ),
+        )
+        if failed is None:
+            return False
+        self.discard_run_local_bundle(run_id, settled_only=True)
+        self.run_notifications.notify(run_id)
+        if self._provider_request_reconciler is not None:
+            try:
+                self._provider_request_reconciler(run_id)
+            except Exception:
+                logger.error(
+                    "GlassHive terminal provider request reconciliation faulted safely",
+                    extra={"error_code": "transient_dependency"},
+                )
+        self.store.finalize_schedule_for_run(run_id, state="failed", last_error=message)
+        if not self.store.list_nonterminal_runs_for_worker(worker_id):
+            self.store.update_worker_state(worker_id, "ready", last_error=message)
+        self.store.add_event(
+            str(worker["project_id"]),
+            worker_id,
+            run_id,
+            "run.failed",
+            message,
+            payload={"failureCode": INVOCATION_OWNER_LOST_FAILURE_CLASS},
+        )
+        self._emit_callback(worker, "run.failed", run=failed, message=message)
+        logger.warning(
+            "Failed requeued run %s: its invocation owner lost the dispatch lease",
+            run_id,
+        )
+        return True
 
     def discard_run_local_bundle(self, run_id: str, *, settled_only: bool = False) -> None:
         with self._run_local_bundles_lock:
@@ -23136,7 +23258,7 @@ class WorkersProjectsService:
         # canonicalization, only to this invocation. Never mutate worker defaults.
         with _native_admission_timing("admission_files", worker.get("worker_id"), run.get("run_id")):
             from .workspace_files import FileAdmissionError
-            from .upload_projection import projected_upload_input_index
+            from .upload_projection import projected_upload_input_index, run_input_manifest_path as run_input_manifest_path_for_run
             try:
                 file_manifest = self.store.get_run_file_manifest(
                     run_id,
@@ -23170,11 +23292,7 @@ class WorkersProjectsService:
                 if input_index:
                     # Both accepted upload transports use the same run-local index.
                     # A reused workspace can contain another same-named input.
-                    run_input_manifest_path = (
-                        ".xperfect/run-inputs/"
-                        + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
-                        + ".json"
-                    )
+                    run_input_manifest_path = run_input_manifest_path_for_run(run_id)
                     run_bundle["files"] = _merge_file_entries(
                         run_bundle["files"],
                         [{
@@ -23206,16 +23324,13 @@ class WorkersProjectsService:
 
     @staticmethod
     def _run_inputs_prompt() -> dict:
-        raw = (Path(__file__).with_name("prompts") / "worker-run-inputs.json").read_bytes()
-        return json.loads(raw) | {"sha256": hashlib.sha256(raw).hexdigest()}
+        from .upload_projection import run_inputs_prompt
+        return run_inputs_prompt()
 
     @classmethod
     def _runtime_instruction_for_run(cls, run_worker: dict, instruction: str) -> str:
-        path = str(run_worker.get("_run_input_manifest_path") or "")
-        if not path:
-            return instruction
-        template = cls._run_inputs_prompt()["instruction"]
-        return instruction + "\n\n" + template.format(index_path=path)
+        from .upload_projection import runtime_instruction_for_run
+        return runtime_instruction_for_run(run_worker, instruction)
 
     def _finish_paused_worker_transition(
         self,

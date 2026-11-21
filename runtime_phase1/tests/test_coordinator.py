@@ -1743,6 +1743,23 @@ def test_large_result_pages_are_exact_and_overview_does_not_duplicate_output(coo
     assert 'output_text' not in coordinator._goal_summary(coordinator.goal_snapshot())
 
 
+@pytest.mark.parametrize('state,revision,output,error,expected', [
+    ('queued', 0, '', 'Admission will retry.', False),
+    ('running', 0, 'Partial work.', 'Earlier admission failed.', False),
+    ('settling', 0, 'Partial work.', '', False),
+    ('completed', 1, '', '', False),
+    ('completed', 1, ' \n', '', False),
+    ('completed', 1, 'Actual result.', '', True),
+    ('failed', 1, '', 'Provider unavailable.', True),
+    ('cancelled', 1, 'Partial result.', '', True),
+])
+def test_goal_summary_only_advertises_terminal_nonempty_results(state, revision, output, error, expected):
+    result = CoordinatorService._goal_summary({'state': state, 'result_revision': revision,
+        'output_text': output, 'error_text': error})
+    assert result['has_result'] is expected
+    assert 'output_text' not in result and 'error_text' not in result
+
+
 def test_default_config_preserves_owner_effort_and_exact_catalog_model(coordinator, monkeypatch):
     from workers_projects_runtime.coordinator_config import configured_coordinator
     monkeypatch.delenv('GLASSHIVE_COORDINATOR_CONFIG_JSON',raising=False)

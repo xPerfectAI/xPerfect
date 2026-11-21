@@ -285,6 +285,25 @@ originates in a supported temporary root before any optional inward private arch
 local-only content cannot be exported by copying or regenerating it elsewhere. Runtime path and
 byte checks remain authoritative.
 
+Workspace inputs also retain a separate, versioned provenance source in the existing context
+manifest and reader. It identifies the materialized workspace path, byte size and digest, and the
+original source location only after the existing bootstrap root and applicable owner-signature checks pass.
+Inline inputs retain an inline-source reference. This metadata covers binary files without presenting
+their bytes as extracted text; existing text content and source IDs remain exact. It grants no new
+read or publication authority. An authorized original outside a local-only workspace can remain the
+source for a new requested deliverable created directly in a supported output root. The protected
+workspace copy stays local. Each normal run preparation refreshes this projection for an existing
+worker; a runtime restart alone does not rewrite an idle worker's saved context.
+
+For a host-native worker with a local-only workspace, normal run preparation can retain the exact
+already-admitted available upload inputs in the existing private managed temporary root. It reads
+the authorized original directly, rechecks its current owner/root grant and declared version, and
+uses the existing private atomic writer and byte verifier. It does not stage protected workspace
+contents. The current run's input index and provenance name that verified temporary input path;
+existing workspace copies and image/video input bindings remain unchanged. Blocked inputs remain
+blocked. Input files stay under the existing `uploads` discovery exclusion and are not new outputs.
+Only model-selected requested deliverables pass through the existing final artifact publisher.
+
 ### Current visual input
 
 Native image blocks belong to the current accepted source messages, using the same verified
@@ -308,6 +327,10 @@ background goals. `CoordinatorConfig.application` supplies a protected Standard 
 accepted only through the existing trusted bootstrap signature. The owner-scoped reference is
 idempotent: the same configuration returns the same conversation; changed content conflicts.
 Application configurations cannot retain a reusable bootstrap bearer or developer context.
+Native storage admission uses the configured byte reserve on both database and worker filesystems,
+then the selected runtime's existing capacity preflight and reservation owner. Percentage pressure
+remains deployment telemetry and retains the isolated runtime's policy; it is not another Native
+admission veto. Missing probes fail closed, including when the filesystems differ.
 
 `POST /v1/coordinator/conversations/{id}/turns` first saves the original request. Existing native
 maintenance emits `coordinator.turn_due` through the same callback outbox and bounded webhook
@@ -385,20 +408,27 @@ declared file metadata comes from the same canonical response. Goal-owned replie
 wakes and failed turns retain their existing paths. Current Stop, hold and source ownership fence
 presentation; the application keeps its existing speaking assistant and delivery owner.
 An accepted goal alone records intent. It suppresses this direct turn result only when its same
-source has a durable dispatch or actual work, worker or run binding; a goal bound to this exact
-Native run also owns that result. An unstarted intent does not hide a completed canonical answer
-and is not marked complete by its delivery.
+source has a valid current pending dispatch receipt or an owned work, worker or run binding; a
+goal bound to this exact Native run also owns that result. A rejected, expired or unreserved
+dispatch remains unstarted intent and does not hide the completed coordinator's truthful report.
+The existing turn-result presentation does not invent a Worker completion or settle that goal.
 Compact owner-authorized interactive turn status retains the exact accepted message and creation
 timestamp so work labels use the existing source instead of a generic placeholder. Internal result
 wake bodies and full response history remain outside that compact projection.
 
 The read-only `/v1/coordinator/conversations/{id}/publications` reader projects retained
-`coordinator.result_ready` and `coordinator.turn_result_ready` identities from that same callback outbox. Authenticated tenant, owner
-and conversation scope apply to every page and cursor. It returns only event identity, original
-timestamps and typed result references, without destinations, credentials or result bodies.
+`coordinator.result_ready`, `coordinator.turn_result_ready` and `coordinator.progress_ready`
+from that same callback outbox. Authenticated tenant, owner and conversation scope apply to every
+page and cursor. Result entries expose event identity, original timestamps and typed result
+references, without destinations, credentials or result bodies. Progress entries retain complete,
+explicitly public native commentary with its digest and exact original source, goal or turn,
+run and attempt identity. Reasoning, tool output and partial fragments are excluded. Progress is
+nonterminal evidence for the application's existing speaking assistant; it grants no output-file
+or completion authority, and the assistant may give a useful update or remain silent.
 Clients can drain all pages. Expired or superseded entries remain provenance; they do not renew
-delivery deadlines or authorize an old result to be presented. Current goal intent, run and restore
-hold retain their existing authority.
+delivery deadlines or authorize an old result to be presented. Cancelled, replaced, terminal and
+old-attempt progress is discarded silently before presentation. Current goal intent, run and
+restore hold retain their existing authority.
 
 Application-managed Queue, Message, Steer and Retry retain the same native action intent, then emit
 `coordinator.action_due`. The application prepares fresh cognition and a signed invocation bundle
@@ -447,6 +477,11 @@ both the goal and conversation. Result pages expose `result_revision` from the e
 run's terminal revision, alongside the existing full-output hash and canonical publisher identity.
 These fields let application delivery verify cancellation, restoration and result generation
 without replacing native process state or guessing a revision.
+
+The compact goal `has_result` flag requires a terminal state, a terminal revision and nonblank
+output or failure detail. Admission diagnostics and partial running output are not results.
+Native `completed` still describes process completion, not fulfillment of the user's objective;
+the application must inspect the retained evidence before reporting success.
 
 
 ## Integration compatibility for original-context coordination

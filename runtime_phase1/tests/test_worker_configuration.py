@@ -1,5 +1,6 @@
 import json
 import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -672,8 +673,182 @@ def test_authorized_text_file_pages_exact_bytes_and_binary_is_not_fake_text(
     }
     worker = worker | {"bootstrap_bundle_json": bundle}
     sources = core.sources(worker)
-    assert len(sources) == 1
-    assert sources[0]["text"] == "Exact uploaded background é"
+    content_sources = [source for source in sources if source["kind"] == "bootstrap"]
+    assert len(content_sources) == 1
+    assert content_sources[0]["text"] == "Exact uploaded background é"
+    provenance = [source for source in sources if source["kind"] == "file_provenance"]
+    assert [source["id"] for source in provenance] == [
+        "bootstrap:file:0:provenance", "bootstrap:file:1:provenance"
+    ]
+    assert json.loads(provenance[1]["text"])["original_source"] == {"kind": "inline"}
+
+
+@pytest.mark.parametrize("enterprise", [False, True])
+def test_upload_provenance_projects_verified_text_and_binary_origins(
+    configured, tmp_path, monkeypatch, enterprise
+):
+    import hashlib
+    from workers_projects_runtime.bootstrap import sign_bootstrap_source_path
+
+    core, worker = configured
+    original_root = tmp_path / "accepted-inputs"
+    original_root.mkdir()
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    home = tmp_path / "member"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS", str(workspace))
+    core.performance_runtime = SimpleNamespace(native_workspace_placement=lambda _worker: {
+        "host_native": True, "home_dir": str(home), "native_home": str(home),
+        "workspace_dir": str(workspace),
+    })
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(original_root))
+    monkeypatch.setenv("GLASSHIVE_ENTERPRISE_MODE", "true" if enterprise else "false")
+    monkeypatch.setenv("GLASSHIVE_BOOTSTRAP_SOURCE_SECRET", "synthetic-source-signing-key")
+    files = []
+    for filename, data in [("source.txt", "Exact source é".encode()), ("opaque.dat", b"\x00\xff\xfe\x01")]:
+        original = original_root / filename
+        original.write_bytes(data)
+        files.append({
+            "scope": "workspace", "path": "uploads/" + filename,
+            "file_id": "file-" + filename,
+            "source_path": str(original),
+            "source_path_token": sign_bootstrap_source_path(
+                original, tenant_id=worker["tenant_id"], owner_id=worker["owner_id"]
+            ),
+        })
+        archived = workspace / "uploads" / filename
+        archived.parent.mkdir(exist_ok=True)
+        archived.write_bytes(data)
+    bundle = {"files": list(files)}
+    with core.store._connect() as conn:
+        conn.execute("UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?",
+                     (json.dumps(bundle), worker["worker_id"]))
+    worker = core.store.get_worker(worker["worker_id"])
+    input_rows = [{"source_file_id": entry["file_id"], "path": entry["path"],
+        "size_bytes": Path(entry["source_path"]).stat().st_size,
+        "sha256": hashlib.sha256(Path(entry["source_path"]).read_bytes()).hexdigest()}
+        for entry in files]
+    index_path = ".xperfect/run-inputs/current.json"
+    bundle["files"] += [{"scope": "workspace", "path": "not-admitted.txt", "content": "unselected",
+        "file_id": "not-admitted"}, {"scope": "workspace", "path": "blocked.txt", "content": "unavailable",
+        "file_id": "blocked"}, {"scope": "workspace", "path": index_path,
+        "content": json.dumps({"version": 1, "files": input_rows + [{
+            "source_file_id": "blocked", "path": "blocked.txt", "available": False,
+        }]})}]
+    worker = worker | {"bootstrap_bundle_json": bundle, "_run_input_manifest_path": index_path}
+    projected = core.prepare_run(worker, {"run_id": "run", "active_attempt_id": "attempt"})
+    sources = core.sources(worker)
+    for index, entry in enumerate(files):
+        source_id = f"bootstrap:file:{index}:provenance"
+        source = next(row for row in sources if row["id"] == source_id)
+        expected = {
+            "version": 1, "scope": "workspace", "materialized_path": entry["path"],
+            "original_source": {"kind": "authorized_file", "path": entry["source_path"]},
+            "bytes": len((original_root / entry["path"].split("/")[-1]).read_bytes()),
+            "sha256": hashlib.sha256((original_root / entry["path"].split("/")[-1]).read_bytes()).hexdigest(),
+        }
+        native = home / ".tmp/uploads" / expected["sha256"] / Path(entry["path"]).name
+        expected["native_input"] = {"root": "managed_tmp", "path": str(native)}
+        assert json.loads(source["text"]) == expected
+        assert source["sha256"] == hashlib.sha256(source["text"].encode()).hexdigest()
+        assert json.loads(core.read("local", "owner", worker["worker_id"], source_id)["text"]) == expected
+        assert native.read_bytes() == Path(entry["source_path"]).read_bytes()
+        assert (workspace / entry["path"]).read_bytes() == native.read_bytes()
+        from workers_projects_runtime.deliverables import is_user_deliverable_relative_path
+        assert not is_user_deliverable_relative_path(native.relative_to(home / ".tmp"))
+    content = next(row for row in sources if row["id"] == "bootstrap:file:0")
+    assert content["text"] == "Exact source é"
+    assert not any(row["id"] == "bootstrap:file:1" for row in sources)
+    projected_bundle = json.loads(projected["bootstrap_bundle_json"])
+    projected_index = json.loads(next(entry["content"] for entry in projected_bundle["files"]
+                                      if entry["path"] == index_path))
+    assert all(Path(entry["path"]).is_relative_to(home / ".tmp") for entry in projected_index["files"][:2])
+    assert projected_index["files"][2] == {"source_file_id": "blocked", "path": "blocked.txt", "available": False}
+    assert len([path for path in (home / ".tmp/uploads").rglob("*") if path.is_file()]) == 2
+    materialize_native_context(
+        {"home_dir": str(home), "native_home": str(home), "workspace_dir": str(workspace)},
+        projected_bundle, projection=projected["_context_projection"],
+    )
+    saved = (home / ".glasshive/native/context.json").read_text()
+    assert all(entry["source_path"] in saved for entry in files)
+    assert "source_path_token" not in saved
+    assert "synthetic-source-signing-key" not in saved
+
+
+@pytest.mark.parametrize("failure", ["protected_source", "changed_version", "linked_target"])
+def test_native_input_carrier_preserves_source_and_version_boundaries(
+    configured, tmp_path, monkeypatch, failure
+):
+    import hashlib
+    core, worker = configured
+    original_root = tmp_path / "accepted"
+    original_root.mkdir()
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    home = tmp_path / "member"
+    home.mkdir(mode=0o700)
+    source = original_root / "opaque.dat"
+    data = b"\x00\xffexact"
+    source.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(original_root))
+    monkeypatch.setenv("GLASSHIVE_PROTECTED_ARTIFACT_ROOTS",
+        str(workspace) + (":" + str(original_root) if failure == "protected_source" else ""))
+    core.performance_runtime = SimpleNamespace(native_workspace_placement=lambda _worker: {
+        "host_native": True, "home_dir": str(home), "workspace_dir": str(workspace),
+    })
+    entry = {"scope": "workspace", "path": "uploads/opaque.dat", "source_path": str(source), "file_id": "source-id"}
+    with core.store._connect() as conn:
+        conn.execute("UPDATE workers SET bootstrap_bundle_json=? WHERE worker_id=?",
+                     (json.dumps({"files": [entry]}), worker["worker_id"]))
+    index_path = ".xperfect/run-inputs/current.json"
+    row = {"source_file_id": "source-id", "path": entry["path"], "size_bytes": len(data),
+           "sha256": "0" * 64 if failure == "changed_version" else digest}
+    worker = core.store.get_worker(worker["worker_id"]) | {"_run_input_manifest_path": index_path,
+        "bootstrap_bundle_json": {"files": [entry, {"scope": "workspace", "path": index_path,
+            "content": json.dumps({"version": 1, "files": [row]})}]}}
+    target = home / ".tmp/uploads" / digest / "opaque.dat"
+    if failure == "linked_target":
+        target.parent.mkdir(parents=True)
+        target.symlink_to(source)
+    if failure == "protected_source":
+        projected = core.prepare_run(worker, {"run_id": "run", "active_attempt_id": "attempt"})
+        assert not target.exists()
+        metadata = next(source for source in core.sources(worker) if source["id"].endswith(":provenance"))
+        assert "native_input" not in json.loads(metadata["text"])
+        assert entry["path"] in projected["bootstrap_bundle_json"]
+    else:
+        with pytest.raises((ConfigurationError, PermissionError)):
+            core.prepare_run(worker, {"run_id": "run", "active_attempt_id": "attempt"})
+    assert source.read_bytes() == data
+
+
+@pytest.mark.parametrize("rejection", ["outside_root", "wrong_owner_signature"])
+def test_upload_provenance_does_not_expose_rejected_originals(
+    configured, tmp_path, monkeypatch, rejection
+):
+    from workers_projects_runtime.bootstrap import sign_bootstrap_source_path
+
+    core, worker = configured
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    source = (tmp_path if rejection == "outside_root" else allowed) / "source.dat"
+    source.write_bytes(b"\xff\x00")
+    monkeypatch.setenv("WPR_BOOTSTRAP_SOURCE_ROOTS", str(allowed))
+    monkeypatch.setenv("GLASSHIVE_ENTERPRISE_MODE", "true")
+    monkeypatch.setenv("GLASSHIVE_BOOTSTRAP_SOURCE_SECRET", "synthetic-source-signing-key")
+    token = sign_bootstrap_source_path(source, tenant_id=worker["tenant_id"],
+        owner_id="another-owner" if rejection == "wrong_owner_signature" else worker["owner_id"])
+    candidate = worker | {"bootstrap_bundle_json": {"files": [{
+        "scope": "workspace", "path": "uploads/source.dat", "source_path": str(source),
+        "source_path_token": token,
+    }]}}
+    sources = core.sources(candidate)
+    assert not any(row["kind"] == "file_provenance" for row in sources)
+    assert len(sources) == 1 and sources[0]["status"] == "unavailable"
+    assert str(source) not in json.dumps(sources)
+    assert token not in json.dumps(sources)
 
 
 def test_missing_file_is_unavailable_not_empty_success(
