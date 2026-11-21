@@ -467,7 +467,7 @@ def _synthetic_healthy_storage_probe(monkeypatch):
     monkeypatch.setattr(
         service_module.shutil,
         "disk_usage",
-        lambda _path: service_module.shutil._ntuple_diskusage(100, 50, 50),
+        lambda _path: service_module.shutil._ntuple_diskusage(100 * 1024**3, 50 * 1024**3, 50 * 1024**3),
     )
 
 
@@ -483,8 +483,14 @@ def _healthy_capability_producers() -> dict[str, object]:
             "state": "healthy",
             "healthy": True,
             "usedPercent": 50.0,
-            "availableBytes": 50,
+            "availableBytes": 50 * 1024**3,
             "thresholdPercent": 90.0,
+        },
+        "nativeStorage": {
+            "version": 1,
+            "healthy": True,
+            "availableBytes": 50 * 1024**3,
+            "requiredBytes": 4 * 1024**3,
         },
         "promptLayers": {
             "contractVersion": 1,

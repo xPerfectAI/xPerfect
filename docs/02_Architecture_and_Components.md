@@ -77,17 +77,16 @@ bounds keep their existing precedence. Reconnection does not renew this deadline
 Clients may use this owner-authored header instead of duplicating the provider timeout. Old records
 without a valid stored deadline omit the header; invalid/non-finite request budgets are rejected.
 
-Conversation admission keeps complete protected inputs within the selected native model's effective
-half-window, calibrated by observed bytes per token. An explicit positive
-`GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES` cap remains authoritative, including values below 32 KiB;
-admission rejects protected source that cannot fit instead of raising that operator maximum. A smaller reported
-window applies only to the matching model and native epoch; admission and pressure use the same
-owner. Native Codex GPT-6.1 Sol reports an effective 475,000-token window; Direct API metadata is
-separate. Discovery advertises the same model/config budget at minimum bytes-per-token
-calibration, without a separate 192 KiB ceiling. The host uses the smallest advertised limit of
-all configured primary and fallback routes. This catalog limit does not override a smaller
-valid native session observation, an explicit operator cap, or the hard ceiling. Final native
-admission remains authoritative; inputs beyond capacity fail with 413 instead of truncation.
+Conversation sizing uses the selected model's effective window after its output reserve, without
+the former 50% cutoff or a separate application byte ceiling. For native CLI harnesses this is
+advisory sizing evidence: a byte/token estimate must not reject or trim complete protected input
+before the native harness receives it. The harness owns actual admission and native compaction.
+Direct API requests retain the model-capacity guard. An explicit positive operator-selected
+`GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES` cap remains enforced on either path, including values below 32 KiB. Replay decisions
+record the budget owner. Missing source, ownership, source-integrity and current-input checks stay
+mandatory. Genuine native/provider capacity errors remain failures, with no silent truncation.
+Discovery and authenticated session receipts share this sizing owner. Matching model and epoch
+observations remain scoped to their session; the host retains each declared route's sizing evidence.
 
 
 ### Private structured response courier
@@ -143,6 +142,13 @@ must have ended before native startup; other invocation history keeps the normal
 Invocation-local context stays in the existing memory owner until native startup is confirmed,
 so a pre-start capacity retry keeps the same exact authority. Confirmed startup and terminal
 or needs-input settlement forget it; credentials are never persisted for recovery.
+A requeued invocation whose exact prior executor lost its dispatch lease fails with
+`invocation_owner_lost` when no process retains its required invocation-local grant. Durable attempt
+and lease proof, same-executor retries, reattached grants, Pause and unfinished controls retain their
+existing fences. Failure frees later accepted turns but is not marked retryable: lease loss does
+not prove that prior actions had no effects. The user must inspect retained results and action
+status before deciding whether to start a new turn. No retry action is minted, and the old turn
+never runs with reconstructed credentials.
 An invoked deadline uses the existing exact-run lifecycle claim and native orphan cleanup,
 then proves all recorded supervisor and child generations stopped before publishing compute release.
 An expired cleanup claim or a normal same-session retry repeats that proof; failed history and
@@ -272,6 +278,17 @@ When a host lane is released, the existing wake-up selects its oldest queued `ho
 ordinary admission path still rechecks lane, account, tenant, resource and lifecycle limits before
 reserving a slot. Other lanes and provider rate-limit backoff remain unchanged.
 
+An armed fallback may be selected before primary admission while that exact primary route has a
+structured quota or rate-limit cooldown and the fallback route is healthy. Accepted turn identity
+pins its route across duplicate requests and changing cooldowns. Responses retain both requested
+and answering models from the authoritative admission decision, ignoring caller-supplied model
+provenance extras; no fallback is invented. Docker and multi-user admission keep their existing
+path. A repeated route failure without an exact provider retry time doubles the default delay to
+a one-hour ceiling, or the configured base delay when that is longer. A completed run on that
+route resets the recent failure streak.
+An exact provider retry time remains authoritative. Typed tenant, owner, profile, runtime and model
+scope own route health; prompt text does not select a route.
+
 The authenticated OpenAI-compatible `/v1/models` route publishes model IDs, effort choices,
 capabilities and native replay-budget declarations without starting a harness or probing sign-in.
 Its default readiness status is `not_checked`; metadata is not evidence of available credentials or a
@@ -381,18 +398,20 @@ mutation is supported and tested. Disabling reuse reconciles the cached process 
 ordinary transport can replace its registry entry. Process death reconciles its exact identity
 before native resume. The startup pool performs no inference for this feature.
 
-Cached processes are one per provider worker. Authenticated external-user interactive turns use
-the existing host conversation capacity. Trusted callback-origin result presentation uses that
-same conversation lane, so ready results are not queued behind maintenance. Other system,
-assistant, tool and worker-origin conversations use the existing mission capacity.
+Cached processes are one per provider worker. The durable host run lease keeps each trusted
+conversation-mode worker in its family's conversation lane. In that lane,
+`WPR_HOST_CONVERSATION_LIVE_RESERVE` slots (default: half the lane) stay free of system-started
+background work: actor `system` with origin `system`, `scheduler` or `worker`. The reservation
+leaves at least one unreserved slot. Interactive turns and callback results can use the reserved
+share while background work waits; other resource, ownership and lifecycle limits still apply.
+The service's foreground and mission executor pools remain separate from this durable lane limit.
 The provider writes this typed origin from normalized request identity; incoming bundle metadata
 cannot choose it. Provider session identity includes actor kind and origin: a background wake
 and a human turn use distinct workers, not one mutable cross-origin worker. Missing origin
 retains legacy foreground behavior. Applications must declare their trusted background scope.
 Existing per-CLI defaults remain two conversation slots and three mission slots, configurable
 through the existing host capacity settings. Foreground contention uses the existing durable
-capacity retry and wake-up path. Background cognition shares mission capacity with same-CLI
-Workers; another CLI has its own lane book. Idle caches release their slot. `GLASSHIVE_CLAUDE_CONVERSATION_IDLE_SECONDS` defaults to
+capacity retry and wake-up path. Mission workers retain their configured mission capacity; each CLI family has its own lane book. Idle caches release their slot. `GLASSHIVE_CLAUDE_CONVERSATION_IDLE_SECONDS` defaults to
 120 and controls cache lifetime, not task duration or conversation length. Idle expiry and turn
 admission serialize on the same turn lock; a message arriving during expiry relaunches normally.
 Shutdown and whole-worker close must confirm exact process death. Current authority style files
@@ -934,6 +953,16 @@ and legitimate silent continuations retain their existing rules. Other surfaces 
 audio judgment. Native and Direct adapters use this same schema owner; this is prompt scoping,
 not a runtime override of the model's delivery decision. A schema test proves projection only;
 actual configured-model and delivered-audio checks prove behavior.
+
+A restricted retained host Claude live call without graph-transfer controls uses its native text
+stream as the authored public speech. The adapter frames those deltas through the existing public
+parts owner instead of forcing a second structured reply. Its declared `reply_without_voice` tool
+carries a complete text-only reply when the model chooses silent delivery; later narration in that
+same turn does not duplicate that reply. Nested subagent output and native error messages do not
+become public speech. A terminal result is still required before saving the final canonical answer.
+Other surfaces, non-retained transports and graph-transfer conversations keep their existing schema.
+The [live-call transport tests](../runtime_phase1/tests/test_claude_live_call_text_delivery.py) prove
+framing and control-channel behavior; they do not prove a real model's delivery choice or audible output.
 
 For a Codex conversation with admitted delivery controls, a valid silent terminal envelope
 retains earlier validated public assistant content from that same native turn, including across

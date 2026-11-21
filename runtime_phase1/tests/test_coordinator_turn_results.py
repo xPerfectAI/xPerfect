@@ -239,7 +239,7 @@ def test_accepted_unstarted_intent_does_not_hide_a_completed_turn_or_complete_th
 
 @pytest.mark.parametrize('binding,value', [('work_ref', 'synthetic-work'), ('worker_id', 'synthetic-worker'),
     ('run_id', 'synthetic-run')])
-def test_same_source_real_work_binding_keeps_the_goal_result_owner(app_core, binding, value):
+def test_unproved_work_binding_does_not_hide_the_original_turn(app_core, binding, value):
     core, cid, _ = app_core
     request, run, _ = complete(core, cid)
     core.accept_goals('local', 'owner', cid, 'source', [Goal(id='owned', text='Make a tiny local page.')])
@@ -247,9 +247,9 @@ def test_same_source_real_work_binding_keeps_the_goal_result_owner(app_core, bin
         conn.execute(f'UPDATE coordinator_goals SET {binding}=? WHERE conversation_id=? AND goal_id=?',
                      (value, cid, 'owned'))
     result = turn_result(core, 'local', 'owner', cid, 'source', request['request_id'], run['run_id'])
-    assert result['presentation_eligible'] is False and result['superseded'] is True
+    assert result['presentation_eligible'] is True and result['superseded'] is False
     queue_turn_results(core, core._conversation('local', 'owner', cid))
-    assert notices(core) == []
+    assert len(notices(core)) == 1
 
 
 def test_another_source_dispatch_does_not_own_this_completed_turn(app_core):

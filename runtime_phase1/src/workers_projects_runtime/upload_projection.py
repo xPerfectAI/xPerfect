@@ -13,6 +13,22 @@ from .bootstrap import (
 )
 
 
+def run_input_manifest_path(run_id: str) -> str:
+    return ".xperfect/run-inputs/" + hashlib.sha256(run_id.encode("utf-8")).hexdigest() + ".json"
+
+
+def run_inputs_prompt() -> dict:
+    raw = (Path(__file__).with_name("prompts") / "worker-run-inputs.json").read_bytes()
+    return json.loads(raw) | {"sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def runtime_instruction_for_run(run_worker: dict, instruction: str) -> str:
+    path = str(run_worker.get("_run_input_manifest_path") or "")
+    if not path:
+        return instruction
+    return instruction + "\n\n" + run_inputs_prompt()["instruction"].format(index_path=path)
+
+
 def project_inline_image_files(messages: Iterable[Any], *, archive: bool = False) -> list[dict[str, Any]]:
     """Preserve validated files; inference batch bounds do not limit the archive."""
     from .deliverables import _native_image_bytes, NATIVE_MEDIA_MAX_ITEMS, NATIVE_MEDIA_MAX_TOTAL_BYTES

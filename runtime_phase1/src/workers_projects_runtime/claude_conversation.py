@@ -19,6 +19,13 @@ import threading
 import time
 import uuid
 
+from .agent_builder_control import (
+    NATIVE_TEXT_DELIVERY_SERVER,
+    NATIVE_TEXT_DELIVERY_TOOL_RESULT,
+    native_text_delivery,
+    native_text_delivery_tool_name,
+    native_text_delivery_tools,
+)
 from .bootstrap import CLEAN_ROOM_RUNTIME_ENV_KEYS
 
 STYLE_NAME = "xperfect-application"
@@ -58,6 +65,33 @@ def assert_private_style_tree(workspace):
         if path.is_symlink() or relative not in (
                 "output-styles", "output-styles/" + STYLE_NAME + ".md"):
             raise ValueError("Unexpected native project configuration in restricted conversation")
+
+
+def text_delivery(bundle):
+    """A live call's authored text is its speech; see native_text_delivery."""
+    return enabled(bundle) and native_text_delivery(
+        bundle.get("agent_builder_control"), bundle.get("messaging_delivery_control"),
+        bundle.get("surface"))
+
+
+def delivery_tool_response(message):
+    """Serve the declared text-only delivery tool over the native control channel."""
+    message = message if isinstance(message, dict) else {}
+    method, identity = message.get("method"), message.get("id")
+    if identity is None:
+        return {"jsonrpc": "2.0", "result": {}}
+    if method == "initialize":
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        result = {"protocolVersion": params.get("protocolVersion") or "2025-06-18",
+                  "capabilities": {"tools": {}},
+                  "serverInfo": {"name": NATIVE_TEXT_DELIVERY_SERVER, "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": native_text_delivery_tools()}
+    elif method == "tools/call":
+        result = {"content": [{"type": "text", "text": NATIVE_TEXT_DELIVERY_TOOL_RESULT}]}
+    else:
+        result = {}
+    return {"jsonrpc": "2.0", "id": identity, "result": result}
 
 
 def idle_seconds():
@@ -134,6 +168,13 @@ class NativeConversation:
                         self.responses[str(response.get("request_id") or "")] = response
                         self.condition.notify_all()
                     continue
+                request = event.get("request") if event.get("type") == "control_request" else None
+                if (isinstance(request, dict) and request.get("subtype") == "mcp_message"
+                        and request.get("server_name") == NATIVE_TEXT_DELIVERY_SERVER):
+                    self.send({"type": "control_response", "response": {
+                        "subtype": "success", "request_id": event.get("request_id"),
+                        "response": {"mcp_response": delivery_tool_response(request.get("message"))}}})
+                    continue
                 session = event.get("session_id")
                 if isinstance(session, str) and session:
                     self.session_id = session
@@ -198,6 +239,12 @@ def run_turn(runtime, worker, command, environment, workspace, run_root,
     assert_private_style_tree(workspace)
     lifetime = idle_seconds()
     native_command, settings = command_projection(command, workspace)
+    speaks_text = text_delivery(bundle)
+    if speaks_text:
+        permissions = dict(settings.get("permissions") or {})
+        permissions["allow"] = [*(permissions.get("allow") or []), native_text_delivery_tool_name()]
+        settings["permissions"] = permissions
+        native_command[native_command.index("--settings") + 1] = json.dumps(settings)
     scope, native_env = process_scope(native_command, environment)
     deadline = time.monotonic() + timeout_sec if timeout_sec else None
     absolute = str(worker.get("_provider_response_deadline_at") or "")
@@ -289,7 +336,8 @@ def run_turn(runtime, worker, command, environment, workspace, run_root,
             initial = metadata("preparing")
             runtime._write_active_session(worker_id, initial, worker=worker, spawned_process=process)
             previous = runtime._read_active_session(worker_id)
-            session.control({"subtype": "initialize", "hooks": {}})
+            session.control({"subtype": "initialize", "hooks": {},
+                             "sdkMcpServers": [NATIVE_TEXT_DELIVERY_SERVER]})
         session.events = queue.SimpleQueue()
         stderr_offset = session.stderr_path.stat().st_size
         if session.idle_expiry is not None:
@@ -307,6 +355,8 @@ def run_turn(runtime, worker, command, environment, workspace, run_root,
         mcp_path = runtime._state_dir(worker_id) / "conversation-mcp.json"
         runtime._assert_host_claude_mcp_config(worker, mcp_path)
         servers = native_servers(json.loads(mcp_path.read_text()), environment)
+        if speaks_text:
+            servers[NATIVE_TEXT_DELIVERY_SERVER] = {"type": "sdk", "name": NATIVE_TEXT_DELIVERY_SERVER}
         applied = session.control({"subtype": "mcp_set_servers", "servers": servers})
         if applied.get("errors"):
             raise RuntimeErrorBase("The current native capability connections are unavailable")

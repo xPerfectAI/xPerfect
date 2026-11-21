@@ -3,7 +3,7 @@ from fastapi import HTTPException
 
 from workers_projects_runtime.conversation_provider import (
     GLASSHIVE_MODELS, _admit_conversation_history, _conversation_replay_budget_bytes,
-    _native_history_budget_receipt, ChatMessage,
+    _native_history_budget_receipt, _conversation_output_reserve_tokens, ChatMessage,
 )
 
 
@@ -51,13 +51,15 @@ def test_observed_small_native_window_remains_smaller_than_catalog(monkeypatch):
     manifest = {'stable_authority_sha256': 'a' * 64, 'observed_chars_per_token': 2,
         'native_context_epoch': 'native', 'native_occupancy_native_context_epoch': 'native',
         'native_context_window_model_id': model.id, 'native_context_window_tokens': 64000}
-    assert _native_history_budget_receipt(model, manifest)['replay_budget_bytes'] == 64000
+    assert _native_history_budget_receipt(model, manifest)['replay_budget_bytes'] == (
+        64000 - _conversation_output_reserve_tokens(model)
+    ) * 2
 
 
 def test_floor_is_not_the_actual_protected_source_ceiling(monkeypatch):
     monkeypatch.delenv('GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES', raising=False)
     model = GLASSHIVE_MODELS['codex-cli:gpt-6.1-sol']
-    text = ('Full retained source. ' * 17000).strip()
+    text = ('Full retained source. ' * 23000).strip()
     floor = _conversation_replay_budget_bytes(model, observed_chars_per_token=1)
     assert len(text.encode()) > floor
     instruction, admitted, _ = _admit_conversation_history(
@@ -69,20 +71,35 @@ def test_floor_is_not_the_actual_protected_source_ceiling(monkeypatch):
     assert admitted['instruction_bytes'] <= admitted['budget_bytes']
 
 
-def test_smaller_actual_budget_rejects_a_stale_receipt_without_truncation(monkeypatch):
+@pytest.mark.parametrize('direct', [False, True])
+def test_smaller_sizing_receipt_keeps_native_source_and_direct_capacity_guard(monkeypatch, direct):
+    from dataclasses import replace
+
     monkeypatch.delenv('GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES', raising=False)
     model = GLASSHIVE_MODELS['codex-cli:gpt-6.1-sol']
-    text = ('Full retained source. ' * 17000).strip()
+    if direct:
+        model = replace(model, harness_profile='direct-openai')
+    text = ('Full retained source. ' * 23000).strip()
     messages = [ChatMessage(role='user', content=text)]
     receipt = _native_history_budget_receipt(model, {
         'stable_authority_sha256': 'a' * 64, 'observed_chars_per_token': 2.054,
     })
     assert len(text.encode()) < receipt['replay_budget_bytes']
-    with pytest.raises(HTTPException) as error:
-        _admit_conversation_history(
+    if direct:
+        with pytest.raises(HTTPException) as error:
+            _admit_conversation_history(
+                messages, start_at=0, turn_context='', model=model,
+                observed_chars_per_token=1.0, protected_indices={0},
+            )
+        assert error.value.status_code == 413
+        assert 'No partial source was admitted' in error.value.detail
+    else:
+        instruction, decision, _ = _admit_conversation_history(
             messages, start_at=0, turn_context='', model=model,
             observed_chars_per_token=1.0, protected_indices={0},
         )
-    assert error.value.status_code == 413
-    assert 'No partial source was admitted' in error.value.detail
+        assert decision['instruction_bytes'] > decision['budget_bytes']
+        assert decision['context_budget_owner'] == 'native_harness'
+        assert text in instruction
+        assert decision['omitted_message_count'] == 0
     assert messages[0].content == text

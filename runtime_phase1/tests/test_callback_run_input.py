@@ -52,6 +52,18 @@ def test_callback_preserves_exact_accepted_input_and_continuation(account_client
     assert replay['callback_id'] == callback['callback_id']
 
 
+def test_callback_keeps_inherited_evidence_separate_from_execution_guidance(account_client):
+    service, store, record = accepted_run(account_client)
+    context = {'version': 1, 'base_instruction': '\n  Original accepted task.\n',
+        'guidance': ['  Latest correction.\n'],
+        'inherited_conversation': {'version': 1, 'conversation_id': 'synthetic-context',
+            'sources': [{'id': 'history', 'role': 'user', 'text': 'Earlier evidence only.'}]}}
+    store.update_run(record['current_run_id'], continuation_context_json=json.dumps(context))
+    callback = emit_terminal(service, store, record)
+    assert json.loads(callback['payload_json'])['run_input']['continuation_context'] == context
+    assert emit_terminal(service, store, record)['payload_json'] == callback['payload_json']
+
+
 def test_callback_ignores_caller_forged_input_and_rejects_stale_terminal(account_client):
     service, store, record = accepted_run(account_client)
     exact = store.finalize_run_if_state(record['current_run_id'], 'queued', 'completed', output_text='Useful result')

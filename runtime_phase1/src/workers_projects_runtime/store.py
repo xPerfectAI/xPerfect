@@ -838,6 +838,17 @@ MANAGED_RESTART_FAILURE_DIAGNOSTIC_SUMMARY = (
     "managed shutdown."
 )
 
+# Requeue classes written only when a running generation lost its exact dispatch lease.
+DISPATCH_OWNER_LOSS_REQUEUE_CLASSES = frozenset(
+    {
+        "running_invariant_reconciled",
+        "stale_owner_no_verified_process",
+        "dead_host_run_lease",
+    }
+)
+
+INVOCATION_OWNER_LOST_FAILURE_CLASS = "invocation_owner_lost"
+
 NONTERMINAL_RUN_STATES = frozenset(
     {"queued", "claimed", "admitted", "running", "settling", "paused", "needs_input"}
 )
@@ -11138,6 +11149,121 @@ class Store:
             conn.execute("COMMIT")
         return self._row(row)
 
+    def fail_forfeited_invocation_retry(
+        self,
+        run_id: str,
+        *,
+        executor_id: str,
+        failure_user_message: str,
+        failure_recommended_recovery: str,
+        failure_diagnostic_summary: str,
+    ) -> dict[str, Any] | None:
+        """Fail a requeued run whose invocation ended with the executor that held it.
+
+        A run bound to one executor's invocation stays queued for that executor. When
+        that executor lost, or at a managed stop released, the dispatch lease of the
+        run's last running generation, the requeue has no claimant: the invocation was
+        never durable and no other process received it. The proof is durable attempt and
+        lease history only. The transition is one CAS, so an invocation its application
+        attached again, a claim, a control and an earlier terminal state all win.
+        Lease loss cannot prove that the invoked attempt completed no prior actions,
+        so this terminal outcome does not authorize a retry.
+        """
+
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM runs WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+            requeue_class = str(run["failure_class"] or "") if run is not None else ""
+            if (
+                run is None
+                or str(run["state"] or "") != "queued"
+                or str(run["active_attempt_id"] or "")
+                or str(run["runtime_invoked_at"] or "")
+                or requeue_class not in DISPATCH_OWNER_LOSS_REQUEUE_CLASSES
+                or str(run["last_retry_class"] or "") != requeue_class
+                or str(run["queue_blocker_class"] or "") != requeue_class
+            ):
+                conn.execute("COMMIT")
+                return None
+            lease = conn.execute(
+                """
+                SELECT host_run_leases.executor_id, host_run_leases.status,
+                       host_run_leases.release_reason, run_attempts.state AS attempt_state
+                FROM run_attempts
+                JOIN host_run_leases
+                  ON host_run_leases.lease_id = run_attempts.lease_id
+                 AND host_run_leases.run_id = run_attempts.run_id
+                WHERE run_attempts.run_id = ?
+                  AND run_attempts.attempt_number = (
+                      SELECT MAX(attempt_number) FROM run_attempts WHERE run_id = ?
+                  )
+                """,
+                (str(run_id), str(run_id)),
+            ).fetchone()
+            holder = self.invocation_executor_for_run(dict(run)) or (
+                str(lease["executor_id"] or "") if lease is not None else ""
+            )
+            worker = conn.execute(
+                "SELECT * FROM workers WHERE worker_id = ?", (run["worker_id"],)
+            ).fetchone()
+            if (
+                lease is None
+                or not holder
+                or holder == str(executor_id)
+                or str(lease["executor_id"] or "") != holder
+                or str(lease["attempt_state"] or "") != "retry_queued"
+                or str(lease["status"] or "") != "released"
+                or str(lease["release_reason"] or "")
+                not in DISPATCH_OWNER_LOSS_REQUEUE_CLASSES
+                | {MANAGED_SHUTDOWN_LEASE_RELEASE_REASON}
+                or conn.execute(
+                    "SELECT 1 FROM host_run_leases WHERE run_id = ? AND status = 'active' LIMIT 1",
+                    (str(run_id),),
+                ).fetchone()
+                is not None
+                # An unfinished control owns this run's exit.
+                or worker is None
+                or str(worker["compute_release_token"] or "")
+                or str(worker["work_stop_id"] or "")
+            ):
+                conn.execute("COMMIT")
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET state = 'failed', ended_at = ?, retry_after = NULL,
+                    runtime_bundle_json = NULL, error_text = ?,
+                    failure_class = ?, failure_retryable = 0, failure_structured = 1,
+                    failure_user_message = ?, failure_recommended_recovery = ?,
+                    failure_diagnostic_summary = ?
+                WHERE run_id = ? AND state = 'queued' AND active_attempt_id = ''
+                """,
+                (
+                    now,
+                    INVOCATION_OWNER_LOST_FAILURE_CLASS,
+                    INVOCATION_OWNER_LOST_FAILURE_CLASS,
+                    str(failure_user_message),
+                    str(failure_recommended_recovery),
+                    str(failure_diagnostic_summary),
+                    str(run_id),
+                ),
+            )
+            if not cursor.rowcount:
+                conn.execute("COMMIT")
+                return None
+            self._record_terminal_artifact_trace_conn(
+                conn, run_id=str(run_id), observed_at=now
+            )
+            row = conn.execute(
+                "SELECT * FROM runs WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+            self._note_provider_account_outcome_conn(conn, row, worker)
+            conn.execute("COMMIT")
+        return self._row(row)
+
     def reconcile_restart_authority_blocked_workers(
         self,
         *,
@@ -16518,8 +16644,14 @@ class Store:
         capacity_reservation: dict[str, int] | None = None,
         capacity_observed_lease_ids: Iterable[str] | None = None,
         capacity_next_retry_at: str = "",
+        system_maintenance: bool = False,
+        conversation_live_reserve: int = 0,
     ) -> dict[str, Any]:
-        """Atomically admit one exact host run across every service process."""
+        """Atomically admit one exact host run across every service process.
+
+        ``conversation_live_reserve`` slots of a conversation lane stay free for live
+        conversation and its results: a ``system_maintenance`` run cannot take them.
+        """
 
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         now_iso = current.isoformat()
@@ -16670,14 +16802,26 @@ class Store:
                     (clean_family, clean_lane),
                 ).fetchone()[0]
             )
-            if family_lane_count >= lane_limit:
+            # Maintenance always keeps one slot, so a reserve cannot starve it outright.
+            live_reserve = (
+                min(max(0, int(conversation_live_reserve)), lane_limit - 1)
+                if clean_lane == "conversation" and system_maintenance
+                else 0
+            )
+            admission_limit = lane_limit - live_reserve
+            if family_lane_count >= admission_limit:
                 conn.execute("ROLLBACK")
                 dimension = f"{clean_family}{clean_lane.title()}Slots"
                 raise HostRunLeaseCapacityError(
-                    f"The {clean_family} {clean_lane} host lane is at its configured capacity.",
+                    (
+                        f"The {clean_family} {clean_lane} host lane is holding its "
+                        "remaining capacity for live conversation."
+                        if live_reserve and family_lane_count < lane_limit
+                        else f"The {clean_family} {clean_lane} host lane is at its configured capacity."
+                    ),
                     capacity_class="family_lane",
                     **_slot_capacity_facts(
-                        dimension, configured=lane_limit, used=family_lane_count
+                        dimension, configured=admission_limit, used=family_lane_count
                     ),
                     next_retry_at=capacity_next_retry_at,
                 )
@@ -23101,6 +23245,38 @@ class Store:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
+    _PROVIDER_ROUTE_BACKOFF_MAX_S = 3600.0
+    _PROVIDER_ROUTE_BACKOFF_WINDOW_S = 6 * 3600.0
+
+    def _provider_route_failure_streak(self, route: dict[str, str], current: datetime) -> int:
+        """Failures recorded for this route since a run on it last completed (recent hours only)."""
+        window_start = (
+            current - timedelta(seconds=self._PROVIDER_ROUTE_BACKOFF_WINDOW_S)
+        ).isoformat()
+        with self._connect() as conn:
+            worked = conn.execute(
+                """
+                SELECT MAX(runs.ended_at) FROM runs
+                JOIN workers ON workers.worker_id = runs.worker_id
+                WHERE workers.tenant_id = ? AND workers.owner_id = ?
+                  AND workers.profile = ? AND workers.model = ?
+                  AND runs.state = 'completed' AND runs.ended_at >= ?
+                """,
+                (route["tenant_id"], route["owner_id"], route["profile"], route["model"],
+                 window_start),
+            ).fetchone()
+            since = max(window_start, str((worked[0] if worked else "") or ""))
+            counted = conn.execute(
+                """
+                SELECT COUNT(*) FROM provider_route_health_events
+                WHERE tenant_id = ? AND owner_id = ? AND profile = ? AND runtime = ?
+                  AND model = ? AND observed_at > ?
+                """,
+                (route["tenant_id"], route["owner_id"], route["profile"], route["runtime"],
+                 route["model"], since),
+            ).fetchone()
+        return int((counted[0] if counted else 0) or 0)
+
     def record_provider_route_failure(
         self,
         *,
@@ -23152,7 +23328,15 @@ class Store:
             cooldown_source = "provider_exact"
         else:
             bounded_default = max(1.0, min(float(default_cooldown_s), 86_400.0))
-            cooldown_until = current + timedelta(seconds=bounded_default)
+            # A route that fails again on its first call after every cooldown is not coming back
+            # soon (a spent quota, for one). Each failure in a row doubles the wait, up to an
+            # hour, so a route that stays down is not called at the full rate.
+            streak = self._provider_route_failure_streak(route, current)
+            backoff = min(
+                bounded_default * (2 ** min(streak, 16)),
+                max(bounded_default, self._PROVIDER_ROUTE_BACKOFF_MAX_S),
+            )
+            cooldown_until = current + timedelta(seconds=backoff)
             cooldown_source = "default"
         data = {
             **route,

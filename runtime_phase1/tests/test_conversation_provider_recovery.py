@@ -312,7 +312,7 @@ def test_current_memory_body_survives_initial_resume_and_configured_fallback(tmp
     assert sessions[0] == sessions[1]
 
 
-def test_current_memory_capacity_keeps_calibrated_body_and_legacy_header_guards(tmp_path, monkeypatch):
+def test_current_memory_capacity_keeps_native_source_operator_cap_and_legacy_header_guard(tmp_path, monkeypatch):
     monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
     client = _client(tmp_path, monkeypatch, runtime=NativeUsageRuntime())
     store = client.app.state.store
@@ -341,10 +341,24 @@ def test_current_memory_capacity_keeps_calibrated_body_and_legacy_header_guards(
                                message_id="capacity-over-boundary", stream_id="capacity-over-boundary",
                                idempotency_key="capacity-over-boundary")
     body, _ = _post_bound(client, payload, invocation="capacity-over-boundary")
-    assert body.status_code == 413, body.text
-    assert "No partial source was admitted" in body.text
+    assert body.status_code == 200, body.text
+    complete = store.get_provider_request(body.json()["id"])
+    assert context + "x" in complete["admitted_instruction"]
+    assert len(complete["admitted_instruction"].encode()) == budget + 1
+    native_decision = json.loads(complete["replay_decision_json"])
+    assert native_decision["context_budget_owner"] == "native_harness"
+    assert native_decision["omitted_message_count"] == 0
+
+    # A Native sizing estimate is advisory; an explicit operator maximum is authority.
+    monkeypatch.setenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", str(budget))
+    payload["metadata"].update(conversation_id="capacity-operator-cap",
+                               message_id="capacity-operator-cap", stream_id="capacity-operator-cap",
+                               idempotency_key="capacity-operator-cap")
+    capped, _ = _post_bound(client, payload, invocation="capacity-operator-cap")
+    assert capped.status_code == 413, capped.text
+    assert "No partial source was admitted" in capped.text
     assert store.get_provider_request(tenant_id="local", owner_id="owner-a",
-                                      native_invocation_id="capacity-over-boundary") is None
+                                      native_invocation_id="capacity-operator-cap") is None
     payload["metadata"].pop("turn_context")
     header_context = "x" * ((TURN_CONTEXT_MAX_ENCODED_BYTES // 4) * 3 + 1)
     header, _ = _post_bound(client, payload, invocation="header-capacity", headers={
