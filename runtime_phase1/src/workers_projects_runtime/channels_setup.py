@@ -52,13 +52,15 @@ _SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try ag
 _RESTART_FIRST_WAIT_S = 5.0
 _RESTART_MAX_WAIT_S = 300.0
 _RECHECK_S = 120.0  # while Teams does not allow the app, Microsoft's report is read again this often
-# While a change spreads, Microsoft's servers answer differently (no, no, yes, no within eight seconds in the first
-# real test). After a "no", Connect goes on only after this many "yes" in a row spanning at least a minute.
-_STEADY_READS = 3
-_STEADY_SPAN_S = 60.0
-_STEADY_RECHECK_S = 30.0
-_STILL_APPLYING = ("Microsoft is still applying the change: it has said yes, but not every time yet. This page checks "
-                   "again by itself and goes on when the answer is steady.")
+# While a change spreads, Microsoft's servers answer differently: in the first real test they flipped between no and
+# yes (about 6 yes in 10) for 43 minutes after the policy was assigned. After a "no", Connect goes on only after eight
+# "yes" in a row about 8 s apart, spanning about a minute (were the answers independent, about 1 in 70 by chance while
+# it still flips; the answer the first real test took as steady was eight in a row).
+_STEADY_READS = 8
+_STEADY_RECHECK_S = 8.0
+_STEADY_SPAN_S = (_STEADY_READS - 1) * _STEADY_RECHECK_S
+_STILL_APPLYING = ("Microsoft is still applying the change: it has said yes, but not every time yet (this can take up "
+                   "to an hour). This page checks again by itself and goes on when the answer is steady.")
 _NOT_REPORTED = ("Microsoft did not say this time whether Teams allows the app here. This page checks again by itself "
                  "and goes on once Microsoft says yes, steadily.")
 
@@ -113,8 +115,8 @@ def _note_for_admin(status: dict, name: str) -> str:
     account = str(status.get("username") or "").strip()
     return (f"Hello, could you let me add a Teams app I set up for myself, {name}? In the Teams admin center:\n{steps}\n"
             + (f"My account: {account}.\n" if account else "")
-            + "If the admin center says it is still setting up, that can take up to 30 minutes, and Microsoft can take a "
-            "while to apply the change. Thank you!")
+            + "If the admin center says it is still setting up, that can take up to 30 minutes, and Microsoft can take up "
+            "to an hour to apply the change. Thank you!")
 
 
 class TeamsSetup:

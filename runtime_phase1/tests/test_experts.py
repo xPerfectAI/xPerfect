@@ -2191,7 +2191,9 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
     run_background()
     assert creations() == 0 and "Upload custom apps" in client.get(f"/v1/channels/{binding_id}/connect").json()["error"]
     report["user"] = True
-    for step in (121, 30, 30):  # three "yes" in a row over a minute
+    from workers_projects_runtime import channels_setup
+    steps = (121,) + (channels_setup._STEADY_RECHECK_S,) * (channels_setup._STEADY_READS - 1)
+    for step in steps:  # eight "yes" in a row over about a minute
         assert creations() == 0
         clock[0] += step
         setup.reconcile_once()
@@ -2327,6 +2329,7 @@ def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_
     assert "1. Teams apps → Setup policies" in note and "2. Teams apps → Manage apps → Actions" in note
     assert "My account" not in note  # no account reported, none invented
     assert "up to 30 minutes" in note  # a first visit to the admin center can take that long
+    assert "up to an hour" in note  # the first real test's policy took 43 minutes to be reported steadily
     assert "Upload custom apps" not in _note_for_admin({"tdp": {"sideloading": {"tenant": False, "user": True}}}, "X")
 
 
@@ -2365,8 +2368,10 @@ def test_after_a_no_a_missing_report_is_not_a_yes(app, monkeypatch, tmp_path):
         assert creations() == 0 and status["step"] == "blocked" and "did not say" in status["error"]
         assert status["note"] == note  # what to ask the administrator stays
     report["value"] = {"tenant": True, "user": True}
-    for step in (30, 30, 30):
-        clock[0] += step
+    from workers_projects_runtime import channels_setup
+    for number in range(channels_setup._STEADY_READS):
+        assert creations() == 0, number
+        clock[0] += channels_setup._STEADY_RECHECK_S
         setup._create("local", owner, binding_id)
     assert creations() == 1
 

@@ -306,7 +306,7 @@ pill, links and wording. Real model, browser and Teams steps stay NOT RUN until 
 | Teams told up front | Press Connect. | Before the sign-in: open Microsoft's page where the work account is signed in (any browser or a phone), a phone approval may come, the code lasts about 15 minutes. |
 | Teams account shown | Complete the sign-in. | While the app is made, and on the card afterwards, the Microsoft account and organisation ID it was made in. |
 | Teams custom apps off | Connect with an account whose setup policy has Upload custom apps off. | Nothing is created; the page names both switches and which is off, offers a note for the administrator, and checks again by itself every two minutes. |
-| Teams change spreading | The administrator turns the switch on. | "Microsoft is still applying the change" until three yes answers in a row over a minute; then the app is created once. |
+| Teams change spreading | The administrator turns the switch on. | "Microsoft is still applying the change" (up to an hour) until eight yes answers in a row over about a minute; then the app is created once. |
 | Teams new bot | The first seconds after the app is created. | Connecting… until Microsoft's socket holds; nothing is claimed or sent before; a refusal that lasts is shown once, in Microsoft's words. |
 | Teams install | Press Install in Teams. | Web or desktop both work; pressing again brings the add window; "permissions needed" right after a change can mean it is still spreading. |
 | Teams not ready yet | Before any message has come through. | Online · no message yet; no Test in Teams. |

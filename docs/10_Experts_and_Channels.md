@@ -141,9 +141,10 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
    status) and, when either is off, creates nothing: the page names the switches and which is off,
    offers a note ready to send to the administrator (a first visit to the admin center can take up to
    30 minutes), and reads the report again by itself every two minutes. While a change spreads,
-   Microsoft's servers answer differently (no, no, yes, no within seconds, more than twenty minutes
-   after the change), so after a "no" Connect goes on only after three "yes" in a row spanning a minute,
-   saying meanwhile that Microsoft is still applying it. Teams refused the install a minute after a
+   Microsoft's servers answer differently: they flipped between no and yes (about 6 yes in 10) for 43
+   minutes after the policy was assigned, so an administrator should expect up to an hour. After a "no",
+   Connect goes on only after eight "yes" in a row about 8 seconds apart, saying meanwhile that Microsoft
+   is still applying it. Teams refused the install a minute after a
    single "yes" (whether Teams also lags behind a steady "yes" is not known yet), so the card says
    "permissions needed" may mean a change is still spreading.
 6. **What xPerfect cannot do with this sign-in.** The pinned CLI's sign-in asks only for Microsoft
