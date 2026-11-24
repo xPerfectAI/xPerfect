@@ -1743,64 +1743,74 @@ class CoordinatorService:
                     f"AND (created_at<? OR (created_at=? AND turn_id<?)) LIMIT 1",
                     (conversation_id, turn_id, turn["created_at"], turn["created_at"], turn_id)).fetchone():
                 return {"turn_id": turn_id, "state": "queued"}
+            build_error = None
             if not turn["payload_json"]:
-                messages = [{"role": "system", "content": json.loads(conversation["prompt_json"])["content"]}]
-                experts = getattr(self, "experts", None)
-                # An Expert's Queen reads its newest instructions when each turn starts;
-                # a job keeps the instructions it started with in its own configuration.
-                developer = (experts.authority(tenant, owner, conversation, config)
-                             if experts is not None and config.expert is not None else config.developer_instructions)
-                if developer:
-                    messages.append({"role": "developer", "content": developer})
-                # Exact source history is retained; the existing provider admission layer
-                # either admits it or returns an explicit budget error. No silent slicing.
-                prior = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND created_at<=? ORDER BY created_at,turn_id", (conversation_id, turn["created_at"])).fetchall()
-                for item in prior:
-                    messages.append({"role": "user" if item["origin"] == "interactive" else "tool", "content": item["message"]})
-                    if item["response_json"]:
-                        response = json.loads(item["response_json"])
-                        for choice in response.get("choices", []):
-                            authored = choice.get("message", {})
-                            if authored.get("content"):
-                                messages.append({"role": "assistant", "content": authored["content"]})
-                if library_packet:
-                    messages.append(library_packet["message"])
-                bundle = library_packet.get("bootstrap_bundle", config.bootstrap_bundle)
-                if config.expert is not None and turn["origin"] in {"owner_decision", "owner_checking"}:
-                    # A line written before or after the owner's decision uses no tool at all.
-                    capabilities = {k: v for k, v in (bundle.get("provider_capabilities") or {}).items()
-                                    if k != "coordination_only"}
-                    bundle = {**bundle, "provider_capabilities": {**capabilities, "native_tools": False}}
-                effort = (experts.speaker_effort(tenant, owner, config)
-                          if experts is not None and config.expert is not None else config.effort)
-                # An Expert's declared backup takes over only before the reply starts.
-                fallback = (experts.fallback(tenant, owner, config)
-                            if experts is not None and config.expert is not None
-                            and turn["origin"] not in {"owner_decision", "owner_checking"} else None)
-                packet = {"model": config.model, "reasoning_effort": effort,
-                          "messages": messages, "metadata": {
-                            "tenant_id": tenant, "owner_id": owner, "conversation_id": conversation_id,
-                            "agent_id": "coordinator", "message_id": turn_id, "stream_id": turn_id,
-                            "idempotency_key": f"{conversation_id}:{turn_id}",
-                            "surface": "coordinator",
-                            "bootstrap_bundle": bundle,
-                            "allowed_ai_origin_scope": self._conversation_scope(conversation),
-                            **({"glasshive_options": {"access": config.expert.access}}
-                               if config.expert is not None and config.expert.access else {}),
-                            **({"fallback_model": fallback[0], "fallback_reasoning_effort": fallback[1]}
-                               if fallback else {}),
-                        }}
-                if library_packet:
-                    # The existing history owner groups this reference with the
-                    # latest accepted user turn and must not silently clip it.
-                    packet["metadata"]["visible_message_chain"] = [{
-                        **library_packet["bootstrap_bundle"]["library_selection"]["reference_message"],
-                        "role": "tool", "accepted_source": True,
-                    }]
-                serialized = canonical(packet)
-                conn.execute("UPDATE coordinator_turns SET payload_json=? WHERE conversation_id=? AND turn_id=?", (serialized, conversation_id, turn_id))
+                try:
+                    messages = [{"role": "system", "content": json.loads(conversation["prompt_json"])["content"]}]
+                    experts = getattr(self, "experts", None)
+                    # An Expert's Queen reads its newest instructions when each turn starts;
+                    # a job keeps the instructions it started with in its own configuration.
+                    developer = (experts.authority(tenant, owner, conversation, config)
+                                 if experts is not None and config.expert is not None else config.developer_instructions)
+                    if developer:
+                        messages.append({"role": "developer", "content": developer})
+                    # Exact source history is retained; the existing provider admission layer
+                    # either admits it or returns an explicit budget error. No silent slicing.
+                    prior = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND created_at<=? ORDER BY created_at,turn_id", (conversation_id, turn["created_at"])).fetchall()
+                    for item in prior:
+                        messages.append({"role": "user" if item["origin"] == "interactive" else "tool", "content": item["message"]})
+                        if item["response_json"]:
+                            response = json.loads(item["response_json"])
+                            for choice in response.get("choices", []):
+                                authored = choice.get("message", {})
+                                if authored.get("content"):
+                                    messages.append({"role": "assistant", "content": authored["content"]})
+                    if library_packet:
+                        messages.append(library_packet["message"])
+                    bundle = library_packet.get("bootstrap_bundle", config.bootstrap_bundle)
+                    if config.expert is not None and turn["origin"] in {"owner_decision", "owner_checking"}:
+                        # A line written before or after the owner's decision uses no tool at all.
+                        capabilities = {k: v for k, v in (bundle.get("provider_capabilities") or {}).items()
+                                        if k != "coordination_only"}
+                        bundle = {**bundle, "provider_capabilities": {**capabilities, "native_tools": False}}
+                    effort = (experts.speaker_effort(tenant, owner, config)
+                              if experts is not None and config.expert is not None else config.effort)
+                    # An Expert's declared backup takes over only before the reply starts.
+                    fallback = (experts.fallback(tenant, owner, config)
+                                if experts is not None and config.expert is not None
+                                and turn["origin"] not in {"owner_decision", "owner_checking"} else None)
+                    packet = {"model": config.model, "reasoning_effort": effort,
+                              "messages": messages, "metadata": {
+                                "tenant_id": tenant, "owner_id": owner, "conversation_id": conversation_id,
+                                "agent_id": "coordinator", "message_id": turn_id, "stream_id": turn_id,
+                                "idempotency_key": f"{conversation_id}:{turn_id}",
+                                "surface": "coordinator",
+                                "bootstrap_bundle": bundle,
+                                "allowed_ai_origin_scope": self._conversation_scope(conversation),
+                                **({"glasshive_options": {"access": config.expert.access}}
+                                   if config.expert is not None and config.expert.access else {}),
+                                **({"fallback_model": fallback[0], "fallback_reasoning_effort": fallback[1]}
+                                   if fallback else {}),
+                            }}
+                    if library_packet:
+                        # The existing history owner groups this reference with the
+                        # latest accepted user turn and must not silently clip it.
+                        packet["metadata"]["visible_message_chain"] = [{
+                            **library_packet["bootstrap_bundle"]["library_selection"]["reference_message"],
+                            "role": "tool", "accepted_source": True,
+                        }]
+                    serialized = canonical(packet)
+                    conn.execute("UPDATE coordinator_turns SET payload_json=? WHERE conversation_id=? AND turn_id=?", (serialized, conversation_id, turn_id))
+                except Exception as exc:
+                    # A turn that cannot even be prepared is refused for good (its blocker recorded),
+                    # so it never holds back the messages after it; the caller still gets the error.
+                    build_error = exc
+                    conn.execute("UPDATE coordinator_turns SET blocker=?,retry_after_at='' WHERE conversation_id=? "
+                                 "AND turn_id=? AND request_id=''", (_safe_blocker_code(exc), conversation_id, turn_id))
             else:
                 serialized = turn["payload_json"]
+        if build_error is not None:
+            raise build_error
         try:
             self._assert_foreground_allowed_ai(conversation, config)
             record = self.provider.start(ChatCompletionRequest.model_validate_json(serialized), tenant_id=tenant)

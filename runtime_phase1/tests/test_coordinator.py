@@ -1472,6 +1472,39 @@ def test_a_newer_message_never_overtakes_an_older_one_still_waiting_to_start(coo
     assert started == ['a', 'b']
 
 
+def test_a_message_that_cannot_be_prepared_never_holds_back_the_messages_after_it(coordinator, monkeypatch):
+    """With messages answered in order, one whose preparation fails before it reaches the provider must be
+    refused for good (its blocker recorded), not left ready forever with every later message behind it."""
+    started = []
+
+    def start(payload, **kwargs):
+        started.append(payload.metadata.message_id)
+        return {'request_id': 'request-' + payload.metadata.message_id, 'state': 'running'}
+
+    coordinator.provider.start = start
+    cid = create(coordinator)
+    real_scope = coordinator._conversation_scope
+    failing = {'first'}
+
+    def scope(conversation):
+        import inspect
+        frame = inspect.currentframe().f_back
+        if frame and frame.f_locals.get('turn_id') in failing:
+            raise ValueError('synthetic preparation failure')
+        return real_scope(conversation)
+
+    monkeypatch.setattr(coordinator, '_conversation_scope', scope)
+    coordinator.accept_turn('local', 'owner', cid, 'first', 'First message.')
+    with pytest.raises(ValueError):
+        coordinator.start_turn('local', 'owner', cid, 'first')
+    with coordinator.store._connect() as conn:
+        assert conn.execute("SELECT blocker FROM coordinator_turns WHERE conversation_id=? AND turn_id='first'",
+                            (cid,)).fetchone()[0] == 'ValueError'
+    coordinator.accept_turn('local', 'owner', cid, 'second', 'Second message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'second')['state'] == 'running'
+    assert started == ['second']
+
+
 def test_a_result_turn_keeps_retrying_a_busy_conversation_so_its_results_are_told(coordinator):
     """Review 2, finding 9: seven busy refusals cleared the retry time and stranded a result turn whose
     results were already given to it. A result turn now retries every temporary refusal, with a capped wait."""
