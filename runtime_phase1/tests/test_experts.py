@@ -2081,3 +2081,32 @@ def test_a_stop_that_arrives_just_after_the_job_was_told_leaves_it_done(app, mon
     monkeypatch.setattr(experts, "_job", original)
     assert experts._job(job_id)["state"] == "done"
     assert _results(application, job_id) == ["SYNTHETIC-OLD-ANSWER"]
+
+
+def test_reading_the_connect_status_never_starts_the_app_creation_and_a_finished_sign_in_creates_it_once(app, monkeypatch):
+    # Found in the real Teams test: a status read moved a finished sign-in on and started the app creation, so two
+    # reads together (the page and anyone else) could start two. Reading now only reads; the thread watching the
+    # sign-in moves it on, once.
+    import threading
+    application, client = app
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", channel["binding_id"])
+    setup = application.state.channels.setup
+    created = []
+    monkeypatch.setattr(setup, "_create", lambda *args: created.append(args))
+    finished = SimpleNamespace(poll=lambda: 0, returncode=0, stdout=None, wait=lambda: 0)  # signed in
+    setup._sessions[channel["binding_id"]] = {"step": "sign_in", "url": "https://login.microsoft.com/device",
+                                              "code": "SYNTHETIC3", "process": finished}
+    readers = [threading.Thread(target=lambda: client.get(f"/v1/channels/{channel['binding_id']}/connect"))
+               for _ in range(4)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(5)
+    status = client.get(f"/v1/channels/{channel['binding_id']}/connect").json()
+    assert status["step"] == "creating" and "code" not in status
+    assert created == []  # no read started anything
+    setup._finish_sign_in("local", owner, channel["binding_id"], finished)
+    setup._finish_sign_in("local", owner, channel["binding_id"], finished)  # a second finish changes nothing
+    assert len(created) == 1

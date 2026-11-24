@@ -47,6 +47,9 @@ def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+_SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try again."
+
+
 class TeamsSetup:
     """One sign-in and app creation at a time per channel, and one package process per channel."""
 
@@ -102,12 +105,10 @@ class TeamsSetup:
             view = self.channels.view(binding)
             return {"step": "connected" if view["app"].get("app_id") else "start", "channel": view}
         if session.get("step") == "sign_in" and session["process"].poll() is not None:
+            # The sign-in has ended. Reading never moves anything on (the thread watching the sign-in does, once);
+            # it only stops showing a code that can no longer be used.
             ok = session["process"].returncode == 0
-            with self._lock:
-                self._sessions[binding_id] = session = {**session, "step": "creating" if ok else "error",
-                                                        **({} if ok else {"error": "Microsoft sign-in did not finish. Press Connect to try again."})}
-            if ok:
-                threading.Thread(target=self._create, args=(tenant, owner, binding_id), daemon=True).start()
+            session = {**session, "step": "creating" if ok else "error", **({} if ok else {"error": _SIGN_IN_UNFINISHED})}
         # A code is shown only while it can still be used.
         keys = ("step", "url", "code", "error") if session.get("step") == "sign_in" else ("step", "error")
         public = {key: session[key] for key in keys if key in session}
@@ -150,11 +151,26 @@ class TeamsSetup:
         if not found:
             process.kill()
             raise ExpertError("Microsoft sign-in did not start. Try Connect again.", code="channel_sign_in_unavailable")
-        threading.Thread(target=lambda: process.stdout and process.stdout.read(), daemon=True).start()
         with self._lock:
             self._sessions[binding_id] = {"step": "sign_in", "url": found.group(1).rstrip("."), "code": found.group(2),
                                           "process": process}
+        threading.Thread(target=self._finish_sign_in, args=(tenant, owner, binding_id, process), daemon=True).start()
         return self.status(tenant, owner, binding_id)
+
+    def _finish_sign_in(self, tenant: str, owner: str, binding_id: str, process: Any) -> None:
+        """The one place a sign-in moves on: once its process ends, the step changes in one lock section and
+        the app is created once, or the error is shown. A newer Connect that replaced this sign-in wins."""
+        if process.stdout:
+            process.stdout.read()
+        process.wait()
+        ok = process.returncode == 0
+        with self._lock:
+            session = self._sessions.get(binding_id) or {}
+            if session.get("process") is not process or session.get("step") != "sign_in":
+                return
+            self._sessions[binding_id] = {"step": "creating"} if ok else {"step": "error", "error": _SIGN_IN_UNFINISHED}
+        if ok:
+            self._create(tenant, owner, binding_id)
 
     def _create(self, tenant: str, owner: str, binding_id: str) -> None:
         try:
