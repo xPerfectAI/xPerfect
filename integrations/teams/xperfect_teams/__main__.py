@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .bridge import Bridge, Readiness, RuntimeClient, start_with_retries
 
-CLAIM_WAIT_S = 5.0  # how long one claim waits at the core for a reply to be ready (the core's own limit too)
+CLAIM_WAIT_S = 2.0  # how long one claim waits at the core for a reply to be ready (the core's own limit too)
 
 logger = logging.getLogger("xperfect_teams")
 

@@ -115,8 +115,8 @@ def ensure_channels_schema(conn: Any) -> None:
 
 
 # How long a package's claim may wait for a reply to become ready: it returns as soon as one is, and a runtime
-# restart waits at most this long for a claim in flight.
-CLAIM_WAIT_MAX_S = 5.0
+# stop waits at most this long for a claim in flight (measured: 4.7 s against 0.4 s with a 5 s wait, so 2 s).
+CLAIM_WAIT_MAX_S = 2.0
 # A waiting claim holds one of the server's worker threads, so only this many wait at once; any more answer at once,
 # as before (their package then looks again a second later).
 CLAIM_WAITERS_MAX = 8
