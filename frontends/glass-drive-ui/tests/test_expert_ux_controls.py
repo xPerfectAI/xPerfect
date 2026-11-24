@@ -57,6 +57,20 @@ assert.equal(sharedFolderNote('sandboxed', 3, 2), '');
 """)
 
 
+def test_the_chat_page_shows_the_reply_while_it_is_written():
+    source = (STATIC / 'conversation.js').read_text()
+    assert "} else if (turn.partial_reply && !turn.blocker) {" in source
+    assert "messages.push(assistantMessage(turn.partial_reply, true));" in source
+    run_node("import assert from 'node:assert/strict';\n"
+             "const markdown={render:t=>t};\nfunction node(tag,text,cls){return {tag,cls,innerHTML:''};}\n"
+             + function('assistantMessage', source) + """
+assert.equal(assistantMessage('Hello', true).cls, 'message assistant writing');
+assert.equal(assistantMessage('Hello').cls, 'message assistant');
+""")
+    page = (STATIC / 'conversation.html').read_text()
+    assert 'conversation.js?v=20261124stream1' in page and 'conversation.css?v=20261124stream1' in page
+
+
 def test_connection_details_explain_the_account_without_exposing_protocol_ids():
     source = (STATIC / 'control-plane.js').read_text()
     run_node("import assert from 'node:assert/strict';\n"
