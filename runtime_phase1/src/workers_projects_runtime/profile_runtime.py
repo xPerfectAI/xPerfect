@@ -1475,6 +1475,56 @@ def _write_expert_skill(target: Path, files: dict[Path, bytes]) -> None:
         path.chmod(0o600)
 
 
+def _place_expert_skills(home: Path, root: Path, declared: object) -> list[str]:
+    """Place an Expert's chosen Skills in a Worker home that the Worker itself can write to (a
+    container's), from outside it. Every path opens through no-follow descriptors and each file is
+    replaced whole, so a link planted in the home cannot redirect a write. Only folders this step
+    placed before are removed; a folder of the same name made by anything else is refused."""
+    from .bootstrap import _read_private_native_file, _sandbox_parent_descriptor, _write_private_native_file
+
+    if declared is None:
+        declared = []
+    if not isinstance(declared, list):
+        raise RuntimeErrorBase("An Expert's Skills must be a list")
+    chosen = [_expert_skill_files(skill) for skill in declared]
+    manifest = root / ".expert-skills.json"
+    if not chosen and not os.path.lexists(home / manifest):
+        return []
+    try:
+        try:
+            earlier = json.loads(_read_private_native_file(home, manifest) or "[]")
+        except ValueError:
+            earlier = []
+        with _sandbox_parent_descriptor(home, manifest) as (folder, _name):
+            # Removal and the name check go through this one descriptor of the Skills folder, opened
+            # without following links, so a folder above it swapped for a link changes nothing here.
+            for name in earlier if isinstance(earlier, list) else []:
+                if not _EXPERT_SKILL_NAME.fullmatch(str(name)):
+                    continue
+                try:
+                    metadata = os.stat(str(name), dir_fd=folder, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise RuntimeErrorBase("An Expert's Skill folder must not be a link")
+                shutil.rmtree(str(name), dir_fd=folder)
+            for name, _files in chosen:
+                try:
+                    os.stat(name, dir_fd=folder, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
+        # The names are recorded before their files, so an interrupted placement is removed next time.
+        placed = [name for name, _files in chosen]
+        _write_private_native_file(home, manifest, json.dumps(placed).encode("utf-8"), mode=0o600)
+        for name, files in chosen:
+            for relative, content in files.items():
+                _write_private_native_file(home, root / name / relative, content, mode=0o600)
+    except OSError as exc:  # a link planted where the Skills go, or the home is unavailable
+        raise RuntimeErrorBase("An Expert's Skills could not be placed safely in this Worker's home") from exc
+    return placed
+
+
 def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
     """The same native skill policy governs admission receipts and actual launch."""
     if execution_mode != "host":
@@ -9232,6 +9282,10 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def _build_command(self, worker: dict, instruction: str, info: RuntimeInfo) -> tuple[list[str], dict[str, str]]:
         worker.pop("_glasshive_native_authority_commands", None)
+        # The Skills chosen on an Expert, placed from outside in this container's own HOME/.agents/skills,
+        # where Codex loads Skills natively.
+        _place_expert_skills(self._home_dir(str(worker["worker_id"])), Path(".agents/skills"),
+                             bootstrap_bundle_for(worker).get("expert_skills"))
         native_authority = self._materialize_direct_worker_native_authority(worker)
         existing_session = (
             None
@@ -9978,6 +10032,11 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
             if native_authority is not None:
                 command[command.index("--append-system-prompt-file") + 1] = native_authority
         command = _with_claude_code_owner_denies(self._with_owner_route_settings(worker, command))
+        # The Skills chosen on an Expert travel as a typed list. Each is placed in this container's
+        # own home from outside it and loaded as one native plug-in folder, on a fresh or resumed start.
+        for name in _place_expert_skills(self._home_dir(str(worker["worker_id"])), Path(".glasshive/expert-skills"),
+                                         bootstrap_bundle_for(worker).get("expert_skills")):
+            command.extend(["--plugin-dir", f"{self.sandbox.home_mount}/.glasshive/expert-skills/{name}"])
         if session_key and not session_key.startswith("claude-worker:"):
             resume_command = [*command, "--resume", session_key]
             if native_authority is not None:
