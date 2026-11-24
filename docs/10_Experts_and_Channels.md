@@ -62,7 +62,7 @@ One mechanism: what the Expert is about to send or start waits for the owner.
 - **Auto:** each incoming message carries who, where and when; the speaking assistant decides
   whether to call `expert_ask_owner`.
 - **Always ask:** the runtime holds two exits on channel conversations: a reply leaving to a person
-  and a job starting. The owner's own Chat in xPerfect is not held.
+  and a job starting. The owner's own Chat in xPerfect is not held: there the owner is the approver.
 - Only a signed-in owner session decides (`POST /v1/expert-reviews/{id}/decision` requires the
   page's `human:confirm` assertion, on a local install too). A runtime token, a Worker's run
   authority or the Expert cannot approve. Waiting never approves.
@@ -139,3 +139,5 @@ or a server for a wall.
   carry an account and cool-downs kept per account; on macOS a named second Claude account also
   needs local named-account support.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.
+- Requests, approvals and outgoing messages carry text only: a file an Expert produces cannot yet be
+  shown for approval or sent through Teams, and a message that is only a file is not read.
