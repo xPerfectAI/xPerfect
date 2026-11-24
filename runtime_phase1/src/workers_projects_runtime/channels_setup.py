@@ -119,8 +119,9 @@ class TeamsSetup:
             raise ExpertError("This channel is not available yet", code="channel_kind_unavailable")
         with self._lock:
             current = self._sessions.get(binding_id)
-            if current and current.get("step") in {"sign_in", "creating"}:
-                return self.status(tenant, owner, binding_id)
+            pending = bool(current and current.get("step") in {"sign_in", "creating"})
+        if pending:  # a second press shows the sign-in already under way (status takes the lock itself)
+            return self.status(tenant, owner, binding_id)
         signed_in = False
         try:
             signed_in = bool(self._run("status", timeout=60).get("loggedIn"))

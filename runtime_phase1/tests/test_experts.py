@@ -395,3 +395,21 @@ def test_an_expired_sign_in_code_is_never_shown_again(app):
         "step": "sign_in", "url": "https://login.microsoft.com/device", "code": "SYNTHETIC1", "process": ended}
     status = client.get(f"/v1/channels/{channel['binding_id']}/connect").json()
     assert status["step"] == "error" and "code" not in status and "Connect" in status["error"]
+
+
+def test_pressing_connect_again_during_sign_in_returns_the_same_code(app):
+    import threading
+    application, client = app
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", channel["binding_id"])
+    setup = application.state.channels.setup
+    waiting = SimpleNamespace(poll=lambda: None, returncode=None)  # Microsoft's sign-in still open
+    setup._sessions[channel["binding_id"]] = {"step": "sign_in", "url": "https://login.microsoft.com/device",
+                                              "code": "SYNTHETIC2", "process": waiting}
+    result = {}
+    pressed = threading.Thread(target=lambda: result.update(setup.connect("local", owner, channel["binding_id"])),
+                               daemon=True)
+    pressed.start(); pressed.join(3)
+    assert not pressed.is_alive(), "Connect hung while a sign-in was pending"
+    assert result["step"] == "sign_in" and result["code"] == "SYNTHETIC2"
