@@ -1418,6 +1418,37 @@ def test_a_message_arriving_while_another_turn_runs_waits_and_starts_after_it(co
     assert started == ['results-first', 'person']
 
 
+def test_a_busy_native_conversation_is_retried_never_left_blocked(coordinator):
+    """The provider can see a running turn a moment before the coordinator records it; its busy
+    answer is a wait with a retry time, and the turn starts once it is ready again."""
+    from fastapi import HTTPException
+    from workers_projects_runtime.coordinator import _READY_TURN, now
+    cid = create(coordinator)
+    answers = []
+
+    def start(payload, **kwargs):
+        if not answers:
+            answers.append('busy')
+            raise HTTPException(status_code=409, detail={"code": "conversation_session_authority_conflict",
+                                                         "message": "The native conversation is active; retry the selected branch after it finishes"})
+        answers.append('started')
+        return {'request_id': 'request-1', 'state': 'running'}
+
+    coordinator.provider.start = start
+    coordinator.accept_turn('local', 'owner', cid, 'person', 'Please start a job.')
+    blocked = coordinator.start_turn('local', 'owner', cid, 'person')
+    assert blocked == {'turn_id': 'person', 'state': 'blocked', 'blocker': 'conversation_session_authority_conflict'}
+    with coordinator.store._connect() as conn:
+        row = conn.execute("SELECT retry_after_at,retry_attempts FROM coordinator_turns WHERE conversation_id=? AND turn_id='person'", (cid,)).fetchone()
+        assert row['retry_after_at'] and row['retry_attempts'] == 1
+        conn.execute("UPDATE coordinator_turns SET retry_after_at='2000-01-01T00:00:00+00:00' WHERE conversation_id=? AND turn_id='person'", (cid,))
+        ready = conn.execute(f"SELECT turn_id FROM coordinator_turns WHERE conversation_id=:cid AND ({_READY_TURN})",
+                             {'cid': cid, 'now': now()}).fetchall()
+    assert [r['turn_id'] for r in ready] == ['person']
+    assert coordinator.start_turn('local', 'owner', cid, 'person')['state'] == 'running'
+    assert answers == ['busy', 'started']
+
+
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):
     from workers_projects_runtime.coordinator import canonical, now
     cid = create(coordinator)

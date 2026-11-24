@@ -188,6 +188,8 @@ _SAFE_HTTP_BLOCKER_CODES = frozenset(
         "provider_unauthorized",
         "provider_unavailable",
         "provider_upstream_unavailable",
+        # The native conversation is answering another turn; this one is retried after it.
+        "conversation_session_authority_conflict",
     }
 )
 _SAFE_FOREGROUND_FAILURE_CODES = frozenset({
@@ -199,6 +201,7 @@ _RETRYABLE_ADMISSION_CODES = frozenset({
     "shared_resource_authority_unavailable",
     "host_capacity",
     "provider_account_busy",
+    "conversation_session_authority_conflict",
 })
 _SAFE_SHARED_ADMISSION_CODES = _RETRYABLE_ADMISSION_CODES | frozenset({
     "shared_account_recovery_pending",
@@ -338,7 +341,7 @@ _READY_TURN = """request_id='' AND (
  blocker='' OR (origin='worker_results' AND blocker IN ('host_capacity','provider_account_busy')
      AND (retry_after_at='' OR retry_after_at<=:now))
  OR (blocker IN ('shared_capacity_busy','shared_resource_authority_unavailable',
-                 'host_capacity','provider_account_busy')
+                 'host_capacity','provider_account_busy','conversation_session_authority_conflict')
      AND retry_after_at<>'' AND retry_after_at<=:now)
 )"""
 
