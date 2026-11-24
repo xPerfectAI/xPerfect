@@ -2651,3 +2651,365 @@ def test_an_app_an_administrator_added_is_not_sent_to_the_blocked_install_dialog
     undone = client.post(f"/v1/channels/{binding_id}/added-by-admin", json={"added": False}).json()
     assert "added_by_admin" not in undone["app"] and undone["app"]["app_id"] == "synthetic-app"
     assert client.post(f"/v1/channels/{binding_id}/added-by-admin", json={}).status_code == 422
+
+
+# ---------------------------------------------------------------- the administrator's one press (Teams refuses the app)
+TOKEN = "token-synthetic-never-kept"
+DEVICE_CODE = "device-code-synthetic-never-kept"
+ALL_GRANTED = ("https://graph.microsoft.com/AppCatalog.ReadWrite.All "
+               "https://graph.microsoft.com/TeamsAppInstallation.ReadWriteForUser https://graph.microsoft.com/User.Read")
+
+
+class FakeMicrosoft:
+    """Microsoft's sign-in and Graph for one organisation, as the route meets them: a code, the person's consent,
+    the catalogue and the install, with the refusals seen or documented."""
+
+    def __init__(self, clock):
+        self.clock, self.calls = clock, []
+        self.pending = 1                      # polls answered "authorization_pending" before the person signs in
+        self.answer = {"access_token": TOKEN, "scope": ALL_GRANTED, "expires_in": 3600}
+        self.me = {"id": "person-synthetic-a", "userPrincipalName": "owner@synthetic.invalid"}
+        self.catalogue: list[dict] = []
+        self.publish_status = 201
+        self.install_refusals = 0             # installs refused while Microsoft spreads the new entry
+        self.installed: list[tuple[str, str]] = []
+
+    def http(self, method, url, *, data=None, headers=None, timeout=60.0):
+        path = url.split("synthetic.invalid", 1)[-1] if "synthetic.invalid" in url else url
+        self.calls.append((method, path, (headers or {}).get("Authorization", ""), data))
+        if path.endswith("/oauth2/v2.0/devicecode"):
+            return 200, json.dumps({"device_code": DEVICE_CODE, "user_code": "SYNTH123", "expires_in": 900, "interval": 5,
+                                    "verification_uri": "https://login.synthetic.invalid/device"}).encode()
+        if path.endswith("/oauth2/v2.0/token"):
+            assert DEVICE_CODE.encode() in data
+            if self.pending:
+                self.pending -= 1
+                return 400, b'{"error": "authorization_pending"}'
+            return (200 if "access_token" in self.answer else 400), json.dumps(self.answer).encode()
+        assert (headers or {}).get("Authorization") == "Bearer " + TOKEN
+        if path.startswith("/me"):
+            return 200, json.dumps(self.me).encode()
+        if method == "GET" and path.startswith("/appCatalogs/teamsApps"):
+            return 200, json.dumps({"value": self.catalogue}).encode()
+        if method == "POST" and path == "/appCatalogs/teamsApps":
+            if self.publish_status != 201:
+                return self.publish_status, b'{"error": {"code": "Forbidden", "message": "raw words never shown"}}'
+            self.catalogue.append({"id": "catalogue-synthetic", "externalId": "teams-app-synthetic"})
+            return 201, b'{"id": "catalogue-synthetic"}'
+        if method == "POST" and path.endswith("/teamwork/installedApps"):
+            if self.install_refusals:
+                self.install_refusals -= 1
+                return 403, b'{"error": {"code": "Forbidden"}}'
+            self.installed.append((path.split("/")[2], json.loads(data)["teamsApp@odata.bind"].rsplit("/", 1)[-1]))
+            return 201, b""
+        raise AssertionError(f"unexpected Microsoft call {method} {path}")
+
+
+def admin_rig(application, client, monkeypatch, tmp_path, *, client_id="client-synthetic"):
+    from workers_projects_runtime import teams_admin
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("XPERFECT_MICROSOFT_LOGIN_URL", "http://127.0.0.1:9/login.synthetic.invalid")
+    monkeypatch.setenv("XPERFECT_MICROSOFT_GRAPH_URL", "http://127.0.0.1:9/graph.synthetic.invalid")
+    if client_id:
+        monkeypatch.setenv("XPERFECT_TEAMS_ADMIN_CLIENT_ID", client_id)
+    else:
+        monkeypatch.delenv("XPERFECT_TEAMS_ADMIN_CLIENT_ID", raising=False)
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    rig = SimpleNamespace(binding_id=channel["binding_id"], calls=[], background=[], clock=[1000.0],
+                          report={"tenant": True, "user": False}, owner=scalar(
+                              application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", channel["binding_id"]))
+    rig.setup = application.state.channels.setup
+    rig.microsoft = FakeMicrosoft(rig.clock)
+
+    rig.who = {"tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a", "username": "Synthetic Owner"}
+
+    def teams_cli(*args, timeout=300):
+        rig.calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, **rig.who, "tdp": {"connected": True, "sideloading": dict(rig.report)}}
+        return {"botId": "bot-synthetic", "teamsAppId": "teams-app-synthetic", "socketMode": True,
+                "installLink": "https://teams.invalid/developer-copy"}
+
+    def sleep(seconds):
+        rig.clock[0] += seconds
+
+    monkeypatch.setattr(rig.setup, "_run", teams_cli)
+    monkeypatch.setattr(rig.setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(rig.setup, "_in_background", lambda target, *args: rig.background.append((target, args)))
+    monkeypatch.setattr(rig.setup, "_download_package", lambda manifest_id: b"PK-synthetic-package")
+    rig.setup._clock = lambda: rig.clock[0]
+    rig.setup._microsoft = lambda tenant_id: teams_admin.Microsoft(tenant_id, http=rig.microsoft.http, sleep=sleep,
+                                                                   clock=lambda: rig.clock[0])
+    rig.creations = lambda: sum(1 for args in rig.calls if args[:2] == ("app", "create"))
+    rig.status = lambda: client.get(f"/v1/channels/{rig.binding_id}/connect").json()
+    rig.press = lambda: client.post(f"/v1/channels/{rig.binding_id}/connect", json={"as_admin": True})
+
+    def run():
+        while rig.background:
+            target, args = rig.background.pop(0)
+            target(*args)
+
+    rig.run = run
+    rig.setup._create("local", rig.owner, rig.binding_id)  # Teams refuses custom apps for this account: blocked
+    return rig
+
+
+def stored_everywhere(application, folder):
+    """Every saved byte this runtime holds: its database and its state folder."""
+    texts = []
+    with application.state.channels.store._connect() as conn:
+        for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            texts.extend(str(tuple(row)) for row in conn.execute(f'SELECT * FROM "{table}"').fetchall())
+    for path in folder.rglob("*"):
+        if path.is_file():
+            texts.append(path.read_bytes().decode("utf-8", "replace"))
+    return "\n".join(texts)
+
+
+def test_an_administrators_one_press_adds_the_app_to_the_catalogue_and_installs_it_keeping_no_token(app, monkeypatch, tmp_path):
+    # The route that worked by hand on 24 November, as one press: while Teams refuses custom apps for the person, an
+    # administrator signs in on Microsoft's page and consents (the yes); the app is then made once, added to the
+    # organisation's catalogue and installed for the person; the card holds the catalogue's link. The token and the
+    # sign-in's device code are kept nowhere.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    blocked = rig.status()
+    assert blocked["step"] == "blocked" and blocked["admin"] is True and rig.creations() == 0
+    assert blocked["channel"]["admin_route"] is True
+    started = rig.press()
+    assert started.status_code == 200, started.text
+    shown = started.json()
+    assert shown["step"] == "admin_sign_in" and shown["code"] == "SYNTH123"
+    assert shown["url"] == "https://login.synthetic.invalid/device" and DEVICE_CODE not in started.text
+    assert rig.press().json()["step"] == "admin_sign_in" and len(rig.background) == 1  # a second press: the same code
+    rig.run()
+    done = rig.status()
+    assert done["step"] == "connected", done
+    card = done["channel"]["app"]
+    assert card["catalogue"] == "installed" and card["catalogue_id"] == "catalogue-synthetic"
+    assert card["install_link"] == "https://teams.microsoft.com/l/app/catalogue-synthetic?tenantId=tenant-synthetic"
+    assert done["channel"]["people"][0]["id"] == "person-synthetic-a" and done["channel"]["state"] == "connected"
+    assert rig.creations() == 1 and ("app", "update", "teams-app-synthetic", "--scopes", "personal") in rig.calls
+    published = [call for call in rig.microsoft.calls if call[:2] == ("POST", "/appCatalogs/teamsApps")]
+    assert len(published) == 1 and published[0][3] == b"PK-synthetic-package"
+    assert rig.microsoft.installed == [("person-synthetic-a", "catalogue-synthetic")]
+    devicecode = next(call for call in rig.microsoft.calls if call[1].endswith("/devicecode"))
+    for permission in ("AppCatalog.ReadWrite.All", "TeamsAppInstallation.ReadWriteForUser", "User.Read"):
+        assert permission in devicecode[3].decode()
+    saved = stored_everywhere(application, tmp_path)
+    assert TOKEN not in saved and DEVICE_CODE not in saved
+    assert TOKEN not in json.dumps(done) and DEVICE_CODE not in json.dumps(done)
+
+
+def test_without_the_catalogue_grant_the_press_makes_nothing_and_says_so(app, monkeypatch, tmp_path):
+    # Microsoft's consent decides: a sign-in that did not grant adding apps to the catalogue (not an administrator)
+    # makes nothing, checked before the app is made, and the card says so plainly with the note still there.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    rig.microsoft.answer = {"access_token": TOKEN, "scope": "https://graph.microsoft.com/User.Read", "expires_in": 3600}
+    rig.press()
+    rig.run()
+    shown = rig.status()
+    assert shown["step"] == "blocked" and "needs a Teams administrator" in shown["error"] and shown["note"]
+    assert rig.creations() == 0 and not [call for call in rig.microsoft.calls if "/appCatalogs" in call[1]]
+    assert TOKEN not in stored_everywhere(application, tmp_path)
+
+
+@pytest.mark.parametrize("answer, words", [
+    ({"error": "authorization_declined"}, "declined"),
+    ({"error": "expired_token"}, "code expired"),
+    ({"error": "invalid_grant", "error_codes": [65001]}, "needs a Teams administrator"),
+])
+def test_a_sign_in_that_does_not_finish_makes_nothing_and_says_why(app, monkeypatch, tmp_path, answer, words):
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    rig.microsoft.answer = answer
+    rig.press()
+    rig.run()
+    shown = rig.status()
+    assert shown["step"] == "blocked" and words in shown["error"] and rig.creations() == 0
+    assert "raw words" not in json.dumps(shown)
+
+
+def test_refused_at_publishing_the_app_waits_and_a_second_press_resumes_without_a_second_app(app, monkeypatch, tmp_path):
+    # An organisation that already consented for everyone lets a person who is not an administrator through the
+    # grant; Microsoft then refuses at publishing, after the app is made. It waits in a state of its own, the card
+    # says so in plain words (never Microsoft's raw reply), and a later press by an administrator resumes at the
+    # catalogue: it never makes a second app.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    rig.microsoft.publish_status = 403
+    rig.press()
+    rig.run()
+    shown = rig.status()
+    assert shown["step"] == "admin_waiting" and "needs a Teams administrator" in shown["error"] and shown["admin"]
+    assert "raw words never shown" not in json.dumps(shown)
+    assert shown["channel"]["app"]["catalogue"] == "pending" and rig.creations() == 1
+    rig.clock[0] += 3 * 121
+    rig.setup.reconcile_once()  # Microsoft's report is not re-read for an app that waits for the catalogue
+    assert rig.background == [] and rig.creations() == 1
+    rig.setup._sessions.clear()  # a restart forgets the session; the card still says where it stands
+    assert rig.status()["channel"]["app"]["catalogue"] == "pending"
+    rig.microsoft.publish_status, rig.microsoft.pending = 201, 0
+    rig.press()
+    rig.run()
+    done = rig.status()
+    assert done["step"] == "connected" and done["channel"]["app"]["catalogue"] == "installed"
+    assert rig.creations() == 1 and rig.microsoft.installed == [("person-synthetic-a", "catalogue-synthetic")]
+
+
+def test_an_administrator_signed_in_with_another_account_adds_it_and_the_person_adds_it_from_the_link(app, monkeypatch, tmp_path):
+    # Hurdle 7: the administrator is often another account. Installing for oneself would install for the
+    # administrator, so the press adds the app to the catalogue only and the card holds the catalogue's link.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    rig.microsoft.me = {"id": "administrator-synthetic", "userPrincipalName": "admin@synthetic.invalid"}
+    rig.press()
+    rig.run()
+    card = rig.status()["channel"]["app"]
+    assert card["catalogue"] == "listed" and card["install_link"].startswith("https://teams.microsoft.com/l/app/catalogue-synthetic")
+    assert rig.microsoft.installed == [] and not [call for call in rig.microsoft.calls if "installedApps" in call[1]]
+
+
+@pytest.mark.parametrize("refusals, catalogue", [(2, "installed"), (10_000, "listed")])
+def test_an_install_refused_while_microsoft_spreads_the_app_is_tried_again_then_left_to_the_link(
+        app, monkeypatch, tmp_path, refusals, catalogue):
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    rig.microsoft.install_refusals = refusals
+    rig.press()
+    rig.run()
+    done = rig.status()
+    assert done["step"] == "connected" and done["channel"]["app"]["catalogue"] == catalogue
+    tries = sum(1 for call in rig.microsoft.calls if "installedApps" in call[1])
+    assert tries == (3 if refusals == 2 else 31)  # every 20 s for at most ten minutes, within the token's life
+
+
+def test_an_app_already_in_the_catalogue_is_found_not_published_again(app, monkeypatch, tmp_path):
+    # An Expert whose app exists already (made before, or added by an administrator in the admin center) and that
+    # Teams still refuses: the press finds it in the catalogue and installs it; nothing new is made or published.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    client.post(f"/v1/channels/{rig.binding_id}/setup", json={"settings": {
+        "app_id": "bot-synthetic", "teams_app_id": "teams-app-synthetic", "connected_by": "person-synthetic-a",
+        "tenant_id": "tenant-synthetic", "install_link": "https://teams.invalid/developer-copy"}})
+    rig.microsoft.catalogue = [{"id": "catalogue-existing", "externalId": "teams-app-synthetic"}]
+    rig.press()
+    rig.run()
+    card = rig.status()["channel"]["app"]
+    assert card["catalogue"] == "installed" and card["catalogue_id"] == "catalogue-existing"
+    assert rig.creations() == 0 and not [call for call in rig.microsoft.calls if call[:2] == ("POST", "/appCatalogs/teamsApps")]
+    assert rig.microsoft.installed == [("person-synthetic-a", "catalogue-existing")]
+
+
+def test_without_a_chosen_microsoft_sign_in_the_press_is_not_offered(app, monkeypatch, tmp_path):
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path, client_id="")
+    shown = rig.status()
+    assert shown["step"] == "blocked" and shown["admin"] is False and shown["channel"]["admin_route"] is False
+    refused = rig.press()
+    assert refused.status_code == 409 and "no Microsoft sign-in for administrators" in refused.text
+    assert rig.background == [] and rig.microsoft.calls == []
+
+
+def test_microsofts_address_can_only_be_replaced_by_one_on_this_computer(monkeypatch):
+    from workers_projects_runtime import teams_admin
+    monkeypatch.setenv("XPERFECT_MICROSOFT_LOGIN_URL", "https://login.elsewhere.invalid")
+    monkeypatch.setenv("XPERFECT_MICROSOFT_GRAPH_URL", "http://127.0.0.1:28790/graph")
+    microsoft = teams_admin.Microsoft("tenant-synthetic")
+    assert microsoft.login == "https://login.microsoftonline.com/tenant-synthetic"
+    assert microsoft.graph == "http://127.0.0.1:28790/graph"
+    assert teams_admin.catalogue_link("a b", "t") == "https://teams.microsoft.com/l/app/a%20b?tenantId=t"
+
+
+def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkeypatch):
+    # The wait before a ready reply left was the package's one-second poll (0.1 to 0.8 s on real Teams). A claim that
+    # asks to wait now returns as soon as the reply is written; an empty one returns after its wait, never longer
+    # than the core's limit; and a claim still leases the message exactly as before. The bounds are wide (a limit of
+    # 10 s here), so a busy machine passes and a claim that never wakes still fails.
+    import threading
+    import time
+    from workers_projects_runtime import channels as channels_module
+    monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 10.0)
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id = channel["binding_id"]
+    accepted = client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Synthetic answer")
+    channels = application.state.channels
+    result = {}
+
+    def waiting():
+        started = time.monotonic()
+        result["items"] = channels.claim(binding_id, 10, 10.0)
+        result["started"], result["returned"] = started, time.monotonic()
+
+    thread = threading.Thread(target=waiting)
+    thread.start()
+    time.sleep(0.4)
+    written = time.monotonic()
+    channels.reconcile_once()  # the reply is written ready to send
+    thread.join(15)
+    assert [item["text"] for item in result["items"]] == ["Synthetic answer"]
+    assert result["returned"] - result["started"] >= 0.4  # it waited for the reply
+    assert result["returned"] - written < 5.0  # and left when it was ready, long before its 10 s
+    assert scalar(application, "SELECT state FROM channel_deliveries") == "sending"
+    started = time.monotonic()
+    assert client.post(f"/v1/channels/{binding_id}/deliveries/claim?wait=0.3").json()["items"] == []
+    assert 0.3 <= time.monotonic() - started < 5.0
+    # Only so many claims wait at once (each holds a server thread); the next answers at once, as before.
+    import threading as _threading
+    monkeypatch.setattr(channels, "_waiters", _threading.BoundedSemaphore(1))
+    assert channels._waiters.acquire(blocking=False)  # one claim is already waiting
+    started = time.monotonic()
+    assert channels.claim(binding_id, 10, 10.0) == [] and time.monotonic() - started < 5.0  # at once, not after 10 s
+    channels._waiters.release()
+    # While nothing is ready, a waiting claim reads only: no write transaction until a message is ready.
+    writes = []
+    real_claim = channels._claim_now
+    monkeypatch.setattr(channels, "_claim_now", lambda *args: writes.append(1) or real_claim(*args))
+    assert channels.claim(binding_id, 10, 1.0) == [] and len(writes) == 1  # the first look only
+    monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 0.2)
+    started = time.monotonic()
+    assert channels.claim(binding_id, 10, 60.0) == [] and time.monotonic() - started < 5.0  # never past the limit
+
+
+@pytest.mark.parametrize("made_before", [False, True])
+def test_the_press_is_refused_when_the_tool_is_now_signed_in_as_another_account(app, monkeypatch, tmp_path, made_before):
+    # The Teams tool's sign-in is shared by the whole computer (hurdle 7). The press goes on only as the account the
+    # channel was refused for, or the one its app was made with: another account now signed in gets a plain line
+    # naming both, and nothing reaches Microsoft or is made.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    if made_before:
+        client.post(f"/v1/channels/{rig.binding_id}/setup", json={"settings": {
+            "app_id": "bot-synthetic", "teams_app_id": "teams-app-synthetic", "account": "Synthetic Owner",
+            "tenant_id": "tenant-synthetic", "connected_by": "person-synthetic-a"}})
+        rig.setup._sessions.clear()  # after a restart: only the recorded app says whose it is
+    rig.who = {"tenantId": "tenant-other", "userObjectId": "person-other", "username": "Another Owner"}
+    shown = rig.press().json()
+    assert shown["step"] == "error", shown
+    assert "Another Owner" in shown["error"] and "Synthetic Owner" in shown["error"] and "nothing was made" in shown["error"]
+    assert rig.background == [] and rig.microsoft.calls == [] and rig.creations() == 0
+
+
+def test_a_refused_publish_for_an_app_made_the_usual_way_leaves_its_card_as_it_was(app, monkeypatch, tmp_path):
+    # When Teams already lets the person add custom apps, Connect makes the app the usual way and the press is a
+    # secondary choice. If Microsoft then refuses to add it to the catalogue, the card keeps its Install in Teams and
+    # "An administrator added it for me": nothing is marked waiting for the catalogue for an app this press did not make.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    settings = {"app_id": "bot-synthetic", "teams_app_id": "teams-app-synthetic", "account": "Synthetic Owner",
+                "tenant_id": "tenant-synthetic", "connected_by": "person-synthetic-a",
+                "install_link": "https://teams.invalid/developer-copy"}
+    client.post(f"/v1/channels/{rig.binding_id}/setup", json={"settings": settings})
+    rig.setup._sessions.clear()
+    rig.microsoft.publish_status = 403
+    rig.press()
+    rig.run()
+    shown = rig.status()
+    assert shown["step"] == "admin_waiting" and "needs a Teams administrator" in shown["error"]
+    card = shown["channel"]["app"]
+    assert "catalogue" not in card and card["install_link"] == "https://teams.invalid/developer-copy"
+    assert rig.creations() == 0

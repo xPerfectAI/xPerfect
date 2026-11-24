@@ -14,11 +14,13 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from . import teams_admin
 from .experts import ExpertError
 
 TEAMS_CLI_PACKAGE = "@microsoft/teams.cli@3.1.0"
@@ -151,6 +153,7 @@ class TeamsSetup:
         self._refused: set[str] = set()  # channels for which Microsoft clearly said no: only a clear yes goes on
         self._signed_in_cache: tuple[float, dict] = (0.0, {})  # who the tool is signed in as, and when it was read
         self._clock = time.monotonic
+        self._microsoft = teams_admin.Microsoft  # the administrator's route: Microsoft's sign-in and Graph
         self._lock = threading.Lock()
         self._package_lock = threading.Lock()  # starting or stopping a package process: one at a time
 
@@ -230,14 +233,21 @@ class TeamsSetup:
             # it only stops showing a code that can no longer be used.
             ok = session["process"].returncode == 0
             session = {**session, "step": "creating" if ok else "error", **({} if ok else {"error": _SIGN_IN_UNFINISHED})}
-        # A code is shown only while it can still be used.
+        if session.get("step") == "admin_sign_in" and session.get("expires_at", 0.0) <= self._clock():
+            session = {**session, "step": "blocked", "error": teams_admin.plain(teams_admin.AdminRouteError("expired"), "")}
+        # A code is shown only while it can still be used. The administrator's press is offered while Teams refuses
+        # the app, once the owner has chosen the Microsoft sign-in it uses.
         keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note"),
-                "creating": ("step", "account", "tenant_id")}.get(session.get("step"), ("step", "error"))
+                "creating": ("step", "account", "tenant_id"), "admin_sign_in": ("step", "url", "code", "account", "tenant_id"),
+                "adding": ("step", "account", "progress"),
+                "admin_waiting": ("step", "error", "note")}.get(session.get("step"), ("step", "error"))
         public = {key: session[key] for key in keys if key in session}
+        if public.get("step") in {"blocked", "admin_waiting"}:
+            public["admin"] = bool(teams_admin.client_id())
         return {**public, "channel": self.channels.view(self.channels._binding(binding_id))}
 
     def connect(self, tenant: str, owner: str, binding_id: str, *, as_account: str = "",
-                other_account: bool = False) -> dict:
+                other_account: bool = False, as_admin: bool = False) -> dict:
         binding = self.channels._binding(binding_id, tenant, owner)
         if binding["kind"] != "teams":
             raise ExpertError("This channel is not available yet", code="channel_kind_unavailable")
@@ -246,6 +256,8 @@ class TeamsSetup:
             current = dict(self._sessions.get(binding_id) or {})
         if pending:  # a second press shows the sign-in already under way (status takes the lock itself)
             return self.status(tenant, owner, binding_id)
+        if as_admin:
+            return self._start_admin(tenant, owner, binding_id)
         status: dict = {}
         if other_account:  # the tool forgets the account it holds; Microsoft's code sign-in below takes another
             self._sign_out()
@@ -331,7 +343,9 @@ class TeamsSetup:
     def _pending(self, binding_id: str) -> bool:
         """Under the lock: a sign-in, an app creation or a check of Microsoft's report is under way."""
         current = self._sessions.get(binding_id) or {}
-        return current.get("step") in {"sign_in", "creating"} or bool(current.get("checking"))
+        if current.get("step") == "admin_sign_in" and current.get("expires_at", 0.0) <= self._clock():
+            return False  # its code can no longer be used: a new press may start again
+        return current.get("step") in {"sign_in", "creating", "admin_sign_in", "adding"} or bool(current.get("checking"))
 
     @staticmethod
     def _in_background(target: Any, *args: Any) -> None:
@@ -371,6 +385,10 @@ class TeamsSetup:
         (a named press, or the one a blocked channel was refused for); None after a fresh code sign-in."""
         try:
             binding = self.channels._binding(binding_id, tenant, owner)
+            if json.loads(binding["settings_json"] or "{}").get("teams_app_id"):
+                with self._lock:  # the app exists already (the administrator's route made it): never a second one
+                    self._sessions[binding_id] = {"step": "connected"}
+                return
             expert = self.channels.experts.latest(tenant, owner, binding["lineage_id"])
             try:
                 status = self._run("status", timeout=60)
@@ -413,36 +431,7 @@ class TeamsSetup:
                 # made and on the card afterwards, so a wrong one is noticed at once.
                 self._sessions[binding_id] = {"step": "creating", "account": account,
                                               "tenant_id": str(status.get("tenantId") or "")}
-            path = self.credentials_path(binding_id)
-            created = self._run("app", "create", "--name", expert["name"][:30], "--messaging-mode", "socket",
-                                "--teams-managed", "--env", str(path), timeout=600)
-            if path.exists():
-                path.chmod(0o600)
-            # The tool's manifest offers the bot in personal chats, teams and group chats; the Expert answers only in
-            # personal chats, so Teams is told the same. The app exists now: a failure here is said on the card, never
-            # retried by making another app.
-            scopes = "personal,team,groupChat"
-            if created.get("teamsAppId"):
-                try:
-                    self._run("app", "update", str(created["teamsAppId"]), "--scopes", "personal", timeout=120)
-                    scopes = "personal"
-                except ExpertError:
-                    pass
-            settings = {"app_id": created.get("botId", ""), "teams_app_id": created.get("teamsAppId", ""),
-                        "app_name": created.get("appName", expert["name"]), "account": account,
-                        "connected_by": str(status.get("userObjectId") or ""),
-                        "tenant_id": str(status.get("tenantId") or ""),
-                        "mode": "socket" if created.get("socketMode") else "http",
-                        "install_link": created.get("installLink", ""), "scopes": scopes}
-            self.channels.record_setup(tenant, owner, binding_id, settings)
-            # The signed-in owner is the first person who may message the Expert.
-            people = self.channels.view(self.channels._binding(binding_id))["people"]
-            me = {"id": str(status.get("userObjectId") or ""), "name": str(status.get("username") or "You"),
-                  "tenant": str(status.get("tenantId") or "")}
-            if me["id"] and all(person["id"] != me["id"] for person in people):
-                people.append(me)
-            self.channels.update(tenant, owner, binding_id, people=people,
-                                 state="connected" if settings["mode"] == "socket" else None)
+            settings, created = self._make_app(tenant, owner, binding_id, expert, status)
             note = {} if settings["mode"] == "socket" else {
                 "error": "Teams did not turn on socket mode for this app. " + str(created.get("socketModeError") or "")}
             with self._lock:
@@ -451,6 +440,190 @@ class TeamsSetup:
         except Exception as exc:
             with self._lock:
                 self._sessions[binding_id] = {"step": "error", "error": str(exc)[:400]}
+
+    def _make_app(self, tenant: str, owner: str, binding_id: str, expert: dict, status: dict,
+                  extra: dict | None = None) -> tuple[dict, dict]:
+        """Make the channel's Teams app with the tool, narrow it to personal chats, record it and list the signed-in
+        owner. extra: settings recorded with it in the same write (the administrator's route marks it "not yet in the
+        catalogue", so a later press resumes there and never makes a second app)."""
+        account = str(status.get("username") or "") if status.get("loggedIn") else ""
+        path = self.credentials_path(binding_id)
+        created = self._run("app", "create", "--name", expert["name"][:30], "--messaging-mode", "socket",
+                            "--teams-managed", "--env", str(path), timeout=600)
+        if path.exists():
+            path.chmod(0o600)
+        # The tool's manifest offers the bot in personal chats, teams and group chats; the Expert answers only in
+        # personal chats, so Teams is told the same. The app exists now: a failure here is said on the card, never
+        # retried by making another app.
+        scopes = "personal,team,groupChat"
+        if created.get("teamsAppId"):
+            try:
+                self._run("app", "update", str(created["teamsAppId"]), "--scopes", "personal", timeout=120)
+                scopes = "personal"
+            except ExpertError:
+                pass
+        settings = {"app_id": created.get("botId", ""), "teams_app_id": created.get("teamsAppId", ""),
+                    "app_name": created.get("appName", expert["name"]), "account": account,
+                    "connected_by": str(status.get("userObjectId") or ""),
+                    "tenant_id": str(status.get("tenantId") or ""),
+                    "mode": "socket" if created.get("socketMode") else "http",
+                    "install_link": created.get("installLink", ""), "scopes": scopes, **(extra or {})}
+        self.channels.record_setup(tenant, owner, binding_id, settings)
+        # The signed-in owner is the first person who may message the Expert.
+        people = self.channels.view(self.channels._binding(binding_id))["people"]
+        me = {"id": str(status.get("userObjectId") or ""), "name": str(status.get("username") or "You"),
+              "tenant": str(status.get("tenantId") or "")}
+        if me["id"] and all(person["id"] != me["id"] for person in people):
+            people.append(me)
+        self.channels.update(tenant, owner, binding_id, people=people,
+                             state="connected" if settings["mode"] == "socket" else None)
+        return settings, created
+
+    # ------------------------------------------------------------------ the administrator's route
+    def _start_admin(self, tenant: str, owner: str, binding_id: str) -> dict:
+        """One press for a Teams administrator: Microsoft's code sign-in and consent page (the yes), then by itself
+        the app is made if it is not, added to the organisation's catalogue and installed for the person."""
+        if not teams_admin.client_id():
+            raise ExpertError("This xPerfect has no Microsoft sign-in for administrators yet, so this route is not "
+                              "offered. Send the note to your administrator.", code="channel_admin_unavailable")
+        try:
+            status = self._run("status", timeout=60)
+        except ExpertError:
+            status = {}
+        if not status.get("loggedIn"):
+            raise ExpertError("The Teams tool is not signed in. Press Connect first.", code="channel_admin_needs_connect")
+        account, tenant_id = str(status.get("username") or ""), str(status.get("tenantId") or "")
+        # The tool's sign-in is shared by the whole computer: the press goes on only as the account the channel was
+        # refused for, or the one its app was made with, in that app's organisation. Nothing reaches Microsoft else.
+        with self._lock:
+            current = dict(self._sessions.get(binding_id) or {})
+        settings = json.loads(self.channels._binding(binding_id)["settings_json"] or "{}")
+        made_with = str(settings.get("account") or "") if settings.get("teams_app_id") else ""
+        expected = made_with or (str(current.get("account") or "") if current.get("step") == "blocked" else "")
+        expected_tenant = str(settings.get("tenant_id") or "") if made_with else ""
+        if (expected and account != expected) or (expected_tenant and tenant_id != expected_tenant):
+            line = (f"The Teams tool is now signed in as {account or 'nobody'}, not {expected}, which made this channel's "
+                    f"app, so nothing was made. Press the button again once the tool is signed in as {expected}."
+                    if made_with else _account_changed(expected, account))
+            with self._lock:
+                self._sessions[binding_id] = {"step": "error", "error": line}
+            return self.status(tenant, owner, binding_id)
+        microsoft = self._microsoft(tenant_id)
+        try:
+            sign_in = microsoft.start_sign_in()
+        except teams_admin.AdminRouteError as exc:
+            raise ExpertError(teams_admin.plain(exc, ""), code="channel_admin_sign_in_unavailable") from None
+        run = uuid.uuid4().hex
+        with self._lock:
+            if self._pending(binding_id):  # two presses at once: the first one's code is shown
+                return self.status(tenant, owner, binding_id)
+            previous = dict(self._sessions.get(binding_id) or {})
+            self._sessions[binding_id] = {"step": "admin_sign_in", "url": sign_in.url, "code": sign_in.code,
+                                          "account": account, "tenant_id": tenant_id,
+                                          "expires_at": sign_in.expires_at, "run": run,
+                                          "note": previous.get("note", "")}
+        self._in_background(self._admin_route, tenant, owner, binding_id, run, account, microsoft, sign_in)
+        return self.status(tenant, owner, binding_id)
+
+    def _current(self, binding_id: str, run: str) -> bool:
+        with self._lock:
+            return (self._sessions.get(binding_id) or {}).get("run") == run
+
+    def _admin_step(self, binding_id: str, run: str, session: dict) -> None:
+        """A step of this press, written only while this press is still the channel's current one."""
+        with self._lock:
+            current = self._sessions.get(binding_id) or {}
+            if current.get("run") == run:
+                self._sessions[binding_id] = {**session, "run": run, "note": current.get("note", "")}
+
+    def _admin_route(self, tenant: str, owner: str, binding_id: str, run: str, account: str,
+                     microsoft: teams_admin.Microsoft, sign_in: teams_admin.SignIn) -> None:
+        name = ""
+        token = None
+        try:
+            binding = self.channels._binding(binding_id, tenant, owner)
+            expert = self.channels.experts.latest(tenant, owner, binding["lineage_id"])
+            name = expert["name"]
+            token = microsoft.wait_for_token(sign_in, lambda: self._current(binding_id, run))
+            if teams_admin.PUBLISH_PERMISSION not in token.granted:
+                raise teams_admin.AdminRouteError("not_granted", "scope")  # checked before anything is made
+            self._admin_step(binding_id, run, {"step": "adding", "account": account, "progress": "Checking the account…"})
+            person = microsoft.me(token)
+            status = self._run("status", timeout=60)
+            now = str(status.get("username") or "") if status.get("loggedIn") else ""
+            if now != account:  # the tool's login changed meanwhile: nothing is made in an organisation nobody chose
+                with self._lock:
+                    if (self._sessions.get(binding_id) or {}).get("run") == run:
+                        self._sessions[binding_id] = {"step": "error", "error": _account_changed(account, now)}
+                return
+            settings = json.loads(self.channels._binding(binding_id)["settings_json"] or "{}")
+            if not settings.get("teams_app_id"):
+                self._admin_step(binding_id, run, {"step": "adding", "account": account,
+                                                   "progress": f"Making {name}'s Teams app…"})
+                # Made by this press while Teams refuses the app: marked waiting for the catalogue, so the card hides
+                # the blocked developer link and offers the press again. An app made the usual way keeps its card as
+                # it is until it is in the catalogue.
+                settings, _created = self._make_app(tenant, owner, binding_id, expert, status,
+                                                    {"catalogue": "pending"})
+            manifest_id = str(settings["teams_app_id"])
+            self._admin_step(binding_id, run, {"step": "adding", "account": account,
+                                               "progress": f"Adding {name} to your organisation's Teams apps…"})
+            catalogue_id = str(settings.get("catalogue_id") or "") or microsoft.find(token, manifest_id)
+            if not catalogue_id:
+                catalogue_id = microsoft.publish(token, self._download_package(manifest_id), manifest_id)
+            link = teams_admin.catalogue_link(catalogue_id, str(settings.get("tenant_id") or microsoft.tenant_id))
+            settings = {**settings, "catalogue": "listed", "catalogue_id": catalogue_id, "install_link": link}
+            self.channels.record_setup(tenant, owner, binding_id, settings)
+            # Installing for oneself only: the account that signed in here must be the one the app was made with
+            # (the administrator can be another account; then the person adds it from the catalogue link).
+            if person["id"] and person["id"] == str(settings.get("connected_by") or ""):
+                self._admin_step(binding_id, run, {"step": "adding", "account": account,
+                                                   "progress": f"Installing {name} in your Teams…"})
+                if microsoft.install_for(token, person["id"], catalogue_id, lambda: self._current(binding_id, run)):
+                    settings = {**settings, "catalogue": "installed"}
+                    self.channels.record_setup(tenant, owner, binding_id, settings)
+            with self._lock:
+                if (self._sessions.get(binding_id) or {}).get("run") == run:
+                    self._sessions[binding_id] = {"step": "connected"}
+            self.ensure_package(binding_id)
+        except teams_admin.AdminRouteError as exc:
+            made = bool(json.loads(self.channels._binding(binding_id)["settings_json"] or "{}").get("teams_app_id"))
+            with self._lock:
+                current = self._sessions.get(binding_id) or {}
+                if current.get("run") == run:
+                    line = teams_admin.plain(exc, name or "The Expert")
+                    # Nothing made yet: the channel stays blocked and Microsoft's report is read again by itself.
+                    # Made but not in the catalogue: it waits there, and a press resumes at the catalogue.
+                    self._sessions[binding_id] = (
+                        {"step": "admin_waiting", "error": line, "note": current.get("note", "")} if made else
+                        {"step": "blocked", "error": line, "note": current.get("note", ""), "account": account,
+                         "tenant": tenant, "owner": owner, "check_at": self._clock() + _RECHECK_S})
+        except ExpertError as exc:  # the Teams tool's own plain line, as Connect shows it
+            with self._lock:
+                if (self._sessions.get(binding_id) or {}).get("run") == run:
+                    self._sessions[binding_id] = {"step": "error", "error": str(exc)[:400]}
+        except Exception as exc:  # never Microsoft's raw words or a token on the card: the error's kind only
+            with self._lock:
+                if (self._sessions.get(binding_id) or {}).get("run") == run:
+                    self._sessions[binding_id] = {"step": "error", "error": "This setup stopped "
+                                                  f"({type(exc).__name__}). Press the button again to go on."}
+        finally:
+            token = None  # noqa: F841 (the token is dropped with this press)
+
+    def _download_package(self, manifest_id: str) -> bytes:
+        """The app's package from the tool (its download command takes no --json), read, then removed."""
+        folder = _private(_state_dir() / "tmp")
+        path = folder / f"teams-package-{uuid.uuid4().hex}.zip"
+        try:
+            completed = subprocess.run([*self._cli(), "app", "package", "download", manifest_id, "--output", str(path),
+                                        "--disable-auto-update"], capture_output=True, text=True, timeout=180,
+                                       env=_clean_env({"TEAMS_NO_INTERACTIVE": "1"}))
+            if completed.returncode != 0 or not path.exists():
+                raise ExpertError("Microsoft's Teams tool could not download the app's package.",
+                                  code="channel_package_download_failed")
+            return path.read_bytes()
+        finally:
+            path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ package processes
     def _package_python(self) -> Path:

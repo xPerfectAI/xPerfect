@@ -20,7 +20,7 @@ def activity(activity_id="act-1", text="Hello", sender="00000000-0000-0000-0000-
 
 class FakeRuntime:
     def __init__(self):
-        self.inbound, self.results, self.queue = [], [], []
+        self.inbound, self.results, self.queue, self.claims = [], [], [], []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -30,6 +30,7 @@ class FakeRuntime:
             self.inbound.append(body)
             return httpx.Response(200, json={"accepted": True, "duplicate": seen})
         if path.endswith("/deliveries/claim"):
+            self.claims.append(dict(request.url.params))
             items, self.queue = self.queue, []
             return httpx.Response(200, json={"items": items})
         if "/deliveries/" in path:
@@ -91,7 +92,7 @@ def test_outbox_reports_sent_refused_and_leaves_unknown_outcomes_unconfirmed():
             raise httpx.ReadTimeout("no answer")
         return "platform-1"
 
-    assert asyncio.run(bridge.deliver_once(send)) == 1
+    assert asyncio.run(bridge.deliver_once(send)) == 3  # how many were claimed; one was sent
     assert calls == ["One", "Two", "Three"]
     assert runtime.results == [("dlv_sent", {"state": "sent", "platform_message_id": "platform-1", "error": ""}),
                                ("dlv_refused", {"state": "failed", "platform_message_id": "", "error": "Teams refused the message (403)"})]
@@ -212,3 +213,17 @@ def test_the_heartbeat_says_connecting_ready_or_the_refusal():
     asyncio.run(beats())
     assert bodies[0] == {} and bodies[1] == {"socket": "connecting"}
     assert bodies[2]["socket"] == "refused" and len(bodies[2]["error"]) == 400
+
+
+def test_a_claim_asks_the_core_to_answer_as_soon_as_a_reply_is_ready():
+    # The wait before a ready reply left was the package's one-second poll (0.1 to 0.8 s on real Teams). The claim
+    # now waits at the core, which answers as soon as a reply is ready; what a claim means is unchanged.
+    runtime, bridge = make()
+    runtime.queue = [{"delivery_id": "dlv_1", "text": "One", "thread_ref": {"conversation_id": "c"}}]
+
+    async def send(thread_ref, text):
+        return "platform-1"
+
+    assert asyncio.run(bridge.deliver_once(send, wait=5.0)) == 1
+    assert asyncio.run(bridge.deliver_once(send)) == 0
+    assert runtime.claims == [{"limit": "10", "wait": "5"}, {"limit": "10"}]

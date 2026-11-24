@@ -8,6 +8,7 @@ protocol and talks to the core only through these routes. Nothing here interpret
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from . import teams_admin
 from .coordinator import CoordinatorScopeError, StrictModel, canonical, digest
 from .experts import ExpertError, ExpertService, reply_text
 
@@ -112,9 +114,20 @@ def ensure_channels_schema(conn: Any) -> None:
     record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
 
 
+# How long a package's claim may wait for a reply to become ready: it returns as soon as one is, and a runtime
+# stop waits at most this long for a claim in flight (measured: 4.7 s against 0.4 s with a 5 s wait, so 2 s).
+CLAIM_WAIT_MAX_S = 2.0
+# A waiting claim holds one of the server's worker threads, so only this many wait at once; any more answer at once,
+# as before (their package then looks again a second later).
+CLAIM_WAITERS_MAX = 8
+
+
 class ChannelService:
     def __init__(self, store: Any, experts: ExpertService) -> None:
         self.store, self.experts = store, experts
+        self._ready = threading.Condition()  # told when a message becomes ready to send
+        self._readiness: dict[str, int] = {}  # per channel: how often a message became ready there
+        self._waiters = threading.BoundedSemaphore(CLAIM_WAITERS_MAX)
         with store._connect() as conn:
             ensure_channels_schema(conn)
         experts.deliveries = self
@@ -156,8 +169,11 @@ class ChannelService:
                 "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
                 "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link",
                                                        "developer", "website_url", "privacy_url", "terms_url", "scopes",
-                                                       "added_by_admin")
+                                                       "added_by_admin", "catalogue", "catalogue_id")
                         if key in settings},
+                # Whether an administrator's one press (Microsoft's sign-in, then the organisation's catalogue) is
+                # offered here: only once the owner has chosen the Microsoft sign-in it uses.
+                "admin_route": bool(teams_admin.client_id()),
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
                 # While the disk guard holds runs, this Expert cannot answer; messages wait.
                 "low_disk": self.experts.low_disk() is not None,
@@ -234,7 +250,7 @@ class ChannelService:
         allowed = {key: str(value)[:2000] for key, value in settings.items()
                    if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
                               "teams_app_id", "developer", "website_url", "privacy_url", "terms_url", "scopes",
-                              "added_by_admin"}}
+                              "added_by_admin", "catalogue", "catalogue_id"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))
@@ -335,7 +351,49 @@ class ChannelService:
                 continue
         return repaired
 
-    def claim(self, binding_id: str, limit: int = 10) -> list[dict]:
+    def _ready_now(self, binding_id: str) -> None:
+        """A message became ready to send on this channel: a claim waiting there claims at once (its own transaction
+        waits for the writer's to commit, so it reads the message)."""
+        with self._ready:
+            self._readiness[binding_id] = self._readiness.get(binding_id, 0) + 1
+            self._ready.notify_all()
+
+    def _pending_exists(self, binding_id: str) -> bool:
+        """A read only, so a claim that waits takes no write lock while nothing is ready."""
+        with self.store._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM channel_deliveries d LEFT JOIN coordinator_conversations c ON c.conversation_id=d.conversation_id "
+                "WHERE d.binding_id=? AND d.state='pending' AND COALESCE(c.restore_hold,0)=0 LIMIT 1",
+                (binding_id,)).fetchone() is not None
+
+    def claim(self, binding_id: str, limit: int = 10, wait: float = 0.0) -> list[dict]:
+        """The channel's ready messages, leased to the package to send. With wait, an empty claim waits up to that
+        long (at most CLAIM_WAIT_MAX_S) and returns as soon as a message is ready; what a claim does is unchanged."""
+        wait = max(0.0, min(float(wait or 0.0), CLAIM_WAIT_MAX_S))
+        if not wait or not self._waiters.acquire(blocking=False):
+            return self._claim_now(binding_id, limit)
+        try:
+            deadline = time.monotonic() + wait
+            with self._ready:
+                seen = self._readiness.get(binding_id, 0)
+            claimed = self._claim_now(binding_id, limit)
+            while not claimed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return claimed
+                with self._ready:
+                    if self._readiness.get(binding_id, 0) == seen:  # nothing ready here meanwhile: wait to be told
+                        self._ready.wait(timeout=min(remaining, 0.25))
+                    now = self._readiness.get(binding_id, 0)
+                    told, seen = now != seen, now
+                # Told: claim at once. Not told: claim only if a read finds a message ready (a path that did not tell).
+                if told or self._pending_exists(binding_id):
+                    claimed = self._claim_now(binding_id, limit)
+            return claimed
+        finally:
+            self._waiters.release()
+
+    def _claim_now(self, binding_id: str, limit: int) -> list[dict]:
         self._binding(binding_id)
         claimed = []
         with self.store._connect() as conn:
@@ -429,6 +487,8 @@ class ChannelService:
             ("dlv_" + digest([speaker["conversation_id"], turn_id, kind])[:32], speaker["binding_id"],
              speaker["conversation_id"], turn_id, kind, text, speaker["thread_ref_json"] or "{}", state, review_id, error,
              _now() if state == "dropped" else "", _now()))
+        if state == "pending":
+            self._ready_now(speaker["binding_id"])
 
     def write_released_reply(self, conn, speaker: dict, review: dict) -> None:
         """Inside the one release's transaction, after its checks: exactly the reply that was shown, word for
@@ -437,6 +497,7 @@ class ChannelService:
                             "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
         if held:
             conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (held["delivery_id"],))
+            self._ready_now(speaker["binding_id"])
         else:
             self._insert_delivery(conn, speaker, "approved-" + review["review_id"], "approved",
                                   json.loads(review["payload_json"]).get("text", ""), "pending", review["review_id"])

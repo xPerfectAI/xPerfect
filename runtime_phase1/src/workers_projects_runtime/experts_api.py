@@ -133,6 +133,9 @@ class ChannelConnectInput(StrictModel):
     # sign in with Microsoft's code again.
     as_account: str = Field(default="", max_length=320)
     other_account: bool = False
+    # as_admin: an administrator's one press while Teams refuses the app (Microsoft's sign-in and consent page, then
+    # the organisation's catalogue and an install for the person).
+    as_admin: bool = False
 
 
 class ChannelAddedInput(StrictModel):
@@ -186,7 +189,7 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
     def connect(binding_id: str, request: Request, payload: ChannelConnectInput | None = None):
         choice = payload or ChannelConnectInput()
         return invoke(channels.setup.connect, *owner(request), binding_id, as_account=choice.as_account,
-                      other_account=choice.other_account)
+                      other_account=choice.other_account, as_admin=choice.as_admin)
 
     @app.get("/v1/channels/{binding_id}/connect")
     def connect_status(binding_id: str, request: Request):
@@ -221,9 +224,9 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
         return invoke(channels.inbound, binding_id, payload)
 
     @app.post("/v1/channels/{binding_id}/deliveries/claim")
-    def claim(binding_id: str, request: Request, limit: int = 10):
+    def claim(binding_id: str, request: Request, limit: int = 10, wait: float = 0.0):
         owned(binding_id, request)
-        return {"items": invoke(channels.claim, binding_id, limit)}
+        return {"items": invoke(channels.claim, binding_id, limit, wait)}
 
     @app.post("/v1/channels/{binding_id}/deliveries/{delivery_id}")
     def delivered(binding_id: str, delivery_id: str, payload: DeliveryResult, request: Request):
