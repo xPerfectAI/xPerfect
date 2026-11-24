@@ -204,23 +204,41 @@ class TeamsSetup:
             session = {**session, "step": "creating" if ok else "error", **({} if ok else {"error": _SIGN_IN_UNFINISHED})}
         # A code is shown only while it can still be used.
         keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note"),
-                "creating": ("step", "account", "tenant_id")}.get(session.get("step"), ("step", "error"))
+                "creating": ("step", "account", "tenant_id"), "confirm": ("step", "account", "tenant_id")}.get(
+            session.get("step"), ("step", "error"))
         public = {key: session[key] for key in keys if key in session}
         return {**public, "channel": self.channels.view(self.channels._binding(binding_id))}
 
-    def connect(self, tenant: str, owner: str, binding_id: str) -> dict:
+    def connect(self, tenant: str, owner: str, binding_id: str, *, confirm: bool = False,
+                other_account: bool = False) -> dict:
         binding = self.channels._binding(binding_id, tenant, owner)
         if binding["kind"] != "teams":
             raise ExpertError("This channel is not available yet", code="channel_kind_unavailable")
         with self._lock:
             pending = self._pending(binding_id)
+            current = dict(self._sessions.get(binding_id) or {})
         if pending:  # a second press shows the sign-in already under way (status takes the lock itself)
             return self.status(tenant, owner, binding_id)
-        signed_in = False
-        try:
-            signed_in = bool(self._run("status", timeout=60).get("loggedIn"))
-        except ExpertError:
-            signed_in = False
+        status: dict = {}
+        if other_account:  # the tool forgets the account it holds; Microsoft's code sign-in below takes another
+            self._sign_out()
+        else:
+            try:
+                status = self._run("status", timeout=60)
+            except ExpertError:
+                status = {}
+        signed_in, account = bool(status.get("loggedIn")), str(status.get("username") or "")
+        # Already signed in: nothing is made before the person has seen which account and organisation it would be
+        # made in (a computer can hold another organisation's login). A press after Microsoft refused custom apps
+        # checks again for the account already confirmed; an account that changed since it was shown is shown again.
+        confirmed = (confirm and (current.get("step") != "confirm" or current.get("account") == account)) \
+            or current.get("step") == "blocked"
+        if signed_in and not confirmed:
+            with self._lock:
+                if not self._pending(binding_id):
+                    self._sessions[binding_id] = {"step": "confirm", "account": account,
+                                                  "tenant_id": str(status.get("tenantId") or "")}
+            return self.status(tenant, owner, binding_id)
         if signed_in:
             with self._lock:  # claimed here, so a check that began meanwhile and this press never both create
                 start = not self._pending(binding_id)
@@ -270,6 +288,14 @@ class TeamsSetup:
         return self.channels.record_setup(tenant, owner, binding_id, {
             **settings, "developer": values["developer"], "website_url": values["website"],
             "privacy_url": values["privacy"], "terms_url": values["terms"]})
+
+    def _sign_out(self) -> None:
+        """The pinned tool forgets the Microsoft account it is signed in with (its `logout` takes no --json)."""
+        try:
+            subprocess.run([*self._cli(), "logout", "--disable-auto-update"], capture_output=True, text=True,
+                           timeout=60, env=_clean_env({"TEAMS_NO_INTERACTIVE": "1"}))
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # the code sign-in that follows shows Microsoft's page either way
 
     def _pending(self, binding_id: str) -> bool:
         """Under the lock: a sign-in, an app creation or a check of Microsoft's report is under way."""

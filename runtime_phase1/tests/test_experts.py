@@ -2466,3 +2466,103 @@ def test_the_owner_sets_the_apps_public_details_instead_of_the_placeholders(app,
     shown = saved.json()["app"]
     assert shown["developer"] == "Synthetic Company" and shown["terms_url"] == "https://synthetic.example/terms"
     assert shown["app_id"] == "synthetic-app" and shown["account"] == "Synthetic Owner"  # the rest is kept
+
+
+def test_an_already_signed_in_connect_shows_the_account_before_anything_is_made(app, monkeypatch, tmp_path):
+    # Hurdle 11, second half: a computer can hold another organisation's login. With the tool already signed in, one
+    # press used to create the app at once; now the page first names the account and organisation it would be made
+    # in, and only "Create it" makes it. An account that changed since it was shown is shown again.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    path, calls, signed_in, background = f"/v1/channels/{binding_id}/connect", [], {"as": "Synthetic Owner"}, []
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "username": signed_in["as"], "tenantId": "tenant-synthetic",
+                    "userObjectId": "person-synthetic-a", "tdp": {"sideloading": {"tenant": True, "user": True}}}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
+    shown = client.post(path, json={}).json()
+    assert shown["step"] == "confirm" and shown["account"] == "Synthetic Owner" and shown["tenant_id"] == "tenant-synthetic"
+    assert background == [] and creations() == 0  # nothing is made yet
+    signed_in["as"] = "Synthetic Other Account"  # the tool's account changed since it was shown
+    again = client.post(path, json={"confirm": True}).json()
+    assert again["step"] == "confirm" and again["account"] == "Synthetic Other Account" and background == []
+    created = client.post(path, json={"confirm": True}).json()
+    assert created["step"] == "creating" and len(background) == 1
+    target, args = background.pop()
+    target(*args)
+    assert creations() == 1 and client.get(path).json()["step"] == "connected"
+
+
+def test_use_another_microsoft_account_signs_the_tool_out_and_shows_microsofts_code(app, monkeypatch):
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    signed_out, statuses, threads = [], [], []
+
+    class Login:  # Microsoft's code sign-in, as the tool prints it; nothing is started for real
+        def __init__(self, *args, **kwargs):
+            lines = ["To sign in, open the page https://microsoft.invalid/devicelogin and enter the code SYNTH12345 now\n"]
+            self.stdout = Namespace(readline=lambda: lines.pop(0) if lines else "", read=lambda: "")
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(setup, "_sign_out", lambda: signed_out.append(True))
+    monkeypatch.setattr(setup, "_run", lambda *args, timeout=300: statuses.append(args) or {"loggedIn": True})
+    monkeypatch.setattr(setup, "_cli", lambda: ["teams-synthetic"])
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=Login, PIPE=-1, STDOUT=-2))
+    monkeypatch.setattr(channels_setup, "threading", Namespace(Thread=lambda **kwargs: Namespace(start=lambda: threads.append(kwargs)),
+                                                               Lock=channels_setup.threading.Lock))
+    step = client.post(f"/v1/channels/{binding_id}/connect", json={"other_account": True}).json()
+    assert signed_out == [True] and statuses == []  # signed out first; the old account is not asked
+    assert step["step"] == "sign_in" and step["code"] == "SYNTH12345" and len(threads) == 1
+
+
+def test_a_package_adopted_after_a_runtime_restart_is_started_again_at_once_when_stopped(app, monkeypatch, tmp_path):
+    # Go-live: after the merge and a runtime restart, the running package is adopted through its pid file (not started
+    # by this runtime). Stopping it by its pid while the outbox is idle lets maintenance start the new code at once,
+    # with no back-off wait and without Turn off (which would drop messages and stop jobs).
+    from pathlib import Path
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    setup.credentials_path(binding_id).write_text("CLIENT_ID=synthetic\n")
+    setup._pid_path(binding_id).write_text("4200000")  # the package from before the restart
+    adopted, processes = {4_200_000}, []
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            self.pid = 4_300_000 + len(processes)
+            processes.append(self)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=FakeProcess, STDOUT=-2))
+    monkeypatch.setattr(setup, "_package_python", lambda: Path("synthetic-python"))
+    monkeypatch.setattr(setup, "_alive", lambda pid: pid in adopted or any(p.pid == pid for p in processes))
+    setup._clock = lambda: 1000.0
+    setup.reconcile_once()
+    assert processes == []  # the adopted package keeps running
+    adopted.clear()  # stopped by its pid
+    setup.reconcile_once()
+    assert len(processes) == 1  # the new code starts at once

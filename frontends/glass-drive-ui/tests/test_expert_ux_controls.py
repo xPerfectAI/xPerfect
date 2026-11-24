@@ -273,7 +273,8 @@ def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
     state = re.search(r"^export function channelState\(.*?^}", source, re.M | re.S)
     assert state, 'channelState'
     assert "node('span', 'expert-pill', channelState(channel))" in source
-    assert "if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(load, 3000);" in source
+    assert "if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(later, 3000);" in source
+    assert "list.querySelector('details[open]') || list.contains(document.activeElement)" in source  # not mid-typing
     assert "if (channel.refusal && channel.state === 'connected') card.append(" in source  # never on an Off card
     # Teams does not allow the app yet: the line, a note for the administrator, and the page follows the
     # runtime's own re-check.
@@ -333,3 +334,15 @@ def test_the_owner_sets_the_teams_apps_public_details():
     assert '@app.post("/api/channels/{binding_id}/details")' in server
     assert '+ "/details", payload)' in server
     assert '.expert-details[open]{display:grid;gap:8px}' in (STATIC / 'experts.css').read_text()
+
+
+def test_an_already_signed_in_connect_names_the_account_before_anything_is_made():
+    # Hurdle 11: a computer can hold another organisation's login. When the tool is already signed in, Connect shows
+    # the account and organisation the app would be made in, with Create it and Use another Microsoft account.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("if (step.step === 'confirm') {", "`Create it as ${step.account}`", "'Use another Microsoft account'",
+                  "connect(channel, { confirm: true })", "connect(channel, { other_account: true })",
+                  "It is made in that account's organisation."):
+        assert words in source, words
+    server = (STATIC.parent / 'server.py').read_text()
+    assert 'choice = {key: bool(payload.get(key)) for key in ("confirm", "other_account") if key in payload}' in server

@@ -128,6 +128,12 @@ class ChannelSetupInput(StrictModel):
     settings: dict[str, str] = Field(default_factory=dict)
 
 
+class ChannelConnectInput(StrictModel):
+    # confirm: create the app in the account already shown; other_account: sign the tool out and sign in again.
+    confirm: bool = False
+    other_account: bool = False
+
+
 class ChannelDetailsInput(StrictModel):
     # The Teams app's public details, as Teams shows them on the app's page; checked again by the service.
     developer: str = Field(max_length=200)
@@ -172,8 +178,10 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
         return invoke(channels.update, *owner(request), binding_id, people=payload.people, state=payload.state)
 
     @app.post("/v1/channels/{binding_id}/connect")
-    def connect(binding_id: str, request: Request):
-        return invoke(channels.setup.connect, *owner(request), binding_id)
+    def connect(binding_id: str, request: Request, payload: ChannelConnectInput | None = None):
+        choice = payload or ChannelConnectInput()
+        return invoke(channels.setup.connect, *owner(request), binding_id, confirm=choice.confirm,
+                      other_account=choice.other_account)
 
     @app.get("/v1/channels/{binding_id}/connect")
     def connect_status(binding_id: str, request: Request):

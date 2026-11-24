@@ -305,6 +305,7 @@ pill, links and wording. Real model, browser and Teams steps stay NOT RUN until 
 | Teams connect | Manage → Channels → Add Teams → Connect; complete Microsoft's sign-in. | The app is created in socket mode; you are the first allowed person; Install in Teams appears. |
 | Teams told up front | Press Connect. | Before the sign-in: open Microsoft's page where the work account is signed in (any browser or a phone), a phone approval may come, the code lasts about 15 minutes. |
 | Teams account shown | Complete the sign-in. | While the app is made, and on the card afterwards, the Microsoft account and organisation ID it was made in. |
+| Teams already signed in | Press Connect when the CLI is already signed in. | Nothing is made yet: "Create it as <account>?" with the organisation ID, or Use another Microsoft account, which shows Microsoft's code for a new sign-in. |
 | Teams custom apps off | Connect with an account whose setup policy has Upload custom apps off. | Nothing is created; the page names both switches and which is off, offers a note for the administrator, and checks again by itself every two minutes. |
 | Teams change spreading | The administrator turns the switch on. | "Microsoft is applying this. It can take an hour or more before Teams lets you add the app." until eight yes answers in a row over about a minute; then the app is created once. |
 | Teams new bot | The first seconds after the app is created. | Connecting… until Microsoft's socket holds; nothing is claimed or sent before; a refusal that lasts is shown once, in Microsoft's words. |

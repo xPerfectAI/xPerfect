@@ -158,8 +158,10 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
    administrator's consent; it is a later capability, so today an administrator turns the switch.
 7. **The account that matters is not always the one expected.** Another login on the same computer
    may belong to another organisation (the CLI also reads the Azure command-line login). Connect
-   always takes the Teams-managed route, never another login, and the page shows the account and
-   organisation ID Microsoft reported, while the app is made and on the card afterwards.
+   always takes the Teams-managed route, never another login. When the CLI is already signed in,
+   nothing is made before the page asks **Create it as …?** with the account and organisation ID
+   Microsoft reported, or **Use another Microsoft account** (which signs the CLI out and shows
+   Microsoft's code); the account is shown again while the app is made and on the card afterwards.
 8. **Online is not ready.** The card says **Online · no message yet** until a first message has really
    come through, with the steps to add the app and write in its own chat; only then **Connected**.
 9. **"Test in Teams" can open somebody else's chat.** Before the app was installed, the direct link to

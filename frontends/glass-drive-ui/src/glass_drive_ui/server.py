@@ -3776,8 +3776,10 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         return _expert_forward(request, "PATCH", "/v1/channels/" + _recurring_path_id(binding_id, "channel id"), payload)
 
     @app.post("/api/channels/{binding_id}/connect")
-    def channel_connect(request: Request, binding_id: str):
-        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect", {})
+    def channel_connect(request: Request, binding_id: str, payload: dict = Body(default={})):
+        # The owner's choice after seeing the account: create it there, or sign in with another account.
+        choice = {key: bool(payload.get(key)) for key in ("confirm", "other_account") if key in payload}
+        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect", choice)
 
     @app.get("/api/channels/{binding_id}/connect")
     def channel_connect_status(request: Request, binding_id: str):

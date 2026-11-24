@@ -254,9 +254,9 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
   async function save(channel, people) {
     await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { people } }); await load();
   }
-  async function connect(channel) {
-    stop(); status.textContent = 'Starting Microsoft sign-in…';
-    try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect', { method: 'POST', body: {} })); }
+  async function connect(channel, choice = {}) {
+    stop(); status.textContent = choice.confirm ? 'Creating your Teams app…' : 'Starting Microsoft sign-in…';
+    try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect', { method: 'POST', body: choice })); }
     catch (error) { status.textContent = error.message; }
   }
   async function poll(channel) {
@@ -273,6 +273,13 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       copy.onclick = async () => { try { await navigator.clipboard.writeText(step.code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the code'; } };
       box.append(node('p', '', 'Open Microsoft’s page where your work account is signed in (any browser, or your phone) and enter this code. Use the account that should own this Teams app. Microsoft may ask you to approve on your phone. The code lasts about 15 minutes.'), code, copy, link);
       status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
+    }
+    if (step.step === 'confirm') {
+      // Already signed in: the account and organisation the app would be made in, before anything exists.
+      const yes = node('button', 'primary-button', `Create it as ${step.account}`); yes.type = 'button'; yes.onclick = () => connect(channel, { confirm: true });
+      const other = node('button', 'secondary-button', 'Use another Microsoft account'); other.type = 'button'; other.onclick = () => connect(channel, { other_account: true });
+      box.append(node('p', '', `Create the Teams app as ${step.account}${step.tenant_id ? ` (organisation ID ${step.tenant_id})` : ''}? It is made in that account's organisation.`), yes, other);
+      status.textContent = ''; return;
     }
     if (step.step === 'creating') { status.textContent = step.account ? `Creating your Teams app with ${step.account}…` : 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
     if (step.step === 'blocked') {
@@ -338,7 +345,9 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       card.append(people); list.append(card);
     }
     // Until Microsoft's socket holds, look again shortly, so the pill moves on by itself.
-    clearTimeout(again); if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(load, 3000);
+    // Never while the person is typing or has the details open: a re-load rebuilds the cards.
+    const later = () => { if (list.querySelector('details[open]') || list.contains(document.activeElement)) again = setTimeout(later, 3000); else void load(); };
+    clearTimeout(again); if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(later, 3000);
   }
   async function load() { try { render((await request(path)).items || [], await place); } catch (error) { status.textContent = error.message; } }
   void load();
