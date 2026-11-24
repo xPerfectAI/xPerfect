@@ -44,7 +44,8 @@ those Workers on this computer's sign-in; a connected account cannot serve her a
   job's final answer is written once as a result event on the speaking assistant's conversation,
   and the existing result wake starts her next turn.
 - **Workers** are dispatched by that coordinator with the existing tools and run in parallel within
-  the host's capacity. Coordinator-dispatched Workers are exempt from the manual one-project fence.
+  the host's capacity. Each Worker carries the owner's instructions as its standing instructions,
+  fixed when the job starts, whatever the coordinator writes in a dispatch. Coordinator-dispatched Workers are exempt from the manual one-project fence.
 
 ## Ask me first
 

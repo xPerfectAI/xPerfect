@@ -675,3 +675,17 @@ def test_the_role_model_becomes_its_conversation_model(app, monkeypatch):
     assert config.model == "claude-code:haiku" and config.effort == "low"
     default = experts._default_role_config("local", "owner", ExpertRole(profile="claude-code"))
     assert default.model == "claude-code:opus"
+
+
+def test_every_worker_of_a_job_carries_the_owners_instructions(app):
+    # The owner's guardrails reach each Worker whatever the coordinator writes in its dispatch.
+    application, client = app
+    experts = application.state.experts
+    created = create_expert(client)
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created["template_id"])
+    template = experts.resolve("local", owner, created["template_id"])
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job",
+                                                                         access="full"))
+    assert config.routes
+    for route in config.routes:
+        assert SPEC["instructions"] in route.bootstrap_bundle["system_instructions"]

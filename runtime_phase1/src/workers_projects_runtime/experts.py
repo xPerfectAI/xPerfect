@@ -406,13 +406,22 @@ class ExpertService:
     def _job_config(self, tenant: str, owner: str, template: dict, binding: ExpertBinding) -> CoordinatorConfig:
         spec = self.spec(template)
         config = self._role_config(tenant, owner, spec.team.coordinate)
+        # The owner's instructions travel with every Worker of the job (its standing instructions),
+        # fixed when the job starts, so they hold whatever the coordinator writes in a dispatch.
+        owner_rules = (_prompt("expert-worker.md").strip() + "\n\n" + spec.instructions.strip()
+                       if spec.instructions.strip() else "")
         routes: list[Route] = []
         for profile in spec.team.work:
             role = (spec.team.coordinate if profile == spec.team.coordinate.profile
                     else spec.team.talk if profile == spec.team.talk.profile else ExpertRole(profile=profile))
             work = self._role_config(tenant, owner, ExpertRole(profile=profile, account_id=role.account_id))
             placement = {"execution_mode": "docker"} if spec.workspace.kind == "sandboxed" else {}
-            routes.extend(route.model_copy(update={"id": profile, **placement}) for route in work.routes[:1])
+            for route in work.routes[:1]:
+                bundle = dict(route.bootstrap_bundle)
+                if owner_rules:
+                    earlier = str(bundle.get("system_instructions") or "").strip()
+                    bundle["system_instructions"] = (earlier + "\n\n" if earlier else "") + owner_rules
+                routes.append(route.model_copy(update={"id": profile, "bootstrap_bundle": bundle, **placement}))
         instructions = spec.instructions.strip()
         return config.model_copy(update={
             "routes": routes, "expert": binding,
