@@ -8,6 +8,7 @@ protocol and talks to the core only through these routes. Nothing here interpret
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -113,9 +114,16 @@ def ensure_channels_schema(conn: Any) -> None:
     record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
 
 
+# How long a package's claim may wait for a reply to become ready: it returns as soon as one is, and a runtime
+# restart waits at most this long for a claim in flight.
+CLAIM_WAIT_MAX_S = 5.0
+
+
 class ChannelService:
     def __init__(self, store: Any, experts: ExpertService) -> None:
         self.store, self.experts = store, experts
+        self._ready = threading.Condition()  # told when a message becomes ready to send
+        self._readiness = 0
         with store._connect() as conn:
             ensure_channels_schema(conn)
         experts.deliveries = self
@@ -339,7 +347,29 @@ class ChannelService:
                 continue
         return repaired
 
-    def claim(self, binding_id: str, limit: int = 10) -> list[dict]:
+    def _ready_now(self) -> None:
+        """A message became ready to send: a claim waiting for one looks again at once (its own transaction waits
+        for the writer's to commit, so it reads the message)."""
+        with self._ready:
+            self._readiness += 1
+            self._ready.notify_all()
+
+    def claim(self, binding_id: str, limit: int = 10, wait: float = 0.0) -> list[dict]:
+        """The channel's ready messages, leased to the package to send. With wait, an empty claim waits up to that
+        long (at most CLAIM_WAIT_MAX_S) and returns as soon as a message is ready; what a claim does is unchanged."""
+        deadline = time.monotonic() + max(0.0, min(float(wait or 0.0), CLAIM_WAIT_MAX_S))
+        while True:
+            with self._ready:
+                seen = self._readiness
+            claimed = self._claim_now(binding_id, limit)
+            remaining = deadline - time.monotonic()
+            if claimed or remaining <= 0:
+                return claimed
+            with self._ready:
+                if self._readiness == seen:  # nothing became ready meanwhile: wait to be told (or look again soon)
+                    self._ready.wait(timeout=min(remaining, 0.25))
+
+    def _claim_now(self, binding_id: str, limit: int) -> list[dict]:
         self._binding(binding_id)
         claimed = []
         with self.store._connect() as conn:
@@ -433,6 +463,8 @@ class ChannelService:
             ("dlv_" + digest([speaker["conversation_id"], turn_id, kind])[:32], speaker["binding_id"],
              speaker["conversation_id"], turn_id, kind, text, speaker["thread_ref_json"] or "{}", state, review_id, error,
              _now() if state == "dropped" else "", _now()))
+        if state == "pending":
+            self._ready_now()
 
     def write_released_reply(self, conn, speaker: dict, review: dict) -> None:
         """Inside the one release's transaction, after its checks: exactly the reply that was shown, word for
@@ -441,6 +473,7 @@ class ChannelService:
                             "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
         if held:
             conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (held["delivery_id"],))
+            self._ready_now()
         else:
             self._insert_delivery(conn, speaker, "approved-" + review["review_id"], "approved",
                                   json.loads(review["payload_json"]).get("text", ""), "pending", review["review_id"])

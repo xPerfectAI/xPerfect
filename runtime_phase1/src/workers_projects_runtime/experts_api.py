@@ -224,9 +224,9 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
         return invoke(channels.inbound, binding_id, payload)
 
     @app.post("/v1/channels/{binding_id}/deliveries/claim")
-    def claim(binding_id: str, request: Request, limit: int = 10):
+    def claim(binding_id: str, request: Request, limit: int = 10, wait: float = 0.0):
         owned(binding_id, request)
-        return {"items": invoke(channels.claim, binding_id, limit)}
+        return {"items": invoke(channels.claim, binding_id, limit, wait)}
 
     @app.post("/v1/channels/{binding_id}/deliveries/{delivery_id}")
     def delivered(binding_id: str, delivery_id: str, payload: DeliveryResult, request: Request):

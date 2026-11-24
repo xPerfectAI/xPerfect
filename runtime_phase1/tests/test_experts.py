@@ -2920,3 +2920,41 @@ def test_microsofts_address_can_only_be_replaced_by_one_on_this_computer(monkeyp
     assert microsoft.login == "https://login.microsoftonline.com/tenant-synthetic"
     assert microsoft.graph == "http://127.0.0.1:28790/graph"
     assert teams_admin.catalogue_link("a b", "t") == "https://teams.microsoft.com/l/app/a%20b?tenantId=t"
+
+
+def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkeypatch):
+    # The wait before a ready reply left was the package's one-second poll (0.1 to 0.8 s on real Teams). A claim that
+    # asks to wait now returns as soon as the reply is written; an empty one returns after its wait, never longer
+    # than the core's limit; and a claim still leases the message exactly as before.
+    import threading
+    import time
+    from workers_projects_runtime import channels as channels_module
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id = channel["binding_id"]
+    accepted = client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Synthetic answer")
+    channels = application.state.channels
+    result = {}
+
+    def waiting():
+        started = time.monotonic()
+        result["items"] = channels.claim(binding_id, 10, 3.0)
+        result["started"], result["returned"] = started, time.monotonic()
+
+    thread = threading.Thread(target=waiting)
+    thread.start()
+    time.sleep(0.4)
+    written = time.monotonic()
+    channels.reconcile_once()  # the reply is written ready to send
+    thread.join(5)
+    assert [item["text"] for item in result["items"]] == ["Synthetic answer"]
+    assert result["returned"] - result["started"] >= 0.4  # it waited for the reply
+    assert result["returned"] - written < 1.0  # and left as soon as it was ready, not after the full wait
+    assert scalar(application, "SELECT state FROM channel_deliveries") == "sending"
+    started = time.monotonic()
+    assert client.post(f"/v1/channels/{binding_id}/deliveries/claim?wait=0.3").json()["items"] == []
+    assert 0.3 <= time.monotonic() - started < 1.5
+    monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 0.2)
+    started = time.monotonic()
+    assert channels.claim(binding_id, 10, 60.0) == [] and time.monotonic() - started < 1.0  # never past the limit

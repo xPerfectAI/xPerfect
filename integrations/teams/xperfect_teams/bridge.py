@@ -86,8 +86,10 @@ class RuntimeClient:
     async def inbound(self, message: dict) -> dict:
         return await self._post(f"/v1/channels/{self.binding_id}/inbound", message)
 
-    async def claim(self, limit: int = 10) -> list[dict]:
-        return (await self._post(f"/v1/channels/{self.binding_id}/deliveries/claim?limit={limit}")).get("items", [])
+    async def claim(self, limit: int = 10, wait: float = 0.0) -> list[dict]:
+        """Ready messages to send; with wait, the core answers as soon as one is ready (at most that long)."""
+        query = f"limit={limit}" + (f"&wait={wait:g}" if wait else "")
+        return (await self._post(f"/v1/channels/{self.binding_id}/deliveries/claim?{query}")).get("items", [])
 
     async def delivered(self, delivery_id: str, state: str, platform_message_id: str = "", error: str = "") -> dict:
         return await self._post(f"/v1/channels/{self.binding_id}/deliveries/{delivery_id}",
@@ -150,10 +152,11 @@ class Bridge:
                 logger.debug("typing indicator failed", exc_info=True)
         return result
 
-    async def deliver_once(self, send: Callable[[dict, str], Awaitable[str]]) -> int:
-        """Send each claimed message once. An unknown outcome is never resent by this package."""
-        sent = 0
-        for delivery in await self.client.claim():
+    async def deliver_once(self, send: Callable[[dict, str], Awaitable[str]], *, wait: float = 0.0) -> int:
+        """Send each claimed message once. An unknown outcome is never resent by this package. Returns how many
+        were claimed; with wait, the claim itself waits for a message to be ready."""
+        claimed = await self.client.claim(wait=wait)
+        for delivery in claimed:
             try:
                 platform_id = await send(delivery["thread_ref"], delivery["text"])
             except Exception as exc:
@@ -166,5 +169,4 @@ class Bridge:
                     logger.warning("send outcome unknown for %s", delivery["delivery_id"])
                 continue
             await self.client.delivered(delivery["delivery_id"], "sent", platform_message_id=str(platform_id or ""))
-            sent += 1
-        return sent
+        return len(claimed)

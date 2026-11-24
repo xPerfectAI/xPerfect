@@ -14,6 +14,8 @@ from pathlib import Path
 
 from .bridge import Bridge, Readiness, RuntimeClient, start_with_retries
 
+CLAIM_WAIT_S = 5.0  # how long one claim waits at the core for a reply to be ready (the core's own limit too)
+
 logger = logging.getLogger("xperfect_teams")
 
 
@@ -53,13 +55,21 @@ async def run(args: argparse.Namespace) -> None:
         return str(getattr(sent, "id", "") or "")
 
     async def deliveries() -> None:
+        loop = asyncio.get_running_loop()
         while True:
-            if readiness.check():  # nothing is claimed before the socket has held: a refused reply is final
-                try:
-                    await bridge.deliver_once(send)
-                except Exception:
-                    logger.warning("delivery round failed", exc_info=True)
-            await asyncio.sleep(1)
+            if not readiness.check():  # nothing is claimed before the socket has held: a refused reply is final
+                await asyncio.sleep(1)
+                continue
+            started, claimed = loop.time(), 0
+            try:
+                # The claim waits at the core until a reply is ready, so it leaves as soon as it is written.
+                claimed = await bridge.deliver_once(send, wait=CLAIM_WAIT_S)
+            except Exception:
+                logger.warning("delivery round failed", exc_info=True)
+                await asyncio.sleep(1)
+                continue
+            if not claimed and loop.time() - started < 0.5:
+                await asyncio.sleep(1)  # a core that does not wait answers at once: never spin
 
     async def heartbeat() -> None:
         while True:
