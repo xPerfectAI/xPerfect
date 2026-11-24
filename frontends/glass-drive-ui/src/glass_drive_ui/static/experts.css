@@ -49,3 +49,4 @@
 .expert-notice strong { color: var(--text, inherit); font-weight: 600; }
 .expert-notice-alert { color: var(--text, inherit); }
 .expert-notice-alert strong { color: var(--danger, var(--text, inherit)); }
+.expert-ask input[type="radio"], .expert-check input[type="checkbox"], .expert-library input[type="checkbox"] { width: auto; flex: none; margin: 0; }
