@@ -61,6 +61,11 @@ def inbound_message(activity: Any, bot_id: str = "") -> dict | None:
     if not text or not sender_id or (bot_id and str(_value(sender, "id") or "").endswith(bot_id)):
         return None
     conversation = _value(activity, "conversation")
+    # Personal chats only for now: a reply in a group chat or a channel would be read by people
+    # the owner never listed. An unknown chat type is treated as shared.
+    kind = str(_value(conversation, "conversation_type") or _value(conversation, "conversationType") or "")
+    if kind != "personal" or _value(conversation, "is_group") is True:
+        return None
     conversation_id = str(_value(conversation, "id") or "")
     tenant = str(_value(conversation, "tenant_id") or _value(activity, "channel_data", "tenant", "id") or "")
     timestamp = _value(activity, "timestamp")

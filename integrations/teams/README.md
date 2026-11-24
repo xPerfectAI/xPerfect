@@ -25,6 +25,9 @@ python -m xperfect_teams --runtime http://127.0.0.1:8766 --binding <channel id> 
   --state-dir <xPerfect state folder> --credentials <private file with CLIENT_ID, CLIENT_SECRET, TENANT_ID>
 ```
 
+Only personal chats are answered: a message from a group chat or a team channel is ignored, so no reply
+is read by people the owner did not list.
+
 Every reply comes from xPerfect's outbox. A send that Teams refuses is reported as failed; a send
 whose outcome is unknown is not reported, and xPerfect marks it not confirmed after two minutes.
 It is never resent by itself.

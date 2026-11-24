@@ -12,7 +12,8 @@ from xperfect_teams.bridge import Bridge, RuntimeClient, inbound_message
 def activity(activity_id="act-1", text="Hello", sender="00000000-0000-0000-0000-00000000000a"):
     return SimpleNamespace(id=activity_id, text=text, timestamp=None, service_url="https://smba.example.invalid/",
                            from_=SimpleNamespace(id="29:synthetic", aad_object_id=sender, name="Synthetic Person"),
-                           conversation=SimpleNamespace(id="a:synthetic-chat", tenant_id="tenant-synthetic"),
+                           conversation=SimpleNamespace(id="a:synthetic-chat", tenant_id="tenant-synthetic",
+                                                        conversation_type="personal"),
                            channel_data=None)
 
 
@@ -94,3 +95,17 @@ def test_outbox_reports_sent_refused_and_leaves_unknown_outcomes_unconfirmed():
     assert runtime.results == [("dlv_sent", {"state": "sent", "platform_message_id": "platform-1", "error": ""}),
                                ("dlv_refused", {"state": "failed", "platform_message_id": "", "error": "Teams refused the message (403)"})]
     # Nothing was reported for the unknown outcome; the core marks it not confirmed.
+
+
+def test_only_personal_chats_are_answered():
+    personal = activity()
+    group = activity(activity_id="act-2")
+    group.conversation = SimpleNamespace(id="19:group", tenant_id="tenant-synthetic", conversation_type="groupChat",
+                                         is_group=True)
+    team_channel = activity(activity_id="act-3")
+    team_channel.conversation = SimpleNamespace(id="19:channel", tenant_id="tenant-synthetic", conversation_type="channel")
+    untyped = activity(activity_id="act-4")
+    untyped.conversation = SimpleNamespace(id="a:untyped", tenant_id="tenant-synthetic")
+    assert inbound_message(personal) is not None
+    # A reply in a shared chat would be read by people the owner never listed.
+    assert inbound_message(group) is None and inbound_message(team_channel) is None and inbound_message(untyped) is None

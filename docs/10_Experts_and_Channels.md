@@ -106,7 +106,8 @@ or a server for a wall.
   the CLI creates a Teams-managed bot in socket mode and writes its secret to a private file in the
   state folder; the signed-in owner becomes the first allowed person; one package process runs per
   connected channel and survives runtime restarts. **Install in Teams** and **Test in Teams** links
-  follow. The first version sends and receives text in personal chats. Files and group chats are
+  follow. The first version sends and receives text in personal chats; a message from a group chat or
+  a team channel gets no answer, so no reply is read by people the owner did not list. Files and group chats are
   later capabilities; Teams file requests need a certificate, federated credential or managed
   identity (Microsoft, 20 November 2026).
 
