@@ -1635,20 +1635,20 @@ def _save_off(client, expert):
         "expected_catalog_revision": read["catalog_revision"], "expert": {**read["expert"], "ask_me_first": "off"}}).status_code == 200
 
 
-@pytest.mark.parametrize("event", ["stopped", "removed", "off", "setting_off"])
+@pytest.mark.parametrize("event", ["crash", "stopped", "removed", "off", "setting_off"])
 def test_an_approved_job_not_yet_started_follows_the_table(app, event, monkeypatch):
-    # Row "Job held, request approved, not started": Stop, a removal or the channel off: never started (stopped);
-    # Off: started once (the owner approved it).
+    # Row "Job held, request approved, not started": a crash: started once by maintenance; Stop, a removal or
+    # the channel off: never started (stopped); Off: started once (the owner approved it).
     application, client = app
     expert, channel, owner, cid, job = _approved_not_started(application, client, monkeypatch)
     experts = application.state.experts
     if event == "setting_off":
         _save_off(client, expert)
-    else:
+    elif event != "crash":
         _close(application, channel, cid, event)
     experts.reconcile_once()
     started = scalar(application, "SELECT count(*) FROM expert_conversations WHERE role='job' AND job_id=?", job["job_id"])
-    if event == "setting_off":
+    if event in {"crash", "setting_off"}:
         assert experts._job(job["job_id"])["state"] == "running" and started == 1
     else:
         assert experts._job(job["job_id"])["state"] == "stopped" and started == 0
@@ -1710,8 +1710,9 @@ def test_a_prepared_job_follows_the_table(app, event):
                       prepared["job_conversation_id"]) != ""
 
 
-def test_a_running_job_stops_when_its_person_is_removed(app):
-    # Row "Job running" x "Person removed": stopped (its conversation fenced).
+@pytest.mark.parametrize("change", [{"people": []}, {"state": "off"}])
+def test_a_running_job_stops_when_its_person_is_removed_or_the_channel_turned_off(app, change):
+    # Row "Job running" x "Person removed" / "Channel off": stopped (its conversation fenced).
     application, client = app
     expert = create_expert(client, ask_me_first="auto")
     channel = connected_channel(application, client, expert)
@@ -1721,7 +1722,7 @@ def test_a_running_job_stops_when_its_person_is_removed(app):
     job = experts.hand_off("local", owner, accepted["conversation_id"], goal="Synthetic job", idempotency_key="k1",
                            source_turn_id=accepted["turn_id"])
     assert experts._job(job["job_id"])["state"] == "running"
-    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": []}).status_code == 200
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json=change).status_code == 200
     stopped = experts._job(job["job_id"])
     assert stopped["state"] == "stopped"
     assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
