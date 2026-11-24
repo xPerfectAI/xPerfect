@@ -213,6 +213,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const head = node('div', 'expert-channel-head');
       const state = channel.state === 'connected' ? (channel.online ? 'Connected' : 'Connected · offline') : channel.state === 'off' ? 'Off' : 'Not connected';
       head.append(node('strong', '', channel.label), node('span', 'expert-pill', state)); card.append(head);
+      if (channel.low_disk) card.append(node('p', 'expert-notice expert-notice-alert', 'Cannot answer right now: this computer is low on disk. Messages wait and are answered when space returns.'));
       const connectBox = node('div', 'expert-connect'); card.append(connectBox);
       if (!channel.app.app_id) {
         const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel); connectBox.append(go);
@@ -307,6 +308,12 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       const notices = (await request('/api/expert-notices')).items || [];
       recent.hidden = !notices.length; recent.replaceChildren(node('h2', '', 'Recent'));
       for (const n of notices.slice(0, 8)) {
+        if (n.kind === 'low_disk') {
+          const waiting = n.waiting ? ` ${n.waiting} message${n.waiting === 1 ? '' : 's'} wait and are answered when space returns.` : ' Messages wait and are answered when space returns.';
+          const line = node('p', 'expert-notice expert-notice-alert');
+          line.append(node('strong', '', 'Low on disk'), node('span', '', ` · This computer has ${n.available_mb} MB free and needs ${n.required_mb} MB, so your Experts cannot answer anyone.${waiting}`));
+          recent.append(line); continue;
+        }
         const who = n.channel === 'chat' ? ' in your Chat' : n.person ? ` for ${n.person}` : '';
         const text = n.kind === 'backup'
           ? `Backup took over${who}: ${aiName(n.backup_ai)} answered because ${aiName(n.ai)} is at its limit${n.until ? ` until ${clock(n.until)}` : ''}.`

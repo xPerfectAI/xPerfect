@@ -789,6 +789,18 @@ class ExpertService:
             conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
                          "WHERE review_id=? AND state='pending'", (note, _now(), review_id))
 
+    def low_disk(self) -> dict | None:
+        """The disk guard's own state: when it holds runs, an Expert cannot answer anyone."""
+        probe = getattr(self.service, "_native_storage_capacity", None)
+        try:
+            state = probe() if callable(probe) else None
+        except Exception:
+            return None
+        if not state or state.get("healthy") is not False or state.get("availableBytes") is None:
+            return None
+        return {"available_mb": int(state["availableBytes"]) // 1024**2,
+                "required_mb": int(state.get("requiredBytes") or 0) // 1024**2}
+
     def notices(self, tenant: str, owner: str, limit: int = 20) -> list[dict]:
         """What the owner should see without acting: a backup took over, or a limit stopped a reply.
 
@@ -832,6 +844,14 @@ class ExpertService:
                 "until": str(detail.get("cooldownUntil") or ""),
                 "reason": str(detail.get("failureClass") or ""),
             })
+        low = self.low_disk()
+        if low is not None:
+            with self.store._connect() as conn:
+                waiting = conn.execute(
+                    "SELECT count(*) FROM coordinator_turns t JOIN expert_conversations e ON e.conversation_id=t.conversation_id "
+                    "WHERE e.tenant_id=? AND e.owner_id=? AND t.response_json='' AND t.blocker='host_capacity' "
+                    "AND t.restore_hold=0", (tenant, owner)).fetchone()[0]
+            items.insert(0, {"kind": "low_disk", "at": _now(), "expert": "", "waiting": waiting, **low})
         return items
 
     def reviews(self, tenant: str, owner: str, state: str = "pending", limit: int = 100) -> list[dict]:

@@ -88,6 +88,9 @@ or a server for a wall.
 - Every outgoing message is saved in an outbox before a package sends it: `held`, `pending`,
   `sending`, `sent`, `not_confirmed`, `failed`, `dropped`. A send with no outcome after two
   minutes becomes `not_confirmed`, is shown to the owner and is never resent by itself.
+- While xPerfect's disk guard holds runs (free disk under `WPR_HOST_MIN_AVAILABLE_DISK_MB`), an Expert cannot
+  answer: Activity and each channel card say so plainly, with how many messages wait. They are answered
+  once space returns; nothing is sent meanwhile.
 - Turning a channel off stops its package and its jobs, drops its unsent messages and withdraws its
   waiting requests; accepted work stays visible. An approval never brings back a dropped message.
 - Channel packages live beside the core and use only the channel routes:

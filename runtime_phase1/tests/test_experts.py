@@ -381,7 +381,7 @@ def test_the_owner_sees_a_backup_take_over_and_a_limit_without_one(app):
     run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic turn")
     store.update_run(run["run_id"], state="failed", failure_class="provider_rate_limited")
     store.update_provider_request(limited["request_id"], run_id=run["run_id"])
-    items = client.get("/v1/expert-notices").json()["items"]
+    items = [item for item in client.get("/v1/expert-notices").json()["items"] if item["kind"] in {"backup", "limited"}]
     assert sorted((item["kind"], item["ai"], item["backup_ai"] if item["kind"] == "backup" else "") for item in items) == [
         ("backup", "claude-code", "codex-cli"), ("limited", "claude-code", "")]
     assert all(item["expert"] == "Synthetic Expert" for item in items)
@@ -601,3 +601,25 @@ def test_off_holds_nothing(app):
     assert result["state"] == "not_asked"
     assert experts.reviews("local", owner) == []
     assert scalar(application, "SELECT count(*) FROM expert_jobs") == 0
+
+
+def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
+    # Tested at the guard, not by filling the disk.
+    application, client = app
+    expert = create_expert(client)
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    with experts.store._connect() as conn:  # the guard refused to start its turn
+        conn.execute("UPDATE coordinator_turns SET blocker='host_capacity' WHERE conversation_id=? AND turn_id=?",
+                     (accepted["conversation_id"], accepted["turn_id"]))
+    monkeypatch.setattr(experts.service, "_native_storage_capacity", lambda *args, **kwargs: {
+        "version": 1, "healthy": False, "availableBytes": 900 * 1024**2, "requiredBytes": 3072 * 1024**2})
+    notices = client.get("/v1/expert-notices").json()["items"]
+    low = [item for item in notices if item["kind"] == "low_disk"]
+    assert low and low[0]["waiting"] == 1 and low[0]["available_mb"] == 900 and low[0]["required_mb"] == 3072
+    view = client.get(f"/v1/experts/{expert['template_id']}/channels").json()["items"][0]
+    assert view["low_disk"] is True
+    monkeypatch.setattr(experts.service, "_native_storage_capacity", lambda *args, **kwargs: {
+        "version": 1, "healthy": True, "availableBytes": 9000 * 1024**2, "requiredBytes": 3072 * 1024**2})
+    assert not [item for item in client.get("/v1/expert-notices").json()["items"] if item["kind"] == "low_disk"]

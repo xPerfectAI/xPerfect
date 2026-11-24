@@ -133,6 +133,8 @@ class ChannelService:
                 "app": {key: settings[key] for key in ("app_id", "app_name", "tenant_id", "mode", "install_link")
                         if key in settings},
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
+                # While the disk guard holds runs, this Expert cannot answer; messages wait.
+                "low_disk": self.experts.low_disk() is not None,
                 "created_at": binding["created_at"], "updated_at": binding["updated_at"]}
 
     def list(self, tenant: str, owner: str, expert_id: str) -> list[dict]:

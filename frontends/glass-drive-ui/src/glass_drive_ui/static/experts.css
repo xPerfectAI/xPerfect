@@ -47,3 +47,5 @@
 .expert-notices h2 { font-size: 0.95rem; margin: 0 0 2px; }
 .expert-notice { margin: 0; color: var(--muted, inherit); font-size: 0.9rem; line-height: 1.45; }
 .expert-notice strong { color: var(--text, inherit); font-weight: 600; }
+.expert-notice-alert { color: var(--text, inherit); }
+.expert-notice-alert strong { color: var(--danger, var(--text, inherit)); }
