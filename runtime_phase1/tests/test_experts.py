@@ -966,6 +966,77 @@ def test_a_sandboxed_experts_skills_survive_the_clean_room_dispatch_and_reach_co
             assert (home / ".agents" / "skills" / "synthetic-brief" / "SKILL.md").read_text() == content
 
 
+def test_a_job_whose_helper_still_runs_is_not_ended_by_a_later_failed_turn(app):
+    # Review 2, finding 8.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts, store = application.state.experts, application.state.experts.store
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    cid = experts._job(job["job_id"])["job_conversation_id"]
+    project = store.create_project(owner, "Synthetic", "Synthetic project", "claude-code")
+    worker = store.create_worker(project["project_id"], owner, "Helper", "worker", "claude-code", "claude-code",
+                                 "claude-code", "haiku", execution_mode="host")
+    run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic helper")
+    with store._connect() as conn:
+        conn.execute("UPDATE expert_jobs SET state='running' WHERE job_id=?", (job["job_id"],))
+        conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+        conn.execute("INSERT INTO coordinator_goals(conversation_id,goal_id,source_turn_id,text,dispatch_json,worker_id,run_id,"
+                     "created_at) VALUES(?,?,?,?,?,?,?,?)", (cid, "g1", "job-brief", "Synthetic goal", "{}", worker["worker_id"],
+                                                          run["run_id"], "t"))
+    finish_turn(application, cid, "job-brief", "Started a helper.")
+    with store._connect() as conn:  # a later change turn failed while the helper still runs
+        conn.execute("INSERT INTO coordinator_turns(conversation_id,turn_id,message,origin,blocker,created_at) "
+                     "VALUES(?,?,?,?,?,?)", (cid, "change-1", "Synthetic change", "interactive", "failed", "9999-12-31"))
+    experts.reconcile_once()
+    assert experts._job(job["job_id"])["state"] == "running"
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result'") == 0
+
+
+def test_a_job_whose_first_turn_is_refused_for_good_is_told_not_left_open(app):
+    # Review 2, finding 12 (second case).
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    cid = experts._job(job["job_id"])["job_conversation_id"]
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE expert_jobs SET state='running' WHERE job_id=?", (job["job_id"],))
+        conn.execute("UPDATE coordinator_turns SET blocker='provider_auth_missing',request_id='' WHERE conversation_id=?", (cid,))
+    experts.reconcile_once()
+    experts.reconcile_once()
+    finished = experts._job(job["job_id"])
+    assert finished["state"] == "failed" and finished["result_text"] == "The job could not start: provider_auth_missing"
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result'") == 1
+
+
+def test_a_job_interrupted_while_it_was_prepared_is_prepared_again_or_told(app):
+    # Review 2, finding 12 (first case): a crash after the job was recorded, before it started.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    recent = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    old = (datetime.now(UTC) - timedelta(minutes=11)).isoformat()
+    with experts.store._connect() as conn:
+        for job_id, stamp in (("job_interrupted", recent), ("job_never_prepared", old)):
+            conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,"
+                         "goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (job_id, "local", owner, expert["lineage_id"], chat["conversation_id"], job_id, "Synthetic job", "",
+                          "starting", expert["template_id"], stamp, stamp))
+    experts.reconcile_once()
+    prepared = experts._job("job_interrupted")
+    assert prepared["state"] == "running" and prepared["job_conversation_id"]
+    told = experts._job("job_never_prepared")
+    assert told["state"] == "failed" and told["result_text"] == "The job could not start."
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result' AND identity=?",
+                  "job_never_prepared") == 1
+
+
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
     # Tested at the guard, not by filling the disk.
     application, client = app

@@ -23,8 +23,8 @@ from typing import Any, Callable, Literal
 from pydantic import Field
 
 from .coordinator import (
-    _RETRYABLE_ADMISSION_CODES, CoordinatorConfig, CoordinatorConflict, CoordinatorScopeError, ExpertBinding, Route,
-    StrictModel, canonical, digest,
+    _RETRYABLE_ADMISSION_CODES, _RUNNABLE_TURN, CoordinatorConfig, CoordinatorConflict, CoordinatorScopeError,
+    ExpertBinding, Route, StrictModel, canonical, digest,
 )
 
 EXPERTS_SCHEMA_VERSION = 1
@@ -818,22 +818,27 @@ class ExpertService:
                 "LEFT JOIN runs r ON r.run_id=g.run_id WHERE g.conversation_id=?", (cid,))]
             waiting = conn.execute("SELECT 1 FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' LIMIT 1",
                                    (cid,)).fetchone()
+            # A turn still waiting to be answered that can still run (queued, running, or retrying a
+            # temporary refusal); one refused for good can no longer change the job.
             pending = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND response_json='' "
-                                   "AND blocker NOT IN ('cancelled','failed') LIMIT 1", (cid,)).fetchone()
+                                   f"AND (restore_hold=1 OR request_id<>'' AND blocker='' OR ({_RUNNABLE_TURN})) LIMIT 1",
+                                   (cid,)).fetchone()
         if row is None:
             return False, "", ""
         latest = dict(row)
-        if latest.get("blocker") in {"failed", "cancelled"} and not latest.get("response_json"):
-            return True, "failed", "The job could not run: " + str(latest.get("blocker"))
-        if not latest.get("response_json"):
+        # Nothing is final while a helper can still change or a turn can still run: a later turn that
+        # failed does not end a job whose helper still runs.
+        if any(_goal_may_move(goal) for goal in goals) or waiting or pending:
             return False, "", ""
-        if any(_goal_may_move(goal) for goal in goals):
-            return False, "", ""
-        if waiting or pending:
-            return False, "", ""
-        return True, "done", reply_text(latest["response_json"])
+        if latest.get("response_json"):
+            return True, "done", reply_text(latest["response_json"])
+        if latest.get("blocker"):
+            # The newest turn failed, or was refused for good before it started: told, never left open.
+            verb = "run" if latest["blocker"] in {"failed", "cancelled"} else "start"
+            return True, "failed", f"The job could not {verb}: {latest['blocker']}"
+        return False, "", ""
 
-    def _publish(self, job: dict, state: str, text: str) -> None:
+    def _publish(self, job: dict, state: str, text: str, *, from_state: str = "running") -> None:
         """Write the job's final answer once onto the Queen's conversation and wake her."""
         tenant, owner = job["tenant_id"], job["owner_id"]
         payload = {"kind": "expert_job_result", "job_id": job["job_id"], "goal": job["goal"], "state": state,
@@ -841,8 +846,8 @@ class ExpertService:
                               "sha256": hashlib.sha256(text.encode()).hexdigest()}}
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            changed = conn.execute("UPDATE expert_jobs SET state=?,result_text=?,updated_at=? WHERE job_id=? AND state='running'",
-                                   (state, text, _now(), job["job_id"])).rowcount
+            changed = conn.execute("UPDATE expert_jobs SET state=?,result_text=?,updated_at=? WHERE job_id=? AND state=?",
+                                   (state, text, _now(), job["job_id"], from_state)).rowcount
             if changed:
                 conn.execute("INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) "
                              "VALUES(?,?,?,?,?)", (job["speaker_conversation_id"], "expert_job_result", job["job_id"],
@@ -1195,6 +1200,26 @@ class ExpertService:
                 outcomes.append({"review_id": review["review_id"], "released": True})
             except Exception as exc:  # retried on the next pass
                 outcomes.append({"review_id": review["review_id"], "error": type(exc).__name__})
+        # A job interrupted while it was being prepared (a crash after it was recorded) is prepared
+        # again: preparing twice reuses its one conversation and its one first turn.
+        # One that still cannot be prepared after ten minutes ends as failed and is told, once.
+        cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+        give_up = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+        with self.store._connect() as conn:
+            stalled = [dict(row) for row in conn.execute(
+                "SELECT j.job_id,j.updated_at FROM expert_jobs j JOIN coordinator_conversations c "
+                "ON c.conversation_id=j.speaker_conversation_id WHERE j.state='starting' AND j.updated_at<? "
+                "AND c.stop_scope='' AND c.restore_hold=0 ORDER BY j.updated_at LIMIT ?", (cutoff, limit))]
+        for row in stalled:
+            try:
+                if row["updated_at"] < give_up:
+                    self._publish(self._job(row["job_id"]), "failed", "The job could not start.", from_state="starting")
+                    outcomes.append({"job_id": row["job_id"], "state": "failed"})
+                    continue
+                self._start_job(row["job_id"])
+                outcomes.append({"job_id": row["job_id"], "prepared_again": True})
+            except Exception as exc:  # retried on the next pass
+                outcomes.append({"job_id": row["job_id"], "error": type(exc).__name__})
         # A stopped job's conversation stays fenced until its Stop is confirmed, also when
         # the Stop raced the job's start or a restart came between them.
         with self.store._connect() as conn:
