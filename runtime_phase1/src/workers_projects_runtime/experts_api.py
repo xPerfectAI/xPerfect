@@ -86,6 +86,11 @@ def install_expert_routes(app, experts, principal: Callable[[Request], tuple[Any
                                 "ORDER BY created_at DESC LIMIT 100", (tenant, user, template["lineage_id"])).fetchall()
         return {"items": [experts._job_view(dict(row)) for row in rows]}
 
+    @app.get("/v1/experts-talk-speeds")
+    def talk_speeds(request: Request):
+        tenant, user = owner(request)
+        return {"items": experts.talk_speeds(tenant, user)}
+
     @app.get("/v1/expert-notices")
     def list_notices(request: Request):
         tenant, user = owner(request)

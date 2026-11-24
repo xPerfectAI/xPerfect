@@ -19,7 +19,7 @@ current; every save makes a new version. The `expert` key in its content holds:
 | Setting | Meaning |
 |---|---|
 | `instructions` | Who it is, what it does for people, what it must never share. The speaking assistant reads the newest text when each turn starts. A running job keeps the text it started with. |
-| `team.talk` | The AI that talks to people (Claude or Codex), its account, its effort and an optional backup. New Experts reply at low effort so first words come quickly. |
+| `team.talk` | The AI that talks to people (Claude or Codex), its model (for Claude: Opus or the faster Haiku), its account, its effort and an optional backup. The form shows each model's median time to a finished reply on this computer. New Experts reply at low effort so first words come quickly. |
 | `team.coordinate` | The AI that runs each job, its account and an optional backup. |
 | `team.work` | The AIs that may work on a job, in parallel. |
 | `ask_me_first` | `always`, `auto` (default) or `off`. |

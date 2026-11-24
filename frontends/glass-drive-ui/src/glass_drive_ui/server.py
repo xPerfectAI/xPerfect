@@ -3783,6 +3783,10 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def channel_connect_status(request: Request, binding_id: str):
         return _expert_forward(request, "GET", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect")
 
+    @app.get("/api/experts-talk-speeds")
+    def experts_talk_speeds(request: Request):
+        return _expert_forward(request, "GET", "/v1/experts-talk-speeds")
+
     @app.get("/api/expert-notices")
     def expert_notices(request: Request):
         return _expert_forward(request, "GET", "/v1/expert-notices")

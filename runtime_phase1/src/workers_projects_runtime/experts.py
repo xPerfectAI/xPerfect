@@ -16,7 +16,7 @@ import hashlib
 import json
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -52,6 +52,8 @@ class ExpertRole(StrictModel):
     backup: ExpertBackup | None = None
     # Empty keeps that AI's own default effort. The owner sees and can change it.
     effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
+    # An exact model of that AI from xPerfect's catalog; empty keeps the AI's configured model.
+    model: str = Field(default="", max_length=200)
 
 
 class ExpertTeam(StrictModel):
@@ -243,6 +245,13 @@ class ExpertService:
                               code="expert_access_unsupported", status=422)
         roles = [spec.team.talk, spec.team.coordinate]
         for role in roles:
+            if role.model:
+                try:
+                    chosen = self.coordinator.provider._model(role.model, tenant_id=tenant, owner_id=owner)
+                except Exception:
+                    chosen = None
+                if chosen is None or chosen.harness_profile != role.profile:
+                    raise ExpertError("That model is not offered for this AI.", code="expert_model_unavailable", status=422)
             if role.backup is not None:
                 # The armed fallback switches the AI before a reply starts; it cannot switch the
                 # account yet. A backup it cannot honour is refused, never silently ignored.
@@ -321,9 +330,10 @@ class ExpertService:
     # ---------------------------------------------------------------- configurations
     def _default_role_config(self, tenant: str, owner: str, role: ExpertRole) -> CoordinatorConfig:
         from .coordinator_config import configured_coordinator, connected_account_execution_mode
-        config = self._with_effort(tenant, owner,
-                                   configured_coordinator(self.service, self.coordinator.provider, tenant, owner, role.profile),
-                                   role.effort)
+        config = configured_coordinator(self.service, self.coordinator.provider, tenant, owner, role.profile)
+        if role.model:  # the role's own model; Workers keep the AI's configured one
+            config = config.model_copy(update={"model": role.model})
+        config = self._with_effort(tenant, owner, config, role.effort)
         if not role.account_id:
             return config
         account = self._templates.get_provider_account(account_id=role.account_id, tenant_id=tenant, owner_id=owner)
@@ -788,6 +798,23 @@ class ExpertService:
         with self.store._connect() as conn:
             conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
                          "WHERE review_id=? AND state='pending'", (note, _now(), review_id))
+
+    def talk_speeds(self, tenant: str, owner: str, per_model: int = 30) -> list[dict]:
+        """Median time to a finished reply per talking model, from this computer's recent replies."""
+        since = (datetime.now(UTC) - timedelta(days=14)).isoformat()
+        with self.store._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.model_id,(julianday(r.ended_at)-julianday(r.queued_at))*86400 AS seconds "
+                "FROM expert_conversations e JOIN provider_sessions s ON s.conversation_id=e.conversation_id "
+                "JOIN provider_requests p ON p.session_id=s.session_id JOIN runs r ON r.run_id=p.run_id "
+                "WHERE e.tenant_id=? AND e.owner_id=? AND e.role='speaker' AND r.state='completed' "
+                "AND r.ended_at>? AND r.queued_at<>'' ORDER BY r.ended_at DESC", (tenant, owner, since)).fetchall()
+        samples: dict[str, list[float]] = {}
+        for model_id, seconds in rows:
+            if seconds is not None and seconds >= 0 and len(samples.setdefault(model_id, [])) < per_model:
+                samples[model_id].append(float(seconds))
+        return [{"model": model_id, "median_s": round(sorted(xs)[len(xs) // 2], 1), "replies": len(xs)}
+                for model_id, xs in sorted(samples.items()) if xs]
 
     def low_disk(self) -> dict | None:
         """The disk guard's own state: when it holds runs, an Expert cannot answer anyone."""

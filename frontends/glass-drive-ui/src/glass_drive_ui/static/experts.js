@@ -11,7 +11,7 @@ const ASK = {
 };
 export const DEFAULT_EXPERT = {
   instructions: '', ask_me_first: 'auto', workspace: { kind: 'host', access: 'full' },
-  team: { talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low' },
+  team: { talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: '' },
           coordinate: { profile: 'codex-cli', account_id: '', backup: null, effort: '' },
           work: ['claude-code', 'codex-cli'] },
 };
@@ -31,7 +31,7 @@ function accountOptions(accounts, profile) {
 }
 
 /** The Expert's own settings, added to the existing name and description fields. */
-function expertFields(body, spec, accounts) {
+function expertFields(body, spec, accounts, speeds) {
   const s = JSON.parse(JSON.stringify(spec || DEFAULT_EXPERT));
   const instructions = node('textarea'); instructions.rows = 6; instructions.maxLength = 32768; instructions.value = s.instructions || '';
   instructions.placeholder = 'Who it is, what it does for people, and what it must never share.';
@@ -39,6 +39,18 @@ function expertFields(body, spec, accounts) {
 
   const team = node('fieldset', 'expert-team'); team.append(node('legend', '', 'AI team'));
   const talk = select(AIS.slice(0, 2), s.team.talk.profile);
+  // Which model talks; each option shows its median time to a finished reply on this computer.
+  const MODELS = { 'claude-code': [['', 'Opus', 'claude-code:opus'], ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
+                   'codex-cli': [['', 'Its usual model', 'codex-cli:native-default']] };
+  const talkModel = node('select'); let measured = {};
+  const fillModels = (keep) => {
+    const options = MODELS[talk.value] || [['', 'Its usual model', '']];
+    talkModel.replaceChildren(...options.map(([value, text, id]) => {
+      const o = node('option', '', measured[id] ? `${text} · about ${measured[id].median_s} s here` : text); o.value = value; return o; }));
+    talkModel.value = options.some(([value]) => value === keep) ? keep : '';
+  };
+  fillModels(s.team.talk.model || '');
+  speeds?.then(items => { measured = Object.fromEntries((items || []).map(item => [item.model, item])); fillModels(talkModel.value); });
   const replies = select([['low', 'Quick'], ['', 'Usual']], s.team.talk.effort || '');
   const coordinate = select(AIS, s.team.coordinate.profile);
   const workers = node('div', 'expert-workers');
@@ -48,6 +60,7 @@ function expertFields(body, spec, accounts) {
     const l = node('label', 'expert-check'); l.append(box, node('span', '', text)); workers.append(l); work.set(value, box);
   }
   team.append(labelled('Talks to people', talk, 'Answers at once and hands work to the coordinator.'),
+              labelled('Model', talkModel, 'Time to a finished reply, measured on this computer.'),
               labelled('Replies', replies),
               labelled('Coordinates the work', coordinate),
               labelled('May work', workers, 'Workers run in parallel on the job.'));
@@ -98,6 +111,7 @@ function expertFields(body, spec, accounts) {
   };
   place.onchange = explain; explain();
   const where = node('div', 'expert-where'); where.append(labelled('Where it works', place), labelled('What it may do', access), placeHint); body.append(where);
+  const pickedAccount = talk.onchange; talk.onchange = () => { pickedAccount?.(); fillModels(talkModel.value); };
 
   return () => {
     const allowed = [...work].filter(([, box]) => box.checked).map(([value]) => value);
@@ -105,7 +119,7 @@ function expertFields(body, spec, accounts) {
     const backupOf = role => { const v = roleAccounts[role].backup.value; if (!v) return null; const [profile, account_id] = v.split('|'); return { profile, account_id }; };
     return { instructions: instructions.value.trim(), ask_me_first: askValue,
       workspace: { kind: place.value, access: access.value },
-      team: { talk: { profile: talk.value, account_id: roleAccounts.talk.main.value, backup: backupOf('talk'), effort: replies.value },
+      team: { talk: { profile: talk.value, account_id: roleAccounts.talk.main.value, backup: backupOf('talk'), effort: replies.value, model: talkModel.value },
               coordinate: { profile: coordinate.value, account_id: roleAccounts.coordinate.main.value, backup: backupOf('coordinate'), effort: '' },
               work: allowed } };
   };
@@ -127,7 +141,8 @@ export async function openExpertForm({ item = null, request = libraryRequest, si
   name = node('input'); name.required = true; name.maxLength = 160; name.value = item?.name || '';
   description = node('textarea'); description.rows = 2; description.maxLength = 1000; description.value = current?.description ?? item?.description ?? '';
   dialog.body.append(labelled('Expert name', name), labelled('What does this expert do?', description));
-  read = expertFields(dialog.body, current?.expert, accounts);
+  const speeds = request('/api/experts-talk-speeds', { signal }).then(r => r.items || []).catch(() => []);
+  read = expertFields(dialog.body, current?.expert, accounts, speeds);
   // Knowledge and Skills come from My Library; an exact saved version stays with the Expert.
   const chosen = new Map(((current || item)?.personal_library_refs || []).map(ref => [ref.item_id, ref]));
   const library = node('fieldset', 'expert-team'); library.append(node('legend', '', 'Knowledge and Skills'));

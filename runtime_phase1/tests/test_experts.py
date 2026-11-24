@@ -623,3 +623,55 @@ def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch)
     monkeypatch.setattr(experts.service, "_native_storage_capacity", lambda *args, **kwargs: {
         "version": 1, "healthy": True, "availableBytes": 9000 * 1024**2, "requiredBytes": 3072 * 1024**2})
     assert not [item for item in client.get("/v1/expert-notices").json()["items"] if item["kind"] == "low_disk"]
+
+
+def test_the_talking_model_is_chosen_checked_and_timed(app, monkeypatch):
+    application, client = app
+    experts = application.state.experts
+    created = create_expert(client, team={**SPEC["team"], "talk": {"profile": "claude-code", "effort": "low",
+                                                                  "model": "claude-code:haiku"}})
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created["template_id"])
+    assert experts.spec(experts.resolve("local", owner, created["template_id"])).team.talk.model == "claude-code:haiku"
+    # A model of another AI is refused for this role.
+    monkeypatch.setattr(experts.coordinator.provider, "_model", lambda model_id, **_: SimpleNamespace(
+        harness_profile=model_id.split(":", 1)[0], effort_choices=("low", "high"), native_model="synthetic",
+        connection_id="", recommended_effort="high", id=model_id))
+    refused = client.post("/v1/experts", json={"name": "Synthetic Expert", "expert": {
+        **SPEC, "team": {**SPEC["team"], "talk": {"profile": "codex-cli", "model": "claude-code:haiku"}}}})
+    assert refused.status_code == 422 and "not offered" in refused.text
+    # The median time to a finished reply, per talking model, from this computer's own replies.
+    chat = client.post(f"/v1/experts/{created['template_id']}/chat").json()
+    store = experts.store
+    project = store.create_project(owner, "Synthetic", "Synthetic project", "claude-code")
+    worker = store.create_worker(project["project_id"], owner, "Queen", "speaker", "claude-code", "claude-code",
+                                 "claude-code", "haiku", execution_mode="host")
+    session = store.upsert_provider_session(tenant_id="local", owner_id=owner, conversation_id=chat["conversation_id"],
+                                            agent_id="coordinator", model_id="claude-code:haiku",
+                                            project_id=project["project_id"], worker_id=worker["worker_id"],
+                                            workspace_dir="/synthetic/workspace", access_mode="read_write")
+    now = datetime.now(UTC)
+    for index, seconds in enumerate([3.0, 4.0, 9.0]):
+        request, _ = store.create_provider_request(tenant_id="local", owner_id=owner, session_id=session["session_id"],
+                                                   idempotency_key=f"speed-{index}", message_id=f"m{index}",
+                                                   stream_id=f"s{index}", requested_history_count=0)
+        run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic turn")
+        with store._connect() as conn:
+            conn.execute("UPDATE runs SET state='completed',queued_at=?,ended_at=? WHERE run_id=?",
+                         ((now - timedelta(seconds=seconds)).isoformat(), now.isoformat(), run["run_id"]))
+        store.update_provider_request(request["request_id"], run_id=run["run_id"])
+    speeds = client.get("/v1/experts-talk-speeds").json()["items"]
+    assert speeds == [{"model": "claude-code:haiku", "median_s": 4.0, "replies": 3}]
+
+
+def test_the_role_model_becomes_its_conversation_model(app, monkeypatch):
+    application, client = app
+    experts = application.state.experts
+    import workers_projects_runtime.coordinator_config as coordinator_config
+    monkeypatch.setattr(coordinator_config, "configured_coordinator", lambda *args, **kwargs: CoordinatorConfig(
+        model="claude-code:opus", effort="high",
+        routes=[Route(id="default", profile="claude-code", model="claude-code:opus", effort="high", execution_mode="host")]))
+    config = experts._default_role_config("local", "owner", ExpertRole(profile="claude-code", model="claude-code:haiku",
+                                                                         effort="low"))
+    assert config.model == "claude-code:haiku" and config.effort == "low"
+    default = experts._default_role_config("local", "owner", ExpertRole(profile="claude-code"))
+    assert default.model == "claude-code:opus"

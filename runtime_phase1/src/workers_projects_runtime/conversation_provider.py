@@ -587,6 +587,16 @@ GLASSHIVE_MODELS: dict[str, HarnessModel] = {
         recommended_effort="max",
         context_window=200_000,
     ),
+    # The fastest Claude model, for roles where first words matter (an Expert's speaking assistant).
+    "claude-code:haiku": HarnessModel(
+        id="claude-code:haiku",
+        display_name="Claude / Haiku",
+        harness_profile="claude-code",
+        native_model="haiku",
+        effort_choices=CLAUDE_CODE_EFFORT_LEVELS,
+        recommended_effort="low",
+        context_window=200_000,
+    ),
     "codex-cli:native-default": HarnessModel(
         id="codex-cli:native-default",
         display_name="Codex / Native default",
