@@ -245,22 +245,13 @@ def test_a_held_job_that_changed_or_stopped_cannot_be_released(app):
 
 def test_a_finished_job_is_told_to_the_queen_once(app):
     application, client = app
-    expert = create_expert(client)
     experts = application.state.experts
-    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
-    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
-    with experts.store._connect() as conn:
-        conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,goal,"
-                     "state,created_at,updated_at) VALUES('job_synthetic','local',?,?,?,'k','Synthetic job','running','t','t')",
-                     (owner, expert["lineage_id"], chat["conversation_id"]))
-    job = experts._job("job_synthetic")
-    experts._publish(job, "done", "Synthetic result")
-    experts._publish(job, "done", "Synthetic result")
-    with experts.store._connect() as conn:
-        events = conn.execute("SELECT kind,payload_json FROM coordinator_events WHERE conversation_id=?", (chat["conversation_id"],)).fetchall()
-    assert [e["kind"] for e in events] == ["expert_job_result"]
-    assert json.loads(events[0]["payload_json"])["result"]["output_text"] == "Synthetic result"
-    assert experts._job("job_synthetic")["state"] == "done"
+    owner, speaker, job_id, cid = _job_answered(application, client, "Synthetic result")
+    experts.reconcile_once()
+    experts.reconcile_once()
+    experts._publish(experts._job(job_id), "done", "Synthetic result")  # telling again changes nothing
+    assert _results(application, job_id) == ["Synthetic result"]
+    assert experts._job(job_id)["state"] == "done"
 
 
 def test_a_stopped_job_never_starts_again_and_a_raced_stop_is_re_driven(app, monkeypatch):
@@ -1987,3 +1978,106 @@ def test_a_restored_copy_returns_an_approval_not_yet_carried_out_to_the_owner(ap
     experts.reconcile_once()
     sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
     assert "SYNTHETIC-APPROVED-IN-THE-COPY" not in sent
+
+
+# ---------------------------------------------------------------- review 5: a job's end, judged where it is told
+
+
+def _job_answered(application, client, answer="SYNTHETIC-OLD-ANSWER"):
+    """A running job whose newest turn is answered and nothing else can move: judged finished."""
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    cid = experts._job(job["job_id"])["job_conversation_id"]
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET request_id='',blocker='' WHERE conversation_id=?", (cid,))
+    finish_turn(application, cid, "job-brief", answer)
+    return owner, chat["conversation_id"], job["job_id"], cid
+
+
+def _results(application, job_id):
+    with application.state.experts.store._connect() as conn:
+        return [json.loads(row[0])["result"]["output_text"] for row in conn.execute(
+            "SELECT payload_json FROM coordinator_events WHERE kind='expert_job_result' AND identity=?", (job_id,))]
+
+
+def test_a_change_written_after_the_first_look_keeps_the_job_running_and_its_answer_is_told(app, monkeypatch):
+    # Review 5 (blocking): maintenance judged the job finished; a change was written before it told it. The end is
+    # judged again under the lock that tells it, so the job stays running and its later answer is told, once.
+    # The reviewer's reproduction: before this, the job was told with the old answer and the new one never.
+    application, client = app
+    experts = application.state.experts
+    owner, speaker, job_id, cid = _job_answered(application, client)
+    original = experts._publish
+    calls = {"n": 0}
+
+    def change_in_the_gap(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the first look said finished; a change lands before the job is told
+            with monkeypatch.context() as quiet:  # the change's turn is written and waits (not started here)
+                quiet.setattr(experts.coordinator, "start_turn", lambda *a, **k: {"state": "queued"})
+                experts.job_control("local", owner, speaker, job_id, action="change", message="Also add a summary.",
+                                    idempotency_key="c1")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(experts, "_publish", change_in_the_gap)
+    experts.reconcile_once()
+    change = scalar(application, "SELECT turn_id FROM coordinator_turns WHERE conversation_id=? AND turn_id LIKE 'change-%'", cid)
+    finish_turn(application, cid, change, "SYNTHETIC-NEW-ANSWER")
+    for _ in range(3):
+        experts.reconcile_once()
+    assert experts._job(job_id)["state"] == "done"
+    assert _results(application, job_id) == ["SYNTHETIC-NEW-ANSWER"]
+
+
+def test_a_change_that_reaches_a_job_already_told_is_refused_in_plain_words_and_never_runs(app, monkeypatch):
+    # Review 5: the job was told between the change's first read of it and the writing of its turn. The change is
+    # refused in words the Queen can pass on, its turn never runs, and the job stays done, told once.
+    application, client = app
+    experts = application.state.experts
+    owner, speaker, job_id, cid = _job_answered(application, client)
+    original = experts.coordinator.accept_turn
+    calls = {"n": 0}
+
+    def told_in_the_gap(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            experts.reconcile_once()  # the job is told as done here
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(experts.coordinator, "accept_turn", told_in_the_gap)
+    with pytest.raises(ExpertError, match="already finished, so the change was not applied"):
+        experts.job_control("local", owner, speaker, job_id, action="change", message="Also add a summary.",
+                            idempotency_key="c1")
+    with experts.store._connect() as conn:
+        change = dict(conn.execute("SELECT request_id,blocker FROM coordinator_turns WHERE conversation_id=? "
+                                   "AND turn_id LIKE 'change-%'", (cid,)).fetchone())
+    assert change == {"request_id": "", "blocker": "cancelled"}
+    experts.reconcile_once()
+    assert experts._job(job_id)["state"] == "done"
+    assert _results(application, job_id) == ["SYNTHETIC-OLD-ANSWER"]
+
+
+def test_a_stop_that_arrives_just_after_the_job_was_told_leaves_it_done(app, monkeypatch):
+    # Review 5: Stop read the job running; it was told as done before Stop's write. Decided from the state read
+    # inside Stop's lock, it stays done, told once.
+    application, client = app
+    experts = application.state.experts
+    owner, speaker, job_id, cid = _job_answered(application, client)
+    original = experts._job
+    calls = {"n": 0}
+
+    def told_after_the_read(requested):
+        row = original(requested)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            experts.reconcile_once()  # told as done right after Stop's first read
+        return row
+
+    monkeypatch.setattr(experts, "_job", told_after_the_read)
+    experts.stop_job(job_id)
+    monkeypatch.setattr(experts, "_job", original)
+    assert experts._job(job_id)["state"] == "done"
+    assert _results(application, job_id) == ["SYNTHETIC-OLD-ANSWER"]

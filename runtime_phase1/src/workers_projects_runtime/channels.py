@@ -280,11 +280,12 @@ class ChannelService:
     def repair_inbox(self, limit: int = 50) -> int:
         """Finish messages accepted before an interruption whose turn was never saved."""
         settled = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
-        with self.store._connect() as conn:
-            rows = [dict(row) for row in conn.execute(
-                "SELECT i.* FROM channel_inbox i WHERE i.state='accepted' AND i.created_at<? AND i.message_json<>'{}' "
-                "AND NOT EXISTS (SELECT 1 FROM coordinator_turns t WHERE t.conversation_id=i.conversation_id "
-                "AND t.turn_id=i.turn_id) LIMIT ?", (settled, limit))]
+        # Taken in turn, so messages that cannot be repaired for good never hide later ones.
+        rows = self.experts._rotating(
+            "inbox", "position", "SELECT i.rowid AS position,i.* FROM channel_inbox i WHERE i.state='accepted' "
+            "AND i.created_at<? AND i.message_json<>'{}' AND NOT EXISTS (SELECT 1 FROM coordinator_turns t "
+            "WHERE t.conversation_id=i.conversation_id AND t.turn_id=i.turn_id) AND i.rowid>? ORDER BY i.rowid LIMIT ?",
+            (settled,), limit, start=0)
         repaired = 0
         for row in rows:
             try:

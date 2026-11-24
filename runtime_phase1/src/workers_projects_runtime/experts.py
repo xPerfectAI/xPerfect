@@ -161,6 +161,15 @@ def _skill_runtimes(files: list) -> list[str]:
     return allowed
 
 
+def _not_running(state: str) -> str:
+    """Plain words for a change that reached a job no longer running."""
+    if state in {"done", "failed"}:
+        return "The job had already finished, so the change was not applied."
+    if state in {"stopped", "withdrawn"}:
+        return "The job was stopped, so the change was not applied."
+    return "The job has not started yet, so the change was not applied."
+
+
 def reply_text(response_json: str) -> str:
     """The assistant text of one completed conversation turn."""
     if not response_json:
@@ -862,13 +871,22 @@ class ExpertService:
         if action != "change":
             raise ExpertError("Use stop or change", status=422)
         if job["state"] != "running" or not job["job_conversation_id"]:
-            raise ExpertError("Only a running job can be changed")
+            raise ExpertError(_not_running(job["state"]), code="expert_job_not_running")
         if not str(message or "").strip():
             raise ExpertError("Say what should change", status=422)
         turn_id = "change-" + digest([job_id, idempotency_key])[:24]
-        self.coordinator.accept_turn(tenant, owner, job["job_conversation_id"], turn_id,
-                                     "Change from the person, passed on by the speaking assistant:\n\n" + message.strip())
-        self.coordinator.start_turn(tenant, owner, job["job_conversation_id"], turn_id)
+        try:
+            self.coordinator.accept_turn(tenant, owner, job["job_conversation_id"], turn_id,
+                                         "Change from the person, passed on by the speaking assistant:\n\n" + message.strip())
+        except CoordinatorConflict:
+            if self._job(job_id)["state"] == "running":
+                raise
+            raise ExpertError(_not_running(self._job(job_id)["state"]), code="expert_job_not_running") from None
+        started = self.coordinator.start_turn(tenant, owner, job["job_conversation_id"], turn_id)
+        if (started or {}).get("state") == "cancelled":
+            # The job ended after this call first read it: its turn gate cancelled the change, which never runs,
+            # and the Queen is told so in plain words. (A change written first keeps the job running instead.)
+            raise ExpertError(_not_running(self._job(job_id)["state"]), code="expert_job_not_running")
         return self._job_view(self._job(job_id))
 
     def stop_job(self, job_id: str) -> dict:
@@ -878,11 +896,17 @@ class ExpertService:
             return self._job_view(job)
         with self.store._connect() as conn:  # the job, its request and its conversation's fence together
             conn.execute("BEGIN IMMEDIATE")
-            waiting = self._open_requests(conn, "review_id=?", (job["review_id"],))
-            conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job_id))
-            self._withdraw_in(conn, waiting, "The job was stopped.")
-            self._mark_job_conversations_stopped(conn, [job])
-        self._fence_job(job)  # completes the fence now; the coordinator re-drives it if this does not land
+            # Decided from the state read here: a job told as done a moment ago stays done.
+            current = dict(conn.execute("SELECT * FROM expert_jobs WHERE job_id=?", (job_id,)).fetchone())
+            stopping = current["state"] in {"held", "starting", "running"}
+            if stopping:
+                waiting = self._open_requests(conn, "review_id=?", (current["review_id"],))
+                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=? "
+                             "AND state IN ('held','starting','running')", (_now(), job_id))
+                self._withdraw_in(conn, waiting, "The job was stopped.")
+                self._mark_job_conversations_stopped(conn, [current])
+        if stopping:
+            self._fence_job(current)  # completes the fence now; the coordinator re-drives it if this does not land
         return self._job_view(self._job(job_id))
 
     def conversation_stopped_in(self, conn: Any, tenant: str, owner: str, conversation_id: str) -> list[dict]:
@@ -962,23 +986,28 @@ class ExpertService:
         A goal starts only from a coordinator turn or from a dispatch the runtime replays. One the
         coordinator could not start and left (its answer says why) must not keep the job open untold."""
         tenant, owner, cid = job["tenant_id"], job["owner_id"], job["job_conversation_id"]
-        self.coordinator.refresh(tenant, owner, cid, False)
+        self.coordinator.refresh(tenant, owner, cid, False)  # outside any lock: it may write the native state
         with self.store._connect() as conn:
             conn.execute("BEGIN")  # one read: a goal started meanwhile is seen together with its turn
-            row = conn.execute("SELECT turn_id,response_json,blocker FROM coordinator_turns WHERE conversation_id=? "
-                               "ORDER BY created_at DESC,turn_id DESC LIMIT 1", (cid,)).fetchone()
-            goals = [dict(goal) for goal in conn.execute(
-                "SELECT g.run_id,g.dispatch_json<>'' AS dispatched,g.blocker,g.intent_state,"
-                "(g.restore_hold OR c.restore_hold) AS held,r.state AS run_state FROM coordinator_goals g "
-                "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
-                "LEFT JOIN runs r ON r.run_id=g.run_id WHERE g.conversation_id=?", (cid,))]
-            waiting = conn.execute("SELECT 1 FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' LIMIT 1",
-                                   (cid,)).fetchone()
-            # A turn still waiting to be answered that can still run (queued, running, or retrying a
-            # temporary refusal); one refused for good can no longer change the job.
-            pending = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND response_json='' "
-                                   f"AND (restore_hold=1 OR request_id<>'' AND blocker='' OR ({_RUNNABLE_TURN})) LIMIT 1",
-                                   (cid,)).fetchone()
+            return self._judge_finished(conn, cid)
+
+    def _judge_finished(self, conn: Any, cid: str) -> tuple[bool, str, str]:
+        """What a job's end rests on, read on ``conn``: the newest turn, every goal, waiting results and any
+        turn that can still run. A first look outside the lock, and the read that tells it, inside one."""
+        row = conn.execute("SELECT turn_id,response_json,blocker FROM coordinator_turns WHERE conversation_id=? "
+                           "ORDER BY created_at DESC,turn_id DESC LIMIT 1", (cid,)).fetchone()
+        goals = [dict(goal) for goal in conn.execute(
+            "SELECT g.run_id,g.dispatch_json<>'' AS dispatched,g.blocker,g.intent_state,"
+            "(g.restore_hold OR c.restore_hold) AS held,r.state AS run_state FROM coordinator_goals g "
+            "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+            "LEFT JOIN runs r ON r.run_id=g.run_id WHERE g.conversation_id=?", (cid,))]
+        waiting = conn.execute("SELECT 1 FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' LIMIT 1",
+                               (cid,)).fetchone()
+        # A turn still waiting to be answered that can still run (queued, running, or retrying a
+        # temporary refusal); one refused for good can no longer change the job.
+        pending = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND response_json='' "
+                               f"AND (restore_hold=1 OR request_id<>'' AND blocker='' OR ({_RUNNABLE_TURN})) LIMIT 1",
+                               (cid,)).fetchone()
         if row is None:
             return False, "", ""
         latest = dict(row)
@@ -995,13 +1024,21 @@ class ExpertService:
         return False, "", ""
 
     def _publish(self, job: dict, state: str, text: str, *, from_state: str = "running") -> None:
-        """Write the job's final answer once onto the Queen's conversation and wake her."""
+        """Write the job's final answer once onto the Queen's conversation and wake her.
+
+        Telling a running job judges its end again under the same write lock, and what is told comes from
+        that read: a change written since the first look keeps the job running, and its later answer is told
+        instead. The "could not start" exits (from "starting") have no answered turn to judge: told as they are."""
         tenant, owner = job["tenant_id"], job["owner_id"]
-        payload = {"kind": "expert_job_result", "job_id": job["job_id"], "goal": job["goal"], "state": state,
-                   "result": {"output_text": text[:12000], "total_chars": len(text),
-                              "sha256": hashlib.sha256(text.encode()).hexdigest()}}
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if from_state == "running":
+                finished, state, text = self._judge_finished(conn, job["job_conversation_id"])
+                if not finished:
+                    return
+            payload = {"kind": "expert_job_result", "job_id": job["job_id"], "goal": job["goal"], "state": state,
+                       "result": {"output_text": text[:12000], "total_chars": len(text),
+                                  "sha256": hashlib.sha256(text.encode()).hexdigest()}}
             changed = conn.execute("UPDATE expert_jobs SET state=?,result_text=?,updated_at=? WHERE job_id=? AND state=?",
                                    (state, text, _now(), job["job_id"], from_state)).rowcount
             if changed:
@@ -1383,13 +1420,13 @@ class ExpertService:
         return turn_id
 
     # ---------------------------------------------------------------- maintenance
-    def _rotating(self, name: str, key: str, sql: str, params: tuple, limit: int) -> list[dict]:
+    def _rotating(self, name: str, key: str, sql: str, params: tuple, limit: int, start: Any = "") -> list[dict]:
         """The rows of one maintenance pass, taken from where its last pass stopped and wrapping around, so
         rows that stay (a job still running, a copy still restored) never hide later ones for good."""
-        after = self._cursors.get(name, "")
+        after = self._cursors.get(name, start)
         with self.store._connect() as conn:
             rows = [dict(row) for row in conn.execute(sql, (*params, after, limit))]
-        self._cursors[name] = rows[-1][key] if len(rows) >= limit else ""
+        self._cursors[name] = rows[-1][key] if len(rows) >= limit else start
         return rows
 
     def reconcile_once(self, limit: int = 100) -> list[dict]:
