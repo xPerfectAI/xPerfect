@@ -418,12 +418,22 @@ class TeamsSetup:
                                 "--teams-managed", "--env", str(path), timeout=600)
             if path.exists():
                 path.chmod(0o600)
+            # The tool's manifest offers the bot in personal chats, teams and group chats; the Expert answers only in
+            # personal chats, so Teams is told the same. The app exists now: a failure here is said on the card, never
+            # retried by making another app.
+            scopes = "personal,team,groupChat"
+            if created.get("teamsAppId"):
+                try:
+                    self._run("app", "update", str(created["teamsAppId"]), "--scopes", "personal", timeout=120)
+                    scopes = "personal"
+                except ExpertError:
+                    pass
             settings = {"app_id": created.get("botId", ""), "teams_app_id": created.get("teamsAppId", ""),
                         "app_name": created.get("appName", expert["name"]), "account": account,
                         "connected_by": str(status.get("userObjectId") or ""),
                         "tenant_id": str(status.get("tenantId") or ""),
                         "mode": "socket" if created.get("socketMode") else "http",
-                        "install_link": created.get("installLink", "")}
+                        "install_link": created.get("installLink", ""), "scopes": scopes}
             self.channels.record_setup(tenant, owner, binding_id, settings)
             # The signed-in owner is the first person who may message the Expert.
             people = self.channels.view(self.channels._binding(binding_id))["people"]

@@ -331,6 +331,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
         // Which Microsoft account and organisation the app was made in, as Microsoft reported them.
+        if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats.'));
         if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
         else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again.`));

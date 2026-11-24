@@ -349,3 +349,10 @@ def test_an_already_signed_in_connect_names_the_account_on_its_one_press():
     assert 'choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account"))}' in server
     assert '.expert-other-account{' in (STATIC / 'experts.css').read_text()
 
+
+
+def test_a_teams_app_still_offered_beyond_personal_chats_says_so():
+    # Hurdle 14: if narrowing the app to personal chats failed, the card says it plainly.
+    source = (STATIC / 'experts.js').read_text()
+    assert "if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(" in source
+    assert "Teams still offers this app in teams and group chats; it answers only in personal chats." in source

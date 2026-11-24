@@ -2601,3 +2601,36 @@ def test_a_blocked_channel_makes_its_app_only_as_the_account_it_was_refused_for(
     named = client.post(f"/v1/channels/{binding_id}/connect", json={"as_account": "Synthetic Account B"}).json()
     run_background()  # pressed again, naming the account signed in now: made there, once
     assert named["step"] == "creating" and creations() == 1
+
+
+def test_the_teams_app_is_offered_in_personal_chats_only(app, monkeypatch, tmp_path):
+    # Hurdle 14: Microsoft's tool makes the bot for personal chats, teams and group chats; the Expert answers only in
+    # personal chats. Right after it is made, the app is narrowed to personal; a failure there is said on the card,
+    # and the app is never made a second time.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    setup = application.state.channels.setup
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    for refuse_update in (False, True):
+        expert = create_expert(client, instructions=f"Synthetic instructions {refuse_update}.")
+        channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+        binding_id = channel["binding_id"]
+        owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+        calls = []
+
+        def teams_cli(*args, timeout=300):
+            calls.append(args)
+            if args[0] == "status":
+                return {"loggedIn": True, "username": "Synthetic Owner", "tenantId": "tenant-synthetic",
+                        "userObjectId": "person-synthetic-a", "tdp": {"sideloading": {"tenant": True, "user": True}}}
+            if args[:2] == ("app", "update") and refuse_update:
+                raise ExpertError("Microsoft Teams setup stopped: synthetic refusal", code="channel_setup_failed")
+            return {"botId": "bot-synthetic", "teamsAppId": "teams-app-synthetic", "socketMode": True}
+
+        monkeypatch.setattr(setup, "_run", teams_cli)
+        setup._create("local", owner, binding_id)
+        assert ("app", "update", "teams-app-synthetic", "--scopes", "personal") in calls
+        assert sum(1 for args in calls if args[:2] == ("app", "create")) == 1  # never made twice
+        shown = client.get(f"/v1/channels/{binding_id}/connect").json()
+        assert shown["step"] == "connected"
+        assert shown["channel"]["app"]["scopes"] == ("personal,team,groupChat" if refuse_update else "personal")
