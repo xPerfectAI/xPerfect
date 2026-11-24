@@ -723,6 +723,16 @@ def test_the_skills_chosen_on_an_expert_travel_with_its_jobs_claude_workers(app)
     assert carried["claude-code"] == [{"name": "synthetic-brief", "files": [
         {"path": "SKILL.md", "content": "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nWrite it.\n"}]}]
     assert carried["codex-cli"] is None  # a Claude Skill is not offered to Codex
+    both = client.post("/v1/personal-library", json={
+        "name": "synthetic-both", "kind": "skill", "description": "For both AIs.", "profiles": ["claude-code", "codex-cli"],
+        "files": [{"path": ".claude/skills/synthetic-both/SKILL.md", "content": "---\nname: synthetic-both\ndescription: Both\n---\nDo it.\n"}],
+        "idempotency_key": "synthetic-both-skill"}).json()
+    created2 = client.post("/v1/experts", json={"name": "Synthetic Expert Two", "description": "Two AIs.", "expert": SPEC,
+                                                "personal_library_refs": [{"item_id": both["item_id"], "version_id": both["version_id"]}]}).json()
+    template2 = experts.resolve("local", owner, created2["template_id"])
+    config2 = experts._job_config("local", owner, template2, ExpertBinding(lineage_id=template2["lineage_id"], role="job"))
+    assert {route.profile: [s["name"] for s in route.bootstrap_bundle.get("expert_skills") or []] for route in config2.routes} == {
+        "claude-code": ["synthetic-both"], "codex-cli": ["synthetic-both"]}
     # A dispatched Worker's clean-room checks accept the typed list (nothing is placed under .claude/).
     bundle = dict(next(route.bootstrap_bundle for route in config.routes if route.profile == "claude-code"))
     _validate_parallel_clean_room_files(bundle)

@@ -211,3 +211,43 @@ def test_an_experts_skill_follows_the_same_policy_gate(selected_skill):
                                                   "claude_settings_local": bundle["claude_settings_local"]})
     command, _ = runtime._build_command(worker, "Write the brief.", info)
     assert "--plugin-dir" not in command
+
+
+def test_an_experts_skill_reaches_a_codex_worker_in_its_own_agents_folder(tmp_path):
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    runtime = object.__new__(HostCodexCliRuntime)
+    home = tmp_path / "worker-home"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    skills = home / ".agents" / "skills"
+    skills.mkdir(parents=True)
+    owner_catalog = tmp_path / "owner-codex-skills"
+    owner_catalog.mkdir()
+    (skills / "native-codex").symlink_to(owner_catalog, target_is_directory=True)
+    (skills / "unrelated").mkdir()
+    runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [SYNTHETIC_EXPERT_SKILL]})
+    folder = skills / "synthetic-brief"
+    assert folder.is_dir() and not folder.is_symlink()
+    assert (folder / "references/style.md").read_text() == "Exact supporting text.\n"
+    assert not any(owner_catalog.iterdir())  # nothing written through the owner's Skills link
+    # The next launch replaces only what this step created.
+    other = {"name": "synthetic-other", "files": [{"path": "SKILL.md", "content": "---\nname: synthetic-other\n---\nOther.\n"}]}
+    runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [other]})
+    assert not folder.exists() and (skills / "synthetic-other" / "SKILL.md").exists()
+    assert (skills / "unrelated").is_dir() and (skills / "native-codex").is_symlink()
+    # A name already used by something this step did not create is refused.
+    with pytest.raises(RuntimeErrorBase):
+        runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [{**other, "name": "unrelated"}]})
+
+
+def test_a_linked_agents_folder_is_refused(tmp_path):
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    runtime = object.__new__(HostCodexCliRuntime)
+    home = tmp_path / "worker-home"
+    (home / ".codex").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (home / ".agents").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(RuntimeErrorBase):
+        runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": [SYNTHETIC_EXPERT_SKILL]})
+    assert not any(elsewhere.iterdir())

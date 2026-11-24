@@ -1447,6 +1447,34 @@ _CLAUDE_PLUGIN_COMPONENTS = frozenset({".claude-plugin", "skills", "commands", "
 _EXPERT_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 
+def _expert_skill_files(skill: object) -> tuple[str, dict[Path, bytes]]:
+    """One Skill chosen on an Expert: its folder name and exact text files, or an error."""
+    name = str(skill.get("name") or "") if isinstance(skill, dict) else ""
+    if not _EXPERT_SKILL_NAME.fullmatch(name):
+        raise RuntimeErrorBase("An Expert's Skill has an invalid name")
+    files: dict[Path, bytes] = {}
+    for entry in skill.get("files") or []:
+        relative = Path(str((entry or {}).get("path") or "")) if isinstance(entry, dict) else Path()
+        if (not relative.parts or relative.is_absolute() or ".." in relative.parts
+                or not isinstance(entry.get("content"), str)):
+            raise RuntimeErrorBase("An Expert's Skill files must be text inside its folder")
+        files[relative] = entry["content"].encode("utf-8")
+    if Path("SKILL.md") not in files:
+        raise RuntimeErrorBase("An Expert's Skill needs its SKILL.md")
+    if any(path.parts[0].casefold() in _CLAUDE_PLUGIN_COMPONENTS and not _codex_skill_metadata(path)
+           for path in files):
+        raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
+    return name, files
+
+
+def _write_expert_skill(target: Path, files: dict[Path, bytes]) -> None:
+    for relative, content in files.items():
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(content)
+        path.chmod(0o600)
+
+
 def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
     """The same native skill policy governs admission receipts and actual launch."""
     if execution_mode != "host":
@@ -12545,6 +12573,38 @@ raise SystemExit(exit_code)
             target_codex_home / "plugins" / "cache",
         )
 
+    def _project_host_codex_expert_skills(self, target_codex_home: Path, bundle: dict) -> None:
+        """The Skills an owner chose for an Expert, as real folders in this Worker's own
+        HOME/.agents/skills (which Codex reads natively). Never inside CODEX_HOME/skills, whose
+        entries link to the owner's own Skills. Only folders this step created are replaced."""
+        skills_root = target_codex_home.parent / ".agents" / "skills"
+        manifest = skills_root / ".expert-skills.json"
+        declared = bundle.get("expert_skills") or []
+        if not isinstance(declared, list):
+            raise RuntimeErrorBase("An Expert's Skills must be a list")
+        chosen = [_expert_skill_files(skill) for skill in declared]
+        if not chosen and not manifest.exists():
+            return
+        for directory in (target_codex_home.parent / ".agents", skills_root):
+            if directory.is_symlink():
+                raise RuntimeErrorBase("An Expert's Skill folder must not be a link")
+            directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            earlier = json.loads(manifest.read_text()) if manifest.exists() else []
+        except (OSError, ValueError):
+            earlier = []
+        for name in earlier if isinstance(earlier, list) else []:
+            target = skills_root / str(name)
+            if _EXPERT_SKILL_NAME.fullmatch(str(name)) and target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+        for name, files in chosen:
+            target = skills_root / name
+            if target.exists() or target.is_symlink():
+                raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
+            _write_expert_skill(target, files)
+        manifest.write_text(json.dumps([name for name, _ in chosen]))
+        manifest.chmod(0o600)
+
     def _host_codex_skill_alias(self, target_codex_home: Path, *, create=False) -> Path | None:
         home = target_codex_home.parent
         for directory in (home, home / ".agents", home / ".agents" / "skills"):
@@ -13058,6 +13118,7 @@ raise SystemExit(exit_code)
                 codex_target.chmod(0o600)
                 if not _native_tools_disabled(bundle):
                     self._project_host_codex_capability_roots(codex_home)
+                    self._project_host_codex_expert_skills(codex_home, bundle)
                 else:
                     self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
@@ -13088,6 +13149,7 @@ raise SystemExit(exit_code)
                 config_path.chmod(0o600)
                 if not _native_tools_disabled(bundle):
                     self._project_host_codex_capability_roots(codex_home)
+                    self._project_host_codex_expert_skills(codex_home, bundle)
                 else:
                     self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
@@ -17194,28 +17256,9 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             shutil.rmtree(root)
         selected = []
         for skill in declared:
-            name = str((skill or {}).get("name") or "") if isinstance(skill, dict) else ""
-            if not _EXPERT_SKILL_NAME.fullmatch(name):
-                raise RuntimeErrorBase("An Expert's Skill has an invalid name")
-            files: dict[Path, bytes] = {}
-            for entry in skill.get("files") or []:
-                relative = Path(str((entry or {}).get("path") or "")) if isinstance(entry, dict) else Path()
-                if (not relative.parts or relative.is_absolute() or ".." in relative.parts
-                        or not isinstance(entry.get("content"), str)):
-                    raise RuntimeErrorBase("An Expert's Skill files must be text inside its folder")
-                files[relative] = entry["content"].encode("utf-8")
-            if Path("SKILL.md") not in files:
-                raise RuntimeErrorBase("An Expert's Skill needs its SKILL.md")
-            if any(path.parts[0].casefold() in _CLAUDE_PLUGIN_COMPONENTS and not _codex_skill_metadata(path)
-                   for path in files):
-                raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
-            target = root / name
-            for relative, content in files.items():
-                path = target / relative
-                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                path.write_bytes(content)
-                path.chmod(0o600)
-            selected.append(target)
+            name, files = _expert_skill_files(skill)
+            _write_expert_skill(root / name, files)
+            selected.append(root / name)
         return selected
 
     def _declared_skill_plugin_directories(self, bundle: dict, workspace: Path) -> list[Path]:
