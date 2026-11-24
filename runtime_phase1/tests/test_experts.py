@@ -77,6 +77,7 @@ def finish_turn(application, conversation_id, turn_id, text):
 
 def test_spec_rules():
     assert default_spec().team.talk.effort == "low"
+    assert default_spec().team.talk.model == "claude-code:haiku"  # the measured faster talker
     with pytest.raises(ValueError):
         ExpertTeam(talk=ExpertRole(profile="grok-build"), coordinate=ExpertRole(profile="codex-cli"), work=["codex-cli"])
     with pytest.raises(ValueError):

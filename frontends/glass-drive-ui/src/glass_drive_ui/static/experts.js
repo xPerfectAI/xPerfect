@@ -11,7 +11,7 @@ const ASK = {
 };
 export const DEFAULT_EXPERT = {
   instructions: '', ask_me_first: 'auto', workspace: { kind: 'host', access: 'full' },
-  team: { talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: '' },
+  team: { talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: 'claude-code:haiku' },
           coordinate: { profile: 'codex-cli', account_id: '', backup: null, effort: '' },
           work: ['claude-code', 'codex-cli'] },
 };

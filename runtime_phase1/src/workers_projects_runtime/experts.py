@@ -93,7 +93,9 @@ class ExpertSpec(StrictModel):
 
 
 def default_spec(profile: str = "claude-code") -> ExpertSpec:
-    return ExpertSpec(team=ExpertTeam(talk=ExpertRole(profile="claude-code", effort="low"),
+    # New Experts talk on Claude Haiku: it judged as well as Opus in the build's checks and answers
+    # in about 2.7 s; Opus stays selectable, and a saved Expert keeps the model it was saved with.
+    return ExpertSpec(team=ExpertTeam(talk=ExpertRole(profile="claude-code", effort="low", model="claude-code:haiku"),
                                       coordinate=ExpertRole(profile=profile if profile in PROFILES else "codex-cli"),
                                       work=[profile if profile in PROFILES else "codex-cli"]))
 

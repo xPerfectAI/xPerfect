@@ -27,6 +27,8 @@ def test_who_talks_offers_each_ais_faster_model_beside_its_usual_one():
              "assert.deepEqual(MODELS['claude-code'].map(m => m[2]), ['claude-code:opus', 'claude-code:haiku']);\n"
              "assert.deepEqual(MODELS['codex-cli'].map(m => m[2]), ['codex-cli:native-default', 'codex-cli:gpt-6.2-sol']);\n"
              "for (const list of Object.values(MODELS)) assert.equal(list[0][0], '');\n")
+    # New Experts talk on the faster model; Opus stays one choice away.
+    assert "talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: 'claude-code:haiku' }" in source
 
 
 def test_needs_you_pops_up_on_every_page_including_the_worker_viewers():
