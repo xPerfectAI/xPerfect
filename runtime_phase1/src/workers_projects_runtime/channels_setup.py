@@ -51,6 +51,7 @@ def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 _SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try again."
 _RESTART_FIRST_WAIT_S = 5.0
 _RESTART_MAX_WAIT_S = 300.0
+_RECHECK_S = 120.0  # while Teams does not allow the app, Microsoft's report is read again this often
 
 
 def _find(value: Any, key: str) -> Any:
@@ -77,8 +78,25 @@ def _custom_apps_blocked(status: dict, name: str) -> str:
     return (f"Teams does not yet let the account you signed in with add custom apps, so {name} cannot be installed. "
             "An administrator turns on two switches in the Teams admin center: \"Upload custom apps\" in an app setup "
             "policy (Teams apps → Setup policies; a new policy can give it to this one person only) and \"Let users "
-            "interact with custom apps in preview\" (Teams apps → Manage apps → Org-wide app settings). Microsoft "
-            f"reports that {off} off. Then press Connect again.")
+            "interact with custom apps in preview\" (Teams apps → Manage apps → Actions → Org-wide app settings). "
+            f"Microsoft reports that {off} off. This page checks again by itself every two minutes.")
+
+
+def _note_for_admin(status: dict, name: str) -> str:
+    """A short note the person can send to their administrator: only the switches Microsoft reports off."""
+    sideloading = _find(status, "sideloading")
+    sideloading = sideloading if isinstance(sideloading, dict) else {}
+    asks = []
+    if sideloading.get("user") is False:
+        asks.append("Teams apps → Setup policies: turn on \"Upload custom apps\" in an app setup policy assigned to "
+                    "my account. A new policy assigned to me alone changes nothing for anyone else.")
+    if sideloading.get("tenant") is False:
+        asks.append("Teams apps → Manage apps → Actions → Org-wide app settings → Custom apps: turn on \"Let users "
+                    "interact with custom apps in preview\".")
+    steps = "\n".join(f"{number}. {ask}" for number, ask in enumerate(asks, 1))
+    account = str(status.get("username") or "").strip()
+    return (f"Hello, could you let me add a Teams app I set up for myself, {name}? In the Teams admin center:\n{steps}\n"
+            + (f"My account: {account}.\n" if account else "") + "Microsoft can take a while to apply it. Thank you!")
 
 
 class TeamsSetup:
@@ -144,7 +162,8 @@ class TeamsSetup:
             ok = session["process"].returncode == 0
             session = {**session, "step": "creating" if ok else "error", **({} if ok else {"error": _SIGN_IN_UNFINISHED})}
         # A code is shown only while it can still be used.
-        keys = ("step", "url", "code", "error") if session.get("step") == "sign_in" else ("step", "error")
+        keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note")}.get(
+            session.get("step"), ("step", "error"))
         public = {key: session[key] for key in keys if key in session}
         return {**public, "channel": self.channels.view(self.channels._binding(binding_id))}
 
@@ -153,8 +172,7 @@ class TeamsSetup:
         if binding["kind"] != "teams":
             raise ExpertError("This channel is not available yet", code="channel_kind_unavailable")
         with self._lock:
-            current = self._sessions.get(binding_id)
-            pending = bool(current and current.get("step") in {"sign_in", "creating"})
+            pending = self._pending(binding_id)
         if pending:  # a second press shows the sign-in already under way (status takes the lock itself)
             return self.status(tenant, owner, binding_id)
         signed_in = False
@@ -163,9 +181,12 @@ class TeamsSetup:
         except ExpertError:
             signed_in = False
         if signed_in:
-            with self._lock:
-                self._sessions[binding_id] = {"step": "creating"}
-            threading.Thread(target=self._create, args=(tenant, owner, binding_id), daemon=True).start()
+            with self._lock:  # claimed here, so a check that began meanwhile and this press never both create
+                start = not self._pending(binding_id)
+                if start:
+                    self._sessions[binding_id] = {"step": "creating"}
+            if start:
+                self._in_background(self._create, tenant, owner, binding_id)
             return self.status(tenant, owner, binding_id)
         process = subprocess.Popen([*self._cli(), "login", "--device-code", "--disable-auto-update"],
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -191,6 +212,28 @@ class TeamsSetup:
         threading.Thread(target=self._finish_sign_in, args=(tenant, owner, binding_id, process), daemon=True).start()
         return self.status(tenant, owner, binding_id)
 
+    def _pending(self, binding_id: str) -> bool:
+        """Under the lock: a sign-in, an app creation or a check of Microsoft's report is under way."""
+        current = self._sessions.get(binding_id) or {}
+        return current.get("step") in {"sign_in", "creating"} or bool(current.get("checking"))
+
+    @staticmethod
+    def _in_background(target: Any, *args: Any) -> None:
+        threading.Thread(target=target, args=args, daemon=True).start()
+
+    def _recheck_due(self) -> None:
+        """While Teams does not allow the app, read Microsoft's report again every two minutes; Connect goes on by
+        itself once it does. One check at a time per channel, claimed under the lock."""
+        due = []
+        with self._lock:
+            for binding_id, session in self._sessions.items():
+                if session.get("step") == "blocked" and not session.get("checking") \
+                        and session.get("check_at", 0.0) <= self._clock():
+                    self._sessions[binding_id] = {**session, "checking": True}
+                    due.append((session["tenant"], session["owner"], binding_id))
+        for tenant, owner, binding_id in due:
+            self._in_background(self._create, tenant, owner, binding_id)
+
     def _finish_sign_in(self, tenant: str, owner: str, binding_id: str, process: Any) -> None:
         """The one place a sign-in moves on: once its process ends, the step changes in one lock section and
         the app is created once, or the error is shown. A newer Connect that replaced this sign-in wins."""
@@ -210,12 +253,25 @@ class TeamsSetup:
         try:
             binding = self.channels._binding(binding_id, tenant, owner)
             expert = self.channels.experts.latest(tenant, owner, binding["lineage_id"])
-            status = self._run("status", timeout=60)
+            try:
+                status = self._run("status", timeout=60)
+            except Exception:
+                with self._lock:
+                    session = self._sessions.get(binding_id) or {}
+                    if session.get("checking"):  # a check that could not read the report: nothing exists yet, so
+                        self._sessions[binding_id] = {**session, "checking": False,  # it is simply tried again later
+                                                      "check_at": self._clock() + _RECHECK_S}
+                        return
+                raise
             blocked = _custom_apps_blocked(status, expert["name"])
             if blocked:
-                # Nothing is created that Teams would not let this account install; the page says why, plainly.
+                # Nothing is created that Teams would not let this account install; the page says why, plainly,
+                # with a note for the administrator, and maintenance reads Microsoft's report again by itself.
                 with self._lock:
-                    self._sessions[binding_id] = {"step": "error", "error": blocked}
+                    self._sessions[binding_id] = {"step": "blocked", "error": blocked,
+                                                  "note": _note_for_admin(status, expert["name"]),
+                                                  "tenant": tenant, "owner": owner,
+                                                  "check_at": self._clock() + _RECHECK_S}
                 return
             path = self.credentials_path(binding_id)
             created = self._run("app", "create", "--name", expert["name"][:30], "--messaging-mode", "socket",
@@ -332,6 +388,7 @@ class TeamsSetup:
 
     def reconcile_once(self) -> list[dict]:
         outcomes = []
+        self._recheck_due()
         with self.channels.store._connect() as conn:
             ids = [row[0] for row in conn.execute("SELECT binding_id FROM channel_bindings WHERE kind='teams'")]
         for binding_id in ids:

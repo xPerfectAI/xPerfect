@@ -2115,14 +2115,16 @@ def test_reading_the_connect_status_never_starts_the_app_creation_and_a_finished
 def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_apps(app, monkeypatch, tmp_path):
     # Found in the real Teams test: the app was created, then Teams showed a disabled "Add" button. Connect now reads
     # Microsoft's own report first (the Teams CLI's status) and, when custom apps are off for this account, creates
-    # nothing and names the switches in one plain line; once allowed, Connect creates the app.
+    # nothing, names the switches in one plain line, offers a note for the administrator, and reads the report
+    # again by itself every two minutes; once allowed, Connect goes on and creates the app, once.
     application, client = app
     monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
     expert = create_expert(client)
     channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
-    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", channel["binding_id"])
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
     setup = application.state.channels.setup
-    calls, report = [], {"tenant": True, "user": False}
+    calls, report, clock, background = [], {"tenant": True, "user": False}, [1000.0], []
 
     def teams_cli(*args, timeout=300):
         calls.append(args)
@@ -2133,17 +2135,51 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
                 "installLink": "https://teams.invalid/install"}
 
     monkeypatch.setattr(setup, "_run", teams_cli)
-    monkeypatch.setattr(setup, "ensure_package", lambda binding_id: "started")
-    setup._create("local", owner, channel["binding_id"])
-    status = client.get(f"/v1/channels/{channel['binding_id']}/connect").json()
-    assert status["step"] == "error"
-    for words in ("Upload custom apps", "Let users interact with custom apps in preview", "this one person only", "Connect again"):
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    setup._clock = lambda: clock[0]
+
+    def creations():
+        return sum(1 for args in calls if args[:2] == ("app", "create"))
+
+    def run_background():
+        while background:
+            target, args = background.pop(0)
+            target(*args)
+
+    setup._create("local", owner, binding_id)
+    status = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert status["step"] == "blocked" and creations() == 0
+    for words in ("Upload custom apps", "Let users interact with custom apps in preview", "this one person only",
+                  "checks again by itself"):
         assert words in status["error"]
-    assert not any(args[:2] == ("app", "create") for args in calls)
+    # The note asks only for what Microsoft reports off, for this account.
+    assert "Upload custom apps" in status["note"] and "Synthetic Owner" in status["note"]
+    assert "Let users interact" not in status["note"]
+    statuses = sum(1 for args in calls if args[0] == "status")
+    clock[0] = 1000 + 119
+    setup.reconcile_once()
+    assert background == []  # not before two minutes
+    clock[0] = 1000 + 121
+    setup.reconcile_once()
+    assert len(background) == 1
+    setup.reconcile_once()
+    assert len(background) == 1  # one check at a time
+    # A press while that check is claimed starts no second creation.
+    assert client.post(f"/v1/channels/{binding_id}/connect", json={}).json()["step"] == "blocked"
+    assert len(background) == 1
+    run_background()  # still not allowed: blocked again, the next check two minutes later
+    assert sum(1 for args in calls if args[0] == "status") > statuses and creations() == 0
+    assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "blocked"
     report["user"] = True  # the administrator turned it on
-    setup._create("local", owner, channel["binding_id"])
-    assert any(args[:2] == ("app", "create") for args in calls)
-    assert client.get(f"/v1/channels/{channel['binding_id']}/connect").json()["step"] == "connected"
+    clock[0] += 121
+    setup.reconcile_once()
+    run_background()
+    assert creations() == 1
+    assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "connected"
+    setup.reconcile_once()
+    run_background()
+    assert creations() == 1  # created once
 
 
 def test_a_channel_is_connecting_until_microsofts_socket_holds_and_a_lasting_refusal_is_said_once(app):
@@ -2234,3 +2270,32 @@ def test_maintenance_restarts_back_off_while_the_package_never_holds_and_the_own
             clock[0] += 5
         waited.append(clock[0] - start)
     assert waited == [5, 10, 20, 40, 80, 160, 300, 300, 300]
+
+
+def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_asks_only_for_what_is_off(
+        app, monkeypatch, tmp_path):
+    from workers_projects_runtime.channels_setup import _note_for_admin
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    setup._clock = lambda: 5000.0
+    setup._sessions[binding_id] = {"step": "blocked", "error": "blocked", "note": "note", "tenant": "local",
+                                   "owner": owner, "check_at": 4000.0, "checking": True}
+
+    def unreachable(*args, timeout=300):
+        raise ExpertError("Microsoft Teams setup stopped: synthetic network failure", code="channel_setup_failed")
+
+    monkeypatch.setattr(setup, "_run", unreachable)
+    setup._create("local", owner, binding_id)
+    session = setup._sessions[binding_id]
+    assert session["step"] == "blocked" and not session["checking"] and session["check_at"] == 5000.0 + 120
+    both = {"tdp": {"sideloading": {"tenant": False, "user": False}}}
+    note = _note_for_admin(both, "Synthetic Expert")
+    assert "1. Teams apps → Setup policies" in note and "2. Teams apps → Manage apps → Actions" in note
+    assert "My account" not in note  # no account reported, none invented
+    assert "Upload custom apps" not in _note_for_admin({"tdp": {"sideloading": {"tenant": False, "user": True}}}, "X")

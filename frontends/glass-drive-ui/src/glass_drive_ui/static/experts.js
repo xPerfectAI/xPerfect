@@ -242,6 +242,15 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
     }
     if (step.step === 'creating') { status.textContent = 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
+    if (step.step === 'blocked') {
+      // Teams does not allow the app yet: the one thing to ask, a note to send, and the page goes on by itself.
+      const note = node('p', 'expert-hint', step.note || ''); note.style.whiteSpace = 'pre-line';
+      const copy = node('button', 'secondary-button', 'Copy a note for your administrator'); copy.type = 'button';
+      copy.onclick = async () => { try { await navigator.clipboard.writeText(step.note || ''); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the note below'; } };
+      const now = node('button', 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
+      box.append(copy, now, note);
+      status.textContent = step.error || ''; timer = setTimeout(() => poll(channel), 10000); return;
+    }
     if (step.step === 'error') {
       const again = node('button', 'primary-button', 'Connect again'); again.type = 'button'; again.onclick = () => connect(channel);
       box.append(again); status.textContent = step.error || 'Setup stopped. Press Connect to try again.'; return;
