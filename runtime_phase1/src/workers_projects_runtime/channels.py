@@ -89,6 +89,8 @@ class ChannelService:
             execute_schema_script(conn, _SCHEMA)
             record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
         experts.deliveries = self
+        from .channels_setup import TeamsSetup
+        self.setup = TeamsSetup(self)
 
     # ---------------------------------------------------------------- bindings (owner)
     def _binding(self, binding_id: str, tenant: str | None = None, owner: str | None = None) -> dict:
@@ -160,6 +162,7 @@ class ChannelService:
             with self.store._connect() as conn:
                 conn.execute(f"UPDATE channel_bindings SET {assignments} WHERE binding_id=?", (*updates.values(), binding_id))
             if updates.get("state") == "off":
+                self.setup.stop(binding_id)
                 # Off means off: nothing more is sent. Accepted work stays visible to the owner.
                 with self.store._connect() as conn:
                     conn.execute("UPDATE channel_deliveries SET state='dropped',error='The channel was turned off',"
@@ -347,4 +350,5 @@ class ChannelService:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
             self.experts.tell_checking(speaker, review)
             outcomes.append({"turn_id": row["turn_id"], "delivery": "held", "review_id": review["review_id"]})
+        outcomes.extend(self.setup.reconcile_once())
         return outcomes

@@ -153,6 +153,14 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
     def update_channel(binding_id: str, payload: ChannelUpdateInput, request: Request):
         return invoke(channels.update, *owner(request), binding_id, people=payload.people, state=payload.state)
 
+    @app.post("/v1/channels/{binding_id}/connect")
+    def connect(binding_id: str, request: Request):
+        return invoke(channels.setup.connect, *owner(request), binding_id)
+
+    @app.get("/v1/channels/{binding_id}/connect")
+    def connect_status(binding_id: str, request: Request):
+        return invoke(channels.setup.status, *owner(request), binding_id)
+
     @app.post("/v1/channels/{binding_id}/setup")
     def record_setup(binding_id: str, payload: ChannelSetupInput, request: Request):
         return invoke(channels.record_setup, *owner(request), binding_id, payload.settings)
