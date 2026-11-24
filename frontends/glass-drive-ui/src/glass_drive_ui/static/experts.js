@@ -328,6 +328,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const waiting = step.step === 'admin_waiting';
       const now = node('button', step.admin ? 'secondary-button' : 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
       if (step.admin) box.append(...adminRoute(channel, true));
+      else box.append(node('p', 'expert-hint', 'One press for a Teams administrator is not available on this xPerfect yet: it needs a Microsoft sign-in for administrators, which the owner of this xPerfect sets up. Meanwhile, send the note to your administrator.'));
       if (step.note) {  // no note while Microsoft is still applying a change already made
         const note = node('p', 'expert-hint', step.note); note.style.whiteSpace = 'pre-line';
         const copy = node('button', 'secondary-button', 'Copy a note for your administrator'); copy.type = 'button';
