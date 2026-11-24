@@ -337,13 +337,17 @@ CREATE TABLE IF NOT EXISTS coordinator_events (
 
 _UNSETTLED_TURN = "restore_hold=0 AND response_json=''"
 _RESULT_STATES = "'completed','failed','cancelled','interrupted'"
-_READY_TURN = """request_id='' AND (
- blocker='' OR (origin='worker_results' AND blocker IN ('host_capacity','provider_account_busy')
+# Turns not yet started that the background pass starts: both rules come from one list of retried
+# blockers, with and without the clock, so they cannot drift apart.
+_RESULT_RETRY_CODES = "'host_capacity','provider_account_busy'"
+_RETRY_CODES = ",".join(f"'{code}'" for code in sorted(_RETRYABLE_ADMISSION_CODES))
+_READY_TURN = f"""request_id='' AND (
+ blocker='' OR (origin='worker_results' AND blocker IN ({_RESULT_RETRY_CODES})
      AND (retry_after_at='' OR retry_after_at<=:now))
- OR (blocker IN ('shared_capacity_busy','shared_resource_authority_unavailable',
-                 'host_capacity','provider_account_busy','conversation_session_authority_conflict')
-     AND retry_after_at<>'' AND retry_after_at<=:now)
+ OR (blocker IN ({_RETRY_CODES}) AND retry_after_at<>'' AND retry_after_at<=:now)
 )"""
+_RUNNABLE_TURN = f"""blocker='' OR (origin='worker_results' AND blocker IN ({_RESULT_RETRY_CODES}))
+ OR (blocker IN ({_RETRY_CODES}) AND retry_after_at<>'')"""
 
 
 class CoordinatorService:
@@ -2206,10 +2210,14 @@ class CoordinatorService:
                 return None
             # Foreground work already accepted always wins admission. A single transaction
             # claims all current result notices into one deterministic continuation.
-            pending = conn.execute("""SELECT 1 FROM coordinator_turns t
+            # Only a turn that can still run holds result turns back: one running, or one not yet started
+            # that the background pass will start (the same test as _READY_TURN, without the clock). A turn
+            # refused for good, or out of retries, never runs; counting it would silence every later result.
+            pending = conn.execute(f"""SELECT 1 FROM coordinator_turns t
                 LEFT JOIN provider_requests p ON p.request_id=t.request_id
-                WHERE t.conversation_id=? AND t.restore_hold=0 AND t.response_json='' AND t.blocker<>'cancelled' AND
-                (t.request_id='' OR p.request_id IS NULL OR p.state NOT IN ('failed','cancelled','completed')) LIMIT 1""", (conversation_id,)).fetchone()
+                WHERE t.conversation_id=? AND t.restore_hold=0 AND t.response_json='' AND t.blocker<>'cancelled' AND (
+                (t.request_id<>'' AND (p.request_id IS NULL OR p.state NOT IN ('failed','cancelled','completed')))
+                OR (t.request_id='' AND ({_RUNNABLE_TURN}))) LIMIT 1""", (conversation_id,)).fetchone()
             if pending:
                 return None
             events = conn.execute("SELECT * FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' ORDER BY sequence", (conversation_id,)).fetchall()
