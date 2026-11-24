@@ -84,12 +84,19 @@ function expertFields(body, spec, accounts) {
   askHint.textContent = ASK[askValue][1]; ask.append(askRow, askHint); body.append(ask);
 
   const place = select([['host', 'This computer'], ['sandboxed', 'Sandboxed workspace']], s.workspace.kind);
-  const access = select([['full', 'Full access'], ['workspace', 'Its workspace only'], ['read_only', 'Read only']], s.workspace.access);
+  // Only what its Workers really run at: full access on this computer, the workspace in a sandbox.
+  const levels = { host: [['full', 'Full access']], sandboxed: [['workspace', 'Its workspace only']] };
+  const access = select(levels[place.value] || levels.host, '');
   const placeHint = node('small', 'expert-hint');
-  const explain = () => { placeHint.textContent = place.value === 'host' && access.value === 'full'
-    ? 'It can read and change what you can on this computer. Your instructions and Ask me first are the guard, not a wall.'
-    : place.value === 'host' ? 'It works on this computer with the limit you chose.' : 'It works in its own sandboxed workspace.'; };
-  place.onchange = access.onchange = explain; explain();
+  const explain = () => {
+    const options = levels[place.value] || levels.host;
+    access.replaceChildren(...options.map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; }));
+    access.value = options[0][0]; access.disabled = options.length === 1;
+    placeHint.textContent = place.value === 'host'
+      ? 'It can read and change what you can on this computer. Your instructions and Ask me first are the guard, not a wall. Narrower permissions on this computer come later.'
+      : 'It works in its own sandboxed workspace and its Workers reach only that workspace. This needs containers on the computer or server running xPerfect.';
+  };
+  place.onchange = explain; explain();
   const where = node('div', 'expert-where'); where.append(labelled('Where it works', place), labelled('What it may do', access), placeHint); body.append(where);
 
   return () => {

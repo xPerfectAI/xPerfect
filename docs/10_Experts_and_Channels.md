@@ -23,7 +23,7 @@ current; every save makes a new version. The `expert` key in its content holds:
 | `team.coordinate` | The AI that runs each job, its account and an optional backup. |
 | `team.work` | The AIs that may work on a job, in parallel. |
 | `ask_me_first` | `always`, `auto` (default) or `off`. |
-| `workspace` | Where it works (this computer or a sandboxed workspace) and what it may do (full, workspace only, read only). |
+| `workspace` | Where it works: this computer, where its Workers run with full access, or a sandboxed workspace, where its Workers run in containers and reach only that workspace. Saving any other level is refused; narrower permissions on this computer are a later capability. |
 
 Knowledge and Skills stay in My Library and are referenced by exact version. An empty account
 means this computer's own sign-in for that AI. Every account, this computer's sign-in included,

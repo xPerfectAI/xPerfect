@@ -233,6 +233,14 @@ class ExpertService:
         return content
 
     def _check_accounts(self, tenant: str, owner: str, spec: ExpertSpec) -> None:
+        # Workers must run at the level the Expert shows. On this computer, xPerfect runs mission
+        # Workers with full access; in a sandboxed workspace, the container is the limit.
+        if spec.workspace.kind == "host" and spec.workspace.access != "full":
+            raise ExpertError("On this computer an Expert's Workers run with full access. Choose a sandboxed "
+                              "workspace to limit what they can reach.", code="expert_access_unsupported", status=422)
+        if spec.workspace.kind == "sandboxed" and spec.workspace.access != "workspace":
+            raise ExpertError("In a sandboxed workspace its Workers reach only that workspace.",
+                              code="expert_access_unsupported", status=422)
         roles = [spec.team.talk, spec.team.coordinate]
         for role in roles:
             if role.backup is not None:
@@ -393,7 +401,8 @@ class ExpertService:
             role = (spec.team.coordinate if profile == spec.team.coordinate.profile
                     else spec.team.talk if profile == spec.team.talk.profile else ExpertRole(profile=profile))
             work = self._role_config(tenant, owner, ExpertRole(profile=profile, account_id=role.account_id))
-            routes.extend(route.model_copy(update={"id": profile}) for route in work.routes[:1])
+            placement = {"execution_mode": "docker"} if spec.workspace.kind == "sandboxed" else {}
+            routes.extend(route.model_copy(update={"id": profile, **placement}) for route in work.routes[:1])
         instructions = spec.instructions.strip()
         return config.model_copy(update={
             "routes": routes, "expert": binding,

@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from workers_projects_runtime.api import create_app
-from workers_projects_runtime.coordinator import CoordinatorConfig, Route, canonical
+from workers_projects_runtime.coordinator import CoordinatorConfig, ExpertBinding, Route, canonical
 from workers_projects_runtime.channels import InboundMessage
 from workers_projects_runtime.experts import ExpertError, ExpertSpec, ExpertTeam, ExpertRole, default_spec
 
@@ -570,3 +570,19 @@ def test_a_restored_copy_never_sends_a_reply_that_was_finished_before_the_copy(a
     with application.state.experts.store._connect() as conn:
         rows = [tuple(row) for row in conn.execute("SELECT kind,state,text FROM channel_deliveries")]
     assert rows == [("reply", "not_confirmed", "Finished before the copy")]
+
+
+def test_workers_run_at_the_level_the_expert_shows_or_saving_is_refused(app):
+    application, client = app
+    for workspace, words in [({"kind": "host", "access": "read_only"}, "full access"),
+                             ({"kind": "host", "access": "workspace"}, "full access"),
+                             ({"kind": "sandboxed", "access": "full"}, "workspace")]:
+        response = client.post("/v1/experts", json={"name": "Synthetic Expert", "expert": {**SPEC, "workspace": workspace}})
+        assert response.status_code == 422 and words in response.text
+    experts = application.state.experts
+    sandboxed = create_expert(client, workspace={"kind": "sandboxed", "access": "workspace"})
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", sandboxed["template_id"])
+    template = experts.resolve("local", owner, sandboxed["template_id"])
+    binding = ExpertBinding(lineage_id=template["lineage_id"], role="job", access="workspace")
+    config = experts._job_config("local", owner, template, binding)
+    assert config.routes and {route.execution_mode for route in config.routes} == {"docker"}
