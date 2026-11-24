@@ -313,3 +313,29 @@ def test_turning_a_channel_off_stops_its_jobs_and_withdraws_its_requests(app):
     with experts.store._connect() as conn:
         states = [row[0] for row in conn.execute("SELECT state FROM channel_deliveries WHERE kind<>'checking'")]
     assert states and set(states) == {"dropped"}
+
+
+def test_a_job_stopped_while_it_is_prepared_never_starts(app, monkeypatch):
+    application, client = app
+    expert = create_expert(client)
+    experts = application.state.experts
+    monkeypatch.setattr(experts.coordinator.provider, "cancel_by_idempotency",
+                        lambda *args, **kwargs: {"capacity_released": True})
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    started = []
+    original_accept = experts.coordinator.accept_turn
+
+    def stop_during_prepare(*args, **kwargs):  # the Stop lands between creating the job and starting it
+        result = original_accept(*args, **kwargs)
+        with experts.store._connect() as conn:
+            conn.execute("UPDATE expert_jobs SET state='stopped' WHERE state='starting'")
+        return result
+
+    monkeypatch.setattr(experts.coordinator, "accept_turn", stop_during_prepare)
+    monkeypatch.setattr(experts.coordinator, "start_turn", lambda *args: started.append(args) or {})
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    assert started == []
+    stored = experts._job(job["job_id"])
+    assert stored["state"] == "stopped"
+    assert experts.coordinator.snapshot("local", owner, stored["job_conversation_id"])["stop_scope"] == "stopped"

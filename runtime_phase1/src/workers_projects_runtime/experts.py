@@ -563,8 +563,12 @@ class ExpertService:
         refs = (template.get("content") or {}).get("personal_library_refs") or []
         self.coordinator.accept_turn(tenant, owner, cid, "job-brief", "\n\n".join(lines), None, refs or None)
         with self.store._connect() as conn:
-            conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=? AND state IN ('starting','held')",
-                         (_now(), job_id))
+            moved = conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=? "
+                                 "AND state IN ('starting','held')", (_now(), job_id)).rowcount
+        if not moved:
+            # Stopped (or withdrawn) while it was being prepared: its first turn never starts.
+            self._fence_job(self._job(job_id))
+            return self._job(job_id)
         self.coordinator.start_turn(tenant, owner, cid, "job-brief")
         return self._job(job_id)
 
