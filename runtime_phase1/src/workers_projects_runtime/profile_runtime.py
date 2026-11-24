@@ -1430,6 +1430,15 @@ def _host_native_web_access() -> str:
     return mode
 
 
+def _codex_skill_metadata(path: Path) -> bool:
+    """Codex's documented skill layout keeps its display metadata in ``agents/openai.yaml``.
+
+    Claude Code loads only ``agents/*.md`` from a plugin root as sub-agents, so this one
+    exact file adds no Claude authority. Every other ``agents/`` entry stays refused.
+    """
+    return path.parts == ("agents", "openai.yaml")
+
+
 def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
     """The same native skill policy governs admission receipts and actual launch."""
     if execution_mode != "host":
@@ -17195,7 +17204,8 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         for root, files in sorted(groups.items()):
             if Path("SKILL.md") not in files:
                 continue
-            if any(path.parts[0].casefold() in components for path in files):
+            if any(path.parts[0].casefold() in components and not _codex_skill_metadata(path)
+                   for path in files):
                 raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
             expected = set(files)
             expected_dirs = {parent for path in files for parent in path.parents}

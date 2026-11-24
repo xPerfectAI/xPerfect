@@ -105,6 +105,27 @@ def test_text_skill_cannot_add_native_plugin_components(selected_skill, componen
         runtime._build_command(worker, "Use the selected skill.", info)
 
 
+def test_codex_skill_metadata_file_is_not_a_claude_plugin_component(selected_skill):
+    # Codex-format skill folders carry agents/openai.yaml; Claude loads only agents/*.md.
+    runtime, worker, bundle, info, workspace = selected_skill
+    bundle["files"].append({"scope": "workspace", "path": ".claude/skills/synthetic-report/agents/openai.yaml",
+                            "content": "interface:\n  display_name: Synthetic report\n"})
+    runtime._materialize_workspace_files(worker, workspace, bundle)
+    worker["bootstrap_bundle_json"] = json.dumps(bundle)
+    command, _ = runtime._build_command(worker, "Use the selected skill.", info)
+    assert command[command.index("--plugin-dir") + 1] == str(workspace / ".claude/skills/synthetic-report")
+
+
+@pytest.mark.parametrize("component", ["agents/openai.md", "agents/OpenAI.yaml", "agents/nested/openai.yaml"])
+def test_only_the_exact_codex_metadata_file_is_allowed_under_agents(selected_skill, component):
+    runtime, worker, bundle, info, workspace = selected_skill
+    bundle["files"].append({"scope": "workspace", "path": ".claude/skills/synthetic-report/" + component, "content": "Synthetic"})
+    runtime._materialize_workspace_files(worker, workspace, bundle)
+    worker["bootstrap_bundle_json"] = json.dumps(bundle)
+    with pytest.raises(RuntimeErrorBase, match="native plugin components"):
+        runtime._build_command(worker, "Use the selected skill.", info)
+
+
 @pytest.mark.parametrize("change", ["changed", "missing", "extra_file", "extra_directory", "file_link", "directory_link", "hard_link", "root_link"])
 def test_skill_selection_rejects_changed_or_unowned_package(selected_skill, change):
     runtime, worker, _, info, workspace = selected_skill

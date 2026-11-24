@@ -657,7 +657,9 @@ Full-access host Claude workers select complete declared text-skill folders thro
 session-only `--plugin-dir` root-`SKILL.md` layout. This keeps `--setting-sources ''`, the selected
 account, strict MCP, managed policy and explicit per-run settings intact. Launch checks the exact
 owned regular files and supporting directories against the declared bytes; links, extra entries,
-changed files and native plugin components are rejected. Source references and Library labels
+changed files and native plugin components are rejected. One exception keeps Codex-format skill
+folders usable: their documented display metadata file `agents/openai.yaml` is allowed, because
+Claude loads only `agents/*.md` from a plugin root. Any other `agents/` entry stays rejected. Source references and Library labels
 cannot select a folder. Restricted, read-only, workspace-only and web-disabled paths retain their
 existing controls. Native discovery supplies the namespaced skill name (for example,
 `report:report`); only a successful native `Skill` call proves load. See the native
