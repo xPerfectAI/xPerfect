@@ -1,0 +1,7 @@
+/* Needs you: the pop-up on every page. Pages that do not load the main theme use the fallbacks. */
+.needs-you-toast{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:max(16px,env(safe-area-inset-bottom,0px));z-index:50;display:flex;align-items:center;gap:12px;max-width:min(420px,calc(100vw - 32px));padding:12px 14px;border-radius:12px;background:var(--overlay-surface,#202124);color:var(--text,#f1f1f1);border:1px solid var(--line-strong,rgba(255,255,255,.18));box-shadow:var(--shadow-pop,0 10px 30px rgba(0,0,0,.35));font-family:inherit;font-size:.9rem}
+.needs-you-toast a{text-decoration:none;white-space:nowrap}
+:where(.needs-you-toast a){color:inherit;padding:6px 10px;border-radius:8px;border:1px solid currentColor}
+@media (prefers-color-scheme:light){:where(.needs-you-toast){background:var(--overlay-surface,#ffffff);color:var(--text,#1d1d1f);border-color:var(--line-strong,rgba(0,0,0,.16))}}
+@media (prefers-reduced-motion:no-preference){.needs-you-toast:not([hidden]){animation:needs-you-in .18s ease-out}}
+@keyframes needs-you-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}

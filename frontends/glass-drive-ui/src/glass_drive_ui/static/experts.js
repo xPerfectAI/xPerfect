@@ -171,6 +171,12 @@ export async function openExpertChat(item, { request = libraryRequest } = {}) {
   location.assign('/conversation?id=' + encodeURIComponent(chat.conversation_id));
 }
 
+/** On this computer all of an Expert's jobs share one work folder: say so once a second person could be added. */
+export function sharedFolderNote(kind, people, waiting) {
+  if (kind !== 'host' || people + waiting < 2) return '';
+  return 'Jobs for everyone here share one work folder on this computer, so a job you approve for one person could read another person’s job files. To keep each person’s work apart, choose a sandboxed workspace in Edit.';
+}
+
 /** Channels: add Teams, Connect with Microsoft's sign-in, people, Test in Teams. */
 export function openChannels(item, { request = libraryRequest, signal } = {}) {
   const dialog = libraryModal(`${item.name} · Channels`, { signal });
@@ -180,6 +186,9 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
   const stop = () => { if (timer) clearTimeout(timer); timer = 0; };
   dialog.dialog.addEventListener('close', stop, { once: true });
   const path = '/api/experts/' + encodeURIComponent(item.template_id) + '/channels';
+  // Where its jobs run decides whether people share a folder; unknown counts as this computer.
+  const place = request('/api/experts/' + encodeURIComponent(item.template_id), { signal })
+    .then(saved => saved?.expert?.workspace?.kind || 'host').catch(() => 'host');
 
   function personRow(person, action, label) {
     const row = node('div', 'expert-person'); row.append(node('span', '', person.name || person.id));
@@ -215,7 +224,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     }
     status.textContent = ''; void load();
   }
-  function render(channels) {
+  function render(channels, kind) {
     list.replaceChildren();
     const teams = channels.find(c => c.kind === 'teams');
     if (!teams) {
@@ -244,6 +253,8 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
       if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));
       for (const person of channel.people) people.append(personRow(person, () => save(channel, channel.people.filter(p => p.id !== person.id)), 'Remove'));
+      const shared = sharedFolderNote(kind, channel.people.length, channel.people_waiting.length);
+      if (shared) people.append(node('p', 'expert-hint', shared));
       if (channel.people_waiting.length) {
         people.append(node('h3', '', 'Waiting to be allowed'));
         for (const person of channel.people_waiting) {
@@ -255,7 +266,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       card.append(people); list.append(card);
     }
   }
-  async function load() { try { render((await request(path)).items || []); } catch (error) { status.textContent = error.message; } }
+  async function load() { try { render((await request(path)).items || [], await place); } catch (error) { status.textContent = error.message; } }
   void load();
   return dialog;
 }

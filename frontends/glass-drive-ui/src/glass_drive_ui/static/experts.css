@@ -37,10 +37,6 @@
 .needs-you-actions input{flex:1 1 220px;min-width:0}
 .needs-you-error{color:var(--danger);font-size:.85rem}
 .needs-you-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;margin-left:6px;border-radius:999px;background:var(--danger);color:#fff;font-size:.7rem;font-weight:700;vertical-align:middle}
-.needs-you-toast{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:max(16px,env(safe-area-inset-bottom,0px));z-index:50;display:flex;align-items:center;gap:12px;max-width:min(420px,calc(100vw - 32px));padding:12px 14px;border-radius:12px;background:var(--overlay-surface);border:1px solid var(--line-strong);box-shadow:var(--shadow-pop);font-size:.9rem}
-.needs-you-toast a{text-decoration:none;white-space:nowrap}
-@media (prefers-reduced-motion:no-preference){.needs-you-toast:not([hidden]){animation:needs-you-in .18s ease-out}}
-@keyframes needs-you-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
 .expert-library{display:grid;gap:6px}
 
 .expert-notices { display: grid; gap: 6px; margin: 0 0 18px; }

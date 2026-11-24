@@ -29,6 +29,34 @@ def test_who_talks_offers_each_ais_faster_model_beside_its_usual_one():
              "for (const list of Object.values(MODELS)) assert.equal(list[0][0], '');\n")
 
 
+def test_needs_you_pops_up_on_every_page_including_the_worker_viewers():
+    stamp = re.search(r"experts\.js\?v=(\w+)", (STATIC / 'needs-you.js').read_text()).group(1)
+    for page in ('conversation.html', 'watch.html', 'desktop.html', 'terminal.html'):
+        html = (STATIC / page).read_text()
+        assert f'src="/static/needs-you.js?v={stamp}"' in html, page
+        assert f'href="/static/needs-you.css?v={stamp}"' in html, page
+    assert f'href="/static/needs-you.css?v={stamp}"' in (STATIC / 'index.html').read_text()
+    # One owner for the pop-up's look, readable on pages without the main theme.
+    assert 'needs-you-toast' not in (STATIC / 'experts.css').read_text()
+    toast = (STATIC / 'needs-you.css').read_text()
+    for token in ('var(--overlay-surface,', 'var(--text,', 'var(--line-strong,', 'prefers-color-scheme:light'):
+        assert token in toast, token
+
+
+def test_shared_folder_note_shows_once_a_second_person_could_join():
+    source = (STATIC / 'experts.js').read_text()
+    note = re.search(r"^export function sharedFolderNote\(.*?^}", source, re.M | re.S)
+    assert note, 'sharedFolderNote'
+    assert 'sharedFolderNote(kind, channel.people.length, channel.people_waiting.length)' in source
+    run_node("import assert from 'node:assert/strict';\n" + note.group(0).replace('export ', '') + """
+assert.equal(sharedFolderNote('host', 1, 0), '');
+assert.equal(sharedFolderNote('host', 0, 1), '');
+assert.match(sharedFolderNote('host', 1, 1), /share one work folder/);
+assert.match(sharedFolderNote('host', 2, 0), /sandboxed workspace/);
+assert.equal(sharedFolderNote('sandboxed', 3, 2), '');
+""")
+
+
 def test_connection_details_explain_the_account_without_exposing_protocol_ids():
     source = (STATIC / 'control-plane.js').read_text()
     run_node("import assert from 'node:assert/strict';\n"
