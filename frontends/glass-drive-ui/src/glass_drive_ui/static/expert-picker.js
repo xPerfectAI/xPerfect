@@ -61,6 +61,13 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
     input.value = value || ''; if (!multiline) { input.required = true; input.maxLength = 160; } else input.maxLength = 1000;
     wrapper.append(input); body.append(wrapper); return input;
   }
+  // Editing, archiving or removing a lineage invalidates an older selected version of it.
+  function clearIfSelected(item) {
+    if (selected?.kind === 'template'
+        && (selected.id === item.template_id || (item.lineage_id && selected.lineage_id === item.lineage_id))) {
+      selected = null; remember(); onChoose?.(null);
+    }
+  }
   function manage(item, action) {
     const token = epoch, path = '/api/workspace-templates/' + encodeURIComponent(item.template_id);
     const body = { expected_catalog_revision: item.catalog_revision };
@@ -77,10 +84,7 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
         else await request(path + (action === 'remove' ? '' : '/state'), { method: action === 'remove' ? 'DELETE' : 'POST', signal,
           body: { ...body, state: action === 'archive' ? 'archived' : 'active', confirm: action === 'remove' } });
         if (!fresh(token)) return;
-        if (action !== 'duplicate' && selected?.kind === 'template'
-            && (selected.id === item.template_id || (item.lineage_id && selected.lineage_id === item.lineage_id))) {
-          selected = null; remember(); onChoose?.(null);
-        }
+        if (action !== 'duplicate') clearIfSelected(item);
         await loadTemplates(); tell(action === 'remove' ? 'Expert removed. Find it under Removed to restore it. Existing workers and saved versions are kept.' : 'Expert saved. Existing workers keep their original setup.');
       } });
     if (action === 'edit' || action === 'duplicate') name = field(dialog.body, 'Expert name', action === 'duplicate' ? item.name + ' copy' : item.name);
@@ -195,7 +199,7 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
     const done = message => { tell(message); void loadTemplates(); };
     if (action === 'chat') { openExpertChat(item, { request }).catch(error => tell(error.message)); return; }
     if (action === 'channels') { openChannels(item, { request, signal: lifetime.signal }); return; }
-    if (action === 'edit') { openExpertForm({ item, request, signal: lifetime.signal, accounts: getData?.()?.provider_accounts || [], onSaved: () => done('Expert saved. Its next message follows the new version.') }); return; }
+    if (action === 'edit') { openExpertForm({ item, request, signal: lifetime.signal, accounts: getData?.()?.provider_accounts || [], onSaved: () => { clearIfSelected(item); done('Expert saved. Its next message follows the new version.'); } }); return; }
     manage(item, action);
   }
   ready.onclick = () => { view = 'starters'; render(); };

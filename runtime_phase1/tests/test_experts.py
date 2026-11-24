@@ -586,3 +586,18 @@ def test_workers_run_at_the_level_the_expert_shows_or_saving_is_refused(app):
     binding = ExpertBinding(lineage_id=template["lineage_id"], role="job", access="workspace")
     config = experts._job_config("local", owner, template, binding)
     assert config.routes and {route.execution_mode for route in config.routes} == {"docker"}
+
+
+def test_off_holds_nothing(app):
+    # The owner's correction: Off skips approval and keeps the instructions.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    result = experts.ask_owner("local", owner, accepted["conversation_id"], reason="Unusual", job_goal="Synthetic job",
+                               idempotency_key="ask-off", source_turn_id=accepted["turn_id"])
+    assert result["state"] == "not_asked"
+    assert experts.reviews("local", owner) == []
+    assert scalar(application, "SELECT count(*) FROM expert_jobs") == 0

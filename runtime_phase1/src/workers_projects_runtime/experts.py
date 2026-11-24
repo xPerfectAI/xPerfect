@@ -747,6 +747,10 @@ class ExpertService:
         reply, job_goal = str(reply or "").strip(), str(job_goal or "").strip()
         if bool(reply) == bool(job_goal):
             raise ExpertError("Ask about exactly one thing: the reply you would send, or the job you would start", status=422)
+        if self.spec(self.latest(tenant, owner, speaker["lineage_id"])).ask_me_first == "off":
+            # Off: nothing waits for the owner and nothing is held; the instructions still apply.
+            return {"state": "not_asked",
+                    "note": "Ask me first is Off: nobody is asked. Decide yourself, following your instructions."}
         if job_goal:
             job_key = "ask:" + idempotency_key
             with self.store._connect() as conn:
