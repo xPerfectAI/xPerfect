@@ -137,9 +137,13 @@ class ChannelService:
                 (binding["binding_id"],))]
             unconfirmed = conn.execute("SELECT COUNT(*) FROM channel_deliveries WHERE binding_id=? AND state='not_confirmed'",
                                        (binding["binding_id"],)).fetchone()[0]
-            # Online is not ready: a channel is ready once a first message has really come through.
-            heard = conn.execute("SELECT 1 FROM channel_inbox WHERE binding_id=? LIMIT 1",
-                                 (binding["binding_id"],)).fetchone() is not None
+            # Online is not ready: a channel is ready once a first message from the account that connected it has
+            # come through and been accepted (an unlisted sender's message is not that; an app made before this was
+            # recorded counts any accepted message).
+            connected_by = str(settings.get("connected_by") or "")
+            heard = conn.execute("SELECT 1 FROM channel_inbox WHERE binding_id=? AND state='accepted' "
+                                 "AND (?='' OR json_extract(person_json,'$.id')=?) LIMIT 1",
+                                 (binding["binding_id"], connected_by, connected_by)).fetchone() is not None
         seen = binding["package_seen_at"]
         recent = bool(seen) and datetime.fromisoformat(seen) > datetime.now(UTC) - timedelta(seconds=45)
         # Online once Microsoft's socket has held. A package from before it reported the socket counts as before.
@@ -226,7 +230,8 @@ class ChannelService:
         """The setup helper stores public app facts only; credentials stay in the private state folder."""
         self._binding(binding_id, tenant, owner)
         allowed = {key: str(value)[:2000] for key, value in settings.items()
-                   if key in {"app_id", "app_name", "account", "tenant_id", "mode", "install_link", "teams_app_id"}}
+                   if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
+                              "teams_app_id"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))

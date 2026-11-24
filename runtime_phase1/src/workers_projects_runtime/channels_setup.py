@@ -59,6 +59,8 @@ _STEADY_SPAN_S = 60.0
 _STEADY_RECHECK_S = 30.0
 _STILL_APPLYING = ("Microsoft is still applying the change: it has said yes, but not every time yet. This page checks "
                    "again by itself and goes on when the answer is steady.")
+_NOT_REPORTED = ("Microsoft did not say this time whether Teams allows the app here. This page checks again by itself "
+                 "and goes on once Microsoft says yes, steadily.")
 
 
 def _find(value: Any, key: str) -> Any:
@@ -87,6 +89,13 @@ def _custom_apps_blocked(status: dict, name: str) -> str:
             "policy (Teams apps → Setup policies; a new policy can give it to this one person only) and \"Let users "
             "interact with custom apps in preview\" (Teams apps → Manage apps → Actions → Org-wide app settings). "
             f"Microsoft reports that {off} off. This page checks again by itself every two minutes.")
+
+
+def _custom_apps_allowed(status: dict) -> bool:
+    """Microsoft's explicit yes for both switches. After a "no", anything less (a missing or partial report, as from a
+    signed-out tool or a portal that did not answer) is not a yes."""
+    sideloading = _find(status, "sideloading")
+    return isinstance(sideloading, dict) and sideloading.get("tenant") is True and sideloading.get("user") is True
 
 
 def _note_for_admin(status: dict, name: str) -> str:
@@ -120,6 +129,7 @@ class TeamsSetup:
         self._steady: dict[str, tuple[int, float]] = {}  # after a "no": the "yes" in a row, and when the first came
         self._clock = time.monotonic
         self._lock = threading.Lock()
+        self._package_lock = threading.Lock()  # starting or stopping a package process: one at a time
 
     # ------------------------------------------------------------------ tools
     def _cli(self) -> list[str]:
@@ -285,6 +295,13 @@ class TeamsSetup:
                                                   "tenant": tenant, "owner": owner, "check_at": now + _RECHECK_S}
                     return
                 if binding_id in self._steady:  # Microsoft said no before: wait until its "yes" is steady
+                    if not _custom_apps_allowed(status):  # no explicit yes: not counted, nothing created
+                        previous = self._sessions.get(binding_id) or {}
+                        self._steady[binding_id] = (0, 0.0)
+                        self._sessions[binding_id] = {"step": "blocked", "error": _NOT_REPORTED,
+                                                      "note": previous.get("note", ""), "tenant": tenant,
+                                                      "owner": owner, "check_at": now + _RECHECK_S}
+                        return
                     count, first = self._steady[binding_id]
                     count, first = count + 1, first if count else now
                     if count < _STEADY_READS or now - first < _STEADY_SPAN_S:
@@ -306,6 +323,7 @@ class TeamsSetup:
                 path.chmod(0o600)
             settings = {"app_id": created.get("botId", ""), "teams_app_id": created.get("teamsAppId", ""),
                         "app_name": created.get("appName", expert["name"]), "account": account,
+                        "connected_by": str(status.get("userObjectId") or ""),
                         "tenant_id": str(status.get("tenantId") or ""),
                         "mode": "socket" if created.get("socketMode") else "http",
                         "install_link": created.get("installLink", "")}
@@ -359,6 +377,10 @@ class TeamsSetup:
     def ensure_package(self, binding_id: str, *, by_owner: bool = True) -> str:
         """Exactly one package process per connected channel, also across runtime restarts. The owner's own
         action starts it at once; maintenance (by_owner=False) waits while it keeps exiting before it held."""
+        with self._package_lock:  # the scheduler and a Connect never both start one: two sockets for one bot
+            return self._ensure_package(binding_id, by_owner=by_owner)
+
+    def _ensure_package(self, binding_id: str, *, by_owner: bool) -> str:
         binding = self.channels._binding(binding_id)
         credentials = self.credentials_path(binding_id)
         pid_path = self._pid_path(binding_id)
@@ -427,9 +449,10 @@ class TeamsSetup:
         return outcomes
 
     def stop(self, binding_id: str) -> None:
-        pid_path = self._pid_path(binding_id)
-        pid = int(pid_path.read_text().strip() or 0) if pid_path.exists() else 0
-        if pid and self._alive(pid):
-            os.kill(pid, 15)
-        pid_path.unlink(missing_ok=True)
-        self._forget(binding_id)
+        with self._package_lock:
+            pid_path = self._pid_path(binding_id)
+            pid = int(pid_path.read_text().strip() or 0) if pid_path.exists() else 0
+            if pid and self._alive(pid):
+                os.kill(pid, 15)
+            pid_path.unlink(missing_ok=True)
+            self._forget(binding_id)

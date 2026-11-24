@@ -143,8 +143,9 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
    30 minutes), and reads the report again by itself every two minutes. While a change spreads,
    Microsoft's servers answer differently (no, no, yes, no within seconds, more than twenty minutes
    after the change), so after a "no" Connect goes on only after three "yes" in a row spanning a minute,
-   saying meanwhile that Microsoft is still applying it. Teams itself can lag behind that report, so
-   the card says "permissions needed" may mean a change is still spreading.
+   saying meanwhile that Microsoft is still applying it. Teams refused the install a minute after a
+   single "yes" (whether Teams also lags behind a steady "yes" is not known yet), so the card says
+   "permissions needed" may mean a change is still spreading.
 6. **What xPerfect cannot do with this sign-in.** The pinned CLI's sign-in asks only for Microsoft
    Graph `Application.ReadWrite.All` and the Developer Portal's `AppDefinitions.ReadWrite`. Assigning a
    policy (`teamsPolicyUserAssignment: assign`, documented for meeting policies), publishing to the

@@ -285,7 +285,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const head = node('div', 'expert-channel-head');
       head.append(node('strong', '', channel.label), node('span', 'expert-pill', channelState(channel))); card.append(head);
       if (channel.low_disk) card.append(node('p', 'expert-notice expert-notice-alert', 'Cannot answer right now: this computer is low on disk. Messages wait and are answered when space returns.'));
-      if (channel.refusal) card.append(node('p', 'expert-notice expert-notice-alert', `Microsoft refused the Teams connection (“${channel.refusal}”). It is tried again by itself every few minutes.`));
+      if (channel.refusal && channel.state === 'connected') card.append(node('p', 'expert-notice expert-notice-alert', `Microsoft refused the Teams connection (“${channel.refusal}”). It is tried again by itself every few minutes.`));
       const connectBox = node('div', 'expert-connect'); card.append(connectBox);
       if (!channel.app.app_id) {
         const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel); connectBox.append(go);

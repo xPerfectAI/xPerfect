@@ -2328,3 +2328,102 @@ def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_
     assert "My account" not in note  # no account reported, none invented
     assert "up to 30 minutes" in note  # a first visit to the admin center can take that long
     assert "Upload custom apps" not in _note_for_admin({"tdp": {"sideloading": {"tenant": False, "user": True}}}, "X")
+
+
+def test_after_a_no_a_missing_report_is_not_a_yes(app, monkeypatch, tmp_path):
+    # Advisor finding: after Microsoft said no, three reports without the custom-app fields (a signed-out tool, a
+    # portal that did not answer) must not count as three "yes" and create the app while Teams still refuses it.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    calls, report, clock = [], {"value": {"tenant": True, "user": False}}, [1000.0]
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            side = report["value"]
+            return {"loggedIn": True, "username": "Synthetic Owner", "tenantId": "tenant-synthetic",
+                    **({"tdp": {"sideloading": dict(side)}} if side is not None else {})}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    setup._clock = lambda: clock[0]
+    creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
+    setup._create("local", owner, binding_id)  # the "no"
+    note = client.get(f"/v1/channels/{binding_id}/connect").json()["note"]
+    for missing in (None, {}, {"tenant": True}, {"user": True}):  # nothing, empty, or only half of the answer
+        report["value"] = missing
+        for step in (30, 30, 30):
+            clock[0] += step
+            setup._create("local", owner, binding_id)
+        status = client.get(f"/v1/channels/{binding_id}/connect").json()
+        assert creations() == 0 and status["step"] == "blocked" and "did not say" in status["error"]
+        assert status["note"] == note  # what to ask the administrator stays
+    report["value"] = {"tenant": True, "user": True}
+    for step in (30, 30, 30):
+        clock[0] += step
+        setup._create("local", owner, binding_id)
+    assert creations() == 1
+
+
+def test_ready_means_a_message_from_the_account_that_connected_it(app):
+    # Advisor finding: an unlisted sender's message also leaves an inbox row. "Test in Teams" (a link that opened
+    # another person's chat before the app was installed) waits for a message from the account that connected it.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, service = channel["binding_id"], application.state.channels
+    colleague = {"id": "person-synthetic-b", "name": "Synthetic Colleague", "tenant": "tenant-synthetic"}
+    client.post(f"/v1/channels/{binding_id}/setup", json={"settings": {
+        "app_id": "synthetic-app", "mode": "socket", "connected_by": PERSON["id"]}})
+    client.patch(f"/v1/channels/{binding_id}", json={"people": [PERSON, colleague]})
+    ready = lambda: service.view(service._binding(binding_id))["first_message"]  # noqa: E731
+    stranger = {"id": "person-synthetic-z", "name": "Synthetic Stranger", "tenant": "tenant-synthetic"}
+    client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-stranger", person=stranger))
+    assert ready() is False  # refused, unlisted
+    client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-colleague", person=colleague))
+    assert ready() is False  # accepted, but not the account that connected it
+    client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-owner"))
+    assert ready() is True
+
+
+def test_two_near_simultaneous_starts_make_one_package(app, monkeypatch, tmp_path):
+    # Advisor finding: the scheduler and a Connect both call ensure_package; two package processes would mean two
+    # sockets for one bot. Fake processes only: nothing is spawned and no real process is signalled.
+    import threading
+    import time
+    from pathlib import Path
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    setup.credentials_path(binding_id).write_text("CLIENT_ID=synthetic\n")
+    processes = []
+
+    class SlowProcess:
+        def __init__(self, *args, **kwargs):
+            time.sleep(0.3)  # a slow start leaves room for the other caller
+            self.pid = 4_100_000 + len(processes)
+            processes.append(self)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=SlowProcess, STDOUT=-2))
+    monkeypatch.setattr(setup, "_package_python", lambda: Path("synthetic-python"))
+    monkeypatch.setattr(setup, "_alive", lambda pid: any(p.pid == pid for p in processes))
+    outcomes = []
+    callers = [threading.Thread(target=lambda: outcomes.append(setup.ensure_package(binding_id))),
+               threading.Thread(target=lambda: outcomes.append(setup.ensure_package(binding_id, by_owner=False)))]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=10)
+    assert len(processes) == 1 and sorted(outcomes) == ["running", "started"]

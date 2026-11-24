@@ -274,7 +274,7 @@ def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
     assert state, 'channelState'
     assert "node('span', 'expert-pill', channelState(channel))" in source
     assert "if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(load, 3000);" in source
-    assert "if (channel.refusal) card.append(" in source
+    assert "if (channel.refusal && channel.state === 'connected') card.append(" in source  # never on an Off card
     # Teams does not allow the app yet: the line, a note for the administrator, and the page follows the
     # runtime's own re-check.
     assert "if (step.step === 'blocked') {" in source and "Copy a note for your administrator" in source
