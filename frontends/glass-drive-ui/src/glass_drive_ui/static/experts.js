@@ -147,7 +147,7 @@ export async function openExpertForm({ item = null, request = libraryRequest, si
   // Knowledge and Skills come from My Library; an exact saved version stays with the Expert.
   const chosen = new Map(((current || item)?.personal_library_refs || []).map(ref => [ref.item_id, ref]));
   const library = node('fieldset', 'expert-team'); library.append(node('legend', '', 'Knowledge and Skills'));
-  const libraryList = node('div', 'expert-library'); library.append(libraryList, node('small', 'expert-hint', 'From My Library. Skills run in Claude Code Workers on this computer.'));
+  const libraryList = node('div', 'expert-library'); library.append(libraryList, node('small', 'expert-hint', 'From My Library. Its coordinator and Workers load them natively, on every AI that can run them.'));
   dialog.body.insertBefore(library, dialog.body.querySelector('.expert-team'));
   try {
     const items = ((await request('/api/personal-library', { signal })).items || []).filter(entry => entry.state !== 'archived');
