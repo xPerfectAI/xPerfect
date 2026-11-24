@@ -1470,6 +1470,10 @@ def test_a_message_refused_for_good_does_not_silence_later_results(coordinator):
         conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
                      (cid2, 'result_available', 'run-b', canonical({'goal_id': 'b', 'run_id': 'run-b', 'state': 'completed'}), now()))
     assert coordinator.queue_result_turn('local', 'owner', cid2) is None
+    # Out of retries (the sixth attempt clears the retry time): it never runs, so results go on.
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET retry_after_at='',retry_attempts=0 WHERE conversation_id=? AND turn_id='waiting'", (cid2,))
+    assert (coordinator.queue_result_turn('local', 'owner', cid2) or '').startswith('results-')
 
 
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):
