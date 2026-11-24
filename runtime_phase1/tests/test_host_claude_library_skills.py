@@ -173,3 +173,41 @@ def test_unselected_worker_keeps_existing_setting_sources(selected_skill, monkey
     command, _ = runtime._build_command(worker, "Use existing capabilities.", info)
     assert "--plugin-dir" not in command
     assert "--setting-sources" not in command
+
+
+SYNTHETIC_EXPERT_SKILL = {"name": "synthetic-brief", "files": [
+    {"path": "SKILL.md", "content": "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nRead references/style.md.\n"},
+    {"path": "references/style.md", "content": "Exact supporting text.\n"}]}
+
+
+def test_an_experts_chosen_skill_becomes_a_native_plugin_folder_in_the_workers_own_home(selected_skill):
+    runtime, worker, bundle, info, workspace = selected_skill
+    expert_bundle = {"expert_skills": [SYNTHETIC_EXPERT_SKILL], "claude_settings_local": bundle["claude_settings_local"]}
+    worker["bootstrap_bundle_json"] = json.dumps(expert_bundle)
+    command, _ = runtime._build_command(worker, "Write the brief.", info)
+    folder = runtime._home_dir(worker["worker_id"]) / ".glasshive" / "expert-skills" / "synthetic-brief"
+    assert command[command.index("--plugin-dir") + 1] == str(folder)
+    assert sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file()) == ["SKILL.md", "references/style.md"]
+    assert (folder / "references/style.md").read_text() == "Exact supporting text.\n"
+    assert workspace not in folder.parents  # never the shared workspace
+
+
+@pytest.mark.parametrize("bad", [
+    {"name": "synthetic-brief", "files": [{"path": "SKILL.md", "content": "x"}, {"path": "hooks/hooks.json", "content": "{}"}]},
+    {"name": "synthetic-brief", "files": [{"path": "SKILL.md", "content": "x"}, {"path": "../escape.md", "content": "x"}]},
+    {"name": "../escape", "files": [{"path": "SKILL.md", "content": "x"}]},
+    {"name": "synthetic-brief", "files": [{"path": "notes.md", "content": "no SKILL.md"}]},
+])
+def test_an_experts_skill_cannot_carry_plugin_parts_or_leave_its_folder(selected_skill, bad):
+    runtime, worker, bundle, info, workspace = selected_skill
+    worker["bootstrap_bundle_json"] = json.dumps({"expert_skills": [bad], "claude_settings_local": bundle["claude_settings_local"]})
+    with pytest.raises(RuntimeErrorBase):
+        runtime._build_command(worker, "Write the brief.", info)
+
+
+def test_an_experts_skill_follows_the_same_policy_gate(selected_skill):
+    runtime, worker, bundle, info, workspace = selected_skill
+    worker["bootstrap_bundle_json"] = json.dumps({"expert_skills": [SYNTHETIC_EXPERT_SKILL], "access_mode": "read_only",
+                                                  "claude_settings_local": bundle["claude_settings_local"]})
+    command, _ = runtime._build_command(worker, "Write the brief.", info)
+    assert "--plugin-dir" not in command

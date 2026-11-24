@@ -1439,6 +1439,14 @@ def _codex_skill_metadata(path: Path) -> bool:
     return path.parts == ("agents", "openai.yaml")
 
 
+# Documented native plugin defaults, not names inferred from skill text. These locations can add
+# authority or displace the single root skill, so a text Skill may not carry them.
+_CLAUDE_PLUGIN_COMPONENTS = frozenset({".claude-plugin", "skills", "commands", "agents", "hooks",
+                                       ".mcp.json", ".lsp.json", "output-styles", "workflows",
+                                       "themes", "monitors", "bin", "settings.json"})
+_EXPERT_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+
+
 def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
     """The same native skill policy governs admission receipts and actual launch."""
     if execution_mode != "host":
@@ -17166,6 +17174,50 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             body, message_id=identity, timeout=0)
     binary_env_var = "WPR_CLAUDE_CODE_BIN"
 
+    def _expert_skill_plugin_directories(self, worker: dict, bundle: dict) -> list[Path]:
+        """The Skills an owner chose for an Expert, written fresh into this Worker's own folder.
+
+        They travel in the launch bundle as a typed list (never as workspace files, which a
+        dispatched Worker may not carry under .claude/), and each becomes one native plug-in
+        folder: SKILL.md at its root, text only, none of the native plug-in parts above.
+        """
+        declared = bundle.get("expert_skills")
+        if not declared:
+            return []
+        if not isinstance(declared, list):
+            raise RuntimeErrorBase("An Expert's Skills must be a list")
+        home = self._home_dir(str(worker["worker_id"]))
+        private, root = home / ".glasshive", home / ".glasshive" / "expert-skills"
+        if private.is_symlink() or root.is_symlink():
+            raise RuntimeErrorBase("An Expert's Skill folder must not be a link")
+        if root.exists():
+            shutil.rmtree(root)
+        selected = []
+        for skill in declared:
+            name = str((skill or {}).get("name") or "") if isinstance(skill, dict) else ""
+            if not _EXPERT_SKILL_NAME.fullmatch(name):
+                raise RuntimeErrorBase("An Expert's Skill has an invalid name")
+            files: dict[Path, bytes] = {}
+            for entry in skill.get("files") or []:
+                relative = Path(str((entry or {}).get("path") or "")) if isinstance(entry, dict) else Path()
+                if (not relative.parts or relative.is_absolute() or ".." in relative.parts
+                        or not isinstance(entry.get("content"), str)):
+                    raise RuntimeErrorBase("An Expert's Skill files must be text inside its folder")
+                files[relative] = entry["content"].encode("utf-8")
+            if Path("SKILL.md") not in files:
+                raise RuntimeErrorBase("An Expert's Skill needs its SKILL.md")
+            if any(path.parts[0].casefold() in _CLAUDE_PLUGIN_COMPONENTS and not _codex_skill_metadata(path)
+                   for path in files):
+                raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
+            target = root / name
+            for relative, content in files.items():
+                path = target / relative
+                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                path.write_bytes(content)
+                path.chmod(0o600)
+            selected.append(target)
+        return selected
+
     def _declared_skill_plugin_directories(self, bundle: dict, workspace: Path) -> list[Path]:
         """Select exact approved text folders through Claude's native root-skill layout.
 
@@ -17195,11 +17247,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 raise RuntimeErrorBase("Claude native skill files contain conflicting declarations")
             files[relative] = content
 
-        # Documented native plugin defaults, not names inferred from skill text.
-        # These locations can add authority or displace the single root skill.
-        components = {".claude-plugin", "skills", "commands", "agents", "hooks",
-                      ".mcp.json", ".lsp.json", "output-styles", "workflows",
-                      "themes", "monitors", "bin", "settings.json"}
+        components = _CLAUDE_PLUGIN_COMPONENTS
         selected = []
         for root, files in sorted(groups.items()):
             if Path("SKILL.md") not in files:
@@ -17775,7 +17823,8 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         if selectors is not None:
             command = apply_claude_context(command, selectors)
         if host_claude_skill_policy_reason(bundle) is None:
-            skills = self._declared_skill_plugin_directories(bundle, Path(str(info.workspace_dir)))
+            skills = [*self._declared_skill_plugin_directories(bundle, Path(str(info.workspace_dir))),
+                      *self._expert_skill_plugin_directories(worker, bundle)]
             if skills:
                 if not self._help_supports("--plugin-dir"):
                     raise RuntimeDependencyMissingError(

@@ -410,6 +410,8 @@ class ExpertService:
         # fixed when the job starts, so they hold whatever the coordinator writes in a dispatch.
         owner_rules = (_prompt("expert-worker.md").strip() + "\n\n" + spec.instructions.strip()
                        if spec.instructions.strip() else "")
+        # The Skills the owner chose for this Expert reach its Workers the native way, fixed at job start.
+        skills = self._expert_skills(tenant, owner, template)
         routes: list[Route] = []
         for profile in spec.team.work:
             role = (spec.team.coordinate if profile == spec.team.coordinate.profile
@@ -421,12 +423,48 @@ class ExpertService:
                 if owner_rules:
                     earlier = str(bundle.get("system_instructions") or "").strip()
                     bundle["system_instructions"] = (earlier + "\n\n" if earlier else "") + owner_rules
+                chosen = [{"name": skill["name"], "files": skill["files"]} for skill in skills if profile in skill["profiles"]]
+                if chosen:
+                    bundle["expert_skills"] = chosen
                 routes.append(route.model_copy(update={"id": profile, "bootstrap_bundle": bundle, **placement}))
         instructions = spec.instructions.strip()
         return config.model_copy(update={
             "routes": routes, "expert": binding,
             "developer_instructions": (_prompt("expert-job.md") + ("\n\n" + instructions if instructions else "")),
         })
+
+    def _expert_skills(self, tenant: str, owner: str, template: dict) -> list[dict]:
+        """The Skills chosen in this Expert's Library, as exact text folders for its job's Workers.
+
+        Choosing a Skill on the Expert is the owner's approval for that Expert's Workers. Each
+        Worker's runtime puts the folder where its AI tool loads Skills natively."""
+        refs = (template.get("content") or {}).get("personal_library_refs") or []
+        library = getattr(self.service, "personal_library", None)
+        if not refs or library is None:
+            return []
+        skills: list[dict] = []
+        with library.store._connect() as conn:
+            for ref in refs:
+                try:
+                    item = library._version(conn, tenant, owner, ref["item_id"], ref["version_id"], allow_deleted=True)
+                except Exception:
+                    continue
+                if item.get("kind") != "skill":
+                    continue
+                payload = item.get("payload") or {}
+                names, files = set(), []
+                for entry in payload.get("files") or []:
+                    path = Path(str((entry or {}).get("path") or ""))
+                    if (len(path.parts) < 4 or path.parts[:2] != (".claude", "skills") or ".." in path.parts
+                            or not isinstance(entry.get("content"), str)):
+                        names = set()
+                        break
+                    names.add(path.parts[2])
+                    files.append({"path": Path(*path.parts[3:]).as_posix(), "content": entry["content"]})
+                if len(names) == 1 and files:
+                    skills.append({"name": names.pop(), "files": files,
+                                   "profiles": list(payload.get("profiles") or ["claude-code"])})
+        return sorted(skills, key=lambda skill: skill["name"])
 
     def authority(self, tenant: str, owner: str, conversation: dict, config: CoordinatorConfig) -> str:
         """The Queen's developer message, read from the Expert's newest version at each turn start."""

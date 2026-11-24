@@ -701,6 +701,34 @@ def test_the_words_so_far_are_read_from_the_running_turns_own_log(app, monkeypat
     assert coordinator._written_so_far(request["request_id"]) == ""  # a finished run shows only its reply
 
 
+def test_the_skills_chosen_on_an_expert_travel_with_its_jobs_claude_workers(app):
+    from workers_projects_runtime.coordinator import ExpertBinding
+    from workers_projects_runtime.service import _contains_parallel_forbidden_authority_key, _validate_parallel_clean_room_files
+    application, client = app
+    experts = application.state.experts
+    skill = client.post("/v1/personal-library", json={
+        "name": "synthetic-brief", "kind": "skill", "description": "Write a synthetic brief.", "profiles": ["claude-code"],
+        "files": [{"path": ".claude/skills/synthetic-brief/SKILL.md",
+                   "content": "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nWrite it.\n"}],
+        "idempotency_key": "synthetic-brief-skill"})
+    assert skill.status_code == 201, skill.text
+    ref = {"item_id": skill.json()["item_id"], "version_id": skill.json()["version_id"]}
+    created = client.post("/v1/experts", json={"name": "Synthetic Expert", "description": "Answers engineering questions.",
+                                               "expert": SPEC, "personal_library_refs": [ref]})
+    assert created.status_code == 201, created.text
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created.json()["template_id"])
+    template = experts.resolve("local", owner, created.json()["template_id"])
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job"))
+    carried = {route.profile: route.bootstrap_bundle.get("expert_skills") for route in config.routes}
+    assert carried["claude-code"] == [{"name": "synthetic-brief", "files": [
+        {"path": "SKILL.md", "content": "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nWrite it.\n"}]}]
+    assert carried["codex-cli"] is None  # a Claude Skill is not offered to Codex
+    # A dispatched Worker's clean-room checks accept the typed list (nothing is placed under .claude/).
+    bundle = dict(next(route.bootstrap_bundle for route in config.routes if route.profile == "claude-code"))
+    _validate_parallel_clean_room_files(bundle)
+    assert not _contains_parallel_forbidden_authority_key(bundle)
+
+
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
     # Tested at the guard, not by filling the disk.
     application, client = app
