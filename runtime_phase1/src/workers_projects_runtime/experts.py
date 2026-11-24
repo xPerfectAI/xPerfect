@@ -333,6 +333,32 @@ class ExpertService:
             return config.effort
         return effort if effort and effort in tuple(getattr(model, "effort_choices", ()) or ()) else config.effort
 
+    def fallback(self, tenant: str, owner: str, config: CoordinatorConfig) -> tuple[str, str] | None:
+        """The declared backup for this turn, reusing the conversation's armed fallback.
+
+        The provider switches to it only before the reply starts, while the main route is in a
+        quota or rate-limit cool-down. Work that has started is never moved by this.
+        """
+        binding = config.expert
+        if binding is None:
+            return None
+        try:
+            if binding.role == "speaker":
+                role = self.spec(self.latest(tenant, owner, binding.lineage_id)).team.talk
+            else:
+                job = self._job(binding.job_id)
+                template = (self._templates.get_workspace_template(template_id=job["template_id"], tenant_id=tenant,
+                                                                   owner_id=owner)
+                            or self.latest(tenant, owner, binding.lineage_id))
+                role = self.spec(template).team.coordinate
+            if role.backup is None:
+                return None
+            backup = self._role_config(tenant, owner, ExpertRole(profile=role.backup.profile,
+                                                                 account_id=role.backup.account_id))
+        except Exception:  # An unavailable backup leaves the main route as the only one.
+            return None
+        return (backup.model, backup.effort) if backup.model != config.model else None
+
     def _speaker_config(self, tenant: str, owner: str, template: dict, binding: ExpertBinding) -> CoordinatorConfig:
         spec = self.spec(template)
         config = self._role_config(tenant, owner, spec.team.talk)

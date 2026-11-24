@@ -1689,6 +1689,10 @@ class CoordinatorService:
                     bundle = {**bundle, "provider_capabilities": {**capabilities, "native_tools": False}}
                 effort = (experts.speaker_effort(tenant, owner, config)
                           if experts is not None and config.expert is not None else config.effort)
+                # An Expert's declared backup takes over only before the reply starts.
+                fallback = (experts.fallback(tenant, owner, config)
+                            if experts is not None and config.expert is not None
+                            and turn["origin"] not in {"owner_decision", "owner_checking"} else None)
                 packet = {"model": config.model, "reasoning_effort": effort,
                           "messages": messages, "metadata": {
                             "tenant_id": tenant, "owner_id": owner, "conversation_id": conversation_id,
@@ -1699,6 +1703,8 @@ class CoordinatorService:
                             "allowed_ai_origin_scope": self._conversation_scope(conversation),
                             **({"glasshive_options": {"access": config.expert.access}}
                                if config.expert is not None and config.expert.access else {}),
+                            **({"fallback_model": fallback[0], "fallback_reasoning_effort": fallback[1]}
+                               if fallback else {}),
                         }}
                 if library_packet:
                     # The existing history owner groups this reference with the

@@ -4765,6 +4765,7 @@ def create_app(
     from .channels import ChannelService
     from .experts_api import install_channel_routes
     service.channels = ChannelService(store, service.experts)
+    app.state.channels = service.channels
     install_channel_routes(app, service.channels, _current_principal)
     expert_mcp = native_expert_server(
         service.experts, service.peers,

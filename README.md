@@ -231,6 +231,7 @@ accounts or calling incomplete work finished.
 7. [Operator UI and design guidelines](docs/07_Minimal_Unified_Operator_UI.md)
 8. [Repository and publication boundaries](docs/08_Repository_Structure_and_Publication_Boundaries.md)
 9. [Application boundary and generic scheduled delivery](docs/09_Application_Boundary_Contract.md)
+10. [Experts on channels](docs/10_Experts_and_Channels.md)
 
 See the [runtime](runtime_phase1/README.md). Existing Python package names,
 `WPR_`/`GLASSHIVE_` configuration and MCP/skill IDs remain compatibility interfaces.

@@ -4455,8 +4455,11 @@ class ConversationProvider:
         # built-in file, shell and web tool off.
         coordination_only = (isinstance(incoming_capabilities, dict)
                              and incoming_capabilities.get("coordination_only") is True)
-        if coordination_only and (not native_tools or model.harness_profile != "claude-code"):
-            raise HTTPException(status_code=400, detail="Coordination-only conversations require Claude Code with its own tool server")
+        if coordination_only and not native_tools:
+            raise HTTPException(status_code=400, detail="A coordination-only turn keeps its own tool server")
+        # Only Claude Code can switch off its built-in tools while keeping its own tool server.
+        # Another speaking harness (a Codex Queen, or a backup) keeps its tools; that difference is shown.
+        coordination_only = coordination_only and model.harness_profile == "claude-code"
         provider_capabilities = {
             "self_delegation": False,
             "native_tools": native_tools,

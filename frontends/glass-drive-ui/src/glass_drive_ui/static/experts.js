@@ -104,7 +104,7 @@ export async function openExpertForm({ item = null, request = libraryRequest, si
   let name, description, read;
   const dialog = libraryModal(item ? 'Edit expert' : 'New expert', { action: 'Save', signal, onSave: async ({ signal: saveSignal }) => {
     const expert = read();
-    const body = { name: name.value.trim(), description: description.value.trim(), expert };
+    const body = { name: name.value.trim(), description: description.value.trim(), expert, personal_library_refs: dialog.libraryRefs ? dialog.libraryRefs() : [] };
     const saved = item
       ? await request('/api/experts/' + encodeURIComponent(item.template_id), { method: 'PATCH', signal: saveSignal, body: { ...body, expected_catalog_revision: (current || item).catalog_revision } })
       : await request('/api/experts', { method: 'POST', signal: saveSignal, body });
@@ -114,6 +114,23 @@ export async function openExpertForm({ item = null, request = libraryRequest, si
   description = node('textarea'); description.rows = 2; description.maxLength = 1000; description.value = current?.description ?? item?.description ?? '';
   dialog.body.append(labelled('Expert name', name), labelled('What does this expert do?', description));
   read = expertFields(dialog.body, current?.expert, accounts);
+  // Knowledge and Skills come from My Library; an exact saved version stays with the Expert.
+  const chosen = new Map(((current || item)?.personal_library_refs || []).map(ref => [ref.item_id, ref]));
+  const library = node('fieldset', 'expert-team'); library.append(node('legend', '', 'Knowledge and Skills'));
+  const libraryList = node('div', 'expert-library'); library.append(libraryList, node('small', 'expert-hint', 'From My Library. Skills run in Claude Code Workers on this computer.'));
+  dialog.body.insertBefore(library, dialog.body.querySelector('.expert-team'));
+  try {
+    const items = ((await request('/api/personal-library', { signal })).items || []).filter(entry => entry.state !== 'archived');
+    if (!items.length) libraryList.append(node('p', 'expert-hint', 'Your Library is empty. Add knowledge or a skill folder in Library.'));
+    for (const entry of items) {
+      const box = node('input'); box.type = 'checkbox'; box.checked = chosen.has(entry.item_id);
+      box.onchange = () => { if (box.checked) chosen.set(entry.item_id, { item_id: entry.item_id, version_id: entry.version_id }); else chosen.delete(entry.item_id); };
+      const kind = entry.kind === 'skill' ? 'Skill' : entry.kind === 'note' ? 'Knowledge' : 'Reference';
+      const label = node('label', 'expert-check'); label.append(box, node('span', '', `${entry.name} · ${kind}`)); libraryList.append(label);
+    }
+  } catch { libraryList.append(node('p', 'expert-hint', 'My Library is unavailable right now. Your other choices are kept.')); }
+  const readExpert = read; read = () => readExpert();
+  dialog.libraryRefs = () => [...chosen.values()];
   if (item) dialog.body.append(node('p', 'expert-hint', 'Saving makes a new version. Its next message follows it; running jobs finish with what they started with.'));
   name.focus();
   return dialog;

@@ -41,3 +41,4 @@
 .needs-you-toast a{text-decoration:none;white-space:nowrap}
 @media (prefers-reduced-motion:no-preference){.needs-you-toast:not([hidden]){animation:needs-you-in .18s ease-out}}
 @keyframes needs-you-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
+.expert-library{display:grid;gap:6px}

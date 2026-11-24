@@ -1354,6 +1354,19 @@ Connections' **More** menu shows concise dates and the runs observed by this dep
 counts and elapsed worker time sit behind **Usage details**. Saved account names remain user data;
 updating a provider's display brand must not silently rename those accounts or change identifiers.
 
+### Experts people can talk to
+
+In **My experts**, the **＋ Create** card opens the same dialog as **Edit**: name, what it does,
+instructions, Knowledge and Skills from My Library, the AI team (who talks, who coordinates, who may
+work; accounts and backups folded under Accounts), Ask me first as one three-way choice with a
+one-line meaning, and where it works with one plain line about full access on this computer. Save
+makes a new version. Manage adds **Chat** (the owner's own conversation with the Expert) and
+**Channels** (Add Teams, Connect with Microsoft's sign-in code shown in the dialog, people who may
+write, people waiting, Install and Test in Teams, Turn off). Activity shows **Needs you** first, with
+a count on the tab, a pop-up on any page and an optional browser notification. A request shows who
+asked, where, their words, the reason and exactly what will be sent or started; Approve and Reject
+act from the signed-in page only. Requirements: [Experts on channels](10_Experts_and_Channels.md).
+
 ### Manage experts and retained work without a second object model
 
 **Run Project → My experts** keeps the same expert cards and approved artwork. Available, Archived
