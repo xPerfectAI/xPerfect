@@ -50,6 +50,12 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _listed(binding: dict, person: dict) -> bool:
+    """The one allow-list rule: a person by platform id, in the listed tenant when one is given."""
+    allowed = {(p["id"], p.get("tenant", "")) for p in json.loads(binding["people_json"] or "[]")}
+    return (str(person.get("id") or ""), str(person.get("tenant") or "")) in allowed or (str(person.get("id") or ""), "") in allowed
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS channel_bindings (
  binding_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL, lineage_id TEXT NOT NULL,
@@ -169,6 +175,16 @@ class ChannelService:
             assignments = ",".join(f"{key}=?" for key in updates)
             with self.store._connect() as conn:
                 conn.execute(f"UPDATE channel_bindings SET {assignments} WHERE binding_id=?", (*updates.values(), binding_id))
+            if "people_json" in updates:
+                changed = {**binding, "people_json": updates["people_json"]}
+                with self.store._connect() as conn:
+                    removed = [row["conversation_id"] for row in conn.execute(
+                        "SELECT conversation_id,sender_json FROM expert_conversations WHERE binding_id=? AND role='speaker'",
+                        (binding_id,)) if not _listed(changed, json.loads(row["sender_json"] or "{}"))]
+                # Nothing more goes to a removed person: their requests, jobs and unsent messages close.
+                self.experts.close_channel_work(removed, "The person was removed from this channel.")
+                for conversation_id in removed:
+                    self.drop_unsent(conversation_id, "The person is no longer allowed")
             if updates.get("state") == "off":
                 self.setup.stop(binding_id)
                 # Off means off: nothing more is sent, its jobs stop and its waiting requests are
@@ -216,9 +232,7 @@ class ChannelService:
                 # A message the channel delivers twice makes one turn.
                 return {"accepted": seen["state"] == "accepted", "duplicate": True,
                         "conversation_id": seen["conversation_id"], "turn_id": seen["turn_id"]}
-            allowed = {(p["id"], p.get("tenant", "")) for p in json.loads(binding["people_json"] or "[]")}
-            permitted = binding["state"] == "connected" and (
-                (person["id"], person["tenant"]) in allowed or (person["id"], "") in allowed)
+            permitted = binding["state"] == "connected" and _listed(binding, person)
             if not permitted:
                 conn.execute("INSERT INTO channel_inbox(binding_id,activity_id,state,person_json,created_at) VALUES(?,?,?,?,?)",
                              (binding_id, message.activity_id, "refused", canonical(person), _now()))
@@ -252,9 +266,14 @@ class ChannelService:
         claimed = []
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute("SELECT * FROM channel_deliveries WHERE binding_id=? AND state='pending' "
-                                "ORDER BY created_at LIMIT ?", (binding_id, max(1, min(limit, 50)))).fetchall()
+            rows = conn.execute("SELECT d.*,e.sender_json FROM channel_deliveries d LEFT JOIN expert_conversations e "
+                                "ON e.conversation_id=d.conversation_id WHERE d.binding_id=? AND d.state='pending' "
+                                "ORDER BY d.created_at LIMIT ?", (binding_id, max(1, min(limit, 50)))).fetchall()
             for row in rows:
+                if not _listed(binding, json.loads(row["sender_json"] or "{}")):
+                    conn.execute("UPDATE channel_deliveries SET state='dropped',error='The person is no longer allowed',"
+                                 "finished_at=? WHERE delivery_id=? AND state='pending'", (_now(), row["delivery_id"]))
+                    continue
                 conn.execute("UPDATE channel_deliveries SET state='sending',claimed_at=? WHERE delivery_id=? AND state='pending'",
                              (_now(), row["delivery_id"]))
                 claimed.append({"delivery_id": row["delivery_id"], "text": row["text"], "kind": row["kind"],

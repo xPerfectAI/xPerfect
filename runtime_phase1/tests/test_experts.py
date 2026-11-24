@@ -480,3 +480,22 @@ def test_a_stopped_conversation_leaves_nothing_approvable(app, monkeypatch):
             experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
     assert experts._job(job["job_id"])["state"] == "stopped"
     assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+
+
+def test_removing_a_person_stops_everything_waiting_for_them(app):
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Prepared answer")
+    application.state.channels.reconcile_once()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    review = experts.reviews("local", owner)[0]
+    with experts.store._connect() as conn:  # and one message already free to leave
+        conn.execute("UPDATE channel_deliveries SET state='pending' WHERE kind='checking'")
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": []}).status_code == 200
+    assert experts.reviews("local", owner) == []
+    with pytest.raises(ExpertError):
+        experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
