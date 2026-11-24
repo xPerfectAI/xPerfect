@@ -137,6 +137,9 @@ class ChannelService:
                 (binding["binding_id"],))]
             unconfirmed = conn.execute("SELECT COUNT(*) FROM channel_deliveries WHERE binding_id=? AND state='not_confirmed'",
                                        (binding["binding_id"],)).fetchone()[0]
+            # Online is not ready: a channel is ready once a first message has really come through.
+            heard = conn.execute("SELECT 1 FROM channel_inbox WHERE binding_id=? LIMIT 1",
+                                 (binding["binding_id"],)).fetchone() is not None
         seen = binding["package_seen_at"]
         recent = bool(seen) and datetime.fromisoformat(seen) > datetime.now(UTC) - timedelta(seconds=45)
         # Online once Microsoft's socket has held. A package from before it reported the socket counts as before.
@@ -144,7 +147,7 @@ class ChannelService:
         online = recent and socket in ("", "ready")
         return {"binding_id": binding["binding_id"], "lineage_id": binding["lineage_id"], "kind": binding["kind"],
                 "label": CHANNEL_LABELS.get(binding["kind"], binding["kind"]), "state": binding["state"],
-                "online": online, "connecting": recent and socket == "connecting",
+                "online": online, "connecting": recent and socket == "connecting", "first_message": heard,
                 # Microsoft's last final refusal, kept until the socket holds again, so it is said once, not per try.
                 "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
                 "app": {key: settings[key] for key in ("app_id", "app_name", "tenant_id", "mode", "install_link")

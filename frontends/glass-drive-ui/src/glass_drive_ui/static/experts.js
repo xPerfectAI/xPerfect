@@ -194,11 +194,12 @@ export function sharedFolderNote(kind, people, waiting) {
   return 'Jobs for everyone here share one work folder on this computer, so a job you approve for one person could read another person’s job files. To keep each person’s work apart, choose a sandboxed workspace in Edit.';
 }
 
-/** A channel's pill: Connecting… while its package runs but Microsoft's socket has not held yet. */
+/** A channel's pill: Connecting… until Microsoft's socket holds, and ready only once a first message came through. */
 export function channelState(channel) {
   if (channel.state === 'off') return 'Off';
   if (channel.state !== 'connected') return 'Not connected';
-  return channel.online ? 'Connected' : channel.connecting ? 'Connecting…' : 'Connected · offline';
+  if (channel.online) return channel.first_message ? 'Connected' : 'Online · no message yet';
+  return channel.connecting ? 'Connecting…' : 'Connected · offline';
 }
 
 /** Channels: add Teams, Connect with Microsoft's sign-in, people, Test in Teams. */
@@ -244,11 +245,13 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     if (step.step === 'creating') { status.textContent = 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
     if (step.step === 'blocked') {
       // Teams does not allow the app yet: the one thing to ask, a note to send, and the page goes on by itself.
-      const note = node('p', 'expert-hint', step.note || ''); note.style.whiteSpace = 'pre-line';
-      const copy = node('button', 'secondary-button', 'Copy a note for your administrator'); copy.type = 'button';
-      copy.onclick = async () => { try { await navigator.clipboard.writeText(step.note || ''); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the note below'; } };
       const now = node('button', 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
-      box.append(copy, now, note);
+      if (step.note) {  // no note while Microsoft is still applying a change already made
+        const note = node('p', 'expert-hint', step.note); note.style.whiteSpace = 'pre-line';
+        const copy = node('button', 'secondary-button', 'Copy a note for your administrator'); copy.type = 'button';
+        copy.onclick = async () => { try { await navigator.clipboard.writeText(step.note); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the note below'; } };
+        box.append(copy, now, note);
+      } else box.append(now);
       status.textContent = step.error || ''; timer = setTimeout(() => poll(channel), 10000); return;
     }
     if (step.step === 'error') {
@@ -282,6 +285,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         const toggle = node('button', 'secondary-button', channel.state === 'connected' ? 'Turn off' : 'Turn on'); toggle.type = 'button';
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
+        if (channel.state === 'connected' && channel.online && !channel.first_message) card.append(node('p', 'expert-hint', 'Press Test in Teams and send it a message: it is ready once that message arrives.'));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
       if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));

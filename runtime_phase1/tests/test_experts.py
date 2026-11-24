@@ -2174,7 +2174,25 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
     report["user"] = True  # the administrator turned it on
     clock[0] += 121
     setup.reconcile_once()
+    run_background()  # one "yes" after a "no" is one of Microsoft's servers: not yet
+    status = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert creations() == 0 and status["step"] == "blocked" and "still applying" in status["error"]
+    assert status.get("note", "") == ""
+    for _ in range(3):  # "Check now" pressed again and again cannot make a minute shorter
+        client.post(f"/v1/channels/{binding_id}/connect", json={})
+        run_background()
+    assert creations() == 0
+    report["user"] = False  # the answer flips back: start over
+    clock[0] += 30
+    setup.reconcile_once()
     run_background()
+    assert creations() == 0 and "Upload custom apps" in client.get(f"/v1/channels/{binding_id}/connect").json()["error"]
+    report["user"] = True
+    for step in (121, 30, 30):  # three "yes" in a row over a minute
+        assert creations() == 0
+        clock[0] += step
+        setup.reconcile_once()
+        run_background()
     assert creations() == 1
     assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "connected"
     setup.reconcile_once()
@@ -2204,6 +2222,9 @@ def test_a_channel_is_connecting_until_microsofts_socket_holds_and_a_lasting_ref
     assert seen() == (False, True, refusal)
     client.post(path, json={"socket": "ready"})
     assert seen() == (True, False, "")
+    assert service.view(service._binding(channel["binding_id"]))["first_message"] is False  # online is not ready
+    client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-first"))
+    assert service.view(service._binding(channel["binding_id"]))["first_message"] is True
     assert client.post(path, json={"socket": "unknown"}).status_code == 422
     assert client.post(path, json={"socket": "ready", "extra": 1}).status_code == 422
 

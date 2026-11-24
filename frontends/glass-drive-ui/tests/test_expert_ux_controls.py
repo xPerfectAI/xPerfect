@@ -280,7 +280,8 @@ def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
     assert "if (step.step === 'blocked') {" in source and "Copy a note for your administrator" in source
     assert "timer = setTimeout(() => poll(channel), 10000); return;" in source
     run_node("import assert from 'node:assert/strict';\n" + state.group(0).replace('export ', '') + """
-assert.equal(channelState({state: 'connected', online: true, connecting: false}), 'Connected');
+assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: true}), 'Connected');
+assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: false}), 'Online · no message yet');
 assert.equal(channelState({state: 'connected', online: false, connecting: true}), 'Connecting…');
 assert.equal(channelState({state: 'connected', online: false, connecting: false}), 'Connected · offline');
 assert.equal(channelState({state: 'off', online: true, connecting: false}), 'Off');

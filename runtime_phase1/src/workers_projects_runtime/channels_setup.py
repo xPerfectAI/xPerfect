@@ -52,6 +52,13 @@ _SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try ag
 _RESTART_FIRST_WAIT_S = 5.0
 _RESTART_MAX_WAIT_S = 300.0
 _RECHECK_S = 120.0  # while Teams does not allow the app, Microsoft's report is read again this often
+# While a change spreads, Microsoft's servers answer differently (no, no, yes, no within eight seconds in the first
+# real test). After a "no", Connect goes on only after this many "yes" in a row spanning at least a minute.
+_STEADY_READS = 3
+_STEADY_SPAN_S = 60.0
+_STEADY_RECHECK_S = 30.0
+_STILL_APPLYING = ("Microsoft is still applying the change: it has said yes, but not every time yet. This page checks "
+                   "again by itself and goes on when the answer is steady.")
 
 
 def _find(value: Any, key: str) -> Any:
@@ -108,6 +115,7 @@ class TeamsSetup:
         self._packages: dict[str, subprocess.Popen] = {}
         self._started: dict[str, str] = {}  # when each package started here began
         self._restarts: dict[str, tuple[int, float]] = {}  # exits before the socket held, and when to try again
+        self._steady: dict[str, tuple[int, float]] = {}  # after a "no": the "yes" in a row, and when the first came
         self._clock = time.monotonic
         self._lock = threading.Lock()
 
@@ -264,15 +272,26 @@ class TeamsSetup:
                         return
                 raise
             blocked = _custom_apps_blocked(status, expert["name"])
-            if blocked:
-                # Nothing is created that Teams would not let this account install; the page says why, plainly,
-                # with a note for the administrator, and maintenance reads Microsoft's report again by itself.
-                with self._lock:
+            with self._lock:
+                now = self._clock()
+                if blocked:
+                    # Nothing is created that Teams would not let this account install; the page says why, plainly,
+                    # with a note for the administrator, and maintenance reads Microsoft's report again by itself.
+                    self._steady[binding_id] = (0, 0.0)
                     self._sessions[binding_id] = {"step": "blocked", "error": blocked,
                                                   "note": _note_for_admin(status, expert["name"]),
-                                                  "tenant": tenant, "owner": owner,
-                                                  "check_at": self._clock() + _RECHECK_S}
-                return
+                                                  "tenant": tenant, "owner": owner, "check_at": now + _RECHECK_S}
+                    return
+                if binding_id in self._steady:  # Microsoft said no before: wait until its "yes" is steady
+                    count, first = self._steady[binding_id]
+                    count, first = count + 1, first if count else now
+                    if count < _STEADY_READS or now - first < _STEADY_SPAN_S:
+                        self._steady[binding_id] = (count, first)
+                        self._sessions[binding_id] = {"step": "blocked", "error": _STILL_APPLYING, "note": "",
+                                                      "tenant": tenant, "owner": owner,
+                                                      "check_at": now + _STEADY_RECHECK_S}
+                        return
+                    del self._steady[binding_id]
             path = self.credentials_path(binding_id)
             created = self._run("app", "create", "--name", expert["name"][:30], "--messaging-mode", "socket",
                                 "--teams-managed", "--env", str(path), timeout=600)
