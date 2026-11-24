@@ -15,8 +15,10 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .channels import CHANNEL_TABLES, CHANNELS_SCHEMA_VERSION
 from .control_plane import CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore
 from .coordinator import COORDINATOR_SCHEMA_VERSION
+from .experts import EXPERT_TABLES, EXPERTS_SCHEMA_VERSION
 from .deliverables import NON_DELIVERABLE_DIR_NAMES
 from .execution_profile import packaged_linux
 from .models import utc_now
@@ -33,7 +35,10 @@ from .store import (CALLBACK_TRACE_AUTHORITY_FIELDS, CLOSED_WORKER_STATES, COMPU
     verified_callback_trace_snapshots)
 
 
-_OPTIONAL_SCHEMA_VERSIONS = {"coordinator": COORDINATOR_SCHEMA_VERSION, "worker_configuration": 2}
+_OPTIONAL_SCHEMA_VERSIONS = {
+    "coordinator": COORDINATOR_SCHEMA_VERSION, "worker_configuration": 2,
+    "experts": EXPERTS_SCHEMA_VERSION, "channels": CHANNELS_SCHEMA_VERSION,
+}
 _KNOWN_COMPONENTS = {
     "runtime_store",
     "control_plane",
@@ -46,6 +51,8 @@ _OPTIONAL_TABLES = {
         "coordinator_actions", "coordinator_events",
     },
     "worker_configuration": {"worker_configurations", "worker_context_snapshots"},
+    "experts": set(EXPERT_TABLES),
+    "channels": set(CHANNEL_TABLES),
 }
 # These existing owners create their complete table sets without a schema ledger row.
 # Presence selects the owner; exact DDL, indexes and constraints are still reviewed below.
@@ -251,6 +258,16 @@ def _apply_schema_owners(path: Path, components) -> Store:
             from .coordinator import CoordinatorService
 
             CoordinatorService(store, object(), object())
+        if "experts" in components:
+            from .experts import ensure_experts_schema
+
+            with store._connect() as connection:
+                ensure_experts_schema(connection)
+        if "channels" in components:
+            from .channels import ensure_channels_schema
+
+            with store._connect() as connection:
+                ensure_channels_schema(connection)
         if "worker_configuration" in components:
             from .worker_configuration import WorkerConfiguration
 
@@ -1386,6 +1403,17 @@ def _reset_restore_authority(connection: sqlite3.Connection) -> None:
         connection.execute(
             "UPDATE peer_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE revoked_at IS NULL",
             (time.time(),),
+        )
+    # A channel package may have sent an outbox message after the copy was taken, so a
+    # restored one is shown to the owner and never sent again by itself.
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_deliveries'"
+    ).fetchone():
+        connection.execute(
+            "UPDATE channel_deliveries SET state='not_confirmed', finished_at=?, "
+            "error='Restored from a copy; it may already have been sent, so it is not sent again.' "
+            "WHERE state IN ('pending','sending')",
+            (utc_now(),),
         )
 
     # Provider requests are retained, but every pre-existing transition/fallback/result

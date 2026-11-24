@@ -333,6 +333,11 @@ def install_coordinator_routes(app, coordinator, principal: Callable, default_co
     def stop_turn(conversation_id: str, turn_id: str, request: Request):
         return invoke(coordinator.cancel_turn, *principal(request), conversation_id, turn_id)
 
+    @router.post("/conversations/{conversation_id}/stop")
+    def stop_conversation(conversation_id: str, request: Request):
+        # Durable and idempotent: repeating it is the recovery while confirmation is pending.
+        return invoke(coordinator.stop_conversation, *principal(request), conversation_id)
+
     @router.post("/conversations/{conversation_id}/turns/{turn_id}/retry-result")
     def retry_result_turn(conversation_id: str, turn_id: str, request: Request):
         return invoke(coordinator.retry_result_turn, *principal(request), conversation_id, turn_id)

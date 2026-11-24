@@ -2608,3 +2608,154 @@ def test_chat_turn_admission_keeps_one_durable_output_stream_identity(coordinato
     assert len(received) == 2
     assert all(item.stream_id == item.message_id == 'turn-files' for item in received)
     assert received[0].idempotency_key == received[1].idempotency_key
+
+
+@pytest.fixture
+def coordinator_backlog(coordinator):
+    template = create(coordinator)
+    with coordinator.store._connect() as conn:
+        conn.executemany(
+            "INSERT INTO coordinator_conversations "
+            "(conversation_id,tenant_id,owner_id,config_json,prompt_json,created_at,scope_json) "
+            "SELECT ?,tenant_id,owner_id,config_json,prompt_json,created_at,scope_json "
+            "FROM coordinator_conversations WHERE conversation_id=?",
+            [(f"conversation-{i:03d}", template) for i in range(404)],
+        )
+        conn.execute("DELETE FROM coordinator_conversations WHERE conversation_id=?", (template,))
+        conn.execute(
+            "INSERT INTO coordinator_turns (conversation_id,turn_id,message,response_json,created_at) "
+            "SELECT conversation_id,'finished','Synthetic completed turn','{}',created_at FROM coordinator_conversations"
+        )
+    coordinator._reconcile_after = "conversation-300"
+    return coordinator, "conversation-167"
+
+
+def _save_wake_event(core, conversation_id):
+    with core.store._connect() as conn:
+        conn.execute(
+            "INSERT INTO coordinator_events (conversation_id,kind,identity,payload_json,created_at) "
+            "VALUES (?,'result_available','synthetic-run','{}','2026-01-01T00:00:00+00:00')",
+            (conversation_id,),
+        )
+
+
+def _result_turn_ids(core, conversation_id):
+    with core.store._connect() as conn:
+        return [row[0] for row in conn.execute(
+            "SELECT turn_id FROM coordinator_turns WHERE conversation_id=? AND origin='worker_results'",
+            (conversation_id,),
+        )]
+
+
+def test_result_event_at_position_168_wakes_in_one_tick(coordinator_backlog):
+    core, cid = coordinator_backlog
+    _save_wake_event(core, cid)
+    core.reconcile_once()
+    result_ids = _result_turn_ids(core, cid)
+    assert len(result_ids) == 1
+    core.reconcile_once()
+    assert _result_turn_ids(core, cid) == result_ids
+
+
+def test_priority_preserves_the_round_robin_and_skips_finished_history(coordinator_backlog, monkeypatch):
+    core, cid = coordinator_backlog
+    recovered = []
+    cold = ["conversation-350", "conversation-001"]
+    with core.store._connect() as conn:
+        conn.executemany(
+            "INSERT INTO coordinator_goals (conversation_id,goal_id,source_turn_id,text,dispatch_json,created_at) "
+            "VALUES (?,'recover','finished','Recover dispatch','{}','2026-01-01T00:00:00+00:00')",
+            [(item,) for item in cold],
+        )
+    monkeypatch.setattr(core, "recover_dispatches", lambda _tenant, _owner, item: recovered.append(item))
+    _save_wake_event(core, cid)
+    # Keep a foreground turn pending so priority has work through the wraparound.
+    core.accept_turn("local", "owner", cid, "foreground", "An accepted foreground turn")
+    monkeypatch.setattr(core, "start_turn", lambda *_: {})
+    for _ in range(3):
+        core.reconcile_once()
+    assert recovered[0] == cid
+    assert [item for item in recovered if item != cid] == cold
+
+
+def test_priority_respects_foreground_turn(coordinator_backlog):
+    core, cid = coordinator_backlog
+    _save_wake_event(core, cid)
+    core.accept_turn("local", "owner", cid, "foreground", "An accepted foreground turn")
+    core.reconcile_once()
+    assert not _result_turn_ids(core, cid)
+    assert core.snapshot("local", "owner", cid)["turns"][-1]["blocker"] == "ConnectionError"
+    with core.store._connect() as conn:
+        conn.execute(
+            "UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=? AND turn_id='foreground'",
+            (cid,),
+        )
+    core.reconcile_once()
+    assert len(_result_turn_ids(core, cid)) == 1
+
+
+def test_priority_respects_restore_hold(coordinator_backlog):
+    core, cid = coordinator_backlog
+    _save_wake_event(core, cid)
+    core.accept_turn("local", "owner", cid, "foreground", "An accepted foreground turn")
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_conversations SET restore_hold=1 WHERE conversation_id=?", (cid,))
+        conn.execute("UPDATE coordinator_turns SET restore_hold=1 WHERE conversation_id=? AND turn_id='foreground'", (cid,))
+    core.reconcile_once()
+    assert not _result_turn_ids(core, cid)
+    assert core.snapshot("local", "owner", cid)["turns"][-1]["blocker"] == ""
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET response_json='{}',restore_hold=0 WHERE conversation_id=?", (cid,))
+        conn.execute("UPDATE coordinator_conversations SET restore_hold=0 WHERE conversation_id=?", (cid,))
+    core.reconcile_once()
+    assert len(_result_turn_ids(core, cid)) == 1
+
+
+def test_terminal_worker_run_records_the_result_and_wakes_existing_scheduler(coordinator_backlog):
+    core, cid = coordinator_backlog
+    core.accept_turn("local", "owner", cid, "source", "Synthetic work", [Goal(id="goal", text="Synthetic goal")])
+    project = core.snapshot("local", "owner", cid)["scope"]["project_id"]
+    worker = core.store.create_worker(
+        project, "owner", "Worker", "Worker", "codex-cli", "codex-cli",
+        "codex-cli", "exact-worker-model", execution_mode="host",
+    )
+    run = core.store.create_run(worker["worker_id"], project, "Synthetic request")
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=?", (cid,))
+        conn.execute(
+            "UPDATE coordinator_goals SET worker_id=?,run_id=? WHERE conversation_id=? AND goal_id='goal'",
+            (worker["worker_id"], run["run_id"], cid),
+        )
+    service = object.__new__(WorkersProjectsService)
+    service.store = core.store
+    service.coordinator = core
+    service.files = SimpleNamespace(artifact_worker=lambda worker: worker)
+    service.run_notifications = SimpleNamespace(notify=lambda _run: None)
+    service._provider_request_reconciler = None
+    service._scheduler_wake_event = Event()
+    service._run_local_bundles_lock = Lock()
+    service._run_local_bundles = {}
+    assert service._finalize_run_if_state(run["run_id"], "queued", "completed", "42")
+    assert service._scheduler_wake_event.is_set()
+    with core.store._connect() as conn:
+        assert conn.execute(
+            "SELECT identity FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id=''",
+            (cid,),
+        ).fetchone()[0] == run["run_id"]
+    core.reconcile_once()
+    assert len(_result_turn_ids(core, cid)) == 1
+
+
+def test_sweep_still_refreshes_application_conversations(coordinator_backlog, monkeypatch):
+    # refresh() is the only driver of an Application's progress and results, so the
+    # prioritised sweep keeps visiting it even while its only live work is a running Worker.
+    core, _ = coordinator_backlog
+    with core.store._connect() as conn:
+        conn.execute(
+            "UPDATE coordinator_conversations SET application_ref='synthetic-application' "
+            "WHERE conversation_id='conversation-350'"
+        )
+    refreshed = []
+    monkeypatch.setattr(core, "refresh", lambda _tenant, _owner, item, *_args, **_kwargs: refreshed.append(item))
+    core.reconcile_once()
+    assert refreshed == ["conversation-350"]

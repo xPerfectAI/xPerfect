@@ -87,7 +87,8 @@ or a server for a wall.
 - Every outgoing message is saved in an outbox before a package sends it: `held`, `pending`,
   `sending`, `sent`, `not_confirmed`, `failed`, `dropped`. A send with no outcome after two
   minutes becomes `not_confirmed`, is shown to the owner and is never resent by itself.
-- Turning a channel off drops its unsent messages and stops its package; accepted work stays visible.
+- Turning a channel off stops its package and its jobs, drops its unsent messages and withdraws its
+  waiting requests; accepted work stays visible. An approval never brings back a dropped message.
 - Channel packages live beside the core and use only the channel routes:
   `/v1/channels/{id}/package`, `/heartbeat`, `/inbound`, `/deliveries/claim`, `/deliveries/{delivery}`.
 
@@ -111,10 +112,16 @@ or a server for a wall.
 ## Nothing happens twice
 
 - A job that has started is never started again by itself; it resumes or is reported.
+- Stopping a job stops its coordinator conversation with the coordinator's durable Stop: nothing in
+  it starts again, also after a restart, and other jobs are untouched. A finished Worker run wakes
+  its job at once instead of waiting for the next pass over every conversation.
 - A declared backup account is the conversation's armed fallback: the provider switches to it only
   before the reply starts, while the main route is in a quota or rate-limit cool-down.
 - A message delivered twice by a channel makes one turn. An outgoing message with an unknown outcome
   is never resent by itself.
+- Backups, restores and upgrades review the Expert and channel tables like the other optional
+  parts. A restored copy marks unsent or sending messages `not_confirmed`, so it never sends them
+  again; it does not carry a channel's app secret, so a channel is connected again on a new machine.
 
 ## Known limits
 

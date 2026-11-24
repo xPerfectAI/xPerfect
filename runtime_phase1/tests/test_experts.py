@@ -256,3 +256,60 @@ def test_a_finished_job_is_told_to_the_queen_once(app):
     assert [e["kind"] for e in events] == ["expert_job_result"]
     assert json.loads(events[0]["payload_json"])["result"]["output_text"] == "Synthetic result"
     assert experts._job("job_synthetic")["state"] == "done"
+
+
+def test_a_stopped_job_never_starts_again_and_a_raced_stop_is_re_driven(app, monkeypatch):
+    application, client = app
+    expert = create_expert(client)
+    experts = application.state.experts
+    monkeypatch.setattr(experts.coordinator.provider, "cancel_by_idempotency",
+                        lambda *args, **kwargs: {"capacity_released": True})
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    first = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    second = experts.hand_off("local", owner, chat["conversation_id"], goal="Another job", idempotency_key="k2")
+    cids = [experts._job(job["job_id"])["job_conversation_id"] for job in (first, second)]
+    assert all(cids)
+    experts.stop_job(first["job_id"])
+    core = experts.coordinator
+    assert core.snapshot("local", owner, cids[0])["stop_scope"] == "stopped"
+    with pytest.raises(Exception, match="stopped"):
+        core.accept_turn("local", owner, cids[0], "late", "Synthetic late message")
+    assert core.queue_result_turn("local", owner, cids[0]) is None
+    # Stop reaches only that job.
+    assert core.snapshot("local", owner, cids[1])["stop_scope"] == ""
+    assert experts._job(second["job_id"])["state"] in {"starting", "running"}
+    # A Stop that raced the job's start (or a restart between the two) is re-driven.
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE expert_jobs SET state='stopped' WHERE job_id=?", (second["job_id"],))
+    experts.reconcile_once()
+    assert core.snapshot("local", owner, cids[1])["stop_scope"] == "stopped"
+
+
+def test_turning_a_channel_off_stops_its_jobs_and_withdraws_its_requests(app):
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, accepted["conversation_id"], goal="Synthetic job", idempotency_key="k1",
+                           source_turn_id=accepted["turn_id"])
+    # A second message whose reply is held for the owner.
+    later = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-2")).json()
+    finish_turn(application, later["conversation_id"], later["turn_id"], "Prepared answer")
+    application.state.channels.reconcile_once()
+    waiting = {review["kind"]: review for review in experts.reviews("local", owner)}
+    assert set(waiting) == {"job", "reply"}
+    response = client.patch(f"/v1/channels/{channel['binding_id']}", json={"state": "off"})
+    assert response.status_code == 200, response.text
+    assert experts._job(job["job_id"])["state"] == "stopped"
+    assert experts.reviews("local", owner) == []
+    reply = waiting["reply"]
+    with pytest.raises(ExpertError):
+        experts.decide("local", owner, reply["review_id"], decision="approve", expected_digest=reply["payload_digest"])
+    # Even a direct release never revives a message the channel dropped.
+    application.state.channels.release_approved_reply(experts._review(reply["review_id"]))
+    with experts.store._connect() as conn:
+        states = [row[0] for row in conn.execute("SELECT state FROM channel_deliveries WHERE kind<>'checking'")]
+    assert states and set(states) == {"dropped"}

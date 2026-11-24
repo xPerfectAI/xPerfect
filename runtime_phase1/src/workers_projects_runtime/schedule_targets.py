@@ -121,6 +121,7 @@ def ensure_target_columns(conn):
             "target_kind": "TEXT NOT NULL DEFAULT 'worker'", "target_json": "TEXT NOT NULL DEFAULT '{}'",
             "version": "INTEGER NOT NULL DEFAULT 1", "create_key": "TEXT NOT NULL DEFAULT ''",
             "create_digest": "TEXT NOT NULL DEFAULT ''", "bootstrap_json": "TEXT NOT NULL DEFAULT '{}'",
+            "source_run_id": "TEXT NOT NULL DEFAULT ''",
         },
         "recurring_schedule_occurrences": {
             "target_kind": "TEXT NOT NULL DEFAULT 'worker'", "target_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -315,7 +316,7 @@ def _target(service,tenant,owner,target):
     return worker
 
 
-def create_definition(service,*,tenant_id,owner_id,target,idempotency_key,instruction="",bootstrap_bundle=None,**values):
+def create_definition(service,*,tenant_id,owner_id,target,idempotency_key,instruction="",bootstrap_bundle=None,source_run_id="",**values):
     from .models import CreateTargetScheduleRequest
     request = CreateTargetScheduleRequest.model_validate({"target":target,"instruction":instruction,"idempotency_key":idempotency_key,"bootstrap_bundle":bootstrap_bundle,**values})
     target=request.target.model_dump();instruction=request.instruction;bootstrap_bundle=request.bootstrap_bundle
@@ -323,6 +324,8 @@ def create_definition(service,*,tenant_id,owner_id,target,idempotency_key,instru
     tenant=tenant_id or "local";owner=str(owner_id)
     if not 8<=len(idempotency_key)<=128:raise ValueError("A stable create idempotency key is required")
     requested={"target":target,"instruction":instruction,"bootstrap_bundle":bootstrap_bundle,**values}
+    if source_run_id:
+        requested["source_run_id"] = source_run_id
     digest=hashlib.sha256(encoded(requested).encode()).hexdigest()
     store=service.store
     with store._connect() as conn:
@@ -355,10 +358,19 @@ def create_definition(service,*,tenant_id,owner_id,target,idempotency_key,instru
           **spec,"next_run_at":due.isoformat(),"active":int(spec["enabled"]),"last_occurrence_at":None,
           "target_kind":target["kind"],"target_json":encoded(target),"version":1,
           "create_key":idempotency_key,"create_digest":digest,"bootstrap_json":encoded(bootstrap_bundle or {}),
+          "source_run_id":source_run_id,
           "created_at":now.isoformat(),"updated_at":now.isoformat()}
     data["enabled"]=int(data["enabled"])
     with store._connect() as conn:
         conn.execute("BEGIN IMMEDIATE");_authority(conn,tenant,owner)
+        if source_run_id:
+            source = conn.execute("SELECT 1 FROM runs r JOIN workers w ON w.worker_id=r.worker_id "
+                "WHERE r.run_id=? AND r.state='running' AND w.tenant_id=? AND w.owner_id=?",
+                (source_run_id,tenant,owner)).fetchone()
+            if not source:
+                raise ValueError("Schedule source run is no longer active")
+            from .coordinator import guard_coordinator_run
+            guard_coordinator_run(conn,source_run_id)
         current=conn.execute("SELECT * FROM recurring_schedule_definitions WHERE tenant_id=? AND owner_id=? AND create_key=?",(tenant,owner,idempotency_key)).fetchone()
         if current:
             if current["create_digest"]!=digest:raise ScheduleCreateConflict("Schedule create idempotency key conflicts with another request")

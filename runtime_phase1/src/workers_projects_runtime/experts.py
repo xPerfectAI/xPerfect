@@ -159,6 +159,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_review_request
 """
 
 
+EXPERT_TABLES = frozenset({"expert_conversations", "expert_jobs", "expert_reviews"})
+
+
+def ensure_experts_schema(conn: Any) -> None:
+    """The one owner of the Expert tables (the service and continuity review both use it)."""
+    from .schema_version import (begin_schema_migration, execute_schema_script,
+                                 record_schema_version, require_compatible_schema)
+    begin_schema_migration(conn)
+    require_compatible_schema(conn, component="experts", target_version=EXPERTS_SCHEMA_VERSION)
+    execute_schema_script(conn, _SCHEMA)
+    record_schema_version(conn, component="experts", version=EXPERTS_SCHEMA_VERSION)
+
+
 class ExpertService:
     """Experts over the existing template, conversation, goal and run owners."""
 
@@ -167,13 +180,8 @@ class ExpertService:
         self.store, self.service, self.coordinator = store, service, coordinator
         self._role_config = role_config or self._default_role_config
         self.deliveries: Any = None  # the channel owner registers itself when installed
-        from .schema_version import (begin_schema_migration, execute_schema_script,
-                                     record_schema_version, require_compatible_schema)
         with store._connect() as conn:
-            begin_schema_migration(conn)
-            require_compatible_schema(conn, component="experts", target_version=EXPERTS_SCHEMA_VERSION)
-            execute_schema_script(conn, _SCHEMA)
-            record_schema_version(conn, component="experts", version=EXPERTS_SCHEMA_VERSION)
+            ensure_experts_schema(conn)
         coordinator.experts = self
 
     # ---------------------------------------------------------------- Expert record
@@ -595,24 +603,38 @@ class ExpertService:
             conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job_id))
         if job["review_id"]:
             self._withdraw(job["review_id"], "The job was stopped.")
-        cid = job["job_conversation_id"]
-        if cid:
-            snapshot = self.coordinator.snapshot(tenant, owner, cid, False)
-            for turn in snapshot.get("turns", []):
-                if not turn.get("response_json") and turn.get("blocker") not in {"cancelled", "failed"}:
-                    try:
-                        self.coordinator.cancel_turn(tenant, owner, cid, turn["turn_id"])
-                    except Exception:  # A turn that already finished keeps its receipt.
-                        pass
-            from .coordinator import Control
-            for goal in snapshot.get("goals", []):
-                if goal.get("state") not in TERMINAL_GOALS and goal.get("run_id"):
-                    try:
-                        self.coordinator.control(tenant, owner, cid, goal["goal_id"], Control(
-                            action="stop", run_id=goal["run_id"], idempotency_key="stop-" + job_id))
-                    except Exception:  # Stop is best effort per goal; the job itself is already stopped.
-                        pass
+        self._fence_job(job)
         return self._job_view(self._job(job_id))
+
+    def close_channel_work(self, speaker_conversation_ids: list[str], note: str) -> None:
+        """A channel turned off: its jobs stop and its waiting requests are withdrawn."""
+        if not speaker_conversation_ids:
+            return
+        marks = ",".join("?" for _ in speaker_conversation_ids)
+        with self.store._connect() as conn:
+            jobs = [row[0] for row in conn.execute(
+                f"SELECT job_id FROM expert_jobs WHERE speaker_conversation_id IN ({marks}) "
+                "AND state IN ('held','starting','running')", speaker_conversation_ids)]
+            reviews = [row[0] for row in conn.execute(
+                f"SELECT review_id FROM expert_reviews WHERE speaker_conversation_id IN ({marks}) "
+                "AND state='pending'", speaker_conversation_ids)]
+        for job_id in jobs:
+            self.stop_job(job_id)
+        for review_id in reviews:
+            self._withdraw(review_id, note)
+
+    def _fence_job(self, job: dict) -> None:
+        """The job's coordinator conversation is durably stopped: nothing in it starts again.
+
+        The job row is already stopped, so a failure here is re-driven by reconcile.
+        """
+        cid = job["job_conversation_id"]
+        if not cid:
+            return
+        try:
+            self.coordinator.stop_conversation(job["tenant_id"], job["owner_id"], cid)
+        except Exception:  # restore-held or briefly unavailable: reconcile retries the same Stop
+            pass
 
     def _job_finished(self, job: dict) -> tuple[bool, str, str]:
         """(finished, state, final text). Finished means no open goal and the newest turn answered."""
@@ -858,6 +880,15 @@ class ExpertService:
                     outcomes.append({"job_id": job["job_id"], "state": state})
             except Exception as exc:  # One job's failure must not stop the others.
                 outcomes.append({"job_id": job["job_id"], "error": type(exc).__name__})
+        # A stopped job's conversation stays fenced until its Stop is confirmed, also when
+        # the Stop raced the job's start or a restart came between them.
+        with self.store._connect() as conn:
+            unconfirmed = [dict(row) for row in conn.execute(
+                "SELECT j.* FROM expert_jobs j JOIN coordinator_conversations c "
+                "ON c.conversation_id=j.job_conversation_id WHERE j.state='stopped' "
+                "AND c.stop_scope<>'stopped' AND c.restore_hold=0 ORDER BY j.updated_at LIMIT ?", (limit,))]
+        for job in unconfirmed:
+            self._fence_job(job)
         if self.deliveries is not None:
             outcomes.extend(self.deliveries.reconcile_once())
         return outcomes

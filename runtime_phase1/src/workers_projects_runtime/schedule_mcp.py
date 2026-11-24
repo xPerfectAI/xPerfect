@@ -132,7 +132,8 @@ class NativeScheduleAccess:
                 if key not in payload.model_fields_set:
                     values[key] = value
             return self.service.create_target_schedule(
-                tenant_id=principal["tenant_id"], owner_id=principal["owner_id"], target=target, **values,
+                tenant_id=principal["tenant_id"], owner_id=principal["owner_id"], target=target,
+                source_run_id=principal["run_id"], **values,
             )
 
     def list(self, token: str, include_inactive: bool = False, limit: int = 100):

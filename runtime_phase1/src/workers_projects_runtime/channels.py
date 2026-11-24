@@ -78,16 +78,24 @@ CREATE TABLE IF NOT EXISTS channel_unknown_people (
 """
 
 
+CHANNEL_TABLES = frozenset({"channel_bindings", "channel_inbox", "channel_deliveries", "channel_unknown_people"})
+
+
+def ensure_channels_schema(conn: Any) -> None:
+    """The one owner of the channel tables (the service and continuity review both use it)."""
+    from .schema_version import (begin_schema_migration, execute_schema_script,
+                                 record_schema_version, require_compatible_schema)
+    begin_schema_migration(conn)
+    require_compatible_schema(conn, component="channels", target_version=CHANNELS_SCHEMA_VERSION)
+    execute_schema_script(conn, _SCHEMA)
+    record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
+
+
 class ChannelService:
     def __init__(self, store: Any, experts: ExpertService) -> None:
         self.store, self.experts = store, experts
-        from .schema_version import (begin_schema_migration, execute_schema_script,
-                                     record_schema_version, require_compatible_schema)
         with store._connect() as conn:
-            begin_schema_migration(conn)
-            require_compatible_schema(conn, component="channels", target_version=CHANNELS_SCHEMA_VERSION)
-            execute_schema_script(conn, _SCHEMA)
-            record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
+            ensure_channels_schema(conn)
         experts.deliveries = self
         from .channels_setup import TeamsSetup
         self.setup = TeamsSetup(self)
@@ -163,10 +171,14 @@ class ChannelService:
                 conn.execute(f"UPDATE channel_bindings SET {assignments} WHERE binding_id=?", (*updates.values(), binding_id))
             if updates.get("state") == "off":
                 self.setup.stop(binding_id)
-                # Off means off: nothing more is sent. Accepted work stays visible to the owner.
+                # Off means off: nothing more is sent, its jobs stop and its waiting requests are
+                # withdrawn. Accepted work stays visible to the owner.
                 with self.store._connect() as conn:
                     conn.execute("UPDATE channel_deliveries SET state='dropped',error='The channel was turned off',"
                                  "finished_at=? WHERE binding_id=? AND state IN ('pending','held')", (_now(), binding_id))
+                    speakers = [row[0] for row in conn.execute(
+                        "SELECT conversation_id FROM expert_conversations WHERE binding_id=?", (binding_id,))]
+                self.experts.close_channel_work(speakers, "The channel was turned off.")
         return self.view(self._binding(binding_id))
 
     def record_setup(self, tenant: str, owner: str, binding_id: str, settings: dict) -> dict:
@@ -283,13 +295,15 @@ class ChannelService:
         text = json.loads(review["payload_json"]).get("text", "")
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            held = conn.execute("SELECT delivery_id FROM channel_deliveries WHERE review_id=? AND state='held'",
-                                (review["review_id"],)).fetchone()
-            if held:
-                conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (held["delivery_id"],))
-            else:
+            existing = conn.execute("SELECT delivery_id,state FROM channel_deliveries WHERE review_id=? "
+                                    "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
+            if existing and existing["state"] == "held":
+                conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (existing["delivery_id"],))
+            elif not existing:
+                # A reply the Expert asked about (Auto) has no held copy yet.
                 self._insert_delivery(conn, speaker, "approved-" + review["review_id"], "approved", text, "pending",
                                       review["review_id"])
+            # Any other state (dropped, sent, not confirmed) is final: approval never revives it.
 
     def discard_held_reply(self, review: dict) -> None:
         with self.store._connect() as conn:

@@ -291,7 +291,8 @@ CREATE TABLE IF NOT EXISTS coordinator_conversations (
  scope_json TEXT NOT NULL DEFAULT '{}',
  application_ref TEXT NOT NULL DEFAULT '', create_digest TEXT NOT NULL DEFAULT '',
  library_json TEXT NOT NULL DEFAULT '{}',
- restore_hold INTEGER NOT NULL DEFAULT 0, restore_hold_set_hash TEXT NOT NULL DEFAULT ''
+ restore_hold INTEGER NOT NULL DEFAULT 0, restore_hold_set_hash TEXT NOT NULL DEFAULT '',
+ stop_scope TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS coordinator_turns (
  conversation_id TEXT NOT NULL REFERENCES coordinator_conversations(conversation_id),
@@ -331,6 +332,16 @@ CREATE TABLE IF NOT EXISTS coordinator_events (
 );
 """
 
+_UNSETTLED_TURN = "restore_hold=0 AND response_json=''"
+_RESULT_STATES = "'completed','failed','cancelled','interrupted'"
+_READY_TURN = """request_id='' AND (
+ blocker='' OR (origin='worker_results' AND blocker IN ('host_capacity','provider_account_busy')
+     AND (retry_after_at='' OR retry_after_at<=:now))
+ OR (blocker IN ('shared_capacity_busy','shared_resource_authority_unavailable',
+                 'host_capacity','provider_account_busy')
+     AND retry_after_at<>'' AND retry_after_at<=:now)
+)"""
+
 
 class CoordinatorService:
     def __init__(self, store: Any, service: Any, provider: Any) -> None:
@@ -352,6 +363,7 @@ class CoordinatorService:
                 ("coordinator_conversations", "library_json", "TEXT NOT NULL DEFAULT '{}'"),
                 ("coordinator_conversations", "restore_hold", "INTEGER NOT NULL DEFAULT 0"),
                 ("coordinator_conversations", "restore_hold_set_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("coordinator_conversations", "stop_scope", "TEXT NOT NULL DEFAULT ''"),
                 ("coordinator_turns", "restore_hold", "INTEGER NOT NULL DEFAULT 0"),
                 ("coordinator_turns", "retry_after_at", "TEXT NOT NULL DEFAULT ''"),
                 ("coordinator_turns", "retry_attempts", "INTEGER NOT NULL DEFAULT 0"),
@@ -371,6 +383,9 @@ class CoordinatorService:
                   OLD.owner_id IS NOT NEW.owner_id OR OLD.destination_id IS NOT NEW.destination_id OR
                   OLD.payload_json IS NOT NEW.payload_json OR OLD.expires_at IS NOT NEW.expires_at)
                 BEGIN SELECT RAISE(ABORT,'coordinator delivery snapshot is immutable'); END""")
+            # An earlier internal version of this sweep adds two partial indexes. Continuity reviews the
+            # exact index set at this schema version, so an install left by the previous release
+            # would be refused on upgrade; the sweep scans instead (measured in the tests).
             record_schema_version(conn, component="coordinator", version=COORDINATOR_SCHEMA_VERSION)
 
     def _conversation(self, tenant: str, owner: str, conversation_id: str) -> dict:
@@ -419,6 +434,17 @@ class CoordinatorService:
     def _assert_not_restore_held(self, conversation: dict) -> None:
         if bool(conversation.get("restore_hold")):
             raise CoordinatorConflict("Conversation is held for exact continuity resume")
+
+    def _assert_accepting(self, conversation: dict) -> None:
+        self._assert_not_restore_held(conversation)
+        if conversation.get("stop_scope"):
+            raise CoordinatorConflict("Conversation was stopped")
+
+    def _assert_accepting_in(self, conn: Any, conversation_id: str) -> None:
+        self._assert_accepting(dict(conn.execute(
+            "SELECT restore_hold,stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()))
 
     def _validated_scope(
         self, tenant: str, owner: str, scope: CoordinatorScope
@@ -771,7 +797,7 @@ class CoordinatorService:
                     message: str, goals: list[Goal] | None = None,
                     library_refs: list[dict] | None = None) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
-        self._assert_not_restore_held(conversation)
+        self._assert_accepting(conversation)
         if not turn_id or not message:
             raise CoordinatorConflict("Turn ID and message are required")
         goals = goals or []
@@ -794,11 +820,7 @@ class CoordinatorService:
                 library.resolve_refs(tenant, owner, refs))
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute(
-                "SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?",
-                (conversation_id,),
-            ).fetchone()[0]:
-                raise CoordinatorConflict("Conversation is held for exact continuity resume")
+            self._assert_accepting_in(conn, conversation_id)
             old = conn.execute("SELECT message,library_json FROM coordinator_turns WHERE conversation_id=? AND turn_id=?", (conversation_id, turn_id)).fetchone()
             if old and old["message"] != message:
                 raise CoordinatorConflict("Turn idempotency key changed content")
@@ -859,14 +881,10 @@ class CoordinatorService:
 
     def accept_goals(self, tenant: str, owner: str, conversation_id: str, turn_id: str, goals: list[Goal]) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
-        self._assert_not_restore_held(conversation)
+        self._assert_accepting(conversation)
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute(
-                "SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?",
-                (conversation_id,),
-            ).fetchone()[0]:
-                raise CoordinatorConflict("Conversation is held for exact continuity resume")
+            self._assert_accepting_in(conn, conversation_id)
             if not conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND turn_id=?", (conversation_id, turn_id)).fetchone():
                 raise CoordinatorConflict("Source turn unavailable")
             config = CoordinatorConfig.model_validate_json(conversation["config_json"])
@@ -883,7 +901,7 @@ class CoordinatorService:
 
     def dispatch(self, tenant: str, owner: str, conversation_id: str, dispatch: Dispatch, *, _recovering: bool = False) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
-        self._assert_not_restore_held(conversation)
+        self._assert_accepting(conversation)
         origin_scope = self._conversation_scope(conversation)
         config = CoordinatorConfig.model_validate_json(conversation["config_json"])
         if config.application is not None and dispatch.worker_id:
@@ -1269,6 +1287,7 @@ class CoordinatorService:
                 "library": selected_library,
                 "library_text_chars": config.library_text_chars,
                 "prompt": {k: v for k, v in json.loads(conversation["prompt_json"]).items() if k != "content"},
+                "stop_scope": str(conversation.get("stop_scope") or ""),
                 "restore_hold": bool(conversation.get("restore_hold")),
                 "restore_hold_set_hash": str(conversation.get("restore_hold_set_hash") or ""),
                 "turns": [{k: v for k, v in t.items() if k not in {"payload_json", "library_json"}} for t in turns],
@@ -1276,7 +1295,7 @@ class CoordinatorService:
                 "goals": [self._goal_summary(self.goal_snapshot(tenant, owner, conversation_id, r["goal_id"])) for r in goals]}
 
     def control(self, tenant: str, owner: str, conversation_id: str, goal_id: str, control: Control) -> dict:
-        self._assert_not_restore_held(self._conversation(tenant, owner, conversation_id))
+        self._assert_accepting(self._conversation(tenant, owner, conversation_id))
         goal = self.goal_snapshot(tenant, owner, conversation_id, goal_id)
         if control.action == "retry" and not control.run_id:
             from .coordinator_application import retry_dispatch
@@ -1623,6 +1642,8 @@ class CoordinatorService:
         from .conversation_provider import ChatCompletionRequest
 
         conversation = self._conversation(tenant, owner, conversation_id)
+        if conversation.get("stop_scope"):
+            return {"turn_id": turn_id, "state": "cancelled"}
         config = CoordinatorConfig.model_validate_json(conversation["config_json"])
         if config.application:
             from .coordinator_application import queue_turn
@@ -1647,7 +1668,7 @@ class CoordinatorService:
                     "message": "Selected Library material is unavailable. Refresh the selection and try again."}
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            live_conversation = conn.execute("SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
+            live_conversation = conn.execute("SELECT restore_hold,stop_scope FROM coordinator_conversations WHERE conversation_id=?", (conversation_id,)).fetchone()
             turn = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND turn_id=?", (conversation_id, turn_id)).fetchone()
             if not turn:
                 raise CoordinatorConflict("Accepted turn unavailable")
@@ -1655,7 +1676,7 @@ class CoordinatorService:
                 return {"turn_id": turn_id, "state": "restore_held", "blocker": "continuity_restore_hold"}
             if turn["origin"] != "interactive" and conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND origin='interactive' AND request_id='' AND blocker='' LIMIT 1", (conversation_id,)).fetchone():
                 return {"turn_id": turn_id, "state": "queued"}
-            if turn["blocker"] == "cancelled":
+            if live_conversation["stop_scope"] or turn["blocker"] == "cancelled":
                 return {"turn_id": turn_id, "state": "cancelled"}
             if turn["request_id"]:
                 return {"turn_id": turn_id, "request_id": turn["request_id"], "state": "accepted"}
@@ -1887,24 +1908,71 @@ class CoordinatorService:
                     (conversation_id, goal["goal_id"]),
                 ).fetchall()
                 for run_id in dict.fromkeys([goal["run_id"], *(run_id for row in sources for run_id in row)]):
-                    if not run_id:
-                        continue
-                    run = self._owned_goal_result_run(conn, tenant, owner, conversation_id, goal["goal_id"], run_id)
-                    # Message can retire a queued reservation into its replacement before
-                    # it starts. That predecessor has no independent worker result to surface.
-                    # Genuine admission failures still belong to the exact goal, even historically.
-                    if (run and run_id != goal["run_id"] and run["state"] == "cancelled"
-                            and not run.get("started_at")):
-                        continue
-                    if run and run["state"] in {"completed", "failed", "cancelled", "interrupted"}:
-                        receipt = {"goal_id": goal["goal_id"], "run_id": run_id, "state": run["state"]}
-                        conn.execute("INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)", (conversation_id, "result_available", run_id, canonical(receipt), now()))
+                    self._record_goal_result(conn, tenant, owner, conversation_id, goal, run_id)
         if CoordinatorConfig.model_validate_json(conversation["config_json"]).application:
             from .coordinator_application import queue_progress, queue_self_results, queue_turn_results
             queue_self_results(self, conversation)
             queue_turn_results(self, conversation)
             queue_progress(self, conversation)
         return self.snapshot(tenant, owner, conversation_id, include_history)
+
+    def _record_goal_result(self, conn: Any, tenant: str, owner: str, conversation_id: str,
+                            goal: dict, run_id: str | None) -> None:
+        if not run_id or conn.execute(
+            "SELECT 1 FROM coordinator_events "
+            "WHERE conversation_id=? AND kind='result_available' AND identity=?",
+            (conversation_id, run_id),
+        ).fetchone():
+            return
+        run = self._owned_goal_result_run(conn, tenant, owner, conversation_id, goal["goal_id"], run_id)
+        if not run or run["state"] not in {"completed", "failed", "cancelled", "interrupted"}:
+            return
+        # Message can replace a queued reservation before it starts. That predecessor
+        # has no independent result. Admission failures still belong to their exact goal.
+        if run_id != goal["run_id"] and run["state"] == "cancelled" and not run.get("started_at"):
+            return
+        receipt = {"goal_id": goal["goal_id"], "run_id": run_id, "state": run["state"]}
+        # A stopped conversation keeps the receipt but never wakes for it.
+        stopped = conn.execute("SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                               (conversation_id,)).fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at,delivered_turn_id) "
+            "VALUES(?,?,?,?,?,?)",
+            (conversation_id, "result_available", run_id, canonical(receipt), now(), "stopped" if stopped else ""),
+        )
+
+    def record_run_result(self, worker_id: str, run_id: str) -> bool:
+        """Record a committed run's result and signal whether maintenance can make progress."""
+        goals_sql = """
+            SELECT g.conversation_id,g.goal_id,g.run_id,c.tenant_id,c.owner_id,c.config_json
+            FROM coordinator_goals g JOIN coordinator_conversations c USING(conversation_id)
+            WHERE g.worker_id=? AND g.restore_hold=0 AND c.restore_hold=0
+        """
+        with self.store._connect() as conn:
+            # A foreground completion can release a waiting result or finish its report.
+            wake = bool(conn.execute("""
+                SELECT 1 FROM provider_requests p JOIN provider_sessions s USING(session_id)
+                JOIN coordinator_turns t ON t.conversation_id=s.conversation_id AND t.request_id=p.request_id
+                JOIN coordinator_conversations c ON c.conversation_id=t.conversation_id
+                WHERE p.run_id=? AND t.restore_hold=0 AND t.response_json='' AND t.blocker=''
+                  AND c.restore_hold=0 LIMIT 1
+            """, (run_id,)).fetchone())
+            if not conn.execute(goals_sql + " LIMIT 1", (worker_id,)).fetchone():
+                return wake
+            conn.execute("BEGIN IMMEDIATE")
+            for row in conn.execute(goals_sql + " ORDER BY g.created_at,g.goal_id", (worker_id,)):
+                goal = dict(row)
+                self._record_goal_result(
+                    conn, goal["tenant_id"], goal["owner_id"], goal["conversation_id"], goal, run_id,
+                )
+                # A concurrent refresh can record the event before this hook sees it.
+                if not wake and conn.execute(
+                    "SELECT 1 FROM coordinator_events WHERE conversation_id=? "
+                    "AND kind='result_available' AND identity=? AND delivered_turn_id=''",
+                    (goal["conversation_id"], run_id),
+                ).fetchone() and CoordinatorConfig.model_validate_json(goal["config_json"]).wake_on_results:
+                    wake = True
+        return wake
 
     def native_identity(self, principal: dict) -> tuple[str, str, str]:
         # PeerCollaboration already authenticates the live run and exact attempt. A peer
@@ -1932,6 +2000,96 @@ class CoordinatorService:
             raise CoordinatorScopeError("Current accepted conversation turn is unavailable")
         return self.accept_goals(tenant, owner, conversation_id, request["message_id"], goals)
 
+    def stop_conversation(self, tenant: str, owner: str, conversation_id: str) -> dict:
+        """Durably fence a whole conversation and cancel the work it started.
+
+        Queued turns, dispatches, actions and result wake-ups cannot start again, also
+        after a restart: reconcile re-drives the Stop. Results, receipts and Workers stay
+        readable. Schedules created by this conversation's own runs are cancelled;
+        owner-created schedules remain. Repeating the call is the recovery while
+        ``confirmation_pending`` is true.
+        """
+        conversation = self._conversation(tenant, owner, conversation_id)
+        self._assert_not_restore_held(conversation)
+        if CoordinatorConfig.model_validate_json(conversation["config_json"]).application:
+            raise CoordinatorConflict("Stop an Application's work through its Application")
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._assert_not_restore_held(dict(conn.execute(
+                "SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?", (conversation_id,),
+            ).fetchone()))
+            conn.execute("UPDATE coordinator_conversations SET stop_scope='goals' "
+                         "WHERE conversation_id=? AND stop_scope=''", (conversation_id,))
+            conn.execute("UPDATE coordinator_goals SET intent_state='cancelled' WHERE conversation_id=?", (conversation_id,))
+            turns = [row[0] for row in conn.execute(
+                "SELECT turn_id FROM coordinator_turns WHERE conversation_id=? AND response_json=''", (conversation_id,))]
+            conn.execute("UPDATE coordinator_turns SET blocker='cancelled',retry_after_at='' "
+                         "WHERE conversation_id=? AND response_json=''", (conversation_id,))
+            conn.execute("UPDATE coordinator_events SET delivered_turn_id='stopped' "
+                         "WHERE conversation_id=? AND delivered_turn_id=''", (conversation_id,))
+            conn.execute("UPDATE coordinator_actions SET response_json=? WHERE conversation_id=? AND response_json=''",
+                         (canonical({"state": "cancelled", "blocker": "conversation_stopped"}), conversation_id))
+            runs = [dict(row) for row in conn.execute(
+                "SELECT worker_id,run_id FROM coordinator_goals WHERE conversation_id=? AND run_id<>'' UNION "
+                "SELECT g.worker_id,json_extract(a.response_json,'$.run_id') FROM coordinator_actions a "
+                "JOIN coordinator_goals g USING(conversation_id,goal_id) WHERE a.conversation_id=? "
+                "AND json_valid(a.response_json) AND json_extract(a.response_json,'$.run_id') IS NOT NULL",
+                (conversation_id, conversation_id),
+            )]
+            owned_runs = [row["run_id"] for row in runs]
+            if owned_runs:
+                marks = ",".join("?" for _ in owned_runs)
+                # A fired schedule can create another one. Follow only the recorded
+                # source-run chain, never every run on a shared Worker.
+                runs = [dict(row) for row in conn.execute(
+                    f"WITH RECURSIVE owned(run_id) AS (SELECT run_id FROM runs WHERE run_id IN ({marks}) UNION "
+                    "SELECT s.queued_run_id FROM owned JOIN recurring_schedule_definitions d ON d.source_run_id=owned.run_id "
+                    "JOIN recurring_schedule_occurrences o ON o.definition_id=d.definition_id "
+                    "JOIN scheduled_runs s ON s.schedule_id=o.scheduled_run_id "
+                    "WHERE d.tenant_id=? AND d.owner_id=? AND s.queued_run_id IS NOT NULL) "
+                    "SELECT r.worker_id,r.run_id FROM runs r JOIN owned ON owned.run_id=r.run_id",
+                    (*owned_runs, tenant, owner))]
+                owned_runs = [row["run_id"] for row in runs]
+                marks = ",".join("?" for _ in owned_runs)
+                definitions = [row[0] for row in conn.execute(
+                    f"SELECT definition_id FROM recurring_schedule_definitions WHERE tenant_id=? AND owner_id=? "
+                    f"AND source_run_id IN ({marks})", (tenant, owner, *owned_runs))]
+                from .schedule_targets import _cancel_pending
+                for definition_id in definitions:
+                    conn.execute("UPDATE recurring_schedule_definitions SET active=0,enabled=0,updated_at=? "
+                                 "WHERE definition_id=?", (now(), definition_id))
+                    _cancel_pending(conn, definition_id, now(), "cancelled")
+                for run_id in owned_runs:
+                    conn.execute("UPDATE scheduled_runs SET state='cancelled',updated_at=? WHERE queued_run_id=? "
+                                 "AND state NOT IN ('completed','failed','cancelled')", (now(), run_id))
+        pending = False
+        for turn_id in turns:
+            try:
+                receipt = self.provider.cancel_by_idempotency(f"{conversation_id}:{turn_id}", owner, tenant_id=tenant)
+                pending |= receipt.get("capacity_released") is not True
+            except Exception:
+                # The fence is kept; the same call retries confirmation, also after a restart.
+                pending = True
+        for run in runs:
+            try:
+                self.service.cancel_run(run["worker_id"], run["run_id"])
+            except Exception:
+                pending = True
+        # Recover a reservation that Stop raced before attachment; never dispatch new work.
+        self.recover_dispatches(tenant, owner, conversation_id)
+        # Refresh records late results as stopped, so nothing is left to wake.
+        snapshot = self.refresh(tenant, owner, conversation_id, False)
+        terminal = {"completed", "failed", "cancelled", "interrupted"}
+        for run_id in {*(run["run_id"] for run in runs), *(g["run_id"] for g in snapshot["goals"] if g.get("run_id"))}:
+            pending |= (self.store.get_run(run_id) or {}).get("state", "cancelled") not in terminal
+        if not pending:
+            # Confirmed: the sweep no longer needs to visit this conversation.
+            with self.store._connect() as conn:
+                conn.execute("UPDATE coordinator_conversations SET stop_scope='stopped' "
+                             "WHERE conversation_id=? AND stop_scope='goals'", (conversation_id,))
+            snapshot = {**snapshot, "stop_scope": "stopped"}
+        return {**snapshot, "confirmation_pending": pending, "state": "stopping" if pending else "stopped"}
+
     def cancel_turn(self, tenant: str, owner: str, conversation_id: str, turn_id: str) -> dict:
         conversation = self._conversation(tenant, owner, conversation_id)
         self._assert_not_restore_held(conversation)
@@ -1952,10 +2110,11 @@ class CoordinatorService:
     def retry_result_turn(self, tenant: str, owner: str, conversation_id: str, source_turn_id: str) -> dict:
         """Retry one failed result handoff with its saved evidence, never its old request."""
         conversation = self._conversation(tenant, owner, conversation_id)
-        self._assert_not_restore_held(conversation)
+        self._assert_accepting(conversation)
         retry_id = "results-retry-" + digest([conversation_id, source_turn_id])[:32]
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._assert_accepting_in(conn, conversation_id)
             source = conn.execute(
                 "SELECT rowid,* FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
                 (conversation_id, source_turn_id),
@@ -1985,16 +2144,14 @@ class CoordinatorService:
         """Explicitly retry a settled planning attempt, retaining the accepted original."""
         from .coordinator_application import interactive_retry_available, turn_status, validate_destination
         conversation = self._conversation(tenant, owner, conversation_id)
-        self._assert_not_restore_held(conversation)
+        self._assert_accepting(conversation)
         config = CoordinatorConfig.model_validate_json(conversation["config_json"])
         if config.application is not None:
             validate_destination(self, tenant, owner, config.application)
         retry_id = "interactive-retry-" + digest([conversation_id, source_turn_id])[:32]
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute("SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?",
-                            (conversation_id,)).fetchone()[0]:
-                raise CoordinatorConflict("Conversation is held for exact continuity resume")
+            self._assert_accepting_in(conn, conversation_id)
             source = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
                                   (conversation_id, source_turn_id)).fetchone()
             if not source or source["blocker"] == "cancelled" or source["restore_hold"]:
@@ -2016,14 +2173,15 @@ class CoordinatorService:
 
     def queue_result_turn(self, tenant: str, owner: str, conversation_id: str) -> str | None:
         conversation = self._conversation(tenant, owner, conversation_id)
-        if bool(conversation.get("restore_hold")) or not CoordinatorConfig.model_validate_json(conversation["config_json"]).wake_on_results:
+        if (conversation.get("stop_scope") or bool(conversation.get("restore_hold"))
+                or not CoordinatorConfig.model_validate_json(conversation["config_json"]).wake_on_results):
             return None
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute(
-                "SELECT restore_hold FROM coordinator_conversations WHERE conversation_id=?",
+                "SELECT 1 FROM coordinator_conversations WHERE conversation_id=? AND (restore_hold=1 OR stop_scope<>'')",
                 (conversation_id,),
-            ).fetchone()[0]:
+            ).fetchone():
                 return None
             # Foreground work already accepted always wins admission. A single transaction
             # claims all current result notices into one deterministic continuation.
@@ -2194,35 +2352,109 @@ class CoordinatorService:
 
         Worker reservation recovery and execution remain entirely owned by service/store.
         Native provider idempotency/active-session fencing owns foreground admission.
+        Prioritize unfinished turns and durable results without spending the recovery sweep's budget.
         """
         if not 1 <= limit <= 1000:
             raise ValueError("Invalid reconciliation limit")
         with self.store._connect() as conn:
-            rows = [dict(r) for r in conn.execute("SELECT * FROM coordinator_conversations WHERE conversation_id>? ORDER BY conversation_id LIMIT ?", (self._reconcile_after, limit))]
-            if not rows:
+            sweep = conn.execute(
+                "SELECT conversation_id FROM coordinator_conversations WHERE conversation_id>? ORDER BY conversation_id LIMIT ?",
+                (self._reconcile_after, limit),
+            ).fetchall()
+            if not sweep:
                 self._reconcile_after = ""
-                rows = [dict(r) for r in conn.execute("SELECT * FROM coordinator_conversations ORDER BY conversation_id LIMIT ?", (limit,))]
+                sweep = conn.execute(
+                    "SELECT conversation_id FROM coordinator_conversations ORDER BY conversation_id LIMIT ?", (limit,),
+                ).fetchall()
+            end = sweep[-1]["conversation_id"] if sweep else self._reconcile_after
+            # The sweep still advances over idle IDs, using indexed checks before
+            # loading any conversation history. It also repairs missed completion hooks.
+            rows = conn.execute(f"""
+                WITH priority AS (
+                    SELECT conversation_id FROM coordinator_turns WHERE {_UNSETTLED_TURN}
+                    AND ((request_id<>'' AND blocker='') OR ({_READY_TURN}))
+                    UNION
+                    SELECT e.conversation_id FROM coordinator_events e
+                    JOIN coordinator_conversations c USING(conversation_id)
+                    WHERE e.delivered_turn_id=''
+                      AND CASE WHEN json_valid(c.config_json)
+                          THEN COALESCE(json_extract(c.config_json,'$.wake_on_results'),1) ELSE 1 END
+                ), first AS (
+                    SELECT c.conversation_id FROM priority p JOIN coordinator_conversations c USING(conversation_id)
+                    WHERE c.restore_hold=0
+                    ORDER BY c.conversation_id<=:cursor,c.conversation_id LIMIT :limit
+                )
+                SELECT c.conversation_id,c.tenant_id,c.owner_id,0 AS phase
+                FROM first f JOIN coordinator_conversations c USING(conversation_id)
+                UNION ALL
+                SELECT c.conversation_id,c.tenant_id,c.owner_id,1 AS phase
+                FROM coordinator_conversations c
+                WHERE c.conversation_id>:cursor AND c.conversation_id<=:end AND c.restore_hold=0
+                  AND c.stop_scope<>'stopped'
+                  AND c.conversation_id NOT IN (SELECT conversation_id FROM first)
+                  AND (
+                    -- refresh() alone drives an Application's progress, results and
+                    -- action-context recovery, so those conversations keep today's sweep.
+                    c.application_ref<>''
+                    -- A Stop not yet confirmed is re-driven until its runs have ended.
+                    OR c.stop_scope='goals'
+                    OR EXISTS (SELECT 1 FROM coordinator_turns WHERE conversation_id=c.conversation_id
+                            AND {_UNSETTLED_TURN} AND (request_id<>'' OR ({_READY_TURN})))
+                    OR c.conversation_id IN (SELECT conversation_id FROM priority)
+                    OR EXISTS (
+                        SELECT 1 FROM coordinator_goals g
+                        WHERE g.conversation_id=c.conversation_id AND g.restore_hold=0 AND (
+                            (g.run_id='' AND g.dispatch_json<>'')
+                            OR EXISTS (
+                                SELECT 1 FROM runs r WHERE r.run_id=g.run_id AND r.state IN ({_RESULT_STATES})
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM coordinator_events e WHERE e.conversation_id=g.conversation_id
+                                    AND e.kind='result_available' AND e.identity=r.run_id)
+                            )
+                        )
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM coordinator_actions a WHERE a.conversation_id=c.conversation_id
+                        AND a.response_json=''
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM coordinator_actions a
+                        JOIN coordinator_goals g USING(conversation_id,goal_id)
+                        JOIN runs r ON r.run_id IN (
+                            CASE WHEN json_valid(a.payload_json) THEN json_extract(a.payload_json,'$.run_id') END,
+                            CASE WHEN json_valid(a.response_json) THEN json_extract(a.response_json,'$.run_id') END
+                        )
+                        WHERE a.conversation_id=c.conversation_id AND g.restore_hold=0
+                          AND json_valid(a.response_json)
+                          AND CASE WHEN json_valid(a.payload_json)
+                              THEN json_extract(a.payload_json,'$.action') END IN ('queue','message')
+                          AND r.state IN ({_RESULT_STATES})
+                          AND (r.state<>'cancelled' OR COALESCE(r.started_at,'')<>'' OR r.run_id=g.run_id)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM coordinator_events e WHERE e.conversation_id=a.conversation_id
+                              AND e.kind='result_available' AND e.identity=r.run_id)
+                    )
+                  )
+                ORDER BY phase,conversation_id
+            """, {"cursor": self._reconcile_after, "end": end, "limit": limit, "now": now()}).fetchall()
+        self._reconcile_after = end
         outcomes = []
         for conversation in rows:
-            self._reconcile_after = conversation["conversation_id"]
             scope = conversation["tenant_id"], conversation["owner_id"], conversation["conversation_id"]
-            if bool(conversation.get("restore_hold")):
-                continue
             try:
+                if self._conversation(*scope).get("stop_scope"):
+                    # A Stop is re-driven until confirmed, never resumed.
+                    self.stop_conversation(*scope)
+                    continue
                 self.recover_dispatches(*scope)
                 self.recover_retry_actions(*scope)
                 self.refresh(*scope)
                 with self.store._connect() as conn:
                     pending = conn.execute(
-                        "SELECT turn_id FROM coordinator_turns WHERE conversation_id=? AND request_id='' "
-                        "AND (blocker='' OR (origin='worker_results' "
-                        "AND blocker IN ('host_capacity','provider_account_busy') "
-                        "AND (retry_after_at='' OR retry_after_at<=?)) "
-                        "OR (blocker IN ('shared_capacity_busy','shared_resource_authority_unavailable',"
-                        "'host_capacity','provider_account_busy') "
-                        "AND retry_after_at<>'' AND retry_after_at<=?)) "
+                        "SELECT turn_id FROM coordinator_turns WHERE conversation_id=:conversation_id "
+                        f"AND {_UNSETTLED_TURN} AND ({_READY_TURN}) "
                         "ORDER BY CASE origin WHEN 'interactive' THEN 0 ELSE 1 END,created_at LIMIT 1",
-                        (scope[2], now(), now()),
+                        {"conversation_id": scope[2], "now": now()},
                     ).fetchone()
                 turn_id = pending["turn_id"] if pending else self.queue_result_turn(*scope)
                 if turn_id:
@@ -2307,6 +2539,7 @@ class CoordinatorService:
         if not session or session.get("agent_id") != "coordinator":
             return worker
         conversation = self._conversation(session["tenant_id"], session["owner_id"], session["conversation_id"])
+        self._assert_accepting(conversation)
         binding = CoordinatorConfig.model_validate_json(conversation["config_json"]).expert
         # An Expert's speaking Queen gets only her own tools; jobs keep the coordinator's.
         speaker = binding is not None and binding.role == "speaker"
