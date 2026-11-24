@@ -390,35 +390,16 @@ class ChannelService:
              speaker["conversation_id"], turn_id, kind, text, speaker["thread_ref_json"] or "{}", state, review_id, error,
              _now() if state == "dropped" else "", _now()))
 
-    def release_approved_reply(self, review: dict) -> None:
-        """Approve sends exactly the reply that was shown, word for word."""
-        speaker = self._speaker_for(review["speaker_conversation_id"])
-        if not speaker or not speaker["binding_id"]:
-            return
-        text = json.loads(review["payload_json"]).get("text", "")
-        with self.store._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            fence = conn.execute("SELECT stop_scope,restore_hold FROM coordinator_conversations WHERE conversation_id=?",
-                                 (review["speaker_conversation_id"],)).fetchone()
-            closed = self._closed_note(conn, speaker)
-            if closed:
-                # Checked where the reply would be released: closed for good, the approval is withdrawn, so
-                # turning the channel on again never revives it.
-                conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=? WHERE review_id=? "
-                             "AND state='approved'", (closed + ".", review["review_id"]))
-                self.discard_held(conn, review["review_id"], closed)
-                return
-            if fence["restore_hold"]:
-                return  # a restored copy waits for the owner's resume
-            existing = conn.execute("SELECT delivery_id,state FROM channel_deliveries WHERE review_id=? "
-                                    "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
-            if existing and existing["state"] == "held":
-                conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (existing["delivery_id"],))
-            elif not existing:
-                # A reply the Expert asked about (Auto) has no held copy yet.
-                self._insert_delivery(conn, speaker, "approved-" + review["review_id"], "approved", text, "pending",
-                                      review["review_id"])
-            # Any other state (dropped, sent, not confirmed) is final: approval never revives it.
+    def write_released_reply(self, conn, speaker: dict, review: dict) -> None:
+        """Inside the one release's transaction, after its checks: exactly the reply that was shown, word for
+        word, leaves its hold (Always), or is written to be sent (Auto, which held no copy)."""
+        held = conn.execute("SELECT delivery_id FROM channel_deliveries WHERE review_id=? AND state='held' "
+                            "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
+        if held:
+            conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (held["delivery_id"],))
+        else:
+            self._insert_delivery(conn, speaker, "approved-" + review["review_id"], "approved",
+                                  json.loads(review["payload_json"]).get("text", ""), "pending", review["review_id"])
 
     def discard_held(self, conn, review_id: str, reason: str) -> None:
         """Inside the caller's transaction: the reply held for this request never leaves its hold."""
@@ -442,11 +423,6 @@ class ChannelService:
             # A send whose outcome never came back is not resent by itself; the owner sees it.
             conn.execute("UPDATE channel_deliveries SET state='not_confirmed',error='The channel did not confirm this message' "
                          "WHERE state='sending' AND claimed_at<>'' AND claimed_at<?", (stale,))
-            # A reply held for a request that is no longer open (an earlier version could leave one) never
-            # leaves its hold: it is dropped, so nothing keeps it.
-            conn.execute("UPDATE channel_deliveries SET state='dropped',error='Its request was closed',finished_at=? "
-                         "WHERE state='held' AND NOT EXISTS (SELECT 1 FROM expert_reviews r "
-                         "WHERE r.review_id=channel_deliveries.review_id AND r.state IN ('pending','approved'))", (_now(),))
             rows = [dict(row) for row in conn.execute(
                 "SELECT t.conversation_id,t.turn_id,t.origin,t.response_json,e.binding_id,e.lineage_id,e.tenant_id,e.owner_id "
                 "FROM coordinator_turns t JOIN expert_conversations e ON e.conversation_id=t.conversation_id "
@@ -463,7 +439,6 @@ class ChannelService:
                 continue
             text = reply_text(row["response_json"])
             origin = row["origin"]
-            mode = self.experts.spec(self.experts.latest(row["tenant_id"], row["owner_id"], row["lineage_id"])).ask_me_first
             kind = {"owner_decision": "decision", "owner_checking": "checking"}.get(origin, "reply")
             with self.store._connect() as conn:
                 closed = self._closed_note(conn, speaker)
@@ -495,25 +470,27 @@ class ChannelService:
                 else:
                     outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped"})
                 continue
-            if mode != "always":
-                with self.store._connect() as conn:
-                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "pending")
-                outcomes.append({"turn_id": row["turn_id"], "delivery": "pending"})
-                continue
-            # Always ask: a reply to another person waits for the owner. Its request and its hold are written
-            # together, after the same check, so neither exists without the other.
+            # Auto or Off sends it; Always holds it for the owner, its request and its hold written together. The
+            # setting is read inside the transaction that writes the message, so a setting saved meanwhile is never
+            # missed: no save can land between the read and the write.
             with self.store._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 closed = self._closed_note(conn, speaker)
+                mode = self.experts.spec(self.experts.latest(row["tenant_id"], row["owner_id"], row["lineage_id"])).ask_me_first
+                review = None
                 if closed:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped", error=closed)
-                    review = None
+                elif mode != "always":
+                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "pending")
                 else:
                     review = self.experts._insert_review(
                         conn, speaker["tenant_id"], speaker["owner_id"], speaker, kind="reply", target_id=row["turn_id"],
                         reason="Ask me first is set to Always ask.", payload={"text": text},
                         source_turn_id=row["turn_id"], idempotency_key="reply:" + row["turn_id"])
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
+            if review is None and not closed:
+                outcomes.append({"turn_id": row["turn_id"], "delivery": "pending"})
+                continue
             if review is None:
                 outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": closed})
                 continue

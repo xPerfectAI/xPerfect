@@ -217,6 +217,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_review_request
 
 EXPERT_TABLES = frozenset({"expert_conversations", "expert_jobs", "expert_reviews"})
 
+# An approval not yet carried out: its job still held, or its reply not yet out of its hold. Carrying it out
+# writes exactly that effect, so the effect is the record that it was released (no flag to fall out of step).
+UNRELEASED_JOB_APPROVAL = ("(expert_reviews.state='approved' AND expert_reviews.kind='job' AND EXISTS (SELECT 1 "
+                           "FROM expert_jobs j WHERE j.job_id=expert_reviews.target_id AND j.state='held'))")
+UNRELEASED_APPROVAL = (f"({UNRELEASED_JOB_APPROVAL} OR (expert_reviews.state='approved' AND expert_reviews.kind='reply' "
+                       "AND NOT EXISTS (SELECT 1 FROM channel_deliveries d WHERE d.review_id=expert_reviews.review_id "
+                       "AND d.state<>'held')))")
+
 
 def ensure_experts_schema(conn: Any) -> None:
     """The one owner of the Expert tables (the service and continuity review both use it)."""
@@ -236,6 +244,7 @@ class ExpertService:
         self.store, self.service, self.coordinator = store, service, coordinator
         self._role_config = role_config or self._default_role_config
         self.deliveries: Any = None  # the channel owner registers itself when installed
+        self._cursors: dict[str, str] = {}  # where each maintenance pass resumes
         with store._connect() as conn:
             ensure_experts_schema(conn)
         coordinator.experts = self
@@ -334,7 +343,7 @@ class ExpertService:
             template_id=created["template_id"], tenant_id=tenant, owner_id=owner))
 
     def _save(self, tenant: str, owner: str, content: dict, name: str, description: str, *,
-              previous: dict | None = None, **revision: Any) -> dict:
+              previous: dict | None = None, within: Callable[[Any], None] | None = None, **revision: Any) -> dict:
         """One commit for the new version and its Library retention, as saved Experts already do."""
         library = self.service.personal_library
         refs = content.get("personal_library_refs") or []
@@ -355,6 +364,8 @@ class ExpertService:
             if refs:
                 library.retain_refs(tenant, owner, refs, "workspace_template", created["template_id"],
                                     connection=conn, resolved={"items": items, "selected_items": items})
+            if within is not None:
+                within(conn)
         return created
 
     def update_expert(self, tenant: str, owner: str, expert_id: str, *, expected_catalog_revision: int,
@@ -370,11 +381,21 @@ class ExpertService:
             content["personal_library_refs"] = [
                 {"item_id": str(r["item_id"]), "version_id": str(r["version_id"])}
                 for r in personal_library_refs if isinstance(r, dict) and r.get("item_id") and r.get("version_id")]
+        told: list[tuple[dict, str]] = []
+
+        def withdraw_for_off(conn: Any) -> None:
+            # Off means nobody is asked: what still waits for the owner, approved or not yet decided, is
+            # withdrawn in the same transaction as the save, and each person is told in the Expert's words.
+            told.extend(self._withdraw_in(
+                conn, self._open_requests(conn, "tenant_id=? AND owner_id=? AND lineage_id=?",
+                                          (tenant, owner, current["lineage_id"])),
+                "Ask me first was switched to Off.", tell=self._OFF_WITHDRAWN))
+
         saved = self._save(tenant, owner, content, new_name, new_description, previous=current,
+                           within=withdraw_for_off if new_spec.ask_me_first == "off" else None,
                            lineage_id=current["lineage_id"], expected_template_id=current["template_id"],
                            expected_catalog_revision=expected_catalog_revision)
-        if new_spec.ask_me_first == "off" and self.spec(current).ask_me_first != "off":
-            self._withdraw_waiting_for_off(tenant, owner, current["lineage_id"])
+        self._start_told(told)
         return self.describe(self._templates.get_workspace_template(
             template_id=saved["template_id"], tenant_id=tenant, owner_id=owner))
 
@@ -382,31 +403,42 @@ class ExpertService:
                       "Nothing was sent or started. Tell the person, in your own words, that you cannot do this now "
                       "and that they may ask again. Do not share what was held.")
 
-    def _withdraw_waiting_for_off(self, tenant: str, owner: str, lineage_id: str) -> None:
-        """Off means nobody is asked. What still waited for the owner is withdrawn, never sent or started
-        by itself, and each person is told, in the Expert's own words, that it cannot do this now.
+    def _open_requests(self, conn: Any, where: str, params: tuple) -> list[dict]:
+        """Requests still open (waiting for the owner, or approved and not yet carried out), read in the
+        caller's transaction."""
+        unreleased = UNRELEASED_APPROVAL if self.deliveries is not None else UNRELEASED_JOB_APPROVAL
+        return [dict(row) for row in conn.execute(
+            f"SELECT * FROM expert_reviews WHERE ({where}) AND (expert_reviews.state='pending' OR {unreleased})", params)]
 
-        Each request's withdrawal, the job it closes, the reply it drops and the turn that tells the person
-        are one transaction; a request a crash left waiting is withdrawn by maintenance the same way."""
-        with self.store._connect() as conn:
-            waiting = [dict(row) for row in conn.execute(
-                "SELECT * FROM expert_reviews WHERE tenant_id=? AND owner_id=? AND lineage_id=? AND state='pending'",
-                (tenant, owner, lineage_id))]
-        for review in waiting:
-            with self.store._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                if not conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
-                                    "WHERE review_id=? AND state='pending'",
-                                    ("Ask me first was switched to Off.", _now(), review["review_id"])).rowcount:
-                    continue
-                if review["kind"] == "job":
-                    conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
-                                 (_now(), review["target_id"]))
-                if self.deliveries is not None:
-                    self.deliveries.discard_held(conn, review["review_id"], "Ask me first was switched to Off")
-                turn_id = self._insert_decision_turn(conn, review, "withdrawn", self._OFF_WITHDRAWN)
-            if turn_id:
-                self.coordinator.start_turn(tenant, owner, review["speaker_conversation_id"], turn_id)
+    def _withdraw_in(self, conn: Any, reviews: list[dict], note: str, *, tell: str = "") -> list[tuple[dict, str]]:
+        """The one withdraw, inside the transaction of the change that causes it (Stop, a removal, the channel
+        turned off, Off, a refused decision or release): each request is withdrawn, the job it held closes and
+        the reply it held is dropped; with ``tell`` the person is told in a turn of its own (returned, to start
+        after the commit)."""
+        told = []
+        for review in reviews:
+            if not conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
+                                "WHERE review_id=? AND state IN ('pending','approved')",
+                                (note, _now(), review["review_id"])).rowcount:
+                continue
+            if review["kind"] == "job":
+                conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
+                             (_now(), review["target_id"]))
+            if self.deliveries is not None:
+                self.deliveries.discard_held(conn, review["review_id"], note.rstrip("."))
+            if tell:
+                turn_id = self._insert_decision_turn(conn, review, "withdrawn", tell)
+                if turn_id:
+                    told.append((review, turn_id))
+        return told
+
+    def _start_told(self, told: list[tuple[dict, str]]) -> None:
+        for review, turn_id in told:
+            try:
+                self.coordinator.start_turn(review["tenant_id"], review["owner_id"], review["speaker_conversation_id"],
+                                            turn_id)
+            except Exception:  # the turn is saved; the coordinator's maintenance starts it
+                pass
 
     # ---------------------------------------------------------------- configurations
     def _default_role_config(self, tenant: str, owner: str, role: ExpertRole) -> CoordinatorConfig:
@@ -720,8 +752,11 @@ class ExpertService:
         return str(row["message"]) if row and row["origin"] == "interactive" else ""
 
     def _start_job(self, job_id: str) -> dict:
+        """Prepare and start a released job (state "starting"; an approval releases a held one first). Two
+        callers may enter at once (an approval and maintenance): the one that marks it running starts it, the
+        other finds it running and does nothing. A job closed meanwhile never starts."""
         job = self._job(job_id)
-        if job["state"] not in {"starting", "held"}:
+        if job["state"] != "starting":
             return job
         tenant, owner = job["tenant_id"], job["owner_id"]
         template = self._templates.get_workspace_template(template_id=job["template_id"], tenant_id=tenant, owner_id=owner)
@@ -742,8 +777,10 @@ class ExpertService:
             return job  # a restored copy: nothing is prepared before the owner resumes it
         if closed:  # nothing is prepared for a conversation closed for good (checked again below)
             with self.store._connect() as conn:
-                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=? "
-                             "AND state IN ('starting','held')", (_now(), job_id))
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=? AND state='starting'",
+                                (_now(), job_id)).rowcount and job["job_conversation_id"]:
+                    self._mark_job_conversations_stopped(conn, [job])
             self._fence_job(self._job(job_id))
             return self._job(job_id)
         if not job["job_conversation_id"]:
@@ -786,28 +823,26 @@ class ExpertService:
                   if team & set(skill["profiles"])}
         refs = [ref for ref in refs if (ref.get("item_id"), ref.get("version_id")) not in native]
         self.coordinator.accept_turn(tenant, owner, cid, "job-brief", "\n\n".join(lines), None, refs or None)
-        waits = False
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             # Checked again where the job is marked running: a Stop or a removal since it was asked for wins.
             closed, for_good = self.closed_reason(conn, speaker)
-            if closed and not for_good:
-                waits = True  # a restored copy: nothing starts before the owner resumes it
-                moved = 0
+            state = conn.execute("SELECT state FROM expert_jobs WHERE job_id=?", (job_id,)).fetchone()["state"]
+            if state == "running" or (state == "starting" and closed and not for_good):
+                outcome = ""  # running already (the other caller won: not a cancellation), or a restored copy waits
+            elif state != "starting":
+                outcome = "fence"  # closed meanwhile: its first turn never starts (fencing again is harmless)
             elif closed:
-                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=? "
-                             "AND state IN ('starting','held')", (_now(), job_id))
-                moved = 0
+                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job_id))
+                self._mark_job_conversations_stopped(conn, [job])
+                outcome = "fence"
             else:
-                moved = conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=? "
-                                     "AND state IN ('starting','held')", (_now(), job_id)).rowcount
-        if waits:
-            return self._job(job_id)
-        if not moved:
-            # Stopped (or withdrawn) while it was being prepared: its first turn never starts.
+                conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=?", (_now(), job_id))
+                outcome = "start"
+        if outcome == "fence":
             self._fence_job(self._job(job_id))
-            return self._job(job_id)
-        self.coordinator.start_turn(tenant, owner, cid, "job-brief")
+        elif outcome == "start":
+            self.coordinator.start_turn(tenant, owner, cid, "job-brief")
         return self._job(job_id)
 
     def jobs(self, tenant: str, owner: str, conversation_id: str) -> list[dict]:
@@ -841,91 +876,71 @@ class ExpertService:
         tenant, owner = job["tenant_id"], job["owner_id"]
         if job["state"] in {"done", "failed", "stopped", "withdrawn"}:
             return self._job_view(job)
-        with self.store._connect() as conn:  # the job and its request close together
+        with self.store._connect() as conn:  # the job, its request and its conversation's fence together
             conn.execute("BEGIN IMMEDIATE")
+            waiting = self._open_requests(conn, "review_id=?", (job["review_id"],))
             conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job_id))
-            conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
-                         "WHERE review_id=? AND state='pending'", ("The job was stopped.", _now(), job["review_id"]))
-        self._fence_job(job)  # re-driven by maintenance if it does not land
+            self._withdraw_in(conn, waiting, "The job was stopped.")
+            self._mark_job_conversations_stopped(conn, [job])
+        self._fence_job(job)  # completes the fence now; the coordinator re-drives it if this does not land
         return self._job_view(self._job(job_id))
 
-    def conversation_stopped(self, tenant: str, owner: str, conversation_id: str) -> None:
-        """A Stop of a speaking assistant's or a job's conversation withdraws everything that waits on it,
-        in one transaction; the stopped jobs' conversations are fenced after it (maintenance re-drives a
-        fence that did not land, and closes what a crash before this left open)."""
-        with self.store._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            jobs = self._close_work_in(conn, [conversation_id], "The conversation was stopped.",
-                                       "The conversation was stopped")
-            own = [dict(row) for row in conn.execute(
-                "SELECT * FROM expert_jobs WHERE tenant_id=? AND owner_id=? AND job_conversation_id=? "
-                "AND state IN ('held','starting','running')", (tenant, owner, conversation_id))]
-            for job in own:  # a Stop of the job's own conversation stops that job
-                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job["job_id"]))
-                conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
-                             "WHERE review_id=? AND state='pending'", ("The job was stopped.", _now(), job["review_id"]))
-        for job in jobs:
-            if job["job_conversation_id"] != conversation_id:
-                self._fence_job(job)
-
-    # Open work of a speaking conversation: a request still waiting, or an approval not yet carried out (a
-    # job still held, a reply not yet out of its hold). Shared by the close and the sweep that finds it.
-    _OPEN_REVIEW = ("(expert_reviews.state='pending' OR (expert_reviews.state='approved' AND expert_reviews.kind='job' "
-                    "AND EXISTS (SELECT 1 FROM expert_jobs j WHERE j.job_id=expert_reviews.target_id AND j.state='held')){reply})")
-    _UNRELEASED_REPLY = (" OR (expert_reviews.state='approved' AND expert_reviews.kind='reply' AND NOT EXISTS ("
-                         "SELECT 1 FROM channel_deliveries d WHERE d.review_id=expert_reviews.review_id AND d.state<>'held'))")
-
-    def _open_review_sql(self) -> str:
-        return self._OPEN_REVIEW.format(reply=self._UNRELEASED_REPLY if self.deliveries is not None else "")
+    def conversation_stopped_in(self, conn: Any, tenant: str, owner: str, conversation_id: str) -> list[dict]:
+        """Inside the coordinator's Stop transaction: everything that waits on this conversation closes with
+        it (as a speaking assistant's, or as a job's own). Returns the jobs whose conversations the caller
+        fences after the commit; each is already marked stopped, so its turns never start meanwhile."""
+        jobs = self._close_work_in(conn, [conversation_id], "The conversation was stopped.",
+                                   "The conversation was stopped")
+        own = [dict(row) for row in conn.execute(
+            "SELECT * FROM expert_jobs WHERE tenant_id=? AND owner_id=? AND job_conversation_id=? "
+            "AND state IN ('held','starting','running')", (tenant, owner, conversation_id))]
+        for job in own:  # a Stop of the job's own conversation stops that job
+            waiting = self._open_requests(conn, "review_id=?", (job["review_id"],))
+            conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job["job_id"]))
+            self._withdraw_in(conn, waiting, "The job was stopped.")
+        return [job for job in jobs if job["job_conversation_id"] and job["job_conversation_id"] != conversation_id]
 
     def _close_work_in(self, conn: Any, speaker_ids: list[str], note: str, error: str) -> list[dict]:
-        """Inside the caller's transaction, everything still open for these speaking conversations closes for
-        good: requests and approvals not yet carried out are withdrawn, held, starting and running jobs stop,
-        and unsent messages are dropped. Returns the stopped jobs; the caller fences their conversations
-        after the commit."""
+        """Inside the transaction of the change that closes these speaking conversations for good (Stop, a
+        removal, the channel turned off): held, starting and running jobs stop and their conversations are
+        marked stopped, every open request is withdrawn (the one withdraw) and unsent messages are dropped.
+        Returns the stopped jobs; the caller completes their fences after the commit."""
         if not speaker_ids:
             return []
         marks = ",".join("?" for _ in speaker_ids)
-        conn.execute(f"UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
-                     f"WHERE speaker_conversation_id IN ({marks}) AND {self._open_review_sql()}",
-                     (note, _now(), *speaker_ids))
+        waiting = self._open_requests(conn, f"speaker_conversation_id IN ({marks})", tuple(speaker_ids))
         jobs = [dict(row) for row in conn.execute(
             f"SELECT * FROM expert_jobs WHERE speaker_conversation_id IN ({marks}) "
             "AND state IN ('held','starting','running')", speaker_ids)]
         conn.execute(f"UPDATE expert_jobs SET state='stopped',updated_at=? WHERE speaker_conversation_id IN ({marks}) "
                      "AND state IN ('held','starting','running')", (_now(), *speaker_ids))
+        self._mark_job_conversations_stopped(conn, jobs)
+        self._withdraw_in(conn, waiting, note)
         if self.deliveries is not None:
             conn.execute(f"UPDATE channel_deliveries SET state='dropped',error=?,finished_at=? "
                          f"WHERE conversation_id IN ({marks}) AND state IN ('held','pending')",
                          (error, _now(), *speaker_ids))
         return jobs
 
-    def _close_abandoned_work(self, limit: int) -> list[dict]:
-        """Maintenance's one owner of work left open in a conversation closed for good: a crash between a
-        Stop, a removal or a channel turned off and its clean-up, or a state an earlier version left."""
-        open_delivery = (" OR EXISTS (SELECT 1 FROM channel_deliveries d WHERE d.conversation_id=e.conversation_id "
-                         "AND d.state IN ('held','pending'))") if self.deliveries is not None else ""
-        with self.store._connect() as conn:
-            candidates = [dict(row) for row in conn.execute(
-                "SELECT e.* FROM expert_conversations e WHERE e.role='speaker' AND (EXISTS (SELECT 1 FROM expert_reviews "
-                f"WHERE expert_reviews.speaker_conversation_id=e.conversation_id AND {self._open_review_sql()}) "
-                "OR EXISTS (SELECT 1 FROM expert_jobs j WHERE j.speaker_conversation_id=e.conversation_id "
-                f"AND j.state IN ('held','starting','running')){open_delivery}) LIMIT ?", (limit * 5,))]
-        outcomes = []
-        for speaker in candidates:
-            with self.store._connect() as conn:  # a read first: open conversations take no write lock
-                closed, for_good = self.closed_reason(conn, speaker)
-            if not (closed and for_good):
-                continue
-            with self.store._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                closed, for_good = self.closed_reason(conn, speaker)
-                jobs = (self._close_work_in(conn, [speaker["conversation_id"]], closed, closed.rstrip("."))
-                        if closed and for_good else [])
-            for job in jobs:
-                self._fence_job(job)
-            outcomes.append({"conversation_id": speaker["conversation_id"], "closed": closed})
-        return outcomes
+    @staticmethod
+    def _mark_job_conversations_stopped(conn: Any, jobs: list[dict]) -> None:
+        """In the transaction that stops these jobs, their conversations are marked stopped, as the
+        coordinator's own Stop begins: no turn of theirs starts after it, and the coordinator completes the
+        Stop (its runs and requests) even if the process ends before the caller's fence."""
+        for job in jobs:
+            if job.get("job_conversation_id"):
+                conn.execute("UPDATE coordinator_conversations SET stop_scope='goals' WHERE conversation_id=? "
+                             "AND stop_scope=''", (job["job_conversation_id"],))
+
+    def turn_gate(self, conn: Any, conversation_id: str) -> str:
+        """Read by the coordinator in the transaction that starts a turn. A job's own turns start only while
+        the job runs, and it is marked running only after every check at its start (Stop, removal, channel,
+        restore, access): before that they wait ("wait"); once the job has ended they never start ("cancel")."""
+        row = conn.execute("SELECT j.state FROM expert_conversations e JOIN expert_jobs j ON j.job_id=e.job_id "
+                           "WHERE e.conversation_id=? AND e.role='job'", (conversation_id,)).fetchone()
+        if row is None or row["state"] == "running":
+            return ""
+        return "wait" if row["state"] in ("starting", "held") else "cancel"
 
     def _fence_job(self, job: dict) -> None:
         """The job's coordinator conversation is durably stopped: nothing in it starts again.
@@ -1091,11 +1106,6 @@ class ExpertService:
                                              idempotency_key=idempotency_key)
         return {"review_id": review["review_id"], "state": review["state"]}
 
-    def _withdraw(self, review_id: str, note: str) -> None:
-        with self.store._connect() as conn:
-            conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
-                         "WHERE review_id=? AND state='pending'", (note, _now(), review_id))
-
     def talk_speeds(self, tenant: str, owner: str, per_model: int = 30) -> list[dict]:
         """Median time to a finished reply per talking model, from this computer's recent replies."""
         since = (datetime.now(UTC) - timedelta(days=14)).isoformat()
@@ -1222,9 +1232,9 @@ class ExpertService:
                 raise ExpertError("This request was already decided or withdrawn", code="expert_review_closed")
             if review["payload_digest"] != expected_digest:
                 raise ExpertError("This request changed. Review it again.", code="expert_review_changed")
-            # A request that can no longer be honoured is withdrawn for good; the withdrawal is committed
-            # before the owner is told, so it never stays waiting in Needs you.
-            refusal, off = "", False
+            # A request that can no longer be honoured is withdrawn for good (the one withdraw); the withdrawal
+            # is committed before the owner is told, so it never stays waiting in Needs you.
+            refusal = ""
             stopped = conn.execute("SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
                                    (review["speaker_conversation_id"],)).fetchone()
             speaker = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
@@ -1233,10 +1243,6 @@ class ExpertService:
                 refusal = "This conversation was stopped. Nothing was sent or started."
             elif decision == "approve" and speaker is not None and not self.channel_open(dict(speaker), conn):
                 refusal = "This person can no longer be served on this channel. Nothing was sent or started."
-            elif decision == "approve" and self.spec(self.latest(tenant, owner, review["lineage_id"])).ask_me_first == "off":
-                # Off means nobody is asked: a request left from before (a crash between saving Off and
-                # withdrawing it) can no longer be approved. It is withdrawn as Off withdraws, the person told.
-                refusal, off = "Ask me first is now Off, so this request was withdrawn. Nothing was sent or started.", True
             elif review["kind"] == "job":
                 job = conn.execute("SELECT state,goal,context FROM expert_jobs WHERE job_id=?", (review["target_id"],)).fetchone()
                 payload = json.loads(review["payload_json"])
@@ -1245,15 +1251,7 @@ class ExpertService:
                     refusal = "This job changed or was stopped. Nothing was started."
             told = ""
             if refusal:
-                conn.execute("UPDATE expert_reviews SET state='withdrawn',decided_at=? WHERE review_id=? AND state='pending'",
-                             (_now(), review_id))
-                if self.deliveries is not None:  # a reply held for it never leaves its hold
-                    self.deliveries.discard_held(conn, review_id, refusal.split(".")[0])
-                if off:
-                    if review["kind"] == "job":
-                        conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? "
-                                     "AND state='held'", (_now(), review["target_id"]))
-                    told = self._insert_decision_turn(conn, dict(review), "withdrawn", self._OFF_WITHDRAWN)
+                self._withdraw_in(conn, [dict(review)], refusal.split(".")[0] + ".")
             else:
                 conn.execute("UPDATE expert_reviews SET state=?,decision_note=?,decided_at=? WHERE review_id=? AND state='pending'",
                              ("approved" if decision == "approve" else "rejected", str(note or "")[:2000], _now(), review_id))
@@ -1268,21 +1266,52 @@ class ExpertService:
                     told = self._insert_decision_turn(conn, dict(review), "rejected", self._REJECTION,
                                                       note=str(note or ""))
         if refusal:
-            if told:
-                try:
-                    self.coordinator.start_turn(tenant, owner, review["speaker_conversation_id"], told)
-                except Exception:  # the turn is saved; the coordinator's maintenance starts it
-                    pass
             raise ExpertError(refusal, code="expert_review_changed")
-        review = dict(review)
         if decision == "approve":
-            if review["kind"] == "job":
-                self._start_job(review["target_id"])
-            elif self.deliveries is not None:
-                self.deliveries.release_approved_reply(review)
+            self.release(review_id)  # maintenance carries it out if this is interrupted
         elif told:
             self.coordinator.start_turn(tenant, owner, review["speaker_conversation_id"], told)
         return self._review_view(self._review(review_id))
+
+    def release(self, review_id: str) -> str:
+        """The one exit from an approval to its effect: the owner's decision, maintenance and recovery all call
+        it. In one write transaction it re-reads the request (never a copy) and acts only if the request is
+        approved and not yet carried out, the conversation is not stopped, the person still listed, the channel
+        on and the Expert's current setting still asks. Then it writes the effect: the reply leaves its hold
+        (or is written to be sent), or the job is released to start. Closed for good, the approval is withdrawn;
+        switched to Off, withdrawn and the person told; a restored copy waits for its resume. A caller that
+        finds it carried out already does nothing: that is not a cancellation."""
+        unreleased = UNRELEASED_APPROVAL if self.deliveries is not None else UNRELEASED_JOB_APPROVAL
+        told: list[tuple[dict, str]] = []
+        start = ""
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(f"SELECT * FROM expert_reviews WHERE review_id=? AND {unreleased}", (review_id,)).fetchone()
+            if row is None:
+                return "nothing"  # withdrawn, decided otherwise, or carried out already
+            review = dict(row)
+            speaker = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
+                                   (review["speaker_conversation_id"],)).fetchone()
+            closed, for_good = self.closed_reason(conn, dict(speaker)) if speaker else ("This conversation is gone.", True)
+            if closed and not for_good:
+                return "waits"
+            if closed:
+                self._withdraw_in(conn, [review], closed)
+                return "withdrawn"
+            if self.spec(self.latest(review["tenant_id"], review["owner_id"], review["lineage_id"])).ask_me_first == "off":
+                told = self._withdraw_in(conn, [review], "Ask me first was switched to Off.", tell=self._OFF_WITHDRAWN)
+            elif review["kind"] == "job":
+                conn.execute("UPDATE expert_jobs SET state='starting',updated_at=? WHERE job_id=? AND state='held'",
+                             (_now(), review["target_id"]))
+                start = review["target_id"]
+            elif self.deliveries is not None:
+                self.deliveries.write_released_reply(conn, dict(speaker), review)
+        if told:
+            self._start_told(told)
+            return "withdrawn"
+        if start:
+            self._start_job(start)
+        return "released"
 
     def _review(self, review_id: str) -> dict:
         with self.store._connect() as conn:
@@ -1290,9 +1319,6 @@ class ExpertService:
 
     _REJECTION = ("Your owner said no. Nothing was sent or started. Tell the person, in your own words, "
                   "that you cannot do this. Do not share what was held.")
-    # A decision the person can no longer be told (the conversation stopped, the channel turned off or the
-    # person removed) is marked so, and maintenance never revisits it.
-    NOT_TOLD = "not-told"
 
     def _tell_rejection(self, review: dict, note: str) -> None:
         """Tell the Queen the owner said no. She writes her own reply with every tool off."""
@@ -1308,15 +1334,13 @@ class ExpertService:
 
     def _insert_decision_turn(self, conn: Any, review: dict, decision: str, instruction: str, *, note: str = "") -> str:
         """Inside the caller's transaction, the turn that tells the Queen a decision; its id to start now, or ""
-        when it may not start now. Checked here, where it is written: closed for good, it is marked never to
-        be told; in a restored copy it is written and waits, and the coordinator's maintenance starts it once
-        the owner resumes the copy (as it starts any turn written but not started)."""
+        when it may not start now. Checked here, where it is written: closed for good, nothing is told; in a
+        restored copy it is written and waits, and the coordinator's maintenance starts it once the owner
+        resumes the copy (as it starts any turn written but not started)."""
         speaker = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
                                (review["speaker_conversation_id"],)).fetchone()
         closed, for_good = self.closed_reason(conn, dict(speaker)) if speaker else ("gone", True)
         if closed and for_good:
-            conn.execute("UPDATE expert_reviews SET followup_turn_id=? WHERE review_id=? AND followup_turn_id=''",
-                         (self.NOT_TOLD, review["review_id"]))
             return ""
         payload = json.loads(review["payload_json"])
         what = (f"the reply you prepared:\n{payload.get('text', '')}" if review["kind"] == "reply"
@@ -1359,16 +1383,24 @@ class ExpertService:
         return turn_id
 
     # ---------------------------------------------------------------- maintenance
-    def reconcile_once(self, limit: int = 100) -> list[dict]:
-        """Called from the existing maintenance tick: publish finished jobs to their Queens, and finish or
-        cancel every half-done state a crash can leave (the outcome table in the build's design record)."""
-        # First, work left open in a conversation closed for good is closed: nothing of it starts or leaves.
-        outcomes = self._close_abandoned_work(limit)
+    def _rotating(self, name: str, key: str, sql: str, params: tuple, limit: int) -> list[dict]:
+        """The rows of one maintenance pass, taken from where its last pass stopped and wrapping around, so
+        rows that stay (a job still running, a copy still restored) never hide later ones for good."""
+        after = self._cursors.get(name, "")
         with self.store._connect() as conn:
-            rows = [dict(row) for row in conn.execute(
-                "SELECT * FROM expert_jobs WHERE state='running' AND job_conversation_id<>'' ORDER BY updated_at LIMIT ?",
-                (limit,))]
-        for job in rows:
+            rows = [dict(row) for row in conn.execute(sql, (*params, after, limit))]
+        self._cursors[name] = rows[-1][key] if len(rows) >= limit else ""
+        return rows
+
+    def reconcile_once(self, limit: int = 100) -> list[dict]:
+        """Called from the existing maintenance tick. Three owners, each over every row in turn: a running job
+        is told once it is finished; an approval not yet carried out goes through the one release; a released
+        job not yet started is prepared, or told it could not start when its first turn could not be written
+        within ten minutes. Everything else is decided in the transaction of the change that causes it."""
+        outcomes: list[dict] = []
+        for job in self._rotating("running", "job_id",
+                                  "SELECT * FROM expert_jobs WHERE state='running' AND job_conversation_id<>'' "
+                                  "AND job_id>? ORDER BY job_id LIMIT ?", (), limit):
             try:
                 finished, state, text = self._job_finished(job)
                 if finished:
@@ -1376,106 +1408,41 @@ class ExpertService:
                     outcomes.append({"job_id": job["job_id"], "state": state})
             except Exception as exc:  # One job's failure must not stop the others.
                 outcomes.append({"job_id": job["job_id"], "error": type(exc).__name__})
-        # An approval whose release was interrupted is completed, once: the approved job is
-        # still held, or the approved reply to a channel has not left its hold.
-        with self.store._connect() as conn:
-            # Never in a stopped conversation, and never in a restored copy before the owner resumes it.
-            unreleased = [dict(row) for row in conn.execute(
-                "SELECT r.* FROM expert_reviews r JOIN coordinator_conversations c "
-                "ON c.conversation_id=r.speaker_conversation_id WHERE r.state='approved' AND r.kind='job' "
-                "AND c.stop_scope='' AND c.restore_hold=0 AND EXISTS ("
-                "SELECT 1 FROM expert_jobs j WHERE j.job_id=r.target_id AND j.state='held') "
-                "ORDER BY r.decided_at LIMIT ?", (limit,))]
-            if self.deliveries is not None:
-                unreleased += [dict(row) for row in conn.execute(
-                    "SELECT r.* FROM expert_reviews r JOIN expert_conversations e "
-                    "ON e.conversation_id=r.speaker_conversation_id JOIN coordinator_conversations c "
-                    "ON c.conversation_id=r.speaker_conversation_id WHERE r.state='approved' AND r.kind='reply' "
-                    "AND e.binding_id<>'' AND c.stop_scope='' AND c.restore_hold=0 AND NOT EXISTS ("
-                    "SELECT 1 FROM channel_deliveries d WHERE d.review_id=r.review_id AND d.state<>'held') "
-                    "ORDER BY r.decided_at LIMIT ?", (limit,))]
-        for review in unreleased:
+        unreleased = UNRELEASED_APPROVAL if self.deliveries is not None else UNRELEASED_JOB_APPROVAL
+        for review in self._rotating("release", "review_id",
+                                     "SELECT expert_reviews.review_id FROM expert_reviews JOIN coordinator_conversations c "
+                                     "ON c.conversation_id=expert_reviews.speaker_conversation_id WHERE c.restore_hold=0 "
+                                     f"AND {unreleased} AND expert_reviews.review_id>? "
+                                     "ORDER BY expert_reviews.review_id LIMIT ?", (), limit):
             try:
-                if review["kind"] == "job":
-                    self._start_job(review["target_id"])
-                else:
-                    self.deliveries.release_approved_reply(review)
-                outcomes.append({"review_id": review["review_id"], "released": True})
+                outcomes.append({"review_id": review["review_id"], "release": self.release(review["review_id"])})
             except Exception as exc:  # retried on the next pass
                 outcomes.append({"review_id": review["review_id"], "error": type(exc).__name__})
-        # A job interrupted while it was being prepared (a crash after it was recorded) is prepared
-        # again: preparing twice reuses its one conversation and its one first turn.
-        # Half-done states a crash can leave, each finished or cancelled here (see the outcome table):
-        # a held job whose request is gone, rejected or withdrawn is withdrawn; a "no" never told is told;
-        # requests left waiting on an Expert switched to Off are withdrawn and the person told.
-        # A restored copy is left as it is until the owner resumes it.
-        with self.store._connect() as conn:
-            orphaned = [row[0] for row in conn.execute(
-                "SELECT j.job_id FROM expert_jobs j JOIN coordinator_conversations c "
-                "ON c.conversation_id=j.speaker_conversation_id WHERE j.state='held' AND c.restore_hold=0 "
-                "AND NOT EXISTS (SELECT 1 FROM expert_reviews r WHERE r.kind='job' AND r.target_id=j.job_id "
-                "AND r.state IN ('pending','approved')) LIMIT ?", (limit,))]
-            # The mirror: a job request still waiting whose job is no longer held can never be approved.
-            conn.execute(
-                "UPDATE expert_reviews SET state='withdrawn',decision_note='The job was stopped.',decided_at=? "
-                "WHERE state='pending' AND kind='job' AND NOT EXISTS (SELECT 1 FROM expert_jobs j "
-                "WHERE j.job_id=expert_reviews.target_id AND j.state='held') AND speaker_conversation_id IN ("
-                "SELECT conversation_id FROM coordinator_conversations WHERE restore_hold=0)", (_now(),))
-            untold = [dict(row) for row in conn.execute(
-                "SELECT r.* FROM expert_reviews r JOIN coordinator_conversations c ON c.conversation_id=r.speaker_conversation_id "
-                "WHERE r.state='rejected' AND r.followup_turn_id='' AND c.stop_scope='' AND c.restore_hold=0 LIMIT ?", (limit,))]
-            waiting = [dict(row) for row in conn.execute(
-                "SELECT DISTINCT tenant_id,owner_id,lineage_id FROM expert_reviews WHERE state='pending' LIMIT ?", (limit,))]
-        for job_id in orphaned:
-            with self.store._connect() as conn:
-                conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
-                             (_now(), job_id))
-            outcomes.append({"job_id": job_id, "state": "withdrawn"})
-        for review in untold:
-            try:
-                self._tell_rejection(review, str(review.get("decision_note") or ""))
-                outcomes.append({"review_id": review["review_id"], "told": True})
-            except Exception as exc:  # retried on the next pass
-                outcomes.append({"review_id": review["review_id"], "error": type(exc).__name__})
-        for row in waiting:
-            try:
-                if self.spec(self.latest(row["tenant_id"], row["owner_id"], row["lineage_id"])).ask_me_first == "off":
-                    self._withdraw_waiting_for_off(row["tenant_id"], row["owner_id"], row["lineage_id"])
-                    outcomes.append({"lineage_id": row["lineage_id"], "withdrawn_for_off": True})
-            except Exception as exc:  # retried on the next pass
-                outcomes.append({"lineage_id": row["lineage_id"], "error": type(exc).__name__})
-        # One that still cannot be prepared after ten minutes ends as failed and is told, once.
         cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
         give_up = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         with self.store._connect() as conn:
             # A job in a restored copy waits for the resume, untried: its ten minutes count from the resume.
             conn.execute("UPDATE expert_jobs SET updated_at=? WHERE state='starting' AND speaker_conversation_id IN "
                          "(SELECT conversation_id FROM coordinator_conversations WHERE restore_hold=1)", (_now(),))
-            stalled = [dict(row) for row in conn.execute(
-                "SELECT j.job_id,j.updated_at,j.job_conversation_id FROM expert_jobs j JOIN coordinator_conversations c "
-                "ON c.conversation_id=j.speaker_conversation_id WHERE j.state='starting' AND j.updated_at<? "
-                "AND c.stop_scope='' AND c.restore_hold=0 ORDER BY j.updated_at LIMIT ?", (cutoff, limit))]
-        for row in stalled:
+        for row in self._rotating("starting", "job_id",
+                                  "SELECT j.job_id,j.updated_at,j.job_conversation_id,EXISTS (SELECT 1 FROM coordinator_turns t "
+                                  "WHERE t.conversation_id=j.job_conversation_id AND t.turn_id='job-brief') AS prepared "
+                                  "FROM expert_jobs j JOIN coordinator_conversations c ON c.conversation_id=j.speaker_conversation_id "
+                                  "WHERE j.state='starting' AND j.updated_at<? AND c.restore_hold=0 AND j.job_id>? "
+                                  "ORDER BY j.job_id LIMIT ?", (cutoff,), limit):
             try:
-                # A job already prepared (its conversation and first turn written) is marked running at any
-                # age: its turn may run already, and giving up would throw its result away.
-                if row["updated_at"] < give_up and not row["job_conversation_id"]:
+                # Prepared (its first turn written) it is marked running at any age; one whose first turn still
+                # cannot be written after ten minutes ends as failed and is told, once.
+                if row["updated_at"] < give_up and not row["prepared"]:
                     self._publish(self._job(row["job_id"]), "failed", "The job could not start.", from_state="starting")
+                    if row["job_conversation_id"]:
+                        self._fence_job(self._job(row["job_id"]))
                     outcomes.append({"job_id": row["job_id"], "state": "failed"})
                     continue
                 self._start_job(row["job_id"])
                 outcomes.append({"job_id": row["job_id"], "prepared_again": True})
             except Exception as exc:  # retried on the next pass
                 outcomes.append({"job_id": row["job_id"], "error": type(exc).__name__})
-        # A stopped job's conversation stays fenced until its Stop is confirmed, also when
-        # the Stop raced the job's start or a restart came between them.
-        with self.store._connect() as conn:
-            unconfirmed = [dict(row) for row in conn.execute(
-                "SELECT j.* FROM expert_jobs j JOIN coordinator_conversations c "
-                "ON c.conversation_id=j.job_conversation_id WHERE j.state='stopped' "
-                "AND c.stop_scope<>'stopped' AND c.restore_hold=0 ORDER BY j.updated_at LIMIT ?", (limit,))]
-        for job in unconfirmed:
-            self._fence_job(job)
         if self.deliveries is not None:
             outcomes.extend(self.deliveries.reconcile_once())
         return outcomes

@@ -1433,6 +1433,21 @@ def _reset_restore_authority(connection: sqlite3.Connection) -> None:
                  "Restored from a copy; it may already have been sent, so it is not sent again.", utc_now(), utc_now()),
             )
 
+    # An approval not yet carried out when the copy was taken may have been carried out by the earlier
+    # machine afterwards: in the restored copy it waits for the owner again, never released by itself.
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='expert_reviews'"
+    ).fetchone():
+        from .experts import UNRELEASED_APPROVAL, UNRELEASED_JOB_APPROVAL
+
+        has_deliveries = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_deliveries'"
+        ).fetchone()
+        connection.execute(
+            "UPDATE expert_reviews SET state='pending',decided_at='',decision_note='' WHERE "
+            + (UNRELEASED_APPROVAL if has_deliveries else UNRELEASED_JOB_APPROVAL)
+        )
+
     # Provider requests are retained, but every pre-existing transition/fallback/result
     # path is fenced until the owner explicitly resumes an exact pending set.
     connection.execute(

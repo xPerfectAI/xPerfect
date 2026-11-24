@@ -1727,6 +1727,16 @@ class CoordinatorService:
                 return {"turn_id": turn_id, "state": "cancelled"}
             if turn["request_id"]:
                 return {"turn_id": turn_id, "request_id": turn["request_id"], "state": "accepted"}
+            # An Expert job's turns start only while the job runs (it is marked running only after every check
+            # at its start): before that they wait; once it has ended they never start.
+            experts = getattr(self, "experts", None)
+            gate = experts.turn_gate(conn, conversation_id) if experts is not None else ""
+            if gate == "wait":
+                return {"turn_id": turn_id, "state": "queued"}
+            if gate == "cancel":
+                conn.execute("UPDATE coordinator_turns SET blocker='cancelled',retry_after_at='' WHERE conversation_id=? "
+                             "AND turn_id=? AND request_id='' AND response_json=''", (conversation_id, turn_id))
+                return {"turn_id": turn_id, "state": "cancelled"}
             # The native conversation answers one turn at a time. A turn accepted while another
             # still runs waits, ready, and the background pass starts it once that one settles
             # (its history then includes that reply); it is never refused as a conflict.
@@ -2147,11 +2157,12 @@ class CoordinatorService:
                 for run_id in owned_runs:
                     conn.execute("UPDATE scheduled_runs SET state='cancelled',updated_at=? WHERE queued_run_id=? "
                                  "AND state NOT IN ('completed','failed','cancelled')", (now(), run_id))
-        experts = getattr(self, "experts", None)
-        if experts is not None:
-            # An Expert's requests, held jobs and unsent messages on this conversation are withdrawn
-            # with the fence: an old approval must never send or start anything after a Stop.
-            experts.conversation_stopped(tenant, owner, conversation_id)
+            experts = getattr(self, "experts", None)
+            # An Expert's requests, held jobs and unsent messages on this conversation are withdrawn in the
+            # same transaction as the fence: an old approval never sends or starts anything after a Stop.
+            fences = experts.conversation_stopped_in(conn, tenant, owner, conversation_id) if experts is not None else []
+        for job in fences:
+            experts._fence_job(job)
         pending = False
         for turn_id in turns:
             try:

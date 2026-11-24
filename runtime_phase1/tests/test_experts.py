@@ -281,10 +281,13 @@ def test_a_stopped_job_never_starts_again_and_a_raced_stop_is_re_driven(app, mon
     # Stop reaches only that job.
     assert core.snapshot("local", owner, cids[1])["stop_scope"] == ""
     assert experts._job(second["job_id"])["state"] in {"starting", "running"}
-    # A Stop that raced the job's start (or a restart between the two) is re-driven.
-    with experts.store._connect() as conn:
-        conn.execute("UPDATE expert_jobs SET state='stopped' WHERE job_id=?", (second["job_id"],))
-    experts.reconcile_once()
+    # The job's conversation is marked stopped in the same transaction as the job, so a Stop whose fence did
+    # not land (the process ended right after it) is completed by the coordinator.
+    with monkeypatch.context() as crash:
+        crash.setattr(experts, "_fence_job", lambda job: None)
+        experts.stop_job(second["job_id"])
+    assert core.snapshot("local", owner, cids[1])["stop_scope"] == "goals"
+    core.reconcile_once()
     assert core.snapshot("local", owner, cids[1])["stop_scope"] == "stopped"
 
 
@@ -311,7 +314,7 @@ def test_turning_a_channel_off_stops_its_jobs_and_withdraws_its_requests(app):
     with pytest.raises(ExpertError):
         experts.decide("local", owner, reply["review_id"], decision="approve", expected_digest=reply["payload_digest"])
     # Even a direct release never revives a message the channel dropped.
-    application.state.channels.release_approved_reply(experts._review(reply["review_id"]))
+    assert experts.release(reply["review_id"]) == "nothing"
     with experts.store._connect() as conn:
         states = [row[0] for row in conn.execute("SELECT state FROM channel_deliveries WHERE kind<>'checking'")]
     assert states and set(states) == {"dropped"}
@@ -670,11 +673,10 @@ def test_an_interrupted_approval_is_released_once(app, monkeypatch):
     channels.reconcile_once()
     owner = scalar(application, "SELECT owner_id FROM expert_reviews")
     review = experts.reviews("local", owner)[0]
-    release = channels.release_approved_reply
-    monkeypatch.setattr(channels, "release_approved_reply", lambda *_: (_ for _ in ()).throw(RuntimeError("stopped")))
-    with pytest.raises(RuntimeError):
-        experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
-    monkeypatch.setattr(channels, "release_approved_reply", release)
+    with monkeypatch.context() as crash:  # the approval is recorded; its release never runs
+        crash.setattr(experts, "release", lambda *_: (_ for _ in ()).throw(RuntimeError("stopped")))
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
     experts.reconcile_once(); experts.reconcile_once()
     with experts.store._connect() as conn:
         states = [row[0] for row in conn.execute("SELECT state FROM channel_deliveries WHERE review_id=?", (review["review_id"],))]
@@ -1128,7 +1130,7 @@ def test_an_expert_saved_before_the_access_rules_never_starts_work_past_them(app
         conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,"
                      "goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                      ("job_held_before", "local", owner, expert["lineage_id"], chat["conversation_id"], "held-before",
-                      "Synthetic job", "", "held", expert["template_id"], "t", "t"))
+                      "Synthetic job", "", "starting", expert["template_id"], "t", "t"))
     with pytest.raises(ExpertError, match="Nothing was started"):
         experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
     assert scalar(application, "SELECT count(*) FROM expert_jobs WHERE idempotency_key='k1'") == 0
@@ -1299,16 +1301,33 @@ def test_work_asked_for_after_a_stop_or_a_removal_is_refused_where_it_is_written
 
 
 @pytest.mark.parametrize("closed", ["stopped", "removed", "off"])
-def test_work_left_open_in_a_conversation_closed_for_good_is_closed_by_maintenance(app, closed):
-    # Review 3, shape 2 (one owner): cells "Job held", "Request pending" and "Message held" x Stop, "Person
-    # removed", "Channel off" after a crash before the clean-up: maintenance closes them the same way.
+def test_stop_a_removal_or_the_channel_off_closes_everything_in_its_own_transaction(app, closed, monkeypatch):
+    # Review 4 (the one withdraw, in the change's own transaction): even if the process ends right after the
+    # change, before any fence is completed, every request is withdrawn, every job stopped with its conversation
+    # marked stopped, and nothing is left to send.
     application, client = app
-    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    expert, channel, owner, cid, held, accepted = _always_with_held_work(application, client)
     experts = application.state.experts
-    _close(application, channel, cid, closed)
-    experts.reconcile_once()
+    monkeypatch.setattr(experts.coordinator.provider, "cancel_by_idempotency",
+                        lambda *args, **kwargs: {"capacity_released": True})
+    review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
+    experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    running = experts._job(held["job_id"])
+    assert running["state"] == "running" and running["job_conversation_id"]
+    waiting = experts.hand_off("local", owner, cid, goal="Synthetic second job", idempotency_key="k2",
+                               source_turn_id=accepted["turn_id"])
+    with monkeypatch.context() as crash:
+        crash.setattr(experts, "_fence_job", lambda job: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            if closed == "stopped":
+                experts.coordinator.stop_conversation("local", owner, cid)
+            else:
+                client.patch(f"/v1/channels/{channel['binding_id']}",
+                             json={"people": []} if closed == "removed" else {"state": "off"})
     assert experts.reviews("local", owner) == []
-    assert experts._job(job["job_id"])["state"] == "stopped"
+    assert {experts._job(job_id)["state"] for job_id in (running["job_id"], waiting["job_id"])} == {"stopped"}
+    assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                  running["job_conversation_id"]) == "goals"
     assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state IN ('held','pending')") == 0
 
 
@@ -1360,11 +1379,11 @@ def test_an_approval_interrupted_before_release_is_never_sent_once_the_person_ca
     owner = scalar(application, "SELECT owner_id FROM expert_reviews")
     review = experts.reviews("local", owner)[0]
     with monkeypatch.context() as crash:  # the approval is recorded; its release never runs
-        crash.setattr(channels, "release_approved_reply", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        crash.setattr(experts, "release", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
         with pytest.raises(RuntimeError):
             experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
     _close(application, channel, accepted["conversation_id"], closed)
-    channels.release_approved_reply(experts._review(review["review_id"]))  # the release checks where it acts
+    assert experts.release(review["review_id"]) == "withdrawn"  # the release checks where it acts
     assert experts._review(review["review_id"])["state"] == "withdrawn"
     with experts.store._connect() as conn:  # on again, the person listed again
         conn.execute("UPDATE channel_bindings SET state='connected',people_json=? WHERE binding_id=?",
@@ -1375,26 +1394,6 @@ def test_an_approval_interrupted_before_release_is_never_sent_once_the_person_ca
     assert not any("SYNTHETIC-APPROVED-REPLY" in item["text"] for item in sent)
 
 
-def test_a_held_job_left_without_a_live_request_is_withdrawn_and_a_no_never_told_is_told_once(app):
-    # Review 3, B4, cells "Job held, no request" and "Job held, request rejected" x Crash, with a held reply
-    # whose request was decided: maintenance withdraws the jobs, tells each "no" once and drops the hold.
-    application, client = app
-    expert, channel, owner, cid, lost, accepted = _always_with_held_work(application, client)
-    experts = application.state.experts
-    refused = experts.hand_off("local", owner, cid, goal="Synthetic job refused", idempotency_key="k2",
-                               source_turn_id=accepted["turn_id"])
-    with experts.store._connect() as conn:  # what an earlier version could leave after a crash
-        conn.execute("DELETE FROM expert_reviews WHERE target_id=?", (lost["job_id"],))  # its request never written
-        conn.execute("UPDATE expert_reviews SET state='rejected',decided_at='t' WHERE target_id=? OR kind='reply'",
-                     (refused["job_id"],))  # the "no" recorded, nothing after it
-    experts.reconcile_once()
-    experts.reconcile_once()
-    assert experts._job(lost["job_id"])["state"] == "withdrawn"
-    assert experts._job(refused["job_id"])["state"] == "withdrawn"
-    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision'") == 2
-    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state='held'") == 0
-    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
-    assert not any("SYNTHETIC-HELD-REPLY" in item["text"] for item in sent)
 
 
 def test_a_rejection_is_recorded_whole_or_not_at_all(app, monkeypatch):
@@ -1416,30 +1415,24 @@ def test_a_rejection_is_recorded_whole_or_not_at_all(app, monkeypatch):
     assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision'") == 1
 
 
-def test_after_off_an_old_approval_is_refused_and_maintenance_withdraws_what_waited(app, monkeypatch):
-    # Review 3, B5, cell "Request pending" x "Setting changed to Off" with a crash between saving Off and
-    # withdrawing what waited: an approval is refused, and everything is withdrawn and each person told.
+def test_off_and_the_withdrawal_of_what_waited_are_one_change(app, monkeypatch):
+    # Review 4, finding 4: saving Off and withdrawing what waited are one transaction. A failure while withdrawing
+    # leaves the setting as it was and every request waiting, nothing half done; the next save does both.
     application, client = app
     expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
     experts = application.state.experts
-    waiting = {review["kind"]: review for review in experts.reviews("local", owner)}
-    read = client.get(f"/v1/experts/{expert['template_id']}").json()
-    with monkeypatch.context() as crash:  # Off is saved; the process stops before it withdraws anything
-        crash.setattr(experts, "_withdraw_waiting_for_off",
-                      lambda *args: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+    with monkeypatch.context() as crash:
+        crash.setattr(experts, "_insert_decision_turn",
+                      lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
         with pytest.raises(RuntimeError):
-            client.patch(f"/v1/experts/{expert['template_id']}", json={
-                "expected_catalog_revision": read["catalog_revision"], "expert": {**read["expert"], "ask_me_first": "off"}})
-    assert experts.spec(experts.latest("local", owner, expert["lineage_id"])).ask_me_first == "off"
-    with pytest.raises(ExpertError, match="Off"):
-        experts.decide("local", owner, waiting["job"]["review_id"], decision="approve",
-                       expected_digest=waiting["job"]["payload_digest"])
-    assert experts._job(job["job_id"])["state"] == "withdrawn"  # never started
-    experts.reconcile_once()
+            _save_off(client, expert)
+    assert experts.spec(experts.latest("local", owner, expert["lineage_id"])).ask_me_first == "always"
+    assert {review["kind"] for review in experts.reviews("local", owner)} == {"job", "reply"}
+    _save_off(client, expert)
     assert experts.reviews("local", owner) == []
-    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state='held'") == 0
+    assert experts._job(job["job_id"])["state"] == "withdrawn"
     assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' "
-                               "AND message LIKE '%switched Ask me first to Off%'") == 2  # each person told once
+                               "AND message LIKE '%switched Ask me first to Off%'") == 2
 
 
 def test_a_prepared_job_is_marked_running_at_any_age_never_given_up(app):
@@ -1479,16 +1472,6 @@ def test_a_prepared_job_never_runs_at_an_access_level_no_longer_supported(app, m
                   refused["job_conversation_id"]) != ""
 
 
-def test_a_job_request_left_waiting_after_its_job_stopped_is_withdrawn(app):
-    # Cell "Request pending" x Crash, after a Stop of the job itself (an earlier version closed the job and
-    # its request in separate steps): a request whose job is no longer held can never be approved.
-    application, client = app
-    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
-    experts = application.state.experts
-    with experts.store._connect() as conn:  # the job stopped, its request not yet withdrawn
-        conn.execute("UPDATE expert_jobs SET state='stopped' WHERE job_id=?", (job["job_id"],))
-    experts.reconcile_once()
-    assert {review["kind"] for review in experts.reviews("local", owner)} == {"reply"}
 
 
 def _hold(application, cid, held=True):
@@ -1584,7 +1567,7 @@ def test_a_no_for_a_person_who_can_no_longer_be_served_is_never_told_nor_revisit
     experts.decide("local", owner, review["review_id"], decision="reject", expected_digest=review["payload_digest"])
     told = "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision'"
     assert scalar(application, told) == 0
-    assert experts._review(review["review_id"])["followup_turn_id"] == experts.NOT_TOLD
+    assert experts._review(review["review_id"])["followup_turn_id"] == ""
     experts.reconcile_once()
     experts.reconcile_once()
     assert scalar(application, told) == 0
@@ -1621,8 +1604,8 @@ def _approved_not_started(application, client, monkeypatch):
     expert, channel, owner, cid, job, accepted = _always_with_held_work(application, client)
     experts = application.state.experts
     review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
-    with monkeypatch.context() as crash:
-        crash.setattr(experts, "_start_job", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+    with monkeypatch.context() as crash:  # the approval is recorded; its release never runs
+        crash.setattr(experts, "release", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
         with pytest.raises(RuntimeError):
             experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
     assert experts._job(job["job_id"])["state"] == "held"
@@ -1637,8 +1620,9 @@ def _save_off(client, expert):
 
 @pytest.mark.parametrize("event", ["crash", "stopped", "removed", "off", "setting_off"])
 def test_an_approved_job_not_yet_started_follows_the_table(app, event, monkeypatch):
-    # Row "Job held, request approved, not started": a crash: started once by maintenance; Stop, a removal or
-    # the channel off: never started (stopped); Off: started once (the owner approved it).
+    # Row "Job held, request approved, not started": a crash: started once by maintenance (the one release);
+    # Stop, a removal, the channel off or Off: never started, the approval withdrawn (review 4, finding 3: Off
+    # withdraws what is not yet carried out, with everything else still waiting, and tells the person).
     application, client = app
     expert, channel, owner, cid, job = _approved_not_started(application, client, monkeypatch)
     experts = application.state.experts
@@ -1648,10 +1632,13 @@ def test_an_approved_job_not_yet_started_follows_the_table(app, event, monkeypat
         _close(application, channel, cid, event)
     experts.reconcile_once()
     started = scalar(application, "SELECT count(*) FROM expert_conversations WHERE role='job' AND job_id=?", job["job_id"])
-    if event in {"crash", "setting_off"}:
+    if event == "crash":
         assert experts._job(job["job_id"])["state"] == "running" and started == 1
     else:
-        assert experts._job(job["job_id"])["state"] == "stopped" and started == 0
+        assert experts._job(job["job_id"])["state"] == "withdrawn" and started == 0
+    told = scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' "
+                               "AND message LIKE '%switched Ask me first to Off%'")
+    assert told == (2 if event == "setting_off" else 0)  # the job's request and the held reply's
 
 
 @pytest.mark.parametrize("closed", ["stopped", "removed", "off"])
@@ -1754,8 +1741,9 @@ def test_a_job_finished_in_a_restored_copy_is_told_to_nobody_before_the_resume(a
                   cid, accepted["turn_id"]) == 0
 
 
-def test_an_interrupted_approval_is_released_after_off_since_the_owner_approved_it(app, monkeypatch):
-    # Row "Request approved, release interrupted" x "Setting changed to Off": released, once.
+def test_off_withdraws_an_approval_not_yet_carried_out_and_tells_the_person(app, monkeypatch):
+    # Review 4, finding 3: an approval whose release was interrupted is not carried out after Off: it is withdrawn
+    # with everything else still waiting, the person told, and the held reply never sent.
     application, client = app
     expert = create_expert(client, ask_me_first="always")
     channel = connected_channel(application, client, expert)
@@ -1765,30 +1753,234 @@ def test_an_interrupted_approval_is_released_after_off_since_the_owner_approved_
     channels.reconcile_once()
     owner = scalar(application, "SELECT owner_id FROM expert_reviews")
     review = experts.reviews("local", owner)[0]
-    with monkeypatch.context() as crash:
-        crash.setattr(channels, "release_approved_reply", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+    with monkeypatch.context() as crash:  # the approval is recorded; its release never runs
+        crash.setattr(experts, "release", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
         with pytest.raises(RuntimeError):
             experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
     _save_off(client, expert)
     experts.reconcile_once()
     experts.reconcile_once()
     sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
-    assert sent.count("SYNTHETIC-APPROVED-BEFORE-OFF") == 1
+    assert "SYNTHETIC-APPROVED-BEFORE-OFF" not in sent
+    assert experts._review(review["review_id"])["state"] == "withdrawn"
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' "
+                               "AND message LIKE '%switched Ask me first to Off%'") == 1
 
 
-@pytest.mark.parametrize("event", ["stopped", "setting_off"])
-def test_a_no_not_yet_told_follows_the_table(app, event):
-    # Row "Request rejected, its no not yet told": Stop: not told; Off: told, once.
+# ---------------------------------------------------------------- review 4: one release, one withdraw
+
+
+def test_an_approval_withdrawn_by_a_removal_is_never_sent_after_the_person_is_listed_again(app, monkeypatch):
+    # Review 4, finding 1: the one release reads the request again in its own transaction, so a caller that
+    # paused before releasing cannot send an approval a removal withdrew, after the person is listed again.
     application, client = app
-    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
     experts = application.state.experts
-    with experts.store._connect() as conn:  # the "no" recorded by an earlier version, its telling not written
-        conn.execute("UPDATE expert_reviews SET state='rejected',decided_at='t' WHERE kind='job'")
-    if event == "stopped":
-        _close(application, channel, cid, "stopped")
-    else:
-        _save_off(client, expert)
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    experts.ask_owner("local", owner, accepted["conversation_id"], reason="Unusual", reply="SYNTHETIC-WITHDRAWN-APPROVAL",
+                      idempotency_key="ask-1", source_turn_id=accepted["turn_id"])
+    review = experts.reviews("local", owner)[0]
+    with monkeypatch.context() as paused:  # approved; the release pauses
+        paused.setattr(experts, "release", lambda *_: (_ for _ in ()).throw(RuntimeError("paused")))
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": []}).status_code == 200
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": [PERSON]}).status_code == 200
+    assert experts.release(review["review_id"]) == "nothing"  # the paused caller resumes
+    experts.reconcile_once()
+    sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
+    assert "SYNTHETIC-WITHDRAWN-APPROVAL" not in sent
+
+
+def test_a_reply_written_while_always_is_saved_is_held_for_the_owner(app, monkeypatch):
+    # Review 4, finding 2: the setting is read inside the transaction that writes the reply, so Always saved
+    # while the outbox pass works on that reply is never missed.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "SYNTHETIC-ANSWER")
+    original = channels._turn_reviews
+
+    def always_saved_meanwhile(*args):
+        result = original(*args)
+        read = client.get(f"/v1/experts/{expert['template_id']}").json()
+        assert client.patch(f"/v1/experts/{expert['template_id']}", json={
+            "expected_catalog_revision": read["catalog_revision"],
+            "expert": {**read["expert"], "ask_me_first": "always"}}).status_code == 200
+        return result
+
+    monkeypatch.setattr(channels, "_turn_reviews", always_saved_meanwhile)
+    channels.reconcile_once()
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    assert [review["kind"] for review in experts.reviews("local", owner)] == ["reply"]
+
+
+def _prepared_not_running(application, experts, job_id):
+    """Its conversation and first turn written, the turn not started, the job not yet marked running."""
+    job = experts._job(job_id)
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE expert_jobs SET state='starting',updated_at=? WHERE job_id=?",
+                     ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), job_id))
+        conn.execute("UPDATE coordinator_turns SET request_id='',blocker='',retry_after_at='' WHERE conversation_id=?",
+                     (job["job_conversation_id"],))
+    return job
+
+
+def _first_turn(application, conversation_id):
+    with application.state.experts.store._connect() as conn:
+        return dict(conn.execute("SELECT request_id,blocker FROM coordinator_turns WHERE conversation_id=? "
+                                 "AND turn_id='job-brief'", (conversation_id,)).fetchone())
+
+
+def test_a_job_its_channel_stopped_never_starts_its_first_turn_even_if_its_fence_did_not_land(app, monkeypatch):
+    # Review 4, finding 5: turning the channel off marks the stopped job's conversation stopped in the same
+    # transaction, so the coordinator's own maintenance (first to run after a restart) never starts its turn.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, accepted["conversation_id"], goal="Synthetic job", idempotency_key="k1",
+                           source_turn_id=accepted["turn_id"])
+    prepared = _prepared_not_running(application, experts, job["job_id"])
+    with monkeypatch.context() as crash:  # the process ends before the fence
+        crash.setattr(experts, "_fence_job", lambda job: None)
+        assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"state": "off"}).status_code == 200
+    experts.coordinator.reconcile_once()
+    turn = _first_turn(application, prepared["job_conversation_id"])  # never started; the Stop completed cancels it
+    assert turn["request_id"] == "" and turn["blocker"] in {"", "cancelled"}
+
+
+def test_a_prepared_job_never_starts_its_first_turn_before_its_access_check(app, monkeypatch):
+    # Review 4 (lesser, and A7): the coordinator's maintenance may run before the Expert's; a prepared job's first
+    # turn waits until the job is marked running, which happens only after the access check.
+    import workers_projects_runtime.experts as experts_module
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    prepared = _prepared_not_running(application, experts, job["job_id"])
+    monkeypatch.setattr(experts_module, "_access_refusal", lambda spec: "Synthetic: this access level is not supported.")
+    experts.coordinator.reconcile_once()
+    assert _first_turn(application, prepared["job_conversation_id"]) == {"request_id": "", "blocker": ""}
+    experts.reconcile_once()
+    assert experts._job(job["job_id"])["state"] == "failed"
+
+
+def test_a_job_started_by_another_caller_meanwhile_is_left_running(app, monkeypatch):
+    # Review 4, finding 6: an approval and maintenance may both start a released job; the one that finds it
+    # running already does nothing (that is not a cancellation), so the job is never fenced.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    old = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    with experts.store._connect() as conn:
+        conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,"
+                     "goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("job_raced", "local", owner, expert["lineage_id"], chat["conversation_id"], "job_raced",
+                      "Synthetic job", "", "starting", expert["template_id"], old, old))
+    original = experts.coordinator.accept_turn
+
+    def the_other_caller_wins(*args, **kwargs):
+        result = original(*args, **kwargs)
+        with experts.store._connect() as conn:
+            conn.execute("UPDATE expert_jobs SET state='running' WHERE job_id='job_raced'")
+        return result
+
+    monkeypatch.setattr(experts.coordinator, "accept_turn", the_other_caller_wins)
+    experts._start_job("job_raced")
+    job = experts._job("job_raced")
+    assert job["state"] == "running"
+    assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                  job["job_conversation_id"]) == ""
+
+
+def test_a_job_whose_first_turn_can_never_be_written_ends_told_after_ten_minutes(app, monkeypatch):
+    # Review 4, finding 7: a conversation alone does not exempt a job from the ten minutes; only a written first
+    # turn does. One whose first turn can never be written (its Library material gone) ends, told once.
+    from workers_projects_runtime.coordinator import CoordinatorConflict
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    with monkeypatch.context() as gone:
+        gone.setattr(experts.coordinator, "accept_turn", lambda *args, **kwargs: (_ for _ in ()).throw(
+            CoordinatorConflict("Selected Library material is unavailable")))
+        with pytest.raises(CoordinatorConflict):
+            experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+        job_id = scalar(application, "SELECT job_id FROM expert_jobs")
+        assert experts._job(job_id)["job_conversation_id"] and experts._job(job_id)["state"] == "starting"
+        with experts.store._connect() as conn:
+            conn.execute("UPDATE expert_jobs SET updated_at=? WHERE job_id=?",
+                         ((datetime.now(UTC) - timedelta(minutes=11)).isoformat(), job_id))
+        experts.reconcile_once()
+        experts.reconcile_once()
+    job = experts._job(job_id)
+    assert job["state"] == "failed" and job["result_text"] == "The job could not start."
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result' AND identity=?",
+                  job_id) == 1
+
+
+def test_maintenance_reaches_every_running_job_in_turn_not_only_the_first_ones(app):
+    # Review 4, finding 8: a pass takes its rows from where the last one stopped, so rows that stay never hide
+    # later ones: with one row per pass, a finished job behind two still running is told within three passes.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    jobs = [experts.hand_off("local", owner, chat["conversation_id"], goal=f"Synthetic job {i}", idempotency_key=f"k{i}")
+            for i in range(3)]
+    finished = sorted(job["job_id"] for job in jobs)[-1]
+    with experts.store._connect() as conn:
+        for job in jobs:
+            cid = experts._job(job["job_id"])["job_conversation_id"]
+            if job["job_id"] == finished:
+                conn.execute("UPDATE coordinator_turns SET request_id='',blocker='' WHERE conversation_id=?", (cid,))
+            else:  # still running, and older, so an unrotated pass would always take them first
+                conn.execute("UPDATE coordinator_turns SET request_id='req-'||turn_id,blocker='' WHERE conversation_id=?", (cid,))
+                conn.execute("UPDATE expert_jobs SET updated_at='2000-01-01T00:00:00+00:00' WHERE job_id=?", (job["job_id"],))
+    finish_turn(application, experts._job(finished)["job_conversation_id"], "job-brief", "SYNTHETIC-DONE")
+    for _ in range(3):
+        experts.reconcile_once(limit=1)
+    assert experts._job(finished)["state"] == "done"
+
+
+def test_a_restored_copy_returns_an_approval_not_yet_carried_out_to_the_owner(app, monkeypatch):
+    # Review 4, finding 9: the copy may have been taken between an approval and its release, and the earlier
+    # machine may have sent it afterwards. In the restored copy the approval waits for the owner again; it is
+    # never carried out by itself.
+    import sqlite3
+    from workers_projects_runtime.native_continuity import _reset_restore_authority
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "SYNTHETIC-APPROVED-IN-THE-COPY")
+    channels.reconcile_once()
+    owner = scalar(application, "SELECT owner_id FROM expert_reviews")
+    review = experts.reviews("local", owner)[0]
+    with monkeypatch.context() as crash:  # the copy is taken here: approved, not yet released
+        crash.setattr(experts, "release", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    with sqlite3.connect(experts.store.db_path) as connection:  # what a restore does to its staged copy
+        connection.row_factory = sqlite3.Row
+        _reset_restore_authority(connection)
+    assert experts._review(review["review_id"])["state"] == "pending"
     experts.reconcile_once()
     experts.reconcile_once()
-    told = scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' AND message LIKE '%said no%'")
-    assert told == (0 if event == "stopped" else 1)
+    sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
+    assert "SYNTHETIC-APPROVED-IN-THE-COPY" not in sent
