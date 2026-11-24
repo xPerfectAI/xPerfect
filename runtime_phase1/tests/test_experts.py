@@ -1614,3 +1614,180 @@ def test_a_checking_line_never_leaves_after_its_request_was_decided(app, written
         channels.reconcile_once()
     sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
     assert sent == ["SYNTHETIC-HELD-ANSWER"]
+
+
+def _approved_not_started(application, client, monkeypatch):
+    """An Always job the owner approved whose start was interrupted: approved, still held."""
+    expert, channel, owner, cid, job, accepted = _always_with_held_work(application, client)
+    experts = application.state.experts
+    review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
+    with monkeypatch.context() as crash:
+        crash.setattr(experts, "_start_job", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    assert experts._job(job["job_id"])["state"] == "held"
+    return expert, channel, owner, cid, job
+
+
+def _save_off(client, expert):
+    read = client.get(f"/v1/experts/{expert['template_id']}").json()
+    assert client.patch(f"/v1/experts/{expert['template_id']}", json={
+        "expected_catalog_revision": read["catalog_revision"], "expert": {**read["expert"], "ask_me_first": "off"}}).status_code == 200
+
+
+@pytest.mark.parametrize("event", ["stopped", "removed", "off", "setting_off"])
+def test_an_approved_job_not_yet_started_follows_the_table(app, event, monkeypatch):
+    # Row "Job held, request approved, not started": Stop, a removal or the channel off: never started (stopped);
+    # Off: started once (the owner approved it).
+    application, client = app
+    expert, channel, owner, cid, job = _approved_not_started(application, client, monkeypatch)
+    experts = application.state.experts
+    if event == "setting_off":
+        _save_off(client, expert)
+    else:
+        _close(application, channel, cid, event)
+    experts.reconcile_once()
+    started = scalar(application, "SELECT count(*) FROM expert_conversations WHERE role='job' AND job_id=?", job["job_id"])
+    if event == "setting_off":
+        assert experts._job(job["job_id"])["state"] == "running" and started == 1
+    else:
+        assert experts._job(job["job_id"])["state"] == "stopped" and started == 0
+
+
+@pytest.mark.parametrize("closed", ["stopped", "removed", "off"])
+def test_a_job_not_yet_prepared_is_never_prepared_once_closed_for_good(app, closed):
+    # Row "Job starting, not prepared" x Stop, "Person removed", "Channel off": stopped, nothing prepared.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    old = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    with experts.store._connect() as conn:
+        conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,"
+                     "goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("job_unprepared", "local", owner, expert["lineage_id"], cid, "job_unprepared", "Synthetic job", "",
+                      "starting", expert["template_id"], old, old))
+    _close(application, channel, cid, closed)
+    experts.reconcile_once()
+    assert experts._job("job_unprepared")["state"] == "stopped"
+    assert scalar(application, "SELECT count(*) FROM expert_conversations WHERE role='job' AND job_id='job_unprepared'") == 0
+
+
+@pytest.mark.parametrize("event", ["removed", "off", "restored"])
+def test_a_prepared_job_follows_the_table(app, event):
+    # Row "Job prepared": a removal or the channel off: stopped and its conversation fenced; a restored copy:
+    # waits, then is marked running once after the resume.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, cid, goal="Synthetic job", idempotency_key="k1", source_turn_id=accepted["turn_id"])
+    prepared = experts._job(job["job_id"])
+    with experts.store._connect() as conn:  # its conversation and first turn written, not yet marked running
+        conn.execute("UPDATE expert_jobs SET state='starting',updated_at=? WHERE job_id=?",
+                     ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), job["job_id"]))
+    if event == "restored":
+        _hold(application, cid)
+        experts.reconcile_once()
+        assert experts._job(job["job_id"])["state"] == "starting"
+        _hold(application, cid, held=False)
+        with experts.store._connect() as conn:
+            conn.execute("UPDATE expert_jobs SET updated_at=? WHERE job_id=?",
+                         ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), job["job_id"]))
+        experts.reconcile_once()
+        assert experts._job(job["job_id"])["state"] == "running"
+    else:
+        _close(application, channel, cid, event)
+        experts.reconcile_once()
+        assert experts._job(job["job_id"])["state"] == "stopped"
+        assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                      prepared["job_conversation_id"]) != ""
+
+
+def test_a_running_job_stops_when_its_person_is_removed(app):
+    # Row "Job running" x "Person removed": stopped (its conversation fenced).
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, accepted["conversation_id"], goal="Synthetic job", idempotency_key="k1",
+                           source_turn_id=accepted["turn_id"])
+    assert experts._job(job["job_id"])["state"] == "running"
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": []}).status_code == 200
+    stopped = experts._job(job["job_id"])
+    assert stopped["state"] == "stopped"
+    assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                  stopped["job_conversation_id"]) != ""
+
+
+def test_a_job_finished_in_a_restored_copy_is_told_to_nobody_before_the_resume(app):
+    # Row "Job running" x "Restored copy": its result is recorded once and waits; nothing reaches the person.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, cid, goal="Synthetic job", idempotency_key="k1", source_turn_id=accepted["turn_id"])
+    running = experts._job(job["job_id"])
+    with experts.store._connect() as conn:  # the job's own answer, finished
+        conn.execute("UPDATE coordinator_turns SET blocker='',request_id='' WHERE conversation_id=?", (running["job_conversation_id"],))
+    finish_turn(application, running["job_conversation_id"], "job-brief", "SYNTHETIC-JOB-RESULT")
+    _hold(application, cid)
+    experts.reconcile_once()
+    experts.reconcile_once()
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result' AND identity=?",
+                  job["job_id"]) == 1
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert not any("SYNTHETIC-JOB-RESULT" in item["text"] for item in sent)
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE conversation_id=? AND turn_id<>?",
+                  cid, accepted["turn_id"]) == 0
+
+
+def test_an_interrupted_approval_is_released_after_off_since_the_owner_approved_it(app, monkeypatch):
+    # Row "Request approved, release interrupted" x "Setting changed to Off": released, once.
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "SYNTHETIC-APPROVED-BEFORE-OFF")
+    channels.reconcile_once()
+    owner = scalar(application, "SELECT owner_id FROM expert_reviews")
+    review = experts.reviews("local", owner)[0]
+    with monkeypatch.context() as crash:
+        crash.setattr(channels, "release_approved_reply", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    _save_off(client, expert)
+    experts.reconcile_once()
+    experts.reconcile_once()
+    sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
+    assert sent.count("SYNTHETIC-APPROVED-BEFORE-OFF") == 1
+
+
+@pytest.mark.parametrize("event", ["stopped", "setting_off"])
+def test_a_no_not_yet_told_follows_the_table(app, event):
+    # Row "Request rejected, its no not yet told": Stop: not told; Off: told, once.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    with experts.store._connect() as conn:  # the "no" recorded by an earlier version, its telling not written
+        conn.execute("UPDATE expert_reviews SET state='rejected',decided_at='t' WHERE kind='job'")
+    if event == "stopped":
+        _close(application, channel, cid, "stopped")
+    else:
+        _save_off(client, expert)
+    experts.reconcile_once()
+    experts.reconcile_once()
+    told = scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' AND message LIKE '%said no%'")
+    assert told == (0 if event == "stopped" else 1)
