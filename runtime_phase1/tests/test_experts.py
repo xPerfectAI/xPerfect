@@ -2634,3 +2634,20 @@ def test_the_teams_app_is_offered_in_personal_chats_only(app, monkeypatch, tmp_p
         shown = client.get(f"/v1/channels/{binding_id}/connect").json()
         assert shown["step"] == "connected"
         assert shown["channel"]["app"]["scopes"] == ("personal,team,groupChat" if refuse_update else "personal")
+
+
+def test_an_app_an_administrator_added_is_not_sent_to_the_blocked_install_dialog(app):
+    # Hurdle 15: after an administrator published and pre-installed the app from the admin center, Install in Teams
+    # still opened the developer copy, blocked by the person's own policy. The owner says so once; the card then
+    # stops offering that link, and Undo brings it back. The other app facts stay.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id = channel["binding_id"]
+    client.post(f"/v1/channels/{binding_id}/setup", json={"settings": {
+        "app_id": "synthetic-app", "teams_app_id": "teams-app-synthetic", "install_link": "https://teams.invalid/install"}})
+    added = client.post(f"/v1/channels/{binding_id}/added-by-admin", json={"added": True})
+    assert added.status_code == 200, added.text
+    assert added.json()["app"]["added_by_admin"] == "yes" and added.json()["app"]["install_link"] == "https://teams.invalid/install"
+    undone = client.post(f"/v1/channels/{binding_id}/added-by-admin", json={"added": False}).json()
+    assert "added_by_admin" not in undone["app"] and undone["app"]["app_id"] == "synthetic-app"
+    assert client.post(f"/v1/channels/{binding_id}/added-by-admin", json={}).status_code == 422

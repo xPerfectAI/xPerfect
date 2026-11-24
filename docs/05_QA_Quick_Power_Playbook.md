@@ -312,6 +312,7 @@ pill, links and wording. Real model, browser and Teams steps stay NOT RUN until 
 | Teams install | Press Install in Teams. | Web or desktop both work; pressing again brings the add window; if Teams says Permissions needed, waiting a few minutes and pressing Install again gets the add window once Microsoft has applied the change. |
 | Teams not ready yet | Before any message has come through. | Online · no message yet; no Test in Teams. |
 | Teams first message | Send the first message in the Expert's own chat. | Connected; Test in Teams appears and says whose chat it opens. |
+| Teams added by an administrator | An administrator publishes and pre-installs the app for you in the Microsoft 365 admin center; on the card press An administrator added it for me. | Install in Teams is no longer offered; the card says the app appears in your Teams by itself; Undo brings the link back. |
 | Teams app details | On the card, open Details Teams shows for this app; enter an http:// link, then four proper details; Save. | The http:// link is refused with Microsoft's rule and nothing is sent; the proper ones are saved and Teams' install window shows them instead of "Developer" and example.com. |
 | Teams message | Message the Expert from your own Teams account. | One reply in the same chat; typing shows while it works. |
 | Not listed | A person who is not listed writes. | No answer; the person waits under Waiting to be allowed. |

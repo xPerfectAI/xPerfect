@@ -307,6 +307,8 @@ assert.deepEqual(labels({state: 'connected', online: true, first_message: false,
 assert.deepEqual(labels({state: 'connected', online: false, first_message: false, app}), ['Install in Teams']);
 assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Install in Teams', 'Test in Teams']);
 assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
+// Hurdle 15: once an administrator added the app, the developer copy's install link is a dead end: not offered.
+assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app: {...app, added_by_admin: 'yes'}}), []);
 """)
 
 
@@ -356,3 +358,12 @@ def test_a_teams_app_still_offered_beyond_personal_chats_says_so():
     source = (STATIC / 'experts.js').read_text()
     assert "if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(" in source
     assert "Teams still offers this app in teams and group chats; it answers only in personal chats." in source
+
+
+def test_the_owner_can_say_an_administrator_added_the_app():
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function adminButton(channel, added)", "'An administrator added it for me'", "'Undo: show Install in Teams again'",
+                  "it appears in your Teams by itself (Apps, Built for your org; this can take a few hours)",
+                  "'/added-by-admin', { method: 'POST', body: { added } }"):
+        assert words in source, words
+    assert '@app.post("/api/channels/{binding_id}/added-by-admin")' in (STATIC.parent / 'server.py').read_text()

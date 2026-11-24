@@ -3785,6 +3785,11 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def channel_connect_status(request: Request, binding_id: str):
         return _expert_forward(request, "GET", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect")
 
+    @app.post("/api/channels/{binding_id}/added-by-admin")
+    def channel_added_by_admin(request: Request, binding_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/added-by-admin",
+                               {"added": bool(payload.get("added"))})
+
     @app.post("/api/channels/{binding_id}/details")
     def channel_details(request: Request, binding_id: str, payload: dict = Body(...)):
         return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/details", payload)

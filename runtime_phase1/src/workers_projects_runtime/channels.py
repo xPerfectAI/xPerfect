@@ -155,7 +155,8 @@ class ChannelService:
                 # Microsoft's last final refusal, kept until the socket holds again, so it is said once, not per try.
                 "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
                 "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link",
-                                                       "developer", "website_url", "privacy_url", "terms_url", "scopes")
+                                                       "developer", "website_url", "privacy_url", "terms_url", "scopes",
+                                                       "added_by_admin")
                         if key in settings},
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
                 # While the disk guard holds runs, this Expert cannot answer; messages wait.
@@ -232,11 +233,20 @@ class ChannelService:
         self._binding(binding_id, tenant, owner)
         allowed = {key: str(value)[:2000] for key, value in settings.items()
                    if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
-                              "teams_app_id", "developer", "website_url", "privacy_url", "terms_url", "scopes"}}
+                              "teams_app_id", "developer", "website_url", "privacy_url", "terms_url", "scopes",
+                              "added_by_admin"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))
         return self.view(self._binding(binding_id))
+
+    def mark_added_by_admin(self, tenant: str, owner: str, binding_id: str, added: bool) -> dict:
+        """The owner says an administrator added the app for them (published or deployed in the admin center): the
+        card then stops offering the developer copy's install link, which stays blocked by the person's own policy
+        (the tool reports no catalogue state, so this cannot be read)."""
+        binding = self._binding(binding_id, tenant, owner)
+        settings = {key: value for key, value in json.loads(binding["settings_json"] or "{}").items() if key != "added_by_admin"}
+        return self.record_setup(tenant, owner, binding_id, {**settings, **({"added_by_admin": "yes"} if added else {})})
 
     # ---------------------------------------------------------------- package routes
     def package_config(self, binding_id: str) -> dict:

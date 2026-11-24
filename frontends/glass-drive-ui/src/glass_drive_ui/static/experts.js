@@ -198,7 +198,8 @@ export function sharedFolderNote(kind, people, waiting) {
  *  came through, Teams opened another person's chat with it (first real test), so it is offered only after that. */
 export function teamsLinks(channel) {
   const links = [];
-  if (channel.app.install_link) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
+  // Once an administrator added the app, this link opens the developer copy, which stays blocked: not offered.
+  if (channel.app.install_link && !channel.app.added_by_admin) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
   if (channel.first_message && channel.app.app_id) {
     links.push({ label: 'Test in Teams', href: 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id), style: 'primary-button' });
   }
@@ -229,6 +230,15 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
   function personRow(person, action, label) {
     const row = node('div', 'expert-person'); row.append(node('span', '', person.name || person.id));
     const button = node('button', 'secondary-button', label); button.type = 'button'; button.onclick = action; row.append(button); return row;
+  }
+  // An administrator who published or deployed the app makes the developer copy's install link a dead end.
+  function adminButton(channel, added) {
+    const button = node('button', 'expert-other-account', added ? 'An administrator added it for me' : 'Undo: show Install in Teams again'); button.type = 'button';
+    button.onclick = async () => {
+      try { await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/added-by-admin', { method: 'POST', body: { added } }); await load(); }
+      catch (error) { status.textContent = error.message; }
+    };
+    return button;
   }
   // The app's public details, which Teams shows to everyone who adds it, instead of the tool's placeholders.
   function appDetails(channel) {
@@ -334,7 +344,9 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats.'));
         if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
+        else if (channel.app.added_by_admin) card.append(node('p', 'expert-hint', `An administrator added ${name} for you: it appears in your Teams by itself (Apps, Built for your org; this can take a few hours). Then write in its own chat, named ${name}.`), adminButton(channel, false));
         else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again.`));
+        if (!channel.first_message && !channel.app.added_by_admin) card.append(adminButton(channel, true));
         card.append(appDetails(channel));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));

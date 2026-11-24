@@ -172,6 +172,15 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
 11. **The app showed placeholder details** ("Developer" and example.com links) in Teams' install window.
     The owner sets the developer name, website, privacy and terms links on the card; xPerfect checks them
     by Microsoft's rules before sending anything and applies them with the CLI's `app update`.
+12. **The CLI makes the bot for personal chats, teams and group chats** (its default when no scopes are
+    given), while the Expert answers only in personal chats. Right after the app is made, xPerfect
+    narrows it with the CLI's `app update --scopes personal`; a failure there is said on the card, and
+    the app is never made twice.
+13. **After an administrator adds the app** (published and pre-installed from the Microsoft 365 admin
+    center, Agents → All agents → Add agent, with the audience limited to one person), Install in Teams
+    still opens the developer copy, which stays blocked by the person's own policy; the CLI reports no
+    catalogue state, so xPerfect cannot read it. The owner says "An administrator added it for me" once;
+    the card then stops offering that link and says the app appears in their Teams by itself.
 
 ## Nothing happens twice
 

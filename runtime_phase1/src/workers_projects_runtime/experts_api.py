@@ -135,6 +135,10 @@ class ChannelConnectInput(StrictModel):
     other_account: bool = False
 
 
+class ChannelAddedInput(StrictModel):
+    added: bool
+
+
 class ChannelDetailsInput(StrictModel):
     # The Teams app's public details, as Teams shows them on the app's page; checked again by the service.
     developer: str = Field(max_length=200)
@@ -187,6 +191,10 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
     @app.get("/v1/channels/{binding_id}/connect")
     def connect_status(binding_id: str, request: Request):
         return invoke(channels.setup.status, *owner(request), binding_id)
+
+    @app.post("/v1/channels/{binding_id}/added-by-admin")
+    def channel_added_by_admin(binding_id: str, payload: ChannelAddedInput, request: Request):
+        return invoke(channels.mark_added_by_admin, *owner(request), binding_id, payload.added)
 
     @app.post("/v1/channels/{binding_id}/details")
     def channel_details(binding_id: str, payload: ChannelDetailsInput, request: Request):
