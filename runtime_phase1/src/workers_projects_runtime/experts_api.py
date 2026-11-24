@@ -129,8 +129,9 @@ class ChannelSetupInput(StrictModel):
 
 
 class ChannelConnectInput(StrictModel):
-    # confirm: create the app in the account already shown; other_account: sign the tool out and sign in again.
-    confirm: bool = False
+    # as_account: the account the Connect button named (pressing it is the yes); other_account: sign the tool out and
+    # sign in with Microsoft's code again.
+    as_account: str = Field(default="", max_length=320)
     other_account: bool = False
 
 
@@ -180,7 +181,7 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
     @app.post("/v1/channels/{binding_id}/connect")
     def connect(binding_id: str, request: Request, payload: ChannelConnectInput | None = None):
         choice = payload or ChannelConnectInput()
-        return invoke(channels.setup.connect, *owner(request), binding_id, confirm=choice.confirm,
+        return invoke(channels.setup.connect, *owner(request), binding_id, as_account=choice.as_account,
                       other_account=choice.other_account)
 
     @app.get("/v1/channels/{binding_id}/connect")

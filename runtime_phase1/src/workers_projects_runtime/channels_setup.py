@@ -53,17 +53,11 @@ _SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try ag
 _RESTART_FIRST_WAIT_S = 5.0
 _RESTART_MAX_WAIT_S = 300.0
 _RECHECK_S = 120.0  # while Teams does not allow the app, Microsoft's report is read again this often
-# While a change spreads, Microsoft's servers answer differently: in the first real test they flipped between no and
-# yes (about 6 yes in 10) for 43 minutes after the policy was assigned. After a "no", Connect goes on only after eight
-# "yes" in a row about 8 s apart, spanning about a minute (were the answers independent, about 1 in 70 by chance while
-# it still flips; the answer the first real test took as steady was eight in a row).
-_STEADY_READS = 8
-_STEADY_RECHECK_S = 8.0
-_STEADY_SPAN_S = (_STEADY_READS - 1) * _STEADY_RECHECK_S
-_STILL_APPLYING = ("Microsoft is applying this. It can take an hour or more before Teams lets you add the app. This page "
-                   "checks again by itself and goes on when Microsoft's answer is steady.")
+# While a change spreads, Microsoft's report flips between yes, no and no answer (for more than an hour in the first
+# real test, even after fourteen yes in a row). It is a hint, so nobody waits for it to settle: after a clear "no",
+# the first clear yes for both switches creates the app, and the card says Microsoft may still be applying it.
 _NOT_REPORTED = ("Microsoft did not say this time whether Teams allows the app here. This page checks again by itself "
-                 "and goes on once Microsoft says yes, steadily.")
+                 "and goes on once Microsoft clearly says yes.")
 
 
 def _find(value: Any, key: str) -> Any:
@@ -147,7 +141,8 @@ class TeamsSetup:
         self._packages: dict[str, subprocess.Popen] = {}
         self._started: dict[str, str] = {}  # when each package started here began
         self._restarts: dict[str, tuple[int, float]] = {}  # exits before the socket held, and when to try again
-        self._steady: dict[str, tuple[int, float]] = {}  # after a "no": the "yes" in a row, and when the first came
+        self._refused: set[str] = set()  # channels for which Microsoft clearly said no: only a clear yes goes on
+        self._signed_in_cache: tuple[float, dict] = (0.0, {})  # who the tool is signed in as, and when it was read
         self._clock = time.monotonic
         self._lock = threading.Lock()
         self._package_lock = threading.Lock()  # starting or stopping a package process: one at a time
@@ -189,6 +184,29 @@ class TeamsSetup:
     def credentials_path(self, binding_id: str) -> Path:
         return _private(_state_dir() / "data" / "channels") / f"{binding_id}.env"
 
+    def _cli_present(self) -> bool:
+        """Whether the pinned tool is already on this computer (a read must never install it)."""
+        configured = os.environ.get("XPERFECT_TEAMS_CLI", "").strip()
+        local = _state_dir() / "tools" / "teams-cli" / "node_modules" / ".bin" / "teams"
+        return bool((configured and Path(configured).exists()) or shutil.which("teams") or local.exists())
+
+    def _signed_in_as(self) -> dict:
+        """Who the pinned tool is signed in as, for the Connect button: read at most every 30 s, and only when the
+        tool is already here; {} when it is not signed in or cannot say."""
+        at, who = self._signed_in_cache
+        if at and self._clock() - at < 30.0:
+            return who
+        who = {}
+        if self._cli_present():
+            try:
+                status = self._run("status", timeout=60)
+                if status.get("loggedIn"):
+                    who = {"account": str(status.get("username") or ""), "tenant_id": str(status.get("tenantId") or "")}
+            except (ExpertError, OSError, subprocess.SubprocessError):
+                who = {}
+        self._signed_in_cache = (self._clock(), who)
+        return who
+
     # ------------------------------------------------------------------ connect
     def status(self, tenant: str, owner: str, binding_id: str) -> dict:
         binding = self.channels._binding(binding_id, tenant, owner)
@@ -196,7 +214,10 @@ class TeamsSetup:
             session = dict(self._sessions.get(binding_id) or {})
         if not session:
             view = self.channels.view(binding)
-            return {"step": "connected" if view["app"].get("app_id") else "start", "channel": view}
+            if view["app"].get("app_id"):
+                return {"step": "connected", "channel": view}
+            # Who Connect would make the app as, so its button can say so before anything is made.
+            return {"step": "start", "signed_in_as": self._signed_in_as(), "channel": view}
         if session.get("step") == "sign_in" and session["process"].poll() is not None:
             # The sign-in has ended. Reading never moves anything on (the thread watching the sign-in does, once);
             # it only stops showing a code that can no longer be used.
@@ -204,12 +225,11 @@ class TeamsSetup:
             session = {**session, "step": "creating" if ok else "error", **({} if ok else {"error": _SIGN_IN_UNFINISHED})}
         # A code is shown only while it can still be used.
         keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note"),
-                "creating": ("step", "account", "tenant_id"), "confirm": ("step", "account", "tenant_id")}.get(
-            session.get("step"), ("step", "error"))
+                "creating": ("step", "account", "tenant_id")}.get(session.get("step"), ("step", "error"))
         public = {key: session[key] for key in keys if key in session}
         return {**public, "channel": self.channels.view(self.channels._binding(binding_id))}
 
-    def connect(self, tenant: str, owner: str, binding_id: str, *, confirm: bool = False,
+    def connect(self, tenant: str, owner: str, binding_id: str, *, as_account: str = "",
                 other_account: bool = False) -> dict:
         binding = self.channels._binding(binding_id, tenant, owner)
         if binding["kind"] != "teams":
@@ -228,17 +248,18 @@ class TeamsSetup:
             except ExpertError:
                 status = {}
         signed_in, account = bool(status.get("loggedIn")), str(status.get("username") or "")
-        # Already signed in: nothing is made before the person has seen which account and organisation it would be
-        # made in (a computer can hold another organisation's login). A press after Microsoft refused custom apps
-        # checks again for the account already confirmed; an account that changed since it was shown is shown again.
-        confirmed = (confirm and (current.get("step") != "confirm" or current.get("account") == account)) \
-            or current.get("step") == "blocked"
-        if signed_in and not confirmed:
+        who = {"account": account, "tenant_id": str(status.get("tenantId") or "")} if signed_in else {}
+        self._signed_in_cache = (self._clock(), who)
+        # Already signed in: the Connect button names the account and organisation, and pressing it is the yes (a
+        # computer can hold another organisation's login). A press without that name, or for an account that is no
+        # longer the one signed in, makes nothing and shows the account now signed in. A press after Microsoft
+        # refused custom apps checks again for the account already shown.
+        if signed_in and current.get("step") != "blocked" and as_account != account:
             with self._lock:
                 if not self._pending(binding_id):
-                    self._sessions[binding_id] = {"step": "confirm", "account": account,
-                                                  "tenant_id": str(status.get("tenantId") or "")}
-            return self.status(tenant, owner, binding_id)
+                    self._sessions.pop(binding_id, None)  # an old error or code no longer applies
+            return {"step": "start", "signed_in_as": who,
+                    "channel": self.channels.view(self.channels._binding(binding_id))}
         if signed_in:
             with self._lock:  # claimed here, so a check that began meanwhile and this press never both create
                 start = not self._pending(binding_id)
@@ -326,6 +347,7 @@ class TeamsSetup:
             process.stdout.read()
         process.wait()
         ok = process.returncode == 0
+        self._signed_in_cache = (0.0, {})  # a new sign-in: the next read asks the tool again
         with self._lock:
             session = self._sessions.get(binding_id) or {}
             if session.get("process") is not process or session.get("step") != "sign_in":
@@ -354,28 +376,19 @@ class TeamsSetup:
                 if blocked:
                     # Nothing is created that Teams would not let this account install; the page says why, plainly,
                     # with a note for the administrator, and maintenance reads Microsoft's report again by itself.
-                    self._steady[binding_id] = (0, 0.0)
+                    self._refused.add(binding_id)
                     self._sessions[binding_id] = {"step": "blocked", "error": blocked,
                                                   "note": _note_for_admin(status, expert["name"]),
                                                   "tenant": tenant, "owner": owner, "check_at": now + _RECHECK_S}
                     return
-                if binding_id in self._steady:  # Microsoft said no before: wait until its "yes" is steady
-                    if not _custom_apps_allowed(status):  # no explicit yes: not counted, nothing created
+                if binding_id in self._refused:  # Microsoft said no before: only a clear yes for both switches
+                    if not _custom_apps_allowed(status):  # a missing or half answer is not a yes: nothing created
                         previous = self._sessions.get(binding_id) or {}
-                        self._steady[binding_id] = (0, 0.0)
                         self._sessions[binding_id] = {"step": "blocked", "error": _NOT_REPORTED,
                                                       "note": previous.get("note", ""), "tenant": tenant,
                                                       "owner": owner, "check_at": now + _RECHECK_S}
                         return
-                    count, first = self._steady[binding_id]
-                    count, first = count + 1, first if count else now
-                    if count < _STEADY_READS or now - first < _STEADY_SPAN_S:
-                        self._steady[binding_id] = (count, first)
-                        self._sessions[binding_id] = {"step": "blocked", "error": _STILL_APPLYING, "note": "",
-                                                      "tenant": tenant, "owner": owner,
-                                                      "check_at": now + _STEADY_RECHECK_S}
-                        return
-                    del self._steady[binding_id]
+                    self._refused.discard(binding_id)
                 # Which account and organisation the app is made in, as Microsoft reports them, shown while it is
                 # made and on the card afterwards, so a wrong one is noticed at once.
                 account = str(status.get("username") or "")

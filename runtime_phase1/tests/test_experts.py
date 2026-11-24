@@ -2178,27 +2178,7 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
     report["user"] = True  # the administrator turned it on
     clock[0] += 121
     setup.reconcile_once()
-    run_background()  # one "yes" after a "no" is one of Microsoft's servers: not yet
-    status = client.get(f"/v1/channels/{binding_id}/connect").json()
-    assert creations() == 0 and status["step"] == "blocked" and "Microsoft is applying this" in status["error"]
-    assert status.get("note", "") == ""
-    for _ in range(3):  # "Check now" pressed again and again cannot make a minute shorter
-        client.post(f"/v1/channels/{binding_id}/connect", json={})
-        run_background()
-    assert creations() == 0
-    report["user"] = False  # the answer flips back: start over
-    clock[0] += 30
-    setup.reconcile_once()
-    run_background()
-    assert creations() == 0 and "Upload custom apps" in client.get(f"/v1/channels/{binding_id}/connect").json()["error"]
-    report["user"] = True
-    from workers_projects_runtime import channels_setup
-    steps = (121,) + (channels_setup._STEADY_RECHECK_S,) * (channels_setup._STEADY_READS - 1)
-    for step in steps:  # eight "yes" in a row over about a minute
-        assert creations() == 0
-        clock[0] += step
-        setup.reconcile_once()
-        run_background()
+    run_background()  # Microsoft's report is a hint: after a "no", the first clear yes is enough
     assert creations() == 1
     connected = client.get(f"/v1/channels/{binding_id}/connect").json()
     assert connected["step"] == "connected"
@@ -2369,12 +2349,9 @@ def test_after_a_no_a_missing_report_is_not_a_yes(app, monkeypatch, tmp_path):
         status = client.get(f"/v1/channels/{binding_id}/connect").json()
         assert creations() == 0 and status["step"] == "blocked" and "did not say" in status["error"]
         assert status["note"] == note  # what to ask the administrator stays
-    report["value"] = {"tenant": True, "user": True}
-    from workers_projects_runtime import channels_setup
-    for number in range(channels_setup._STEADY_READS):
-        assert creations() == 0, number
-        clock[0] += channels_setup._STEADY_RECHECK_S
-        setup._create("local", owner, binding_id)
+    report["value"] = {"tenant": True, "user": True}  # the first clear yes for both switches
+    clock[0] += 30
+    setup._create("local", owner, binding_id)
     assert creations() == 1
 
 
@@ -2468,16 +2445,16 @@ def test_the_owner_sets_the_apps_public_details_instead_of_the_placeholders(app,
     assert shown["app_id"] == "synthetic-app" and shown["account"] == "Synthetic Owner"  # the rest is kept
 
 
-def test_an_already_signed_in_connect_shows_the_account_before_anything_is_made(app, monkeypatch, tmp_path):
-    # Hurdle 11, second half: a computer can hold another organisation's login. With the tool already signed in, one
-    # press used to create the app at once; now the page first names the account and organisation it would be made
-    # in, and only "Create it" makes it. An account that changed since it was shown is shown again.
+def test_an_already_signed_in_connect_names_the_account_on_its_one_press(app, monkeypatch, tmp_path):
+    # Hurdle 11: a computer can hold another organisation's login. With the tool already signed in, the Connect button
+    # names the account and organisation, and its one press is the yes. A press without that name, or for an
+    # account that is no longer the one signed in, makes nothing and shows the account now signed in.
     application, client = app
     monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
     expert = create_expert(client)
     channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
     binding_id, setup = channel["binding_id"], application.state.channels.setup
-    path, calls, signed_in, background = f"/v1/channels/{binding_id}/connect", [], {"as": "Synthetic Owner"}, []
+    path, calls, signed_in, background, clock = f"/v1/channels/{binding_id}/connect", [], {"as": "Synthetic Owner"}, [], [1000.0]
 
     def teams_cli(*args, timeout=300):
         calls.append(args)
@@ -2487,17 +2464,24 @@ def test_an_already_signed_in_connect_shows_the_account_before_anything_is_made(
         return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
 
     monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "_cli_present", lambda: True)
     monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
     monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    setup._clock = lambda: clock[0]
     creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
-    shown = client.post(path, json={}).json()
-    assert shown["step"] == "confirm" and shown["account"] == "Synthetic Owner" and shown["tenant_id"] == "tenant-synthetic"
-    assert background == [] and creations() == 0  # nothing is made yet
-    signed_in["as"] = "Synthetic Other Account"  # the tool's account changed since it was shown
-    again = client.post(path, json={"confirm": True}).json()
-    assert again["step"] == "confirm" and again["account"] == "Synthetic Other Account" and background == []
-    created = client.post(path, json={"confirm": True}).json()
-    assert created["step"] == "creating" and len(background) == 1
+    statuses = lambda: sum(1 for args in calls if args[0] == "status")  # noqa: E731
+    named = client.get(path).json()  # what the Connect button says before anything is made
+    assert named["step"] == "start" and named["signed_in_as"] == {"account": "Synthetic Owner", "tenant_id": "tenant-synthetic"}
+    client.get(path)
+    assert statuses() == 1  # read at most every 30 s
+    unnamed = client.post(path, json={}).json()
+    assert unnamed["step"] == "start" and background == [] and creations() == 0
+    signed_in["as"] = "Synthetic Other Account"  # the tool's account changed since the button was drawn
+    changed = client.post(path, json={"as_account": "Synthetic Owner"}).json()
+    assert changed["step"] == "start" and changed["signed_in_as"]["account"] == "Synthetic Other Account"
+    assert background == [] and creations() == 0
+    pressed = client.post(path, json={"as_account": "Synthetic Other Account"}).json()  # the one press, named
+    assert pressed["step"] == "creating" and len(background) == 1
     target, args = background.pop()
     target(*args)
     assert creations() == 1 and client.get(path).json()["step"] == "connected"

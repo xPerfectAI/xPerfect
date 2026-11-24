@@ -8,6 +8,7 @@
 .expert-accounts[open]{display:grid;gap:8px}
 .expert-details summary{cursor:pointer;font-size:.86rem;color:var(--muted);padding:4px 0}
 .expert-details[open]{display:grid;gap:8px}
+.expert-other-account{background:none;border:0;padding:4px 2px;color:var(--muted);font-size:.8rem;text-decoration:underline;cursor:pointer}
 .expert-segment{display:inline-flex;border:1px solid var(--line-strong);border-radius:10px;overflow:hidden;width:fit-content;max-width:100%;flex-wrap:wrap}
 .expert-segment-option{display:inline-flex;align-items:center;padding:7px 14px;cursor:pointer;font-size:.88rem;border-right:1px solid var(--line)}
 .expert-segment-option:last-child{border-right:0}

@@ -318,7 +318,7 @@ def test_the_person_is_told_up_front_what_microsoft_and_teams_will_ask():
                   "Microsoft may ask you to approve on your phone.", "The code lasts about 15 minutes.",
                   "Creating your Teams app with ${step.account}…", "Made with ${channel.app.account}",
                   "Teams may ask web or desktop, either works", "press Install in Teams again",
-                  "it can take an hour or more before Teams lets you add the app. Install in Teams stays here"):
+                  "Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again."):
         assert words in source, words
 
 
@@ -336,13 +336,16 @@ def test_the_owner_sets_the_teams_apps_public_details():
     assert '.expert-details[open]{display:grid;gap:8px}' in (STATIC / 'experts.css').read_text()
 
 
-def test_an_already_signed_in_connect_names_the_account_before_anything_is_made():
-    # Hurdle 11: a computer can hold another organisation's login. When the tool is already signed in, Connect shows
-    # the account and organisation the app would be made in, with Create it and Use another Microsoft account.
+def test_an_already_signed_in_connect_names_the_account_on_its_one_press():
+    # Hurdle 11: the Connect button itself names the account ("Connect Teams as …"), its press is the yes, and a small
+    # "Use another Microsoft account" sits beside it; no second dialog.
     source = (STATIC / 'experts.js').read_text()
-    for words in ("if (step.step === 'confirm') {", "`Create it as ${step.account}`", "'Use another Microsoft account'",
-                  "connect(channel, { confirm: true })", "connect(channel, { other_account: true })",
-                  "It is made in that account's organisation."):
+    for words in ("async function nameConnect(channel, go, box)", "`Connect Teams as ${who.account}`",
+                  "'Use another Microsoft account'", "connect(channel, { as_account: go.dataset.account || '' })",
+                  "connect(channel, { other_account: true })", "void nameConnect(channel, go, connectBox);"):
         assert words in source, words
+    assert "step.step === 'confirm'" not in source  # no second dialog
     server = (STATIC.parent / 'server.py').read_text()
-    assert 'choice = {key: bool(payload.get(key)) for key in ("confirm", "other_account") if key in payload}' in server
+    assert 'choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account"))}' in server
+    assert '.expert-other-account{' in (STATIC / 'experts.css').read_text()
+
