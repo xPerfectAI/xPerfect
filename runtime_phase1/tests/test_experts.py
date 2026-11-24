@@ -435,3 +435,22 @@ def test_the_speaking_assistant_cannot_use_the_coordinators_tools(app):
     with pytest.raises(CoordinatorScopeError):
         experts.coordinator.native_identity(principal)
     assert experts.coordinator.native_identity(principal, allow_speaker=True)[2] == chat["conversation_id"]
+
+
+def test_on_auto_nothing_of_a_turn_that_asked_the_owner_leaves_while_it_waits(app):
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    experts.ask_owner("local", owner, accepted["conversation_id"], reason="Unusual request", reply="SYNTHETIC-HELD-TEXT",
+                      idempotency_key="ask-1", source_turn_id=accepted["turn_id"])
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Checking. SYNTHETIC-HELD-TEXT")
+    application.state.channels.reconcile_once()
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert not any("SYNTHETIC-HELD-TEXT" in item["text"] for item in sent)
+    with experts.store._connect() as conn:
+        checking = conn.execute("SELECT payload_json FROM coordinator_turns WHERE origin='owner_checking'").fetchone()
+    assert checking is not None  # her checking line is written in a turn of its own
+    assert json.loads(checking["payload_json"])["metadata"]["bootstrap_bundle"]["provider_capabilities"]["native_tools"] is False

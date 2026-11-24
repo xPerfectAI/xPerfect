@@ -347,21 +347,23 @@ class ChannelService:
                     self._insert_delivery(conn, speaker, row["turn_id"], kind, text, "pending")
                     continue
             pending_reviews = self._turn_reviews(row["conversation_id"], row["turn_id"])
+            if pending_reviews:
+                # In any setting, a turn that asked the owner sends nothing of its own while the request
+                # waits; her checking line is written in a turn with every tool off.
+                with self.store._connect() as conn:
+                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped")
+                self.experts.tell_checking(speaker, pending_reviews[0])
+                outcomes.append({"turn_id": row["turn_id"], "delivery": "held", "review_id": pending_reviews[0]["review_id"]})
+                continue
             if mode != "always":
                 with self.store._connect() as conn:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "pending")
                 outcomes.append({"turn_id": row["turn_id"], "delivery": "pending"})
                 continue
-            # Always ask: a reply to another person waits for the owner. When the turn already
-            # asked about a job or a reply, the checking line replaces this text.
-            if pending_reviews:
-                with self.store._connect() as conn:
-                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped")
-                review = pending_reviews[0]
-            else:
-                review = self.experts.hold_reply(speaker, row["turn_id"], text, "Ask me first is set to Always ask.")
-                with self.store._connect() as conn:
-                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
+            # Always ask: a reply to another person waits for the owner.
+            review = self.experts.hold_reply(speaker, row["turn_id"], text, "Ask me first is set to Always ask.")
+            with self.store._connect() as conn:
+                self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
             self.experts.tell_checking(speaker, review)
             outcomes.append({"turn_id": row["turn_id"], "delivery": "held", "review_id": review["review_id"]})
         outcomes.extend(self.setup.reconcile_once())
