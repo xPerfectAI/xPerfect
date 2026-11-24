@@ -1588,3 +1588,29 @@ def test_a_no_for_a_person_who_can_no_longer_be_served_is_never_told_nor_revisit
     experts.reconcile_once()
     experts.reconcile_once()
     assert scalar(application, told) == 0
+
+
+@pytest.mark.parametrize("written", ["before", "after"])
+def test_a_checking_line_never_leaves_after_its_request_was_decided(app, written):
+    # Found on the running build (Always, a fast Approve): the answer went out, then "I'm checking". A checking
+    # line leaves only while its request still waits, whether it was written before or after the decision.
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    finish_turn(application, cid, accepted["turn_id"], "SYNTHETIC-HELD-ANSWER")
+    channels.reconcile_once()
+    owner = scalar(application, "SELECT owner_id FROM expert_reviews")
+    review = experts.reviews("local", owner)[0]
+    checking = "checking-" + review["review_id"]
+    if written == "before":  # the checking line is written and waits to leave; then the owner decides
+        finish_turn(application, cid, checking, "SYNTHETIC-CHECKING-LINE")
+        channels.reconcile_once()
+    experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    if written == "after":  # the owner decided while the checking line was still being written
+        finish_turn(application, cid, checking, "SYNTHETIC-CHECKING-LINE")
+        channels.reconcile_once()
+    sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
+    assert sent == ["SYNTHETIC-HELD-ANSWER"]

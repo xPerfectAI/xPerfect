@@ -323,6 +323,12 @@ class ChannelService:
                     continue
                 if row["conversation_hold"]:
                     continue  # a restored copy sends nothing before the owner resumes it
+                if row["kind"] == "checking" and self._request_decided(conn, row["turn_id"]):
+                    # A checking line leaves only while its request still waits: after the owner's decision
+                    # the person gets the answer or the "no", never "I'm checking" after it.
+                    conn.execute("UPDATE channel_deliveries SET state='dropped',error='Its request was already decided',"
+                                 "finished_at=? WHERE delivery_id=? AND state='pending'", (_now(), row["delivery_id"]))
+                    continue
                 conn.execute("UPDATE channel_deliveries SET state='sending',claimed_at=? WHERE delivery_id=? AND state='pending'",
                              (_now(), row["delivery_id"]))
                 claimed.append({"delivery_id": row["delivery_id"], "text": row["text"], "kind": row["kind"],
@@ -347,6 +353,13 @@ class ChannelService:
             row = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
                                (conversation_id,)).fetchone()
         return dict(row) if row else None
+
+    @staticmethod
+    def _request_decided(conn, checking_turn_id: str) -> bool:
+        """Whether the request a checking line announces (its turn is "checking-<request id>") was decided."""
+        row = conn.execute("SELECT state FROM expert_reviews WHERE review_id=?",
+                           (checking_turn_id.removeprefix("checking-"),)).fetchone()
+        return row is not None and row["state"] != "pending"
 
     def _closed_note(self, conn, speaker: dict) -> str:
         """Why nothing may leave for this person for good, read in the caller's transaction; "" when it may."""
@@ -462,7 +475,9 @@ class ChannelService:
                         outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": closed})
                     continue
                 if kind != "reply":
-                    self._insert_delivery(conn, speaker, row["turn_id"], kind, text, "pending")
+                    decided = kind == "checking" and self._request_decided(conn, row["turn_id"])
+                    self._insert_delivery(conn, speaker, row["turn_id"], kind, text, "dropped" if decided else "pending",
+                                          error="Its request was already decided" if decided else "")
                     continue
             asked = self._turn_reviews(row["conversation_id"], row["turn_id"])
             if asked:
