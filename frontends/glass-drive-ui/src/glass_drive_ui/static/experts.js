@@ -262,7 +262,6 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       } else {
         const links = node('div', 'expert-links');
         if (channel.app.install_link) { const install = node('a', 'secondary-button', 'Install in Teams'); install.href = channel.app.install_link; install.target = '_blank'; install.rel = 'noopener'; links.append(install); }
-        const test = node('a', 'primary-button', 'Test in Teams'); test.href = 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id); test.target = '_blank'; test.rel = 'noopener'; links.append(test);
         const toggle = node('button', 'secondary-button', channel.state === 'connected' ? 'Turn off' : 'Turn on'); toggle.type = 'button';
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
