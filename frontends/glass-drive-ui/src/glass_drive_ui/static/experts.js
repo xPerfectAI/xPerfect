@@ -1,0 +1,274 @@
+/* Experts people can talk to: one form for New and Edit, Channels with Connect, and Needs you. */
+import { libraryRequest, libraryModal } from './personal-library.js?v=20261024polish1';
+
+const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
+const AIS = [['claude-code', 'Claude'], ['codex-cli', 'Codex'], ['grok-build', 'Grok']];
+const PROVIDER = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] };
+const ASK = {
+  always: ['Always ask', 'You approve every reply to another person and every job before it happens.'],
+  auto: ['Auto', 'It asks you when a request is unusual or outside its role. Otherwise it carries on.'],
+  off: ['Off', 'Nobody is asked. Its instructions still apply.'],
+};
+export const DEFAULT_EXPERT = {
+  instructions: '', ask_me_first: 'auto', workspace: { kind: 'host', access: 'full' },
+  team: { talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low' },
+          coordinate: { profile: 'codex-cli', account_id: '', backup: null, effort: '' },
+          work: ['claude-code', 'codex-cli'] },
+};
+
+function labelled(text, control, hint = '') {
+  const wrapper = node('label', 'personal-library-field expert-field'); wrapper.append(node('span', '', text), control);
+  if (hint) wrapper.append(node('small', 'expert-hint', hint));
+  return wrapper;
+}
+function select(options, value) {
+  const s = node('select'); for (const [v, t] of options) { const o = node('option', '', t); o.value = v; s.append(o); } s.value = value; return s;
+}
+function accountOptions(accounts, profile) {
+  const providers = PROVIDER[profile] || [];
+  return [['', 'This computer’s sign-in'], ...accounts.filter(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()))
+    .map(a => [a.account_id, a.label || a.provider])];
+}
+
+/** The Expert's own settings, added to the existing name and description fields. */
+function expertFields(body, spec, accounts) {
+  const s = JSON.parse(JSON.stringify(spec || DEFAULT_EXPERT));
+  const instructions = node('textarea'); instructions.rows = 6; instructions.maxLength = 32768; instructions.value = s.instructions || '';
+  instructions.placeholder = 'Who it is, what it does for people, and what it must never share.';
+  body.append(labelled('Instructions', instructions, 'It reads these at every message. You can change them at any time.'));
+
+  const team = node('fieldset', 'expert-team'); team.append(node('legend', '', 'AI team'));
+  const talk = select(AIS.slice(0, 2), s.team.talk.profile);
+  const replies = select([['low', 'Quick'], ['', 'Usual']], s.team.talk.effort || '');
+  const coordinate = select(AIS, s.team.coordinate.profile);
+  const workers = node('div', 'expert-workers');
+  const work = new Map();
+  for (const [value, text] of AIS) {
+    const box = node('input'); box.type = 'checkbox'; box.value = value; box.checked = s.team.work.includes(value);
+    const l = node('label', 'expert-check'); l.append(box, node('span', '', text)); workers.append(l); work.set(value, box);
+  }
+  team.append(labelled('Talks to people', talk, 'Answers at once and hands work to the coordinator.'),
+              labelled('Replies', replies),
+              labelled('Coordinates the work', coordinate),
+              labelled('May work', workers, 'Workers run in parallel on the job.'));
+  const accountsBox = node('details', 'expert-accounts'); accountsBox.append(node('summary', '', 'Accounts'));
+  const roleAccounts = {};
+  for (const [role, title] of [['talk', 'Talks'], ['coordinate', 'Coordinates']]) {
+    const main = select(accountOptions(accounts, s.team[role].profile), s.team[role].account_id || '');
+    const backup = select([['', 'No backup'], ...AIS.flatMap(([p, t]) => accountOptions(accounts, p).map(([id, label]) => [`${p}|${id}`, `${t}: ${label}`]))],
+      s.team[role].backup ? `${s.team[role].backup.profile}|${s.team[role].backup.account_id || ''}` : '');
+    roleAccounts[role] = { main, backup };
+    accountsBox.append(labelled(`${title}: main`, main), labelled(`${title}: backup`, backup, 'Used only for work that has not started.'));
+  }
+  accountsBox.append(node('p', 'expert-hint', 'A connected account runs one thing at a time. This computer’s sign-in can run the Queen and Workers together. API keys stay optional.'));
+  talk.onchange = () => { roleAccounts.talk.main.replaceChildren(...accountOptions(accounts, talk.value).map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; })); };
+  coordinate.onchange = () => { roleAccounts.coordinate.main.replaceChildren(...accountOptions(accounts, coordinate.value).map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; })); };
+  team.append(accountsBox); body.append(team);
+
+  const ask = node('fieldset', 'expert-ask'); ask.append(node('legend', '', 'Ask me first'));
+  const askHint = node('small', 'expert-hint');
+  const askRow = node('div', 'expert-segment'); let askValue = s.ask_me_first;
+  const group = 'expert-ask-' + Math.random().toString(36).slice(2);
+  for (const [value, [text]] of Object.entries(ASK)) {
+    const radio = node('input'); radio.type = 'radio'; radio.name = group; radio.value = value; radio.checked = value === askValue;
+    radio.onchange = () => { askValue = value; askHint.textContent = ASK[value][1]; };
+    const l = node('label', 'expert-segment-option'); l.append(radio, node('span', '', text)); askRow.append(l);
+  }
+  askHint.textContent = ASK[askValue][1]; ask.append(askRow, askHint); body.append(ask);
+
+  const place = select([['host', 'This computer'], ['sandboxed', 'Sandboxed workspace']], s.workspace.kind);
+  const access = select([['full', 'Full access'], ['workspace', 'Its workspace only'], ['read_only', 'Read only']], s.workspace.access);
+  const placeHint = node('small', 'expert-hint');
+  const explain = () => { placeHint.textContent = place.value === 'host' && access.value === 'full'
+    ? 'It can read and change what you can on this computer. Your instructions and Ask me first are the guard, not a wall.'
+    : place.value === 'host' ? 'It works on this computer with the limit you chose.' : 'It works in its own sandboxed workspace.'; };
+  place.onchange = access.onchange = explain; explain();
+  const where = node('div', 'expert-where'); where.append(labelled('Where it works', place), labelled('What it may do', access), placeHint); body.append(where);
+
+  return () => {
+    const allowed = [...work].filter(([, box]) => box.checked).map(([value]) => value);
+    if (!allowed.length) throw new Error('Choose at least one AI that may work.');
+    const backupOf = role => { const v = roleAccounts[role].backup.value; if (!v) return null; const [profile, account_id] = v.split('|'); return { profile, account_id }; };
+    return { instructions: instructions.value.trim(), ask_me_first: askValue,
+      workspace: { kind: place.value, access: access.value },
+      team: { talk: { profile: talk.value, account_id: roleAccounts.talk.main.value, backup: backupOf('talk'), effort: replies.value },
+              coordinate: { profile: coordinate.value, account_id: roleAccounts.coordinate.main.value, backup: backupOf('coordinate'), effort: '' },
+              work: allowed } };
+  };
+}
+
+/** New expert and Edit expert share one dialog. Save makes a new version. */
+export async function openExpertForm({ item = null, request = libraryRequest, signal, onSaved, accounts = [] } = {}) {
+  let current = null;
+  if (item) { try { current = await request('/api/experts/' + encodeURIComponent(item.template_id), { signal }); } catch { current = null; } }
+  let name, description, read;
+  const dialog = libraryModal(item ? 'Edit expert' : 'New expert', { action: 'Save', signal, onSave: async ({ signal: saveSignal }) => {
+    const expert = read();
+    const body = { name: name.value.trim(), description: description.value.trim(), expert };
+    const saved = item
+      ? await request('/api/experts/' + encodeURIComponent(item.template_id), { method: 'PATCH', signal: saveSignal, body: { ...body, expected_catalog_revision: (current || item).catalog_revision } })
+      : await request('/api/experts', { method: 'POST', signal: saveSignal, body });
+    onSaved?.(saved);
+  } });
+  name = node('input'); name.required = true; name.maxLength = 160; name.value = item?.name || '';
+  description = node('textarea'); description.rows = 2; description.maxLength = 1000; description.value = current?.description ?? item?.description ?? '';
+  dialog.body.append(labelled('Expert name', name), labelled('What does this expert do?', description));
+  read = expertFields(dialog.body, current?.expert, accounts);
+  if (item) dialog.body.append(node('p', 'expert-hint', 'Saving makes a new version. Its next message follows it; running jobs finish with what they started with.'));
+  name.focus();
+  return dialog;
+}
+
+export async function openExpertChat(item, { request = libraryRequest } = {}) {
+  const chat = await request('/api/experts/' + encodeURIComponent(item.template_id) + '/chat', { method: 'POST', body: {} });
+  location.assign('/conversation?id=' + encodeURIComponent(chat.conversation_id));
+}
+
+/** Channels: add Teams, Connect with Microsoft's sign-in, people, Test in Teams. */
+export function openChannels(item, { request = libraryRequest, signal } = {}) {
+  const dialog = libraryModal(`${item.name} · Channels`, { signal });
+  const list = node('div', 'expert-channels'); const status = node('p', 'expert-status'); status.setAttribute('role', 'status');
+  dialog.body.append(node('p', 'expert-hint', 'People reach this expert where they already work. Only the people you allow get an answer.'), list, status);
+  let timer = 0;
+  const stop = () => { if (timer) clearTimeout(timer); timer = 0; };
+  dialog.dialog.addEventListener('close', stop, { once: true });
+  const path = '/api/experts/' + encodeURIComponent(item.template_id) + '/channels';
+
+  function personRow(person, action, label) {
+    const row = node('div', 'expert-person'); row.append(node('span', '', person.name || person.id));
+    const button = node('button', 'secondary-button', label); button.type = 'button'; button.onclick = action; row.append(button); return row;
+  }
+  async function save(channel, people) {
+    await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { people } }); await load();
+  }
+  async function connect(channel) {
+    stop(); status.textContent = 'Starting Microsoft sign-in…';
+    try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect', { method: 'POST', body: {} })); }
+    catch (error) { status.textContent = error.message; }
+  }
+  async function poll(channel) {
+    try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect')); }
+    catch (error) { status.textContent = error.message; }
+  }
+  function show(channel, step) {
+    const box = list.querySelector(`[data-binding="${channel.binding_id}"] .expert-connect`); if (!box) return;
+    box.replaceChildren();
+    if (step.step === 'sign_in') {
+      const link = node('a', 'primary-button', 'Open Microsoft sign-in'); link.href = step.url; link.target = '_blank'; link.rel = 'noopener';
+      const code = node('code', 'expert-code', step.code);
+      const copy = node('button', 'secondary-button', 'Copy code'); copy.type = 'button';
+      copy.onclick = async () => { try { await navigator.clipboard.writeText(step.code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the code'; } };
+      box.append(node('p', '', 'Sign in to Microsoft with the account that should own this Teams app, then enter this code on Microsoft’s page:'), code, copy, link);
+      status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
+    }
+    if (step.step === 'creating') { status.textContent = 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
+    if (step.step === 'error') { status.textContent = step.error || 'Setup stopped. Press Connect to try again.'; return; }
+    status.textContent = ''; void load();
+  }
+  function render(channels) {
+    list.replaceChildren();
+    const teams = channels.find(c => c.kind === 'teams');
+    if (!teams) {
+      const add = node('button', 'primary-button', 'Add Teams'); add.type = 'button';
+      add.onclick = async () => { const created = await request(path, { method: 'POST', body: { kind: 'teams' } }); await load(); await connect(created); };
+      const slack = node('button', 'secondary-button', 'Slack · next'); slack.type = 'button'; slack.disabled = true;
+      list.append(add, slack); return;
+    }
+    for (const channel of channels) {
+      const card = node('section', 'expert-channel'); card.dataset.binding = channel.binding_id;
+      const head = node('div', 'expert-channel-head');
+      const state = channel.state === 'connected' ? (channel.online ? 'Connected' : 'Connected · offline') : channel.state === 'off' ? 'Off' : 'Not connected';
+      head.append(node('strong', '', channel.label), node('span', 'expert-pill', state)); card.append(head);
+      const connectBox = node('div', 'expert-connect'); card.append(connectBox);
+      if (!channel.app.app_id) {
+        const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel); connectBox.append(go);
+      } else {
+        const links = node('div', 'expert-links');
+        if (channel.app.install_link) { const install = node('a', 'secondary-button', 'Install in Teams'); install.href = channel.app.install_link; install.target = '_blank'; install.rel = 'noopener'; links.append(install); }
+        const test = node('a', 'primary-button', 'Test in Teams'); test.href = 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id); test.target = '_blank'; test.rel = 'noopener'; links.append(test);
+        const toggle = node('button', 'secondary-button', channel.state === 'connected' ? 'Turn off' : 'Turn on'); toggle.type = 'button';
+        toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
+        links.append(toggle); card.append(links);
+      }
+      const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
+      if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));
+      for (const person of channel.people) people.append(personRow(person, () => save(channel, channel.people.filter(p => p.id !== person.id)), 'Remove'));
+      if (channel.people_waiting.length) {
+        people.append(node('h3', '', 'Waiting to be allowed'));
+        for (const person of channel.people_waiting) {
+          const clean = { id: person.id, name: person.name || '', tenant: person.tenant || '', email: person.email || '' };
+          people.append(personRow(person, () => save(channel, [...channel.people, clean]), 'Allow'));
+        }
+      }
+      if (channel.unconfirmed_messages) people.append(node('p', 'expert-hint', `${channel.unconfirmed_messages} message(s) may not have arrived. They are not resent by themselves.`));
+      card.append(people); list.append(card);
+    }
+  }
+  async function load() { try { render((await request(path)).items || []); } catch (error) { status.textContent = error.message; } }
+  void load();
+  return dialog;
+}
+
+/** Needs you: requests from Experts, on top of Activity, with a count and a pop-up on any page. */
+export function initNeedsYou({ request = libraryRequest, mount = null, tab = null } = {}) {
+  const seen = new Set(); let first = true; let items = [];
+  let section = null;
+  if (mount) {
+    section = node('section', 'needs-you'); section.hidden = true; section.setAttribute('aria-label', 'Needs you');
+    mount.before(section);
+  }
+  const badge = tab ? node('span', 'needs-you-count') : null; if (badge) { badge.hidden = true; tab.append(badge); }
+  const toast = node('div', 'needs-you-toast'); toast.hidden = true; toast.setAttribute('role', 'status'); document.body.append(toast);
+  const age = iso => { const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000)); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
+  async function decide(item, decision, note, buttons) {
+    buttons.forEach(b => { b.disabled = true; });
+    try { await request('/api/expert-reviews/' + encodeURIComponent(item.review_id) + '/decision', { method: 'POST', body: { decision, expected_digest: item.payload_digest, note } }); await refresh(); }
+    catch (error) { buttons.forEach(b => { b.disabled = false; }); alertIn(item, error.message); }
+  }
+  function alertIn(item, text) { const card = section?.querySelector(`[data-review="${item.review_id}"] .needs-you-error`); if (card) { card.textContent = text; card.hidden = false; } }
+  function render() {
+    if (badge) { badge.textContent = String(items.length); badge.hidden = !items.length; }
+    if (!section) return;
+    section.hidden = !items.length; section.replaceChildren();
+    const head = node('div', 'needs-you-head'); head.append(node('h2', '', 'Needs you'));
+    if ('Notification' in window && Notification.permission === 'default') {
+      const allow = node('button', 'secondary-button', 'Notify me'); allow.type = 'button'; allow.onclick = () => Notification.requestPermission().then(render); head.append(allow);
+    }
+    section.append(head);
+    for (const item of items) {
+      const card = node('article', 'needs-you-card'); card.dataset.review = item.review_id;
+      card.append(node('p', 'needs-you-from', `${item.from.name || 'Someone'} · ${item.channel || 'Chat'} · ${age(item.created_at)} · ${item.expert}`));
+      if (item.asked) card.append(node('p', 'needs-you-asked', `Asked: “${item.asked}”`));
+      if (item.reason) card.append(node('p', 'needs-you-reason', `Why it asks: ${item.reason}`));
+      const what = item.kind === 'reply' ? `Will send: ${item.payload.text}` : `Will start a job: ${item.payload.goal}`;
+      card.append(node('p', 'needs-you-what', what));
+      if (item.kind === 'job' && item.payload.context) card.append(node('p', 'expert-hint', item.payload.context));
+      const note = node('input'); note.placeholder = 'Note for the expert (optional)'; note.maxLength = 2000;
+      const approve = node('button', 'primary-button', 'Approve'); approve.type = 'button';
+      const reject = node('button', 'secondary-button', 'Reject'); reject.type = 'button';
+      const buttons = [approve, reject];
+      approve.onclick = () => decide(item, 'approve', note.value, buttons); reject.onclick = () => decide(item, 'reject', note.value, buttons);
+      const actions = node('div', 'needs-you-actions'); actions.append(note, approve, reject);
+      const error = node('p', 'needs-you-error'); error.hidden = true; error.setAttribute('role', 'alert');
+      card.append(actions, error); section.append(card);
+    }
+  }
+  function announce(item) {
+    const text = `${item.expert} asks you first · ${item.from.name || 'Someone'} on ${item.channel || 'Chat'}`;
+    toast.replaceChildren(node('span', '', text));
+    const open = node('a', 'secondary-button', 'Open'); open.href = '/#activity'; toast.append(open); toast.hidden = false;
+    setTimeout(() => { toast.hidden = true; }, 12000);
+    if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+      try { new Notification('xPerfect: Needs you', { body: text }); } catch { /* The in-page pop-up remains. */ }
+    }
+  }
+  async function refresh() {
+    try {
+      items = (await request('/api/expert-reviews?state=pending')).items || [];
+      for (const item of items) { if (!seen.has(item.review_id)) { seen.add(item.review_id); if (!first) announce(item); } }
+      first = false; render();
+    } catch { /* Keep the last known list; the next refresh retries. */ }
+  }
+  void refresh(); setInterval(refresh, 4000);
+  return { refresh };
+}

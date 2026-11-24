@@ -716,9 +716,16 @@ class ExpertService:
                 "payload_digest": review["payload_digest"], "expert": expert["name"] if expert else "",
                 "lineage_id": review["lineage_id"], "channel": speaker["channel"] if speaker else "",
                 "from": {"name": sender.get("name", ""), "id": sender.get("id", "")},
-                "asked": self._original_message(review["speaker_conversation_id"], review["source_turn_id"]),
+                "asked": self._person_words(self._original_message(review["speaker_conversation_id"], review["source_turn_id"])),
                 "created_at": review["created_at"], "decided_at": review["decided_at"],
                 "decision_note": review["decision_note"]}
+
+    @staticmethod
+    def _person_words(message: str) -> str:
+        """The person's own words, without the who-where-when frame added on delivery."""
+        if message.startswith("New message from ") and "\n\n" in message:
+            return message.split("\n\n", 1)[1]
+        return message
 
     def decide(self, tenant: str, owner: str, review_id: str, *, decision: str, expected_digest: str,
                note: str = "") -> dict:

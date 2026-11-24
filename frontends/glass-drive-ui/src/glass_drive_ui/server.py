@@ -3733,6 +3733,68 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="Workspace template save failed") from exc
 
+    # Experts that people can talk to: settings, the owner's Chat, Needs you and channels.
+    def _expert_forward(request, method, path, body=None, *, human_confirmation=False):
+        try:
+            return _client_for_request(request, human_confirmation=human_confirmation)._request(
+                method, path, **({"json_body": body} if body is not None else {}))
+        except httpx.HTTPStatusError as exc:
+            raise _runtime_http_exception(exc, "xPerfect could not complete this Expert change. Your changes are kept.") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Could not reach xPerfect. Your changes are kept; try again.") from exc
+
+    @app.post("/api/experts", status_code=201)
+    def expert_create(request: Request, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/experts", payload)
+
+    @app.get("/api/experts/{expert_id}")
+    def expert_read(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id"))
+
+    @app.patch("/api/experts/{expert_id}")
+    def expert_update(request: Request, expert_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "PATCH", "/v1/experts/" + _recurring_path_id(expert_id, "expert id"), payload)
+
+    @app.post("/api/experts/{expert_id}/chat")
+    def expert_chat(request: Request, expert_id: str):
+        return _expert_forward(request, "POST", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/chat", {})
+
+    @app.get("/api/experts/{expert_id}/jobs")
+    def expert_jobs(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/jobs")
+
+    @app.get("/api/experts/{expert_id}/channels")
+    def expert_channels(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/channels")
+
+    @app.post("/api/experts/{expert_id}/channels", status_code=201)
+    def expert_channel_add(request: Request, expert_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/channels", payload)
+
+    @app.patch("/api/channels/{binding_id}")
+    def channel_update(request: Request, binding_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "PATCH", "/v1/channels/" + _recurring_path_id(binding_id, "channel id"), payload)
+
+    @app.post("/api/channels/{binding_id}/connect")
+    def channel_connect(request: Request, binding_id: str):
+        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect", {})
+
+    @app.get("/api/channels/{binding_id}/connect")
+    def channel_connect_status(request: Request, binding_id: str):
+        return _expert_forward(request, "GET", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect")
+
+    @app.get("/api/expert-reviews")
+    def expert_reviews(request: Request, state: str = "pending"):
+        if state not in {"pending", "approved", "rejected", "withdrawn", "all"}:
+            raise HTTPException(status_code=422, detail="Unknown request state")
+        return _expert_forward(request, "GET", "/v1/expert-reviews?state=" + state)
+
+    @app.post("/api/expert-reviews/{review_id}/decision")
+    def expert_review_decision(request: Request, review_id: str, payload: dict = Body(...)):
+        # Only this signed-in browser session can decide; the runtime checks the signed person.
+        return _expert_forward(request, "POST", "/v1/expert-reviews/" + _recurring_path_id(review_id, "request id") + "/decision",
+                               payload, human_confirmation=True)
+
     @app.post("/api/workspace-templates/{template_id}/instantiate", status_code=201)
     def instantiate_workspace_template(
         request: Request,
