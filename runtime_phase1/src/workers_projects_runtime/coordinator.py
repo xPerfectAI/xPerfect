@@ -1681,6 +1681,13 @@ class CoordinatorService:
                 return {"turn_id": turn_id, "state": "cancelled"}
             if turn["request_id"]:
                 return {"turn_id": turn_id, "request_id": turn["request_id"], "state": "accepted"}
+            # The native conversation answers one turn at a time. A turn accepted while another
+            # still runs waits, ready, and the background pass starts it once that one settles
+            # (its history then includes that reply); it is never refused as a conflict.
+            if conn.execute(f"SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND turn_id<>? "
+                            f"AND request_id<>'' AND blocker='' AND {_UNSETTLED_TURN} LIMIT 1",
+                            (conversation_id, turn_id)).fetchone():
+                return {"turn_id": turn_id, "state": "queued"}
             if not turn["payload_json"]:
                 messages = [{"role": "system", "content": json.loads(conversation["prompt_json"])["content"]}]
                 experts = getattr(self, "experts", None)

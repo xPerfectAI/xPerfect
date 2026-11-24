@@ -1387,6 +1387,37 @@ def test_native_projection_reuses_peer_binder_when_discovery_is_off(coordinator,
         monkeypatch.setattr(native_transport, '_hub', None)
 
 
+def test_a_message_arriving_while_another_turn_runs_waits_and_starts_after_it(coordinator):
+    """A person's message that lands while a result turn is being answered is queued, never refused."""
+    from fastapi import HTTPException
+    cid = create(coordinator)
+    started = []
+
+    def start(payload, **kwargs):
+        with coordinator.store._connect() as conn:
+            busy = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND request_id<>'' "
+                                "AND response_json='' AND blocker=''", (cid,)).fetchone()
+        if busy:  # what the native provider answers while its conversation is active
+            raise HTTPException(status_code=409, detail="The native conversation is active; retry the selected branch after it finishes")
+        started.append(payload.metadata.message_id)
+        return {'request_id': f'request-{len(started)}', 'state': 'running'}
+
+    coordinator.provider.start = start
+    coordinator.accept_turn('local', 'owner', cid, 'results-first', 'job results')
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET origin='worker_results' WHERE conversation_id=? AND turn_id='results-first'", (cid,))
+    assert coordinator.start_turn('local', 'owner', cid, 'results-first')['state'] == 'running'
+    coordinator.accept_turn('local', 'owner', cid, 'person', 'Please start another job.')
+    assert coordinator.start_turn('local', 'owner', cid, 'person') == {'turn_id': 'person', 'state': 'queued'}
+    assert started == ['results-first']
+    with coordinator.store._connect() as conn:
+        waiting = conn.execute("SELECT request_id,blocker FROM coordinator_turns WHERE conversation_id=? AND turn_id='person'", (cid,)).fetchone()
+        assert tuple(waiting) == ('', '')  # still ready for the background pass
+        conn.execute("UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=? AND turn_id='results-first'", (cid,))
+    assert coordinator.start_turn('local', 'owner', cid, 'person')['state'] == 'running'
+    assert started == ['results-first', 'person']
+
+
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):
     from workers_projects_runtime.coordinator import canonical, now
     cid = create(coordinator)
