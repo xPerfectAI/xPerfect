@@ -454,3 +454,29 @@ def test_on_auto_nothing_of_a_turn_that_asked_the_owner_leaves_while_it_waits(ap
         checking = conn.execute("SELECT payload_json FROM coordinator_turns WHERE origin='owner_checking'").fetchone()
     assert checking is not None  # her checking line is written in a turn of its own
     assert json.loads(checking["payload_json"])["metadata"]["bootstrap_bundle"]["provider_capabilities"]["native_tools"] is False
+
+
+def test_a_stopped_conversation_leaves_nothing_approvable(app, monkeypatch):
+    # The owner's correction: changed or stopped work must invalidate old approvals.
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    monkeypatch.setattr(experts.coordinator.provider, "cancel_by_idempotency",
+                        lambda *args, **kwargs: {"capacity_released": True})
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    cid = accepted["conversation_id"]
+    job = experts.hand_off("local", owner, cid, goal="Synthetic job", idempotency_key="k1", source_turn_id=accepted["turn_id"])
+    later = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-2")).json()
+    finish_turn(application, cid, later["turn_id"], "Prepared answer")
+    application.state.channels.reconcile_once()
+    waiting = {review["kind"]: review for review in experts.reviews("local", owner)}
+    assert set(waiting) == {"job", "reply"}
+    experts.coordinator.stop_conversation("local", owner, cid)
+    assert experts.reviews("local", owner) == []
+    for review in waiting.values():
+        with pytest.raises(ExpertError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    assert experts._job(job["job_id"])["state"] == "stopped"
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []

@@ -305,6 +305,12 @@ class ChannelService:
                                       review["review_id"])
             # Any other state (dropped, sent, not confirmed) is final: approval never revives it.
 
+    def drop_unsent(self, conversation_id: str, reason: str) -> None:
+        """Nothing waiting in a stopped conversation leaves; what was already sent keeps its receipt."""
+        with self.store._connect() as conn:
+            conn.execute("UPDATE channel_deliveries SET state='dropped',error=?,finished_at=? "
+                         "WHERE conversation_id=? AND state IN ('held','pending')", (reason, _now(), conversation_id))
+
     def discard_held_reply(self, review: dict) -> None:
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_deliveries SET state='dropped',error='Your owner said no',finished_at=? "

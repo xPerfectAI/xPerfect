@@ -619,6 +619,23 @@ class ExpertService:
         self._fence_job(job)
         return self._job_view(self._job(job_id))
 
+    def conversation_stopped(self, tenant: str, owner: str, conversation_id: str) -> None:
+        """A Stop of a speaking assistant's or a job's conversation withdraws everything that waits on it."""
+        with self.store._connect() as conn:
+            reviews = [row[0] for row in conn.execute(
+                "SELECT review_id FROM expert_reviews WHERE tenant_id=? AND owner_id=? AND speaker_conversation_id=? "
+                "AND state='pending'", (tenant, owner, conversation_id))]
+            jobs = [row[0] for row in conn.execute(
+                "SELECT job_id FROM expert_jobs WHERE tenant_id=? AND owner_id=? AND (speaker_conversation_id=? "
+                "OR job_conversation_id=?) AND state IN ('held','starting','running')",
+                (tenant, owner, conversation_id, conversation_id))]
+        for review_id in reviews:
+            self._withdraw(review_id, "The conversation was stopped.")
+        for job_id in jobs:
+            self.stop_job(job_id)
+        if self.deliveries is not None:
+            self.deliveries.drop_unsent(conversation_id, "The conversation was stopped")
+
     def close_channel_work(self, speaker_conversation_ids: list[str], note: str) -> None:
         """A channel turned off: its jobs stop and its waiting requests are withdrawn."""
         if not speaker_conversation_ids:
@@ -848,6 +865,11 @@ class ExpertService:
                 raise ExpertError("This request was already decided or withdrawn", code="expert_review_closed")
             if review["payload_digest"] != expected_digest:
                 raise ExpertError("This request changed. Review it again.", code="expert_review_changed")
+            stopped = conn.execute("SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                                   (review["speaker_conversation_id"],)).fetchone()
+            if stopped and stopped[0]:
+                conn.execute("UPDATE expert_reviews SET state='withdrawn',decided_at=? WHERE review_id=?", (_now(), review_id))
+                raise ExpertError("This conversation was stopped. Nothing was sent or started.", code="expert_review_changed")
             if review["kind"] == "job":
                 job = conn.execute("SELECT state,goal,context FROM expert_jobs WHERE job_id=?", (review["target_id"],)).fetchone()
                 payload = json.loads(review["payload_json"])

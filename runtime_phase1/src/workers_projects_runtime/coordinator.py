@@ -2068,6 +2068,11 @@ class CoordinatorService:
                 for run_id in owned_runs:
                     conn.execute("UPDATE scheduled_runs SET state='cancelled',updated_at=? WHERE queued_run_id=? "
                                  "AND state NOT IN ('completed','failed','cancelled')", (now(), run_id))
+        experts = getattr(self, "experts", None)
+        if experts is not None:
+            # An Expert's requests, held jobs and unsent messages on this conversation are withdrawn
+            # with the fence: an old approval must never send or start anything after a Stop.
+            experts.conversation_stopped(tenant, owner, conversation_id)
         pending = False
         for turn_id in turns:
             try:
