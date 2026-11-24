@@ -677,6 +677,23 @@ def test_the_role_model_becomes_its_conversation_model(app, monkeypatch):
     assert default.model == "claude-code:opus"
 
 
+def test_each_ai_that_talks_offers_its_faster_model(app, monkeypatch):
+    application, client = app
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
+    for model_id, profile, native in (("claude-code:haiku", "claude-code", "haiku"),
+                                      ("codex-cli:gpt-6.2-sol", "codex-cli", "gpt-6.2-sol")):
+        model = GLASSHIVE_MODELS[model_id]
+        assert (model.harness_profile, model.native_model, model.recommended_effort) == (profile, native, "low")
+    experts = application.state.experts
+    provider = experts.coordinator.provider
+    real = type(provider)._model  # the save check uses the real catalog, not the fixture's stand-in
+    monkeypatch.setattr(provider, "_model", lambda *args, **kwargs: real(provider, *args, **kwargs))
+    created = create_expert(client, team={**SPEC["team"], "talk": {"profile": "codex-cli", "effort": "low",
+                                                                  "model": "codex-cli:gpt-6.2-sol"}})
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created["template_id"])
+    assert experts.spec(experts.resolve("local", owner, created["template_id"])).team.talk.model == "codex-cli:gpt-6.2-sol"
+
+
 def test_every_worker_of_a_job_carries_the_owners_instructions(app):
     # The owner's guardrails reach each Worker whatever the coordinator writes in its dispatch.
     application, client = app

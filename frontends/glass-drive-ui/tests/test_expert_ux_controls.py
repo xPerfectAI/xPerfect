@@ -19,6 +19,16 @@ def run_node(code):
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_who_talks_offers_each_ais_faster_model_beside_its_usual_one():
+    source = (STATIC / 'experts.js').read_text()
+    models = re.search(r"const MODELS = (\{.*?\});", source, re.S)
+    assert models, 'talking models'
+    run_node("import assert from 'node:assert/strict';\nconst MODELS = " + models.group(1) + ";\n"
+             "assert.deepEqual(MODELS['claude-code'].map(m => m[2]), ['claude-code:opus', 'claude-code:haiku']);\n"
+             "assert.deepEqual(MODELS['codex-cli'].map(m => m[2]), ['codex-cli:native-default', 'codex-cli:gpt-6.2-sol']);\n"
+             "for (const list of Object.values(MODELS)) assert.equal(list[0][0], '');\n")
+
+
 def test_connection_details_explain_the_account_without_exposing_protocol_ids():
     source = (STATIC / 'control-plane.js').read_text()
     run_node("import assert from 'node:assert/strict';\n"

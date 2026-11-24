@@ -597,6 +597,16 @@ GLASSHIVE_MODELS: dict[str, HarnessModel] = {
         recommended_effort="low",
         context_window=200_000,
     ),
+    # Codex's fastest everyday model, for the same role (its Luna models answered more slowly).
+    "codex-cli:gpt-6.2-sol": HarnessModel(
+        id="codex-cli:gpt-6.2-sol",
+        display_name="Codex / GPT-6.2 Sol",
+        harness_profile="codex-cli",
+        native_model="gpt-6.2-sol",
+        effort_choices=("low", "medium", "high", "xhigh", "max", "ultra"),
+        recommended_effort="low",
+        context_window=475_000,
+    ),
     "codex-cli:native-default": HarnessModel(
         id="codex-cli:native-default",
         display_name="Codex / Native default",

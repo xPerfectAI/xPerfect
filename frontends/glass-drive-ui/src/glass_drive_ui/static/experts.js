@@ -41,7 +41,8 @@ function expertFields(body, spec, accounts, speeds) {
   const talk = select(AIS.slice(0, 2), s.team.talk.profile);
   // Which model talks; each option shows its median time to a finished reply on this computer.
   const MODELS = { 'claude-code': [['', 'Opus', 'claude-code:opus'], ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
-                   'codex-cli': [['', 'Its usual model', 'codex-cli:native-default']] };
+                   'codex-cli': [['', 'Its usual model', 'codex-cli:native-default'],
+                                 ['codex-cli:gpt-6.2-sol', 'GPT-6.2 Sol', 'codex-cli:gpt-6.2-sol']] };
   const talkModel = node('select'); let measured = {};
   const fillModels = (keep) => {
     const options = MODELS[talk.value] || [['', 'Its usual model', '']];
