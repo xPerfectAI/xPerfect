@@ -295,6 +295,7 @@ Real model, browser and Teams steps stay NOT RUN until observed.
 |---|---|---|
 | New expert | My experts → Create; name, instructions, Library Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; Edit shows every choice. |
 | Chat | Manage → Chat; ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
+| Talking model | Edit → Talks to people → Model: compare Opus and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
 | Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
 | Second question | Ask something else while the job runs. | Answered at once; the job continues. |
 | Edit | Change the instructions; ask again. | The next reply follows the new text; a running job finishes with the old. |
