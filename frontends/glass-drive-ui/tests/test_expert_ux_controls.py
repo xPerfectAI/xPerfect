@@ -264,3 +264,106 @@ syncWorkspaceUI({value:'new:codex-cli'},{},button,help);
 assert.equal(label.textContent,'Run Project');assert.equal(button.children[0],icon);assert.equal(help.textContent,'Exact help');
 const legacy={textContent:''};syncWorkspaceUI({value:''},{},legacy,help);assert.equal(legacy.textContent,'Run Project');
 """)
+
+
+def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
+    # The first real test: a new bot was refused for its first seconds. The pill says so, the page looks again
+    # by itself until the socket holds, and a lasting refusal is said once on the card.
+    source = (STATIC / 'experts.js').read_text()
+    state = re.search(r"^export function channelState\(.*?^}", source, re.M | re.S)
+    assert state, 'channelState'
+    assert "node('span', 'expert-pill', channelState(channel))" in source
+    assert "if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(later, 3000);" in source
+    assert "list.querySelector('details[open]') || list.contains(document.activeElement)" in source  # not mid-typing
+    assert "if (channel.refusal && channel.state === 'connected') card.append(" in source  # never on an Off card
+    # Teams does not allow the app yet: the line, a note for the administrator, and the page follows the
+    # runtime's own re-check.
+    assert "if (step.step === 'blocked') {" in source and "Copy a note for your administrator" in source
+    assert "timer = setTimeout(() => poll(channel), 10000); return;" in source
+    run_node("import assert from 'node:assert/strict';\n" + state.group(0).replace('export ', '') + """
+assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: true}), 'Connected');
+assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: false}), 'Online · no message yet');
+assert.equal(channelState({state: 'connected', online: false, connecting: true}), 'Connecting…');
+assert.equal(channelState({state: 'connected', online: false, connecting: false}), 'Connected · offline');
+assert.equal(channelState({state: 'off', online: true, connecting: false}), 'Off');
+assert.equal(channelState({state: 'setup', online: false, connecting: false}), 'Not connected');
+""")
+
+
+def test_test_in_teams_waits_until_a_first_message_came_through():
+    # The first real test: before the app was installed, "Test in Teams" (a chat opened by the bot's id) opened an
+    # existing chat with another person. It is offered only once a first message has come through, and the page
+    # says whose chat it should open.
+    source = (STATIC / 'experts.js').read_text()
+    links = re.search(r"^export function teamsLinks\(.*?^}", source, re.M | re.S)
+    assert links, 'teamsLinks'
+    assert "for (const link of teamsLinks(channel))" in source and source.count("l/chat/0/0") == 1
+    assert "Test in Teams opens your chat with ${name}. If another chat opens, send nothing there." in source
+    assert "Press Test in Teams and send it a message" not in source
+    run_node("import assert from 'node:assert/strict';\n" + links.group(0).replace('export ', '') + """
+const app = {app_id: 'bot-synthetic', install_link: 'https://teams.invalid/install'};
+const labels = channel => teamsLinks(channel).map(link => link.label);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app}), ['Install in Teams']);
+assert.deepEqual(labels({state: 'connected', online: false, first_message: false, app}), ['Install in Teams']);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Test in Teams']);  // installed: no Install
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
+// Hurdle 15: once an administrator added the app, the developer copy's install link is a dead end: not offered.
+assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app: {...app, added_by_admin: 'yes'}}), []);
+""")
+
+
+def test_the_person_is_told_up_front_what_microsoft_and_teams_will_ask():
+    # The first real test's hurdles 1, 2, 4, 5 and 7: where to open the sign-in, a phone approval, Teams asking web or
+    # desktop, a change still spreading, and which account and organisation the app was made in.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("where your work account is signed in (any browser, or your phone)",
+                  "Microsoft may ask you to approve on your phone.", "The code lasts about 15 minutes.",
+                  "Creating your Teams app with ${step.account}…", "Made with ${channel.app.account}",
+                  "Teams may ask web or desktop, either works", "press Install in Teams again",
+                  "Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again."):
+        assert words in source, words
+
+
+def test_the_owner_sets_the_teams_apps_public_details():
+    # Hurdle 10: the install window showed "Developer" and example.com. The card offers the four details Teams shows,
+    # and the page's server forwards them to the runtime, which checks and applies them.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function appDetails(channel)", "'Details Teams shows for this app'", "card.append(appDetails(channel));",
+                  "'/details', { method: 'POST'", "Microsoft needs all four; the links start with https://.",
+                  "input.maxLength = 32"):
+        assert words in source, words
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '@app.post("/api/channels/{binding_id}/details")' in server
+    assert '+ "/details", payload)' in server
+    assert '.expert-details[open]{display:grid;gap:8px}' in (STATIC / 'experts.css').read_text()
+
+
+def test_an_already_signed_in_connect_names_the_account_on_its_one_press():
+    # Hurdle 11: the Connect button itself names the account ("Connect Teams as …"), its press is the yes, and a small
+    # "Use another Microsoft account" sits beside it; no second dialog.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("async function nameConnect(channel, go, box)", "`Connect Teams as ${who.account}`",
+                  "'Use another Microsoft account'", "connect(channel, { as_account: go.dataset.account || '' })",
+                  "connect(channel, { other_account: true })", "void nameConnect(channel, go, connectBox);"):
+        assert words in source, words
+    assert "step.step === 'confirm'" not in source  # no second dialog
+    server = (STATIC.parent / 'server.py').read_text()
+    assert 'choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account"))}' in server
+    assert '.expert-other-account{' in (STATIC / 'experts.css').read_text()
+
+
+
+def test_a_teams_app_still_offered_beyond_personal_chats_says_so():
+    # Hurdle 14: if narrowing the app to personal chats failed, the card says it plainly.
+    source = (STATIC / 'experts.js').read_text()
+    assert "if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(" in source
+    assert "Teams still offers this app in teams and group chats; it answers only in personal chats." in source
+
+
+def test_the_owner_can_say_an_administrator_added_the_app():
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function adminButton(channel, added)", "'An administrator added it for me'", "'Undo: show Install in Teams again'",
+                  "it appears in your Teams by itself (Apps, Built for your org; this can take a few hours)",
+                  "'/added-by-admin', { method: 'POST', body: { added } }"):
+        assert words in source, words
+    assert '@app.post("/api/channels/{binding_id}/added-by-admin")' in (STATIC.parent / 'server.py').read_text()

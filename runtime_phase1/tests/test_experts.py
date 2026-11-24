@@ -2081,3 +2081,573 @@ def test_a_stop_that_arrives_just_after_the_job_was_told_leaves_it_done(app, mon
     monkeypatch.setattr(experts, "_job", original)
     assert experts._job(job_id)["state"] == "done"
     assert _results(application, job_id) == ["SYNTHETIC-OLD-ANSWER"]
+
+
+def test_reading_the_connect_status_never_starts_the_app_creation_and_a_finished_sign_in_creates_it_once(app, monkeypatch):
+    # Found in the real Teams test: a status read moved a finished sign-in on and started the app creation, so two
+    # reads together (the page and anyone else) could start two. Reading now only reads; the thread watching the
+    # sign-in moves it on, once.
+    import threading
+    application, client = app
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", channel["binding_id"])
+    setup = application.state.channels.setup
+    created = []
+    monkeypatch.setattr(setup, "_create", lambda *args: created.append(args))
+    finished = SimpleNamespace(poll=lambda: 0, returncode=0, stdout=None, wait=lambda: 0)  # signed in
+    setup._sessions[channel["binding_id"]] = {"step": "sign_in", "url": "https://login.microsoft.com/device",
+                                              "code": "SYNTHETIC3", "process": finished}
+    readers = [threading.Thread(target=lambda: client.get(f"/v1/channels/{channel['binding_id']}/connect"))
+               for _ in range(4)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(5)
+    status = client.get(f"/v1/channels/{channel['binding_id']}/connect").json()
+    assert status["step"] == "creating" and "code" not in status
+    assert created == []  # no read started anything
+    setup._finish_sign_in("local", owner, channel["binding_id"], finished)
+    setup._finish_sign_in("local", owner, channel["binding_id"], finished)  # a second finish changes nothing
+    assert len(created) == 1
+
+
+def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_apps(app, monkeypatch, tmp_path):
+    # Found in the real Teams test: the app was created, then Teams showed a disabled "Add" button. Connect now reads
+    # Microsoft's own report first (the Teams CLI's status) and, when custom apps are off for this account, creates
+    # nothing, names the switches in one plain line, offers a note for the administrator, and reads the report
+    # again by itself every two minutes; once allowed, Connect goes on and creates the app, once.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    calls, report, clock, background = [], {"tenant": True, "user": False}, [1000.0], []
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a",
+                    "username": "Synthetic Owner", "tdp": {"connected": True, "sideloading": dict(report)}}
+        if args[:2] == ("app", "create"):  # while it is made, the page names the account and organisation
+            during.append(client.get(f"/v1/channels/{binding_id}/connect").json())
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True,
+                "installLink": "https://teams.invalid/install"}
+
+    during = []
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    setup._clock = lambda: clock[0]
+
+    def creations():
+        return sum(1 for args in calls if args[:2] == ("app", "create"))
+
+    def run_background():
+        while background:
+            target, args = background.pop(0)
+            target(*args)
+
+    setup._create("local", owner, binding_id)
+    status = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert status["step"] == "blocked" and creations() == 0
+    for words in ("Upload custom apps", "Let users install and use available apps by default",
+                  "Let users interact with custom apps in preview", "this one person only",
+                  "the person's own switch is off", "checks again by itself"):
+        assert words in status["error"], words
+    # The note asks only for what Microsoft reports off, for this account.
+    assert "Upload custom apps" in status["note"] and "Synthetic Owner" in status["note"]
+    assert "Let users interact" not in status["note"]
+    statuses = sum(1 for args in calls if args[0] == "status")
+    clock[0] = 1000 + 119
+    setup.reconcile_once()
+    assert background == []  # not before two minutes
+    clock[0] = 1000 + 121
+    setup.reconcile_once()
+    assert len(background) == 1
+    setup.reconcile_once()
+    assert len(background) == 1  # one check at a time
+    # A press while that check is claimed starts no second creation.
+    assert client.post(f"/v1/channels/{binding_id}/connect", json={}).json()["step"] == "blocked"
+    assert len(background) == 1
+    run_background()  # still not allowed: blocked again, the next check two minutes later
+    assert sum(1 for args in calls if args[0] == "status") > statuses and creations() == 0
+    assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "blocked"
+    report["user"] = True  # the administrator turned it on
+    clock[0] += 121
+    setup.reconcile_once()
+    run_background()  # Microsoft's report is a hint: after a "no", the first clear yes is enough
+    assert creations() == 1
+    connected = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert connected["step"] == "connected"
+    assert during[-1]["step"] == "creating" and during[-1]["account"] == "Synthetic Owner"
+    assert during[-1]["tenant_id"] == "tenant-synthetic"
+    assert connected["channel"]["app"]["account"] == "Synthetic Owner"  # and on the card afterwards
+    setup.reconcile_once()
+    run_background()
+    assert creations() == 1  # created once
+
+
+def test_a_channel_is_connecting_until_microsofts_socket_holds_and_a_lasting_refusal_is_said_once(app):
+    # The first real test: a new bot was refused twice before its socket held. The page says "Connecting…" until
+    # Microsoft's socket holds, and a refusal the package gave up on stays shown, once, until it holds.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    path, service = f"/v1/channels/{channel['binding_id']}/heartbeat", application.state.channels
+
+    def seen():
+        view = service.view(service._binding(channel["binding_id"]))
+        return view["online"], view["connecting"], view["refusal"]
+
+    assert client.post(path, json={}).status_code == 200  # a package from before this: online, as before
+    assert seen() == (True, False, "")
+    client.post(path, json={"socket": "connecting"})
+    assert seen() == (False, True, "")
+    refusal = "Socket Mode negotiate failed: HTTP 401. Check the bot credentials"
+    client.post(path, json={"socket": "refused", "error": refusal})
+    assert seen() == (False, False, refusal)
+    client.post(path, json={"socket": "connecting"})  # the next try leaves the refusal shown
+    assert seen() == (False, True, refusal)
+    client.post(path, json={"socket": "ready"})
+    assert seen() == (True, False, "")
+    assert service.view(service._binding(channel["binding_id"]))["first_message"] is False  # online is not ready
+    client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-first"))
+    assert service.view(service._binding(channel["binding_id"]))["first_message"] is True
+    assert client.post(path, json={"socket": "unknown"}).status_code == 422
+    assert client.post(path, json={"socket": "ready", "extra": 1}).status_code == 422
+
+
+def test_maintenance_restarts_back_off_while_the_package_never_holds_and_the_owner_starts_it_at_once(
+        app, monkeypatch, tmp_path):
+    # Before: maintenance restarted a package that exited at once every 5 s, for ever. Now it waits 5 s after the
+    # first exit before the socket held, doubling to 5 minutes; a package that held, or the owner's own action,
+    # starts again at once. Fake processes only: nothing is spawned and no real process is signalled.
+    from pathlib import Path
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, service = channel["binding_id"], application.state.channels
+    setup = service.setup
+    setup.credentials_path(binding_id).write_text("CLIENT_ID=synthetic\n")
+    processes, clock = [], [1000.0]
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            self.pid, self.code = 4_000_000 + len(processes), None
+            processes.append(self)
+
+        def poll(self):
+            return self.code
+
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=FakeProcess, STDOUT=-2))
+    monkeypatch.setattr(setup, "_package_python", lambda: Path("synthetic-python"))
+    monkeypatch.setattr(setup, "_alive", lambda pid: any(p.pid == pid and p.code is None for p in processes))
+    setup._clock = lambda: clock[0]
+
+    def cycle(at):
+        clock[0] = at
+        setup.reconcile_once()
+        return len(processes)
+
+    assert cycle(1000) == 1
+    processes[-1].code = 1  # exited before its socket held
+    assert cycle(1000) == 1 and cycle(1004) == 1  # waits 5 s
+    assert cycle(1006) == 2
+    processes[-1].code = 1
+    assert cycle(1006) == 2 and cycle(1015) == 2  # then 10 s
+    assert cycle(1017) == 3
+    service.heartbeat(binding_id, "ready")  # this one held
+    processes[-1].code = 1
+    assert cycle(1017) == 4  # a package that held starts again at once
+    processes[-1].code = 1
+    assert cycle(1017) == 4  # one exit before it held: waits again
+    assert setup.ensure_package(binding_id) == "started" and len(processes) == 5  # the owner's own action: at once
+    processes[-1].code = 1
+    assert cycle(1017) == 5
+    client.patch(f"/v1/channels/{binding_id}", json={"state": "off"})
+    assert cycle(1017) == 5
+    client.patch(f"/v1/channels/{binding_id}", json={"state": "connected"})
+    assert cycle(1017) == 6  # Turn off, Turn on: starts at once
+    waited = []
+    for _ in range(9):  # the wait doubles and stops at 5 minutes
+        count, start = len(processes), clock[0]
+        processes[-1].code = 1
+        while cycle(clock[0]) == count:
+            clock[0] += 5
+        waited.append(clock[0] - start)
+    assert waited == [5, 10, 20, 40, 80, 160, 300, 300, 300]
+
+
+def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_asks_only_for_what_is_off(
+        app, monkeypatch, tmp_path):
+    from workers_projects_runtime.channels_setup import _note_for_admin
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    setup._clock = lambda: 5000.0
+    setup._sessions[binding_id] = {"step": "blocked", "error": "blocked", "note": "note", "tenant": "local",
+                                   "owner": owner, "check_at": 4000.0, "checking": True}
+
+    def unreachable(*args, timeout=300):
+        raise ExpertError("Microsoft Teams setup stopped: synthetic network failure", code="channel_setup_failed")
+
+    monkeypatch.setattr(setup, "_run", unreachable)
+    setup._create("local", owner, binding_id)
+    session = setup._sessions[binding_id]
+    assert session["step"] == "blocked" and not session["checking"] and session["check_at"] == 5000.0 + 120
+    both = {"tdp": {"sideloading": {"tenant": False, "user": False}}}
+    note = _note_for_admin(both, "Synthetic Expert")
+    assert "1. Teams apps → Setup policies" in note and "2. Teams apps → Manage apps → Actions" in note
+    assert "Let users install and use available apps by default" in note  # both organisation-wide switches
+    assert "My account" not in note  # no account reported, none invented
+    assert "up to 30 minutes" in note  # a first visit to the admin center can take that long
+    assert "an hour or more" in note  # two clocks: 43 minutes to a steady report, Teams later still
+    assert "Upload custom apps" not in _note_for_admin({"tdp": {"sideloading": {"tenant": False, "user": True}}}, "X")
+
+
+def test_after_a_no_a_missing_report_is_not_a_yes(app, monkeypatch, tmp_path):
+    # Advisor finding: after Microsoft said no, three reports without the custom-app fields (a signed-out tool, a
+    # portal that did not answer) must not count as three "yes" and create the app while Teams still refuses it.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    calls, report, clock = [], {"value": {"tenant": True, "user": False}}, [1000.0]
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            side = report["value"]
+            return {"loggedIn": True, "username": "Synthetic Owner", "tenantId": "tenant-synthetic",
+                    **({"tdp": {"sideloading": dict(side)}} if side is not None else {})}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    setup._clock = lambda: clock[0]
+    creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
+    setup._create("local", owner, binding_id)  # the "no"
+    note = client.get(f"/v1/channels/{binding_id}/connect").json()["note"]
+    for missing in (None, {}, {"tenant": True}, {"user": True}):  # nothing, empty, or only half of the answer
+        report["value"] = missing
+        for step in (30, 30, 30):
+            clock[0] += step
+            setup._create("local", owner, binding_id)
+        status = client.get(f"/v1/channels/{binding_id}/connect").json()
+        assert creations() == 0 and status["step"] == "blocked" and "did not say" in status["error"]
+        assert status["note"] == note  # what to ask the administrator stays
+    report["value"] = {"tenant": True, "user": True}  # the first clear yes for both switches
+    clock[0] += 30
+    setup._create("local", owner, binding_id)
+    assert creations() == 1
+
+
+def test_ready_means_a_message_from_the_account_that_connected_it(app):
+    # Advisor finding: an unlisted sender's message also leaves an inbox row. "Test in Teams" (a link that opened
+    # another person's chat before the app was installed) waits for a message from the account that connected it.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, service = channel["binding_id"], application.state.channels
+    colleague = {"id": "person-synthetic-b", "name": "Synthetic Colleague", "tenant": "tenant-synthetic"}
+    client.post(f"/v1/channels/{binding_id}/setup", json={"settings": {
+        "app_id": "synthetic-app", "mode": "socket", "connected_by": PERSON["id"]}})
+    client.patch(f"/v1/channels/{binding_id}", json={"people": [PERSON, colleague]})
+    ready = lambda: service.view(service._binding(binding_id))["first_message"]  # noqa: E731
+    stranger = {"id": "person-synthetic-z", "name": "Synthetic Stranger", "tenant": "tenant-synthetic"}
+    client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-stranger", person=stranger))
+    assert ready() is False  # refused, unlisted
+    client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-colleague", person=colleague))
+    assert ready() is False  # accepted, but not the account that connected it
+    client.post(f"/v1/channels/{binding_id}/inbound", json=message("act-owner"))
+    assert ready() is True
+
+
+def test_two_near_simultaneous_starts_make_one_package(app, monkeypatch, tmp_path):
+    # Advisor finding: the scheduler and a Connect both call ensure_package; two package processes would mean two
+    # sockets for one bot. Fake processes only: nothing is spawned and no real process is signalled.
+    import threading
+    import time
+    from pathlib import Path
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    setup.credentials_path(binding_id).write_text("CLIENT_ID=synthetic\n")
+    processes = []
+
+    class SlowProcess:
+        def __init__(self, *args, **kwargs):
+            time.sleep(0.3)  # a slow start leaves room for the other caller
+            self.pid = 4_100_000 + len(processes)
+            processes.append(self)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=SlowProcess, STDOUT=-2))
+    monkeypatch.setattr(setup, "_package_python", lambda: Path("synthetic-python"))
+    monkeypatch.setattr(setup, "_alive", lambda pid: any(p.pid == pid for p in processes))
+    outcomes = []
+    callers = [threading.Thread(target=lambda: outcomes.append(setup.ensure_package(binding_id))),
+               threading.Thread(target=lambda: outcomes.append(setup.ensure_package(binding_id, by_owner=False)))]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=10)
+    assert len(processes) == 1 and sorted(outcomes) == ["running", "started"]
+
+
+def test_the_owner_sets_the_apps_public_details_instead_of_the_placeholders(app, monkeypatch):
+    # The first real test's install window showed "Developer" and example.com links (hurdle 10). The owner now sets
+    # the four details; they are checked by Microsoft's rules first and applied with the pinned tool's own
+    # `app update` on this channel's Teams app. A fake tool only: nothing reaches Microsoft.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    path, calls = f"/v1/channels/{binding_id}/details", []
+    monkeypatch.setattr(setup, "_run", lambda *args, timeout=300: calls.append(args) or {})
+    good = {"developer": "Synthetic Company", "website": "https://synthetic.example/teams",
+            "privacy": "https://synthetic.example/privacy", "terms": "https://synthetic.example/terms"}
+    before = client.post(path, json=good)
+    assert before.status_code >= 400 and "Connect the channel first" in before.text and calls == []
+    client.post(f"/v1/channels/{binding_id}/setup", json={"settings": {
+        "app_id": "synthetic-app", "teams_app_id": "teams-app-synthetic", "mode": "socket", "account": "Synthetic Owner"}})
+    for change, words in (({"developer": "x" * 33}, "1 to 32 characters"), ({"developer": " "}, "1 to 32 characters"),
+                          ({"website": "http://synthetic.example"}, "website link must start with https://"),
+                          ({"privacy": "https://localhost"}, "privacy policy link must start with https://"),
+                          ({"terms": "synthetic.example/terms"}, "terms of use link must start with https://")):
+        refused = client.post(path, json={**good, **change})
+        assert refused.status_code >= 400 and words in refused.text, (change, refused.text)
+    assert calls == []  # nothing is sent to Microsoft that it would refuse
+    saved = client.post(path, json=good)
+    assert saved.status_code == 200, saved.text
+    assert calls == [("app", "update", "teams-app-synthetic", "--developer", "Synthetic Company",
+                      "--website", "https://synthetic.example/teams", "--privacy-url", "https://synthetic.example/privacy",
+                      "--terms-url", "https://synthetic.example/terms")]
+    shown = saved.json()["app"]
+    assert shown["developer"] == "Synthetic Company" and shown["terms_url"] == "https://synthetic.example/terms"
+    assert shown["app_id"] == "synthetic-app" and shown["account"] == "Synthetic Owner"  # the rest is kept
+
+
+def test_an_already_signed_in_connect_names_the_account_on_its_one_press(app, monkeypatch, tmp_path):
+    # Hurdle 11: a computer can hold another organisation's login. With the tool already signed in, the Connect button
+    # names the account and organisation, and its one press is the yes. A press without that name, or for an
+    # account that is no longer the one signed in, makes nothing and shows the account now signed in.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    path, calls, signed_in, background, clock = f"/v1/channels/{binding_id}/connect", [], {"as": "Synthetic Owner"}, [], [1000.0]
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "username": signed_in["as"], "tenantId": "tenant-synthetic",
+                    "userObjectId": "person-synthetic-a", "tdp": {"sideloading": {"tenant": True, "user": True}}}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "_cli_present", lambda: True)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    setup._clock = lambda: clock[0]
+    creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
+    statuses = lambda: sum(1 for args in calls if args[0] == "status")  # noqa: E731
+    named = client.get(path).json()  # what the Connect button says before anything is made
+    assert named["step"] == "start" and named["signed_in_as"] == {"account": "Synthetic Owner", "tenant_id": "tenant-synthetic"}
+    client.get(path)
+    assert statuses() == 1  # read at most every 30 s
+    unnamed = client.post(path, json={}).json()
+    assert unnamed["step"] == "start" and background == [] and creations() == 0
+    signed_in["as"] = "Synthetic Other Account"  # the tool's account changed since the button was drawn
+    changed = client.post(path, json={"as_account": "Synthetic Owner"}).json()
+    assert changed["step"] == "start" and changed["signed_in_as"]["account"] == "Synthetic Other Account"
+    assert background == [] and creations() == 0
+    pressed = client.post(path, json={"as_account": "Synthetic Other Account"}).json()  # the one press, named
+    assert pressed["step"] == "creating" and len(background) == 1
+    target, args = background.pop()
+    target(*args)
+    assert creations() == 1 and client.get(path).json()["step"] == "connected"
+
+
+def test_use_another_microsoft_account_signs_the_tool_out_and_shows_microsofts_code(app, monkeypatch):
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    signed_out, statuses, threads = [], [], []
+
+    class Login:  # Microsoft's code sign-in, as the tool prints it; nothing is started for real
+        def __init__(self, *args, **kwargs):
+            lines = ["To sign in, open the page https://microsoft.invalid/devicelogin and enter the code SYNTH12345 now\n"]
+            self.stdout = Namespace(readline=lambda: lines.pop(0) if lines else "", read=lambda: "")
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(setup, "_sign_out", lambda: signed_out.append(True))
+    monkeypatch.setattr(setup, "_run", lambda *args, timeout=300: statuses.append(args) or {"loggedIn": True})
+    monkeypatch.setattr(setup, "_cli", lambda: ["teams-synthetic"])
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=Login, PIPE=-1, STDOUT=-2))
+    monkeypatch.setattr(channels_setup, "threading", Namespace(Thread=lambda **kwargs: Namespace(start=lambda: threads.append(kwargs)),
+                                                               Lock=channels_setup.threading.Lock))
+    step = client.post(f"/v1/channels/{binding_id}/connect", json={"other_account": True}).json()
+    assert signed_out == [True] and statuses == []  # signed out first; the old account is not asked
+    assert step["step"] == "sign_in" and step["code"] == "SYNTH12345" and len(threads) == 1
+
+
+def test_a_package_adopted_after_a_runtime_restart_is_started_again_at_once_when_stopped(app, monkeypatch, tmp_path):
+    # Go-live: after the merge and a runtime restart, the running package is adopted through its pid file (not started
+    # by this runtime). Stopping it by its pid while the outbox is idle lets maintenance start the new code at once,
+    # with no back-off wait and without Turn off (which would drop messages and stop jobs).
+    from pathlib import Path
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    setup.credentials_path(binding_id).write_text("CLIENT_ID=synthetic\n")
+    setup._pid_path(binding_id).write_text("4200000")  # the package from before the restart
+    adopted, processes = {4_200_000}, []
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            self.pid = 4_300_000 + len(processes)
+            processes.append(self)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=FakeProcess, STDOUT=-2))
+    monkeypatch.setattr(setup, "_package_python", lambda: Path("synthetic-python"))
+    monkeypatch.setattr(setup, "_alive", lambda pid: pid in adopted or any(p.pid == pid for p in processes))
+    setup._clock = lambda: 1000.0
+    setup.reconcile_once()
+    assert processes == []  # the adopted package keeps running
+    adopted.clear()  # stopped by its pid
+    setup.reconcile_once()
+    assert len(processes) == 1  # the new code starts at once
+
+
+def test_a_blocked_channel_makes_its_app_only_as_the_account_it_was_refused_for(app, monkeypatch, tmp_path):
+    # Advisor finding: the tool's login is shared by the whole computer. If the owner was blocked as account A and then
+    # signed the tool in as B (for another Expert), the first channel's re-check or Check now would have made its app
+    # in B's organisation, unasked. Now nothing is made and Connect names the account signed in now.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    calls, tool, clock, background = [], {"as": "Synthetic Owner A", "user": False}, [1000.0], []
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "username": tool["as"], "tenantId": "tenant-synthetic",
+                    "tdp": {"sideloading": {"tenant": True, "user": tool["user"]}}}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    setup._clock = lambda: clock[0]
+    creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
+
+    def run_background():
+        while background:
+            target, args = background.pop(0)
+            target(*args)
+
+    setup._create("local", owner, binding_id, "Synthetic Owner A")  # the press named A; Microsoft says no
+    assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "blocked"
+    tool.update({"as": "Synthetic Account B", "user": True})  # another Expert signed the tool in as B, allowed there
+    clock[0] += 121
+    setup.reconcile_once()
+    run_background()
+    status = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert creations() == 0 and status["step"] == "error"
+    assert "Synthetic Account B" in status["error"] and "Synthetic Owner A" in status["error"]
+    setup._sessions[binding_id] = {"step": "blocked", "error": "blocked", "note": "", "account": "Synthetic Owner A",
+                                   "tenant": "local", "owner": owner, "check_at": clock[0] + 120}
+    pressed = client.post(f"/v1/channels/{binding_id}/connect", json={}).json()  # Check now, from the blocked card
+    run_background()
+    assert creations() == 0 and client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "error"
+    assert pressed["step"] in ("creating", "error")
+    named = client.post(f"/v1/channels/{binding_id}/connect", json={"as_account": "Synthetic Account B"}).json()
+    run_background()  # pressed again, naming the account signed in now: made there, once
+    assert named["step"] == "creating" and creations() == 1
+
+
+def test_the_teams_app_is_offered_in_personal_chats_only(app, monkeypatch, tmp_path):
+    # Hurdle 14: Microsoft's tool makes the bot for personal chats, teams and group chats; the Expert answers only in
+    # personal chats. Right after it is made, the app is narrowed to personal; a failure there is said on the card,
+    # and the app is never made a second time.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    setup = application.state.channels.setup
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    for refuse_update in (False, True):
+        expert = create_expert(client, instructions=f"Synthetic instructions {refuse_update}.")
+        channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+        binding_id = channel["binding_id"]
+        owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+        calls = []
+
+        def teams_cli(*args, timeout=300):
+            calls.append(args)
+            if args[0] == "status":
+                return {"loggedIn": True, "username": "Synthetic Owner", "tenantId": "tenant-synthetic",
+                        "userObjectId": "person-synthetic-a", "tdp": {"sideloading": {"tenant": True, "user": True}}}
+            if args[:2] == ("app", "update") and refuse_update:
+                raise ExpertError("Microsoft Teams setup stopped: synthetic refusal", code="channel_setup_failed")
+            return {"botId": "bot-synthetic", "teamsAppId": "teams-app-synthetic", "socketMode": True}
+
+        monkeypatch.setattr(setup, "_run", teams_cli)
+        setup._create("local", owner, binding_id)
+        assert ("app", "update", "teams-app-synthetic", "--scopes", "personal") in calls
+        assert sum(1 for args in calls if args[:2] == ("app", "create")) == 1  # never made twice
+        shown = client.get(f"/v1/channels/{binding_id}/connect").json()
+        assert shown["step"] == "connected"
+        assert shown["channel"]["app"]["scopes"] == ("personal,team,groupChat" if refuse_update else "personal")
+
+
+def test_an_app_an_administrator_added_is_not_sent_to_the_blocked_install_dialog(app):
+    # Hurdle 15: after an administrator published and pre-installed the app from the admin center, Install in Teams
+    # still opened the developer copy, blocked by the person's own policy. The owner says so once; the card then
+    # stops offering that link, and Undo brings it back. The other app facts stay.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id = channel["binding_id"]
+    client.post(f"/v1/channels/{binding_id}/setup", json={"settings": {
+        "app_id": "synthetic-app", "teams_app_id": "teams-app-synthetic", "install_link": "https://teams.invalid/install"}})
+    added = client.post(f"/v1/channels/{binding_id}/added-by-admin", json={"added": True})
+    assert added.status_code == 200, added.text
+    assert added.json()["app"]["added_by_admin"] == "yes" and added.json()["app"]["install_link"] == "https://teams.invalid/install"
+    undone = client.post(f"/v1/channels/{binding_id}/added-by-admin", json={"added": False}).json()
+    assert "added_by_admin" not in undone["app"] and undone["app"]["app_id"] == "synthetic-app"
+    assert client.post(f"/v1/channels/{binding_id}/added-by-admin", json={}).status_code == 422

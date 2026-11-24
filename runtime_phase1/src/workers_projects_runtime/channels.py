@@ -46,6 +46,13 @@ class DeliveryResult(StrictModel):
     error: str = Field(default="", max_length=2000)
 
 
+class PackageHeartbeat(StrictModel):
+    # "connecting" until Microsoft's socket has held once, then "ready"; "refused" with the refusal when the package
+    # gives up on Microsoft's final refusal; empty from a package that predates it.
+    socket: Literal["", "connecting", "ready", "refused"] = ""
+    error: str = Field(default="", max_length=400)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -62,6 +69,7 @@ CREATE TABLE IF NOT EXISTS channel_bindings (
  kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'setup' CHECK(state IN ('setup','connected','off')),
  people_json TEXT NOT NULL DEFAULT '[]', settings_json TEXT NOT NULL DEFAULT '{}',
  package_seen_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ package_socket TEXT NOT NULL DEFAULT '', package_refusal TEXT NOT NULL DEFAULT '',
  UNIQUE(tenant_id, owner_id, lineage_id, kind)
 );
 CREATE TABLE IF NOT EXISTS channel_inbox (
@@ -97,6 +105,10 @@ def ensure_channels_schema(conn: Any) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(channel_inbox)")}
     if "message_json" not in columns:  # added in place, as the other owners do
         conn.execute("ALTER TABLE channel_inbox ADD COLUMN message_json TEXT NOT NULL DEFAULT '{}'")
+    binding_columns = {row[1] for row in conn.execute("PRAGMA table_info(channel_bindings)")}
+    for column in ("package_socket", "package_refusal"):
+        if column not in binding_columns:
+            conn.execute(f"ALTER TABLE channel_bindings ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
 
 
@@ -125,12 +137,26 @@ class ChannelService:
                 (binding["binding_id"],))]
             unconfirmed = conn.execute("SELECT COUNT(*) FROM channel_deliveries WHERE binding_id=? AND state='not_confirmed'",
                                        (binding["binding_id"],)).fetchone()[0]
+            # Online is not ready: a channel is ready once a first message from the account that connected it has
+            # come through and been accepted (an unlisted sender's message is not that; an app made before this was
+            # recorded counts any accepted message).
+            connected_by = str(settings.get("connected_by") or "")
+            heard = conn.execute("SELECT 1 FROM channel_inbox WHERE binding_id=? AND state='accepted' "
+                                 "AND (?='' OR json_extract(person_json,'$.id')=?) LIMIT 1",
+                                 (binding["binding_id"], connected_by, connected_by)).fetchone() is not None
         seen = binding["package_seen_at"]
-        online = bool(seen) and datetime.fromisoformat(seen) > datetime.now(UTC) - timedelta(seconds=45)
+        recent = bool(seen) and datetime.fromisoformat(seen) > datetime.now(UTC) - timedelta(seconds=45)
+        # Online once Microsoft's socket has held. A package from before it reported the socket counts as before.
+        socket = binding.get("package_socket", "")
+        online = recent and socket in ("", "ready")
         return {"binding_id": binding["binding_id"], "lineage_id": binding["lineage_id"], "kind": binding["kind"],
                 "label": CHANNEL_LABELS.get(binding["kind"], binding["kind"]), "state": binding["state"],
-                "online": online, "people": json.loads(binding["people_json"] or "[]"),
-                "app": {key: settings[key] for key in ("app_id", "app_name", "tenant_id", "mode", "install_link")
+                "online": online, "connecting": recent and socket == "connecting", "first_message": heard,
+                # Microsoft's last final refusal, kept until the socket holds again, so it is said once, not per try.
+                "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
+                "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link",
+                                                       "developer", "website_url", "privacy_url", "terms_url", "scopes",
+                                                       "added_by_admin")
                         if key in settings},
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
                 # While the disk guard holds runs, this Expert cannot answer; messages wait.
@@ -206,11 +232,21 @@ class ChannelService:
         """The setup helper stores public app facts only; credentials stay in the private state folder."""
         self._binding(binding_id, tenant, owner)
         allowed = {key: str(value)[:2000] for key, value in settings.items()
-                   if key in {"app_id", "app_name", "tenant_id", "mode", "install_link", "teams_app_id"}}
+                   if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
+                              "teams_app_id", "developer", "website_url", "privacy_url", "terms_url", "scopes",
+                              "added_by_admin"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))
         return self.view(self._binding(binding_id))
+
+    def mark_added_by_admin(self, tenant: str, owner: str, binding_id: str, added: bool) -> dict:
+        """The owner says an administrator added the app for them (published or deployed in the admin center): the
+        card then stops offering the developer copy's install link, which stays blocked by the person's own policy
+        (the tool reports no catalogue state, so this cannot be read)."""
+        binding = self._binding(binding_id, tenant, owner)
+        settings = {key: value for key, value in json.loads(binding["settings_json"] or "{}").items() if key != "added_by_admin"}
+        return self.record_setup(tenant, owner, binding_id, {**settings, **({"added_by_admin": "yes"} if added else {})})
 
     # ---------------------------------------------------------------- package routes
     def package_config(self, binding_id: str) -> dict:
@@ -219,10 +255,13 @@ class ChannelService:
         return {**self.view(binding), "expert_name": expert["name"],
                 "settings": json.loads(binding["settings_json"] or "{}")}
 
-    def heartbeat(self, binding_id: str) -> dict:
+    def heartbeat(self, binding_id: str, socket: str = "", error: str = "") -> dict:
         self._binding(binding_id)
         with self.store._connect() as conn:
-            conn.execute("UPDATE channel_bindings SET package_seen_at=? WHERE binding_id=?", (_now(), binding_id))
+            # A refusal stays until the socket holds; the tries in between ("connecting") leave it as it is.
+            conn.execute("UPDATE channel_bindings SET package_seen_at=?, package_socket=?, package_refusal=CASE ? "
+                         "WHEN 'ready' THEN '' WHEN 'refused' THEN ? ELSE package_refusal END WHERE binding_id=?",
+                         (_now(), socket, socket, error[:400] or "Microsoft refused the connection.", binding_id))
         return {"ok": True}
 
     def inbound(self, binding_id: str, message: InboundMessage) -> dict:

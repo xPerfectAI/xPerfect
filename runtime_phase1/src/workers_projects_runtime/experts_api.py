@@ -7,7 +7,7 @@ from fastapi import HTTPException, Request
 from pydantic import Field, ValidationError
 
 from .coordinator import CoordinatorConflict, CoordinatorScopeError, StrictModel
-from .channels import DeliveryResult, InboundMessage
+from .channels import DeliveryResult, InboundMessage, PackageHeartbeat
 from .experts import ExpertError, ExpertSpec
 
 
@@ -128,6 +128,25 @@ class ChannelSetupInput(StrictModel):
     settings: dict[str, str] = Field(default_factory=dict)
 
 
+class ChannelConnectInput(StrictModel):
+    # as_account: the account the Connect button named (pressing it is the yes); other_account: sign the tool out and
+    # sign in with Microsoft's code again.
+    as_account: str = Field(default="", max_length=320)
+    other_account: bool = False
+
+
+class ChannelAddedInput(StrictModel):
+    added: bool
+
+
+class ChannelDetailsInput(StrictModel):
+    # The Teams app's public details, as Teams shows them on the app's page; checked again by the service.
+    developer: str = Field(max_length=200)
+    website: str = Field(max_length=2000)
+    privacy: str = Field(max_length=2000)
+    terms: str = Field(max_length=2000)
+
+
 def install_channel_routes(app, channels, principal: Callable[[Request], tuple[Any, str, str]]) -> None:
     """Owner routes for an Expert's channels, and the routes a channel package uses."""
 
@@ -164,12 +183,22 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
         return invoke(channels.update, *owner(request), binding_id, people=payload.people, state=payload.state)
 
     @app.post("/v1/channels/{binding_id}/connect")
-    def connect(binding_id: str, request: Request):
-        return invoke(channels.setup.connect, *owner(request), binding_id)
+    def connect(binding_id: str, request: Request, payload: ChannelConnectInput | None = None):
+        choice = payload or ChannelConnectInput()
+        return invoke(channels.setup.connect, *owner(request), binding_id, as_account=choice.as_account,
+                      other_account=choice.other_account)
 
     @app.get("/v1/channels/{binding_id}/connect")
     def connect_status(binding_id: str, request: Request):
         return invoke(channels.setup.status, *owner(request), binding_id)
+
+    @app.post("/v1/channels/{binding_id}/added-by-admin")
+    def channel_added_by_admin(binding_id: str, payload: ChannelAddedInput, request: Request):
+        return invoke(channels.mark_added_by_admin, *owner(request), binding_id, payload.added)
+
+    @app.post("/v1/channels/{binding_id}/details")
+    def channel_details(binding_id: str, payload: ChannelDetailsInput, request: Request):
+        return invoke(channels.setup.set_details, *owner(request), binding_id, payload.model_dump())
 
     @app.post("/v1/channels/{binding_id}/setup")
     def record_setup(binding_id: str, payload: ChannelSetupInput, request: Request):
@@ -182,9 +211,9 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
         return invoke(channels.package_config, binding_id)
 
     @app.post("/v1/channels/{binding_id}/heartbeat")
-    def heartbeat(binding_id: str, request: Request):
+    def heartbeat(binding_id: str, request: Request, payload: PackageHeartbeat | None = None):
         owned(binding_id, request)
-        return invoke(channels.heartbeat, binding_id)
+        return invoke(channels.heartbeat, binding_id, payload.socket if payload else "", payload.error if payload else "")
 
     @app.post("/v1/channels/{binding_id}/inbound")
     def inbound(binding_id: str, payload: InboundMessage, request: Request):

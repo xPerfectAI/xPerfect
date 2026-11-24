@@ -194,14 +194,35 @@ export function sharedFolderNote(kind, people, waiting) {
   return 'Jobs for everyone here share one work folder on this computer, so a job you approve for one person could read another person’s job files. To keep each person’s work apart, choose a sandboxed workspace in Edit.';
 }
 
+/** A Teams card's links. "Test in Teams" opens a chat by the bot's id; before the app is installed and a first message
+ *  came through, Teams opened another person's chat with it (first real test), so it is offered only after that. */
+export function teamsLinks(channel) {
+  const links = [];
+  // Once an administrator added the app, this link opens the developer copy, which stays blocked: not offered.
+  // Once a first message came through, the app is installed for the owner; this card is theirs alone.
+  if (channel.app.install_link && !channel.app.added_by_admin && !channel.first_message) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
+  if (channel.first_message && channel.app.app_id) {
+    links.push({ label: 'Test in Teams', href: 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id), style: 'primary-button' });
+  }
+  return links;
+}
+
+/** A channel's pill: Connecting… until Microsoft's socket holds, and ready only once a first message came through. */
+export function channelState(channel) {
+  if (channel.state === 'off') return 'Off';
+  if (channel.state !== 'connected') return 'Not connected';
+  if (channel.online) return channel.first_message ? 'Connected' : 'Online · no message yet';
+  return channel.connecting ? 'Connecting…' : 'Connected · offline';
+}
+
 /** Channels: add Teams, Connect with Microsoft's sign-in, people, Test in Teams. */
 export function openChannels(item, { request = libraryRequest, signal } = {}) {
   const dialog = libraryModal(`${item.name} · Channels`, { signal });
   const list = node('div', 'expert-channels'); const status = node('p', 'expert-status'); status.setAttribute('role', 'status');
   dialog.body.append(node('p', 'expert-hint', 'People reach this expert where they already work. Only the people you allow get an answer.'), list, status);
-  let timer = 0;
+  let timer = 0; let again = 0;
   const stop = () => { if (timer) clearTimeout(timer); timer = 0; };
-  dialog.dialog.addEventListener('close', stop, { once: true });
+  dialog.dialog.addEventListener('close', () => { stop(); clearTimeout(again); }, { once: true });
   const path = '/api/experts/' + encodeURIComponent(item.template_id) + '/channels';
   // Where its jobs run decides whether people share a folder; unknown counts as this computer.
   const place = request('/api/experts/' + encodeURIComponent(item.template_id), { signal })
@@ -211,13 +232,56 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     const row = node('div', 'expert-person'); row.append(node('span', '', person.name || person.id));
     const button = node('button', 'secondary-button', label); button.type = 'button'; button.onclick = action; row.append(button); return row;
   }
+  // An administrator who published or deployed the app makes the developer copy's install link a dead end.
+  function adminButton(channel, added) {
+    const button = node('button', 'expert-other-account', added ? 'An administrator added it for me' : 'Undo: show Install in Teams again'); button.type = 'button';
+    button.onclick = async () => {
+      try { await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/added-by-admin', { method: 'POST', body: { added } }); await load(); }
+      catch (error) { status.textContent = error.message; }
+    };
+    return button;
+  }
+  // The app's public details, which Teams shows to everyone who adds it, instead of the tool's placeholders.
+  function appDetails(channel) {
+    const about = node('details', 'expert-details'); about.append(node('summary', '', 'Details Teams shows for this app'));
+    const inputs = {};
+    for (const [key, label, value] of [['developer', 'Developer name', channel.app.developer], ['website', 'Website', channel.app.website_url],
+      ['privacy', 'Privacy policy link', channel.app.privacy_url], ['terms', 'Terms of use link', channel.app.terms_url]]) {
+      const input = node('input'); input.name = key; input.value = value || '';
+      if (key === 'developer') input.maxLength = 32; else { input.type = 'url'; input.placeholder = 'https://'; }
+      inputs[key] = input; about.append(labelled(label, input));
+    }
+    const keep = node('button', 'secondary-button', 'Save details'); keep.type = 'button';
+    keep.onclick = async () => {
+      status.textContent = 'Saving the details in Teams…';
+      try {
+        await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/details', { method: 'POST', body: Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])) });
+        status.textContent = 'Saved: Teams shows them on the app’s page.'; await load();
+      } catch (error) { status.textContent = error.message; }
+    };
+    about.append(node('p', 'expert-hint', 'Teams shows these to everyone who adds the app. Microsoft needs all four; the links start with https://.'), keep);
+    return about;
+  }
   async function save(channel, people) {
     await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { people } }); await load();
   }
-  async function connect(channel) {
-    stop(); status.textContent = 'Starting Microsoft sign-in…';
-    try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect', { method: 'POST', body: {} })); }
+  async function connect(channel, choice = {}) {
+    stop(); status.textContent = choice.as_account ? 'Creating your Teams app…' : 'Starting Microsoft sign-in…';
+    try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect', { method: 'POST', body: choice })); }
     catch (error) { status.textContent = error.message; }
+  }
+  // Already signed in: the button names the account and organisation, so its one press is the yes (another
+  // organisation's login can sit on the same computer); a small button beside it takes another account.
+  async function nameConnect(channel, go, box) {
+    try {
+      const who = (await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect')).signed_in_as;
+      if (!who || !who.account || !go.isConnected) return;
+      go.textContent = `Connect Teams as ${who.account}`; go.dataset.account = who.account;
+      const other = node('button', 'expert-other-account', 'Use another Microsoft account'); other.type = 'button';
+      other.onclick = () => connect(channel, { other_account: true });
+      box.append(other);
+      if (who.tenant_id) box.append(node('small', 'expert-hint', `Organisation ID ${who.tenant_id}`));
+    } catch { /* the plain Connect still works: it signs in with Microsoft's code */ }
   }
   async function poll(channel) {
     try { show(channel, await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/connect')); }
@@ -231,10 +295,21 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const code = node('code', 'expert-code', step.code);
       const copy = node('button', 'secondary-button', 'Copy code'); copy.type = 'button';
       copy.onclick = async () => { try { await navigator.clipboard.writeText(step.code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the code'; } };
-      box.append(node('p', '', 'Sign in to Microsoft with the account that should own this Teams app, then enter this code on Microsoft’s page:'), code, copy, link);
+      box.append(node('p', '', 'Open Microsoft’s page where your work account is signed in (any browser, or your phone) and enter this code. Use the account that should own this Teams app. Microsoft may ask you to approve on your phone. The code lasts about 15 minutes.'), code, copy, link);
       status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
     }
-    if (step.step === 'creating') { status.textContent = 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
+    if (step.step === 'creating') { status.textContent = step.account ? `Creating your Teams app with ${step.account}…` : 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
+    if (step.step === 'blocked') {
+      // Teams does not allow the app yet: the one thing to ask, a note to send, and the page goes on by itself.
+      const now = node('button', 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
+      if (step.note) {  // no note while Microsoft is still applying a change already made
+        const note = node('p', 'expert-hint', step.note); note.style.whiteSpace = 'pre-line';
+        const copy = node('button', 'secondary-button', 'Copy a note for your administrator'); copy.type = 'button';
+        copy.onclick = async () => { try { await navigator.clipboard.writeText(step.note); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the note below'; } };
+        box.append(copy, now, note);
+      } else box.append(now);
+      status.textContent = step.error || ''; timer = setTimeout(() => poll(channel), 10000); return;
+    }
     if (step.step === 'error') {
       const again = node('button', 'primary-button', 'Connect again'); again.type = 'button'; again.onclick = () => connect(channel);
       box.append(again); status.textContent = step.error || 'Setup stopped. Press Connect to try again.'; return;
@@ -253,18 +328,27 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     for (const channel of channels) {
       const card = node('section', 'expert-channel'); card.dataset.binding = channel.binding_id;
       const head = node('div', 'expert-channel-head');
-      const state = channel.state === 'connected' ? (channel.online ? 'Connected' : 'Connected · offline') : channel.state === 'off' ? 'Off' : 'Not connected';
-      head.append(node('strong', '', channel.label), node('span', 'expert-pill', state)); card.append(head);
+      head.append(node('strong', '', channel.label), node('span', 'expert-pill', channelState(channel))); card.append(head);
       if (channel.low_disk) card.append(node('p', 'expert-notice expert-notice-alert', 'Cannot answer right now: this computer is low on disk. Messages wait and are answered when space returns.'));
+      if (channel.refusal && channel.state === 'connected') card.append(node('p', 'expert-notice expert-notice-alert', `Microsoft refused the Teams connection (“${channel.refusal}”). It is tried again by itself every few minutes.`));
       const connectBox = node('div', 'expert-connect'); card.append(connectBox);
       if (!channel.app.app_id) {
-        const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel); connectBox.append(go);
+        const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel, { as_account: go.dataset.account || '' }); connectBox.append(go);
+        void nameConnect(channel, go, connectBox);
       } else {
-        const links = node('div', 'expert-links');
-        if (channel.app.install_link) { const install = node('a', 'secondary-button', 'Install in Teams'); install.href = channel.app.install_link; install.target = '_blank'; install.rel = 'noopener'; links.append(install); }
+        const links = node('div', 'expert-links'); const name = channel.app.app_name || item.name;
+        for (const link of teamsLinks(channel)) { const a = node('a', link.style, link.label); a.href = link.href; a.target = '_blank'; a.rel = 'noopener'; links.append(a); }
         const toggle = node('button', 'secondary-button', channel.state === 'connected' ? 'Turn off' : 'Turn on'); toggle.type = 'button';
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
+        // Which Microsoft account and organisation the app was made in, as Microsoft reported them.
+        if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats.'));
+        if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
+        if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
+        else if (channel.app.added_by_admin) card.append(node('p', 'expert-hint', `An administrator added ${name} for you: it appears in your Teams by itself (Apps, Built for your org; this can take a few hours). Then write in its own chat, named ${name}.`), adminButton(channel, false));
+        else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again.`));
+        if (!channel.first_message && !channel.app.added_by_admin) card.append(adminButton(channel, true));
+        card.append(appDetails(channel));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
       if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));
@@ -281,6 +365,10 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       if (channel.unconfirmed_messages) people.append(node('p', 'expert-hint', `${channel.unconfirmed_messages} message(s) may not have arrived. They are not resent by themselves.`));
       card.append(people); list.append(card);
     }
+    // Until Microsoft's socket holds, look again shortly, so the pill moves on by itself.
+    // Never while the person is typing or has the details open: a re-load rebuilds the cards.
+    const later = () => { if (list.querySelector('details[open]') || list.contains(document.activeElement)) again = setTimeout(later, 3000); else void load(); };
+    clearTimeout(again); if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(later, 3000);
   }
   async function load() { try { render((await request(path)).items || [], await place); } catch (error) { status.textContent = error.message; } }
   void load();

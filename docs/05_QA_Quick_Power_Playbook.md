@@ -288,8 +288,11 @@ real-client step as NOT RUN until visible controls, current configuration and de
 Requirements live in [Experts on channels](10_Experts_and_Channels.md). `test_experts.py` owns the
 deterministic checks (settings and versions, channel intake once, unlisted people, channel off,
 outbox and not-confirmed messages, Always-ask holds, exact approval, rejection with tools off,
-stopped jobs, one result per job); `integrations/teams/tests` owns the Teams mapping and outbox.
-Real model, browser and Teams steps stay NOT RUN until observed.
+stopped jobs, one result per job, and the Teams connection's own checks: Microsoft's custom-app
+report before anything is created, the administrator's note and re-checks, steady answers, socket
+states and restart back-off); `integrations/teams/tests` owns the Teams mapping, outbox, first-start
+retries and readiness; `frontends/glass-drive-ui/tests/test_expert_ux_controls.py` owns the card's
+pill, links and wording. Real model, browser and Teams steps stay NOT RUN until observed.
 
 | Path | User check | Expected result |
 |---|---|---|
@@ -299,7 +302,18 @@ Real model, browser and Teams steps stay NOT RUN until observed.
 | Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
 | Second question | Ask something else while the job runs. | Answered at once; the job continues. |
 | Edit | Change the instructions; ask again. | The next reply follows the new text; a running job finishes with the old. |
-| Teams connect | Manage → Channels → Add Teams → Connect; complete Microsoft's sign-in. | The app is created in socket mode; you are the first allowed person; Install and Test links appear. |
+| Teams connect | Manage → Channels → Add Teams → Connect; complete Microsoft's sign-in. | The app is created in socket mode; you are the first allowed person; Install in Teams appears. |
+| Teams told up front | Press Connect. | Before the sign-in: open Microsoft's page where the work account is signed in (any browser or a phone), a phone approval may come, the code lasts about 15 minutes. |
+| Teams account shown | Complete the sign-in. | While the app is made, and on the card afterwards, the Microsoft account and organisation ID it was made in. |
+| Teams already signed in | Press Connect when the CLI is already signed in. | Nothing is made yet: "Create it as <account>?" with the organisation ID, or Use another Microsoft account, which shows Microsoft's code for a new sign-in. |
+| Teams custom apps off | Connect with an account whose setup policy has Upload custom apps off. | Nothing is created; the page names both switches and which is off, offers a note for the administrator, and checks again by itself every two minutes. |
+| Teams change spreading | The administrator turns the switch on. | At the next check, the first clear yes for both switches creates the app once (a missing answer does not); the card says "Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again." |
+| Teams new bot | The first seconds after the app is created. | Connecting… until Microsoft's socket holds; nothing is claimed or sent before; a refusal that lasts is shown once, in Microsoft's words. |
+| Teams install | Press Install in Teams. | Web or desktop both work; pressing again brings the add window; if Teams says Permissions needed, waiting a few minutes and pressing Install again gets the add window once Microsoft has applied the change. |
+| Teams not ready yet | Before any message has come through. | Online · no message yet; no Test in Teams. |
+| Teams first message | Send the first message in the Expert's own chat. | Connected; Test in Teams appears and says whose chat it opens. |
+| Teams added by an administrator | An administrator publishes and pre-installs the app for you in the Microsoft 365 admin center; on the card press An administrator added it for me. | Install in Teams is no longer offered; the card says the app appears in your Teams by itself; Undo brings the link back. |
+| Teams app details | On the card, open Details Teams shows for this app; enter an http:// link, then four proper details; Save. | The http:// link is refused with Microsoft's rule and nothing is sent; the proper ones are saved and Teams' install window shows them instead of "Developer" and example.com. |
 | Teams message | Message the Expert from your own Teams account. | One reply in the same chat; typing shows while it works. |
 | Not listed | A person who is not listed writes. | No answer; the person waits under Waiting to be allowed. |
 | Same message twice | The channel delivers a message twice. | One turn, one reply. |
