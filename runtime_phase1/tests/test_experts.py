@@ -684,7 +684,8 @@ def test_workers_run_at_the_level_the_expert_shows_or_saving_is_refused(app):
         response = client.post("/v1/experts", json={"name": "Synthetic Expert", "expert": {**SPEC, "workspace": workspace}})
         assert response.status_code == 422 and words in response.text
     experts = application.state.experts
-    sandboxed = create_expert(client, workspace={"kind": "sandboxed", "access": "workspace"})
+    sandboxed = create_expert(client, workspace={"kind": "sandboxed", "access": "workspace"},
+                              team={**SPEC["team"], "coordinate": {"profile": "claude-code"}})
     owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", sandboxed["template_id"])
     template = experts.resolve("local", owner, sandboxed["template_id"])
     binding = ExpertBinding(lineage_id=template["lineage_id"], role="job", access="workspace")
@@ -930,7 +931,8 @@ def test_a_sandboxed_experts_skills_survive_the_clean_room_dispatch_and_reach_co
         "files": [{"path": ".claude/skills/synthetic-brief/SKILL.md", "content": content}],
         "idempotency_key": "synthetic-brief-skill"}).json()
     created = client.post("/v1/experts", json={"name": "Synthetic Sandboxed", "description": "Works in containers.",
-                                               "expert": {**SPEC, "workspace": {"kind": "sandboxed", "access": "workspace"}},
+                                               "expert": {**SPEC, "workspace": {"kind": "sandboxed", "access": "workspace"},
+                                                          "team": {**SPEC["team"], "coordinate": {"profile": "claude-code"}}},
                                                "personal_library_refs": [{"item_id": skill["item_id"],
                                                                           "version_id": skill["version_id"]}]})
     assert created.status_code == 201, created.text
@@ -1035,6 +1037,56 @@ def test_a_job_interrupted_while_it_was_prepared_is_prepared_again_or_told(app):
     assert told["state"] == "failed" and told["result_text"] == "The job could not start."
     assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result' AND identity=?",
                   "job_never_prepared") == 1
+
+
+def test_in_a_sandboxed_workspace_nothing_of_the_expert_works_on_this_computer(app):
+    # Review 2, finding 4: the coordinator runs on this computer, so its own tools stay off there.
+    from workers_projects_runtime.coordinator import ExpertBinding
+    application, client = app
+    experts = application.state.experts
+    sandboxed = {"kind": "sandboxed", "access": "workspace"}
+    refused = client.post("/v1/experts", json={"name": "Synthetic Sandboxed", "expert": {**SPEC, "workspace": sandboxed}})
+    assert refused.status_code == 422 and "Claude talks and coordinates" in refused.text  # a Codex coordinator
+    with_backup = {**SPEC["team"], "coordinate": {"profile": "claude-code", "backup": {"profile": "codex-cli"}}}
+    assert client.post("/v1/experts", json={"name": "Synthetic Sandboxed", "expert": {
+        **SPEC, "workspace": sandboxed, "team": with_backup}}).status_code == 422  # a Codex backup would work here too
+    team = {**SPEC["team"], "coordinate": {"profile": "claude-code"}}
+    created = client.post("/v1/experts", json={"name": "Synthetic Sandboxed", "expert": {**SPEC, "workspace": sandboxed, "team": team}})
+    assert created.status_code == 201, created.text
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created.json()["template_id"])
+    template = experts.resolve("local", owner, created.json()["template_id"])
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job"))
+    assert config.bootstrap_bundle["provider_capabilities"]["coordination_only"] is True
+    assert "expert_skills" not in config.bootstrap_bundle
+    assert {route.execution_mode for route in config.routes} == {"docker"}
+
+
+@pytest.mark.parametrize("saved", ["host_read_only", "sandboxed_codex_coordinator"])
+def test_an_expert_saved_before_the_access_rules_never_starts_work_past_them(app, saved, monkeypatch):
+    # Review 2, finding 7 (and 4 for older records): the save-time rules hold again when work starts.
+    import workers_projects_runtime.experts as experts_module
+    application, client = app
+    experts = application.state.experts
+    workspace = ({"kind": "host", "access": "read_only"} if saved == "host_read_only"
+                 else {"kind": "sandboxed", "access": "workspace"})
+    with monkeypatch.context() as before_the_rule:  # saved while the rule did not exist yet
+        before_the_rule.setattr(experts_module, "_access_refusal", lambda spec: "")
+        expert = create_expert(client, ask_me_first="off", workspace=workspace)
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    with experts.store._connect() as conn:  # a job approved earlier, still waiting to start
+        conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,"
+                     "goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("job_held_before", "local", owner, expert["lineage_id"], chat["conversation_id"], "held-before",
+                      "Synthetic job", "", "held", expert["template_id"], "t", "t"))
+    with pytest.raises(ExpertError, match="Nothing was started"):
+        experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    assert scalar(application, "SELECT count(*) FROM expert_jobs WHERE idempotency_key='k1'") == 0
+    held = experts._start_job("job_held_before")
+    assert held["state"] == "failed" and held["result_text"].startswith("The job could not start: ")
+    assert not held["job_conversation_id"]
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result' AND identity=?",
+                  "job_held_before") == 1
 
 
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):

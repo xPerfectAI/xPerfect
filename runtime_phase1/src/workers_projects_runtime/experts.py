@@ -33,6 +33,28 @@ COORDINATION_ONLY_PROFILES = ("claude-code",)
 TERMINAL_GOALS = {"completed", "failed", "cancelled", "interrupted", "dismissed"}
 
 
+def _access_refusal(spec: "ExpertSpec") -> str:
+    """Why an Expert cannot run at the level it shows, or "" when it can. Checked when it is saved and
+    again when each job starts, so an Expert saved before a rule existed never runs past it.
+
+    On this computer, xPerfect runs mission Workers with full access. In a sandboxed workspace the
+    container is the limit, so nothing of the Expert may work on this computer itself: the roles that
+    run here (talking, coordinating and their backups) are Claude with its own tools off."""
+    if spec.workspace.kind == "host":
+        if spec.workspace.access != "full":
+            return ("On this computer an Expert's Workers run with full access. Choose a sandboxed workspace to "
+                    "limit what they can reach.")
+        return ""
+    if spec.workspace.access != "workspace":
+        return "In a sandboxed workspace its Workers reach only that workspace."
+    roles = [spec.team.talk, spec.team.coordinate]
+    roles += [role.backup for role in list(roles) if role.backup is not None]
+    if any(role.profile not in COORDINATION_ONLY_PROFILES for role in roles):
+        return ("In a sandboxed workspace Claude talks and coordinates, with its own tools off, so all the work "
+                "happens inside the sandbox. Codex would work on this computer itself.")
+    return ""
+
+
 def _goal_may_move(goal: dict) -> bool:
     """Whether a job's goal can still change without a new coordinator turn."""
     if goal["held"]:  # held for an exact continuity resume
@@ -267,14 +289,9 @@ class ExpertService:
         return content
 
     def _check_accounts(self, tenant: str, owner: str, spec: ExpertSpec) -> None:
-        # Workers must run at the level the Expert shows. On this computer, xPerfect runs mission
-        # Workers with full access; in a sandboxed workspace, the container is the limit.
-        if spec.workspace.kind == "host" and spec.workspace.access != "full":
-            raise ExpertError("On this computer an Expert's Workers run with full access. Choose a sandboxed "
-                              "workspace to limit what they can reach.", code="expert_access_unsupported", status=422)
-        if spec.workspace.kind == "sandboxed" and spec.workspace.access != "workspace":
-            raise ExpertError("In a sandboxed workspace its Workers reach only that workspace.",
-                              code="expert_access_unsupported", status=422)
+        refusal = _access_refusal(spec)
+        if refusal:
+            raise ExpertError(refusal, code="expert_access_unsupported", status=422)
         roles = [spec.team.talk, spec.team.coordinate]
         for role in roles:
             if role.model:
@@ -444,9 +461,16 @@ class ExpertService:
                        if spec.instructions.strip() else "")
         # The Skills the owner chose for this Expert reach its Workers the native way, fixed at job start.
         skills = self._expert_skills(tenant, owner, template)
-        # The coordinator gets them too, for its own AI: it often does the work itself.
+        sandboxed = spec.workspace.kind == "sandboxed"
+        if sandboxed:
+            # The coordinator runs on this computer: in a sandboxed workspace its own tools stay off and
+            # all the work happens through its Workers, inside the sandbox.
+            capabilities = {**(config.bootstrap_bundle.get("provider_capabilities") or {}), "coordination_only": True}
+            config = config.model_copy(update={"bootstrap_bundle": {**config.bootstrap_bundle,
+                                                                    "provider_capabilities": capabilities}})
+        # Otherwise the coordinator gets them too, for its own AI: it often does the work itself.
         for_coordinator = [{"name": skill["name"], "files": skill["files"]} for skill in skills
-                           if spec.team.coordinate.profile in skill["profiles"]]
+                           if spec.team.coordinate.profile in skill["profiles"]] if not sandboxed else []
         if for_coordinator:
             config = config.model_copy(update={"bootstrap_bundle": {**config.bootstrap_bundle,
                                                                     "expert_skills": for_coordinator}})
@@ -609,6 +633,9 @@ class ExpertService:
         if not goal:
             raise ExpertError("Describe the job to hand off", status=422)
         template = self.latest(tenant, owner, speaker["lineage_id"])
+        refusal = _access_refusal(self.spec(template))
+        if refusal:  # an Expert saved before this rule never starts work past it
+            raise ExpertError(refusal + " Nothing was started.", code="expert_access_unsupported")
         hold = self.spec(template).ask_me_first == "always" and speaker["channel"] != "chat"
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -663,6 +690,11 @@ class ExpertService:
         template = self._templates.get_workspace_template(template_id=job["template_id"], tenant_id=tenant, owner_id=owner)
         if template is None:
             template = self.latest(tenant, owner, job["lineage_id"])
+        refusal = _access_refusal(self.spec(template))
+        if refusal and not job["job_conversation_id"]:
+            # Held, approved or interrupted, a job never starts past the rule: it is told, once.
+            self._publish(job, "failed", "The job could not start: " + refusal, from_state=job["state"])
+            return self._job(job_id)
         speaker = self.speaker(tenant, owner, job["speaker_conversation_id"])
         if not job["job_conversation_id"]:
             binding = ExpertBinding(lineage_id=job["lineage_id"], role="job",

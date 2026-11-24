@@ -108,7 +108,14 @@ function expertFields(body, spec, accounts, speeds) {
     access.value = options[0][0]; access.disabled = options.length === 1;
     placeHint.textContent = place.value === 'host'
       ? 'It can read and change what you can on this computer. Your instructions and Ask me first are the guard, not a wall. Narrower permissions on this computer come later.'
-      : 'It works in its own sandboxed workspace and its Workers reach only that workspace. This needs containers on the computer or server running xPerfect.';
+      : 'It works in its own sandboxed workspace and its Workers reach only that workspace. Claude talks and coordinates there with its own tools off, so all the work happens inside the sandbox. This needs containers on the computer or server running xPerfect.';
+    if (place.value === 'sandboxed') {
+      // Nothing of the Expert works on this computer itself: Claude talks and coordinates, with no backup.
+      for (const [role, picker] of [['talk', talk], ['coordinate', coordinate]]) {
+        if (picker.value !== 'claude-code') { picker.value = 'claude-code'; picker.onchange?.(); }
+        if (roleAccounts[role]) roleAccounts[role].backup.value = '';
+      }
+    }
   };
   place.onchange = explain; explain();
   const where = node('div', 'expert-where'); where.append(labelled('Where it works', place), labelled('What it may do', access), placeHint); body.append(where);
