@@ -133,11 +133,13 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
 4. **Teams asks web or desktop, and the add window may not appear the first time.** The card says
    either works and to press **Install in Teams** again.
 5. **Teams does not let the person add custom apps.** Teams shows the add button greyed out and
-   "Permissions needed. Ask your IT admin to add … to this team/chat/meeting." Two switches decide it:
-   **Upload custom apps** in the person's app setup policy (Teams admin center → Teams apps → Setup
-   policies; a new policy assigned to one person changes nothing for anyone else) and **Let users
-   interact with custom apps in preview** (Teams apps → Manage apps → Actions → Org-wide app
-   settings). Before creating anything, Connect reads Microsoft's own report of both (the CLI's
+   "Permissions needed. Ask your IT admin to add … to this team/chat/meeting." The person's own switch
+   decides it, **Upload custom apps** in their app setup policy (Teams admin center → Teams apps → Setup
+   policies; a new policy assigned to one person changes nothing for anyone else), together with two
+   organisation-wide ones under Teams apps → Manage apps → Actions → Org-wide app settings → Custom
+   apps: **Let users install and use available apps by default** and **Let users interact with custom
+   apps in preview**. In the first real test both organisation-wide ones were on, and the one off was
+   the person's own Upload custom apps. Before creating anything, Connect reads Microsoft's own report of both (the CLI's
    status) and, when either is off, creates nothing: the page names the switches and which is off,
    offers a note ready to send to the administrator (a first visit to the admin center can take up to
    30 minutes), and reads the report again by itself every two minutes. While a change spreads,

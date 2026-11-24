@@ -2153,9 +2153,10 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
     setup._create("local", owner, binding_id)
     status = client.get(f"/v1/channels/{binding_id}/connect").json()
     assert status["step"] == "blocked" and creations() == 0
-    for words in ("Upload custom apps", "Let users interact with custom apps in preview", "this one person only",
-                  "checks again by itself"):
-        assert words in status["error"]
+    for words in ("Upload custom apps", "Let users install and use available apps by default",
+                  "Let users interact with custom apps in preview", "this one person only",
+                  "the person's own switch is off", "checks again by itself"):
+        assert words in status["error"], words
     # The note asks only for what Microsoft reports off, for this account.
     assert "Upload custom apps" in status["note"] and "Synthetic Owner" in status["note"]
     assert "Let users interact" not in status["note"]
@@ -2327,6 +2328,7 @@ def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_
     both = {"tdp": {"sideloading": {"tenant": False, "user": False}}}
     note = _note_for_admin(both, "Synthetic Expert")
     assert "1. Teams apps → Setup policies" in note and "2. Teams apps → Manage apps → Actions" in note
+    assert "Let users install and use available apps by default" in note  # both organisation-wide switches
     assert "My account" not in note  # no account reported, none invented
     assert "up to 30 minutes" in note  # a first visit to the admin center can take that long
     assert "an hour or more" in note  # two clocks: 43 minutes to a steady report, Teams later still

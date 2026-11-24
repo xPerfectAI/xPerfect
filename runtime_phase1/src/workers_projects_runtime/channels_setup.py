@@ -86,11 +86,13 @@ def _custom_apps_blocked(status: dict, name: str) -> str:
     tenant, user = sideloading.get("tenant"), sideloading.get("user")
     if tenant is not False and user is not False:
         return ""
-    off = "both are" if tenant is False and user is False else ("the first is" if user is False else "the second is")
+    off = ("both the person's switch and the organisation's are" if tenant is False and user is False
+           else "the person's own switch is" if user is False else "the organisation's switches are")
     return (f"Teams does not yet let the account you signed in with add custom apps, so {name} cannot be installed. "
-            "An administrator turns on two switches in the Teams admin center: \"Upload custom apps\" in an app setup "
-            "policy (Teams apps → Setup policies; a new policy can give it to this one person only) and \"Let users "
-            "interact with custom apps in preview\" (Teams apps → Manage apps → Actions → Org-wide app settings). "
+            "An administrator turns them on in the Teams admin center: \"Upload custom apps\" in the person's app setup "
+            "policy (Teams apps → Setup policies; a new policy can give it to this one person only), and for the whole "
+            "organisation, under Teams apps → Manage apps → Actions → Org-wide app settings → Custom apps, \"Let users "
+            "install and use available apps by default\" and \"Let users interact with custom apps in preview\". "
             f"Microsoft reports that {off} off. This page checks again by itself every two minutes.")
 
 
@@ -127,7 +129,7 @@ def _note_for_admin(status: dict, name: str) -> str:
                     "my account. A new policy assigned to me alone changes nothing for anyone else.")
     if sideloading.get("tenant") is False:
         asks.append("Teams apps → Manage apps → Actions → Org-wide app settings → Custom apps: turn on \"Let users "
-                    "interact with custom apps in preview\".")
+                    "install and use available apps by default\" and \"Let users interact with custom apps in preview\".")
     steps = "\n".join(f"{number}. {ask}" for number, ask in enumerate(asks, 1))
     account = str(status.get("username") or "").strip()
     return (f"Hello, could you let me add a Teams app I set up for myself, {name}? In the Teams admin center:\n{steps}\n"
