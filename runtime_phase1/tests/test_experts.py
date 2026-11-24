@@ -38,6 +38,9 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(experts, "_role_config", lambda tenant, owner, role: CoordinatorConfig(
         model="synthetic-model", effort="high",
         routes=[Route(id="default", profile=role.profile, model="synthetic-model", effort="high", execution_mode="host")]))
+    # Maintenance runs only when a test calls it: the background scheduler would otherwise land between steps a
+    # test orders on purpose (an approval paused before its release, then a removal or Off).
+    monkeypatch.setattr(experts.service, "_process_scheduler_cycle", lambda: None)
     with TestClient(application) as client:
         yield application, client
 
