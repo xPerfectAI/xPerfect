@@ -7,7 +7,7 @@ from fastapi import HTTPException, Request
 from pydantic import Field, ValidationError
 
 from .coordinator import CoordinatorConflict, CoordinatorScopeError, StrictModel
-from .channels import DeliveryResult, InboundMessage
+from .channels import DeliveryResult, InboundMessage, PackageHeartbeat
 from .experts import ExpertError, ExpertSpec
 
 
@@ -182,9 +182,9 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
         return invoke(channels.package_config, binding_id)
 
     @app.post("/v1/channels/{binding_id}/heartbeat")
-    def heartbeat(binding_id: str, request: Request):
+    def heartbeat(binding_id: str, request: Request, payload: PackageHeartbeat | None = None):
         owned(binding_id, request)
-        return invoke(channels.heartbeat, binding_id)
+        return invoke(channels.heartbeat, binding_id, payload.socket if payload else "", payload.error if payload else "")
 
     @app.post("/v1/channels/{binding_id}/inbound")
     def inbound(binding_id: str, payload: InboundMessage, request: Request):

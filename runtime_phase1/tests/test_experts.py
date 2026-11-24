@@ -2144,3 +2144,93 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
     setup._create("local", owner, channel["binding_id"])
     assert any(args[:2] == ("app", "create") for args in calls)
     assert client.get(f"/v1/channels/{channel['binding_id']}/connect").json()["step"] == "connected"
+
+
+def test_a_channel_is_connecting_until_microsofts_socket_holds_and_a_lasting_refusal_is_said_once(app):
+    # The first real test: a new bot was refused twice before its socket held. The page says "Connecting…" until
+    # Microsoft's socket holds, and a refusal the package gave up on stays shown, once, until it holds.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    path, service = f"/v1/channels/{channel['binding_id']}/heartbeat", application.state.channels
+
+    def seen():
+        view = service.view(service._binding(channel["binding_id"]))
+        return view["online"], view["connecting"], view["refusal"]
+
+    assert client.post(path, json={}).status_code == 200  # a package from before this: online, as before
+    assert seen() == (True, False, "")
+    client.post(path, json={"socket": "connecting"})
+    assert seen() == (False, True, "")
+    refusal = "Socket Mode negotiate failed: HTTP 401. Check the bot credentials"
+    client.post(path, json={"socket": "refused", "error": refusal})
+    assert seen() == (False, False, refusal)
+    client.post(path, json={"socket": "connecting"})  # the next try leaves the refusal shown
+    assert seen() == (False, True, refusal)
+    client.post(path, json={"socket": "ready"})
+    assert seen() == (True, False, "")
+    assert client.post(path, json={"socket": "unknown"}).status_code == 422
+    assert client.post(path, json={"socket": "ready", "extra": 1}).status_code == 422
+
+
+def test_maintenance_restarts_back_off_while_the_package_never_holds_and_the_owner_starts_it_at_once(
+        app, monkeypatch, tmp_path):
+    # Before: maintenance restarted a package that exited at once every 5 s, for ever. Now it waits 5 s after the
+    # first exit before the socket held, doubling to 5 minutes; a package that held, or the owner's own action,
+    # starts again at once. Fake processes only: nothing is spawned and no real process is signalled.
+    from pathlib import Path
+    from types import SimpleNamespace as Namespace
+    from workers_projects_runtime import channels_setup
+
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, service = channel["binding_id"], application.state.channels
+    setup = service.setup
+    setup.credentials_path(binding_id).write_text("CLIENT_ID=synthetic\n")
+    processes, clock = [], [1000.0]
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            self.pid, self.code = 4_000_000 + len(processes), None
+            processes.append(self)
+
+        def poll(self):
+            return self.code
+
+    monkeypatch.setattr(channels_setup, "subprocess", Namespace(Popen=FakeProcess, STDOUT=-2))
+    monkeypatch.setattr(setup, "_package_python", lambda: Path("synthetic-python"))
+    monkeypatch.setattr(setup, "_alive", lambda pid: any(p.pid == pid and p.code is None for p in processes))
+    setup._clock = lambda: clock[0]
+
+    def cycle(at):
+        clock[0] = at
+        setup.reconcile_once()
+        return len(processes)
+
+    assert cycle(1000) == 1
+    processes[-1].code = 1  # exited before its socket held
+    assert cycle(1000) == 1 and cycle(1004) == 1  # waits 5 s
+    assert cycle(1006) == 2
+    processes[-1].code = 1
+    assert cycle(1006) == 2 and cycle(1015) == 2  # then 10 s
+    assert cycle(1017) == 3
+    service.heartbeat(binding_id, "ready")  # this one held
+    processes[-1].code = 1
+    assert cycle(1017) == 4  # a package that held starts again at once
+    processes[-1].code = 1
+    assert cycle(1017) == 4  # one exit before it held: waits again
+    assert setup.ensure_package(binding_id) == "started" and len(processes) == 5  # the owner's own action: at once
+    processes[-1].code = 1
+    assert cycle(1017) == 5
+    client.patch(f"/v1/channels/{binding_id}", json={"state": "off"})
+    assert cycle(1017) == 5
+    client.patch(f"/v1/channels/{binding_id}", json={"state": "connected"})
+    assert cycle(1017) == 6  # Turn off, Turn on: starts at once
+    waited = []
+    for _ in range(9):  # the wait doubles and stops at 5 minutes
+        count, start = len(processes), clock[0]
+        processes[-1].code = 1
+        while cycle(clock[0]) == count:
+            clock[0] += 5
+        waited.append(clock[0] - start)
+    assert waited == [5, 10, 20, 40, 80, 160, 300, 300, 300]

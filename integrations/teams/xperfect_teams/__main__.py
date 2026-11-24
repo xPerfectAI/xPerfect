@@ -12,7 +12,7 @@ import logging
 import os
 from pathlib import Path
 
-from .bridge import Bridge, RuntimeClient
+from .bridge import Bridge, Readiness, RuntimeClient, start_with_retries
 
 logger = logging.getLogger("xperfect_teams")
 
@@ -41,6 +41,8 @@ async def run(args: argparse.Namespace) -> None:
                    tenant_id=credentials["TENANT_ID"])
     app = App(**options) if args.http_port else App(**options, socket_mode=True)
     bridge = Bridge(client, bot_id=credentials["CLIENT_ID"])
+    socket = app.socket_mode
+    readiness = Readiness(None if socket is None else (lambda: socket.status))
 
     @app.on_message
     async def on_message(ctx):  # noqa: ANN001 - the SDK's context type
@@ -52,22 +54,26 @@ async def run(args: argparse.Namespace) -> None:
 
     async def deliveries() -> None:
         while True:
-            try:
-                await bridge.deliver_once(send)
-            except Exception:
-                logger.warning("delivery round failed", exc_info=True)
+            if readiness.check():  # nothing is claimed before the socket has held: a refused reply is final
+                try:
+                    await bridge.deliver_once(send)
+                except Exception:
+                    logger.warning("delivery round failed", exc_info=True)
             await asyncio.sleep(1)
 
     async def heartbeat() -> None:
         while True:
+            state = "ready" if readiness.check() else "connecting"
             try:
-                await client.heartbeat()
+                await client.heartbeat(state)
             except Exception:
                 logger.warning("heartbeat failed", exc_info=True)
-            await asyncio.sleep(15)
+            await asyncio.sleep(15 if state == "ready" else 3)
 
     await app.initialize()
-    await asyncio.gather(app.start(args.http_port or None), deliveries(), heartbeat())
+    await asyncio.gather(start_with_retries(lambda: app.start(args.http_port or None), lambda: readiness.held,
+                                            gave_up=lambda error: client.heartbeat("refused", str(error))),
+                         deliveries(), heartbeat())
 
 
 def main() -> None:

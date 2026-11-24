@@ -264,3 +264,21 @@ syncWorkspaceUI({value:'new:codex-cli'},{},button,help);
 assert.equal(label.textContent,'Run Project');assert.equal(button.children[0],icon);assert.equal(help.textContent,'Exact help');
 const legacy={textContent:''};syncWorkspaceUI({value:''},{},legacy,help);assert.equal(legacy.textContent,'Run Project');
 """)
+
+
+def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
+    # The first real test: a new bot was refused for its first seconds. The pill says so, the page looks again
+    # by itself until the socket holds, and a lasting refusal is said once on the card.
+    source = (STATIC / 'experts.js').read_text()
+    state = re.search(r"^export function channelState\(.*?^}", source, re.M | re.S)
+    assert state, 'channelState'
+    assert "node('span', 'expert-pill', channelState(channel))" in source
+    assert "if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(load, 3000);" in source
+    assert "if (channel.refusal) card.append(" in source
+    run_node("import assert from 'node:assert/strict';\n" + state.group(0).replace('export ', '') + """
+assert.equal(channelState({state: 'connected', online: true, connecting: false}), 'Connected');
+assert.equal(channelState({state: 'connected', online: false, connecting: true}), 'Connecting…');
+assert.equal(channelState({state: 'connected', online: false, connecting: false}), 'Connected · offline');
+assert.equal(channelState({state: 'off', online: true, connecting: false}), 'Off');
+assert.equal(channelState({state: 'setup', online: false, connecting: false}), 'Not connected');
+""")

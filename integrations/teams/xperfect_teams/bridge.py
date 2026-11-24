@@ -1,12 +1,61 @@
 """Map Teams activities to xPerfect's channel routes, and the outbox back to Teams."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
 import httpx
 
 logger = logging.getLogger("xperfect_teams")
+
+# Microsoft can refuse a brand-new bot's socket (HTTP 401 or 403) until its registration has reached every
+# region: in the first real test, one region refused it twice and the third start held, 8 s after the first.
+FIRST_START_WAITS = (2, 4, 8, 15, 30, 60)  # about two minutes in all
+
+
+def refused_as_final(error: BaseException) -> bool:
+    """Microsoft's final refusal of the socket (HTTP 401 or 403), read from the SDK's fields, never its words."""
+    return getattr(error, "terminal", False) is True and getattr(error, "status_code", None) in (401, 403)
+
+
+async def start_with_retries(start: Callable[[], Awaitable[Any]], held: Callable[[], bool], *,
+                             waits: tuple[float, ...] = FIRST_START_WAITS,
+                             sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+                             gave_up: Callable[[BaseException], Awaitable[Any]] | None = None) -> Any:
+    """Start serving. Until the socket has held once, a final refusal is tried again after growing waits, within
+    a fixed budget; any other error, a refusal after the socket held, or the budget spent is raised as before.
+    A final refusal that is raised is first handed to gave_up, once, so the owner can be told in its words."""
+    for wait in (*waits, None):
+        try:
+            return await start()
+        except Exception as error:
+            final = refused_as_final(error)
+            if wait is None or held() or not final:
+                if final and gave_up is not None:
+                    try:
+                        await gave_up(error)
+                    except Exception:  # telling the owner must never hide the refusal itself
+                        logger.warning("could not report the refusal", exc_info=True)
+                raise
+            logger.warning("Microsoft refused the Teams socket (HTTP %s); a new bot can take a few minutes to reach "
+                           "every region. Trying again in %s s.", error.status_code, wait)
+            await sleep(wait)
+
+
+class Readiness:
+    """Whether the Teams socket has held once. Replies are claimed, and the package reports itself online, only
+    after that: a reply Teams refuses is final. It stays held, because the SDK's overall status drops for a
+    moment whenever one region reconnects. Without a socket (served over HTTP) there is nothing to wait for."""
+
+    def __init__(self, status: Callable[[], Any] | None) -> None:
+        self._status = status
+        self.held = status is None
+
+    def check(self) -> bool:
+        if not self.held and str(self._status()) == "ready":
+            self.held = True
+        return self.held
 
 
 class RuntimeClient:
@@ -28,8 +77,11 @@ class RuntimeClient:
         response.raise_for_status()
         return response.json()
 
-    async def heartbeat(self) -> dict:
-        return await self._post(f"/v1/channels/{self.binding_id}/heartbeat")
+    async def heartbeat(self, socket: str = "", error: str = "") -> dict:
+        """socket: "connecting" until Microsoft's socket has held once, then "ready"; "refused", with the refusal,
+        once, when the package gives up."""
+        body = {"socket": socket, **({"error": error[:400]} if error else {})} if socket else None
+        return await self._post(f"/v1/channels/{self.binding_id}/heartbeat", body)
 
     async def inbound(self, message: dict) -> dict:
         return await self._post(f"/v1/channels/{self.binding_id}/inbound", message)

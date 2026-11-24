@@ -46,6 +46,13 @@ class DeliveryResult(StrictModel):
     error: str = Field(default="", max_length=2000)
 
 
+class PackageHeartbeat(StrictModel):
+    # "connecting" until Microsoft's socket has held once, then "ready"; "refused" with the refusal when the package
+    # gives up on Microsoft's final refusal; empty from a package that predates it.
+    socket: Literal["", "connecting", "ready", "refused"] = ""
+    error: str = Field(default="", max_length=400)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -62,6 +69,7 @@ CREATE TABLE IF NOT EXISTS channel_bindings (
  kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'setup' CHECK(state IN ('setup','connected','off')),
  people_json TEXT NOT NULL DEFAULT '[]', settings_json TEXT NOT NULL DEFAULT '{}',
  package_seen_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ package_socket TEXT NOT NULL DEFAULT '', package_refusal TEXT NOT NULL DEFAULT '',
  UNIQUE(tenant_id, owner_id, lineage_id, kind)
 );
 CREATE TABLE IF NOT EXISTS channel_inbox (
@@ -97,6 +105,10 @@ def ensure_channels_schema(conn: Any) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(channel_inbox)")}
     if "message_json" not in columns:  # added in place, as the other owners do
         conn.execute("ALTER TABLE channel_inbox ADD COLUMN message_json TEXT NOT NULL DEFAULT '{}'")
+    binding_columns = {row[1] for row in conn.execute("PRAGMA table_info(channel_bindings)")}
+    for column in ("package_socket", "package_refusal"):
+        if column not in binding_columns:
+            conn.execute(f"ALTER TABLE channel_bindings ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     record_schema_version(conn, component="channels", version=CHANNELS_SCHEMA_VERSION)
 
 
@@ -126,10 +138,15 @@ class ChannelService:
             unconfirmed = conn.execute("SELECT COUNT(*) FROM channel_deliveries WHERE binding_id=? AND state='not_confirmed'",
                                        (binding["binding_id"],)).fetchone()[0]
         seen = binding["package_seen_at"]
-        online = bool(seen) and datetime.fromisoformat(seen) > datetime.now(UTC) - timedelta(seconds=45)
+        recent = bool(seen) and datetime.fromisoformat(seen) > datetime.now(UTC) - timedelta(seconds=45)
+        # Online once Microsoft's socket has held. A package from before it reported the socket counts as before.
+        socket = binding.get("package_socket", "")
+        online = recent and socket in ("", "ready")
         return {"binding_id": binding["binding_id"], "lineage_id": binding["lineage_id"], "kind": binding["kind"],
                 "label": CHANNEL_LABELS.get(binding["kind"], binding["kind"]), "state": binding["state"],
-                "online": online, "people": json.loads(binding["people_json"] or "[]"),
+                "online": online, "connecting": recent and socket == "connecting",
+                # Microsoft's last final refusal, kept until the socket holds again, so it is said once, not per try.
+                "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
                 "app": {key: settings[key] for key in ("app_id", "app_name", "tenant_id", "mode", "install_link")
                         if key in settings},
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
@@ -219,10 +236,13 @@ class ChannelService:
         return {**self.view(binding), "expert_name": expert["name"],
                 "settings": json.loads(binding["settings_json"] or "{}")}
 
-    def heartbeat(self, binding_id: str) -> dict:
+    def heartbeat(self, binding_id: str, socket: str = "", error: str = "") -> dict:
         self._binding(binding_id)
         with self.store._connect() as conn:
-            conn.execute("UPDATE channel_bindings SET package_seen_at=? WHERE binding_id=?", (_now(), binding_id))
+            # A refusal stays until the socket holds; the tries in between ("connecting") leave it as it is.
+            conn.execute("UPDATE channel_bindings SET package_seen_at=?, package_socket=?, package_refusal=CASE ? "
+                         "WHEN 'ready' THEN '' WHEN 'refused' THEN ? ELSE package_refusal END WHERE binding_id=?",
+                         (_now(), socket, socket, error[:400] or "Microsoft refused the connection.", binding_id))
         return {"ok": True}
 
     def inbound(self, binding_id: str, message: InboundMessage) -> dict:

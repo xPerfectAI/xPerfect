@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 _SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try again."
+_RESTART_FIRST_WAIT_S = 5.0
+_RESTART_MAX_WAIT_S = 300.0
 
 
 def _find(value: Any, key: str) -> Any:
@@ -85,6 +88,9 @@ class TeamsSetup:
         self.channels = channels
         self._sessions: dict[str, dict] = {}
         self._packages: dict[str, subprocess.Popen] = {}
+        self._started: dict[str, str] = {}  # when each package started here began
+        self._restarts: dict[str, tuple[int, float]] = {}  # exits before the socket held, and when to try again
+        self._clock = time.monotonic
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ tools
@@ -268,8 +274,9 @@ class TeamsSetup:
             return False
         return "xperfect_teams" in command
 
-    def ensure_package(self, binding_id: str) -> str:
-        """Exactly one package process per connected channel, also across runtime restarts."""
+    def ensure_package(self, binding_id: str, *, by_owner: bool = True) -> str:
+        """Exactly one package process per connected channel, also across runtime restarts. The owner's own
+        action starts it at once; maintenance (by_owner=False) waits while it keeps exiting before it held."""
         binding = self.channels._binding(binding_id)
         credentials = self.credentials_path(binding_id)
         pid_path = self._pid_path(binding_id)
@@ -279,9 +286,14 @@ class TeamsSetup:
             if running:
                 os.kill(pid, 15)
             pid_path.unlink(missing_ok=True)
+            self._forget(binding_id)
             return "off"
         if running:
             return "running"
+        if by_owner:
+            self._forget(binding_id)
+        elif self._backing_off(binding_id, binding):
+            return "waiting"
         runtime = os.environ.get("GLASSHIVE_RUNTIME_BASE_URL", "http://127.0.0.1:8766")
         logs = _private(_state_dir() / "logs")
         with open(logs / f"teams-{binding_id[-8:]}.log", "ab") as handle:
@@ -291,9 +303,32 @@ class TeamsSetup:
                 stdout=handle, stderr=subprocess.STDOUT, env=_clean_env(), cwd=str(_state_dir()),
                 start_new_session=True)
         self._packages[binding_id] = process
+        self._started[binding_id] = datetime.now(UTC).isoformat()
         pid_path.write_text(str(process.pid))
         pid_path.chmod(0o600)
         return "started"
+
+    def _forget(self, binding_id: str) -> None:
+        self._packages.pop(binding_id, None)
+        self._started.pop(binding_id, None)
+        self._restarts.pop(binding_id, None)
+
+    def _backing_off(self, binding_id: str, binding: dict) -> bool:
+        """Whether maintenance waits before starting this package again: 5 s after the first exit before
+        Microsoft's socket held, doubling to at most 5 minutes; a package that held starts again at once."""
+        process = self._packages.pop(binding_id, None)
+        if process is not None:
+            if process.poll() is None:  # still alive though its pid says otherwise: never start a second one
+                self._packages[binding_id] = process
+                return True
+            started = self._started.pop(binding_id, "")
+            seen = binding.get("package_seen_at") or ""
+            held = (binding.get("package_socket") == "ready" and bool(seen) and bool(started)
+                    and datetime.fromisoformat(seen) >= datetime.fromisoformat(started))
+            failures = 0 if held else self._restarts.get(binding_id, (0, 0.0))[0] + 1
+            wait = min(_RESTART_FIRST_WAIT_S * 2 ** (failures - 1), _RESTART_MAX_WAIT_S) if failures else 0.0
+            self._restarts[binding_id] = (failures, self._clock() + wait)
+        return self._clock() < self._restarts.get(binding_id, (0, 0.0))[1]
 
     def reconcile_once(self) -> list[dict]:
         outcomes = []
@@ -301,7 +336,7 @@ class TeamsSetup:
             ids = [row[0] for row in conn.execute("SELECT binding_id FROM channel_bindings WHERE kind='teams'")]
         for binding_id in ids:
             try:
-                state = self.ensure_package(binding_id)
+                state = self.ensure_package(binding_id, by_owner=False)
                 if state == "started":
                     outcomes.append({"binding_id": binding_id, "package": state})
             except Exception as exc:
@@ -314,3 +349,4 @@ class TeamsSetup:
         if pid and self._alive(pid):
             os.kill(pid, 15)
         pid_path.unlink(missing_ok=True)
+        self._forget(binding_id)

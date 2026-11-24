@@ -194,14 +194,21 @@ export function sharedFolderNote(kind, people, waiting) {
   return 'Jobs for everyone here share one work folder on this computer, so a job you approve for one person could read another person’s job files. To keep each person’s work apart, choose a sandboxed workspace in Edit.';
 }
 
+/** A channel's pill: Connecting… while its package runs but Microsoft's socket has not held yet. */
+export function channelState(channel) {
+  if (channel.state === 'off') return 'Off';
+  if (channel.state !== 'connected') return 'Not connected';
+  return channel.online ? 'Connected' : channel.connecting ? 'Connecting…' : 'Connected · offline';
+}
+
 /** Channels: add Teams, Connect with Microsoft's sign-in, people, Test in Teams. */
 export function openChannels(item, { request = libraryRequest, signal } = {}) {
   const dialog = libraryModal(`${item.name} · Channels`, { signal });
   const list = node('div', 'expert-channels'); const status = node('p', 'expert-status'); status.setAttribute('role', 'status');
   dialog.body.append(node('p', 'expert-hint', 'People reach this expert where they already work. Only the people you allow get an answer.'), list, status);
-  let timer = 0;
+  let timer = 0; let again = 0;
   const stop = () => { if (timer) clearTimeout(timer); timer = 0; };
-  dialog.dialog.addEventListener('close', stop, { once: true });
+  dialog.dialog.addEventListener('close', () => { stop(); clearTimeout(again); }, { once: true });
   const path = '/api/experts/' + encodeURIComponent(item.template_id) + '/channels';
   // Where its jobs run decides whether people share a folder; unknown counts as this computer.
   const place = request('/api/experts/' + encodeURIComponent(item.template_id), { signal })
@@ -253,9 +260,9 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     for (const channel of channels) {
       const card = node('section', 'expert-channel'); card.dataset.binding = channel.binding_id;
       const head = node('div', 'expert-channel-head');
-      const state = channel.state === 'connected' ? (channel.online ? 'Connected' : 'Connected · offline') : channel.state === 'off' ? 'Off' : 'Not connected';
-      head.append(node('strong', '', channel.label), node('span', 'expert-pill', state)); card.append(head);
+      head.append(node('strong', '', channel.label), node('span', 'expert-pill', channelState(channel))); card.append(head);
       if (channel.low_disk) card.append(node('p', 'expert-notice expert-notice-alert', 'Cannot answer right now: this computer is low on disk. Messages wait and are answered when space returns.'));
+      if (channel.refusal) card.append(node('p', 'expert-notice expert-notice-alert', `Microsoft refused the Teams connection (“${channel.refusal}”). It is tried again by itself every few minutes.`));
       const connectBox = node('div', 'expert-connect'); card.append(connectBox);
       if (!channel.app.app_id) {
         const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel); connectBox.append(go);
@@ -282,6 +289,8 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       if (channel.unconfirmed_messages) people.append(node('p', 'expert-hint', `${channel.unconfirmed_messages} message(s) may not have arrived. They are not resent by themselves.`));
       card.append(people); list.append(card);
     }
+    // Until Microsoft's socket holds, look again shortly, so the pill moves on by itself.
+    clearTimeout(again); if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(load, 3000);
   }
   async function load() { try { render((await request(path)).items || [], await place); } catch (error) { status.textContent = error.message; } }
   void load();
