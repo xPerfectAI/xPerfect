@@ -367,8 +367,11 @@ CREATE TABLE IF NOT EXISTS coordinator_events (
 _UNSETTLED_TURN = "restore_hold=0 AND response_json=''"
 _RESULT_STATES = "'completed','failed','cancelled','interrupted'"
 # Turns not yet started that the background pass starts: both rules come from one list of retried
-# blockers, with and without the clock, so they cannot drift apart.
-_RESULT_RETRY_CODES = "'host_capacity','provider_account_busy'"
+# blockers, with and without the clock, so they cannot drift apart. A result turn retries every
+# temporary refusal without a limit: its results are already given to it, so giving up would leave
+# them untold.
+_RESULT_RETRY_BLOCKERS = frozenset({"host_capacity", "provider_account_busy"}) | _RETRYABLE_ADMISSION_CODES
+_RESULT_RETRY_CODES = ",".join(f"'{code}'" for code in sorted(_RESULT_RETRY_BLOCKERS))
 _RETRY_CODES = ",".join(f"'{code}'" for code in sorted(_RETRYABLE_ADMISSION_CODES))
 _READY_TURN = f"""request_id='' AND (
  blocker='' OR (origin='worker_results' AND blocker IN ({_RESULT_RETRY_CODES})
@@ -1732,6 +1735,14 @@ class CoordinatorService:
                             f"AND request_id<>'' AND blocker='' AND {_UNSETTLED_TURN} LIMIT 1",
                             (conversation_id, turn_id)).fetchone():
                 return {"turn_id": turn_id, "state": "queued"}
+            # Messages are answered in the order they arrived: a newer message waits behind an older
+            # one that has not started yet but will (the background pass starts the oldest first).
+            if turn["origin"] == "interactive" and conn.execute(
+                    f"SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND turn_id<>? AND origin='interactive' "
+                    f"AND request_id='' AND {_UNSETTLED_TURN} AND ({_RUNNABLE_TURN}) "
+                    f"AND (created_at<? OR (created_at=? AND turn_id<?)) LIMIT 1",
+                    (conversation_id, turn_id, turn["created_at"], turn["created_at"], turn_id)).fetchone():
+                return {"turn_id": turn_id, "state": "queued"}
             if not turn["payload_json"]:
                 messages = [{"role": "system", "content": json.loads(conversation["prompt_json"])["content"]}]
                 experts = getattr(self, "experts", None)
@@ -1804,7 +1815,7 @@ class CoordinatorService:
                 retryable_result = (
                     current is not None
                     and current["origin"] == "worker_results"
-                    and blocker in {"host_capacity", "provider_account_busy"}
+                    and blocker in _RESULT_RETRY_BLOCKERS
                 )
                 retryable_admission = (
                     current is not None

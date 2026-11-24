@@ -1449,6 +1449,58 @@ def test_a_busy_native_conversation_is_retried_never_left_blocked(coordinator):
     assert answers == ['busy', 'started']
 
 
+def test_a_newer_message_never_overtakes_an_older_one_still_waiting_to_start(coordinator):
+    """Review 2, finding 10: B waits while A runs; A settles; C arrives before the background pass
+    starts B. C must wait behind B, so the person's messages are answered in order."""
+    started = []
+
+    def start(payload, **kwargs):
+        started.append(payload.metadata.message_id)
+        return {'request_id': 'request-' + payload.metadata.message_id, 'state': 'running'}
+
+    coordinator.provider.start = start
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'a', 'First message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'a')['state'] == 'running'
+    coordinator.accept_turn('local', 'owner', cid, 'b', 'Second message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'b')['state'] == 'queued'
+    with coordinator.store._connect() as conn:  # A settles; the background pass has not run yet
+        conn.execute("UPDATE coordinator_turns SET response_json='{\"choices\":[]}' WHERE conversation_id=? AND turn_id='a'", (cid,))
+    coordinator.accept_turn('local', 'owner', cid, 'c', 'Third message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'c')['state'] == 'queued'
+    assert coordinator.start_turn('local', 'owner', cid, 'b')['state'] == 'running'
+    assert started == ['a', 'b']
+
+
+def test_a_result_turn_keeps_retrying_a_busy_conversation_so_its_results_are_told(coordinator):
+    """Review 2, finding 9: seven busy refusals cleared the retry time and stranded a result turn whose
+    results were already given to it. A result turn now retries every temporary refusal, with a capped wait."""
+    from fastapi import HTTPException
+    from workers_projects_runtime.coordinator import _READY_TURN, canonical, now
+    cid = create(coordinator)
+
+    def busy(payload, **kwargs):
+        raise HTTPException(status_code=409, detail={"code": "conversation_session_authority_conflict",
+                                                     "message": "The native conversation is active"})
+
+    coordinator.provider.start = busy
+    with coordinator.store._connect() as conn:
+        conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
+                     (cid, 'result_available', 'run-a', canonical({'goal_id': 'a', 'run_id': 'run-a', 'state': 'completed'}), now()))
+    turn = coordinator.queue_result_turn('local', 'owner', cid)
+    for attempt in range(1, 10):
+        assert coordinator.start_turn('local', 'owner', cid, turn)['state'] == 'blocked'
+        with coordinator.store._connect() as conn:
+            row = conn.execute("SELECT retry_after_at,retry_attempts FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
+                               (cid, turn)).fetchone()
+            assert row['retry_after_at'], f"stranded after {attempt} refusals"
+            conn.execute("UPDATE coordinator_turns SET retry_after_at='2000-01-01T00:00:00+00:00' WHERE conversation_id=? AND turn_id=?",
+                         (cid, turn))
+            ready = conn.execute(f"SELECT turn_id FROM coordinator_turns WHERE conversation_id=:cid AND ({_READY_TURN})",
+                                 {'cid': cid, 'now': now()}).fetchall()
+        assert [r['turn_id'] for r in ready] == [turn]
+
+
 def test_a_message_refused_for_good_does_not_silence_later_results(coordinator):
     """One message refused before it started (a blocker that is not retried) must not hold back every
     later result; a message still waiting to retry does hold them back."""
