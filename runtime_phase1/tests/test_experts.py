@@ -384,3 +384,14 @@ def test_the_owner_sees_a_backup_take_over_and_a_limit_without_one(app):
     assert sorted((item["kind"], item["ai"], item["backup_ai"] if item["kind"] == "backup" else "") for item in items) == [
         ("backup", "claude-code", "codex-cli"), ("limited", "claude-code", "")]
     assert all(item["expert"] == "Synthetic Expert" for item in items)
+
+
+def test_an_expired_sign_in_code_is_never_shown_again(app):
+    application, client = app
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    ended = SimpleNamespace(poll=lambda: 1, returncode=1)  # Microsoft's sign-in timed out
+    application.state.channels.setup._sessions[channel["binding_id"]] = {
+        "step": "sign_in", "url": "https://login.microsoft.com/device", "code": "SYNTHETIC1", "process": ended}
+    status = client.get(f"/v1/channels/{channel['binding_id']}/connect").json()
+    assert status["step"] == "error" and "code" not in status and "Connect" in status["error"]

@@ -108,7 +108,9 @@ class TeamsSetup:
                                                         **({} if ok else {"error": "Microsoft sign-in did not finish. Press Connect to try again."})}
             if ok:
                 threading.Thread(target=self._create, args=(tenant, owner, binding_id), daemon=True).start()
-        public = {key: session[key] for key in ("step", "url", "code", "error") if key in session}
+        # A code is shown only while it can still be used.
+        keys = ("step", "url", "code", "error") if session.get("step") == "sign_in" else ("step", "error")
+        public = {key: session[key] for key in keys if key in session}
         return {**public, "channel": self.channels.view(self.channels._binding(binding_id))}
 
     def connect(self, tenant: str, owner: str, binding_id: str) -> dict:

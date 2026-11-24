@@ -186,7 +186,10 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
     }
     if (step.step === 'creating') { status.textContent = 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
-    if (step.step === 'error') { status.textContent = step.error || 'Setup stopped. Press Connect to try again.'; return; }
+    if (step.step === 'error') {
+      const again = node('button', 'primary-button', 'Connect again'); again.type = 'button'; again.onclick = () => connect(channel);
+      box.append(again); status.textContent = step.error || 'Setup stopped. Press Connect to try again.'; return;
+    }
     status.textContent = ''; void load();
   }
   function render(channels) {
