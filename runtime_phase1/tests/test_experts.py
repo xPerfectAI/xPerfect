@@ -504,6 +504,29 @@ def test_nothing_leaves_a_conversation_stopped_after_its_reply_finished(app, mon
     assert scalar(application, "SELECT error FROM channel_deliveries WHERE turn_id=?", second["turn_id"]) == "The conversation was stopped"
 
 
+def test_messages_waiting_in_a_restored_copy_never_use_up_the_claim(app):
+    # Second review, a note: restore-held messages skipped after the limit starved everything behind them.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    held = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-held")).json()
+    other = {**PERSON, "id": "person-synthetic-b"}
+    client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": [PERSON, other]})
+    ready = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-ready", person=other)).json()
+    with experts.store._connect() as conn:
+        for i in range(12):  # twelve messages of a restored copy, older than the ready one
+            conn.execute("INSERT INTO channel_deliveries(delivery_id,binding_id,conversation_id,turn_id,kind,text,thread_ref_json,"
+                         "state,review_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                         (f"dlv_held_{i}", channel["binding_id"], held["conversation_id"], f"held-{i}", "reply", "HELD", "{}",
+                          "pending", "", f"2000-01-01T00:00:{i:02d}"))
+        conn.execute("UPDATE coordinator_conversations SET restore_hold=1 WHERE conversation_id=?", (held["conversation_id"],))
+    finish_turn(application, ready["conversation_id"], ready["turn_id"], "SYNTHETIC-READY")
+    application.state.channels.reconcile_once()
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim", params={"limit": 10}).json()["items"]
+    assert [item["text"] for item in sent] == ["SYNTHETIC-READY"]
+
+
 @pytest.mark.parametrize("fence", ["stopped", "restored"])
 def test_an_interrupted_approval_is_never_released_past_a_stop_or_a_restore_hold(app, fence):
     # Review 2, findings 3 and 5: the approval committed, its release did not; recovery must respect the fences.

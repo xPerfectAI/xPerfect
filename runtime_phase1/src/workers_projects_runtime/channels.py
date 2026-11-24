@@ -306,6 +306,8 @@ class ChannelService:
                                 "FROM channel_deliveries d LEFT JOIN expert_conversations e "
                                 "ON e.conversation_id=d.conversation_id LEFT JOIN coordinator_conversations c "
                                 "ON c.conversation_id=d.conversation_id WHERE d.binding_id=? AND d.state='pending' "
+                                # A restored copy's messages wait for the owner's resume without using up the claim.
+                                "AND COALESCE(c.restore_hold,0)=0 "
                                 "ORDER BY d.created_at LIMIT ?", (binding_id, max(1, min(limit, 50)))).fetchall()
             for row in rows:
                 if not _listed(binding, json.loads(row["sender_json"] or "{}")):
