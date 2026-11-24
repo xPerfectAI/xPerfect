@@ -117,6 +117,9 @@ def ensure_channels_schema(conn: Any) -> None:
 # How long a package's claim may wait for a reply to become ready: it returns as soon as one is, and a runtime
 # restart waits at most this long for a claim in flight.
 CLAIM_WAIT_MAX_S = 5.0
+# A waiting claim holds one of the server's worker threads, so only this many wait at once; any more answer at once,
+# as before (their package then looks again a second later).
+CLAIM_WAITERS_MAX = 8
 
 
 class ChannelService:
@@ -124,6 +127,7 @@ class ChannelService:
         self.store, self.experts = store, experts
         self._ready = threading.Condition()  # told when a message becomes ready to send
         self._readiness = 0
+        self._waiters = threading.BoundedSemaphore(CLAIM_WAITERS_MAX)
         with store._connect() as conn:
             ensure_channels_schema(conn)
         experts.deliveries = self
@@ -357,17 +361,23 @@ class ChannelService:
     def claim(self, binding_id: str, limit: int = 10, wait: float = 0.0) -> list[dict]:
         """The channel's ready messages, leased to the package to send. With wait, an empty claim waits up to that
         long (at most CLAIM_WAIT_MAX_S) and returns as soon as a message is ready; what a claim does is unchanged."""
-        deadline = time.monotonic() + max(0.0, min(float(wait or 0.0), CLAIM_WAIT_MAX_S))
-        while True:
-            with self._ready:
-                seen = self._readiness
-            claimed = self._claim_now(binding_id, limit)
-            remaining = deadline - time.monotonic()
-            if claimed or remaining <= 0:
-                return claimed
-            with self._ready:
-                if self._readiness == seen:  # nothing became ready meanwhile: wait to be told (or look again soon)
-                    self._ready.wait(timeout=min(remaining, 0.25))
+        wait = max(0.0, min(float(wait or 0.0), CLAIM_WAIT_MAX_S))
+        if not wait or not self._waiters.acquire(blocking=False):
+            return self._claim_now(binding_id, limit)
+        try:
+            deadline = time.monotonic() + wait
+            while True:
+                with self._ready:
+                    seen = self._readiness
+                claimed = self._claim_now(binding_id, limit)
+                remaining = deadline - time.monotonic()
+                if claimed or remaining <= 0:
+                    return claimed
+                with self._ready:
+                    if self._readiness == seen:  # nothing became ready meanwhile: wait to be told (or look again soon)
+                        self._ready.wait(timeout=min(remaining, 0.25))
+        finally:
+            self._waiters.release()
 
     def _claim_now(self, binding_id: str, limit: int) -> list[dict]:
         self._binding(binding_id)

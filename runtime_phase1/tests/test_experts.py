@@ -2958,3 +2958,10 @@ def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkey
     monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 0.2)
     started = time.monotonic()
     assert channels.claim(binding_id, 10, 60.0) == [] and time.monotonic() - started < 1.0  # never past the limit
+    # Only so many claims wait at once (each holds a server thread); the next answers at once, as before.
+    import threading as _threading
+    monkeypatch.setattr(channels, "_waiters", _threading.BoundedSemaphore(1))
+    assert channels._waiters.acquire(blocking=False)  # one claim is already waiting
+    started = time.monotonic()
+    assert channels.claim(binding_id, 10, 3.0) == [] and time.monotonic() - started < 0.2
+    channels._waiters.release()
