@@ -1477,3 +1477,114 @@ def test_a_prepared_job_never_runs_at_an_access_level_no_longer_supported(app, m
     assert refused["state"] == "failed" and refused["result_text"].startswith("The job could not start: ")
     assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
                   refused["job_conversation_id"]) != ""
+
+
+def test_a_job_request_left_waiting_after_its_job_stopped_is_withdrawn(app):
+    # Cell "Request pending" x Crash, after a Stop of the job itself (an earlier version closed the job and
+    # its request in separate steps): a request whose job is no longer held can never be approved.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    with experts.store._connect() as conn:  # the job stopped, its request not yet withdrawn
+        conn.execute("UPDATE expert_jobs SET state='stopped' WHERE job_id=?", (job["job_id"],))
+    experts.reconcile_once()
+    assert {review["kind"] for review in experts.reviews("local", owner)} == {"reply"}
+
+
+def _hold(application, cid, held=True):
+    with application.state.experts.store._connect() as conn:
+        conn.execute("UPDATE coordinator_conversations SET restore_hold=? WHERE conversation_id=?", (int(held), cid))
+
+
+def test_in_a_restored_copy_an_approved_job_waits_and_starts_once_after_the_resume(app):
+    # Cell "Job held, request approved, not started" x "Restored copy": waits; started once after the resume.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
+    _hold(application, cid)
+    experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    experts.reconcile_once()
+    waiting = experts._job(job["job_id"])
+    assert waiting["state"] == "held" and not waiting["job_conversation_id"]
+    _hold(application, cid, held=False)
+    experts.reconcile_once()
+    assert experts._job(job["job_id"])["state"] == "running"
+    experts.reconcile_once()  # (the stub's provider is unreachable, so its first turn then fails and is told)
+    assert scalar(application, "SELECT count(*) FROM expert_conversations WHERE role='job' AND job_id=?", job["job_id"]) == 1
+
+
+def test_in_a_restored_copy_a_job_not_yet_prepared_waits_and_is_prepared_once_after_the_resume(app):
+    # Cell "Job starting, not prepared" x "Restored copy": waits for the resume, then prepared once.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    old = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
+    with experts.store._connect() as conn:
+        conn.execute("INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,idempotency_key,"
+                     "goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("job_restored", "local", owner, expert["lineage_id"], chat["conversation_id"], "job_restored",
+                      "Synthetic job", "", "starting", expert["template_id"], old, old))
+    _hold(application, chat["conversation_id"])
+    experts.reconcile_once()
+    assert experts._job("job_restored")["state"] == "starting" and not experts._job("job_restored")["job_conversation_id"]
+    _hold(application, chat["conversation_id"], held=False)
+    experts.reconcile_once()
+    assert experts._job("job_restored")["state"] == "starting"  # not given up for the time it waited
+    a_minute_later = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    with experts.store._connect() as conn:  # the next pass after the resume, past its 30 seconds
+        conn.execute("UPDATE expert_jobs SET updated_at=? WHERE job_id='job_restored'", (a_minute_later,))
+    experts.reconcile_once()
+    assert experts._job("job_restored")["state"] == "running"
+    experts.reconcile_once()
+    assert scalar(application, "SELECT count(*) FROM expert_conversations WHERE role='job' AND job_id='job_restored'") == 1
+
+
+@pytest.mark.parametrize("decision", ["reject", "off"])
+def test_in_a_restored_copy_a_decision_is_told_once_after_the_resume(app, decision):
+    # Cells "Request rejected, not yet told" and "Request pending" x Off, in a restored copy: the turn that
+    # tells the person is written and waits; nothing is told twice once the owner resumes the copy.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    _hold(application, cid)
+    if decision == "reject":
+        review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
+        experts.decide("local", owner, review["review_id"], decision="reject", expected_digest=review["payload_digest"])
+        expected = 1
+    else:
+        read = client.get(f"/v1/experts/{expert['template_id']}").json()
+        assert client.patch(f"/v1/experts/{expert['template_id']}", json={
+            "expected_catalog_revision": read["catalog_revision"],
+            "expert": {**read["expert"], "ask_me_first": "off"}}).status_code == 200
+        expected = 2
+    assert experts._job(job["job_id"])["state"] == "withdrawn"
+    told = "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' AND conversation_id=?"
+    assert scalar(application, told, cid) == expected
+    experts.reconcile_once()
+    _hold(application, cid, held=False)
+    experts.reconcile_once()
+    experts.reconcile_once()
+    assert scalar(application, told, cid) == expected
+    assert scalar(application, "SELECT count(*) FROM expert_reviews WHERE speaker_conversation_id=? AND followup_turn_id=''",
+                  cid) == (0 if decision == "off" else 1)  # the reply's request, still waiting for the owner
+
+
+@pytest.mark.parametrize("closed", ["removed", "off"])
+def test_a_no_for_a_person_who_can_no_longer_be_served_is_never_told_nor_revisited(app, closed):
+    # Cell "Request rejected, its no not yet told" x "Person removed" / "Channel off": not told, and marked so
+    # that maintenance never tries again.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
+    _close(application, channel, cid, closed)
+    experts.decide("local", owner, review["review_id"], decision="reject", expected_digest=review["payload_digest"])
+    told = "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision'"
+    assert scalar(application, told) == 0
+    assert experts._review(review["review_id"])["followup_turn_id"] == experts.NOT_TOLD
+    experts.reconcile_once()
+    experts.reconcile_once()
+    assert scalar(application, told) == 0
