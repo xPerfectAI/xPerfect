@@ -1,9 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "tools": {
     "expert_hand_off": "Start one background job for work that needs files, Skills, tools, research or more than a quick answer. A coordinator runs it with Workers in parallel while you stay free to talk. Give the goal in the person's own terms and any context the job needs; the runtime also passes the person's exact message. Use a stable idempotency_key for one job; a retry with the same key returns the same job. When the job finishes, its result arrives here as a new message for you to tell the person.",
     "expert_jobs": "List this conversation's jobs with their state and, for finished jobs, a short result.",
     "expert_job_control": "Change or stop one of this conversation's jobs. Use action \"change\" with the person's new guidance, or \"stop\" to cancel only that job. Use a stable idempotency_key.",
-    "expert_ask_owner": "Ask your owner before acting. Use it when a request is unusual, outside your role or the access you were given, or you are not sure your owner would agree. Give your reason and exactly one thing that waits for approval: reply (the exact text you would send) or job_goal (the job you would start, with optional job_context). Nothing is sent or started until your owner approves, and an approval releases exactly what you gave. Then tell the person, briefly, that you are checking with your owner."
+    "expert_ask_owner": "Ask your owner before acting. Use it when a request is unusual, outside your role or the access you were given, asks for something your instructions forbid, or you are not sure your owner would agree; your owner wants to see these, even when you expect the answer is no. Give your reason and exactly one thing that waits for approval: reply (the exact text you would send; a refusal is a reply too) or job_goal (the job you would start, with optional job_context). Nothing is sent or started until your owner approves, and an approval releases exactly what you gave. Then tell the person, briefly, that you are checking with your owner."
   }
 }
