@@ -128,6 +128,14 @@ class ChannelSetupInput(StrictModel):
     settings: dict[str, str] = Field(default_factory=dict)
 
 
+class ChannelDetailsInput(StrictModel):
+    # The Teams app's public details, as Teams shows them on the app's page; checked again by the service.
+    developer: str = Field(max_length=200)
+    website: str = Field(max_length=2000)
+    privacy: str = Field(max_length=2000)
+    terms: str = Field(max_length=2000)
+
+
 def install_channel_routes(app, channels, principal: Callable[[Request], tuple[Any, str, str]]) -> None:
     """Owner routes for an Expert's channels, and the routes a channel package uses."""
 
@@ -170,6 +178,10 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
     @app.get("/v1/channels/{binding_id}/connect")
     def connect_status(binding_id: str, request: Request):
         return invoke(channels.setup.status, *owner(request), binding_id)
+
+    @app.post("/v1/channels/{binding_id}/details")
+    def channel_details(binding_id: str, payload: ChannelDetailsInput, request: Request):
+        return invoke(channels.setup.set_details, *owner(request), binding_id, payload.model_dump())
 
     @app.post("/v1/channels/{binding_id}/setup")
     def record_setup(binding_id: str, payload: ChannelSetupInput, request: Request):

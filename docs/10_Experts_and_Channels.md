@@ -142,11 +142,11 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
    offers a note ready to send to the administrator (a first visit to the admin center can take up to
    30 minutes), and reads the report again by itself every two minutes. While a change spreads,
    Microsoft's servers answer differently: they flipped between no and yes (about 6 yes in 10) for 43
-   minutes after the policy was assigned, so an administrator should expect up to an hour. After a "no",
-   Connect goes on only after eight "yes" in a row about 8 seconds apart, saying meanwhile that Microsoft
-   is still applying it. Teams refused the install a minute after a
-   single "yes" (whether Teams also lags behind a steady "yes" is not known yet), so the card says
-   "permissions needed" may mean a change is still spreading.
+   minutes after the policy was assigned. After a "no", Connect goes on only after eight "yes" in a row
+   about 8 seconds apart, saying meanwhile that Microsoft is applying it. There are two clocks: Teams'
+   own add button still refused six minutes after that report was steady (49 minutes after the change),
+   so the page says it can take an hour or more before Teams lets the person add the app, keeps
+   **Install in Teams** there, and calls the channel ready only after a first message.
 6. **What xPerfect cannot do with this sign-in.** The pinned CLI's sign-in asks only for Microsoft
    Graph `Application.ReadWrite.All` and the Developer Portal's `AppDefinitions.ReadWrite`. Assigning a
    policy (`teamsPolicyUserAssignment: assign`, documented for meeting policies), publishing to the
@@ -165,6 +165,9 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
    message has come through, with a line saying whose chat it opens and to send nothing in any other.
 10. **Reading the Connect status never starts anything.** A finished sign-in creates the app once,
     however often the page reads the status.
+11. **The app showed placeholder details** ("Developer" and example.com links) in Teams' install window.
+    The owner sets the developer name, website, privacy and terms links on the card; xPerfect checks them
+    by Microsoft's rules before sending anything and applies them with the CLI's `app update`.
 
 ## Nothing happens twice
 
@@ -194,8 +197,10 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
   carry an account and cool-downs kept per account; on macOS a named second Claude account also
   needs local named-account support.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.
-- The Teams app's public details (developer name, website, privacy and terms links) are still the
-  CLI's placeholders; Microsoft requires all four (HTTPS links, a name of at most 32 characters).
+- A new Teams app starts with the CLI's placeholder details ("Developer", example.com links) until the
+  owner sets the four under **Details Teams shows for this app** on the Channels card (Microsoft requires
+  all four: HTTPS links with a domain and a developer name of at most 32 characters); xPerfect applies
+  them with the CLI's own `app update`. A neutral default page of xPerfect's own is not decided yet.
 - A Teams app is created for any organisation's sign-in (the CLI's default); creating it for one
   organisation (`--sign-in-audience myOrg`) waits until a fresh connection proves it with socket mode.
 - A blocked Connect's re-check lives in memory: after a runtime restart, Connect is pressed again.

@@ -230,6 +230,27 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     const row = node('div', 'expert-person'); row.append(node('span', '', person.name || person.id));
     const button = node('button', 'secondary-button', label); button.type = 'button'; button.onclick = action; row.append(button); return row;
   }
+  // The app's public details, which Teams shows to everyone who adds it, instead of the tool's placeholders.
+  function appDetails(channel) {
+    const about = node('details', 'expert-details'); about.append(node('summary', '', 'Details Teams shows for this app'));
+    const inputs = {};
+    for (const [key, label, value] of [['developer', 'Developer name', channel.app.developer], ['website', 'Website', channel.app.website_url],
+      ['privacy', 'Privacy policy link', channel.app.privacy_url], ['terms', 'Terms of use link', channel.app.terms_url]]) {
+      const input = node('input'); input.name = key; input.value = value || '';
+      if (key === 'developer') input.maxLength = 32; else { input.type = 'url'; input.placeholder = 'https://'; }
+      inputs[key] = input; about.append(labelled(label, input));
+    }
+    const keep = node('button', 'secondary-button', 'Save details'); keep.type = 'button';
+    keep.onclick = async () => {
+      status.textContent = 'Saving the details in Teams…';
+      try {
+        await request('/api/channels/' + encodeURIComponent(channel.binding_id) + '/details', { method: 'POST', body: Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])) });
+        status.textContent = 'Saved: Teams shows them on the app’s page.'; await load();
+      } catch (error) { status.textContent = error.message; }
+    };
+    about.append(node('p', 'expert-hint', 'Teams shows these to everyone who adds the app. Microsoft needs all four; the links start with https://.'), keep);
+    return about;
+  }
   async function save(channel, people) {
     await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { people } }); await load();
   }
@@ -298,7 +319,8 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         // Which Microsoft account and organisation the app was made in, as Microsoft reported them.
         if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
-        else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. If Teams says permissions are needed, an administrator's change may still be spreading; try again in a few minutes.`));
+        else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. If Teams says permissions are needed, Microsoft may still be applying a change: it can take an hour or more before Teams lets you add the app. Install in Teams stays here; try again later.`));
+        card.append(appDetails(channel));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
       if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));

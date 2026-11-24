@@ -317,5 +317,19 @@ def test_the_person_is_told_up_front_what_microsoft_and_teams_will_ask():
                   "Microsoft may ask you to approve on your phone.", "The code lasts about 15 minutes.",
                   "Creating your Teams app with ${step.account}…", "Made with ${channel.app.account}",
                   "Teams may ask web or desktop, either works", "press Install in Teams again",
-                  "If Teams says permissions are needed, an administrator's change may still be spreading"):
+                  "it can take an hour or more before Teams lets you add the app. Install in Teams stays here"):
         assert words in source, words
+
+
+def test_the_owner_sets_the_teams_apps_public_details():
+    # Hurdle 10: the install window showed "Developer" and example.com. The card offers the four details Teams shows,
+    # and the page's server forwards them to the runtime, which checks and applies them.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function appDetails(channel)", "'Details Teams shows for this app'", "card.append(appDetails(channel));",
+                  "'/details', { method: 'POST'", "Microsoft needs all four; the links start with https://.",
+                  "input.maxLength = 32"):
+        assert words in source, words
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '@app.post("/api/channels/{binding_id}/details")' in server
+    assert '+ "/details", payload)' in server
+    assert '.expert-details[open]{display:grid;gap:8px}' in (STATIC / 'experts.css').read_text()

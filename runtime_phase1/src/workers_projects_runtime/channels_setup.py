@@ -17,6 +17,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .experts import ExpertError
 
@@ -59,8 +60,8 @@ _RECHECK_S = 120.0  # while Teams does not allow the app, Microsoft's report is 
 _STEADY_READS = 8
 _STEADY_RECHECK_S = 8.0
 _STEADY_SPAN_S = (_STEADY_READS - 1) * _STEADY_RECHECK_S
-_STILL_APPLYING = ("Microsoft is still applying the change: it has said yes, but not every time yet (this can take up "
-                   "to an hour). This page checks again by itself and goes on when the answer is steady.")
+_STILL_APPLYING = ("Microsoft is applying this. It can take an hour or more before Teams lets you add the app. This page "
+                   "checks again by itself and goes on when Microsoft's answer is steady.")
 _NOT_REPORTED = ("Microsoft did not say this time whether Teams allows the app here. This page checks again by itself "
                  "and goes on once Microsoft says yes, steadily.")
 
@@ -93,6 +94,22 @@ def _custom_apps_blocked(status: dict, name: str) -> str:
             f"Microsoft reports that {off} off. This page checks again by itself every two minutes.")
 
 
+_DETAIL_FLAGS = (("developer", "--developer"), ("website", "--website"), ("privacy", "--privacy-url"),
+                 ("terms", "--terms-url"))
+
+
+def _detail_problem(values: dict[str, str]) -> str:
+    """Microsoft's rules for the app's public details: a developer name of 1 to 32 characters and HTTPS links with a
+    domain (Teams requires all four; the pinned tool checks the links the same way)."""
+    if not 1 <= len(values["developer"]) <= 32:
+        return "The developer name needs 1 to 32 characters."
+    for key, label in (("website", "website"), ("privacy", "privacy policy"), ("terms", "terms of use")):
+        parsed = urlparse(values[key])
+        if parsed.scheme != "https" or "." not in parsed.netloc or len(values[key]) > 2000:
+            return f"The {label} link must start with https:// and include a domain."
+    return ""
+
+
 def _custom_apps_allowed(status: dict) -> bool:
     """Microsoft's explicit yes for both switches. After a "no", anything less (a missing or partial report, as from a
     signed-out tool or a portal that did not answer) is not a yes."""
@@ -115,8 +132,8 @@ def _note_for_admin(status: dict, name: str) -> str:
     account = str(status.get("username") or "").strip()
     return (f"Hello, could you let me add a Teams app I set up for myself, {name}? In the Teams admin center:\n{steps}\n"
             + (f"My account: {account}.\n" if account else "")
-            + "If the admin center says it is still setting up, that can take up to 30 minutes, and Microsoft can take up "
-            "to an hour to apply the change. Thank you!")
+            + "If the admin center says it is still setting up, that can take up to 30 minutes, and it can take an hour "
+            "or more before Teams lets me add the app. Thank you!")
 
 
 class TeamsSetup:
@@ -233,6 +250,24 @@ class TeamsSetup:
                                           "process": process}
         threading.Thread(target=self._finish_sign_in, args=(tenant, owner, binding_id, process), daemon=True).start()
         return self.status(tenant, owner, binding_id)
+
+    def set_details(self, tenant: str, owner: str, binding_id: str, details: dict) -> dict:
+        """The owner's own public details for the Teams app (Teams shows them on the app's page) instead of the
+        tool's placeholders: checked first, then applied with the tool's own `app update`, then kept."""
+        binding = self.channels._binding(binding_id, tenant, owner)
+        settings = json.loads(binding["settings_json"] or "{}")
+        app_id = str(settings.get("teams_app_id") or "")
+        if not app_id:
+            raise ExpertError("Connect the channel first: its Teams app does not exist yet.", code="channel_not_connected")
+        values = {key: str(details.get(key) or "").strip() for key, _ in _DETAIL_FLAGS}
+        problem = _detail_problem(values)
+        if problem:
+            raise ExpertError(problem, code="channel_details_invalid")
+        flags = [part for key, flag in _DETAIL_FLAGS for part in (flag, values[key])]
+        self._run("app", "update", app_id, *flags, timeout=120)
+        return self.channels.record_setup(tenant, owner, binding_id, {
+            **settings, "developer": values["developer"], "website_url": values["website"],
+            "privacy_url": values["privacy"], "terms_url": values["terms"]})
 
     def _pending(self, binding_id: str) -> bool:
         """Under the lock: a sign-in, an app creation or a check of Microsoft's report is under way."""

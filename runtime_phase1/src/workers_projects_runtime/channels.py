@@ -154,7 +154,8 @@ class ChannelService:
                 "online": online, "connecting": recent and socket == "connecting", "first_message": heard,
                 # Microsoft's last final refusal, kept until the socket holds again, so it is said once, not per try.
                 "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
-                "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link")
+                "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link",
+                                                       "developer", "website_url", "privacy_url", "terms_url")
                         if key in settings},
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
                 # While the disk guard holds runs, this Expert cannot answer; messages wait.
@@ -231,7 +232,7 @@ class ChannelService:
         self._binding(binding_id, tenant, owner)
         allowed = {key: str(value)[:2000] for key, value in settings.items()
                    if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
-                              "teams_app_id"}}
+                              "teams_app_id", "developer", "website_url", "privacy_url", "terms_url"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))

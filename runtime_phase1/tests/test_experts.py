@@ -2179,7 +2179,7 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
     setup.reconcile_once()
     run_background()  # one "yes" after a "no" is one of Microsoft's servers: not yet
     status = client.get(f"/v1/channels/{binding_id}/connect").json()
-    assert creations() == 0 and status["step"] == "blocked" and "still applying" in status["error"]
+    assert creations() == 0 and status["step"] == "blocked" and "Microsoft is applying this" in status["error"]
     assert status.get("note", "") == ""
     for _ in range(3):  # "Check now" pressed again and again cannot make a minute shorter
         client.post(f"/v1/channels/{binding_id}/connect", json={})
@@ -2329,7 +2329,7 @@ def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_
     assert "1. Teams apps → Setup policies" in note and "2. Teams apps → Manage apps → Actions" in note
     assert "My account" not in note  # no account reported, none invented
     assert "up to 30 minutes" in note  # a first visit to the admin center can take that long
-    assert "up to an hour" in note  # the first real test's policy took 43 minutes to be reported steadily
+    assert "an hour or more" in note  # two clocks: 43 minutes to a steady report, Teams later still
     assert "Upload custom apps" not in _note_for_admin({"tdp": {"sideloading": {"tenant": False, "user": True}}}, "X")
 
 
@@ -2432,3 +2432,35 @@ def test_two_near_simultaneous_starts_make_one_package(app, monkeypatch, tmp_pat
     for caller in callers:
         caller.join(timeout=10)
     assert len(processes) == 1 and sorted(outcomes) == ["running", "started"]
+
+
+def test_the_owner_sets_the_apps_public_details_instead_of_the_placeholders(app, monkeypatch):
+    # The first real test's install window showed "Developer" and example.com links (hurdle 10). The owner now sets
+    # the four details; they are checked by Microsoft's rules first and applied with the pinned tool's own
+    # `app update` on this channel's Teams app. A fake tool only: nothing reaches Microsoft.
+    application, client = app
+    channel = connected_channel(application, client, create_expert(client))
+    binding_id, setup = channel["binding_id"], application.state.channels.setup
+    path, calls = f"/v1/channels/{binding_id}/details", []
+    monkeypatch.setattr(setup, "_run", lambda *args, timeout=300: calls.append(args) or {})
+    good = {"developer": "Synthetic Company", "website": "https://synthetic.example/teams",
+            "privacy": "https://synthetic.example/privacy", "terms": "https://synthetic.example/terms"}
+    before = client.post(path, json=good)
+    assert before.status_code >= 400 and "Connect the channel first" in before.text and calls == []
+    client.post(f"/v1/channels/{binding_id}/setup", json={"settings": {
+        "app_id": "synthetic-app", "teams_app_id": "teams-app-synthetic", "mode": "socket", "account": "Synthetic Owner"}})
+    for change, words in (({"developer": "x" * 33}, "1 to 32 characters"), ({"developer": " "}, "1 to 32 characters"),
+                          ({"website": "http://synthetic.example"}, "website link must start with https://"),
+                          ({"privacy": "https://localhost"}, "privacy policy link must start with https://"),
+                          ({"terms": "synthetic.example/terms"}, "terms of use link must start with https://")):
+        refused = client.post(path, json={**good, **change})
+        assert refused.status_code >= 400 and words in refused.text, (change, refused.text)
+    assert calls == []  # nothing is sent to Microsoft that it would refuse
+    saved = client.post(path, json=good)
+    assert saved.status_code == 200, saved.text
+    assert calls == [("app", "update", "teams-app-synthetic", "--developer", "Synthetic Company",
+                      "--website", "https://synthetic.example/teams", "--privacy-url", "https://synthetic.example/privacy",
+                      "--terms-url", "https://synthetic.example/terms")]
+    shown = saved.json()["app"]
+    assert shown["developer"] == "Synthetic Company" and shown["terms_url"] == "https://synthetic.example/terms"
+    assert shown["app_id"] == "synthetic-app" and shown["account"] == "Synthetic Owner"  # the rest is kept
