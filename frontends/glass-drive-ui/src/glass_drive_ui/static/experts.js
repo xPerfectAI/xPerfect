@@ -16,6 +16,19 @@ export const DEFAULT_EXPERT = {
           work: ['claude-code', 'codex-cli'] },
 };
 
+// Which model talks: '' is the deployment's usual model; every other option saves that exact model.
+export const MODELS = { 'claude-code': [['', 'Its usual model', 'claude-code:opus'], ['claude-code:opus', 'Opus', 'claude-code:opus'],
+                                        ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
+                        'codex-cli': [['', 'Its usual model', 'codex-cli:native-default'],
+                                      ['codex-cli:gpt-6.2-sol', 'GPT-6.2 Sol', 'codex-cli:gpt-6.2-sol']] };
+
+/** The talking model choices; a model saved exactly stays selected as saved, also one the list does not name. */
+export function modelOptions(profile, keep = '') {
+  const options = MODELS[profile] || [['', 'Its usual model', '']];
+  const unnamed = keep && keep.startsWith(profile + ':') && !options.some(([value]) => value === keep);
+  return unnamed ? [...options, [keep, keep.slice(profile.length + 1), keep]] : options;
+}
+
 function labelled(text, control, hint = '') {
   const wrapper = node('label', 'personal-library-field expert-field'); wrapper.append(node('span', '', text), control);
   if (hint) wrapper.append(node('small', 'expert-hint', hint));
@@ -40,12 +53,9 @@ function expertFields(body, spec, accounts, speeds) {
   const team = node('fieldset', 'expert-team'); team.append(node('legend', '', 'AI team'));
   const talk = select(AIS.slice(0, 2), s.team.talk.profile);
   // Which model talks; each option shows its median time to a finished reply on this computer.
-  const MODELS = { 'claude-code': [['', 'Opus', 'claude-code:opus'], ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
-                   'codex-cli': [['', 'Its usual model', 'codex-cli:native-default'],
-                                 ['codex-cli:gpt-6.2-sol', 'GPT-6.2 Sol', 'codex-cli:gpt-6.2-sol']] };
   const talkModel = node('select'); let measured = {};
   const fillModels = (keep) => {
-    const options = MODELS[talk.value] || [['', 'Its usual model', '']];
+    const options = modelOptions(talk.value, keep);
     talkModel.replaceChildren(...options.map(([value, text, id]) => {
       const o = node('option', '', measured[id] ? `${text} · about ${measured[id].median_s} s here` : text); o.value = value; return o; }));
     talkModel.value = options.some(([value]) => value === keep) ? keep : '';
