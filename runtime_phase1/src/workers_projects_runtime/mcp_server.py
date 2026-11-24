@@ -2672,6 +2672,8 @@ def _normalize_bootstrap_bundle(value: Any) -> dict[str, Any] | None:
     parsed.pop("viventium_continuation_contract", None)
     parsed.pop("viventium_continuation_context", None)
     parsed.pop("inherited_conversation", None)
+    # An Expert's Skills reach its Workers only from that Expert's own job dispatch.
+    parsed.pop("expert_skills", None)
 
     if isinstance(launch_authority_for(parsed), dict):
         parsed = canonical_parallel_clean_room_bootstrap(parsed)
