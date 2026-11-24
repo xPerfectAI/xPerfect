@@ -383,9 +383,10 @@ class CoordinatorService:
                   OLD.owner_id IS NOT NEW.owner_id OR OLD.destination_id IS NOT NEW.destination_id OR
                   OLD.payload_json IS NOT NEW.payload_json OR OLD.expires_at IS NOT NEW.expires_at)
                 BEGIN SELECT RAISE(ABORT,'coordinator delivery snapshot is immutable'); END""")
-            # An earlier internal version of this sweep adds two partial indexes. Continuity reviews the
-            # exact index set at this schema version, so an install left by the previous release
-            # would be refused on upgrade; the sweep scans instead (measured in the tests).
+            # An earlier internal version of this sweep adds two partial indexes. Continuity's incoming review
+            # requires the exact index set at this schema version, so they are left out and the
+            # sweep scans: about 34 ms per cycle at 40,000 turns with goals, runs and results
+            # (1.7 ms with the indexes). Adding them needs that review to accept owner-added indexes.
             record_schema_version(conn, component="coordinator", version=COORDINATOR_SCHEMA_VERSION)
 
     def _conversation(self, tenant: str, owner: str, conversation_id: str) -> dict:

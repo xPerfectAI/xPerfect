@@ -42,3 +42,8 @@
 @media (prefers-reduced-motion:no-preference){.needs-you-toast:not([hidden]){animation:needs-you-in .18s ease-out}}
 @keyframes needs-you-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
 .expert-library{display:grid;gap:6px}
+
+.expert-notices { display: grid; gap: 6px; margin: 0 0 18px; }
+.expert-notices h2 { font-size: 0.95rem; margin: 0 0 2px; }
+.expert-notice { margin: 0; color: var(--muted, inherit); font-size: 0.9rem; line-height: 1.45; }
+.expert-notice strong { color: var(--text, inherit); font-weight: 600; }

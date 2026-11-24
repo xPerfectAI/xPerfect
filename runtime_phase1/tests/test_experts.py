@@ -339,3 +339,48 @@ def test_a_job_stopped_while_it_is_prepared_never_starts(app, monkeypatch):
     stored = experts._job(job["job_id"])
     assert stored["state"] == "stopped"
     assert experts.coordinator.snapshot("local", owner, stored["job_conversation_id"])["stop_scope"] == "stopped"
+
+
+def test_a_backup_the_runtime_cannot_honour_is_refused_at_save(app):
+    application, client = app
+    for talk, words in [({"profile": "claude-code", "backup": {"profile": "claude-code"}}, "different AI"),
+                        ({"profile": "claude-code", "backup": {"profile": "codex-cli", "account_id": "acct-synthetic"}},
+                         "sign-in")]:
+        response = client.post("/v1/experts", json={"name": "Synthetic Expert",
+                                                    "expert": {**SPEC, "team": {**SPEC["team"], "talk": talk}}})
+        assert response.status_code == 422 and words in response.text
+    create_expert(client, team={**SPEC["team"], "talk": {"profile": "claude-code", "effort": "low",
+                                                         "backup": {"profile": "codex-cli"}}})
+
+
+def test_the_owner_sees_a_backup_take_over_and_a_limit_without_one(app):
+    application, client = app
+    expert = create_expert(client)
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    store = experts.store
+    project = store.create_project(owner, "Synthetic", "Synthetic project", "claude-code")
+    worker = store.create_worker(project["project_id"], owner, "Queen", "speaker", "claude-code", "claude-code",
+                                 "claude-code", "opus", execution_mode="host")
+    session = store.upsert_provider_session(tenant_id="local", owner_id=owner, conversation_id=chat["conversation_id"],
+                                            agent_id="coordinator", model_id="claude-code:opus",
+                                            project_id=project["project_id"], worker_id=worker["worker_id"],
+                                            workspace_dir="/synthetic/workspace", access_mode="read_write")
+    switched, _ = store.create_provider_request(tenant_id="local", owner_id=owner, session_id=session["session_id"],
+                                                idempotency_key="synthetic-switched", message_id="m1", stream_id="s1",
+                                                requested_history_count=0)
+    store.add_provider_activity(switched["request_id"], "route-skipped", "Skipped a known-unhealthy provider route.",
+                                {"profile": "claude-code", "fallbackProfile": "codex-cli",
+                                 "failureClass": "provider_rate_limited", "cooldownUntil": "2099-01-01T00:00:00+00:00",
+                                 "fallbackEligible": True})
+    limited, _ = store.create_provider_request(tenant_id="local", owner_id=owner, session_id=session["session_id"],
+                                               idempotency_key="synthetic-limited", message_id="m2", stream_id="s2",
+                                               requested_history_count=0)
+    run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic turn")
+    store.update_run(run["run_id"], state="failed", failure_class="provider_rate_limited")
+    store.update_provider_request(limited["request_id"], run_id=run["run_id"])
+    items = client.get("/v1/expert-notices").json()["items"]
+    assert sorted((item["kind"], item["ai"], item["backup_ai"] if item["kind"] == "backup" else "") for item in items) == [
+        ("backup", "claude-code", "codex-cli"), ("limited", "claude-code", "")]
+    assert all(item["expert"] == "Synthetic Expert" for item in items)

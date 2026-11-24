@@ -53,16 +53,23 @@ function expertFields(body, spec, accounts) {
               labelled('May work', workers, 'Workers run in parallel on the job.'));
   const accountsBox = node('details', 'expert-accounts'); accountsBox.append(node('summary', '', 'Accounts'));
   const roleAccounts = {};
-  for (const [role, title] of [['talk', 'Talks'], ['coordinate', 'Coordinates']]) {
+  const fill = (box, options, value) => {
+    box.replaceChildren(...options.map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; }));
+    box.value = options.some(([v]) => v === value) ? value : '';
+  };
+  // A backup is another AI on this computer's sign-in; it takes only work that has not started.
+  const backupOptions = profile => [['', 'No backup'], ...AIS.filter(([p]) => p !== profile).map(([p, t]) => [`${p}|`, t])];
+  for (const [role, title, picker] of [['talk', 'Talks', talk], ['coordinate', 'Coordinates', coordinate]]) {
     const main = select(accountOptions(accounts, s.team[role].profile), s.team[role].account_id || '');
-    const backup = select([['', 'No backup'], ...AIS.flatMap(([p, t]) => accountOptions(accounts, p).map(([id, label]) => [`${p}|${id}`, `${t}: ${label}`]))],
+    const backup = select(backupOptions(s.team[role].profile),
       s.team[role].backup ? `${s.team[role].backup.profile}|${s.team[role].backup.account_id || ''}` : '');
     roleAccounts[role] = { main, backup };
     accountsBox.append(labelled(`${title}: main`, main), labelled(`${title}: backup`, backup, 'Used only for work that has not started.'));
+    const sync = () => { backup.disabled = Boolean(main.value); if (main.value) backup.value = ''; };
+    main.onchange = sync; sync();
+    picker.onchange = () => { fill(main, accountOptions(accounts, picker.value), main.value); fill(backup, backupOptions(picker.value), backup.value); sync(); };
   }
-  accountsBox.append(node('p', 'expert-hint', 'A connected account runs one thing at a time. This computer’s sign-in can run the Queen and Workers together. API keys stay optional.'));
-  talk.onchange = () => { roleAccounts.talk.main.replaceChildren(...accountOptions(accounts, talk.value).map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; })); };
-  coordinate.onchange = () => { roleAccounts.coordinate.main.replaceChildren(...accountOptions(accounts, coordinate.value).map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; })); };
+  accountsBox.append(node('p', 'expert-hint', 'A backup works on this computer’s sign-in for now; a second account of the same AI comes later. A connected account runs one thing at a time. API keys stay optional.'));
   team.append(accountsBox); body.append(team);
 
   const ask = node('fieldset', 'expert-ask'); ask.append(node('legend', '', 'Ask me first'));
@@ -279,12 +286,33 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       try { new Notification('xPerfect: Needs you', { body: text }); } catch { /* The in-page pop-up remains. */ }
     }
   }
+  // Things to know, not to act on: a backup took over, or a limit stopped a reply.
+  let recent = null; let tick = 0;
+  if (mount) { recent = node('section', 'expert-notices'); recent.hidden = true; recent.setAttribute('aria-label', 'Recent'); mount.before(recent); }
+  const aiName = profile => (AIS.find(([p]) => p === profile) || [profile, profile || 'The AI'])[1];
+  const clock = iso => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
+  async function refreshNotices() {
+    if (!recent) return;
+    try {
+      const notices = (await request('/api/expert-notices')).items || [];
+      recent.hidden = !notices.length; recent.replaceChildren(node('h2', '', 'Recent'));
+      for (const n of notices.slice(0, 8)) {
+        const who = n.person ? ` for ${n.person}` : '';
+        const text = n.kind === 'backup'
+          ? `Backup took over${who}: ${aiName(n.backup_ai)} answered because ${aiName(n.ai)} is at its limit${n.until ? ` until ${clock(n.until)}` : ''}.`
+          : `Could not answer${who}: ${aiName(n.ai)} is at its limit and no backup took over.`;
+        const line = node('p', 'expert-notice'); line.append(node('strong', '', n.expert), node('span', '', ` · ${age(n.at)} · ${text}`));
+        recent.append(line);
+      }
+    } catch { /* Keep the last known lines; the next refresh retries. */ }
+  }
   async function refresh() {
     try {
       items = (await request('/api/expert-reviews?state=pending')).items || [];
       for (const item of items) { if (!seen.has(item.review_id)) { seen.add(item.review_id); if (!first) announce(item); } }
       first = false; render();
     } catch { /* Keep the last known list; the next refresh retries. */ }
+    if (tick++ % 4 === 0) void refreshNotices();
   }
   void refresh(); setInterval(refresh, 4000);
   return { refresh };

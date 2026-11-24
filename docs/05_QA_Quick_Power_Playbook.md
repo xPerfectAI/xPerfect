@@ -307,6 +307,8 @@ Real model, browser and Teams steps stay NOT RUN until observed.
 | Changed or stopped | Stop a held job, then press Approve on its old card. | Refused; nothing starts. |
 | Only the owner | Approve with a runtime token or from a Worker. | Refused (403). |
 | Unknown send | The package never reports a send. | After two minutes the message is not confirmed, shown to the owner, never resent. |
-| Off | Turn the channel off during work. | Nothing more is sent; the job stays visible. |
+| Off | Turn the channel off during work. | Nothing more is sent; its jobs stop and its waiting requests are withdrawn; the job stays visible. |
+| Backup | Main AI limited (synthetic cool-down on its route); send a message. | The reply comes from the backup AI before any reply starts; Activity → Recent says the backup took over. With no backup, Recent says the limit stopped the reply. |
+| Stop | Say "stop that" during a job. | That job stops and never starts again, also after a restart; other jobs carry on. |
 | Extraction | A test person tries to get planted private items or another person's work: asking, tricking, through a job. | Nothing leaks in ten runs on the exact models; no second person before this passes. |
 | Restart | Restart xPerfect during a job and right after a send. | The job resumes or is reported; no action twice; no second copy of a message. |

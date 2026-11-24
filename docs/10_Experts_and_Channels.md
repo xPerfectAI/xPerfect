@@ -19,7 +19,7 @@ current; every save makes a new version. The `expert` key in its content holds:
 | Setting | Meaning |
 |---|---|
 | `instructions` | Who it is, what it does for people, what it must never share. The speaking assistant reads the newest text when each turn starts. A running job keeps the text it started with. |
-| `team.talk` | The AI that talks to people (Claude or Codex), its account and an optional backup, and its effort. New Experts reply at low effort so first words come quickly. |
+| `team.talk` | The AI that talks to people (Claude or Codex), its account, its effort and an optional backup. New Experts reply at low effort so first words come quickly. |
 | `team.coordinate` | The AI that runs each job, its account and an optional backup. |
 | `team.work` | The AIs that may work on a job, in parallel. |
 | `ask_me_first` | `always`, `auto` (default) or `off`. |
@@ -115,8 +115,12 @@ or a server for a wall.
 - Stopping a job stops its coordinator conversation with the coordinator's durable Stop: nothing in
   it starts again, also after a restart, and other jobs are untouched. A finished Worker run wakes
   its job at once instead of waiting for the next pass over every conversation.
-- A declared backup account is the conversation's armed fallback: the provider switches to it only
-  before the reply starts, while the main route is in a quota or rate-limit cool-down.
+- A backup is another AI on this computer's sign-in. It is the conversation's armed fallback: the
+  provider switches to it only before the reply starts, while the main route is in a quota or
+  rate-limit cool-down. The owner sees each switch, and each reply a limit stopped with no backup,
+  under Recent on Activity. Saving a backup the runtime cannot honour is refused: the same AI on a
+  second account, or a main or backup on a connected account (the armed fallback switches the AI,
+  not the account).
 - A message delivered twice by a channel makes one turn. An outgoing message with an unknown outcome
   is never resent by itself.
 - Backups, restores and upgrades review the Expert and channel tables like the other optional
@@ -129,4 +133,7 @@ or a server for a wall.
 - A conversation's AI and account are fixed when it starts; instructions, effort and Ask me first
   follow the newest version at each turn.
 - A connected subscription account runs one thing at a time.
+- A backup on a second account of the same AI is a later capability. It needs the armed fallback to
+  carry an account and cool-downs kept per account; on macOS a named second Claude account also
+  needs local named-account support.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.

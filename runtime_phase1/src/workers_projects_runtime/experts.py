@@ -235,6 +235,15 @@ class ExpertService:
     def _check_accounts(self, tenant: str, owner: str, spec: ExpertSpec) -> None:
         roles = [spec.team.talk, spec.team.coordinate]
         for role in roles:
+            if role.backup is not None:
+                # The armed fallback switches the AI before a reply starts; it cannot switch the
+                # account yet. A backup it cannot honour is refused, never silently ignored.
+                if role.backup.profile == role.profile:
+                    raise ExpertError("For now a backup must be a different AI from the main one.",
+                                      code="expert_backup_unsupported", status=422)
+                if role.backup.account_id or role.account_id:
+                    raise ExpertError("For now a backup works when the main AI and the backup both use this "
+                                      "computer's own sign-in.", code="expert_backup_unsupported", status=422)
             for account_id in [role.account_id, role.backup.account_id if role.backup else ""]:
                 if not account_id:
                     continue
@@ -749,6 +758,51 @@ class ExpertService:
         with self.store._connect() as conn:
             conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
                          "WHERE review_id=? AND state='pending'", (note, _now(), review_id))
+
+    def notices(self, tenant: str, owner: str, limit: int = 20) -> list[dict]:
+        """What the owner should see without acting: a backup took over, or a limit stopped a reply.
+
+        Read from the provider's own receipts, so nothing switches silently and nothing new is stored.
+        """
+        with self.store._connect() as conn:
+            rows = [dict(row) for row in conn.execute("""
+                SELECT * FROM (
+                  SELECT e.lineage_id,e.role,e.sender_json,e.channel,a.created_at AS at,'backup' AS kind,
+                         a.payload_json AS detail
+                  FROM provider_activity a JOIN provider_requests p ON p.request_id=a.request_id
+                  JOIN provider_sessions s ON s.session_id=p.session_id
+                  JOIN expert_conversations e ON e.conversation_id=s.conversation_id
+                  WHERE a.event_type='route-skipped' AND e.tenant_id=? AND e.owner_id=?
+                  UNION ALL
+                  SELECT e.lineage_id,e.role,e.sender_json,e.channel,COALESCE(r.ended_at,p.updated_at) AS at,
+                         CASE WHEN p.fallback_state<>'' THEN 'backup' ELSE 'limited' END AS kind,
+                         json_object('failureClass',r.failure_class,'profile',w.profile,
+                                     'fallbackModel',p.fallback_model_id) AS detail
+                  FROM provider_requests p JOIN provider_sessions s ON s.session_id=p.session_id
+                  JOIN expert_conversations e ON e.conversation_id=s.conversation_id
+                  JOIN runs r ON r.run_id=p.run_id LEFT JOIN workers w ON w.worker_id=r.worker_id
+                  WHERE e.tenant_id=? AND e.owner_id=? AND r.state='failed'
+                    AND r.failure_class IN ('provider_rate_limited','provider_quota_exhausted')
+                ) ORDER BY at DESC LIMIT ?""", (tenant, owner, tenant, owner, limit))]
+        names: dict[str, str] = {}
+        items = []
+        for row in rows:
+            if row["lineage_id"] not in names:
+                try:
+                    names[row["lineage_id"]] = str(self.latest(tenant, owner, row["lineage_id"]).get("name") or "Expert")
+                except Exception:
+                    names[row["lineage_id"]] = "Expert"
+            detail = json.loads(row["detail"] or "{}")
+            backup_model = str(detail.get("fallbackModel") or "")
+            items.append({
+                "kind": row["kind"], "at": row["at"], "expert": names[row["lineage_id"]], "role": row["role"],
+                "person": str(json.loads(row["sender_json"] or "{}").get("name") or ""), "channel": row["channel"],
+                "ai": str(detail.get("profile") or ""),
+                "backup_ai": str(detail.get("fallbackProfile") or backup_model.split(":", 1)[0]),
+                "until": str(detail.get("cooldownUntil") or ""),
+                "reason": str(detail.get("failureClass") or ""),
+            })
+        return items
 
     def reviews(self, tenant: str, owner: str, state: str = "pending", limit: int = 100) -> list[dict]:
         with self.store._connect() as conn:
