@@ -72,7 +72,7 @@ def test_a_container_codex_worker_finds_the_experts_skill_in_its_own_home(tmp_pa
     skills = runtime._home_dir("wrk_container_codex") / ".agents" / "skills"
     assert (skills / "synthetic-brief" / "SKILL.md").read_text() == SKILL["files"][0]["content"]
     record = runtime._state_dir("wrk_container_codex") / "expert-skills-codex.json"
-    assert json.loads(record.read_text()) == ["synthetic-brief"]  # in the runtime's own state, not the home
+    assert list(json.loads(record.read_text())["placed"]) == ["synthetic-brief"]  # in the runtime's own state
     assert not (skills / ".expert-skills.json").exists()
     # The next start without that Skill removes only what was placed; a Skill the Worker made stays.
     (skills / "worker-own").mkdir()
@@ -121,14 +121,17 @@ def test_placing_skills_refuses_links_and_folders_it_did_not_place(tmp_path):
     with pytest.raises(RuntimeErrorBase, match="already used"):
         _place_expert_skills(own, Path(".agents/skills"), [SKILL], record=tmp_path / "state-own" / "record.json")
     assert (own / ".agents" / "skills" / "synthetic-brief" / "SKILL.md").read_text() == "mine"
-    # A placed folder later swapped for a link is unlinked, never followed; the place it points to is untouched.
+    # A placed folder later swapped for a link is not what the runtime placed: never followed, never removed,
+    # and the Skill is not placed over it; the place it points to is untouched.
     swapped = tmp_path / "swapped"
     swapped_record = tmp_path / "state-swapped" / "record.json"
     assert _place_expert_skills(swapped, Path(".agents/skills"), [SKILL], record=swapped_record) == ["synthetic-brief"]
     shutil.rmtree(swapped / ".agents" / "skills" / "synthetic-brief")
     os.symlink(outside, swapped / ".agents" / "skills" / "synthetic-brief")
     assert _place_expert_skills(swapped, Path(".agents/skills"), [], record=swapped_record) == []
-    assert not os.path.lexists(swapped / ".agents" / "skills" / "synthetic-brief")
+    assert os.path.islink(swapped / ".agents" / "skills" / "synthetic-brief")
+    with pytest.raises(RuntimeErrorBase, match="already used"):
+        _place_expert_skills(swapped, Path(".agents/skills"), [SKILL], record=swapped_record)
     assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
     # The runtime's own Skills folder (Claude's) is replaced whole: a link planted in its place is unlinked.
     owned = tmp_path / "owned"

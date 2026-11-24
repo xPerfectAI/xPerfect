@@ -1488,14 +1488,54 @@ def _remove_skill_entry(folder: int, name: str) -> None:
         os.unlink(name, dir_fd=folder)
 
 
+def _placed_skill_matches(folder: int, name: str, placed: dict[str, str]) -> bool:
+    """Whether the entry ``name`` of a Skills folder holds only files the runtime placed there, each with
+    exactly the content it placed (an interrupted placement holds some of them). A link, another kind of
+    entry, a file it did not place or a changed file makes the folder someone else's."""
+    try:
+        top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+    except FileNotFoundError:
+        return False
+    except OSError:  # a link or a file where the folder was
+        return False
+
+    def holds_only_placed(directory: int, prefix: str) -> bool:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                relative = prefix + entry.name
+                if entry.is_symlink():
+                    return False
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                    try:
+                        if not holds_only_placed(child, relative + "/"):
+                            return False
+                    finally:
+                        os.close(child)
+                elif entry.is_file(follow_symlinks=False) and relative in placed:
+                    with os.fdopen(os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory), "rb") as handle:
+                        if hashlib.sha256(handle.read()).hexdigest() != placed[relative]:
+                            return False
+                else:
+                    return False
+        return True
+
+    try:
+        return holds_only_placed(top, "")
+    finally:
+        os.close(top)
+
+
 def _place_expert_skills(home: Path, root: Path, declared: object, *, record: Path | None = None) -> list[str]:
     """Place an Expert's chosen Skills under ``home/root``, a folder its Worker can write to.
 
     Every write opens its path through no-follow descriptors and replaces the file whole, so a link
     planted in the home can neither redirect a write nor change an outside file. With no ``record``
     the Skills folder belongs to the runtime alone and is replaced whole at each launch. With one (a
-    file in the runtime's own state, outside the Worker's reach) the folder is shared with the Worker:
-    only the names the runtime recorded are removed, and a name the Worker made itself is refused."""
+    file in the runtime's own state) the folder is shared with the Worker, and a full-access Worker on
+    this computer can reach the record as its owner can. So the runtime removes only what it can prove
+    it placed: a recorded folder holding nothing but the files it recorded, each with the content it
+    recorded. Anything else stays, and a chosen name already in use is refused."""
     from .bootstrap import _read_private_native_file, _sandbox_parent_descriptor, _write_private_native_file
 
     if declared is None:
@@ -1504,6 +1544,8 @@ def _place_expert_skills(home: Path, root: Path, declared: object, *, record: Pa
         raise RuntimeErrorBase("An Expert's Skills must be a list")
     chosen = [_expert_skill_files(skill) for skill in declared]
     names = [name for name, _files in chosen]
+    placing = {name: {relative.as_posix(): hashlib.sha256(content).hexdigest() for relative, content in files.items()}
+               for name, files in chosen}
     try:
         if record is None:
             if not chosen and not os.path.lexists(home / root):
@@ -1511,27 +1553,43 @@ def _place_expert_skills(home: Path, root: Path, declared: object, *, record: Pa
             with _sandbox_parent_descriptor(home, root) as (parent, folder_name):
                 _remove_skill_entry(parent, folder_name)
         else:
-            earlier = []
+            raw: object = {}
             if os.path.lexists(record):
                 try:
-                    earlier = json.loads(_read_private_native_file(record.parent, Path(record.name)) or "[]")
+                    raw = json.loads(_read_private_native_file(record.parent, Path(record.name)) or "{}")
                 except ValueError:
-                    earlier = []
-            earlier = [str(name) for name in earlier if _EXPERT_SKILL_NAME.fullmatch(str(name))] \
-                if isinstance(earlier, list) else []
+                    raw = {}
+            earlier: dict[str, dict[str, str] | None] = {}
+            if isinstance(raw, dict) and isinstance(raw.get("placed"), dict):
+                earlier = {str(name): {str(path): str(sha) for path, sha in files.items()}
+                           for name, files in raw["placed"].items()
+                           if _EXPERT_SKILL_NAME.fullmatch(str(name)) and isinstance(files, dict)}
+            elif isinstance(raw, list):  # an earlier version recorded names only: proven by content below
+                earlier = {str(name): None for name in raw if _EXPERT_SKILL_NAME.fullmatch(str(name))}
             if not chosen and not earlier:
                 return []
+            kept: dict[str, dict[str, str]] = {}
             with _sandbox_parent_descriptor(home, root / ".expert-skills-check") as (folder, _name):
-                for name in earlier:
-                    _remove_skill_entry(folder, name)
+                for name, placed in earlier.items():
+                    proof = placed if placed is not None else placing.get(name)
+                    if proof is not None and _placed_skill_matches(folder, name, proof):
+                        _remove_skill_entry(folder, name)
+                    elif placed is not None:
+                        try:  # still there, unproven: removed once it holds only what was placed
+                            os.stat(name, dir_fd=folder, follow_symlinks=False)
+                            kept[name] = placed
+                        except FileNotFoundError:
+                            pass
                 for name in names:
                     try:
                         os.stat(name, dir_fd=folder, follow_symlinks=False)
                     except FileNotFoundError:
                         continue
                     raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
-            # The names are recorded before their files, so an interrupted placement is removed next time.
-            _write_private_native_file(record.parent, Path(record.name), json.dumps(names).encode("utf-8"), mode=0o600)
+            # What is placed is recorded before its files, so an interrupted placement is removed next time.
+            _write_private_native_file(record.parent, Path(record.name),
+                                       json.dumps({"placed": {**kept, **placing}}, sort_keys=True).encode("utf-8"),
+                                       mode=0o600)
         for name, files in chosen:
             for relative, content in files.items():
                 _write_private_native_file(home, root / name / relative, content, mode=0o600)

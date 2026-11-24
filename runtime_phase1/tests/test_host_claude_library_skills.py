@@ -290,3 +290,37 @@ def test_names_a_worker_writes_in_its_home_are_never_trusted_for_removal(tmp_pat
     runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": []}, record=record)
     assert (skills / "worker-own" / "SKILL.md").read_text() == "made by the Worker"
     assert not (skills / "synthetic-brief").exists()
+
+
+def test_a_record_the_worker_rewrote_never_removes_a_folder_the_runtime_did_not_place(tmp_path):
+    # Review 3, C2: a full-access Worker can reach the record, so removal needs proof: a folder holding only
+    # the files the runtime placed, each with the content it placed. Anything else stays.
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    runtime = object.__new__(HostCodexCliRuntime)
+    home = tmp_path / "worker-home"
+    (home / ".codex").mkdir(parents=True)
+    skills = home / ".agents" / "skills"
+    (skills / "owner-own").mkdir(parents=True)
+    (skills / "owner-own" / "SKILL.md").write_text("the owner's own Skill")
+    record = tmp_path / "state" / "expert-skills-codex.json"
+    chosen = {"expert_skills": [SYNTHETIC_EXPERT_SKILL]}
+    runtime._project_host_codex_expert_skills(home / ".codex", chosen, record=record)
+    placed = json.loads(record.read_text())["placed"]
+    # The Worker rewrites the record to claim the owner's folder, in an earlier version's form and in today's.
+    for claim in (["owner-own", "synthetic-brief"], {"placed": {**placed, "owner-own": {"SKILL.md": "0" * 64}}}):
+        record.write_text(json.dumps(claim))
+        runtime._project_host_codex_expert_skills(home / ".codex", chosen, record=record)
+        assert (skills / "owner-own" / "SKILL.md").read_text() == "the owner's own Skill"
+        assert (skills / "synthetic-brief" / "SKILL.md").exists()
+    # A placed folder the Worker changed is its own now: left in place when no longer chosen, and the Skill is
+    # not placed over it again.
+    (skills / "synthetic-brief" / "notes.md").write_text("added by the Worker")
+    runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": []}, record=record)
+    assert (skills / "synthetic-brief" / "notes.md").read_text() == "added by the Worker"
+    with pytest.raises(RuntimeErrorBase, match="already used"):
+        runtime._project_host_codex_expert_skills(home / ".codex", chosen, record=record)
+    # Unchanged, what the runtime placed is removed when no longer chosen.
+    (skills / "synthetic-brief" / "notes.md").unlink()
+    runtime._project_host_codex_expert_skills(home / ".codex", chosen, record=record)
+    runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": []}, record=record)
+    assert not (skills / "synthetic-brief").exists() and (skills / "owner-own").is_dir()
