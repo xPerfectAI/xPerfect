@@ -179,27 +179,27 @@ class ChannelService:
             updates["updated_at"] = _now()
             assignments = ",".join(f"{key}=?" for key in updates)
             with self.store._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(f"UPDATE channel_bindings SET {assignments} WHERE binding_id=?", (*updates.values(), binding_id))
-            if "people_json" in updates:
-                changed = {**binding, "people_json": updates["people_json"]}
-                with self.store._connect() as conn:
-                    removed = [row["conversation_id"] for row in conn.execute(
-                        "SELECT conversation_id,sender_json FROM expert_conversations WHERE binding_id=? AND role='speaker'",
-                        (binding_id,)) if not _listed(changed, json.loads(row["sender_json"] or "{}"))]
-                # Nothing more goes to a removed person: their requests, jobs and unsent messages close.
-                self.experts.close_channel_work(removed, "The person was removed from this channel.")
-                for conversation_id in removed:
-                    self.drop_unsent(conversation_id, "The person is no longer allowed")
+                changed = dict(conn.execute("SELECT * FROM channel_bindings WHERE binding_id=?", (binding_id,)).fetchone())
+                speakers = [dict(row) for row in conn.execute(
+                    "SELECT conversation_id,sender_json FROM expert_conversations WHERE binding_id=? AND role='speaker'",
+                    (binding_id,))]
+                # The change and everything it closes are one transaction, so no crash leaves part of it open.
+                # Off means off: nothing more is sent, its jobs stop and its requests are withdrawn. Nothing
+                # more goes to a removed person either. Accepted work stays visible to the owner.
+                if updates.get("state") == "off":
+                    closing = [row["conversation_id"] for row in speakers]
+                    note, error = "The channel was turned off.", "The channel was turned off"
+                else:
+                    closing = [row["conversation_id"] for row in speakers
+                               if not _listed(changed, json.loads(row["sender_json"] or "{}"))]
+                    note, error = "The person was removed from this channel.", "The person is no longer allowed"
+                stopped = self.experts._close_work_in(conn, closing, note, error)
             if updates.get("state") == "off":
                 self.setup.stop(binding_id)
-                # Off means off: nothing more is sent, its jobs stop and its waiting requests are
-                # withdrawn. Accepted work stays visible to the owner.
-                with self.store._connect() as conn:
-                    conn.execute("UPDATE channel_deliveries SET state='dropped',error='The channel was turned off',"
-                                 "finished_at=? WHERE binding_id=? AND state IN ('pending','held')", (_now(), binding_id))
-                    speakers = [row[0] for row in conn.execute(
-                        "SELECT conversation_id FROM expert_conversations WHERE binding_id=?", (binding_id,))]
-                self.experts.close_channel_work(speakers, "The channel was turned off.")
+            for job in stopped:  # maintenance re-drives a fence that does not land here
+                self.experts._fence_job(job)
         return self.view(self._binding(binding_id))
 
     def record_setup(self, tenant: str, owner: str, binding_id: str, settings: dict) -> dict:
@@ -296,12 +296,14 @@ class ChannelService:
         return repaired
 
     def claim(self, binding_id: str, limit: int = 10) -> list[dict]:
-        binding = self._binding(binding_id)
-        if binding["state"] != "connected":
-            return []
+        self._binding(binding_id)
         claimed = []
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # Read in the transaction that claims: a channel turned off or a person removed a moment ago wins.
+            binding = dict(conn.execute("SELECT * FROM channel_bindings WHERE binding_id=?", (binding_id,)).fetchone())
+            if binding["state"] != "connected":
+                return []
             rows = conn.execute("SELECT d.*,e.sender_json,c.stop_scope AS stop_scope,c.restore_hold AS conversation_hold "
                                 "FROM channel_deliveries d LEFT JOIN expert_conversations e "
                                 "ON e.conversation_id=d.conversation_id LEFT JOIN coordinator_conversations c "
@@ -346,12 +348,34 @@ class ChannelService:
                                (conversation_id,)).fetchone()
         return dict(row) if row else None
 
-    def _insert_delivery(self, conn, speaker: dict, turn_id: str, kind: str, text: str, state: str, review_id: str = "") -> None:
+    def _closed_note(self, conn, speaker: dict) -> str:
+        """Why nothing may leave for this person for good, read in the caller's transaction; "" when it may."""
+        fence = conn.execute("SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                             (speaker["conversation_id"],)).fetchone()
+        if fence is None or fence["stop_scope"]:
+            return "The conversation was stopped"
+        binding = conn.execute("SELECT state,people_json FROM channel_bindings WHERE binding_id=?",
+                               (speaker["binding_id"],)).fetchone()
+        if binding is None or binding["state"] != "connected":
+            return "The channel was turned off"
+        if not _listed(dict(binding), json.loads(speaker.get("sender_json") or "{}")):
+            return "The person is no longer allowed"
+        return ""
+
+    def _insert_delivery(self, conn, speaker: dict, turn_id: str, kind: str, text: str, state: str, review_id: str = "",
+                         *, error: str = "") -> None:
+        if state in {"pending", "held"}:
+            # Checked where the message is written: none is created to leave a stopped conversation, a
+            # channel turned off or a person removed.
+            error = self._closed_note(conn, speaker) or error
+            if error:
+                state = "dropped"
         conn.execute(
             "INSERT OR IGNORE INTO channel_deliveries(delivery_id,binding_id,conversation_id,turn_id,kind,text,thread_ref_json,"
-            "state,review_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "state,review_id,error,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             ("dlv_" + digest([speaker["conversation_id"], turn_id, kind])[:32], speaker["binding_id"],
-             speaker["conversation_id"], turn_id, kind, text, speaker["thread_ref_json"] or "{}", state, review_id, _now()))
+             speaker["conversation_id"], turn_id, kind, text, speaker["thread_ref_json"] or "{}", state, review_id, error,
+             _now() if state == "dropped" else "", _now()))
 
     def release_approved_reply(self, review: dict) -> None:
         """Approve sends exactly the reply that was shown, word for word."""
@@ -363,9 +387,16 @@ class ChannelService:
             conn.execute("BEGIN IMMEDIATE")
             fence = conn.execute("SELECT stop_scope,restore_hold FROM coordinator_conversations WHERE conversation_id=?",
                                  (review["speaker_conversation_id"],)).fetchone()
-            if fence is None or fence["stop_scope"] or fence["restore_hold"]:
-                # A stopped conversation sends nothing; a restored copy waits for the owner's resume.
+            closed = self._closed_note(conn, speaker)
+            if closed:
+                # Checked where the reply would be released: closed for good, the approval is withdrawn, so
+                # turning the channel on again never revives it.
+                conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=? WHERE review_id=? "
+                             "AND state='approved'", (closed + ".", review["review_id"]))
+                self.discard_held(conn, review["review_id"], closed)
                 return
+            if fence["restore_hold"]:
+                return  # a restored copy waits for the owner's resume
             existing = conn.execute("SELECT delivery_id,state FROM channel_deliveries WHERE review_id=? "
                                     "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
             if existing and existing["state"] == "held":
@@ -376,16 +407,10 @@ class ChannelService:
                                       review["review_id"])
             # Any other state (dropped, sent, not confirmed) is final: approval never revives it.
 
-    def drop_unsent(self, conversation_id: str, reason: str) -> None:
-        """Nothing waiting in a stopped conversation leaves; what was already sent keeps its receipt."""
-        with self.store._connect() as conn:
-            conn.execute("UPDATE channel_deliveries SET state='dropped',error=?,finished_at=? "
-                         "WHERE conversation_id=? AND state IN ('held','pending')", (reason, _now(), conversation_id))
-
-    def discard_held_reply(self, review: dict) -> None:
-        with self.store._connect() as conn:
-            conn.execute("UPDATE channel_deliveries SET state='dropped',error='Your owner said no',finished_at=? "
-                         "WHERE review_id=? AND state='held'", (_now(), review["review_id"]))
+    def discard_held(self, conn, review_id: str, reason: str) -> None:
+        """Inside the caller's transaction: the reply held for this request never leaves its hold."""
+        conn.execute("UPDATE channel_deliveries SET state='dropped',error=?,finished_at=? "
+                     "WHERE review_id=? AND state='held'", (reason, _now(), review_id))
 
     def _turn_reviews(self, conversation_id: str, turn_id: str) -> list[dict]:
         """Every request a turn made of the owner, whatever its state: pending, decided or withdrawn."""
@@ -404,6 +429,11 @@ class ChannelService:
             # A send whose outcome never came back is not resent by itself; the owner sees it.
             conn.execute("UPDATE channel_deliveries SET state='not_confirmed',error='The channel did not confirm this message' "
                          "WHERE state='sending' AND claimed_at<>'' AND claimed_at<?", (stale,))
+            # A reply held for a request that is no longer open (an earlier version could leave one) never
+            # leaves its hold: it is dropped, so nothing keeps it.
+            conn.execute("UPDATE channel_deliveries SET state='dropped',error='Its request was closed',finished_at=? "
+                         "WHERE state='held' AND NOT EXISTS (SELECT 1 FROM expert_reviews r "
+                         "WHERE r.review_id=channel_deliveries.review_id AND r.state IN ('pending','approved'))", (_now(),))
             rows = [dict(row) for row in conn.execute(
                 "SELECT t.conversation_id,t.turn_id,t.origin,t.response_json,e.binding_id,e.lineage_id,e.tenant_id,e.owner_id "
                 "FROM coordinator_turns t JOIN expert_conversations e ON e.conversation_id=t.conversation_id "
@@ -421,12 +451,17 @@ class ChannelService:
             text = reply_text(row["response_json"])
             origin = row["origin"]
             mode = self.experts.spec(self.experts.latest(row["tenant_id"], row["owner_id"], row["lineage_id"])).ask_me_first
+            kind = {"owner_decision": "decision", "owner_checking": "checking"}.get(origin, "reply")
             with self.store._connect() as conn:
-                if not text:
-                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", "", "dropped")
+                closed = self._closed_note(conn, speaker)
+                if closed or not text:
+                    # Closed for good since its turn began (the channel off, the person removed): nothing of the
+                    # turn leaves and nothing is asked for it.
+                    self._insert_delivery(conn, speaker, row["turn_id"], kind, text, "dropped", error=closed)
+                    if closed:
+                        outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": closed})
                     continue
-                if origin in {"owner_decision", "owner_checking"}:
-                    kind = "decision" if origin == "owner_decision" else "checking"
+                if kind != "reply":
                     self._insert_delivery(conn, speaker, row["turn_id"], kind, text, "pending")
                     continue
             asked = self._turn_reviews(row["conversation_id"], row["turn_id"])
@@ -450,10 +485,23 @@ class ChannelService:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "pending")
                 outcomes.append({"turn_id": row["turn_id"], "delivery": "pending"})
                 continue
-            # Always ask: a reply to another person waits for the owner.
-            review = self.experts.hold_reply(speaker, row["turn_id"], text, "Ask me first is set to Always ask.")
+            # Always ask: a reply to another person waits for the owner. Its request and its hold are written
+            # together, after the same check, so neither exists without the other.
             with self.store._connect() as conn:
-                self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
+                conn.execute("BEGIN IMMEDIATE")
+                closed = self._closed_note(conn, speaker)
+                if closed:
+                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped", error=closed)
+                    review = None
+                else:
+                    review = self.experts._insert_review(
+                        conn, speaker["tenant_id"], speaker["owner_id"], speaker, kind="reply", target_id=row["turn_id"],
+                        reason="Ask me first is set to Always ask.", payload={"text": text},
+                        source_turn_id=row["turn_id"], idempotency_key="reply:" + row["turn_id"])
+                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
+            if review is None:
+                outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": closed})
+                continue
             self.experts.tell_checking(speaker, review)
             outcomes.append({"turn_id": row["turn_id"], "delivery": "held", "review_id": review["review_id"]})
         outcomes.extend(self.setup.reconcile_once())

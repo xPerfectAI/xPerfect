@@ -1555,10 +1555,11 @@ def test_a_message_refused_for_good_does_not_silence_later_results(coordinator):
         conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
                      (cid2, 'result_available', 'run-b', canonical({'goal_id': 'b', 'run_id': 'run-b', 'state': 'completed'}), now()))
     assert coordinator.queue_result_turn('local', 'owner', cid2) is None
-    # Out of retries (the sixth attempt clears the retry time): it never runs, so results go on.
+    # Retried without a limit (review 3, the retry rule): a retry time an earlier version cleared after its
+    # sixth attempt still runs again, so later results still wait behind it.
     with coordinator.store._connect() as conn:
         conn.execute("UPDATE coordinator_turns SET retry_after_at='',retry_attempts=0 WHERE conversation_id=? AND turn_id='waiting'", (cid2,))
-    assert (coordinator.queue_result_turn('local', 'owner', cid2) or '').startswith('results-')
+    assert coordinator.queue_result_turn('local', 'owner', cid2) is None
 
 
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):
@@ -2933,3 +2934,47 @@ def test_sweep_still_refreshes_application_conversations(coordinator_backlog, mo
     monkeypatch.setattr(core, "refresh", lambda _tenant, _owner, item, *_args, **_kwargs: refreshed.append(item))
     core.reconcile_once()
     assert refreshed == ["conversation-350"]
+
+
+@pytest.mark.parametrize('temporary_code', ['host_capacity', 'provider_account_busy'])
+def test_an_ordinary_message_refused_as_busy_keeps_retrying_and_is_never_dropped(coordinator, temporary_code):
+    # Review 3, the retry rule: an ordinary message refused as busy is retried like a result turn, its wait
+    # capped at a minute; it is never dropped because it waited too long, also when an earlier version had
+    # already cleared its retry time.
+    from datetime import datetime, timedelta, timezone
+
+    class CapacityError(RuntimeError):
+        code = temporary_code
+
+    class BusyProvider(Provider):
+        calls = 0
+
+        def start(self, payload, **kwargs):
+            self.calls += 1
+            if self.calls <= 10:
+                raise CapacityError('private capacity detail')
+            return {'request_id': 'accepted-after-ten-refusals', 'state': 'queued'}
+
+    provider = BusyProvider()
+    coordinator.provider = provider
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'turn', 'Exact ordinary message')
+    assert coordinator.start_turn('local', 'owner', cid, 'turn')['blocker'] == temporary_code
+    for attempt in range(9):
+        saved = coordinator.snapshot('local', 'owner', cid)['turns'][0]
+        assert saved['request_id'] == '' and saved['retry_after_at']
+        wait = datetime.fromisoformat(saved['retry_after_at']) - datetime.now(timezone.utc)
+        assert wait <= timedelta(seconds=61)
+        due = '2026-09-23T00:00:00+00:00' if attempt != 4 else ''  # '' : cleared by an earlier version
+        with coordinator.store._connect() as conn:
+            conn.execute("UPDATE coordinator_turns SET retry_after_at=? WHERE conversation_id=? AND turn_id=?",
+                         (due, cid, 'turn'))
+        coordinator.reconcile_once()
+    assert provider.calls == 10
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET retry_after_at=? WHERE conversation_id=? AND turn_id=?",
+                     ('2026-09-23T00:00:00+00:00', cid, 'turn'))
+    assert coordinator.reconcile_once() == [
+        {'turn_id': 'turn', 'request_id': 'accepted-after-ten-refusals', 'state': 'queued'}
+    ]
+    assert coordinator.snapshot('local', 'owner', cid)['turns'][0]['message'] == 'Exact ordinary message'

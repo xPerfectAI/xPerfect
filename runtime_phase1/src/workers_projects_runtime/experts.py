@@ -378,25 +378,35 @@ class ExpertService:
         return self.describe(self._templates.get_workspace_template(
             template_id=saved["template_id"], tenant_id=tenant, owner_id=owner))
 
+    _OFF_WITHDRAWN = ("Your owner switched Ask me first to Off, so this request was withdrawn without approval. "
+                      "Nothing was sent or started. Tell the person, in your own words, that you cannot do this now "
+                      "and that they may ask again. Do not share what was held.")
+
     def _withdraw_waiting_for_off(self, tenant: str, owner: str, lineage_id: str) -> None:
         """Off means nobody is asked. What still waited for the owner is withdrawn, never sent or started
-        by itself, and each person is told, in the Expert's own words, that it cannot do this now."""
+        by itself, and each person is told, in the Expert's own words, that it cannot do this now.
+
+        Each request's withdrawal, the job it closes, the reply it drops and the turn that tells the person
+        are one transaction; a request a crash left waiting is withdrawn by maintenance the same way."""
         with self.store._connect() as conn:
             waiting = [dict(row) for row in conn.execute(
                 "SELECT * FROM expert_reviews WHERE tenant_id=? AND owner_id=? AND lineage_id=? AND state='pending'",
                 (tenant, owner, lineage_id))]
         for review in waiting:
-            self._withdraw(review["review_id"], "Ask me first was switched to Off.")
-            if review["kind"] == "job":
-                with self.store._connect() as conn:
+            with self.store._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if not conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
+                                    "WHERE review_id=? AND state='pending'",
+                                    ("Ask me first was switched to Off.", _now(), review["review_id"])).rowcount:
+                    continue
+                if review["kind"] == "job":
                     conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
                                  (_now(), review["target_id"]))
-            if self.deliveries is not None:
-                self.deliveries.discard_held_reply(review)
-            self._tell_owner_decision(review, "withdrawn",
-                                      "Your owner switched Ask me first to Off, so this request was withdrawn without "
-                                      "approval. Nothing was sent or started. Tell the person, in your own words, that "
-                                      "you cannot do this now and that they may ask again. Do not share what was held.")
+                if self.deliveries is not None:
+                    self.deliveries.discard_held(conn, review["review_id"], "Ask me first was switched to Off")
+                turn_id = self._insert_decision_turn(conn, review, "withdrawn", self._OFF_WITHDRAWN)
+            if turn_id:
+                self.coordinator.start_turn(tenant, owner, review["speaker_conversation_id"], turn_id)
 
     # ---------------------------------------------------------------- configurations
     def _default_role_config(self, tenant: str, owner: str, role: ExpertRole) -> CoordinatorConfig:
@@ -654,11 +664,6 @@ class ExpertService:
         goal, context = str(goal or "").strip(), str(context or "").strip()
         if not goal:
             raise ExpertError("Describe the job to hand off", status=422)
-        template = self.latest(tenant, owner, speaker["lineage_id"])
-        refusal = _access_refusal(self.spec(template))
-        if refusal:  # an Expert saved before this rule never starts work past it
-            raise ExpertError(refusal + " Nothing was started.", code="expert_access_unsupported")
-        hold = self.spec(template).ask_me_first == "always" and speaker["channel"] != "chat"
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute("SELECT * FROM expert_jobs WHERE speaker_conversation_id=? AND idempotency_key=?",
@@ -667,19 +672,29 @@ class ExpertService:
                 if existing["goal"] != goal or existing["context"] != context:
                     raise ExpertError("This hand-off key was already used for a different job")
                 return self._job_view(dict(existing))
+            # Checked again here, where the job is written: a Stop or a removal since the call entered wins,
+            # and the Expert's current access and Ask me first setting decide.
+            closed, _for_good = self.closed_reason(conn, speaker)
+            if closed:
+                raise ExpertError(closed + " Nothing was started.", code="expert_channel_closed")
+            template = self.latest(tenant, owner, speaker["lineage_id"])
+            refusal = _access_refusal(self.spec(template))
+            if refusal:  # an Expert saved before this rule never starts work past it
+                raise ExpertError(refusal + " Nothing was started.", code="expert_access_unsupported")
+            hold = self.spec(template).ask_me_first == "always" and speaker["channel"] != "chat"
             job_id = _id("job")
             conn.execute(
                 "INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,source_turn_id,"
                 "idempotency_key,goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, tenant, owner, speaker["lineage_id"], conversation_id, source_turn_id, idempotency_key,
                  goal, context, "held" if hold else "starting", template["template_id"], _now(), _now()))
-        if hold:
-            review = self._create_review(tenant, owner, speaker, kind="job", target_id=job_id,
-                                         reason="Ask me first is set to Always ask.",
-                                         payload={"goal": goal, "context": context},
-                                         source_turn_id=source_turn_id, idempotency_key="job:" + job_id)
-            with self.store._connect() as conn:
+            if hold:  # the held job and its request are written together: never one without the other
+                review = self._insert_review(conn, tenant, owner, speaker, kind="job", target_id=job_id,
+                                             reason="Ask me first is set to Always ask.",
+                                             payload={"goal": goal, "context": context},
+                                             source_turn_id=source_turn_id, idempotency_key="job:" + job_id)
                 conn.execute("UPDATE expert_jobs SET review_id=? WHERE job_id=?", (review["review_id"], job_id))
+        if hold:
             return {**self._job_view(self._job(job_id)), "held_for_owner": True}
         return self._job_view(self._start_job(job_id))
 
@@ -713,11 +728,24 @@ class ExpertService:
         if template is None:
             template = self.latest(tenant, owner, job["lineage_id"])
         refusal = _access_refusal(self.spec(template))
-        if refusal and not job["job_conversation_id"]:
-            # Held, approved or interrupted, a job never starts past the rule: it is told, once.
+        if refusal:
+            # Held, approved, interrupted or already prepared, a job never starts past the rule: it is told,
+            # once, and a conversation already prepared for it is fenced, so its first turn never starts.
             self._publish(job, "failed", "The job could not start: " + refusal, from_state=job["state"])
+            if job["job_conversation_id"]:
+                self._fence_job(self._job(job_id))
             return self._job(job_id)
         speaker = self.speaker(tenant, owner, job["speaker_conversation_id"])
+        with self.store._connect() as conn:
+            closed, for_good = self.closed_reason(conn, speaker)
+        if closed and not for_good:
+            return job  # a restored copy: nothing is prepared before the owner resumes it
+        if closed:  # nothing is prepared for a conversation closed for good (checked again below)
+            with self.store._connect() as conn:
+                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=? "
+                             "AND state IN ('starting','held')", (_now(), job_id))
+            self._fence_job(self._job(job_id))
+            return self._job(job_id)
         if not job["job_conversation_id"]:
             binding = ExpertBinding(lineage_id=job["lineage_id"], role="job",
                                     parent_conversation_id=job["speaker_conversation_id"], job_id=job_id,
@@ -758,9 +786,23 @@ class ExpertService:
                   if team & set(skill["profiles"])}
         refs = [ref for ref in refs if (ref.get("item_id"), ref.get("version_id")) not in native]
         self.coordinator.accept_turn(tenant, owner, cid, "job-brief", "\n\n".join(lines), None, refs or None)
+        waits = False
         with self.store._connect() as conn:
-            moved = conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=? "
-                                 "AND state IN ('starting','held')", (_now(), job_id)).rowcount
+            conn.execute("BEGIN IMMEDIATE")
+            # Checked again where the job is marked running: a Stop or a removal since it was asked for wins.
+            closed, for_good = self.closed_reason(conn, speaker)
+            if closed and not for_good:
+                waits = True  # a restored copy: nothing starts before the owner resumes it
+                moved = 0
+            elif closed:
+                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=? "
+                             "AND state IN ('starting','held')", (_now(), job_id))
+                moved = 0
+            else:
+                moved = conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=? "
+                                     "AND state IN ('starting','held')", (_now(), job_id)).rowcount
+        if waits:
+            return self._job(job_id)
         if not moved:
             # Stopped (or withdrawn) while it was being prepared: its first turn never starts.
             self._fence_job(self._job(job_id))
@@ -807,38 +849,82 @@ class ExpertService:
         return self._job_view(self._job(job_id))
 
     def conversation_stopped(self, tenant: str, owner: str, conversation_id: str) -> None:
-        """A Stop of a speaking assistant's or a job's conversation withdraws everything that waits on it."""
+        """A Stop of a speaking assistant's or a job's conversation withdraws everything that waits on it,
+        in one transaction; the stopped jobs' conversations are fenced after it (maintenance re-drives a
+        fence that did not land, and closes what a crash before this left open)."""
         with self.store._connect() as conn:
-            reviews = [row[0] for row in conn.execute(
-                "SELECT review_id FROM expert_reviews WHERE tenant_id=? AND owner_id=? AND speaker_conversation_id=? "
-                "AND state='pending'", (tenant, owner, conversation_id))]
-            jobs = [row[0] for row in conn.execute(
-                "SELECT job_id FROM expert_jobs WHERE tenant_id=? AND owner_id=? AND (speaker_conversation_id=? "
-                "OR job_conversation_id=?) AND state IN ('held','starting','running')",
-                (tenant, owner, conversation_id, conversation_id))]
-        for review_id in reviews:
-            self._withdraw(review_id, "The conversation was stopped.")
-        for job_id in jobs:
-            self.stop_job(job_id)
-        if self.deliveries is not None:
-            self.deliveries.drop_unsent(conversation_id, "The conversation was stopped")
+            conn.execute("BEGIN IMMEDIATE")
+            jobs = self._close_work_in(conn, [conversation_id], "The conversation was stopped.",
+                                       "The conversation was stopped")
+            own = [dict(row) for row in conn.execute(
+                "SELECT * FROM expert_jobs WHERE tenant_id=? AND owner_id=? AND job_conversation_id=? "
+                "AND state IN ('held','starting','running')", (tenant, owner, conversation_id))]
+            for job in own:  # a Stop of the job's own conversation stops that job
+                conn.execute("UPDATE expert_jobs SET state='stopped',updated_at=? WHERE job_id=?", (_now(), job["job_id"]))
+                conn.execute("UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
+                             "WHERE review_id=? AND state='pending'", ("The job was stopped.", _now(), job["review_id"]))
+        for job in jobs:
+            if job["job_conversation_id"] != conversation_id:
+                self._fence_job(job)
 
-    def close_channel_work(self, speaker_conversation_ids: list[str], note: str) -> None:
-        """A channel turned off: its jobs stop and its waiting requests are withdrawn."""
-        if not speaker_conversation_ids:
-            return
-        marks = ",".join("?" for _ in speaker_conversation_ids)
+    # Open work of a speaking conversation: a request still waiting, or an approval not yet carried out (a
+    # job still held, a reply not yet out of its hold). Shared by the close and the sweep that finds it.
+    _OPEN_REVIEW = ("(expert_reviews.state='pending' OR (expert_reviews.state='approved' AND expert_reviews.kind='job' "
+                    "AND EXISTS (SELECT 1 FROM expert_jobs j WHERE j.job_id=expert_reviews.target_id AND j.state='held')){reply})")
+    _UNRELEASED_REPLY = (" OR (expert_reviews.state='approved' AND expert_reviews.kind='reply' AND NOT EXISTS ("
+                         "SELECT 1 FROM channel_deliveries d WHERE d.review_id=expert_reviews.review_id AND d.state<>'held'))")
+
+    def _open_review_sql(self) -> str:
+        return self._OPEN_REVIEW.format(reply=self._UNRELEASED_REPLY if self.deliveries is not None else "")
+
+    def _close_work_in(self, conn: Any, speaker_ids: list[str], note: str, error: str) -> list[dict]:
+        """Inside the caller's transaction, everything still open for these speaking conversations closes for
+        good: requests and approvals not yet carried out are withdrawn, held, starting and running jobs stop,
+        and unsent messages are dropped. Returns the stopped jobs; the caller fences their conversations
+        after the commit."""
+        if not speaker_ids:
+            return []
+        marks = ",".join("?" for _ in speaker_ids)
+        conn.execute(f"UPDATE expert_reviews SET state='withdrawn',decision_note=?,decided_at=? "
+                     f"WHERE speaker_conversation_id IN ({marks}) AND {self._open_review_sql()}",
+                     (note, _now(), *speaker_ids))
+        jobs = [dict(row) for row in conn.execute(
+            f"SELECT * FROM expert_jobs WHERE speaker_conversation_id IN ({marks}) "
+            "AND state IN ('held','starting','running')", speaker_ids)]
+        conn.execute(f"UPDATE expert_jobs SET state='stopped',updated_at=? WHERE speaker_conversation_id IN ({marks}) "
+                     "AND state IN ('held','starting','running')", (_now(), *speaker_ids))
+        if self.deliveries is not None:
+            conn.execute(f"UPDATE channel_deliveries SET state='dropped',error=?,finished_at=? "
+                         f"WHERE conversation_id IN ({marks}) AND state IN ('held','pending')",
+                         (error, _now(), *speaker_ids))
+        return jobs
+
+    def _close_abandoned_work(self, limit: int) -> list[dict]:
+        """Maintenance's one owner of work left open in a conversation closed for good: a crash between a
+        Stop, a removal or a channel turned off and its clean-up, or a state an earlier version left."""
+        open_delivery = (" OR EXISTS (SELECT 1 FROM channel_deliveries d WHERE d.conversation_id=e.conversation_id "
+                         "AND d.state IN ('held','pending'))") if self.deliveries is not None else ""
         with self.store._connect() as conn:
-            jobs = [row[0] for row in conn.execute(
-                f"SELECT job_id FROM expert_jobs WHERE speaker_conversation_id IN ({marks}) "
-                "AND state IN ('held','starting','running')", speaker_conversation_ids)]
-            reviews = [row[0] for row in conn.execute(
-                f"SELECT review_id FROM expert_reviews WHERE speaker_conversation_id IN ({marks}) "
-                "AND state='pending'", speaker_conversation_ids)]
-        for job_id in jobs:
-            self.stop_job(job_id)
-        for review_id in reviews:
-            self._withdraw(review_id, note)
+            candidates = [dict(row) for row in conn.execute(
+                "SELECT e.* FROM expert_conversations e WHERE e.role='speaker' AND (EXISTS (SELECT 1 FROM expert_reviews "
+                f"WHERE expert_reviews.speaker_conversation_id=e.conversation_id AND {self._open_review_sql()}) "
+                "OR EXISTS (SELECT 1 FROM expert_jobs j WHERE j.speaker_conversation_id=e.conversation_id "
+                f"AND j.state IN ('held','starting','running')){open_delivery}) LIMIT ?", (limit * 5,))]
+        outcomes = []
+        for speaker in candidates:
+            with self.store._connect() as conn:  # a read first: open conversations take no write lock
+                closed, for_good = self.closed_reason(conn, speaker)
+            if not (closed and for_good):
+                continue
+            with self.store._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                closed, for_good = self.closed_reason(conn, speaker)
+                jobs = (self._close_work_in(conn, [speaker["conversation_id"]], closed, closed.rstrip("."))
+                        if closed and for_good else [])
+            for job in jobs:
+                self._fence_job(job)
+            outcomes.append({"conversation_id": speaker["conversation_id"], "closed": closed})
+        return outcomes
 
     def _fence_job(self, job: dict) -> None:
         """The job's coordinator conversation is durably stopped: nothing in it starts again.
@@ -912,25 +998,37 @@ class ExpertService:
                 self.coordinator.start_turn(tenant, owner, job["speaker_conversation_id"], turn_id)
 
     # ---------------------------------------------------------------- Ask me first
-    def _create_review(self, tenant: str, owner: str, speaker: dict, *, kind: str, target_id: str, reason: str,
-                       payload: dict, source_turn_id: str, idempotency_key: str) -> dict:
+    def _insert_review(self, conn: Any, tenant: str, owner: str, speaker: dict, *, kind: str, target_id: str,
+                       reason: str, payload: dict, source_turn_id: str, idempotency_key: str) -> dict:
+        """Write one request to the owner inside the caller's transaction."""
         review_digest = digest({"kind": kind, "target_id": target_id, "payload": payload})
-        with self.store._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute("SELECT * FROM expert_reviews WHERE speaker_conversation_id=? AND idempotency_key=?",
-                                    (speaker["conversation_id"], idempotency_key)).fetchone()
-            if existing:
-                if existing["payload_digest"] != review_digest:
-                    raise ExpertError("This review key was already used for a different request")
-                return dict(existing)
-            review_id = _id("rev")
-            conn.execute(
-                "INSERT INTO expert_reviews(review_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,source_turn_id,"
-                "kind,target_id,reason,payload_json,payload_digest,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (review_id, tenant, owner, speaker["lineage_id"], speaker["conversation_id"], source_turn_id, kind,
-                 target_id, str(reason or "")[:2000], canonical(payload), review_digest, idempotency_key, _now()))
-            row = conn.execute("SELECT * FROM expert_reviews WHERE review_id=?", (review_id,)).fetchone()
-        return dict(row)
+        existing = conn.execute("SELECT * FROM expert_reviews WHERE speaker_conversation_id=? AND idempotency_key=?",
+                                (speaker["conversation_id"], idempotency_key)).fetchone()
+        if existing:
+            if existing["payload_digest"] != review_digest:
+                raise ExpertError("This review key was already used for a different request")
+            return dict(existing)
+        review_id = _id("rev")
+        conn.execute(
+            "INSERT INTO expert_reviews(review_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,source_turn_id,"
+            "kind,target_id,reason,payload_json,payload_digest,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (review_id, tenant, owner, speaker["lineage_id"], speaker["conversation_id"], source_turn_id, kind,
+             target_id, str(reason or "")[:2000], canonical(payload), review_digest, idempotency_key, _now()))
+        return dict(conn.execute("SELECT * FROM expert_reviews WHERE review_id=?", (review_id,)).fetchone())
+
+    def closed_reason(self, conn: Any, speaker: dict) -> tuple[str, bool]:
+        """(why nothing may start, be asked or be sent for this speaking conversation now, whether that is
+        for good). Checked in the same transaction that records the effect, never only when a tool call
+        enters. A restored copy waits for the owner's resume: not for good."""
+        fence = conn.execute("SELECT stop_scope,restore_hold FROM coordinator_conversations WHERE conversation_id=?",
+                             (speaker["conversation_id"],)).fetchone()
+        if fence is None or fence["stop_scope"]:
+            return "This conversation was stopped.", True
+        if not self.channel_open(speaker, conn):
+            return "This person can no longer be served on this channel.", True
+        if fence["restore_hold"]:
+            return "This conversation waits for the owner to resume it.", False
+        return "", False
 
     def shows_writing(self, conversation_id: str) -> bool:
         """Words may appear while they are written only where nothing is ever held: the owner's own Chat.
@@ -957,10 +1055,19 @@ class ExpertService:
             return {"state": "not_asked",
                     "note": "This is your owner's own Chat: your owner is the one asking, so nothing is held. If the "
                             "request goes against your instructions, say so in your reply and let them decide here."}
-        if job_goal:
-            job_key = "ask:" + idempotency_key
-            with self.store._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
+        template_id = self.latest(tenant, owner, speaker["lineage_id"])["template_id"]
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Checked again where the request is written: a Stop or a removal since the call entered wins,
+            # and so does Off saved meanwhile (nothing then waits for the owner).
+            closed, _for_good = self.closed_reason(conn, speaker)
+            if closed:
+                raise ExpertError(closed + " Nothing was asked.", code="expert_channel_closed")
+            if self.spec(self.latest(tenant, owner, speaker["lineage_id"])).ask_me_first == "off":
+                return {"state": "not_asked",
+                        "note": "Ask me first is Off: nobody is asked. Decide yourself, following your instructions."}
+            if job_goal:
+                job_key = "ask:" + idempotency_key
                 existing = conn.execute("SELECT job_id FROM expert_jobs WHERE speaker_conversation_id=? AND idempotency_key=?",
                                         (conversation_id, job_key)).fetchone()
                 if existing:
@@ -971,24 +1078,17 @@ class ExpertService:
                         "INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,source_turn_id,"
                         "idempotency_key,goal,context,state,template_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (job_id, tenant, owner, speaker["lineage_id"], conversation_id, source_turn_id, job_key, job_goal,
-                         str(job_context or "").strip(), "held",
-                         self.latest(tenant, owner, speaker["lineage_id"])["template_id"], _now(), _now()))
-            review = self._create_review(tenant, owner, speaker, kind="job", target_id=job_id, reason=reason,
-                                         payload={"goal": job_goal, "context": str(job_context or "").strip()},
-                                         source_turn_id=source_turn_id, idempotency_key=idempotency_key)
-            with self.store._connect() as conn:
+                         str(job_context or "").strip(), "held", template_id, _now(), _now()))
+                # The held job and its request are written together: never one without the other.
+                review = self._insert_review(conn, tenant, owner, speaker, kind="job", target_id=job_id, reason=reason,
+                                             payload={"goal": job_goal, "context": str(job_context or "").strip()},
+                                             source_turn_id=source_turn_id, idempotency_key=idempotency_key)
                 conn.execute("UPDATE expert_jobs SET review_id=? WHERE job_id=?", (review["review_id"], job_id))
-        else:
-            review = self._create_review(tenant, owner, speaker, kind="reply", target_id="", reason=reason,
-                                         payload={"text": reply}, source_turn_id=source_turn_id,
-                                         idempotency_key=idempotency_key)
+            else:
+                review = self._insert_review(conn, tenant, owner, speaker, kind="reply", target_id="", reason=reason,
+                                             payload={"text": reply}, source_turn_id=source_turn_id,
+                                             idempotency_key=idempotency_key)
         return {"review_id": review["review_id"], "state": review["state"]}
-
-    def hold_reply(self, speaker: dict, turn_id: str, text: str, reason: str) -> dict:
-        """Always ask: a channel reply to another person waits for the owner."""
-        return self._create_review(speaker["tenant_id"], speaker["owner_id"], speaker, kind="reply",
-                                   target_id=turn_id, reason=reason, payload={"text": text},
-                                   source_turn_id=turn_id, idempotency_key="reply:" + turn_id)
 
     def _withdraw(self, review_id: str, note: str) -> None:
         with self.store._connect() as conn:
@@ -1123,7 +1223,7 @@ class ExpertService:
                 raise ExpertError("This request changed. Review it again.", code="expert_review_changed")
             # A request that can no longer be honoured is withdrawn for good; the withdrawal is committed
             # before the owner is told, so it never stays waiting in Needs you.
-            refusal = ""
+            refusal, off = "", False
             stopped = conn.execute("SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
                                    (review["speaker_conversation_id"],)).fetchone()
             speaker = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
@@ -1132,19 +1232,46 @@ class ExpertService:
                 refusal = "This conversation was stopped. Nothing was sent or started."
             elif decision == "approve" and speaker is not None and not self.channel_open(dict(speaker), conn):
                 refusal = "This person can no longer be served on this channel. Nothing was sent or started."
+            elif decision == "approve" and self.spec(self.latest(tenant, owner, review["lineage_id"])).ask_me_first == "off":
+                # Off means nobody is asked: a request left from before (a crash between saving Off and
+                # withdrawing it) can no longer be approved. It is withdrawn as Off withdraws, the person told.
+                refusal, off = "Ask me first is now Off, so this request was withdrawn. Nothing was sent or started.", True
             elif review["kind"] == "job":
                 job = conn.execute("SELECT state,goal,context FROM expert_jobs WHERE job_id=?", (review["target_id"],)).fetchone()
                 payload = json.loads(review["payload_json"])
                 if (not job or job["state"] != "held" or job["goal"] != payload.get("goal")
                         or job["context"] != payload.get("context", "")):
                     refusal = "This job changed or was stopped. Nothing was started."
+            told = ""
             if refusal:
                 conn.execute("UPDATE expert_reviews SET state='withdrawn',decided_at=? WHERE review_id=? AND state='pending'",
                              (_now(), review_id))
+                if self.deliveries is not None:  # a reply held for it never leaves its hold
+                    self.deliveries.discard_held(conn, review_id, refusal.split(".")[0])
+                if off:
+                    if review["kind"] == "job":
+                        conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? "
+                                     "AND state='held'", (_now(), review["target_id"]))
+                    told = self._insert_decision_turn(conn, dict(review), "withdrawn", self._OFF_WITHDRAWN)
             else:
                 conn.execute("UPDATE expert_reviews SET state=?,decision_note=?,decided_at=? WHERE review_id=? AND state='pending'",
                              ("approved" if decision == "approve" else "rejected", str(note or "")[:2000], _now(), review_id))
+                if decision == "reject":
+                    # The no, the job it closes, the reply it drops and the turn that tells the person are one
+                    # change: a crash leaves none of them half done.
+                    if review["kind"] == "job":
+                        conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
+                                     (_now(), review["target_id"]))
+                    if self.deliveries is not None:
+                        self.deliveries.discard_held(conn, review_id, "Your owner said no")
+                    told = self._insert_decision_turn(conn, dict(review), "rejected", self._REJECTION,
+                                                      note=str(note or ""))
         if refusal:
+            if told:
+                try:
+                    self.coordinator.start_turn(tenant, owner, review["speaker_conversation_id"], told)
+                except Exception:  # the turn is saved; the coordinator's maintenance starts it
+                    pass
             raise ExpertError(refusal, code="expert_review_changed")
         review = dict(review)
         if decision == "approve":
@@ -1152,28 +1279,45 @@ class ExpertService:
                 self._start_job(review["target_id"])
             elif self.deliveries is not None:
                 self.deliveries.release_approved_reply(review)
-        else:
-            if review["kind"] == "job":
-                with self.store._connect() as conn:
-                    conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
-                                 (_now(), review["target_id"]))
-            if self.deliveries is not None:
-                self.deliveries.discard_held_reply(review)
-            self._tell_rejection(review, str(note or ""))
+        elif told:
+            self.coordinator.start_turn(tenant, owner, review["speaker_conversation_id"], told)
         return self._review_view(self._review(review_id))
 
     def _review(self, review_id: str) -> dict:
         with self.store._connect() as conn:
             return dict(conn.execute("SELECT * FROM expert_reviews WHERE review_id=?", (review_id,)).fetchone())
 
+    _REJECTION = ("Your owner said no. Nothing was sent or started. Tell the person, in your own words, "
+                  "that you cannot do this. Do not share what was held.")
+    # A decision the person can no longer be told (the conversation stopped, the channel turned off or the
+    # person removed) is marked so, and maintenance never revisits it.
+    NOT_TOLD = "not-told"
+
     def _tell_rejection(self, review: dict, note: str) -> None:
         """Tell the Queen the owner said no. She writes her own reply with every tool off."""
-        self._tell_owner_decision(review, "rejected",
-                                  "Your owner said no. Nothing was sent or started. Tell the person, in your own words, "
-                                  "that you cannot do this. Do not share what was held.", note=note)
+        self._tell_owner_decision(review, "rejected", self._REJECTION, note=note)
 
     def _tell_owner_decision(self, review: dict, decision: str, instruction: str, *, note: str = "") -> None:
         """A decision about a held request, told to the Queen; she writes her own reply with every tool off."""
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            turn_id = self._insert_decision_turn(conn, review, decision, instruction, note=note)
+        if turn_id:
+            self.coordinator.start_turn(review["tenant_id"], review["owner_id"], review["speaker_conversation_id"], turn_id)
+
+    def _insert_decision_turn(self, conn: Any, review: dict, decision: str, instruction: str, *, note: str = "") -> str:
+        """Inside the caller's transaction, the turn that tells the Queen a decision; its id, or "" when nothing
+        may be told now. Checked here, where it is written: closed for good, it is marked never to be told;
+        a restored copy tells it after the owner's resume. A turn written but not started is started by the
+        coordinator's maintenance."""
+        speaker = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
+                               (review["speaker_conversation_id"],)).fetchone()
+        closed, for_good = self.closed_reason(conn, dict(speaker)) if speaker else ("gone", True)
+        if closed:
+            if for_good:
+                conn.execute("UPDATE expert_reviews SET followup_turn_id=? WHERE review_id=? AND followup_turn_id=''",
+                             (self.NOT_TOLD, review["review_id"]))
+            return ""
         payload = json.loads(review["payload_json"])
         what = (f"the reply you prepared:\n{payload.get('text', '')}" if review["kind"] == "reply"
                 else f"starting this job:\n{payload.get('goal', '')}")
@@ -1181,16 +1325,14 @@ class ExpertService:
                              "about": what, **({"owner_note": note} if decision == "rejected" else {}),
                              "instruction": instruction})
         turn_id = "decision-" + review["review_id"]
-        tenant, owner, cid = review["tenant_id"], review["owner_id"], review["speaker_conversation_id"]
-        with self.store._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            exists = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND turn_id=?", (cid, turn_id)).fetchone()
-            if not exists:
-                library = conn.execute("SELECT library_json FROM coordinator_conversations WHERE conversation_id=?", (cid,)).fetchone()[0]
-                conn.execute("INSERT INTO coordinator_turns(conversation_id,turn_id,message,origin,library_json,created_at) "
-                             "VALUES(?,?,?,?,?,?)", (cid, turn_id, message, "owner_decision", library, _now()))
-            conn.execute("UPDATE expert_reviews SET followup_turn_id=? WHERE review_id=?", (turn_id, review["review_id"]))
-        self.coordinator.start_turn(tenant, owner, cid, turn_id)
+        cid = review["speaker_conversation_id"]
+        exists = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND turn_id=?", (cid, turn_id)).fetchone()
+        if not exists:
+            library = conn.execute("SELECT library_json FROM coordinator_conversations WHERE conversation_id=?", (cid,)).fetchone()[0]
+            conn.execute("INSERT INTO coordinator_turns(conversation_id,turn_id,message,origin,library_json,created_at) "
+                         "VALUES(?,?,?,?,?,?)", (cid, turn_id, message, "owner_decision", library, _now()))
+        conn.execute("UPDATE expert_reviews SET followup_turn_id=? WHERE review_id=?", (turn_id, review["review_id"]))
+        return turn_id
 
     def tools_off_turn(self, conversation_id: str, turn_id: str) -> bool:
         """Owner-decision and checking turns are written with every native tool off."""
@@ -1218,12 +1360,14 @@ class ExpertService:
 
     # ---------------------------------------------------------------- maintenance
     def reconcile_once(self, limit: int = 100) -> list[dict]:
-        """Called from the existing maintenance tick: publish finished jobs to their Queens."""
+        """Called from the existing maintenance tick: publish finished jobs to their Queens, and finish or
+        cancel every half-done state a crash can leave (the outcome table in the build's design record)."""
+        # First, work left open in a conversation closed for good is closed: nothing of it starts or leaves.
+        outcomes = self._close_abandoned_work(limit)
         with self.store._connect() as conn:
             rows = [dict(row) for row in conn.execute(
                 "SELECT * FROM expert_jobs WHERE state='running' AND job_conversation_id<>'' ORDER BY updated_at LIMIT ?",
                 (limit,))]
-        outcomes = []
         for job in rows:
             try:
                 finished, state, text = self._job_finished(job)
@@ -1261,17 +1405,49 @@ class ExpertService:
                 outcomes.append({"review_id": review["review_id"], "error": type(exc).__name__})
         # A job interrupted while it was being prepared (a crash after it was recorded) is prepared
         # again: preparing twice reuses its one conversation and its one first turn.
+        # Half-done states a crash can leave, each finished or cancelled here (see the outcome table):
+        # a held job whose request is gone, rejected or withdrawn is withdrawn; a "no" never told is told;
+        # requests left waiting on an Expert switched to Off are withdrawn and the person told.
+        with self.store._connect() as conn:
+            orphaned = [row[0] for row in conn.execute(
+                "SELECT j.job_id FROM expert_jobs j WHERE j.state='held' AND NOT EXISTS (SELECT 1 FROM expert_reviews r "
+                "WHERE r.kind='job' AND r.target_id=j.job_id AND r.state IN ('pending','approved')) LIMIT ?", (limit,))]
+            untold = [dict(row) for row in conn.execute(
+                "SELECT r.* FROM expert_reviews r JOIN coordinator_conversations c ON c.conversation_id=r.speaker_conversation_id "
+                "WHERE r.state='rejected' AND r.followup_turn_id='' AND c.stop_scope='' AND c.restore_hold=0 LIMIT ?", (limit,))]
+            waiting = [dict(row) for row in conn.execute(
+                "SELECT DISTINCT tenant_id,owner_id,lineage_id FROM expert_reviews WHERE state='pending' LIMIT ?", (limit,))]
+        for job_id in orphaned:
+            with self.store._connect() as conn:
+                conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
+                             (_now(), job_id))
+            outcomes.append({"job_id": job_id, "state": "withdrawn"})
+        for review in untold:
+            try:
+                self._tell_rejection(review, str(review.get("decision_note") or ""))
+                outcomes.append({"review_id": review["review_id"], "told": True})
+            except Exception as exc:  # retried on the next pass
+                outcomes.append({"review_id": review["review_id"], "error": type(exc).__name__})
+        for row in waiting:
+            try:
+                if self.spec(self.latest(row["tenant_id"], row["owner_id"], row["lineage_id"])).ask_me_first == "off":
+                    self._withdraw_waiting_for_off(row["tenant_id"], row["owner_id"], row["lineage_id"])
+                    outcomes.append({"lineage_id": row["lineage_id"], "withdrawn_for_off": True})
+            except Exception as exc:  # retried on the next pass
+                outcomes.append({"lineage_id": row["lineage_id"], "error": type(exc).__name__})
         # One that still cannot be prepared after ten minutes ends as failed and is told, once.
         cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
         give_up = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         with self.store._connect() as conn:
             stalled = [dict(row) for row in conn.execute(
-                "SELECT j.job_id,j.updated_at FROM expert_jobs j JOIN coordinator_conversations c "
+                "SELECT j.job_id,j.updated_at,j.job_conversation_id FROM expert_jobs j JOIN coordinator_conversations c "
                 "ON c.conversation_id=j.speaker_conversation_id WHERE j.state='starting' AND j.updated_at<? "
                 "AND c.stop_scope='' AND c.restore_hold=0 ORDER BY j.updated_at LIMIT ?", (cutoff, limit))]
         for row in stalled:
             try:
-                if row["updated_at"] < give_up:
+                # A job already prepared (its conversation and first turn written) is marked running at any
+                # age: its turn may run already, and giving up would throw its result away.
+                if row["updated_at"] < give_up and not row["job_conversation_id"]:
                     self._publish(self._job(row["job_id"]), "failed", "The job could not start.", from_state="starting")
                     outcomes.append({"job_id": row["job_id"], "state": "failed"})
                     continue

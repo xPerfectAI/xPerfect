@@ -1242,3 +1242,238 @@ def test_every_worker_of_a_job_carries_the_owners_instructions(app):
     assert config.routes
     for route in config.routes:
         assert SPEC["instructions"] in route.bootstrap_bundle["system_instructions"]
+
+
+# ---------------------------------------------------------------- review 3: the outcome table
+# Each test names its cells (a state, an event) and the one allowed outcome from the build's design record.
+
+
+def _always_with_held_work(application, client):
+    """A channel person on Always ask with a held job and a held reply, each waiting for the owner."""
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, cid, goal="Synthetic held job", idempotency_key="k1",
+                           source_turn_id=accepted["turn_id"])
+    later = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-2")).json()
+    finish_turn(application, cid, later["turn_id"], "SYNTHETIC-HELD-REPLY")
+    application.state.channels.reconcile_once()
+    assert {review["kind"] for review in experts.reviews("local", owner)} == {"job", "reply"}
+    return expert, channel, owner, cid, job, accepted
+
+
+def _close(application, channel, cid, closed):
+    """The change itself, committed without the clean-up that follows it (a crash, or a call already inside)."""
+    with application.state.experts.store._connect() as conn:
+        if closed == "stopped":
+            conn.execute("UPDATE coordinator_conversations SET stop_scope='stopped' WHERE conversation_id=?", (cid,))
+        elif closed == "removed":
+            conn.execute("UPDATE channel_bindings SET people_json='[]' WHERE binding_id=?", (channel["binding_id"],))
+        else:
+            conn.execute("UPDATE channel_bindings SET state='off' WHERE binding_id=?", (channel["binding_id"],))
+
+
+@pytest.mark.parametrize("closed", ["stopped", "removed", "off"])
+def test_work_asked_for_after_a_stop_or_a_removal_is_refused_where_it_is_written(app, closed, monkeypatch):
+    # Review 3, B2 (check at the exit): the tool call entered before the change; the write checks again.
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    monkeypatch.setattr(experts, "_assert_channel_open", lambda speaker: None)  # its door was passed before
+    _close(application, channel, cid, closed)
+    with pytest.raises(ExpertError, match="Nothing was started"):
+        experts.hand_off("local", owner, cid, goal="Synthetic late job", idempotency_key="late-1",
+                         source_turn_id=accepted["turn_id"])
+    with pytest.raises(ExpertError, match="Nothing was asked"):
+        experts.ask_owner("local", owner, cid, reason="Late", job_goal="Synthetic late job", idempotency_key="late-2",
+                          source_turn_id=accepted["turn_id"])
+    assert scalar(application, "SELECT count(*) FROM expert_jobs") == 0
+    assert scalar(application, "SELECT count(*) FROM expert_reviews") == 0
+
+
+@pytest.mark.parametrize("closed", ["stopped", "removed", "off"])
+def test_work_left_open_in_a_conversation_closed_for_good_is_closed_by_maintenance(app, closed):
+    # Review 3, shape 2 (one owner): cells "Job held", "Request pending" and "Message held" x Stop, "Person
+    # removed", "Channel off" after a crash before the clean-up: maintenance closes them the same way.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    _close(application, channel, cid, closed)
+    experts.reconcile_once()
+    assert experts.reviews("local", owner) == []
+    assert experts._job(job["job_id"])["state"] == "stopped"
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state IN ('held','pending')") == 0
+
+
+def test_turning_a_channel_off_closes_everything_with_it_even_if_the_process_stops_right_after(app, monkeypatch):
+    # Review 3, shape 2: the channel turned off and everything it closes are one change; turning it on
+    # again revives nothing (cells "Message held", "Request pending", "Job held" x "Channel off").
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts, channels = application.state.experts, application.state.channels
+    with monkeypatch.context() as crash:  # the process stops right after the channel was turned off
+        crash.setattr(channels.setup, "stop", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            client.patch(f"/v1/channels/{channel['binding_id']}", json={"state": "off"})
+    assert experts.reviews("local", owner) == []
+    assert experts._job(job["job_id"])["state"] == "stopped"
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state IN ('held','pending')") == 0
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"state": "connected"}).status_code == 200
+    experts.reconcile_once()
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+
+
+def test_no_message_is_created_to_leave_through_a_channel_turned_off(app):
+    # Review 3, cell "Message waiting to be sent" x "Channel off": dropped, and none created while off.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    channels = application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"state": "off"}).status_code == 200
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "SYNTHETIC-LATE-REPLY")
+    channels.reconcile_once()
+    assert client.patch(f"/v1/channels/{channel['binding_id']}", json={"state": "connected"}).status_code == 200
+    channels.reconcile_once()
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+    assert scalar(application, "SELECT state FROM channel_deliveries WHERE turn_id=?", accepted["turn_id"]) == "dropped"
+
+
+@pytest.mark.parametrize("closed", ["off", "removed"])
+def test_an_approval_interrupted_before_release_is_never_sent_once_the_person_cannot_be_served(app, closed, monkeypatch):
+    # Review 3, B3, cell "Request approved, release interrupted" x "Channel off" / "Person removed": never
+    # released, withdrawn; turning the channel on again or listing the person again does not revive it.
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "SYNTHETIC-APPROVED-REPLY")
+    channels.reconcile_once()
+    owner = scalar(application, "SELECT owner_id FROM expert_reviews")
+    review = experts.reviews("local", owner)[0]
+    with monkeypatch.context() as crash:  # the approval is recorded; its release never runs
+        crash.setattr(channels, "release_approved_reply", lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    _close(application, channel, accepted["conversation_id"], closed)
+    channels.release_approved_reply(experts._review(review["review_id"]))  # the release checks where it acts
+    assert experts._review(review["review_id"])["state"] == "withdrawn"
+    with experts.store._connect() as conn:  # on again, the person listed again
+        conn.execute("UPDATE channel_bindings SET state='connected',people_json=? WHERE binding_id=?",
+                     (json.dumps([PERSON]), channel["binding_id"]))
+    experts.reconcile_once()
+    experts.reconcile_once()
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert not any("SYNTHETIC-APPROVED-REPLY" in item["text"] for item in sent)
+
+
+def test_a_held_job_left_without_a_live_request_is_withdrawn_and_a_no_never_told_is_told_once(app):
+    # Review 3, B4, cells "Job held, no request" and "Job held, request rejected" x Crash, with a held reply
+    # whose request was decided: maintenance withdraws the jobs, tells each "no" once and drops the hold.
+    application, client = app
+    expert, channel, owner, cid, lost, accepted = _always_with_held_work(application, client)
+    experts = application.state.experts
+    refused = experts.hand_off("local", owner, cid, goal="Synthetic job refused", idempotency_key="k2",
+                               source_turn_id=accepted["turn_id"])
+    with experts.store._connect() as conn:  # what an earlier version could leave after a crash
+        conn.execute("DELETE FROM expert_reviews WHERE target_id=?", (lost["job_id"],))  # its request never written
+        conn.execute("UPDATE expert_reviews SET state='rejected',decided_at='t' WHERE target_id=? OR kind='reply'",
+                     (refused["job_id"],))  # the "no" recorded, nothing after it
+    experts.reconcile_once()
+    experts.reconcile_once()
+    assert experts._job(lost["job_id"])["state"] == "withdrawn"
+    assert experts._job(refused["job_id"])["state"] == "withdrawn"
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision'") == 2
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state='held'") == 0
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert not any("SYNTHETIC-HELD-REPLY" in item["text"] for item in sent)
+
+
+def test_a_rejection_is_recorded_whole_or_not_at_all(app, monkeypatch):
+    # Review 3, shape 2: the "no", the job it closes, the reply it drops and the turn that tells the person
+    # are one change. A failure while recording it leaves the request waiting, nothing half done.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    review = next(review for review in experts.reviews("local", owner) if review["kind"] == "job")
+    with monkeypatch.context() as failing:
+        failing.setattr(experts, "_insert_decision_turn",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic failure")), raising=False)
+        with pytest.raises(RuntimeError):
+            experts.decide("local", owner, review["review_id"], decision="reject", expected_digest=review["payload_digest"])
+    assert experts._review(review["review_id"])["state"] == "pending"
+    assert experts._job(job["job_id"])["state"] == "held"
+    experts.decide("local", owner, review["review_id"], decision="reject", expected_digest=review["payload_digest"])
+    assert experts._job(job["job_id"])["state"] == "withdrawn"
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision'") == 1
+
+
+def test_after_off_an_old_approval_is_refused_and_maintenance_withdraws_what_waited(app, monkeypatch):
+    # Review 3, B5, cell "Request pending" x "Setting changed to Off" with a crash between saving Off and
+    # withdrawing what waited: an approval is refused, and everything is withdrawn and each person told.
+    application, client = app
+    expert, channel, owner, cid, job, _ = _always_with_held_work(application, client)
+    experts = application.state.experts
+    waiting = {review["kind"]: review for review in experts.reviews("local", owner)}
+    read = client.get(f"/v1/experts/{expert['template_id']}").json()
+    with monkeypatch.context() as crash:  # Off is saved; the process stops before it withdraws anything
+        crash.setattr(experts, "_withdraw_waiting_for_off",
+                      lambda *args: (_ for _ in ()).throw(RuntimeError("synthetic crash")))
+        with pytest.raises(RuntimeError):
+            client.patch(f"/v1/experts/{expert['template_id']}", json={
+                "expected_catalog_revision": read["catalog_revision"], "expert": {**read["expert"], "ask_me_first": "off"}})
+    assert experts.spec(experts.latest("local", owner, expert["lineage_id"])).ask_me_first == "off"
+    with pytest.raises(ExpertError, match="Off"):
+        experts.decide("local", owner, waiting["job"]["review_id"], decision="approve",
+                       expected_digest=waiting["job"]["payload_digest"])
+    assert experts._job(job["job_id"])["state"] == "withdrawn"  # never started
+    experts.reconcile_once()
+    assert experts.reviews("local", owner) == []
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE state='held'") == 0
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' "
+                               "AND message LIKE '%switched Ask me first to Off%'") == 2  # each person told once
+
+
+def test_a_prepared_job_is_marked_running_at_any_age_never_given_up(app):
+    # Review 3, B6, cell "Job prepared" x Crash: marked running by maintenance at any age.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    assert experts._job(job["job_id"])["job_conversation_id"]
+    old = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
+    with experts.store._connect() as conn:  # its conversation and first turn written, not yet marked running
+        conn.execute("UPDATE expert_jobs SET state='starting',updated_at=? WHERE job_id=?", (old, job["job_id"]))
+    experts.reconcile_once()
+    assert experts._job(job["job_id"])["state"] == "running"
+    assert scalar(application, "SELECT count(*) FROM coordinator_events WHERE kind='expert_job_result' AND identity=?",
+                  job["job_id"]) == 0
+
+
+def test_a_prepared_job_never_runs_at_an_access_level_no_longer_supported(app, monkeypatch):
+    # Review 3, C1: a job prepared under an access level the runtime no longer supports is refused like a
+    # held one, told once, and its prepared conversation is fenced so its first turn never starts.
+    import workers_projects_runtime.experts as experts_module
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE expert_jobs SET state='starting' WHERE job_id=?", (job["job_id"],))
+    monkeypatch.setattr(experts_module, "_access_refusal", lambda spec: "Synthetic: this access level is not supported.")
+    refused = experts._start_job(job["job_id"])
+    assert refused["state"] == "failed" and refused["result_text"].startswith("The job could not start: ")
+    assert scalar(application, "SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
+                  refused["job_conversation_id"]) != ""

@@ -372,14 +372,13 @@ _RESULT_STATES = "'completed','failed','cancelled','interrupted'"
 # them untold.
 _RESULT_RETRY_BLOCKERS = frozenset({"host_capacity", "provider_account_busy"}) | _RETRYABLE_ADMISSION_CODES
 _RESULT_RETRY_CODES = ",".join(f"'{code}'" for code in sorted(_RESULT_RETRY_BLOCKERS))
-_RETRY_CODES = ",".join(f"'{code}'" for code in sorted(_RETRYABLE_ADMISSION_CODES))
+# Every turn, an ordinary message as much as a result turn, retries a temporary refusal without a
+# limit (its wait capped at a minute): a message is never dropped because it waited too long. A
+# row whose retry time an earlier version cleared after seven tries is retried again as well.
 _READY_TURN = f"""request_id='' AND (
- blocker='' OR (origin='worker_results' AND blocker IN ({_RESULT_RETRY_CODES})
-     AND (retry_after_at='' OR retry_after_at<=:now))
- OR (blocker IN ({_RETRY_CODES}) AND retry_after_at<>'' AND retry_after_at<=:now)
+ blocker='' OR (blocker IN ({_RESULT_RETRY_CODES}) AND (retry_after_at='' OR retry_after_at<=:now))
 )"""
-_RUNNABLE_TURN = f"""blocker='' OR (origin='worker_results' AND blocker IN ({_RESULT_RETRY_CODES}))
- OR (blocker IN ({_RETRY_CODES}) AND retry_after_at<>'')"""
+_RUNNABLE_TURN = f"""blocker='' OR blocker IN ({_RESULT_RETRY_CODES})"""
 
 
 class CoordinatorService:
@@ -1822,17 +1821,7 @@ class CoordinatorService:
                     "SELECT origin,retry_attempts FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
                     (conversation_id, turn_id),
                 ).fetchone()
-                retryable_result = (
-                    current is not None
-                    and current["origin"] == "worker_results"
-                    and blocker in _RESULT_RETRY_BLOCKERS
-                )
-                retryable_admission = (
-                    current is not None
-                    and blocker in _RETRYABLE_ADMISSION_CODES
-                    and int(current["retry_attempts"] or 0) < 6
-                )
-                retryable = retryable_result or retryable_admission
+                retryable = current is not None and blocker in _RESULT_RETRY_BLOCKERS
                 attempts = int(current["retry_attempts"] or 0) + 1 if retryable else 0
                 retry_after = (
                     (datetime.now(UTC) + timedelta(seconds=min(60, 5 * (2 ** min(attempts - 1, 4))))).isoformat()
