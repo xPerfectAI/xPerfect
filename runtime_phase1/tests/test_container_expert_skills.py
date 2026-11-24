@@ -71,7 +71,9 @@ def test_a_container_codex_worker_finds_the_experts_skill_in_its_own_home(tmp_pa
     runtime._build_command(worker, "Do the work.", runtime._runtime_info(worker))
     skills = runtime._home_dir("wrk_container_codex") / ".agents" / "skills"
     assert (skills / "synthetic-brief" / "SKILL.md").read_text() == SKILL["files"][0]["content"]
-    assert json.loads((skills / ".expert-skills.json").read_text()) == ["synthetic-brief"]
+    record = runtime._state_dir("wrk_container_codex") / "expert-skills-codex.json"
+    assert json.loads(record.read_text()) == ["synthetic-brief"]  # in the runtime's own state, not the home
+    assert not (skills / ".expert-skills.json").exists()
     # The next start without that Skill removes only what was placed; a Skill the Worker made stays.
     (skills / "worker-own").mkdir()
     (skills / "worker-own" / "SKILL.md").write_text("own")
@@ -104,27 +106,36 @@ def test_placing_skills_refuses_links_and_folders_it_did_not_place(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "keep.txt").write_text("keep")
-    # A link planted where the Skills go redirects neither a write nor a removal.
+    record = tmp_path / "state" / "expert-skills-codex.json"
+    # A link planted above a shared Skills folder redirects neither a write nor a removal.
     planted = tmp_path / "planted"
     (planted / ".agents").mkdir(parents=True)
     os.symlink(outside, planted / ".agents" / "skills")
     with pytest.raises(RuntimeErrorBase, match="placed safely"):
-        _place_expert_skills(planted, Path(".agents/skills"), [SKILL])
+        _place_expert_skills(planted, Path(".agents/skills"), [SKILL], record=record)
     assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
     # A folder of the same name that the Worker made itself is refused, not overwritten.
     own = tmp_path / "own"
     (own / ".agents" / "skills" / "synthetic-brief").mkdir(parents=True)
     (own / ".agents" / "skills" / "synthetic-brief" / "SKILL.md").write_text("mine")
     with pytest.raises(RuntimeErrorBase, match="already used"):
-        _place_expert_skills(own, Path(".agents/skills"), [SKILL])
+        _place_expert_skills(own, Path(".agents/skills"), [SKILL], record=tmp_path / "state-own" / "record.json")
     assert (own / ".agents" / "skills" / "synthetic-brief" / "SKILL.md").read_text() == "mine"
-    # A placed folder later swapped for a link is refused; the place it points to is untouched.
+    # A placed folder later swapped for a link is unlinked, never followed; the place it points to is untouched.
     swapped = tmp_path / "swapped"
-    assert _place_expert_skills(swapped, Path(".agents/skills"), [SKILL]) == ["synthetic-brief"]
+    swapped_record = tmp_path / "state-swapped" / "record.json"
+    assert _place_expert_skills(swapped, Path(".agents/skills"), [SKILL], record=swapped_record) == ["synthetic-brief"]
     shutil.rmtree(swapped / ".agents" / "skills" / "synthetic-brief")
     os.symlink(outside, swapped / ".agents" / "skills" / "synthetic-brief")
-    with pytest.raises(RuntimeErrorBase, match="must not be a link"):
-        _place_expert_skills(swapped, Path(".agents/skills"), [])
+    assert _place_expert_skills(swapped, Path(".agents/skills"), [], record=swapped_record) == []
+    assert not os.path.lexists(swapped / ".agents" / "skills" / "synthetic-brief")
+    assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
+    # The runtime's own Skills folder (Claude's) is replaced whole: a link planted in its place is unlinked.
+    owned = tmp_path / "owned"
+    (owned / ".glasshive").mkdir(parents=True)
+    os.symlink(outside, owned / ".glasshive" / "expert-skills")
+    assert _place_expert_skills(owned, Path(".glasshive/expert-skills"), [SKILL]) == ["synthetic-brief"]
+    assert not (owned / ".glasshive" / "expert-skills").is_symlink()
     assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
     # A Skill carrying a native plug-in part is refused before anything is written.
     with pytest.raises(RuntimeErrorBase):

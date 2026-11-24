@@ -1475,11 +1475,27 @@ def _write_expert_skill(target: Path, files: dict[Path, bytes]) -> None:
         path.chmod(0o600)
 
 
-def _place_expert_skills(home: Path, root: Path, declared: object) -> list[str]:
-    """Place an Expert's chosen Skills in a Worker home that the Worker itself can write to (a
-    container's), from outside it. Every path opens through no-follow descriptors and each file is
-    replaced whole, so a link planted in the home cannot redirect a write. Only folders this step
-    placed before are removed; a folder of the same name made by anything else is refused."""
+def _remove_skill_entry(folder: int, name: str) -> None:
+    """Remove one entry of a Skills folder through its descriptor: a folder is removed without
+    following any link inside it, and a link or file in its place is unlinked, never followed."""
+    try:
+        metadata = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        shutil.rmtree(name, dir_fd=folder)
+    else:
+        os.unlink(name, dir_fd=folder)
+
+
+def _place_expert_skills(home: Path, root: Path, declared: object, *, record: Path | None = None) -> list[str]:
+    """Place an Expert's chosen Skills under ``home/root``, a folder its Worker can write to.
+
+    Every write opens its path through no-follow descriptors and replaces the file whole, so a link
+    planted in the home can neither redirect a write nor change an outside file. With no ``record``
+    the Skills folder belongs to the runtime alone and is replaced whole at each launch. With one (a
+    file in the runtime's own state, outside the Worker's reach) the folder is shared with the Worker:
+    only the names the runtime recorded are removed, and a name the Worker made itself is refused."""
     from .bootstrap import _read_private_native_file, _sandbox_parent_descriptor, _write_private_native_file
 
     if declared is None:
@@ -1487,42 +1503,41 @@ def _place_expert_skills(home: Path, root: Path, declared: object) -> list[str]:
     if not isinstance(declared, list):
         raise RuntimeErrorBase("An Expert's Skills must be a list")
     chosen = [_expert_skill_files(skill) for skill in declared]
-    manifest = root / ".expert-skills.json"
-    if not chosen and not os.path.lexists(home / manifest):
-        return []
+    names = [name for name, _files in chosen]
     try:
-        try:
-            earlier = json.loads(_read_private_native_file(home, manifest) or "[]")
-        except ValueError:
+        if record is None:
+            if not chosen and not os.path.lexists(home / root):
+                return []
+            with _sandbox_parent_descriptor(home, root) as (parent, folder_name):
+                _remove_skill_entry(parent, folder_name)
+        else:
             earlier = []
-        with _sandbox_parent_descriptor(home, manifest) as (folder, _name):
-            # Removal and the name check go through this one descriptor of the Skills folder, opened
-            # without following links, so a folder above it swapped for a link changes nothing here.
-            for name in earlier if isinstance(earlier, list) else []:
-                if not _EXPERT_SKILL_NAME.fullmatch(str(name)):
-                    continue
+            if os.path.lexists(record):
                 try:
-                    metadata = os.stat(str(name), dir_fd=folder, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                if not stat.S_ISDIR(metadata.st_mode):
-                    raise RuntimeErrorBase("An Expert's Skill folder must not be a link")
-                shutil.rmtree(str(name), dir_fd=folder)
-            for name, _files in chosen:
-                try:
-                    os.stat(name, dir_fd=folder, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
-        # The names are recorded before their files, so an interrupted placement is removed next time.
-        placed = [name for name, _files in chosen]
-        _write_private_native_file(home, manifest, json.dumps(placed).encode("utf-8"), mode=0o600)
+                    earlier = json.loads(_read_private_native_file(record.parent, Path(record.name)) or "[]")
+                except ValueError:
+                    earlier = []
+            earlier = [str(name) for name in earlier if _EXPERT_SKILL_NAME.fullmatch(str(name))] \
+                if isinstance(earlier, list) else []
+            if not chosen and not earlier:
+                return []
+            with _sandbox_parent_descriptor(home, root / ".expert-skills-check") as (folder, _name):
+                for name in earlier:
+                    _remove_skill_entry(folder, name)
+                for name in names:
+                    try:
+                        os.stat(name, dir_fd=folder, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
+            # The names are recorded before their files, so an interrupted placement is removed next time.
+            _write_private_native_file(record.parent, Path(record.name), json.dumps(names).encode("utf-8"), mode=0o600)
         for name, files in chosen:
             for relative, content in files.items():
                 _write_private_native_file(home, root / name / relative, content, mode=0o600)
-    except OSError as exc:  # a link planted where the Skills go, or the home is unavailable
+    except OSError as exc:  # a link planted above the Skills folder, or the home is unavailable
         raise RuntimeErrorBase("An Expert's Skills could not be placed safely in this Worker's home") from exc
-    return placed
+    return names
 
 
 def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
@@ -9283,9 +9298,10 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
     def _build_command(self, worker: dict, instruction: str, info: RuntimeInfo) -> tuple[list[str], dict[str, str]]:
         worker.pop("_glasshive_native_authority_commands", None)
         # The Skills chosen on an Expert, placed from outside in this container's own HOME/.agents/skills,
-        # where Codex loads Skills natively.
+        # where Codex loads Skills natively; what was placed is recorded in the runtime's own state.
         _place_expert_skills(self._home_dir(str(worker["worker_id"])), Path(".agents/skills"),
-                             bootstrap_bundle_for(worker).get("expert_skills"))
+                             bootstrap_bundle_for(worker).get("expert_skills"),
+                             record=self._state_dir(str(worker["worker_id"])) / "expert-skills-codex.json")
         native_authority = self._materialize_direct_worker_native_authority(worker)
         existing_session = (
             None
@@ -12632,37 +12648,13 @@ raise SystemExit(exit_code)
             target_codex_home / "plugins" / "cache",
         )
 
-    def _project_host_codex_expert_skills(self, target_codex_home: Path, bundle: dict) -> None:
+    def _project_host_codex_expert_skills(self, target_codex_home: Path, bundle: dict, *, record: Path) -> None:
         """The Skills an owner chose for an Expert, as real folders in this Worker's own
         HOME/.agents/skills (which Codex reads natively). Never inside CODEX_HOME/skills, whose
-        entries link to the owner's own Skills. Only folders this step created are replaced."""
-        skills_root = target_codex_home.parent / ".agents" / "skills"
-        manifest = skills_root / ".expert-skills.json"
-        declared = bundle.get("expert_skills") or []
-        if not isinstance(declared, list):
-            raise RuntimeErrorBase("An Expert's Skills must be a list")
-        chosen = [_expert_skill_files(skill) for skill in declared]
-        if not chosen and not manifest.exists():
-            return
-        for directory in (target_codex_home.parent / ".agents", skills_root):
-            if directory.is_symlink():
-                raise RuntimeErrorBase("An Expert's Skill folder must not be a link")
-            directory.mkdir(mode=0o700, exist_ok=True)
-        try:
-            earlier = json.loads(manifest.read_text()) if manifest.exists() else []
-        except (OSError, ValueError):
-            earlier = []
-        for name in earlier if isinstance(earlier, list) else []:
-            target = skills_root / str(name)
-            if _EXPERT_SKILL_NAME.fullmatch(str(name)) and target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-        for name, files in chosen:
-            target = skills_root / name
-            if target.exists() or target.is_symlink():
-                raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
-            _write_expert_skill(target, files)
-        manifest.write_text(json.dumps([name for name, _ in chosen]))
-        manifest.chmod(0o600)
+        entries link to the owner's own Skills. What was placed is recorded in ``record``, in the
+        runtime's own state; only those names are ever removed."""
+        _place_expert_skills(target_codex_home.parent, Path(".agents/skills"), bundle.get("expert_skills"),
+                             record=record)
 
     def _host_codex_skill_alias(self, target_codex_home: Path, *, create=False) -> Path | None:
         home = target_codex_home.parent
@@ -13177,7 +13169,9 @@ raise SystemExit(exit_code)
                 codex_target.chmod(0o600)
                 if not _native_tools_disabled(bundle):
                     self._project_host_codex_capability_roots(codex_home)
-                    self._project_host_codex_expert_skills(codex_home, bundle)
+                    self._project_host_codex_expert_skills(
+                        codex_home, bundle,
+                        record=self._state_dir(str(worker["worker_id"])) / "expert-skills-codex.json")
                 else:
                     self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
@@ -13208,7 +13202,9 @@ raise SystemExit(exit_code)
                 config_path.chmod(0o600)
                 if not _native_tools_disabled(bundle):
                     self._project_host_codex_capability_roots(codex_home)
-                    self._project_host_codex_expert_skills(codex_home, bundle)
+                    self._project_host_codex_expert_skills(
+                        codex_home, bundle,
+                        record=self._state_dir(str(worker["worker_id"])) / "expert-skills-codex.json")
                 else:
                     self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
@@ -17300,25 +17296,12 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
 
         They travel in the launch bundle as a typed list (never as workspace files, which a
         dispatched Worker may not carry under .claude/), and each becomes one native plug-in
-        folder: SKILL.md at its root, text only, none of the native plug-in parts above.
+        folder: SKILL.md at its root, text only, none of the native plug-in parts above. The
+        folder belongs to the runtime and is replaced whole, through no-follow descriptors.
         """
-        declared = bundle.get("expert_skills")
-        if not declared:
-            return []
-        if not isinstance(declared, list):
-            raise RuntimeErrorBase("An Expert's Skills must be a list")
         home = self._home_dir(str(worker["worker_id"]))
-        private, root = home / ".glasshive", home / ".glasshive" / "expert-skills"
-        if private.is_symlink() or root.is_symlink():
-            raise RuntimeErrorBase("An Expert's Skill folder must not be a link")
-        if root.exists():
-            shutil.rmtree(root)
-        selected = []
-        for skill in declared:
-            name, files = _expert_skill_files(skill)
-            _write_expert_skill(root / name, files)
-            selected.append(root / name)
-        return selected
+        root = Path(".glasshive/expert-skills")
+        return [home / root / name for name in _place_expert_skills(home, root, bundle.get("expert_skills"))]
 
     def _declared_skill_plugin_directories(self, bundle: dict, workspace: Path) -> list[Path]:
         """Select exact approved text folders through Claude's native root-skill layout.

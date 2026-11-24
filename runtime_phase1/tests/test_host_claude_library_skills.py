@@ -225,19 +225,20 @@ def test_an_experts_skill_reaches_a_codex_worker_in_its_own_agents_folder(tmp_pa
     owner_catalog.mkdir()
     (skills / "native-codex").symlink_to(owner_catalog, target_is_directory=True)
     (skills / "unrelated").mkdir()
-    runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [SYNTHETIC_EXPERT_SKILL]})
+    record = tmp_path / "state" / "expert-skills-codex.json"
+    runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [SYNTHETIC_EXPERT_SKILL]}, record=record)
     folder = skills / "synthetic-brief"
     assert folder.is_dir() and not folder.is_symlink()
     assert (folder / "references/style.md").read_text() == "Exact supporting text.\n"
     assert not any(owner_catalog.iterdir())  # nothing written through the owner's Skills link
     # The next launch replaces only what this step created.
     other = {"name": "synthetic-other", "files": [{"path": "SKILL.md", "content": "---\nname: synthetic-other\n---\nOther.\n"}]}
-    runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [other]})
+    runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [other]}, record=record)
     assert not folder.exists() and (skills / "synthetic-other" / "SKILL.md").exists()
     assert (skills / "unrelated").is_dir() and (skills / "native-codex").is_symlink()
     # A name already used by something this step did not create is refused.
     with pytest.raises(RuntimeErrorBase):
-        runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [{**other, "name": "unrelated"}]})
+        runtime._project_host_codex_expert_skills(codex_home, {"expert_skills": [{**other, "name": "unrelated"}]}, record=record)
 
 
 def test_a_linked_agents_folder_is_refused(tmp_path):
@@ -249,5 +250,43 @@ def test_a_linked_agents_folder_is_refused(tmp_path):
     elsewhere.mkdir()
     (home / ".agents").symlink_to(elsewhere, target_is_directory=True)
     with pytest.raises(RuntimeErrorBase):
-        runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": [SYNTHETIC_EXPERT_SKILL]})
+        runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": [SYNTHETIC_EXPERT_SKILL]},
+                                                  record=tmp_path / "state" / "expert-skills-codex.json")
     assert not any(elsewhere.iterdir())
+
+
+def test_a_linked_record_in_the_workers_home_never_changes_an_owner_file(tmp_path):
+    # Review 2, finding 2: a Worker plants .agents/skills/.expert-skills.json as a link to an owner file.
+    import os, stat
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    runtime = object.__new__(HostCodexCliRuntime)
+    home = tmp_path / "worker-home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".agents" / "skills").mkdir(parents=True)
+    owner_file = tmp_path / "owner-file.txt"
+    owner_file.write_text("owner content")
+    owner_file.chmod(0o644)
+    (home / ".agents" / "skills" / ".expert-skills.json").symlink_to(owner_file)
+    record = tmp_path / "state" / "expert-skills-codex.json"
+    for chosen in ([SYNTHETIC_EXPERT_SKILL], []):
+        runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": chosen}, record=record)
+        assert owner_file.read_text() == "owner content"
+        assert stat.S_IMODE(owner_file.stat().st_mode) == 0o644
+    assert not (home / ".agents" / "skills" / "synthetic-brief").exists()  # removed again when no longer chosen
+
+
+def test_names_a_worker_writes_in_its_home_are_never_trusted_for_removal(tmp_path):
+    # Review 2, finding 11: what was placed is recorded in the runtime's own state, out of the Worker's reach.
+    from workers_projects_runtime.profile_runtime import HostCodexCliRuntime
+    runtime = object.__new__(HostCodexCliRuntime)
+    home = tmp_path / "worker-home"
+    (home / ".codex").mkdir(parents=True)
+    skills = home / ".agents" / "skills"
+    (skills / "worker-own").mkdir(parents=True)
+    (skills / "worker-own" / "SKILL.md").write_text("made by the Worker")
+    record = tmp_path / "state" / "expert-skills-codex.json"
+    runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": [SYNTHETIC_EXPERT_SKILL]}, record=record)
+    (skills / ".expert-skills.json").write_text(json.dumps(["worker-own", "synthetic-brief"]))  # the Worker's claim
+    runtime._project_host_codex_expert_skills(home / ".codex", {"expert_skills": []}, record=record)
+    assert (skills / "worker-own" / "SKILL.md").read_text() == "made by the Worker"
+    assert not (skills / "synthetic-brief").exists()
