@@ -324,7 +324,7 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       recent.hidden = !notices.length; recent.replaceChildren(node('h2', '', 'Recent'));
       for (const n of notices.slice(0, 8)) {
         if (n.kind === 'low_disk') {
-          const waiting = n.waiting ? ` ${n.waiting} message${n.waiting === 1 ? '' : 's'} wait and are answered when space returns.` : ' Messages wait and are answered when space returns.';
+          const waiting = n.waiting === 1 ? ' 1 message waits and is answered when space returns.' : n.waiting ? ` ${n.waiting} messages wait and are answered when space returns.` : ' Messages wait and are answered when space returns.';
           const line = node('p', 'expert-notice expert-notice-alert');
           line.append(node('strong', '', 'Low on disk'), node('span', '', ` · This computer has ${n.available_mb} MB free and needs ${n.required_mb} MB, so your Experts cannot answer anyone.${waiting}`));
           recent.append(line); continue;
