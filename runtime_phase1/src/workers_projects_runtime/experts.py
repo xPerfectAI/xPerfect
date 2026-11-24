@@ -50,6 +50,8 @@ class ExpertRole(StrictModel):
     profile: Literal["claude-code", "codex-cli", "grok-build"]
     account_id: str = Field(default="", max_length=512)
     backup: ExpertBackup | None = None
+    # Empty keeps that AI's own default effort. The owner sees and can change it.
+    effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
 
 
 class ExpertTeam(StrictModel):
@@ -77,7 +79,7 @@ class ExpertSpec(StrictModel):
 
 
 def default_spec(profile: str = "claude-code") -> ExpertSpec:
-    return ExpertSpec(team=ExpertTeam(talk=ExpertRole(profile="claude-code"),
+    return ExpertSpec(team=ExpertTeam(talk=ExpertRole(profile="claude-code", effort="low"),
                                       coordinate=ExpertRole(profile=profile if profile in PROFILES else "codex-cli"),
                                       work=[profile if profile in PROFILES else "codex-cli"]))
 
@@ -294,7 +296,9 @@ class ExpertService:
     # ---------------------------------------------------------------- configurations
     def _default_role_config(self, tenant: str, owner: str, role: ExpertRole) -> CoordinatorConfig:
         from .coordinator_config import configured_coordinator, connected_account_execution_mode
-        config = configured_coordinator(self.service, self.coordinator.provider, tenant, owner, role.profile)
+        config = self._with_effort(tenant, owner,
+                                   configured_coordinator(self.service, self.coordinator.provider, tenant, owner, role.profile),
+                                   role.effort)
         if not role.account_id:
             return config
         account = self._templates.get_provider_account(account_id=role.account_id, tenant_id=tenant, owner_id=owner)
@@ -307,6 +311,27 @@ class ExpertService:
         return config.model_copy(update={
             "scope": config.scope.model_copy(update={"connection_id": role.account_id, "execution_mode": mode}),
             "routes": routes})
+
+    def _with_effort(self, tenant: str, owner: str, config: CoordinatorConfig, effort: str) -> CoordinatorConfig:
+        if not effort:
+            return config
+        model = self.coordinator.provider._model(config.model, tenant_id=tenant, owner_id=owner)
+        if effort not in tuple(getattr(model, "effort_choices", ()) or ()):
+            raise ExpertError(f"This AI does not offer the {effort} effort", code="expert_effort_unavailable")
+        return config.model_copy(update={"effort": effort,
+                                         "routes": [route.model_copy(update={"effort": effort}) for route in config.routes]})
+
+    def speaker_effort(self, tenant: str, owner: str, config: CoordinatorConfig) -> str:
+        """The Queen's effort from the Expert's newest version, when her model offers it."""
+        binding = config.expert
+        if binding is None or binding.role != "speaker":
+            return config.effort
+        effort = self.spec(self.latest(tenant, owner, binding.lineage_id)).team.talk.effort
+        try:
+            model = self.coordinator.provider._model(config.model, tenant_id=tenant, owner_id=owner)
+        except Exception:
+            return config.effort
+        return effort if effort and effort in tuple(getattr(model, "effort_choices", ()) or ()) else config.effort
 
     def _speaker_config(self, tenant: str, owner: str, template: dict, binding: ExpertBinding) -> CoordinatorConfig:
         spec = self.spec(template)

@@ -4762,6 +4762,10 @@ def create_app(
     service.experts = ExpertService(store, service, service.coordinator)
     app.state.experts = service.experts
     install_expert_routes(app, service.experts, _current_principal, _auth_context)
+    from .channels import ChannelService
+    from .experts_api import install_channel_routes
+    service.channels = ChannelService(store, service.experts)
+    install_channel_routes(app, service.channels, _current_principal)
     expert_mcp = native_expert_server(
         service.experts, service.peers,
         os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766").rstrip("/") + "/v1/native/expert/",

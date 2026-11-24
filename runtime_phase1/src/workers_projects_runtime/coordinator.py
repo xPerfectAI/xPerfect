@@ -1687,7 +1687,9 @@ class CoordinatorService:
                     capabilities = {k: v for k, v in (bundle.get("provider_capabilities") or {}).items()
                                     if k != "coordination_only"}
                     bundle = {**bundle, "provider_capabilities": {**capabilities, "native_tools": False}}
-                packet = {"model": config.model, "reasoning_effort": config.effort,
+                effort = (experts.speaker_effort(tenant, owner, config)
+                          if experts is not None and config.expert is not None else config.effort)
+                packet = {"model": config.model, "reasoning_effort": effort,
                           "messages": messages, "metadata": {
                             "tenant_id": tenant, "owner_id": owner, "conversation_id": conversation_id,
                             "agent_id": "coordinator", "message_id": turn_id, "stream_id": turn_id,
