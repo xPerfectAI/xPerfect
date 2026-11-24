@@ -100,12 +100,20 @@ def test_direct_text_is_actual_bounded_reference_after_unchanged_history(core):
     assert "source_path_token" not in json.dumps(state)
 
 
+def settle_unstarted(coordinator, cid, turn_id):
+    """Messages are answered in the order they arrived, so a later one never starts while an earlier one
+    still waits; these checks use the earlier message only as history, so it is settled unstarted."""
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET blocker='cancelled' WHERE conversation_id=? AND turn_id=?", (cid, turn_id))
+
+
 def test_appended_library_evidence_preserves_latest_actionable_user_turn(core):
     from workers_projects_runtime.conversation_provider import ChatCompletionRequest, GLASSHIVE_MODELS, _admit_conversation_history, _protected_source_indices, _visible_message_keys
     coordinator, service, provider = core
     saved = note(service, "Reference evidence. " * 1200)
     cid = create(coordinator, 24000)
     coordinator.accept_turn("local", "owner", cid, "first", "Earlier question")
+    settle_unstarted(coordinator, cid, "first")
     coordinator.accept_turn("local", "owner", cid, "second", "Delegate the complete source verification to a Helper", library_refs=[ref(saved)])
     coordinator.start_turn("local", "owner", cid, "second")
     packet = ChatCompletionRequest.model_validate(provider.packets[-1])
@@ -242,6 +250,7 @@ def test_conversation_selection_retains_versions_without_copying_skill_bodies(co
     assert "files" not in conversation and "payload" not in conversation
     assert service.personal_library.get_item("local","owner",saved["item_id"])["payload"]["files"][0]["content"] == content
     monkeypatch.setattr(service.personal_library,"resolve_refs",lambda *args,**kwargs:pytest.fail("Unchanged retained selection should not resolve catalog bodies again"))
+    settle_unstarted(coordinator, cid, "first")
     coordinator.accept_turn("local","owner",cid,"second","Next job",library_refs=[ref(saved)])
     coordinator.start_turn("local","owner",cid,"second")
     assert content not in json.dumps(provider.packets[-1])
