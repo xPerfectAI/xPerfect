@@ -300,7 +300,7 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       const notices = (await request('/api/expert-notices')).items || [];
       recent.hidden = !notices.length; recent.replaceChildren(node('h2', '', 'Recent'));
       for (const n of notices.slice(0, 8)) {
-        const who = n.person ? ` for ${n.person}` : '';
+        const who = n.channel === 'chat' ? ' in your Chat' : n.person ? ` for ${n.person}` : '';
         const text = n.kind === 'backup'
           ? `Backup took over${who}: ${aiName(n.backup_ai)} answered because ${aiName(n.ai)} is at its limit${n.until ? ` until ${clock(n.until)}` : ''}.`
           : `Could not answer${who}: ${aiName(n.ai)} is at its limit and no backup took over.`;
