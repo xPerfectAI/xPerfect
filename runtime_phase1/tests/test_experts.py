@@ -815,6 +815,54 @@ def test_a_job_whose_goal_never_started_ends_with_the_coordinators_answer_told_o
     assert told() == 1
 
 
+def test_a_sandboxed_experts_skills_survive_the_clean_room_dispatch_and_reach_container_workers(app, tmp_path, monkeypatch):
+    from workers_projects_runtime.coordinator import ExpertBinding
+    from workers_projects_runtime.profile_runtime import ClaudeCodeRuntime, CodexCliRuntime
+    from workers_projects_runtime.service import derive_parallel_clean_room_bootstrap, _validate_parallel_clean_room_files
+    application, client = app
+    experts = application.state.experts
+    content = "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nWrite it.\n"
+    skill = client.post("/v1/personal-library", json={
+        "name": "synthetic-brief", "kind": "skill", "description": "Write a synthetic brief.", "profiles": ["claude-code"],
+        "files": [{"path": ".claude/skills/synthetic-brief/SKILL.md", "content": content}],
+        "idempotency_key": "synthetic-brief-skill"}).json()
+    created = client.post("/v1/experts", json={"name": "Synthetic Sandboxed", "description": "Works in containers.",
+                                               "expert": {**SPEC, "workspace": {"kind": "sandboxed", "access": "workspace"}},
+                                               "personal_library_refs": [{"item_id": skill["item_id"],
+                                                                          "version_id": skill["version_id"]}]})
+    assert created.status_code == 201, created.text
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created.json()["template_id"])
+    template = experts.resolve("local", owner, created.json()["template_id"])
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job"))
+    monkeypatch.setenv("WPR_CODEX_DANGEROUS", "0")
+    for route in config.routes:
+        assert route.execution_mode == "docker"
+        bundle = dict(route.bootstrap_bundle)
+        _validate_parallel_clean_room_files(bundle)
+        # The same projection dispatch and storage apply to a container Worker's bundle.
+        _, dispatched = derive_parallel_clean_room_bootstrap(None, bundle)
+        assert dispatched["execution_policy"] == "parallel-clean-room-v1"
+        assert dispatched["expert_skills"] == [{"name": "synthetic-brief", "files": [{"path": "SKILL.md", "content": content}]}]
+        # The clean-room network, as the container sandbox tests configure it (no container runs here).
+        for name, value in {"WPR_PARALLEL_CLEAN_ROOM_NETWORK": "glasshive-parallel-clean-room",
+                            "WPR_PARALLEL_CLEAN_ROOM_PROVIDER_PROXY_URL": "http://provider-egress:8080",
+                            "WPR_PARALLEL_CLEAN_ROOM_PROVIDER_PROXY_CONTAINER": "glasshive-provider-egress",
+                            "WPR_PARALLEL_CLEAN_ROOM_BROKER_PROXY_CONTAINER": "glasshive-capability-broker-proxy",
+                            "WPR_PARALLEL_CLEAN_ROOM_PROVIDER_EGRESS_NETWORK": "provider-egress"}.items():
+            monkeypatch.setenv(name, value)
+        runtime = (ClaudeCodeRuntime if route.profile == "claude-code" else CodexCliRuntime)(str(tmp_path / route.profile))
+        worker = {"worker_id": "wrk_sandboxed_" + route.profile.replace("-", "_"), "name": "Helper", "profile": route.profile,
+                  "execution_mode": "docker", "bootstrap_bundle_json": json.dumps(dispatched)}
+        command, _ = runtime._build_command(worker, "Do the work.", runtime._runtime_info(worker))
+        home = runtime._home_dir(worker["worker_id"])
+        if route.profile == "claude-code":
+            inside = f"{runtime.sandbox.home_mount}/.glasshive/expert-skills/synthetic-brief"
+            assert ["--plugin-dir", inside] in [command[i:i + 2] for i in range(len(command) - 1)]
+            assert (home / ".glasshive" / "expert-skills" / "synthetic-brief" / "SKILL.md").read_text() == content
+        else:
+            assert (home / ".agents" / "skills" / "synthetic-brief" / "SKILL.md").read_text() == content
+
+
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
     # Tested at the guard, not by filling the disk.
     application, client = app

@@ -289,6 +289,7 @@ PARALLEL_CLEAN_ROOM_BOOTSTRAP_KEYS = frozenset(
         "developer_instructions",
         "env",
         "execution_policy",
+        "expert_skills",
         "files",
         "glasshive_capability_authorization",
         "glasshive_capability_broker",
@@ -389,6 +390,46 @@ def _liveness_mode_from_bootstrap_json(value: object) -> str:
         return "declared_long"
     return "standard"
 
+_EXPERT_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+_EXPERT_SKILLS_MAX_BYTES = 1024 * 1024
+
+
+def canonical_expert_skills(value: object) -> list[dict[str, Any]]:
+    """The Skills an owner chose on an Expert, as exact text folders for its job's Workers.
+
+    Each is a folder name and text files inside that folder; nothing else is carried. Choosing a
+    Skill on the Expert is the owner's approval; the Worker's runtime checks the files again where
+    it places them (a SKILL.md, no native plug-in parts)."""
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError("An Expert's Skills are invalid")
+    skills, total = [], 0
+    for skill in value:
+        if not isinstance(skill, dict) or set(skill) != {"name", "files"}:
+            raise ValueError("An Expert's Skills are invalid")
+        name, files = skill["name"], skill["files"]
+        if not isinstance(name, str) or not _EXPERT_SKILL_NAME.fullmatch(name):
+            raise ValueError("An Expert's Skills are invalid")
+        if not isinstance(files, list) or not files or len(files) > 64:
+            raise ValueError("An Expert's Skills are invalid")
+        clean = []
+        for entry in files:
+            if not isinstance(entry, dict) or set(entry) != {"path", "content"}:
+                raise ValueError("An Expert's Skills are invalid")
+            path, content = entry["path"], entry["content"]
+            if not isinstance(path, str) or not isinstance(content, str):
+                raise ValueError("An Expert's Skills are invalid")
+            from pathlib import PurePosixPath
+            relative = PurePosixPath(path)
+            if not relative.parts or relative.is_absolute() or ".." in relative.parts or "\\" in path:
+                raise ValueError("An Expert's Skills are invalid")
+            total += len(content.encode("utf-8"))
+            clean.append({"path": relative.as_posix(), "content": content})
+        skills.append({"name": name, "files": clean})
+    if total > _EXPERT_SKILLS_MAX_BYTES:
+        raise ValueError("An Expert's Skills are too large")
+    return skills
+
+
 def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
     """Project only reviewed clean-room task and capability fields.
 
@@ -434,6 +475,9 @@ def canonical_parallel_clean_room_bootstrap(value: object) -> dict[str, Any]:
         result["inherited_conversation"] = InheritedConversationRequest.model_validate(
             result["inherited_conversation"]
         ).model_dump()
+
+    if "expert_skills" in result:
+        result["expert_skills"] = canonical_expert_skills(result["expert_skills"])
 
     if "viventium_run_liveness" in result:
         liveness = result["viventium_run_liveness"]

@@ -81,6 +81,25 @@ def test_a_container_codex_worker_finds_the_experts_skill_in_its_own_home(tmp_pa
     assert (skills / "worker-own" / "SKILL.md").read_text() == "own"
 
 
+def test_the_clean_room_boundary_carries_only_well_formed_skills():
+    from workers_projects_runtime.store import canonical_expert_skills, canonical_parallel_clean_room_bootstrap
+    kept = canonical_parallel_clean_room_bootstrap({"expert_skills": [SKILL], "unknown_context": "dropped"})
+    assert kept == {"expert_skills": [SKILL]}
+    bad = [
+        "not a list",
+        [{"name": "../escape", "files": SKILL["files"]}],
+        [{"name": "synthetic", "files": [{"path": "/etc/passwd", "content": "x"}]}],
+        [{"name": "synthetic", "files": [{"path": "../outside.md", "content": "x"}]}],
+        [{"name": "synthetic", "files": [{"path": "SKILL.md", "content": 7}]}],
+        [{"name": "synthetic", "files": [{"path": "SKILL.md", "content": "x", "mode": "0755"}]}],
+        [{"name": "synthetic", "files": []}],
+        [{"name": "synthetic", "files": [{"path": "SKILL.md", "content": "x" * (1024 * 1024 + 1)}]}],
+    ]
+    for value in bad:
+        with pytest.raises(ValueError):
+            canonical_expert_skills(value)
+
+
 def test_placing_skills_refuses_links_and_folders_it_did_not_place(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
