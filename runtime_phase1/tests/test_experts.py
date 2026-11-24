@@ -2110,3 +2110,37 @@ def test_reading_the_connect_status_never_starts_the_app_creation_and_a_finished
     setup._finish_sign_in("local", owner, channel["binding_id"], finished)
     setup._finish_sign_in("local", owner, channel["binding_id"], finished)  # a second finish changes nothing
     assert len(created) == 1
+
+
+def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_apps(app, monkeypatch, tmp_path):
+    # Found in the real Teams test: the app was created, then Teams showed a disabled "Add" button. Connect now reads
+    # Microsoft's own report first (the Teams CLI's status) and, when custom apps are off for this account, creates
+    # nothing and names the switches in one plain line; once allowed, Connect creates the app.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", channel["binding_id"])
+    setup = application.state.channels.setup
+    calls, report = [], {"tenant": True, "user": False}
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a",
+                    "username": "Synthetic Owner", "tdp": {"connected": True, "sideloading": dict(report)}}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True,
+                "installLink": "https://teams.invalid/install"}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id: "started")
+    setup._create("local", owner, channel["binding_id"])
+    status = client.get(f"/v1/channels/{channel['binding_id']}/connect").json()
+    assert status["step"] == "error"
+    for words in ("Upload custom apps", "Let users interact with custom apps in preview", "this one person only", "Connect again"):
+        assert words in status["error"]
+    assert not any(args[:2] == ("app", "create") for args in calls)
+    report["user"] = True  # the administrator turned it on
+    setup._create("local", owner, channel["binding_id"])
+    assert any(args[:2] == ("app", "create") for args in calls)
+    assert client.get(f"/v1/channels/{channel['binding_id']}/connect").json()["step"] == "connected"

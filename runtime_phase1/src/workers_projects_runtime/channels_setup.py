@@ -50,6 +50,34 @@ def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 _SIGN_IN_UNFINISHED = "Microsoft sign-in did not finish. Press Connect to try again."
 
 
+def _find(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _find(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _custom_apps_blocked(status: dict, name: str) -> str:
+    """Microsoft's own report (the Teams CLI's status) of whether the signed-in account may add a custom app: one
+    plain line naming both switches (Microsoft's names) and which is off, or "" when allowed or not reported."""
+    sideloading = _find(status, "sideloading")
+    if not isinstance(sideloading, dict):
+        return ""
+    tenant, user = sideloading.get("tenant"), sideloading.get("user")
+    if tenant is not False and user is not False:
+        return ""
+    off = "both are" if tenant is False and user is False else ("the first is" if user is False else "the second is")
+    return (f"Teams does not yet let the account you signed in with add custom apps, so {name} cannot be installed. "
+            "An administrator turns on two switches in the Teams admin center: \"Upload custom apps\" in an app setup "
+            "policy (Teams apps → Setup policies; a new policy can give it to this one person only) and \"Let users "
+            "interact with custom apps in preview\" (Teams apps → Manage apps → Org-wide app settings). Microsoft "
+            f"reports that {off} off. Then press Connect again.")
+
+
 class TeamsSetup:
     """One sign-in and app creation at a time per channel, and one package process per channel."""
 
@@ -177,6 +205,12 @@ class TeamsSetup:
             binding = self.channels._binding(binding_id, tenant, owner)
             expert = self.channels.experts.latest(tenant, owner, binding["lineage_id"])
             status = self._run("status", timeout=60)
+            blocked = _custom_apps_blocked(status, expert["name"])
+            if blocked:
+                # Nothing is created that Teams would not let this account install; the page says why, plainly.
+                with self._lock:
+                    self._sessions[binding_id] = {"step": "error", "error": blocked}
+                return
             path = self.credentials_path(binding_id)
             created = self._run("app", "create", "--name", expert["name"][:30], "--messaging-mode", "socket",
                                 "--teams-managed", "--env", str(path), timeout=600)
