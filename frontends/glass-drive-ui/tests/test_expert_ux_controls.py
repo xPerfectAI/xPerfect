@@ -390,7 +390,11 @@ def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_
                   "is in your organisation's Teams apps and installed for you",
                   "Teams shows the details of the version there",
                   "One press for a Teams administrator is not available on this xPerfect yet",
-                  "For the Teams app made with ${step.account}"):
+                  "For the Teams app made with ${step.account}",
+                  "“Read and write to all app catalogs”, “Manage user's installed Teams apps” and “Sign in and read user profile”",
+                  "If an administrator added this app to your organisation’s Teams apps, Teams shows the details of the version there",
+                  "Narrowing it takes a new version of the app",
+                  "This app was made before xPerfect narrowed new apps to personal chats"):
         assert words in source, words
     server = (STATIC.parent / 'server.py').read_text()
     assert '"as_admin": bool(payload.get("as_admin"))}' in server

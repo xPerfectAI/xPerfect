@@ -242,7 +242,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     const name = channel.app?.app_name || item.name;
     const button = node('button', primary ? 'primary-button' : 'secondary-button', `Add ${name} to my organisation's Teams apps`); button.type = 'button';
     button.onclick = () => connect(channel, { as_admin: true });
-    const hint = node('p', 'expert-hint', `For a Teams administrator. Microsoft asks you to sign in and to approve, on its own page, what this setup may do: add apps to your organisation's Teams apps, install Teams apps for you, and read your profile. ${name} then goes into your organisation's Teams apps, where people may find it as your organisation's settings allow; only the people listed here get an answer. It is installed for you when you sign in with the account that made it. An administrator can delete it again in the Teams admin center.`);
+    const hint = node('p', 'expert-hint', `For a Teams administrator. Microsoft asks you to sign in and to approve, on its own page, three permissions: “Read and write to all app catalogs”, “Manage user's installed Teams apps” and “Sign in and read user profile”. ${name} then goes into your organisation's Teams apps, where people may find it as your organisation's settings allow; only the people listed here get an answer. It is installed for you when you sign in with the account that made it. An administrator can delete it again in the Teams admin center.`);
     return [button, hint];
   }
   // An administrator who published or deployed the app makes the developer copy's install link a dead end.
@@ -274,6 +274,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     };
     about.append(node('p', 'expert-hint', 'Teams shows these to everyone who adds the app. Microsoft needs all four; the links start with https://.'), keep);
     if (channel.app.catalogue_id || channel.app.added_by_admin) about.append(node('p', 'expert-hint', 'This app is in your organisation’s Teams apps, and Teams shows the details of the version there. Saving here changes the app’s own copy; what Teams shows changes when an administrator adds a new version of the app there.'));
+    else about.append(node('p', 'expert-hint', 'If an administrator added this app to your organisation’s Teams apps, Teams shows the details of the version there, and changing them there takes a new version that an administrator adds.'));
     return about;
   }
   async function save(channel, people) {
@@ -371,7 +372,8 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
         // Which Microsoft account and organisation the app was made in, as Microsoft reported them.
-        if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats.'));
+        if (!channel.app.scopes && channel.app.app_id) card.append(node('p', 'expert-hint', 'This app was made before xPerfect narrowed new apps to personal chats, so Teams may still offer it in teams and group chats; it answers only in personal chats. Narrowing it takes a new version of the app; for an app in your organisation’s Teams apps, an administrator adds that version there.'));
+        if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats. Narrowing it takes a new version of the app; for an app in your organisation’s Teams apps, an administrator adds that version there.'));
         if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
         const catalogue = channel.app.catalogue;
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));

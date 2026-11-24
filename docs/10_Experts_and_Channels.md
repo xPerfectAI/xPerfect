@@ -187,10 +187,15 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
     approves what the setup may do; that consent is the yes. The sign-in asks for three Graph permissions:
     `AppCatalog.ReadWrite.All` (admin consent), `TeamsAppInstallation.ReadWriteForUser` (admin consent;
     the "Self" variant installs only the calling app itself) and `User.Read`. Then, by itself:
+    - the press goes on only as the account the channel was refused for, or the one its app was made with,
+      in that app's organisation (the CLI's sign-in is shared by the whole computer); another account gets a
+      plain line naming both, and nothing reaches Microsoft or is made; the sign-in step names the account
+      and organisation ID it is for;
     - nothing is made unless Microsoft granted `AppCatalog.ReadWrite.All` (a person who is not an
       administrator gets a plain line and the note for their administrator);
     - the app is made if it does not exist yet, and recorded at once as "not yet in the catalogue", so a
-      later press resumes there and never makes a second app;
+      later press resumes there and never makes a second app (an app made the usual way keeps its card as
+      it is until it is in the catalogue);
     - the app's package goes into the organisation's catalogue (Graph "Publish teamsApp", no review), or
       the entry an administrator already added is found and reused;
     - it is installed for the person (Graph "Install app for user") only when the administrator signed in

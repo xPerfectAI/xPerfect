@@ -560,11 +560,11 @@ class TeamsSetup:
             if not settings.get("teams_app_id"):
                 self._admin_step(binding_id, run, {"step": "adding", "account": account,
                                                    "progress": f"Making {name}'s Teams app…"})
+                # Made by this press while Teams refuses the app: marked waiting for the catalogue, so the card hides
+                # the blocked developer link and offers the press again. An app made the usual way keeps its card as
+                # it is until it is in the catalogue.
                 settings, _created = self._make_app(tenant, owner, binding_id, expert, status,
                                                     {"catalogue": "pending"})
-            elif settings.get("catalogue") not in {"listed", "installed"}:
-                settings = {**settings, "catalogue": "pending"}
-                self.channels.record_setup(tenant, owner, binding_id, settings)
             manifest_id = str(settings["teams_app_id"])
             self._admin_step(binding_id, run, {"step": "adding", "account": account,
                                                "progress": f"Adding {name} to your organisation's Teams apps…"})

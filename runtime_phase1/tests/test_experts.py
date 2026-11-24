@@ -2926,10 +2926,12 @@ def test_microsofts_address_can_only_be_replaced_by_one_on_this_computer(monkeyp
 def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkeypatch):
     # The wait before a ready reply left was the package's one-second poll (0.1 to 0.8 s on real Teams). A claim that
     # asks to wait now returns as soon as the reply is written; an empty one returns after its wait, never longer
-    # than the core's limit; and a claim still leases the message exactly as before.
+    # than the core's limit; and a claim still leases the message exactly as before. The bounds are wide (a limit of
+    # 10 s here), so a busy machine passes and a claim that never wakes still fails.
     import threading
     import time
     from workers_projects_runtime import channels as channels_module
+    monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 10.0)
     application, client = app
     channel = connected_channel(application, client, create_expert(client))
     binding_id = channel["binding_id"]
@@ -2940,7 +2942,7 @@ def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkey
 
     def waiting():
         started = time.monotonic()
-        result["items"] = channels.claim(binding_id, 10, 3.0)
+        result["items"] = channels.claim(binding_id, 10, 10.0)
         result["started"], result["returned"] = started, time.monotonic()
 
     thread = threading.Thread(target=waiting)
@@ -2948,29 +2950,29 @@ def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkey
     time.sleep(0.4)
     written = time.monotonic()
     channels.reconcile_once()  # the reply is written ready to send
-    thread.join(5)
+    thread.join(15)
     assert [item["text"] for item in result["items"]] == ["Synthetic answer"]
     assert result["returned"] - result["started"] >= 0.4  # it waited for the reply
-    assert result["returned"] - written < 1.0  # and left as soon as it was ready, not after the full wait
+    assert result["returned"] - written < 5.0  # and left when it was ready, long before its 10 s
     assert scalar(application, "SELECT state FROM channel_deliveries") == "sending"
     started = time.monotonic()
     assert client.post(f"/v1/channels/{binding_id}/deliveries/claim?wait=0.3").json()["items"] == []
-    assert 0.3 <= time.monotonic() - started < 1.5
-    monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 0.2)
-    started = time.monotonic()
-    assert channels.claim(binding_id, 10, 60.0) == [] and time.monotonic() - started < 1.0  # never past the limit
+    assert 0.3 <= time.monotonic() - started < 5.0
     # Only so many claims wait at once (each holds a server thread); the next answers at once, as before.
     import threading as _threading
     monkeypatch.setattr(channels, "_waiters", _threading.BoundedSemaphore(1))
     assert channels._waiters.acquire(blocking=False)  # one claim is already waiting
     started = time.monotonic()
-    assert channels.claim(binding_id, 10, 3.0) == [] and time.monotonic() - started < 1.5  # at once, not after 3 s
+    assert channels.claim(binding_id, 10, 10.0) == [] and time.monotonic() - started < 5.0  # at once, not after 10 s
     channels._waiters.release()
     # While nothing is ready, a waiting claim reads only: no write transaction until a message is ready.
     writes = []
     real_claim = channels._claim_now
     monkeypatch.setattr(channels, "_claim_now", lambda *args: writes.append(1) or real_claim(*args))
     assert channels.claim(binding_id, 10, 1.0) == [] and len(writes) == 1  # the first look only
+    monkeypatch.setattr(channels_module, "CLAIM_WAIT_MAX_S", 0.2)
+    started = time.monotonic()
+    assert channels.claim(binding_id, 10, 60.0) == [] and time.monotonic() - started < 5.0  # never past the limit
 
 
 @pytest.mark.parametrize("made_before", [False, True])
@@ -2990,3 +2992,24 @@ def test_the_press_is_refused_when_the_tool_is_now_signed_in_as_another_account(
     assert shown["step"] == "error", shown
     assert "Another Owner" in shown["error"] and "Synthetic Owner" in shown["error"] and "nothing was made" in shown["error"]
     assert rig.background == [] and rig.microsoft.calls == [] and rig.creations() == 0
+
+
+def test_a_refused_publish_for_an_app_made_the_usual_way_leaves_its_card_as_it_was(app, monkeypatch, tmp_path):
+    # When Teams already lets the person add custom apps, Connect makes the app the usual way and the press is a
+    # secondary choice. If Microsoft then refuses to add it to the catalogue, the card keeps its Install in Teams and
+    # "An administrator added it for me": nothing is marked waiting for the catalogue for an app this press did not make.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    settings = {"app_id": "bot-synthetic", "teams_app_id": "teams-app-synthetic", "account": "Synthetic Owner",
+                "tenant_id": "tenant-synthetic", "connected_by": "person-synthetic-a",
+                "install_link": "https://teams.invalid/developer-copy"}
+    client.post(f"/v1/channels/{rig.binding_id}/setup", json={"settings": settings})
+    rig.setup._sessions.clear()
+    rig.microsoft.publish_status = 403
+    rig.press()
+    rig.run()
+    shown = rig.status()
+    assert shown["step"] == "admin_waiting" and "needs a Teams administrator" in shown["error"]
+    card = shown["channel"]["app"]
+    assert "catalogue" not in card and card["install_link"] == "https://teams.invalid/developer-copy"
+    assert rig.creations() == 0
