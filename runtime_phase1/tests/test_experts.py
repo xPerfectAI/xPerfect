@@ -603,6 +603,26 @@ def test_off_holds_nothing(app):
     assert scalar(application, "SELECT count(*) FROM expert_jobs") == 0
 
 
+def test_the_owners_own_chat_asks_in_the_chat_never_in_needs_you(app):
+    # In his own Chat the owner is the one asking; a check goes in the reply, not to Needs you.
+    application, client = app
+    expert = create_expert(client)  # Auto
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    result = experts.ask_owner("local", owner, chat["conversation_id"], reason="Uses private context",
+                               job_goal="Synthetic job", idempotency_key="ask-own-chat")
+    assert result["state"] == "not_asked" and "own Chat" in result["note"]
+    assert experts.reviews("local", owner) == []
+    assert scalar(application, "SELECT count(*) FROM expert_jobs") == 0
+    # Another person on a channel is still asked about.
+    channel = connected_channel(application, client, expert)
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-own")).json()
+    asked = experts.ask_owner("local", owner, accepted["conversation_id"], reason="Unusual", reply="SYNTHETIC",
+                              idempotency_key="ask-person", source_turn_id=accepted["turn_id"])
+    assert asked["state"] == "pending" and len(experts.reviews("local", owner)) == 1
+
+
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
     # Tested at the guard, not by filling the disk.
     application, client = app

@@ -770,6 +770,11 @@ class ExpertService:
             # Off: nothing waits for the owner and nothing is held; the instructions still apply.
             return {"state": "not_asked",
                     "note": "Ask me first is Off: nobody is asked. Decide yourself, following your instructions."}
+        if speaker["channel"] == "chat":
+            # The owner's own Chat (as for Always): the owner is the one asking and decides here.
+            return {"state": "not_asked",
+                    "note": "This is your owner's own Chat: your owner is the one asking, so nothing is held. If the "
+                            "request goes against your instructions, say so in your reply and let them decide here."}
         if job_goal:
             job_key = "ask:" + idempotency_key
             with self.store._connect() as conn:
