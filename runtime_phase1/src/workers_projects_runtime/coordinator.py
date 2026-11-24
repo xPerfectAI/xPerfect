@@ -2206,9 +2206,13 @@ class CoordinatorService:
                 return None
             # Foreground work already accepted always wins admission. A single transaction
             # claims all current result notices into one deterministic continuation.
-            pending = conn.execute("""SELECT 1 FROM coordinator_turns t
+            # A turn refused for good before it started (a blocker that is not retried) never runs, so
+            # it must not hold back result turns: otherwise one refused message silences every later result.
+            retried = ",".join("'" + code + "'" for code in sorted(_RETRYABLE_ADMISSION_CODES))
+            pending = conn.execute(f"""SELECT 1 FROM coordinator_turns t
                 LEFT JOIN provider_requests p ON p.request_id=t.request_id
                 WHERE t.conversation_id=? AND t.restore_hold=0 AND t.response_json='' AND t.blocker<>'cancelled' AND
+                NOT (t.request_id='' AND t.blocker<>'' AND t.blocker NOT IN ({retried})) AND
                 (t.request_id='' OR p.request_id IS NULL OR p.state NOT IN ('failed','cancelled','completed')) LIMIT 1""", (conversation_id,)).fetchone()
             if pending:
                 return None

@@ -1449,6 +1449,29 @@ def test_a_busy_native_conversation_is_retried_never_left_blocked(coordinator):
     assert answers == ['busy', 'started']
 
 
+def test_a_message_refused_for_good_does_not_silence_later_results(coordinator):
+    """One message refused before it started (a blocker that is not retried) must not hold back every
+    later result; a message still waiting to retry does hold them back."""
+    from workers_projects_runtime.coordinator import canonical, now
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'refused', 'Please start a job.')
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET blocker='provider_auth_missing' WHERE conversation_id=? AND turn_id='refused'", (cid,))
+        conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
+                     (cid, 'result_available', 'run-a', canonical({'goal_id': 'a', 'run_id': 'run-a', 'state': 'completed'}), now()))
+    turn = coordinator.queue_result_turn('local', 'owner', cid)
+    assert turn and turn.startswith('results-')
+    # A message that will run again (a retryable blocker with its retry time) still comes first.
+    cid2 = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid2, 'waiting', 'Please start a job.')
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET blocker='conversation_session_authority_conflict',retry_after_at=?,retry_attempts=1 "
+                     "WHERE conversation_id=? AND turn_id='waiting'", (now(), cid2))
+        conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
+                     (cid2, 'result_available', 'run-b', canonical({'goal_id': 'b', 'run_id': 'run-b', 'state': 'completed'}), now()))
+    assert coordinator.queue_result_turn('local', 'owner', cid2) is None
+
+
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):
     from workers_projects_runtime.coordinator import canonical, now
     cid = create(coordinator)
