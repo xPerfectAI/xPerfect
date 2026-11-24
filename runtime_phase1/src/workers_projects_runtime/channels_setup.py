@@ -106,6 +106,13 @@ def _detail_problem(values: dict[str, str]) -> str:
     return ""
 
 
+def _account_changed(before: str, now: str) -> str:
+    if not now:
+        return f"The Teams tool is no longer signed in as {before}, so nothing was made. Press Connect again to sign in."
+    return (f"The Teams tool is now signed in as {now}, not {before}, so nothing was made. Press Connect again: it "
+            "names the account signed in now.")
+
+
 def _custom_apps_allowed(status: dict) -> bool:
     """Microsoft's explicit yes for both switches. After a "no", anything less (a missing or partial report, as from a
     signed-out tool or a portal that did not answer) is not a yes."""
@@ -261,12 +268,15 @@ class TeamsSetup:
             return {"step": "start", "signed_in_as": who,
                     "channel": self.channels.view(self.channels._binding(binding_id))}
         if signed_in:
+            # The app is made only as the account the press expects: the one the button named, or the one a
+            # blocked channel was refused for (the tool's login is shared by the whole computer).
+            expected = current.get("account") if current.get("step") == "blocked" else as_account
             with self._lock:  # claimed here, so a check that began meanwhile and this press never both create
                 start = not self._pending(binding_id)
                 if start:
                     self._sessions[binding_id] = {"step": "creating"}
             if start:
-                self._in_background(self._create, tenant, owner, binding_id)
+                self._in_background(self._create, tenant, owner, binding_id, expected)
             return self.status(tenant, owner, binding_id)
         process = subprocess.Popen([*self._cli(), "login", "--device-code", "--disable-auto-update"],
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -336,9 +346,9 @@ class TeamsSetup:
                 if session.get("step") == "blocked" and not session.get("checking") \
                         and session.get("check_at", 0.0) <= self._clock():
                     self._sessions[binding_id] = {**session, "checking": True}
-                    due.append((session["tenant"], session["owner"], binding_id))
-        for tenant, owner, binding_id in due:
-            self._in_background(self._create, tenant, owner, binding_id)
+                    due.append((session["tenant"], session["owner"], binding_id, session.get("account")))
+        for tenant, owner, binding_id, account in due:
+            self._in_background(self._create, tenant, owner, binding_id, account)
 
     def _finish_sign_in(self, tenant: str, owner: str, binding_id: str, process: Any) -> None:
         """The one place a sign-in moves on: once its process ends, the step changes in one lock section and
@@ -356,7 +366,9 @@ class TeamsSetup:
         if ok:
             self._create(tenant, owner, binding_id)
 
-    def _create(self, tenant: str, owner: str, binding_id: str) -> None:
+    def _create(self, tenant: str, owner: str, binding_id: str, expected_account: str | None = None) -> None:
+        """Make the channel's Teams app once Microsoft allows it. expected_account: the account the person chose
+        (a named press, or the one a blocked channel was refused for); None after a fresh code sign-in."""
         try:
             binding = self.channels._binding(binding_id, tenant, owner)
             expert = self.channels.experts.latest(tenant, owner, binding["lineage_id"])
@@ -370,6 +382,14 @@ class TeamsSetup:
                                                       "check_at": self._clock() + _RECHECK_S}
                         return
                 raise
+            account = str(status.get("username") or "") if status.get("loggedIn") else ""
+            if expected_account is not None and account != expected_account:
+                # The tool's login changed since the person chose (another Expert signed in elsewhere, or a sign-out):
+                # nothing is made in an organisation nobody chose; Connect names the account signed in now.
+                with self._lock:
+                    self._refused.discard(binding_id)
+                    self._sessions[binding_id] = {"step": "error", "error": _account_changed(expected_account, account)}
+                return
             blocked = _custom_apps_blocked(status, expert["name"])
             with self._lock:
                 now = self._clock()
@@ -378,20 +398,19 @@ class TeamsSetup:
                     # with a note for the administrator, and maintenance reads Microsoft's report again by itself.
                     self._refused.add(binding_id)
                     self._sessions[binding_id] = {"step": "blocked", "error": blocked,
-                                                  "note": _note_for_admin(status, expert["name"]),
+                                                  "note": _note_for_admin(status, expert["name"]), "account": account,
                                                   "tenant": tenant, "owner": owner, "check_at": now + _RECHECK_S}
                     return
                 if binding_id in self._refused:  # Microsoft said no before: only a clear yes for both switches
                     if not _custom_apps_allowed(status):  # a missing or half answer is not a yes: nothing created
                         previous = self._sessions.get(binding_id) or {}
                         self._sessions[binding_id] = {"step": "blocked", "error": _NOT_REPORTED,
-                                                      "note": previous.get("note", ""), "tenant": tenant,
+                                                      "note": previous.get("note", ""), "account": account, "tenant": tenant,
                                                       "owner": owner, "check_at": now + _RECHECK_S}
                         return
                     self._refused.discard(binding_id)
                 # Which account and organisation the app is made in, as Microsoft reports them, shown while it is
                 # made and on the card afterwards, so a wrong one is noticed at once.
-                account = str(status.get("username") or "")
                 self._sessions[binding_id] = {"step": "creating", "account": account,
                                               "tenant_id": str(status.get("tenantId") or "")}
             path = self.credentials_path(binding_id)

@@ -2550,3 +2550,54 @@ def test_a_package_adopted_after_a_runtime_restart_is_started_again_at_once_when
     adopted.clear()  # stopped by its pid
     setup.reconcile_once()
     assert len(processes) == 1  # the new code starts at once
+
+
+def test_a_blocked_channel_makes_its_app_only_as_the_account_it_was_refused_for(app, monkeypatch, tmp_path):
+    # Advisor finding: the tool's login is shared by the whole computer. If the owner was blocked as account A and then
+    # signed the tool in as B (for another Expert), the first channel's re-check or Check now would have made its app
+    # in B's organisation, unasked. Now nothing is made and Connect names the account signed in now.
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path))
+    expert = create_expert(client)
+    channel = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()
+    binding_id = channel["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    calls, tool, clock, background = [], {"as": "Synthetic Owner A", "user": False}, [1000.0], []
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "username": tool["as"], "tenantId": "tenant-synthetic",
+                    "tdp": {"sideloading": {"tenant": True, "user": tool["user"]}}}
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
+    setup._clock = lambda: clock[0]
+    creations = lambda: sum(1 for args in calls if args[:2] == ("app", "create"))  # noqa: E731
+
+    def run_background():
+        while background:
+            target, args = background.pop(0)
+            target(*args)
+
+    setup._create("local", owner, binding_id, "Synthetic Owner A")  # the press named A; Microsoft says no
+    assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "blocked"
+    tool.update({"as": "Synthetic Account B", "user": True})  # another Expert signed the tool in as B, allowed there
+    clock[0] += 121
+    setup.reconcile_once()
+    run_background()
+    status = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert creations() == 0 and status["step"] == "error"
+    assert "Synthetic Account B" in status["error"] and "Synthetic Owner A" in status["error"]
+    setup._sessions[binding_id] = {"step": "blocked", "error": "blocked", "note": "", "account": "Synthetic Owner A",
+                                   "tenant": "local", "owner": owner, "check_at": clock[0] + 120}
+    pressed = client.post(f"/v1/channels/{binding_id}/connect", json={}).json()  # Check now, from the blocked card
+    run_background()
+    assert creations() == 0 and client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "error"
+    assert pressed["step"] in ("creating", "error")
+    named = client.post(f"/v1/channels/{binding_id}/connect", json={"as_account": "Synthetic Account B"}).json()
+    run_background()  # pressed again, naming the account signed in now: made there, once
+    assert named["step"] == "creating" and creations() == 1
