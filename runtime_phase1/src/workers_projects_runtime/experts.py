@@ -960,6 +960,28 @@ class ExpertService:
                     outcomes.append({"job_id": job["job_id"], "state": state})
             except Exception as exc:  # One job's failure must not stop the others.
                 outcomes.append({"job_id": job["job_id"], "error": type(exc).__name__})
+        # An approval whose release was interrupted is completed, once: the approved job is
+        # still held, or the approved reply to a channel has not left its hold.
+        with self.store._connect() as conn:
+            unreleased = [dict(row) for row in conn.execute(
+                "SELECT r.* FROM expert_reviews r WHERE r.state='approved' AND r.kind='job' AND EXISTS ("
+                "SELECT 1 FROM expert_jobs j WHERE j.job_id=r.target_id AND j.state='held') "
+                "ORDER BY r.decided_at LIMIT ?", (limit,))]
+            if self.deliveries is not None:
+                unreleased += [dict(row) for row in conn.execute(
+                    "SELECT r.* FROM expert_reviews r JOIN expert_conversations e "
+                    "ON e.conversation_id=r.speaker_conversation_id WHERE r.state='approved' AND r.kind='reply' "
+                    "AND e.binding_id<>'' AND NOT EXISTS (SELECT 1 FROM channel_deliveries d "
+                    "WHERE d.review_id=r.review_id AND d.state<>'held') ORDER BY r.decided_at LIMIT ?", (limit,))]
+        for review in unreleased:
+            try:
+                if review["kind"] == "job":
+                    self._start_job(review["target_id"])
+                else:
+                    self.deliveries.release_approved_reply(review)
+                outcomes.append({"review_id": review["review_id"], "released": True})
+            except Exception as exc:  # retried on the next pass
+                outcomes.append({"review_id": review["review_id"], "error": type(exc).__name__})
         # A stopped job's conversation stays fenced until its Stop is confirmed, also when
         # the Stop raced the job's start or a restart came between them.
         with self.store._connect() as conn:

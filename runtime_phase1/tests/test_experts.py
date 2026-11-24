@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from workers_projects_runtime.api import create_app
 from workers_projects_runtime.coordinator import CoordinatorConfig, Route, canonical
+from workers_projects_runtime.channels import InboundMessage
 from workers_projects_runtime.experts import ExpertError, ExpertSpec, ExpertTeam, ExpertRole, default_spec
 
 SPEC = {"instructions": "Synthetic instructions: help with engineering; never share private data.",
@@ -499,3 +500,73 @@ def test_removing_a_person_stops_everything_waiting_for_them(app):
     with pytest.raises(ExpertError):
         experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
     assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+
+
+def test_a_message_accepted_before_an_interruption_still_gets_its_turn(app, monkeypatch):
+    application, client = app
+    expert = create_expert(client)
+    channel = connected_channel(application, client, expert)
+    channels, experts = application.state.channels, application.state.experts
+    original = experts.queen
+    calls = {"n": 0}
+
+    def interrupted(*args, **kwargs):  # xPerfect stops after the inbox commit, before the turn exists
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("synthetic interruption")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(experts, "queen", interrupted)
+    with pytest.raises(RuntimeError):
+        channels.inbound(channel["binding_id"], InboundMessage.model_validate(message("act-1")))
+    again = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    assert again["duplicate"] is True and again["turn_id"]
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE turn_id=?", again["turn_id"]) == 1
+    # Without a redelivery, maintenance finishes it.
+    calls["n"] = 0
+    with pytest.raises(RuntimeError):
+        channels.inbound(channel["binding_id"], InboundMessage.model_validate(message("act-2")))
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE channel_inbox SET created_at='2026-01-01T00:00:00+00:00' WHERE activity_id='act-2'")
+    assert channels.repair_inbox() == 1
+    turn = scalar(application, "SELECT turn_id FROM channel_inbox WHERE activity_id='act-2'")
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE turn_id=?", turn) == 1
+
+
+def test_an_interrupted_approval_is_released_once(app, monkeypatch):
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    channels, experts = application.state.channels, application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Prepared answer")
+    channels.reconcile_once()
+    owner = scalar(application, "SELECT owner_id FROM expert_reviews")
+    review = experts.reviews("local", owner)[0]
+    release = channels.release_approved_reply
+    monkeypatch.setattr(channels, "release_approved_reply", lambda *_: (_ for _ in ()).throw(RuntimeError("stopped")))
+    with pytest.raises(RuntimeError):
+        experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    monkeypatch.setattr(channels, "release_approved_reply", release)
+    experts.reconcile_once(); experts.reconcile_once()
+    with experts.store._connect() as conn:
+        states = [row[0] for row in conn.execute("SELECT state FROM channel_deliveries WHERE review_id=?", (review["review_id"],))]
+    assert states == ["pending"]
+
+
+def test_a_restored_copy_never_sends_a_reply_that_was_finished_before_the_copy(app):
+    import sqlite3
+    from workers_projects_runtime.native_continuity import _reset_restore_authority
+    application, client = app
+    expert = create_expert(client)
+    channel = connected_channel(application, client, expert)
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Finished before the copy")
+    database = application.state.experts.store.db_path
+    with sqlite3.connect(database) as connection:  # what a restore does to its staged copy
+        connection.row_factory = sqlite3.Row
+        _reset_restore_authority(connection)
+    application.state.channels.reconcile_once()
+    with application.state.experts.store._connect() as conn:
+        rows = [tuple(row) for row in conn.execute("SELECT kind,state,text FROM channel_deliveries")]
+    assert rows == [("reply", "not_confirmed", "Finished before the copy")]

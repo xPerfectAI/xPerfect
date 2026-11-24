@@ -1415,6 +1415,23 @@ def _reset_restore_authority(connection: sqlite3.Connection) -> None:
             "WHERE state IN ('pending','sending')",
             (utc_now(),),
         )
+        # A reply finished before the copy but not yet in the outbox may also have left the
+        # earlier machine afterwards: it is recorded as not confirmed, never created for sending.
+        from .experts import reply_text
+
+        for row in connection.execute(
+            "SELECT t.conversation_id,t.turn_id,t.response_json,e.binding_id,e.thread_ref_json FROM coordinator_turns t "
+            "JOIN expert_conversations e ON e.conversation_id=t.conversation_id WHERE e.role='speaker' "
+            "AND e.binding_id<>'' AND t.response_json<>'' AND NOT EXISTS (SELECT 1 FROM channel_deliveries d "
+            "WHERE d.conversation_id=t.conversation_id AND d.turn_id=t.turn_id)"
+        ).fetchall():
+            identity = hashlib.sha256(f"restored:{row[0]}:{row[1]}".encode()).hexdigest()[:32]
+            connection.execute(
+                "INSERT OR IGNORE INTO channel_deliveries(delivery_id,binding_id,conversation_id,turn_id,kind,text,"
+                "thread_ref_json,state,error,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("dlv_" + identity, row[3], row[0], row[1], "reply", reply_text(row[2]), row[4], "not_confirmed",
+                 "Restored from a copy; it may already have been sent, so it is not sent again.", utc_now(), utc_now()),
+            )
 
     # Provider requests are retained, but every pre-existing transition/fallback/result
     # path is fenced until the owner explicitly resumes an exact pending set.
