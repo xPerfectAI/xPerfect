@@ -760,6 +760,15 @@ class ExpertService:
             row = conn.execute("SELECT * FROM expert_reviews WHERE review_id=?", (review_id,)).fetchone()
         return dict(row)
 
+    def shows_writing(self, conversation_id: str) -> bool:
+        """Words may appear while they are written only where nothing is ever held: the owner's own Chat.
+
+        On a channel a reply to another person may wait for the owner (Always) or be replaced by a
+        request to the owner (Auto); streaming there needs its own gate and is not done yet."""
+        with self.store._connect() as conn:
+            return bool(conn.execute("SELECT 1 FROM expert_conversations WHERE conversation_id=? AND role='speaker' "
+                                     "AND channel='chat'", (conversation_id,)).fetchone())
+
     def ask_owner(self, tenant: str, owner: str, conversation_id: str, *, reason: str, reply: str = "",
                   job_goal: str = "", job_context: str = "", idempotency_key: str, source_turn_id: str = "") -> dict:
         speaker = self.speaker(tenant, owner, conversation_id)

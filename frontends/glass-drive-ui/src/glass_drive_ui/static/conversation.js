@@ -88,8 +88,8 @@ function node(tag, text, className) {
   if (className) result.className = className;
   return result;
 }
-function assistantMessage(text) {
-  const message=node('div',undefined,'message assistant');
+function assistantMessage(text, writing=false) {
+  const message=node('div',undefined,writing ? 'message assistant writing' : 'message assistant');
   // markdown-it escapes raw HTML and rejects unsafe link schemes by default.
   message.innerHTML=markdown.render(text);
   return message;
@@ -147,6 +147,9 @@ function render(snapshot) {
     if (turn.response_json) {
       const response=JSON.parse(turn.response_json);
       for (const choice of response.choices || []) if (choice.message?.content) messages.push(assistantMessage(choice.message.content));
+    } else if (turn.partial_reply && !turn.blocker) {
+      // The reply as far as it is written; the finished reply replaces it.
+      messages.push(assistantMessage(turn.partial_reply, true));
     }
     if (turn.origin === 'interactive' && turn.blocker && !turn.response_json && turn.request_id) {
       const ended=node('div',`${endedMessage(turn.blocker)} Your message is saved.`,'message');

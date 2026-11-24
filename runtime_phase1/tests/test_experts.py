@@ -623,6 +623,84 @@ def test_the_owners_own_chat_asks_in_the_chat_never_in_needs_you(app):
     assert asked["state"] == "pending" and len(experts.reviews("local", owner)) == 1
 
 
+def _stream(*events):
+    return "\n".join(json.dumps({"type": "stream_event", **event}) for event in events)
+
+
+def test_the_words_written_so_far_are_the_latest_messages_text():
+    from workers_projects_runtime.coordinator import text_written_so_far
+    log = "\n".join([
+        json.dumps({"type": "system", "subtype": "init"}),
+        _stream({"event": {"type": "message_start"}}),
+        _stream({"event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}}),
+        _stream({"event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Let me hand that off."}}}),
+        _stream({"event": {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use"}}}),
+        _stream({"event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{}"}}}),
+        _stream({"parent_tool_use_id": "sub", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "SUB-AGENT"}}}),
+        _stream({"event": {"type": "message_start"}}),
+        _stream({"event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}}),
+        _stream({"event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Started: "}}}),
+        _stream({"event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "the report job."}}}),
+    ])
+    assert text_written_so_far(log) == "Started: the report job."
+    assert text_written_so_far("") == ""
+
+
+def test_the_owners_own_chat_shows_the_reply_while_it_is_written_and_a_channel_does_not(app, monkeypatch):
+    application, client = app
+    experts = application.state.experts
+    coordinator = experts.coordinator
+    expert = create_expert(client)
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    channel = connected_channel(application, client, expert)
+    person = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-stream")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    coordinator.accept_turn("local", owner, chat["conversation_id"], "own-turn", "Explain write-ahead logs.")
+    with experts.store._connect() as conn:
+        for cid, tid in ((chat["conversation_id"], "own-turn"), (person["conversation_id"], person["turn_id"])):
+            conn.execute("UPDATE coordinator_turns SET request_id=?,blocker='' WHERE conversation_id=? AND turn_id=?",
+                         ("request-" + tid, cid, tid))
+    monkeypatch.setattr(coordinator, "_written_so_far", lambda request_id: "A write-ahead log records each change")
+    own = coordinator.snapshot("local", owner, chat["conversation_id"])
+    assert [t.get("partial_reply") for t in own["turns"] if t["turn_id"] == "own-turn"] == ["A write-ahead log records each change"]
+    # Another person on a channel: nothing appears before the turn has finished.
+    theirs = coordinator.snapshot("local", owner, person["conversation_id"])
+    assert not any(t.get("partial_reply") for t in theirs["turns"])
+    # A finished turn shows its reply, not the words written so far.
+    finish_turn(application, chat["conversation_id"], "own-turn", "Done.")
+    assert not any(t.get("partial_reply") for t in coordinator.snapshot("local", owner, chat["conversation_id"])["turns"])
+
+
+def test_the_words_so_far_are_read_from_the_running_turns_own_log(app, monkeypatch):
+    application, client = app
+    experts = application.state.experts
+    coordinator, store = experts.coordinator, experts.store
+    owner = "owner-synthetic"
+    project = store.create_project(owner, "Synthetic", "Synthetic project", "claude-code")
+    worker = store.create_worker(project["project_id"], owner, "Queen", "speaker", "claude-code", "claude-code",
+                                 "claude-code", "haiku", execution_mode="host")
+    run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic turn")
+    session = store.upsert_provider_session(tenant_id="local", owner_id=owner, conversation_id="coordinator-synthetic",
+                                            agent_id="coordinator", model_id="claude-code:haiku",
+                                            project_id=project["project_id"], worker_id=worker["worker_id"],
+                                            workspace_dir="/synthetic/workspace", access_mode="read_write")
+    request, _ = store.create_provider_request(tenant_id="local", owner_id=owner, session_id=session["session_id"],
+                                               idempotency_key="stream-1", message_id="m1", stream_id="s1",
+                                               requested_history_count=0)
+    store.update_provider_request(request["request_id"], run_id=run["run_id"])
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+    log = "\n".join([_stream({"event": {"type": "message_start"}}),
+                     _stream({"event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}}),
+                     _stream({"event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "First words"}}})])
+    seen = []
+    monkeypatch.setattr(coordinator, "_run_log", lambda r: seen.append(r["run_id"]) or log)
+    assert coordinator._written_so_far(request["request_id"]) == "First words" and seen == [run["run_id"]]
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET state='completed' WHERE run_id=?", (run["run_id"],))
+    assert coordinator._written_so_far(request["request_id"]) == ""  # a finished run shows only its reply
+
+
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
     # Tested at the guard, not by filling the disk.
     application, client = app

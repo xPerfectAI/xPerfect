@@ -224,6 +224,35 @@ _SAFE_SHARED_ADMISSION_CODES = _RETRYABLE_ADMISSION_CODES | frozenset({
 })
 
 
+def text_written_so_far(stdout: str) -> str:
+    """The latest assistant message's text, as far as it is written, from a Claude stream-json log.
+
+    Only the top-level conversation counts (no sub-agent output); a new message starts afresh, so
+    narration before a tool call is replaced by the reply that follows it."""
+    text: list[str] = []
+    blocks: set = set()
+    for line in str(stdout or "").splitlines():
+        if '"stream_event"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "stream_event" or event.get("parent_tool_use_id"):
+            continue
+        inner = event.get("event") if isinstance(event.get("event"), dict) else {}
+        step = inner.get("type")
+        if step == "message_start":
+            text, blocks = [], set()
+        elif step == "content_block_start" and (inner.get("content_block") or {}).get("type") == "text":
+            blocks.add(inner.get("index"))
+        elif step == "content_block_delta" and inner.get("index") in blocks:
+            delta = inner.get("delta") if isinstance(inner.get("delta"), dict) else {}
+            if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                text.append(delta["text"])
+    return "".join(text)
+
+
 def _safe_blocker_code(exc: Exception) -> str:
     """Keep typed admission reasons while excluding provider error prose."""
 
@@ -1281,6 +1310,14 @@ class CoordinatorService:
                     continue
                 turn["response_json"] = canonical(project_coordinator_response(
                     self.service, tenant, owner, str(turn["request_id"]), response))
+        experts = getattr(self, "experts", None)
+        if include_history and experts is not None and config.expert is not None and experts.shows_writing(conversation_id):
+            # Words appear while they are written only where nothing can be held (the owner's own Chat).
+            for turn in turns:
+                if turn.get("request_id") and not turn.get("response_json") and not turn.get("blocker"):
+                    written = self._written_so_far(str(turn["request_id"]))
+                    if written.strip():
+                        turn["partial_reply"] = written
         return {"conversation_id": conversation_id, "model": config.model, "effort": config.effort,
                 **self._available_workers(tenant, owner, conversation),
                 "max_goals": config.max_goals, "routes": [{k: v for k, v in r.model_dump().items() if k != "bootstrap_bundle"} for r in config.routes],
@@ -1804,6 +1841,24 @@ class CoordinatorService:
             if settled and settled["request_id"]:
                 return {"turn_id": turn_id, "request_id": settled["request_id"], "state": record["state"]}
         return {"turn_id": turn_id, "request_id": record["request_id"], "state": record["state"]}
+
+    def _written_so_far(self, request_id: str) -> str:
+        request = self.store.get_provider_request(request_id) or {}
+        run = self.store.get_run(str(request.get("run_id") or "")) if request.get("run_id") else None
+        if not run or run.get("state") not in {"queued", "claimed", "admitted", "running"}:
+            return ""
+        try:
+            stdout = self._run_log(run)
+        except Exception:
+            return ""
+        return text_written_so_far(stdout)
+
+    def _run_log(self, run: dict) -> str:
+        worker = self.store.get_worker(str(run["worker_id"])) or {}
+        path = self.service.runtime._runtime_for_worker(worker)._run_root(str(run["worker_id"]), str(run["run_id"])) / "stdout.log"
+        if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+            return ""
+        return path.read_text(errors="replace")
 
     def _repair_turn_output_identity(self, tenant: str, owner: str, conversation_id: str,
                                      turn_id: str, record: dict) -> dict:
