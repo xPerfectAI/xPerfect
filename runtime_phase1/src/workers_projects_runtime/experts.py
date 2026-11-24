@@ -581,9 +581,30 @@ class ExpertService:
         request = self.store.get_provider_request_for_run(principal["run_id"])
         return str((request or {}).get("message_id") or "")
 
+    def channel_open(self, speaker: dict, conn: Any = None) -> bool:
+        """Whether this speaking conversation may still start or ask anything: always for the owner's own
+        Chat; on a channel only while the channel is on and the person is still allowed."""
+        if not speaker.get("binding_id"):
+            return True
+        from .channels import _listed
+        query = "SELECT state,people_json FROM channel_bindings WHERE binding_id=?"
+        if conn is not None:
+            binding = conn.execute(query, (speaker["binding_id"],)).fetchone()
+        else:
+            with self.store._connect() as own:
+                binding = own.execute(query, (speaker["binding_id"],)).fetchone()
+        return bool(binding and binding["state"] == "connected"
+                    and _listed(dict(binding), json.loads(speaker.get("sender_json") or "{}")))
+
+    def _assert_channel_open(self, speaker: dict) -> None:
+        if not self.channel_open(speaker):
+            raise ExpertError("This person can no longer be served on this channel. Nothing was started or asked.",
+                              code="expert_channel_closed")
+
     def hand_off(self, tenant: str, owner: str, conversation_id: str, *, goal: str, context: str = "",
                  idempotency_key: str, source_turn_id: str = "") -> dict:
         speaker = self.speaker(tenant, owner, conversation_id)
+        self._assert_channel_open(speaker)
         goal, context = str(goal or "").strip(), str(context or "").strip()
         if not goal:
             raise ExpertError("Describe the job to hand off", status=422)
@@ -864,6 +885,7 @@ class ExpertService:
     def ask_owner(self, tenant: str, owner: str, conversation_id: str, *, reason: str, reply: str = "",
                   job_goal: str = "", job_context: str = "", idempotency_key: str, source_turn_id: str = "") -> dict:
         speaker = self.speaker(tenant, owner, conversation_id)
+        self._assert_channel_open(speaker)
         reply, job_goal = str(reply or "").strip(), str(job_goal or "").strip()
         if bool(reply) == bool(job_goal):
             raise ExpertError("Ask about exactly one thing: the reply you would send, or the job you would start", status=422)
@@ -1040,20 +1062,31 @@ class ExpertService:
                 raise ExpertError("This request was already decided or withdrawn", code="expert_review_closed")
             if review["payload_digest"] != expected_digest:
                 raise ExpertError("This request changed. Review it again.", code="expert_review_changed")
+            # A request that can no longer be honoured is withdrawn for good; the withdrawal is committed
+            # before the owner is told, so it never stays waiting in Needs you.
+            refusal = ""
             stopped = conn.execute("SELECT stop_scope FROM coordinator_conversations WHERE conversation_id=?",
                                    (review["speaker_conversation_id"],)).fetchone()
+            speaker = conn.execute("SELECT * FROM expert_conversations WHERE conversation_id=? AND role='speaker'",
+                                   (review["speaker_conversation_id"],)).fetchone()
             if stopped and stopped[0]:
-                conn.execute("UPDATE expert_reviews SET state='withdrawn',decided_at=? WHERE review_id=?", (_now(), review_id))
-                raise ExpertError("This conversation was stopped. Nothing was sent or started.", code="expert_review_changed")
-            if review["kind"] == "job":
+                refusal = "This conversation was stopped. Nothing was sent or started."
+            elif decision == "approve" and speaker is not None and not self.channel_open(dict(speaker), conn):
+                refusal = "This person can no longer be served on this channel. Nothing was sent or started."
+            elif review["kind"] == "job":
                 job = conn.execute("SELECT state,goal,context FROM expert_jobs WHERE job_id=?", (review["target_id"],)).fetchone()
                 payload = json.loads(review["payload_json"])
                 if (not job or job["state"] != "held" or job["goal"] != payload.get("goal")
                         or job["context"] != payload.get("context", "")):
-                    conn.execute("UPDATE expert_reviews SET state='withdrawn',decided_at=? WHERE review_id=?", (_now(), review_id))
-                    raise ExpertError("This job changed or was stopped. Nothing was started.", code="expert_review_changed")
-            conn.execute("UPDATE expert_reviews SET state=?,decision_note=?,decided_at=? WHERE review_id=? AND state='pending'",
-                         ("approved" if decision == "approve" else "rejected", str(note or "")[:2000], _now(), review_id))
+                    refusal = "This job changed or was stopped. Nothing was started."
+            if refusal:
+                conn.execute("UPDATE expert_reviews SET state='withdrawn',decided_at=? WHERE review_id=? AND state='pending'",
+                             (_now(), review_id))
+            else:
+                conn.execute("UPDATE expert_reviews SET state=?,decision_note=?,decided_at=? WHERE review_id=? AND state='pending'",
+                             ("approved" if decision == "approve" else "rejected", str(note or "")[:2000], _now(), review_id))
+        if refusal:
+            raise ExpertError(refusal, code="expert_review_changed")
         review = dict(review)
         if decision == "approve":
             if review["kind"] == "job":
@@ -1138,16 +1171,21 @@ class ExpertService:
         # An approval whose release was interrupted is completed, once: the approved job is
         # still held, or the approved reply to a channel has not left its hold.
         with self.store._connect() as conn:
+            # Never in a stopped conversation, and never in a restored copy before the owner resumes it.
             unreleased = [dict(row) for row in conn.execute(
-                "SELECT r.* FROM expert_reviews r WHERE r.state='approved' AND r.kind='job' AND EXISTS ("
+                "SELECT r.* FROM expert_reviews r JOIN coordinator_conversations c "
+                "ON c.conversation_id=r.speaker_conversation_id WHERE r.state='approved' AND r.kind='job' "
+                "AND c.stop_scope='' AND c.restore_hold=0 AND EXISTS ("
                 "SELECT 1 FROM expert_jobs j WHERE j.job_id=r.target_id AND j.state='held') "
                 "ORDER BY r.decided_at LIMIT ?", (limit,))]
             if self.deliveries is not None:
                 unreleased += [dict(row) for row in conn.execute(
                     "SELECT r.* FROM expert_reviews r JOIN expert_conversations e "
-                    "ON e.conversation_id=r.speaker_conversation_id WHERE r.state='approved' AND r.kind='reply' "
-                    "AND e.binding_id<>'' AND NOT EXISTS (SELECT 1 FROM channel_deliveries d "
-                    "WHERE d.review_id=r.review_id AND d.state<>'held') ORDER BY r.decided_at LIMIT ?", (limit,))]
+                    "ON e.conversation_id=r.speaker_conversation_id JOIN coordinator_conversations c "
+                    "ON c.conversation_id=r.speaker_conversation_id WHERE r.state='approved' AND r.kind='reply' "
+                    "AND e.binding_id<>'' AND c.stop_scope='' AND c.restore_hold=0 AND NOT EXISTS ("
+                    "SELECT 1 FROM channel_deliveries d WHERE d.review_id=r.review_id AND d.state<>'held') "
+                    "ORDER BY r.decided_at LIMIT ?", (limit,))]
         for review in unreleased:
             try:
                 if review["kind"] == "job":

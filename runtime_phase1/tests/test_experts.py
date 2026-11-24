@@ -479,6 +479,88 @@ def test_a_decision_before_the_outbox_pass_never_lets_the_turns_own_reply_out(ap
     assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_checking'") == 0
 
 
+def test_nothing_leaves_a_conversation_stopped_after_its_reply_finished(app, monkeypatch):
+    # Review 2, finding 5: a reply finished, then Stop, before the outbox pass or the claim.
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    monkeypatch.setattr(experts.coordinator.provider, "cancel_by_idempotency", lambda *args, **kwargs: {"capacity_released": True})
+    first = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    finish_turn(application, first["conversation_id"], first["turn_id"], "SYNTHETIC-AFTER-STOP")
+    experts.coordinator.stop_conversation("local", owner, first["conversation_id"])
+    channels.reconcile_once()
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+    # A message already waiting when the Stop lands (a race past the Stop's own drop) is dropped at the claim.
+    client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": [PERSON, {**PERSON, "id": "person-synthetic-b"}]})
+    second = client.post(f"/v1/channels/{channel['binding_id']}/inbound",
+                         json=message("act-2", person={**PERSON, "id": "person-synthetic-b"})).json()
+    finish_turn(application, second["conversation_id"], second["turn_id"], "SYNTHETIC-RACED")
+    channels.reconcile_once()
+    with experts.store._connect() as conn:
+        conn.execute("UPDATE coordinator_conversations SET stop_scope='stopped' WHERE conversation_id=?", (second["conversation_id"],))
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+    assert scalar(application, "SELECT error FROM channel_deliveries WHERE turn_id=?", second["turn_id"]) == "The conversation was stopped"
+
+
+@pytest.mark.parametrize("fence", ["stopped", "restored"])
+def test_an_interrupted_approval_is_never_released_past_a_stop_or_a_restore_hold(app, fence):
+    # Review 2, findings 3 and 5: the approval committed, its release did not; recovery must respect the fences.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts, channels = application.state.experts, application.state.channels
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    experts.ask_owner("local", owner, cid, reason="Unusual request", reply="SYNTHETIC-APPROVED-TEXT",
+                      idempotency_key="ask-1", source_turn_id=accepted["turn_id"])
+    with experts.store._connect() as conn:  # approved, but the release never ran
+        conn.execute("UPDATE expert_reviews SET state='approved',decided_at='t' WHERE speaker_conversation_id=?", (cid,))
+        column = "stop_scope='stopped'" if fence == "stopped" else "restore_hold=1"
+        conn.execute(f"UPDATE coordinator_conversations SET {column} WHERE conversation_id=?", (cid,))
+    experts.reconcile_once()
+    channels.reconcile_once()
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+    if fence == "restored":  # once the owner resumes the copy, the approval is released once
+        with experts.store._connect() as conn:
+            conn.execute("UPDATE coordinator_conversations SET restore_hold=0 WHERE conversation_id=?", (cid,))
+        experts.reconcile_once()
+        experts.reconcile_once()
+        sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+        assert [item["text"] for item in sent] == ["SYNTHETIC-APPROVED-TEXT"]
+
+
+@pytest.mark.parametrize("closed", ["removed", "off"])
+def test_a_removed_person_or_a_channel_turned_off_gets_nothing_new_started_or_asked(app, closed):
+    # Review 2, finding 6: a late tool call of their speaking turn, and an approval racing the removal.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    experts.ask_owner("local", owner, cid, reason="Unusual request", reply="SYNTHETIC-RACED-APPROVAL",
+                      idempotency_key="ask-1", source_turn_id=accepted["turn_id"])
+    review = experts.reviews("local", owner)[0]
+    with experts.store._connect() as conn:  # the removal lands, its own clean-up not yet
+        if closed == "removed":
+            conn.execute("UPDATE channel_bindings SET people_json='[]' WHERE binding_id=?", (channel["binding_id"],))
+        else:
+            conn.execute("UPDATE channel_bindings SET state='off' WHERE binding_id=?", (channel["binding_id"],))
+    with pytest.raises(ExpertError, match="no longer be served"):
+        experts.hand_off("local", owner, cid, goal="Synthetic late job", idempotency_key="late-1", source_turn_id=accepted["turn_id"])
+    with pytest.raises(ExpertError, match="no longer be served"):
+        experts.ask_owner("local", owner, cid, reason="Late", reply="SYNTHETIC-LATE", idempotency_key="late-2",
+                          source_turn_id=accepted["turn_id"])
+    with pytest.raises(ExpertError, match="no longer be served"):
+        experts.decide("local", owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    assert experts._review(review["review_id"])["state"] == "withdrawn"
+    assert scalar(application, "SELECT count(*) FROM expert_jobs") == 0
+
+
 def test_a_stopped_conversation_leaves_nothing_approvable(app, monkeypatch):
     # The owner's correction: changed or stopped work must invalidate old approvals.
     application, client = app

@@ -302,14 +302,23 @@ class ChannelService:
         claimed = []
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute("SELECT d.*,e.sender_json FROM channel_deliveries d LEFT JOIN expert_conversations e "
-                                "ON e.conversation_id=d.conversation_id WHERE d.binding_id=? AND d.state='pending' "
+            rows = conn.execute("SELECT d.*,e.sender_json,c.stop_scope AS stop_scope,c.restore_hold AS conversation_hold "
+                                "FROM channel_deliveries d LEFT JOIN expert_conversations e "
+                                "ON e.conversation_id=d.conversation_id LEFT JOIN coordinator_conversations c "
+                                "ON c.conversation_id=d.conversation_id WHERE d.binding_id=? AND d.state='pending' "
                                 "ORDER BY d.created_at LIMIT ?", (binding_id, max(1, min(limit, 50)))).fetchall()
             for row in rows:
                 if not _listed(binding, json.loads(row["sender_json"] or "{}")):
                     conn.execute("UPDATE channel_deliveries SET state='dropped',error='The person is no longer allowed',"
                                  "finished_at=? WHERE delivery_id=? AND state='pending'", (_now(), row["delivery_id"]))
                     continue
+                if row["stop_scope"]:
+                    # The last fence before a message leaves: nothing leaves a stopped conversation.
+                    conn.execute("UPDATE channel_deliveries SET state='dropped',error='The conversation was stopped',"
+                                 "finished_at=? WHERE delivery_id=? AND state='pending'", (_now(), row["delivery_id"]))
+                    continue
+                if row["conversation_hold"]:
+                    continue  # a restored copy sends nothing before the owner resumes it
                 conn.execute("UPDATE channel_deliveries SET state='sending',claimed_at=? WHERE delivery_id=? AND state='pending'",
                              (_now(), row["delivery_id"]))
                 claimed.append({"delivery_id": row["delivery_id"], "text": row["text"], "kind": row["kind"],
@@ -350,6 +359,11 @@ class ChannelService:
         text = json.loads(review["payload_json"]).get("text", "")
         with self.store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            fence = conn.execute("SELECT stop_scope,restore_hold FROM coordinator_conversations WHERE conversation_id=?",
+                                 (review["speaker_conversation_id"],)).fetchone()
+            if fence is None or fence["stop_scope"] or fence["restore_hold"]:
+                # A stopped conversation sends nothing; a restored copy waits for the owner's resume.
+                return
             existing = conn.execute("SELECT delivery_id,state FROM channel_deliveries WHERE review_id=? "
                                     "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
             if existing and existing["state"] == "held":
@@ -394,7 +408,8 @@ class ChannelService:
                 "JOIN coordinator_conversations c ON c.conversation_id=t.conversation_id "
                 # A restored turn waits for the owner's resume; it never becomes a message by itself.
                 "WHERE e.role='speaker' AND e.binding_id<>'' AND t.response_json<>'' AND t.restore_hold=0 "
-                "AND c.restore_hold=0 AND NOT EXISTS ("
+                # A stopped conversation creates nothing new to send.
+                "AND c.restore_hold=0 AND c.stop_scope='' AND NOT EXISTS ("
                 "SELECT 1 FROM channel_deliveries d WHERE d.conversation_id=t.conversation_id AND d.turn_id=t.turn_id) "
                 "ORDER BY t.created_at LIMIT ?", (limit,))]
         for row in rows:
