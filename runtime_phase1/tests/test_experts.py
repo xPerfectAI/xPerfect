@@ -722,7 +722,10 @@ def test_the_skills_chosen_on_an_expert_travel_with_its_jobs_claude_workers(app)
     carried = {route.profile: route.bootstrap_bundle.get("expert_skills") for route in config.routes}
     assert carried["claude-code"] == [{"name": "synthetic-brief", "files": [
         {"path": "SKILL.md", "content": "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nWrite it.\n"}]}]
-    assert carried["codex-cli"] is None  # a Claude Skill is not offered to Codex
+    # The Library page saves every Skill as Claude Code only; the Library's own rule (text files run on
+    # every AI with a native Skills place) decides instead, so a Codex coordinator or Worker gets it too.
+    assert carried["codex-cli"] == carried["claude-code"]
+    assert config.bootstrap_bundle.get("expert_skills") == carried["claude-code"]  # the coordinator (Codex) as well
     both = client.post("/v1/personal-library", json={
         "name": "synthetic-both", "kind": "skill", "description": "For both AIs.", "profiles": ["claude-code", "codex-cli"],
         "files": [{"path": ".claude/skills/synthetic-both/SKILL.md", "content": "---\nname: synthetic-both\ndescription: Both\n---\nDo it.\n"}],

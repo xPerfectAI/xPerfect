@@ -107,6 +107,24 @@ def expert_tool_manifest() -> dict:
     return json.loads((Path(__file__).with_name("prompts") / "expert-tools.json").read_text(encoding="utf-8"))
 
 
+# The AIs with a native place for an Expert's text Skills (Claude Code's plug-in folder, Codex's own
+# skills folder). Which of them a Skill may run on is the Library's own rule, not the profile list the
+# Library page saves (it always saves Claude Code): a choice of AI must not hide a Skill the owner chose.
+SKILL_RUNTIMES = ("claude-code", "codex-cli")
+
+
+def _skill_runtimes(files: list) -> list[str]:
+    from .library_registry import LibraryManifestError, _validate_bundle
+    allowed = []
+    for profile in SKILL_RUNTIMES:
+        try:
+            _validate_bundle({"files": files}, profile=profile)
+        except (LibraryManifestError, TypeError, ValueError):
+            continue
+        allowed.append(profile)
+    return allowed
+
+
 def reply_text(response_json: str) -> str:
     """The assistant text of one completed conversation turn."""
     if not response_json:
@@ -412,6 +430,12 @@ class ExpertService:
                        if spec.instructions.strip() else "")
         # The Skills the owner chose for this Expert reach its Workers the native way, fixed at job start.
         skills = self._expert_skills(tenant, owner, template)
+        # The coordinator gets them too, for its own AI: it often does the work itself.
+        for_coordinator = [{"name": skill["name"], "files": skill["files"]} for skill in skills
+                           if spec.team.coordinate.profile in skill["profiles"]]
+        if for_coordinator:
+            config = config.model_copy(update={"bootstrap_bundle": {**config.bootstrap_bundle,
+                                                                    "expert_skills": for_coordinator}})
         routes: list[Route] = []
         for profile in spec.team.work:
             role = (spec.team.coordinate if profile == spec.team.coordinate.profile
@@ -463,7 +487,7 @@ class ExpertService:
                     files.append({"path": Path(*path.parts[3:]).as_posix(), "content": entry["content"]})
                 if len(names) == 1 and files:
                     skills.append({"name": names.pop(), "files": files,
-                                   "profiles": list(payload.get("profiles") or ["claude-code"])})
+                                   "profiles": _skill_runtimes(payload.get("files") or [])})
         return sorted(skills, key=lambda skill: skill["name"])
 
     def authority(self, tenant: str, owner: str, conversation: dict, config: CoordinatorConfig) -> str:
