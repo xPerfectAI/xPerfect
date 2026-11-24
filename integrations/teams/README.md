@@ -11,7 +11,9 @@ In xPerfect: **My experts → Manage → Channels → Add Teams → Connect**. C
 on Microsoft's page with the code shown. xPerfect then creates a Teams-managed bot with the pinned
 Teams developer CLI (`@microsoft/teams.cli` 3.1.0), keeps the app secret in a private file in its
 state folder, adds you as the first person who may write, and starts this package. Use **Install in
-Teams**, then **Test in Teams**. No terminal step is needed.
+Teams**, add the app, and send it a message in its own chat, named after the Expert. The channel is
+ready once that first message arrives; only then does the page offer **Test in Teams**, because before
+the app is installed Teams can open another person's chat with that link. No terminal step is needed.
 
 ## How it runs
 

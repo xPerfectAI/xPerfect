@@ -287,3 +287,23 @@ assert.equal(channelState({state: 'connected', online: false, connecting: false}
 assert.equal(channelState({state: 'off', online: true, connecting: false}), 'Off');
 assert.equal(channelState({state: 'setup', online: false, connecting: false}), 'Not connected');
 """)
+
+
+def test_test_in_teams_waits_until_a_first_message_came_through():
+    # The first real test: before the app was installed, "Test in Teams" (a chat opened by the bot's id) opened an
+    # existing chat with another person. It is offered only once a first message has come through, and the page
+    # says whose chat it should open.
+    source = (STATIC / 'experts.js').read_text()
+    links = re.search(r"^export function teamsLinks\(.*?^}", source, re.M | re.S)
+    assert links, 'teamsLinks'
+    assert "for (const link of teamsLinks(channel))" in source and source.count("l/chat/0/0") == 1
+    assert "Test in Teams opens your chat with ${name}. If another chat opens, send nothing there." in source
+    assert "Press Test in Teams and send it a message" not in source
+    run_node("import assert from 'node:assert/strict';\n" + links.group(0).replace('export ', '') + """
+const app = {app_id: 'bot-synthetic', install_link: 'https://teams.invalid/install'};
+const labels = channel => teamsLinks(channel).map(link => link.label);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app}), ['Install in Teams']);
+assert.deepEqual(labels({state: 'connected', online: false, first_message: false, app}), ['Install in Teams']);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Install in Teams', 'Test in Teams']);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
+""")

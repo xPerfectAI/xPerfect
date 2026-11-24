@@ -194,6 +194,17 @@ export function sharedFolderNote(kind, people, waiting) {
   return 'Jobs for everyone here share one work folder on this computer, so a job you approve for one person could read another person’s job files. To keep each person’s work apart, choose a sandboxed workspace in Edit.';
 }
 
+/** A Teams card's links. "Test in Teams" opens a chat by the bot's id; before the app is installed and a first message
+ *  came through, Teams opened another person's chat with it (first real test), so it is offered only after that. */
+export function teamsLinks(channel) {
+  const links = [];
+  if (channel.app.install_link) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
+  if (channel.first_message && channel.app.app_id) {
+    links.push({ label: 'Test in Teams', href: 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id), style: 'primary-button' });
+  }
+  return links;
+}
+
 /** A channel's pill: Connecting… until Microsoft's socket holds, and ready only once a first message came through. */
 export function channelState(channel) {
   if (channel.state === 'off') return 'Off';
@@ -279,13 +290,13 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       if (!channel.app.app_id) {
         const go = node('button', 'primary-button', 'Connect'); go.type = 'button'; go.onclick = () => connect(channel); connectBox.append(go);
       } else {
-        const links = node('div', 'expert-links');
-        if (channel.app.install_link) { const install = node('a', 'secondary-button', 'Install in Teams'); install.href = channel.app.install_link; install.target = '_blank'; install.rel = 'noopener'; links.append(install); }
-        const test = node('a', 'primary-button', 'Test in Teams'); test.href = 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id); test.target = '_blank'; test.rel = 'noopener'; links.append(test);
+        const links = node('div', 'expert-links'); const name = channel.app.app_name || item.name;
+        for (const link of teamsLinks(channel)) { const a = node('a', link.style, link.label); a.href = link.href; a.target = '_blank'; a.rel = 'noopener'; links.append(a); }
         const toggle = node('button', 'secondary-button', channel.state === 'connected' ? 'Turn off' : 'Turn on'); toggle.type = 'button';
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
-        if (channel.state === 'connected' && channel.online && !channel.first_message) card.append(node('p', 'expert-hint', 'Press Test in Teams and send it a message: it is ready once that message arrives.'));
+        if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
+        else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams, add ${name}, then send it a message in its own chat, named ${name}. It is ready once that message arrives.`));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
       if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));
