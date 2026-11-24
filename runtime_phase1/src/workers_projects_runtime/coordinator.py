@@ -1975,7 +1975,7 @@ class CoordinatorService:
                     wake = True
         return wake
 
-    def native_identity(self, principal: dict) -> tuple[str, str, str]:
+    def native_identity(self, principal: dict, *, allow_speaker: bool = False) -> tuple[str, str, str]:
         # PeerCollaboration already authenticates the live run and exact attempt. A peer
         # token alone is never delegation permission: require this provider-session role.
         session = self.store.get_provider_session_by_worker(principal["worker_id"])
@@ -1983,9 +1983,14 @@ class CoordinatorService:
             raise CoordinatorScopeError("Coordinator role required")
         tenant, owner = principal["tenant_id"], principal["owner_id"]
         conversation_id = session["conversation_id"]
-        self._conversation(tenant, owner, conversation_id)
+        conversation = self._conversation(tenant, owner, conversation_id)
         if session["owner_id"] != owner or session["tenant_id"] != tenant:
             raise CoordinatorScopeError("Coordinator owner mismatch")
+        # An Expert's speaking assistant reaches only her own tools: the coordinator's could
+        # start work that never passes her hand-off and its Ask me first hold.
+        binding = CoordinatorConfig.model_validate_json(conversation["config_json"]).expert
+        if not allow_speaker and binding is not None and binding.role == "speaker":
+            raise CoordinatorScopeError("The speaking assistant uses only its own tools")
         return tenant, owner, conversation_id
 
     def accept_native_goals(self, principal: dict, goals: list[Goal]) -> dict:

@@ -25,7 +25,7 @@ def native_expert_server(experts, peers, endpoint: str):
         if scheme.lower() != "bearer":
             raise CoordinatorScopeError("Native authority required")
         principal = peers.native_principal(token)
-        tenant, owner, conversation_id = experts.coordinator.native_identity(principal)
+        tenant, owner, conversation_id = experts.coordinator.native_identity(principal, allow_speaker=True)
         experts.speaker(tenant, owner, conversation_id)  # only a speaking Queen may use these tools
         return tenant, owner, conversation_id, experts._current_turn(principal)
 

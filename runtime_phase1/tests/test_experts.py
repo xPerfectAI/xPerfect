@@ -413,3 +413,25 @@ def test_pressing_connect_again_during_sign_in_returns_the_same_code(app):
     pressed.start(); pressed.join(3)
     assert not pressed.is_alive(), "Connect hung while a sign-in was pending"
     assert result["step"] == "sign_in" and result["code"] == "SYNTHETIC2"
+
+
+def test_the_speaking_assistant_cannot_use_the_coordinators_tools(app):
+    # Her token reaches only her own four tools; coordinator tools could start work past Ask me first.
+    from workers_projects_runtime.coordinator import CoordinatorScopeError
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    experts = application.state.experts
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    store = experts.store
+    project = store.create_project(owner, "Synthetic", "Synthetic project", "claude-code")
+    worker = store.create_worker(project["project_id"], owner, "Queen", "speaker", "claude-code", "claude-code",
+                                 "claude-code", "opus", execution_mode="host")
+    store.upsert_provider_session(tenant_id="local", owner_id=owner, conversation_id=chat["conversation_id"],
+                                  agent_id="coordinator", model_id="claude-code:opus", project_id=project["project_id"],
+                                  worker_id=worker["worker_id"], workspace_dir="/synthetic/workspace", access_mode="read_write")
+    principal = {"tenant_id": "local", "owner_id": owner, "worker_id": worker["worker_id"], "run_id": "run-synthetic",
+                 "attempt_id": "attempt-synthetic"}
+    with pytest.raises(CoordinatorScopeError):
+        experts.coordinator.native_identity(principal)
+    assert experts.coordinator.native_identity(principal, allow_speaker=True)[2] == chat["conversation_id"]

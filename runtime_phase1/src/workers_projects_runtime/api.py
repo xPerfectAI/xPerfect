@@ -1027,7 +1027,7 @@ def create_app(
             try:
                 if scheme.lower() != "bearer":
                     raise CoordinatorScopeError("Native authority required")
-                identity = service.coordinator.native_identity(service.peers.native_principal(token))
+                identity = service.coordinator.native_identity(service.peers.native_principal(token), allow_speaker=True)
                 service.experts.speaker(*identity)
             except (PeerError, CoordinatorScopeError):
                 return JSONResponse(status_code=403, content={"detail": {"code": "expert_native_unauthorized"}})
