@@ -278,7 +278,8 @@ def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
     assert "if (channel.refusal && channel.state === 'connected') card.append(" in source  # never on an Off card
     # Teams does not allow the app yet: the line, a note for the administrator, and the page follows the
     # runtime's own re-check.
-    assert "if (step.step === 'blocked') {" in source and "Copy a note for your administrator" in source
+    assert "if (step.step === 'blocked' || step.step === 'admin_waiting') {" in source
+    assert "Copy a note for your administrator" in source
     assert "timer = setTimeout(() => poll(channel), 10000); return;" in source
     run_node("import assert from 'node:assert/strict';\n" + state.group(0).replace('export ', '') + """
 assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: true}), 'Connected');
@@ -309,6 +310,12 @@ assert.deepEqual(labels({state: 'connected', online: true, first_message: true, 
 assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
 // Hurdle 15: once an administrator added the app, the developer copy's install link is a dead end: not offered.
 assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app: {...app, added_by_admin: 'yes'}}), []);
+// The administrator's route: the catalogue's own link opens the app, ready to add; never the blocked developer copy.
+const listed = {...app, catalogue: 'listed', install_link: 'https://teams.microsoft.com/l/app/catalogue-synthetic?tenantId=t'};
+assert.deepEqual(teamsLinks({state: 'connected', first_message: false, app: listed}), [{label: 'Open in Teams', href: listed.install_link, style: 'secondary-button'}]);
+assert.deepEqual(labels({state: 'connected', first_message: false, app: {...listed, catalogue: 'installed'}}), ['Open in Teams']);
+assert.deepEqual(labels({state: 'connected', first_message: false, app: {...app, catalogue: 'pending'}}), []);
+assert.deepEqual(labels({state: 'connected', first_message: true, app: listed}), ['Test in Teams']);
 """)
 
 
@@ -348,7 +355,7 @@ def test_an_already_signed_in_connect_names_the_account_on_its_one_press():
         assert words in source, words
     assert "step.step === 'confirm'" not in source  # no second dialog
     server = (STATIC.parent / 'server.py').read_text()
-    assert 'choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account"))}' in server
+    assert 'choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account")),' in server
     assert '.expert-other-account{' in (STATIC / 'experts.css').read_text()
 
 
@@ -367,3 +374,21 @@ def test_the_owner_can_say_an_administrator_added_the_app():
                   "'/added-by-admin', { method: 'POST', body: { added } }"):
         assert words in source, words
     assert '@app.post("/api/channels/{binding_id}/added-by-admin")' in (STATIC.parent / 'server.py').read_text()
+
+
+def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_press():
+    # While Teams refuses custom apps for the person, the card offers one press for a Teams administrator: the button
+    # names the change, the hint says what it makes visible and how to undo it, Microsoft's own page is the yes, and
+    # the page follows the setup until the app is in the organisation's Teams apps.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function adminRoute(channel, primary)", "`Add ${name} to my organisation's Teams apps`",
+                  "connect(channel, { as_admin: true })", "where people may find it as your organisation's settings allow",
+                  "only the people listed here get an answer", "An administrator can delete it again in the Teams admin center.",
+                  "if (step.step === 'admin_sign_in') {", "sign in with a Teams administrator account of this organisation",
+                  "approving it there is the yes", "if (step.step === 'adding') {", "if (step.admin) box.append(...adminRoute(channel, true));",
+                  "if (catalogue === 'pending') {", "if (channel.admin_route) card.append(...adminRoute(channel, false));",
+                  "is in your organisation's Teams apps and installed for you",
+                  "Teams shows the details of the version there"):
+        assert words in source, words
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '"as_admin": bool(payload.get("as_admin"))}' in server

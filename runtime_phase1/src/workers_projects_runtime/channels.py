@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from . import teams_admin
 from .coordinator import CoordinatorScopeError, StrictModel, canonical, digest
 from .experts import ExpertError, ExpertService, reply_text
 
@@ -156,8 +157,11 @@ class ChannelService:
                 "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
                 "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link",
                                                        "developer", "website_url", "privacy_url", "terms_url", "scopes",
-                                                       "added_by_admin")
+                                                       "added_by_admin", "catalogue", "catalogue_id")
                         if key in settings},
+                # Whether an administrator's one press (Microsoft's sign-in, then the organisation's catalogue) is
+                # offered here: only once the owner has chosen the Microsoft sign-in it uses.
+                "admin_route": bool(teams_admin.client_id()),
                 "people_waiting": unknown, "unconfirmed_messages": unconfirmed,
                 # While the disk guard holds runs, this Expert cannot answer; messages wait.
                 "low_disk": self.experts.low_disk() is not None,
@@ -234,7 +238,7 @@ class ChannelService:
         allowed = {key: str(value)[:2000] for key, value in settings.items()
                    if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
                               "teams_app_id", "developer", "website_url", "privacy_url", "terms_url", "scopes",
-                              "added_by_admin"}}
+                              "added_by_admin", "catalogue", "catalogue_id"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))

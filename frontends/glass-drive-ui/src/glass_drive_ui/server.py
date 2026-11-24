@@ -3777,8 +3777,10 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
 
     @app.post("/api/channels/{binding_id}/connect")
     def channel_connect(request: Request, binding_id: str, payload: dict = Body(default={})):
-        # The account the Connect button named (pressing it is the yes), or signing in with another account.
-        choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account"))}
+        # The account the Connect button named (pressing it is the yes), signing in with another account, or an
+        # administrator's one press while Teams refuses the app.
+        choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account")),
+                  "as_admin": bool(payload.get("as_admin"))}
         return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect", choice)
 
     @app.get("/api/channels/{binding_id}/connect")

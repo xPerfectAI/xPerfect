@@ -149,13 +149,12 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
    or half answer is not a yes), and the card says "Microsoft may still be applying this. If Teams says
    Permissions needed, wait a few minutes and press Install again." The channel is ready only after a
    first message.
-6. **What xPerfect cannot do with this sign-in.** The pinned CLI's sign-in asks only for Microsoft
+6. **What xPerfect cannot do with the CLI's sign-in.** The pinned CLI's sign-in asks only for Microsoft
    Graph `Application.ReadWrite.All` and the Developer Portal's `AppDefinitions.ReadWrite`. Assigning a
    policy (`teamsPolicyUserAssignment: assign`, documented for meeting policies), publishing to the
    organisation's catalogue (`POST /appCatalogs/teamsApps`) and installing for a person
-   (`POST /users/{id}/teamwork/installedApps`) each need a permission it does not ask for, two of them
-   an administrator's. The catalogue route needs an app registration of xPerfect's own with an
-   administrator's consent; it is a later capability, so today an administrator turns the switch.
+   (`POST /users/{id}/teamwork/installedApps`) each need a permission it does not ask for. So the
+   catalogue route has a sign-in of its own (item 14).
 7. **The account that matters is not always the one expected.** Another login on the same computer
    may belong to another organisation (the CLI also reads the Azure command-line login). Connect
    always takes the Teams-managed route, never another login. When the CLI is already signed in,
@@ -181,6 +180,35 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
     still opens the developer copy, which stays blocked by the person's own policy; the CLI reports no
     catalogue state, so xPerfect cannot read it. The owner says "An administrator added it for me" once;
     the card then stops offering that link and says the app appears in their Teams by itself.
+14. **An administrator's one press, while Teams refuses the app.** When the owner has chosen the Microsoft
+    sign-in client for this route (`XPERFECT_TEAMS_ADMIN_CLIENT_ID`, a public client registration; none by
+    default, and then the press is not offered), the card adds **Add <Expert> to my organisation's Teams
+    apps**. Pressing it shows Microsoft's code. The administrator signs in on Microsoft's own page and
+    approves what the setup may do; that consent is the yes. The sign-in asks for three Graph permissions:
+    `AppCatalog.ReadWrite.All` (admin consent), `TeamsAppInstallation.ReadWriteForUser` (admin consent;
+    the "Self" variant installs only the calling app itself) and `User.Read`. Then, by itself:
+    - nothing is made unless Microsoft granted `AppCatalog.ReadWrite.All` (a person who is not an
+      administrator gets a plain line and the note for their administrator);
+    - the app is made if it does not exist yet, and recorded at once as "not yet in the catalogue", so a
+      later press resumes there and never makes a second app;
+    - the app's package goes into the organisation's catalogue (Graph "Publish teamsApp", no review), or
+      the entry an administrator already added is found and reused;
+    - it is installed for the person (Graph "Install app for user") only when the administrator signed in
+      with the account that made it; another account adds it to the catalogue only, and the card holds the
+      catalogue's link (`https://teams.microsoft.com/l/app/<catalogue id>?tenantId=<organisation>`);
+    - an install refused while Microsoft spreads the new entry is tried again every 20 seconds for up to ten
+      minutes, then left to that link.
+    The card says what it makes visible: an app in the organisation's catalogue may be found by others as the
+    organisation's settings allow (new custom apps follow the organisation-wide "Let users install and use
+    available apps by default"), while only the people on the Expert's list get an answer. Narrowing who can see
+    it is an administrator's step (Teams PowerShell `Update-M365TeamsApp`, or the admin center); no Graph call
+    does it. To undo it, an administrator deletes the app in the Teams admin center (or Graph "Delete
+    teamsApp"); "Uninstall app for user" removes it for one person. The token and the sign-in's device code
+    live only in memory for that press: nothing writes them, and the card shows plain lines, never Microsoft's
+    raw reply. An app already in the catalogue changes only by a new version there, so the card's details form
+    says that saving there changes the app's own copy, not what Teams shows. For tests, the Microsoft addresses
+    can be replaced only by addresses on the same computer (`XPERFECT_MICROSOFT_LOGIN_URL`,
+    `XPERFECT_MICROSOFT_GRAPH_URL`).
 
 ## Nothing happens twice
 

@@ -198,9 +198,14 @@ export function sharedFolderNote(kind, people, waiting) {
  *  came through, Teams opened another person's chat with it (first real test), so it is offered only after that. */
 export function teamsLinks(channel) {
   const links = [];
+  const catalogue = channel.app.catalogue;
+  // In the organisation's catalogue (the administrator's route): its link opens the app there, ready to add.
+  if (channel.app.install_link && (catalogue === 'listed' || catalogue === 'installed') && !channel.first_message) {
+    links.push({ label: 'Open in Teams', href: channel.app.install_link, style: 'secondary-button' });
+  }
   // Once an administrator added the app, this link opens the developer copy, which stays blocked: not offered.
   // Once a first message came through, the app is installed for the owner; this card is theirs alone.
-  if (channel.app.install_link && !channel.app.added_by_admin && !channel.first_message) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
+  else if (channel.app.install_link && !catalogue && !channel.app.added_by_admin && !channel.first_message) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
   if (channel.first_message && channel.app.app_id) {
     links.push({ label: 'Test in Teams', href: 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id), style: 'primary-button' });
   }
@@ -232,6 +237,14 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     const row = node('div', 'expert-person'); row.append(node('span', '', person.name || person.id));
     const button = node('button', 'secondary-button', label); button.type = 'button'; button.onclick = action; row.append(button); return row;
   }
+  // An administrator's one press: Microsoft's own sign-in and consent page is the yes; the button names the change.
+  function adminRoute(channel, primary) {
+    const name = channel.app?.app_name || item.name;
+    const button = node('button', primary ? 'primary-button' : 'secondary-button', `Add ${name} to my organisation's Teams apps`); button.type = 'button';
+    button.onclick = () => connect(channel, { as_admin: true });
+    const hint = node('p', 'expert-hint', `For a Teams administrator. Microsoft asks you to sign in and to approve, on its own page, what this setup may do: add apps to your organisation's Teams apps, install Teams apps for you, and read your profile. ${name} then goes into your organisation's Teams apps, where people may find it as your organisation's settings allow; only the people listed here get an answer. It is installed for you when you sign in with the account that made it. An administrator can delete it again in the Teams admin center.`);
+    return [button, hint];
+  }
   // An administrator who published or deployed the app makes the developer copy's install link a dead end.
   function adminButton(channel, added) {
     const button = node('button', 'expert-other-account', added ? 'An administrator added it for me' : 'Undo: show Install in Teams again'); button.type = 'button';
@@ -260,6 +273,7 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       } catch (error) { status.textContent = error.message; }
     };
     about.append(node('p', 'expert-hint', 'Teams shows these to everyone who adds the app. Microsoft needs all four; the links start with https://.'), keep);
+    if (channel.app.catalogue_id || channel.app.added_by_admin) about.append(node('p', 'expert-hint', 'This app is in your organisation’s Teams apps, and Teams shows the details of the version there. Saving here changes the app’s own copy; what Teams shows changes when an administrator adds a new version of the app there.'));
     return about;
   }
   async function save(channel, people) {
@@ -299,16 +313,28 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
     }
     if (step.step === 'creating') { status.textContent = step.account ? `Creating your Teams app with ${step.account}…` : 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
-    if (step.step === 'blocked') {
-      // Teams does not allow the app yet: the one thing to ask, a note to send, and the page goes on by itself.
-      const now = node('button', 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
+    if (step.step === 'admin_sign_in') {
+      const link = node('a', 'primary-button', 'Open Microsoft sign-in'); link.href = step.url; link.target = '_blank'; link.rel = 'noopener';
+      const code = node('code', 'expert-code', step.code);
+      const copy = node('button', 'secondary-button', 'Copy code'); copy.type = 'button';
+      copy.onclick = async () => { try { await navigator.clipboard.writeText(step.code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the code'; } };
+      box.append(node('p', '', 'Open Microsoft’s page, sign in with a Teams administrator account of this organisation and enter this code. Microsoft then shows what this setup asks for; approving it there is the yes. The code lasts about 15 minutes.'), code, copy, link);
+      status.textContent = 'Waiting for the administrator’s sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
+    }
+    if (step.step === 'adding') { status.textContent = step.progress || 'Adding it to your organisation’s Teams apps…'; timer = setTimeout(() => poll(channel), 2000); return; }
+    if (step.step === 'blocked' || step.step === 'admin_waiting') {
+      // Teams does not allow the app yet: the one thing to ask, a note to send, and the page goes on by itself;
+      // an administrator can instead add it to the organisation's Teams apps with one press.
+      const waiting = step.step === 'admin_waiting';
+      const now = node('button', step.admin ? 'secondary-button' : 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
+      if (step.admin) box.append(...adminRoute(channel, true));
       if (step.note) {  // no note while Microsoft is still applying a change already made
         const note = node('p', 'expert-hint', step.note); note.style.whiteSpace = 'pre-line';
         const copy = node('button', 'secondary-button', 'Copy a note for your administrator'); copy.type = 'button';
         copy.onclick = async () => { try { await navigator.clipboard.writeText(step.note); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the note below'; } };
-        box.append(copy, now, note);
-      } else box.append(now);
-      status.textContent = step.error || ''; timer = setTimeout(() => poll(channel), 10000); return;
+        box.append(copy); if (!waiting) box.append(now); box.append(note);
+      } else if (!waiting) box.append(now);
+      status.textContent = step.error || ''; if (!waiting) timer = setTimeout(() => poll(channel), 10000); return;
     }
     if (step.step === 'error') {
       const again = node('button', 'primary-button', 'Connect again'); again.type = 'button'; again.onclick = () => connect(channel);
@@ -344,10 +370,20 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         // Which Microsoft account and organisation the app was made in, as Microsoft reported them.
         if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats.'));
         if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
+        const catalogue = channel.app.catalogue;
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
+        else if (catalogue === 'installed') card.append(node('p', 'expert-hint', `${name} is in your organisation's Teams apps and installed for you. Write in its own chat, named ${name}: it is ready once that message arrives. Open in Teams goes straight to it.`));
+        else if (catalogue === 'listed') card.append(node('p', 'expert-hint', `${name} is in your organisation's Teams apps. Press Open in Teams, then Add, and write in its own chat, named ${name}: it is ready once that message arrives. Microsoft can take a few minutes before Add works.`));
+        else if (catalogue === 'pending') {
+          card.append(node('p', 'expert-notice', `${name}'s Teams app is made, but it is not in your organisation's Teams apps yet.`));
+          if (channel.admin_route) card.append(...adminRoute(channel, true));
+        }
         else if (channel.app.added_by_admin) card.append(node('p', 'expert-hint', `An administrator added ${name} for you: it appears in your Teams by itself (Apps, Built for your org; this can take a few hours). Then write in its own chat, named ${name}.`), adminButton(channel, false));
         else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again.`));
-        if (!channel.first_message && !channel.app.added_by_admin) card.append(adminButton(channel, true));
+        if (!channel.first_message && !channel.app.added_by_admin && !catalogue) {
+          card.append(adminButton(channel, true));
+          if (channel.admin_route) card.append(...adminRoute(channel, false));
+        }
         card.append(appDetails(channel));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
