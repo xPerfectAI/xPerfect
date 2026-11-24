@@ -373,8 +373,30 @@ class ExpertService:
         saved = self._save(tenant, owner, content, new_name, new_description, previous=current,
                            lineage_id=current["lineage_id"], expected_template_id=current["template_id"],
                            expected_catalog_revision=expected_catalog_revision)
+        if new_spec.ask_me_first == "off" and self.spec(current).ask_me_first != "off":
+            self._withdraw_waiting_for_off(tenant, owner, current["lineage_id"])
         return self.describe(self._templates.get_workspace_template(
             template_id=saved["template_id"], tenant_id=tenant, owner_id=owner))
+
+    def _withdraw_waiting_for_off(self, tenant: str, owner: str, lineage_id: str) -> None:
+        """Off means nobody is asked. What still waited for the owner is withdrawn, never sent or started
+        by itself, and each person is told, in the Expert's own words, that it cannot do this now."""
+        with self.store._connect() as conn:
+            waiting = [dict(row) for row in conn.execute(
+                "SELECT * FROM expert_reviews WHERE tenant_id=? AND owner_id=? AND lineage_id=? AND state='pending'",
+                (tenant, owner, lineage_id))]
+        for review in waiting:
+            self._withdraw(review["review_id"], "Ask me first was switched to Off.")
+            if review["kind"] == "job":
+                with self.store._connect() as conn:
+                    conn.execute("UPDATE expert_jobs SET state='withdrawn',updated_at=? WHERE job_id=? AND state='held'",
+                                 (_now(), review["target_id"]))
+            if self.deliveries is not None:
+                self.deliveries.discard_held_reply(review)
+            self._tell_owner_decision(review, "withdrawn",
+                                      "Your owner switched Ask me first to Off, so this request was withdrawn without "
+                                      "approval. Nothing was sent or started. Tell the person, in your own words, that "
+                                      "you cannot do this now and that they may ask again. Do not share what was held.")
 
     # ---------------------------------------------------------------- configurations
     def _default_role_config(self, tenant: str, owner: str, role: ExpertRole) -> CoordinatorConfig:
@@ -1146,13 +1168,18 @@ class ExpertService:
 
     def _tell_rejection(self, review: dict, note: str) -> None:
         """Tell the Queen the owner said no. She writes her own reply with every tool off."""
+        self._tell_owner_decision(review, "rejected",
+                                  "Your owner said no. Nothing was sent or started. Tell the person, in your own words, "
+                                  "that you cannot do this. Do not share what was held.", note=note)
+
+    def _tell_owner_decision(self, review: dict, decision: str, instruction: str, *, note: str = "") -> None:
+        """A decision about a held request, told to the Queen; she writes her own reply with every tool off."""
         payload = json.loads(review["payload_json"])
         what = (f"the reply you prepared:\n{payload.get('text', '')}" if review["kind"] == "reply"
                 else f"starting this job:\n{payload.get('goal', '')}")
-        message = canonical({"kind": "owner_decision", "decision": "rejected", "review_id": review["review_id"],
-                             "about": what, "owner_note": note,
-                             "instruction": "Your owner said no. Nothing was sent or started. Tell the person, in your "
-                                            "own words, that you cannot do this. Do not share what was held."})
+        message = canonical({"kind": "owner_decision", "decision": decision, "review_id": review["review_id"],
+                             "about": what, **({"owner_note": note} if decision == "rejected" else {}),
+                             "instruction": instruction})
         turn_id = "decision-" + review["review_id"]
         tenant, owner, cid = review["tenant_id"], review["owner_id"], review["speaker_conversation_id"]
         with self.store._connect() as conn:

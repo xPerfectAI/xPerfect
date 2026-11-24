@@ -693,6 +693,33 @@ def test_workers_run_at_the_level_the_expert_shows_or_saving_is_refused(app):
     assert config.routes and {route.execution_mode for route in config.routes} == {"docker"}
 
 
+def test_switching_to_off_withdraws_what_waited_and_tells_each_person(app):
+    # Review 2, finding 13: Off means nobody is asked; nothing held is sent or started by itself.
+    application, client = app
+    expert = create_expert(client, ask_me_first="always")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    cid = accepted["conversation_id"]
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, cid, goal="Synthetic held job", idempotency_key="k1", source_turn_id=accepted["turn_id"])
+    later = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-2")).json()
+    finish_turn(application, cid, later["turn_id"], "SYNTHETIC-HELD-REPLY")
+    application.state.channels.reconcile_once()
+    assert {review["kind"] for review in experts.reviews("local", owner)} == {"job", "reply"}
+    read = client.get(f"/v1/experts/{expert['template_id']}").json()
+    updated = client.patch(f"/v1/experts/{expert['template_id']}", json={
+        "expected_catalog_revision": read["catalog_revision"], "expert": {**read["expert"], "ask_me_first": "off"}})
+    assert updated.status_code == 200, updated.text
+    assert experts.reviews("local", owner) == []  # nothing left waiting in Needs you
+    assert experts._job(job["job_id"])["state"] == "withdrawn"
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_decision' "
+                               "AND message LIKE '%switched Ask me first to Off%'") == 2
+    application.state.channels.reconcile_once()
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert not any("SYNTHETIC-HELD-REPLY" in item["text"] for item in sent)
+
+
 def test_off_holds_nothing(app):
     # The owner's correction: Off skips approval and keeps the instructions.
     application, client = app
