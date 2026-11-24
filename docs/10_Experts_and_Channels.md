@@ -109,11 +109,60 @@ or a server for a wall.
   3.1.0): the owner completes Microsoft's sign-in on Microsoft's own page with the code shown;
   the CLI creates a Teams-managed bot in socket mode and writes its secret to a private file in the
   state folder; the signed-in owner becomes the first allowed person; one package process runs per
-  connected channel and survives runtime restarts. **Install in Teams** and **Test in Teams** links
-  follow. The first version sends and receives text in personal chats; a message from a group chat or
+  connected channel and survives runtime restarts. **Install in Teams** follows; **Test in Teams**
+  only once a first message has come through (hurdle 9 below). The first version sends and receives text in personal chats; a message from a group chat or
   a team channel gets no answer, so no reply is read by people the owner did not list. Files and group chats are
   later capabilities; Teams file requests need a certificate, federated credential or managed
   identity (Microsoft, 20 November 2026).
+
+#### What Microsoft and Teams ask, and what xPerfect does
+
+Found in the first connection to a real company tenant (24 November 2026). Each wall is said before
+the person meets it, and xPerfect clears what Microsoft lets it clear.
+
+1. **The work account is signed in elsewhere.** The sign-in shows a code to enter on Microsoft's own
+   page, which works from any browser or a phone; the page says so.
+2. **Microsoft may ask for a phone approval** in the middle of the sign-in. The page says so before
+   it starts; the code lasts about 15 minutes, and Connect is offered again when it runs out.
+3. **A brand-new bot is refused for its first seconds.** Microsoft answered 403, then 401 ("Socket Mode
+   negotiate failed"), until the new registration had reached every region; the SDK treats both as
+   final. The package tries again for about two minutes with growing waits, claims nothing and does
+   not report itself online before the socket has held, and the card says **Connecting…**. A refusal
+   that lasts is shown once, in Microsoft's words, until the socket holds. Restarts of a package that
+   keeps exiting wait 5 seconds, doubling to 5 minutes; the owner's own action starts it at once.
+4. **Teams asks web or desktop, and the add window may not appear the first time.** The card says
+   either works and to press **Install in Teams** again.
+5. **Teams does not let the person add custom apps.** Teams shows the add button greyed out and
+   "Permissions needed. Ask your IT admin to add … to this team/chat/meeting." Two switches decide it:
+   **Upload custom apps** in the person's app setup policy (Teams admin center → Teams apps → Setup
+   policies; a new policy assigned to one person changes nothing for anyone else) and **Let users
+   interact with custom apps in preview** (Teams apps → Manage apps → Actions → Org-wide app
+   settings). Before creating anything, Connect reads Microsoft's own report of both (the CLI's
+   status) and, when either is off, creates nothing: the page names the switches and which is off,
+   offers a note ready to send to the administrator (a first visit to the admin center can take up to
+   30 minutes), and reads the report again by itself every two minutes. While a change spreads,
+   Microsoft's servers answer differently (no, no, yes, no within seconds, more than twenty minutes
+   after the change), so after a "no" Connect goes on only after three "yes" in a row spanning a minute,
+   saying meanwhile that Microsoft is still applying it. Teams itself can lag behind that report, so
+   the card says "permissions needed" may mean a change is still spreading.
+6. **What xPerfect cannot do with this sign-in.** The pinned CLI's sign-in asks only for Microsoft
+   Graph `Application.ReadWrite.All` and the Developer Portal's `AppDefinitions.ReadWrite`. Assigning a
+   policy (`teamsPolicyUserAssignment: assign`, documented for meeting policies), publishing to the
+   organisation's catalogue (`POST /appCatalogs/teamsApps`) and installing for a person
+   (`POST /users/{id}/teamwork/installedApps`) each need a permission it does not ask for, two of them
+   an administrator's. The catalogue route needs an app registration of xPerfect's own with an
+   administrator's consent; it is a later capability, so today an administrator turns the switch.
+7. **The account that matters is not always the one expected.** Another login on the same computer
+   may belong to another organisation (the CLI also reads the Azure command-line login). Connect
+   always takes the Teams-managed route, never another login, and the page shows the account and
+   organisation ID Microsoft reported, while the app is made and on the card afterwards.
+8. **Online is not ready.** The card says **Online · no message yet** until a first message has really
+   come through, with the steps to add the app and write in its own chat; only then **Connected**.
+9. **"Test in Teams" can open somebody else's chat.** Before the app was installed, the direct link to
+   a chat with the bot opened an existing chat with another person. It is offered only once a first
+   message has come through, with a line saying whose chat it opens and to send nothing in any other.
+10. **Reading the Connect status never starts anything.** A finished sign-in creates the app once,
+    however often the page reads the status.
 
 ## Nothing happens twice
 
@@ -143,5 +192,10 @@ or a server for a wall.
   carry an account and cool-downs kept per account; on macOS a named second Claude account also
   needs local named-account support.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.
+- The Teams app's public details (developer name, website, privacy and terms links) are still the
+  CLI's placeholders; Microsoft requires all four (HTTPS links, a name of at most 32 characters).
+- A Teams app is created for any organisation's sign-in (the CLI's default); creating it for one
+  organisation (`--sign-in-audience myOrg`) waits until a fresh connection proves it with socket mode.
+- A blocked Connect's re-check lives in memory: after a runtime restart, Connect is pressed again.
 - Requests, approvals and outgoing messages carry text only: a file an Expert produces cannot yet be
   shown for approval or sent through Teams, and a message that is only a file is not read.
