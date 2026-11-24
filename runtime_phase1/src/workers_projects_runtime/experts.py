@@ -23,7 +23,7 @@ from typing import Any, Callable, Literal
 from pydantic import Field
 
 from .coordinator import (
-    CoordinatorConfig, CoordinatorConflict, CoordinatorScopeError, ExpertBinding, Route,
+    _RETRYABLE_ADMISSION_CODES, CoordinatorConfig, CoordinatorConflict, CoordinatorScopeError, ExpertBinding, Route,
     StrictModel, canonical, digest,
 )
 
@@ -31,6 +31,18 @@ EXPERTS_SCHEMA_VERSION = 1
 PROFILES = ("claude-code", "codex-cli", "grok-build")
 COORDINATION_ONLY_PROFILES = ("claude-code",)
 TERMINAL_GOALS = {"completed", "failed", "cancelled", "interrupted", "dismissed"}
+
+
+def _goal_may_move(goal: dict) -> bool:
+    """Whether a job's goal can still change without a new coordinator turn."""
+    if goal["held"]:  # held for an exact continuity resume
+        return True
+    if goal["run_id"]:
+        return goal["run_state"] not in TERMINAL_GOALS
+    if goal["intent_state"] == "cancelled":
+        return False
+    # Accepted and never started: only a dispatch the runtime replays (crash or capacity) can start it.
+    return bool(goal["dispatched"]) and (not goal["blocker"] or goal["blocker"] in _RETRYABLE_ADMISSION_CODES)
 
 
 class ExpertError(CoordinatorConflict):
@@ -486,7 +498,8 @@ class ExpertService:
                     names.add(path.parts[2])
                     files.append({"path": Path(*path.parts[3:]).as_posix(), "content": entry["content"]})
                 if len(names) == 1 and files:
-                    skills.append({"name": names.pop(), "files": files,
+                    skills.append({"name": names.pop(), "files": files, "item_id": ref["item_id"],
+                                   "version_id": ref["version_id"],
                                    "profiles": _skill_runtimes(payload.get("files") or [])})
         return sorted(skills, key=lambda skill: skill["name"])
 
@@ -660,6 +673,13 @@ class ExpertService:
             lines.append("The person's message, exactly as received:\n" + original)
         lines.append("When the job is finished, give the final answer for the person in your reply.")
         refs = (template.get("content") or {}).get("personal_library_refs") or []
+        # A Skill that travels with this job natively (to its coordinator or Workers) is applied: it is
+        # not offered again as Library material waiting for review.
+        spec = self.spec(template)
+        team = {spec.team.coordinate.profile, *spec.team.work}
+        native = {(skill["item_id"], skill["version_id"]) for skill in self._expert_skills(tenant, owner, template)
+                  if team & set(skill["profiles"])}
+        refs = [ref for ref in refs if (ref.get("item_id"), ref.get("version_id")) not in native]
         self.coordinator.accept_turn(tenant, owner, cid, "job-brief", "\n\n".join(lines), None, refs or None)
         with self.store._connect() as conn:
             moved = conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=? "
@@ -757,13 +777,26 @@ class ExpertService:
             pass
 
     def _job_finished(self, job: dict) -> tuple[bool, str, str]:
-        """(finished, state, final text). Finished means no open goal and the newest turn answered."""
+        """(finished, state, final text). Finished means the newest turn is answered and nothing in the job
+        can move without a new message: each goal has ended, or never started and nothing will start it.
+
+        A goal starts only from a coordinator turn or from a dispatch the runtime replays. One the
+        coordinator could not start and left (its answer says why) must not keep the job open untold."""
         tenant, owner, cid = job["tenant_id"], job["owner_id"], job["job_conversation_id"]
-        snapshot = self.coordinator.refresh(tenant, owner, cid, False)
-        goals = snapshot.get("goals", [])
+        self.coordinator.refresh(tenant, owner, cid, False)
         with self.store._connect() as conn:
+            conn.execute("BEGIN")  # one read: a goal started meanwhile is seen together with its turn
             row = conn.execute("SELECT turn_id,response_json,blocker FROM coordinator_turns WHERE conversation_id=? "
                                "ORDER BY created_at DESC,turn_id DESC LIMIT 1", (cid,)).fetchone()
+            goals = [dict(goal) for goal in conn.execute(
+                "SELECT g.run_id,g.dispatch_json<>'' AS dispatched,g.blocker,g.intent_state,"
+                "(g.restore_hold OR c.restore_hold) AS held,r.state AS run_state FROM coordinator_goals g "
+                "JOIN coordinator_conversations c ON c.conversation_id=g.conversation_id "
+                "LEFT JOIN runs r ON r.run_id=g.run_id WHERE g.conversation_id=?", (cid,))]
+            waiting = conn.execute("SELECT 1 FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' LIMIT 1",
+                                   (cid,)).fetchone()
+            pending = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND response_json='' "
+                                   "AND blocker NOT IN ('cancelled','failed') LIMIT 1", (cid,)).fetchone()
         if row is None:
             return False, "", ""
         latest = dict(row)
@@ -771,13 +804,8 @@ class ExpertService:
             return True, "failed", "The job could not run: " + str(latest.get("blocker"))
         if not latest.get("response_json"):
             return False, "", ""
-        if any(goal.get("state") not in TERMINAL_GOALS for goal in goals):
+        if any(_goal_may_move(goal) for goal in goals):
             return False, "", ""
-        with self.store._connect() as conn:
-            waiting = conn.execute("SELECT 1 FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id='' LIMIT 1",
-                                   (cid,)).fetchone()
-            pending = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND response_json='' "
-                                   "AND blocker NOT IN ('cancelled','failed') LIMIT 1", (cid,)).fetchone()
         if waiting or pending:
             return False, "", ""
         return True, "done", reply_text(latest["response_json"])

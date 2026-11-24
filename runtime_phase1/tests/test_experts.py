@@ -742,6 +742,78 @@ def test_the_skills_chosen_on_an_expert_travel_with_its_jobs_claude_workers(app)
     assert not _contains_parallel_forbidden_authority_key(bundle)
 
 
+def test_a_skill_that_travels_natively_is_not_offered_again_as_pending_library_material(app):
+    application, client = app
+    experts = application.state.experts
+    skill = client.post("/v1/personal-library", json={
+        "name": "synthetic-brief", "kind": "skill", "description": "Write a synthetic brief.", "profiles": ["claude-code"],
+        "files": [{"path": ".claude/skills/synthetic-brief/SKILL.md",
+                   "content": "---\nname: synthetic-brief\ndescription: Write a synthetic brief\n---\nWrite it.\n"}],
+        "idempotency_key": "synthetic-brief-skill"}).json()
+    created = client.post("/v1/experts", json={"name": "Synthetic Expert", "description": "Answers engineering questions.",
+                                               "expert": {**SPEC, "ask_me_first": "off"}, "personal_library_refs": [
+                                                   {"item_id": skill["item_id"], "version_id": skill["version_id"]}]}).json()
+    chat = client.post(f"/v1/experts/{created['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    cid = experts._job(job["job_id"])["job_conversation_id"]
+    library = json.loads(scalar(application, "SELECT library_json FROM coordinator_turns WHERE conversation_id=? "
+                                             "AND turn_id='job-brief'", cid) or "{}")
+    # The job carries the Skill natively (its coordinator and Workers load it), so the brief does not list it
+    # among Library requirements that wait for review.
+    assert not library.get("refs") and not library.get("pending")
+
+
+def test_a_job_whose_goal_never_started_ends_with_the_coordinators_answer_told_once(app):
+    application, client = app
+    expert = create_expert(client, ask_me_first="off")
+    experts = application.state.experts
+    store = experts.store
+    chat = client.post(f"/v1/experts/{expert['template_id']}/chat").json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    job = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1")
+    cid = experts._job(job["job_id"])["job_conversation_id"]
+    with store._connect() as conn:
+        conn.execute("UPDATE expert_jobs SET state='running' WHERE job_id=?", (job["job_id"],))
+        conn.execute("UPDATE coordinator_turns SET blocker='' WHERE conversation_id=?", (cid,))
+        conn.execute("INSERT INTO coordinator_goals(conversation_id,goal_id,source_turn_id,text,created_at) "
+                     "VALUES(?,?,?,?,?)", (cid, "g1", "job-brief", "Synthetic goal", "t"))
+
+    def told():
+        return scalar(application, "SELECT count(*) FROM coordinator_events WHERE conversation_id=? AND kind='expert_job_result'",
+                      chat["conversation_id"])
+
+    experts.reconcile_once()  # the coordinator is still writing its answer
+    assert experts._job(job["job_id"])["state"] == "running" and told() == 0
+    finish_turn(application, cid, "job-brief", "The job is blocked: no ready account for the helper.")
+    # A start that is only waiting for capacity, or a helper still running, keeps the job open.
+    with store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET dispatch_json='{\"goal_id\":\"g1\",\"route_id\":\"codex-cli\"}',"
+                     "blocker='host_capacity' WHERE conversation_id=? AND goal_id='g1'", (cid,))
+    experts.reconcile_once()
+    assert experts._job(job["job_id"])["state"] == "running" and told() == 0
+    project = store.create_project(owner, "Synthetic", "Synthetic project", "claude-code")
+    worker = store.create_worker(project["project_id"], owner, "Helper", "worker", "claude-code", "claude-code",
+                                 "claude-code", "haiku", execution_mode="host")
+    run = store.create_run(worker["worker_id"], project["project_id"], "Synthetic helper")
+    with store._connect() as conn:
+        conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (run["run_id"],))
+        conn.execute("UPDATE coordinator_goals SET blocker='',worker_id=?,run_id=? WHERE conversation_id=? AND goal_id='g1'",
+                     (worker["worker_id"], run["run_id"], cid))
+    experts.reconcile_once()
+    assert experts._job(job["job_id"])["state"] == "running" and told() == 0
+    # The goal the coordinator could not start and left: nothing will ever start it, so the job ends with
+    # the coordinator's own answer and the Queen is told, once.
+    with store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET dispatch_json='',worker_id='',run_id='',blocker='' "
+                     "WHERE conversation_id=? AND goal_id='g1'", (cid,))
+    experts.reconcile_once()
+    experts.reconcile_once()
+    finished = experts._job(job["job_id"])
+    assert finished["state"] == "done" and finished["result_text"] == "The job is blocked: no ready account for the helper."
+    assert told() == 1
+
+
 def test_a_low_disk_says_plainly_that_the_expert_cannot_answer(app, monkeypatch):
     # Tested at the guard, not by filling the disk.
     application, client = app
