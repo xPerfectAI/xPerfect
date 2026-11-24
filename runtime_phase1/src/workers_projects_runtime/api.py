@@ -427,7 +427,7 @@ def create_app(
             except Exception as exc:
                 logger.warning("Native workspace sockets are unavailable: %s", type(exc).__name__)
         try:
-            async with peer_mcp.session_manager.run(), coordinator_mcp.session_manager.run(), context_mcp.session_manager.run(), schedule_mcp.session_manager.run():
+            async with peer_mcp.session_manager.run(), coordinator_mcp.session_manager.run(), expert_mcp.session_manager.run(), context_mcp.session_manager.run(), schedule_mcp.session_manager.run():
                 yield
         finally:
             if native_sockets:
@@ -1020,6 +1020,17 @@ def create_app(
                 service.coordinator.native_identity(service.peers.native_principal(token))
             except (PeerError, CoordinatorScopeError):
                 return JSONResponse(status_code=403, content={"detail": {"code": "coordinator_native_unauthorized"}})
+            return await call_next(request)
+        if request.url.path == "/v1/native/expert" or request.url.path.startswith("/v1/native/expert/"):
+            # Only an Expert's speaking Queen run reaches her own tools.
+            scheme, _, token = str(request.headers.get("authorization") or "").partition(" ")
+            try:
+                if scheme.lower() != "bearer":
+                    raise CoordinatorScopeError("Native authority required")
+                identity = service.coordinator.native_identity(service.peers.native_principal(token))
+                service.experts.speaker(*identity)
+            except (PeerError, CoordinatorScopeError):
+                return JSONResponse(status_code=403, content={"detail": {"code": "expert_native_unauthorized"}})
             return await call_next(request)
         if request.url.path == "/v1/native/schedules" or request.url.path.startswith("/v1/native/schedules/"):
             scheme, _, token = str(request.headers.get("authorization") or "").partition(" ")
@@ -4743,6 +4754,19 @@ def create_app(
         os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766").rstrip("/") + "/v1/native/coordinator/",
     )
     app.mount("/v1/native/coordinator", coordinator_mcp.streamable_http_app())
+
+    # Experts that people can talk to: a Queen per person, jobs, owner review and channels.
+    from .experts import ExpertService
+    from .experts_api import install_expert_routes
+    from .expert_mcp import native_expert_server
+    service.experts = ExpertService(store, service, service.coordinator)
+    app.state.experts = service.experts
+    install_expert_routes(app, service.experts, _current_principal, _auth_context)
+    expert_mcp = native_expert_server(
+        service.experts, service.peers,
+        os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766").rstrip("/") + "/v1/native/expert/",
+    )
+    app.mount("/v1/native/expert", expert_mcp.streamable_http_app())
 
     install_peer_routes(app, service.peers, _current_principal, _require_human_confirmation_scope)
     from .spend_control_api import install_spend_control_routes

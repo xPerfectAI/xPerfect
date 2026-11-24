@@ -84,19 +84,25 @@ def project_coordinator_bootstrap(worker: dict, bundle: dict) -> dict:
     mcp = result.get("claude_project_mcp") or {}
     servers = mcp.get("mcpServers", mcp)
     from . import native_transport
-    servers["xperfect-coordinator"] = _claude_server(projection)
+    name = _server_name(projection)
+    servers[name] = _claude_server(projection)
     if projection.get("transport") == "stdio":
-        block = native_transport.codex_stdio_block("xperfect-coordinator", projection["url"], "GLASSHIVE_PEER_TOKEN")
+        block = native_transport.codex_stdio_block(name, projection["url"], "GLASSHIVE_PEER_TOKEN")
     else:
-        block = '[mcp_servers.xperfect-coordinator]\nurl = ' + json.dumps(projection["url"]) + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
+        block = f'[mcp_servers.{name}]\nurl = ' + json.dumps(projection["url"]) + '\nbearer_token_env_var = "GLASSHIVE_PEER_TOKEN"\n'
     # This exact server is the authenticated run's own control API. Keep native
     # approval for every other MCP server and capability unchanged.
     block += 'default_tools_approval_mode = "approve"\n'
     result["claude_project_mcp"] = {"mcpServers": servers}
     from .bootstrap import _strip_codex_mcp_server_blocks
-    append = _strip_codex_mcp_server_blocks(result.get("codex_config_append", ""), {"xperfect-coordinator"}).rstrip()
+    append = _strip_codex_mcp_server_blocks(result.get("codex_config_append", ""), {name}).rstrip()
     result["codex_config_append"] = append + '\n\n' + block
     return result
+
+
+def _server_name(projection: dict) -> str:
+    """The coordinator's tool server, or an Expert Queen's own; never a caller-chosen name."""
+    return "xperfect-expert" if projection.get("server") == "xperfect-expert" else "xperfect-coordinator"
 
 
 def _claude_server(projection: dict) -> dict:
@@ -115,10 +121,16 @@ def claude_coordinator_tool_rules(worker: dict, bundle: dict, servers: dict) -> 
     """
     projection = worker.get("_coordinator_native_projection")
     environment = bundle.get("env") if isinstance(bundle.get("env"), dict) else {}
-    if (not isinstance(projection, dict) or not projection.get("token")
+    if not isinstance(projection, dict):
+        return []
+    name = _server_name(projection)
+    if (not projection.get("token")
             or projection.get("worker_id") != worker.get("worker_id")
             or projection.get("run_id") != worker.get("_active_run_id")
             or environment.get("GLASSHIVE_PEER_TOKEN") != projection["token"]
-            or servers.get("xperfect-coordinator") != _claude_server(projection)):
+            or servers.get(name) != _claude_server(projection)):
         return []
-    return ["mcp__xperfect-coordinator__" + name for name in coordinator_tool_manifest()["tools"]]
+    if name == "xperfect-expert":
+        from .experts import expert_tool_manifest
+        return [f"mcp__{name}__" + tool for tool in expert_tool_manifest()["tools"]]
+    return [f"mcp__{name}__" + tool for tool in coordinator_tool_manifest()["tools"]]

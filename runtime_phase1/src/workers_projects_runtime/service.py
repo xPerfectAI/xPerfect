@@ -19968,6 +19968,7 @@ class WorkersProjectsService:
             ("provider liveness", self.process_provider_liveness_once),
             ("unfinished projections", self.settle_unfinished_projections_once),
             ("conversation coordinator", lambda: self.coordinator.reconcile_once() if getattr(self, "coordinator", None) is not None else None),
+            ("experts", lambda: self.experts.reconcile_once() if getattr(self, "experts", None) is not None else None),
         ):
             if self._shutdown_event.is_set():
                 return

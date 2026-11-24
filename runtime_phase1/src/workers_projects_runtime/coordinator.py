@@ -82,6 +82,17 @@ class ApplicationBinding(StrictModel):
     delivery_timeout_seconds: int = Field(default=3600, gt=0, strict=True)
 
 
+class ExpertBinding(StrictModel):
+    """A conversation that belongs to a saved Expert: its speaking Queen or one of its jobs."""
+
+    lineage_id: str = Field(min_length=1, max_length=200)
+    role: Literal["speaker", "job"]
+    parent_conversation_id: str = Field(default="", max_length=200)
+    job_id: str = Field(default="", max_length=200)
+    # A job keeps the Expert's chosen access level for its whole life.
+    access: Literal["full", "workspace", "read_only"] | None = None
+
+
 class CoordinatorConfig(StrictModel):
     model: str = Field(min_length=1, max_length=200)
     effort: str = Field(min_length=1, max_length=50)
@@ -94,11 +105,22 @@ class CoordinatorConfig(StrictModel):
     library_text_chars: int = Field(default=24000, ge=0, le=262144, strict=True)
     scope: CoordinatorScope = Field(default_factory=CoordinatorScope)
     application: ApplicationBinding | None = None
+    expert: ExpertBinding | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if self.application and (self.bootstrap_bundle or self.developer_instructions
                                  or any(route.bootstrap_bundle for route in self.routes)):
             raise ValueError("Application coordinator authority must be prepared per invocation")
+        if self.application and self.expert:
+            raise ValueError("An application conversation cannot also belong to an Expert")
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        # Saved configurations and application create digests stay byte-exact for
+        # conversations that do not belong to an Expert.
+        dumped = super().model_dump(*args, **kwargs)
+        if dumped.get("expert") is None:
+            dumped.pop("expert", None)
+        return dumped
 
 
 class Goal(StrictModel):
@@ -232,7 +254,17 @@ from .bootstrap import worker_prompt_layer_producer
 
 
 @worker_prompt_layer_producer("system_instructions", "tool_schemas")
-def prompt_manifest(application: bool = False) -> dict[str, Any]:
+def prompt_manifest(application: bool = False, expert_role: str | None = None) -> dict[str, Any]:
+    if expert_role == "speaker":
+        # An Expert's speaking Queen answers people and hands work to background jobs.
+        source = Path(__file__).with_name("prompts") / "expert-queen.md"
+        content = source.read_text(encoding="utf-8")
+        tools = source.with_name("expert-tools.json").read_bytes()
+        return {"id": "xperfect.expert.queen", "version": 1,
+                "source": "workers_projects_runtime/prompts/expert-queen.md",
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "tool_schema_version": json.loads(tools)["version"],
+                "tool_schema_sha256": hashlib.sha256(tools).hexdigest(), "content": content}
     source = Path(__file__).with_name("prompts") / "coordinator.md"
     content = source.read_text(encoding="utf-8")
     tools = source.with_name("coordinator-tools.json").read_bytes()
@@ -618,7 +650,8 @@ class CoordinatorService:
                     tenant,
                     owner,
                     canonical(config.model_dump()),
-                    canonical(prompt_manifest(application=config.application is not None)),
+                    canonical(prompt_manifest(application=config.application is not None) if config.expert is None
+                              else prompt_manifest(expert_role=config.expert.role)),
                     canonical(scope),
                     now(), application_ref, create_digest,
                 ),
@@ -1628,8 +1661,13 @@ class CoordinatorService:
                 return {"turn_id": turn_id, "request_id": turn["request_id"], "state": "accepted"}
             if not turn["payload_json"]:
                 messages = [{"role": "system", "content": json.loads(conversation["prompt_json"])["content"]}]
-                if config.developer_instructions:
-                    messages.append({"role": "developer", "content": config.developer_instructions})
+                experts = getattr(self, "experts", None)
+                # An Expert's Queen reads its newest instructions when each turn starts;
+                # a job keeps the instructions it started with in its own configuration.
+                developer = (experts.authority(tenant, owner, conversation, config)
+                             if experts is not None and config.expert is not None else config.developer_instructions)
+                if developer:
+                    messages.append({"role": "developer", "content": developer})
                 # Exact source history is retained; the existing provider admission layer
                 # either admits it or returns an explicit budget error. No silent slicing.
                 prior = conn.execute("SELECT * FROM coordinator_turns WHERE conversation_id=? AND created_at<=? ORDER BY created_at,turn_id", (conversation_id, turn["created_at"])).fetchall()
@@ -1643,14 +1681,22 @@ class CoordinatorService:
                                 messages.append({"role": "assistant", "content": authored["content"]})
                 if library_packet:
                     messages.append(library_packet["message"])
+                bundle = library_packet.get("bootstrap_bundle", config.bootstrap_bundle)
+                if config.expert is not None and turn["origin"] in {"owner_decision", "owner_checking"}:
+                    # A line written before or after the owner's decision uses no tool at all.
+                    capabilities = {k: v for k, v in (bundle.get("provider_capabilities") or {}).items()
+                                    if k != "coordination_only"}
+                    bundle = {**bundle, "provider_capabilities": {**capabilities, "native_tools": False}}
                 packet = {"model": config.model, "reasoning_effort": config.effort,
                           "messages": messages, "metadata": {
                             "tenant_id": tenant, "owner_id": owner, "conversation_id": conversation_id,
                             "agent_id": "coordinator", "message_id": turn_id, "stream_id": turn_id,
                             "idempotency_key": f"{conversation_id}:{turn_id}",
                             "surface": "coordinator",
-                            "bootstrap_bundle": library_packet.get("bootstrap_bundle", config.bootstrap_bundle),
+                            "bootstrap_bundle": bundle,
                             "allowed_ai_origin_scope": self._conversation_scope(conversation),
+                            **({"glasshive_options": {"access": config.expert.access}}
+                               if config.expert is not None and config.expert.access else {}),
                         }}
                 if library_packet:
                     # The existing history owner groups this reference with the
@@ -2252,7 +2298,10 @@ class CoordinatorService:
         session = self.store.get_provider_session_by_worker(str(worker["worker_id"]))
         if not session or session.get("agent_id") != "coordinator":
             return worker
-        self._conversation(session["tenant_id"], session["owner_id"], session["conversation_id"])
+        conversation = self._conversation(session["tenant_id"], session["owner_id"], session["conversation_id"])
+        binding = CoordinatorConfig.model_validate_json(conversation["config_json"]).expert
+        # An Expert's speaking Queen gets only her own tools; jobs keep the coordinator's.
+        speaker = binding is not None and binding.role == "speaker"
         from urllib.parse import urlparse
         from . import native_transport
         socket_base = native_transport.native_base()
@@ -2273,7 +2322,11 @@ class CoordinatorService:
         if not token:
             # Same O06 binder; coordinator authority does not require peer discovery on.
             token = peers.mint_native_session(worker["worker_id"], run["run_id"])
+        if speaker:
+            endpoint = endpoint[: -len("/v1/native/coordinator/")] + "/v1/native/expert/"
         projection = {"worker_id": worker["worker_id"], "run_id": run["run_id"], "token": token, "url": endpoint}
+        if speaker:
+            projection["server"] = "xperfect-expert"
         if socket_base:
             projection["transport"] = "stdio"
         return {**worker, "_active_run_id": run["run_id"], "_coordinator_native_projection": projection}

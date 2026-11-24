@@ -4451,10 +4451,17 @@ class ConversationProvider:
             raise HTTPException(status_code=400, detail="Retained native conversations require a supported coordination-only persistent route")
         if not native_tools and not reuse_process:
             incoming_env[GLASSHIVE_PROVIDER_SESSION_MODE_ENV] = "stateless"
+        # An Expert's speaking Queen keeps her session and her own tools, with every
+        # built-in file, shell and web tool off.
+        coordination_only = (isinstance(incoming_capabilities, dict)
+                             and incoming_capabilities.get("coordination_only") is True)
+        if coordination_only and (not native_tools or model.harness_profile != "claude-code"):
+            raise HTTPException(status_code=400, detail="Coordination-only conversations require Claude Code with its own tool server")
         provider_capabilities = {
             "self_delegation": False,
             "native_tools": native_tools,
             **({"conversation_process_reuse": True} if reuse_process else {}),
+            **({"coordination_only": True} if coordination_only else {}),
         }
         private_contract = _private_machine_state_response_contract(payload.metadata)
         if private_machine_state_output_schema(private_contract) is not None:

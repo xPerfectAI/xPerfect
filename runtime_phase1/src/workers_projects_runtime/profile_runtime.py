@@ -17494,7 +17494,11 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             )
         if self._conversation_mode_from_worker(worker):
             permission_mode = "dontAsk" if read_only else "bypassPermissions" if access_mode == "full" else "acceptEdits"
-        if restricted:
+        # An Expert's speaking Queen keeps her session and her own tool server; every
+        # built-in file, shell, web and browser tool is off and nothing else is allowed.
+        coordination_only = (not restricted and self._conversation_mode_from_worker(worker)
+                             and (bundle.get("provider_capabilities") or {}).get("coordination_only") is True)
+        if restricted or coordination_only:
             permission_mode = "dontAsk"
         elif native_web_locked and not read_only:
             permission_mode = "acceptEdits"
@@ -17518,6 +17522,8 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             ])
             if not broker:
                 command.append("--safe-mode")
+        elif coordination_only:
+            command.extend(["--tools", "", "--setting-sources", "", "--disable-slash-commands"])
         elif read_only:
             tools = ["Read", "Glob", "Grep"]
             if not native_web_locked:
@@ -17534,7 +17540,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         settings: dict[str, object] = (
             {"autoMemoryEnabled": False, "disableAllHooks": True,
              "permissions": {"defaultMode": "dontAsk"}}
-            if restricted else json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
+            if restricted or coordination_only else json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
         )
         if restricted and broker:
             # Explicit signed MCP authority is separate from disabled native action tools.
@@ -17551,7 +17557,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 raise RuntimeErrorBase("Claude Code read-only permissions are invalid")
             allowed = permissions.get("allow") if isinstance(permissions.get("allow"), list) else []
             permissions.update(defaultMode="dontAsk", allow=[*allowed, *tools])
-        if self._conversation_mode_from_worker(worker) and not restricted:
+        if self._conversation_mode_from_worker(worker) and not restricted and not coordination_only:
             auto_memory = _host_claude_conversation_auto_memory()
             if auto_memory is not None:
                 settings["autoMemoryEnabled"] = auto_memory
@@ -17659,7 +17665,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             )
         if native_web_locked:
             command.extend(["--disallowedTools", "WebSearch", "WebFetch"])
-        if restricted or native_web_locked or access_mode != "full":
+        if restricted or coordination_only or native_web_locked or access_mode != "full":
             command.insert(2, "--no-chrome")
         elif self._chrome_enabled():
             command.insert(2, "--chrome")

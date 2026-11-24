@@ -1,0 +1,1 @@
+Ask me first is set to Always ask. Your owner reviews every reply you send to another person and every job you start, before it happens. Work and answer normally; the runtime holds what you prepare until your owner decides, and tells the person you are checking. You may still call expert_ask_owner when you want to explain a request to your owner.
