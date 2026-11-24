@@ -305,7 +305,7 @@ const app = {app_id: 'bot-synthetic', install_link: 'https://teams.invalid/insta
 const labels = channel => teamsLinks(channel).map(link => link.label);
 assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app}), ['Install in Teams']);
 assert.deepEqual(labels({state: 'connected', online: false, first_message: false, app}), ['Install in Teams']);
-assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Install in Teams', 'Test in Teams']);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Test in Teams']);  // installed: no Install
 assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
 // Hurdle 15: once an administrator added the app, the developer copy's install link is a dead end: not offered.
 assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app: {...app, added_by_admin: 'yes'}}), []);

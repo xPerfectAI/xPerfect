@@ -199,7 +199,8 @@ export function sharedFolderNote(kind, people, waiting) {
 export function teamsLinks(channel) {
   const links = [];
   // Once an administrator added the app, this link opens the developer copy, which stays blocked: not offered.
-  if (channel.app.install_link && !channel.app.added_by_admin) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
+  // Once a first message came through, the app is installed for the owner; this card is theirs alone.
+  if (channel.app.install_link && !channel.app.added_by_admin && !channel.first_message) links.push({ label: 'Install in Teams', href: channel.app.install_link, style: 'secondary-button' });
   if (channel.first_message && channel.app.app_id) {
     links.push({ label: 'Test in Teams', href: 'https://teams.microsoft.com/l/chat/0/0?users=28:' + encodeURIComponent(channel.app.app_id), style: 'primary-button' });
   }
