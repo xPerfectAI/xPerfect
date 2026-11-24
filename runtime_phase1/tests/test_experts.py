@@ -458,6 +458,27 @@ def test_on_auto_nothing_of_a_turn_that_asked_the_owner_leaves_while_it_waits(ap
     assert json.loads(checking["payload_json"])["metadata"]["bootstrap_bundle"]["provider_capabilities"]["native_tools"] is False
 
 
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_a_decision_before_the_outbox_pass_never_lets_the_turns_own_reply_out(app, decision):
+    # Review 2, finding 1: Approve releases what was shown and nothing else; a no sends nothing that was held.
+    application, client = app
+    expert = create_expert(client, ask_me_first="auto")
+    channel = connected_channel(application, client, expert)
+    experts = application.state.experts
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    experts.ask_owner("local", owner, accepted["conversation_id"], reason="Unusual request", reply="SYNTHETIC-SHOWN-TEXT",
+                      idempotency_key="ask-1", source_turn_id=accepted["turn_id"])
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "SYNTHETIC-OWN-REPLY")
+    review = experts.reviews("local", owner)[0]
+    experts.decide("local", owner, review["review_id"], decision=decision, expected_digest=review["payload_digest"])
+    application.state.channels.reconcile_once()
+    sent = [item["text"] for item in client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]]
+    assert not any("SYNTHETIC-OWN-REPLY" in text for text in sent)
+    assert sent == (["SYNTHETIC-SHOWN-TEXT"] if decision == "approve" else [])
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_checking'") == 0
+
+
 def test_a_stopped_conversation_leaves_nothing_approvable(app, monkeypatch):
     # The owner's correction: changed or stopped work must invalidate old approvals.
     application, client = app

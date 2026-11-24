@@ -372,9 +372,10 @@ class ChannelService:
                          "WHERE review_id=? AND state='held'", (_now(), review["review_id"]))
 
     def _turn_reviews(self, conversation_id: str, turn_id: str) -> list[dict]:
+        """Every request a turn made of the owner, whatever its state: pending, decided or withdrawn."""
         with self.store._connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM expert_reviews WHERE speaker_conversation_id=? AND source_turn_id=? AND state='pending'",
+                "SELECT * FROM expert_reviews WHERE speaker_conversation_id=? AND source_turn_id=? ORDER BY created_at",
                 (conversation_id, turn_id))]
 
     # ---------------------------------------------------------------- maintenance
@@ -411,14 +412,21 @@ class ChannelService:
                     kind = "decision" if origin == "owner_decision" else "checking"
                     self._insert_delivery(conn, speaker, row["turn_id"], kind, text, "pending")
                     continue
-            pending_reviews = self._turn_reviews(row["conversation_id"], row["turn_id"])
-            if pending_reviews:
-                # In any setting, a turn that asked the owner sends nothing of its own while the request
-                # waits; her checking line is written in a turn with every tool off.
+            asked = self._turn_reviews(row["conversation_id"], row["turn_id"])
+            if asked:
+                # In any setting, a turn that asked the owner never sends its own reply, also when the owner
+                # decided before this pass: an approval releases exactly what was shown, a no is told in a
+                # turn of its own. While a request still waits, her checking line goes out instead, written
+                # in a turn with every tool off.
                 with self.store._connect() as conn:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped")
-                self.experts.tell_checking(speaker, pending_reviews[0])
-                outcomes.append({"turn_id": row["turn_id"], "delivery": "held", "review_id": pending_reviews[0]["review_id"]})
+                pending_reviews = [review for review in asked if review["state"] == "pending"]
+                if pending_reviews:
+                    self.experts.tell_checking(speaker, pending_reviews[0])
+                    outcomes.append({"turn_id": row["turn_id"], "delivery": "held",
+                                     "review_id": pending_reviews[0]["review_id"]})
+                else:
+                    outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped"})
                 continue
             if mode != "always":
                 with self.store._connect() as conn:
