@@ -790,7 +790,10 @@ def test_models_expose_exact_harness_registry(tmp_path, monkeypatch):
         "codex-cli:gpt-5.4", "codex-cli:native-default",
         "claude-code:claude-opus-5-5", "claude-code:claude-opus-5", "claude-code:opus",
         "direct-openai:gpt-6.1-sol", "direct-anthropic:claude-opus-5-5", "direct-xai:grok-4.7",
+        # Each AI's fastest model, for a role where first words matter (an Expert's speaking assistant).
+        "claude-code:haiku", "codex-cli:gpt-6.2-sol",
     }
+    assert models["claude-code:haiku"]["recommended_effort"] == models["codex-cli:gpt-6.2-sol"]["recommended_effort"] == "low"
     assert models["codex-cli:gpt-5.6-sol"]["display_name"] == "Codex / GPT-5.6 Sol"
     assert models["codex-cli:gpt-5.6-sol"]["recommended_effort"] == "medium"
     assert models["codex-cli:gpt-5.6-sol"]["context_window"] == 272000
