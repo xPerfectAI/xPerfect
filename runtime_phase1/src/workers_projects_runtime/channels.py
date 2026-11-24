@@ -126,7 +126,7 @@ class ChannelService:
     def __init__(self, store: Any, experts: ExpertService) -> None:
         self.store, self.experts = store, experts
         self._ready = threading.Condition()  # told when a message becomes ready to send
-        self._readiness = 0
+        self._readiness: dict[str, int] = {}  # per channel: how often a message became ready there
         self._waiters = threading.BoundedSemaphore(CLAIM_WAITERS_MAX)
         with store._connect() as conn:
             ensure_channels_schema(conn)
@@ -351,12 +351,20 @@ class ChannelService:
                 continue
         return repaired
 
-    def _ready_now(self) -> None:
-        """A message became ready to send: a claim waiting for one looks again at once (its own transaction waits
-        for the writer's to commit, so it reads the message)."""
+    def _ready_now(self, binding_id: str) -> None:
+        """A message became ready to send on this channel: a claim waiting there claims at once (its own transaction
+        waits for the writer's to commit, so it reads the message)."""
         with self._ready:
-            self._readiness += 1
+            self._readiness[binding_id] = self._readiness.get(binding_id, 0) + 1
             self._ready.notify_all()
+
+    def _pending_exists(self, binding_id: str) -> bool:
+        """A read only, so a claim that waits takes no write lock while nothing is ready."""
+        with self.store._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM channel_deliveries d LEFT JOIN coordinator_conversations c ON c.conversation_id=d.conversation_id "
+                "WHERE d.binding_id=? AND d.state='pending' AND COALESCE(c.restore_hold,0)=0 LIMIT 1",
+                (binding_id,)).fetchone() is not None
 
     def claim(self, binding_id: str, limit: int = 10, wait: float = 0.0) -> list[dict]:
         """The channel's ready messages, leased to the package to send. With wait, an empty claim waits up to that
@@ -366,16 +374,22 @@ class ChannelService:
             return self._claim_now(binding_id, limit)
         try:
             deadline = time.monotonic() + wait
-            while True:
-                with self._ready:
-                    seen = self._readiness
-                claimed = self._claim_now(binding_id, limit)
+            with self._ready:
+                seen = self._readiness.get(binding_id, 0)
+            claimed = self._claim_now(binding_id, limit)
+            while not claimed:
                 remaining = deadline - time.monotonic()
-                if claimed or remaining <= 0:
+                if remaining <= 0:
                     return claimed
                 with self._ready:
-                    if self._readiness == seen:  # nothing became ready meanwhile: wait to be told (or look again soon)
+                    if self._readiness.get(binding_id, 0) == seen:  # nothing ready here meanwhile: wait to be told
                         self._ready.wait(timeout=min(remaining, 0.25))
+                    now = self._readiness.get(binding_id, 0)
+                    told, seen = now != seen, now
+                # Told: claim at once. Not told: claim only if a read finds a message ready (a path that did not tell).
+                if told or self._pending_exists(binding_id):
+                    claimed = self._claim_now(binding_id, limit)
+            return claimed
         finally:
             self._waiters.release()
 
@@ -474,7 +488,7 @@ class ChannelService:
              speaker["conversation_id"], turn_id, kind, text, speaker["thread_ref_json"] or "{}", state, review_id, error,
              _now() if state == "dropped" else "", _now()))
         if state == "pending":
-            self._ready_now()
+            self._ready_now(speaker["binding_id"])
 
     def write_released_reply(self, conn, speaker: dict, review: dict) -> None:
         """Inside the one release's transaction, after its checks: exactly the reply that was shown, word for
@@ -483,7 +497,7 @@ class ChannelService:
                             "ORDER BY created_at LIMIT 1", (review["review_id"],)).fetchone()
         if held:
             conn.execute("UPDATE channel_deliveries SET state='pending' WHERE delivery_id=?", (held["delivery_id"],))
-            self._ready_now()
+            self._ready_now(speaker["binding_id"])
         else:
             self._insert_delivery(conn, speaker, "approved-" + review["review_id"], "approved",
                                   json.loads(review["payload_json"]).get("text", ""), "pending", review["review_id"])

@@ -318,7 +318,9 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const code = node('code', 'expert-code', step.code);
       const copy = node('button', 'secondary-button', 'Copy code'); copy.type = 'button';
       copy.onclick = async () => { try { await navigator.clipboard.writeText(step.code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the code'; } };
-      box.append(node('p', '', 'Open Microsoft’s page, sign in with a Teams administrator account of this organisation and enter this code. Microsoft then shows what this setup asks for; approving it there is the yes. The code lasts about 15 minutes.'), code, copy, link);
+      box.append(node('p', '', 'Open Microsoft’s page, sign in with a Teams administrator account of this organisation and enter this code. Microsoft then shows what this setup asks for; approving it there is the yes. The code lasts about 15 minutes.'));
+      if (step.account) box.append(node('p', 'expert-hint', `For the Teams app made with ${step.account}${step.tenant_id ? ` · organisation ID ${step.tenant_id}` : ''}.`));
+      box.append(code, copy, link);
       status.textContent = 'Waiting for the administrator’s sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
     }
     if (step.step === 'adding') { status.textContent = step.progress || 'Adding it to your organisation’s Teams apps…'; timer = setTimeout(() => poll(channel), 2000); return; }

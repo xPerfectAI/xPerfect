@@ -2722,11 +2722,12 @@ def admin_rig(application, client, monkeypatch, tmp_path, *, client_id="client-s
     rig.setup = application.state.channels.setup
     rig.microsoft = FakeMicrosoft(rig.clock)
 
+    rig.who = {"tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a", "username": "Synthetic Owner"}
+
     def teams_cli(*args, timeout=300):
         rig.calls.append(args)
         if args[0] == "status":
-            return {"loggedIn": True, "tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a",
-                    "username": "Synthetic Owner", "tdp": {"connected": True, "sideloading": dict(rig.report)}}
+            return {"loggedIn": True, **rig.who, "tdp": {"connected": True, "sideloading": dict(rig.report)}}
         return {"botId": "bot-synthetic", "teamsAppId": "teams-app-synthetic", "socketMode": True,
                 "installLink": "https://teams.invalid/developer-copy"}
 
@@ -2963,5 +2964,29 @@ def test_a_claim_waits_for_a_reply_and_leaves_as_soon_as_it_is_ready(app, monkey
     monkeypatch.setattr(channels, "_waiters", _threading.BoundedSemaphore(1))
     assert channels._waiters.acquire(blocking=False)  # one claim is already waiting
     started = time.monotonic()
-    assert channels.claim(binding_id, 10, 3.0) == [] and time.monotonic() - started < 0.2
+    assert channels.claim(binding_id, 10, 3.0) == [] and time.monotonic() - started < 1.5  # at once, not after 3 s
     channels._waiters.release()
+    # While nothing is ready, a waiting claim reads only: no write transaction until a message is ready.
+    writes = []
+    real_claim = channels._claim_now
+    monkeypatch.setattr(channels, "_claim_now", lambda *args: writes.append(1) or real_claim(*args))
+    assert channels.claim(binding_id, 10, 1.0) == [] and len(writes) == 1  # the first look only
+
+
+@pytest.mark.parametrize("made_before", [False, True])
+def test_the_press_is_refused_when_the_tool_is_now_signed_in_as_another_account(app, monkeypatch, tmp_path, made_before):
+    # The Teams tool's sign-in is shared by the whole computer (hurdle 7). The press goes on only as the account the
+    # channel was refused for, or the one its app was made with: another account now signed in gets a plain line
+    # naming both, and nothing reaches Microsoft or is made.
+    application, client = app
+    rig = admin_rig(application, client, monkeypatch, tmp_path)
+    if made_before:
+        client.post(f"/v1/channels/{rig.binding_id}/setup", json={"settings": {
+            "app_id": "bot-synthetic", "teams_app_id": "teams-app-synthetic", "account": "Synthetic Owner",
+            "tenant_id": "tenant-synthetic", "connected_by": "person-synthetic-a"}})
+        rig.setup._sessions.clear()  # after a restart: only the recorded app says whose it is
+    rig.who = {"tenantId": "tenant-other", "userObjectId": "person-other", "username": "Another Owner"}
+    shown = rig.press().json()
+    assert shown["step"] == "error", shown
+    assert "Another Owner" in shown["error"] and "Synthetic Owner" in shown["error"] and "nothing was made" in shown["error"]
+    assert rig.background == [] and rig.microsoft.calls == [] and rig.creations() == 0

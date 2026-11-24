@@ -238,7 +238,7 @@ class TeamsSetup:
         # A code is shown only while it can still be used. The administrator's press is offered while Teams refuses
         # the app, once the owner has chosen the Microsoft sign-in it uses.
         keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note"),
-                "creating": ("step", "account", "tenant_id"), "admin_sign_in": ("step", "url", "code", "account"),
+                "creating": ("step", "account", "tenant_id"), "admin_sign_in": ("step", "url", "code", "account", "tenant_id"),
                 "adding": ("step", "account", "progress"),
                 "admin_waiting": ("step", "error", "note")}.get(session.get("step"), ("step", "error"))
         public = {key: session[key] for key in keys if key in session}
@@ -493,6 +493,21 @@ class TeamsSetup:
         if not status.get("loggedIn"):
             raise ExpertError("The Teams tool is not signed in. Press Connect first.", code="channel_admin_needs_connect")
         account, tenant_id = str(status.get("username") or ""), str(status.get("tenantId") or "")
+        # The tool's sign-in is shared by the whole computer: the press goes on only as the account the channel was
+        # refused for, or the one its app was made with, in that app's organisation. Nothing reaches Microsoft else.
+        with self._lock:
+            current = dict(self._sessions.get(binding_id) or {})
+        settings = json.loads(self.channels._binding(binding_id)["settings_json"] or "{}")
+        made_with = str(settings.get("account") or "") if settings.get("teams_app_id") else ""
+        expected = made_with or (str(current.get("account") or "") if current.get("step") == "blocked" else "")
+        expected_tenant = str(settings.get("tenant_id") or "") if made_with else ""
+        if (expected and account != expected) or (expected_tenant and tenant_id != expected_tenant):
+            line = (f"The Teams tool is now signed in as {account or 'nobody'}, not {expected}, which made this channel's "
+                    f"app, so nothing was made. Press the button again once the tool is signed in as {expected}."
+                    if made_with else _account_changed(expected, account))
+            with self._lock:
+                self._sessions[binding_id] = {"step": "error", "error": line}
+            return self.status(tenant, owner, binding_id)
         microsoft = self._microsoft(tenant_id)
         try:
             sign_in = microsoft.start_sign_in()
@@ -504,7 +519,8 @@ class TeamsSetup:
                 return self.status(tenant, owner, binding_id)
             previous = dict(self._sessions.get(binding_id) or {})
             self._sessions[binding_id] = {"step": "admin_sign_in", "url": sign_in.url, "code": sign_in.code,
-                                          "account": account, "expires_at": sign_in.expires_at, "run": run,
+                                          "account": account, "tenant_id": tenant_id,
+                                          "expires_at": sign_in.expires_at, "run": run,
                                           "note": previous.get("note", "")}
         self._in_background(self._admin_route, tenant, owner, binding_id, run, account, microsoft, sign_in)
         return self.status(tenant, owner, binding_id)

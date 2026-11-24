@@ -389,7 +389,8 @@ def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_
                   "if (catalogue === 'pending') {", "if (channel.admin_route) card.append(...adminRoute(channel, false));",
                   "is in your organisation's Teams apps and installed for you",
                   "Teams shows the details of the version there",
-                  "One press for a Teams administrator is not available on this xPerfect yet"):
+                  "One press for a Teams administrator is not available on this xPerfect yet",
+                  "For the Teams app made with ${step.account}"):
         assert words in source, words
     server = (STATIC.parent / 'server.py').read_text()
     assert '"as_admin": bool(payload.get("as_admin"))}' in server
