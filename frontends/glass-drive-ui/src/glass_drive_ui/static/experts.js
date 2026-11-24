@@ -250,10 +250,10 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
       const code = node('code', 'expert-code', step.code);
       const copy = node('button', 'secondary-button', 'Copy code'); copy.type = 'button';
       copy.onclick = async () => { try { await navigator.clipboard.writeText(step.code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select the code'; } };
-      box.append(node('p', '', 'Sign in to Microsoft with the account that should own this Teams app, then enter this code on Microsoft’s page:'), code, copy, link);
+      box.append(node('p', '', 'Open Microsoft’s page where your work account is signed in (any browser, or your phone) and enter this code. Use the account that should own this Teams app. Microsoft may ask you to approve on your phone. The code lasts about 15 minutes.'), code, copy, link);
       status.textContent = 'Waiting for your sign-in…'; timer = setTimeout(() => poll(channel), 2000); return;
     }
-    if (step.step === 'creating') { status.textContent = 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
+    if (step.step === 'creating') { status.textContent = step.account ? `Creating your Teams app with ${step.account}…` : 'Creating your Teams app…'; timer = setTimeout(() => poll(channel), 2000); return; }
     if (step.step === 'blocked') {
       // Teams does not allow the app yet: the one thing to ask, a note to send, and the page goes on by itself.
       const now = node('button', 'primary-button', 'Check now'); now.type = 'button'; now.onclick = () => connect(channel);
@@ -295,8 +295,10 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         const toggle = node('button', 'secondary-button', channel.state === 'connected' ? 'Turn off' : 'Turn on'); toggle.type = 'button';
         toggle.onclick = async () => { await request('/api/channels/' + encodeURIComponent(channel.binding_id), { method: 'PATCH', body: { state: channel.state === 'connected' ? 'off' : 'connected' } }); await load(); };
         links.append(toggle); card.append(links);
+        // Which Microsoft account and organisation the app was made in, as Microsoft reported them.
+        if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
-        else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams, add ${name}, then send it a message in its own chat, named ${name}. It is ready once that message arrives.`));
+        else if (channel.state === 'connected' && channel.online) card.append(node('p', 'expert-hint', `Press Install in Teams and add ${name}; Teams may ask web or desktop, either works, and if the add window does not appear, press Install in Teams again. Then send it a message in its own chat, named ${name}: it is ready once that message arrives. If Teams says permissions are needed, an administrator's change may still be spreading; try again in a few minutes.`));
       }
       const people = node('div', 'expert-people'); people.append(node('h3', '', 'People who may message it'));
       if (!channel.people.length) people.append(node('p', 'expert-hint', 'Nobody yet.'));

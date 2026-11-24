@@ -2131,9 +2131,12 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
         if args[0] == "status":
             return {"loggedIn": True, "tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a",
                     "username": "Synthetic Owner", "tdp": {"connected": True, "sideloading": dict(report)}}
+        if args[:2] == ("app", "create"):  # while it is made, the page names the account and organisation
+            during.append(client.get(f"/v1/channels/{binding_id}/connect").json())
         return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True,
                 "installLink": "https://teams.invalid/install"}
 
+    during = []
     monkeypatch.setattr(setup, "_run", teams_cli)
     monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
     monkeypatch.setattr(setup, "_in_background", lambda target, *args: background.append((target, args)))
@@ -2194,7 +2197,11 @@ def test_connect_says_plainly_when_teams_will_not_let_this_account_add_custom_ap
         setup.reconcile_once()
         run_background()
     assert creations() == 1
-    assert client.get(f"/v1/channels/{binding_id}/connect").json()["step"] == "connected"
+    connected = client.get(f"/v1/channels/{binding_id}/connect").json()
+    assert connected["step"] == "connected"
+    assert during[-1]["step"] == "creating" and during[-1]["account"] == "Synthetic Owner"
+    assert during[-1]["tenant_id"] == "tenant-synthetic"
+    assert connected["channel"]["app"]["account"] == "Synthetic Owner"  # and on the card afterwards
     setup.reconcile_once()
     run_background()
     assert creations() == 1  # created once
@@ -2319,4 +2326,5 @@ def test_a_check_that_cannot_read_microsofts_report_keeps_checking_and_the_note_
     note = _note_for_admin(both, "Synthetic Expert")
     assert "1. Teams apps → Setup policies" in note and "2. Teams apps → Manage apps → Actions" in note
     assert "My account" not in note  # no account reported, none invented
+    assert "up to 30 minutes" in note  # a first visit to the admin center can take that long
     assert "Upload custom apps" not in _note_for_admin({"tdp": {"sideloading": {"tenant": False, "user": True}}}, "X")

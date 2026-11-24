@@ -307,3 +307,15 @@ assert.deepEqual(labels({state: 'connected', online: false, first_message: false
 assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Install in Teams', 'Test in Teams']);
 assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
 """)
+
+
+def test_the_person_is_told_up_front_what_microsoft_and_teams_will_ask():
+    # The first real test's hurdles 1, 2, 4, 5 and 7: where to open the sign-in, a phone approval, Teams asking web or
+    # desktop, a change still spreading, and which account and organisation the app was made in.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("where your work account is signed in (any browser, or your phone)",
+                  "Microsoft may ask you to approve on your phone.", "The code lasts about 15 minutes.",
+                  "Creating your Teams app with ${step.account}…", "Made with ${channel.app.account}",
+                  "Teams may ask web or desktop, either works", "press Install in Teams again",
+                  "If Teams says permissions are needed, an administrator's change may still be spreading"):
+        assert words in source, words

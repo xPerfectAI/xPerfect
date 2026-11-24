@@ -103,7 +103,9 @@ def _note_for_admin(status: dict, name: str) -> str:
     steps = "\n".join(f"{number}. {ask}" for number, ask in enumerate(asks, 1))
     account = str(status.get("username") or "").strip()
     return (f"Hello, could you let me add a Teams app I set up for myself, {name}? In the Teams admin center:\n{steps}\n"
-            + (f"My account: {account}.\n" if account else "") + "Microsoft can take a while to apply it. Thank you!")
+            + (f"My account: {account}.\n" if account else "")
+            + "If the admin center says it is still setting up, that can take up to 30 minutes, and Microsoft can take a "
+            "while to apply the change. Thank you!")
 
 
 class TeamsSetup:
@@ -170,8 +172,8 @@ class TeamsSetup:
             ok = session["process"].returncode == 0
             session = {**session, "step": "creating" if ok else "error", **({} if ok else {"error": _SIGN_IN_UNFINISHED})}
         # A code is shown only while it can still be used.
-        keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note")}.get(
-            session.get("step"), ("step", "error"))
+        keys = {"sign_in": ("step", "url", "code", "error"), "blocked": ("step", "error", "note"),
+                "creating": ("step", "account", "tenant_id")}.get(session.get("step"), ("step", "error"))
         public = {key: session[key] for key in keys if key in session}
         return {**public, "channel": self.channels.view(self.channels._binding(binding_id))}
 
@@ -292,13 +294,18 @@ class TeamsSetup:
                                                       "check_at": now + _STEADY_RECHECK_S}
                         return
                     del self._steady[binding_id]
+                # Which account and organisation the app is made in, as Microsoft reports them, shown while it is
+                # made and on the card afterwards, so a wrong one is noticed at once.
+                account = str(status.get("username") or "")
+                self._sessions[binding_id] = {"step": "creating", "account": account,
+                                              "tenant_id": str(status.get("tenantId") or "")}
             path = self.credentials_path(binding_id)
             created = self._run("app", "create", "--name", expert["name"][:30], "--messaging-mode", "socket",
                                 "--teams-managed", "--env", str(path), timeout=600)
             if path.exists():
                 path.chmod(0o600)
             settings = {"app_id": created.get("botId", ""), "teams_app_id": created.get("teamsAppId", ""),
-                        "app_name": created.get("appName", expert["name"]),
+                        "app_name": created.get("appName", expert["name"]), "account": account,
                         "tenant_id": str(status.get("tenantId") or ""),
                         "mode": "socket" if created.get("socketMode") else "http",
                         "install_link": created.get("installLink", "")}
