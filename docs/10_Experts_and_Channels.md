@@ -26,9 +26,10 @@ current; every save makes a new version. The `expert` key in its content holds:
 | `workspace` | Where it works (this computer or a sandboxed workspace) and what it may do (full, workspace only, read only). |
 
 Knowledge and Skills stay in My Library and are referenced by exact version. An empty account
-means this computer's own sign-in for that AI. A connected account is leased to one run at a
-time, so it cannot serve the speaking assistant and Workers together; this computer's sign-in
-can.
+means this computer's own sign-in for that AI. Every account, this computer's sign-in included,
+is leased to one Worker run at a time: Workers of the same AI on one sign-in take turns, and a job
+runs in parallel across the AI types it may use. The speaking assistant's replies are not held by
+those Workers on this computer's sign-in; a connected account cannot serve her and Workers together.
 
 ## Three roles
 
@@ -132,7 +133,7 @@ or a server for a wall.
 - Skills run only in a Claude Code Worker on this computer with full access.
 - A conversation's AI and account are fixed when it starts; instructions, effort and Ask me first
   follow the newest version at each turn.
-- A connected subscription account runs one thing at a time.
+- One sign-in runs one Worker of its AI at a time; parallel Workers need several AI types or accounts.
 - A backup on a second account of the same AI is a later capability. It needs the armed fallback to
   carry an account and cool-downs kept per account; on macOS a named second Claude account also
   needs local named-account support.

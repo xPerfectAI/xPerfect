@@ -69,7 +69,7 @@ function expertFields(body, spec, accounts) {
     main.onchange = sync; sync();
     picker.onchange = () => { fill(main, accountOptions(accounts, picker.value), main.value); fill(backup, backupOptions(picker.value), backup.value); sync(); };
   }
-  accountsBox.append(node('p', 'expert-hint', 'A backup works on this computer’s sign-in for now; a second account of the same AI comes later. A connected account runs one thing at a time. API keys stay optional.'));
+  accountsBox.append(node('p', 'expert-hint', 'A backup works on this computer’s sign-in for now; a second account of the same AI comes later. One sign-in runs one Worker of its AI at a time, so tick several AI types for parallel work. API keys stay optional.'));
   team.append(accountsBox); body.append(team);
 
   const ask = node('fieldset', 'expert-ask'); ask.append(node('legend', '', 'Ask me first'));
