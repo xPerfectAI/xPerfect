@@ -59,3 +59,10 @@
 .channel-brand-mark{object-fit:contain}
 button .channel-mark{width:16px;height:16px;margin-right:7px;vertical-align:-3px}
 .expert-trademark{font-size:.72rem}
+/* An Expert's picture: a round preview; Teams shows the square as its app icon. */
+.expert-picture{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.expert-picture-preview{width:64px;height:64px;border-radius:50%;object-fit:cover;border:1px solid var(--line)}
+.expert-picture-empty{width:64px;height:64px;border-radius:50%;border:1px dashed var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:.72rem;color:var(--muted)}
+.expert-picture-preview[hidden],.expert-picture-empty[hidden]{display:none}
+.expert-picture-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.expert-picture-input{display:none}

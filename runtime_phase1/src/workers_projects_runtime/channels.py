@@ -169,7 +169,8 @@ class ChannelService:
                 "refusal": binding.get("package_refusal", ""), "people": json.loads(binding["people_json"] or "[]"),
                 "app": {key: settings[key] for key in ("app_id", "app_name", "account", "tenant_id", "mode", "install_link",
                                                        "developer", "website_url", "privacy_url", "terms_url", "scopes",
-                                                       "added_by_admin", "catalogue", "catalogue_id")
+                                                       "added_by_admin", "catalogue", "catalogue_id",
+                                                       "picture_digest", "picture_error")
                         if key in settings},
                 # Whether an administrator's one press (Microsoft's sign-in, then the organisation's catalogue) is
                 # offered here: only once the owner has chosen the Microsoft sign-in it uses.
@@ -250,7 +251,7 @@ class ChannelService:
         allowed = {key: str(value)[:2000] for key, value in settings.items()
                    if key in {"app_id", "app_name", "account", "connected_by", "tenant_id", "mode", "install_link",
                               "teams_app_id", "developer", "website_url", "privacy_url", "terms_url", "scopes",
-                              "added_by_admin", "catalogue", "catalogue_id"}}
+                              "added_by_admin", "catalogue", "catalogue_id", "picture_digest", "picture_error"}}
         with self.store._connect() as conn:
             conn.execute("UPDATE channel_bindings SET settings_json=?,updated_at=? WHERE binding_id=?",
                          (canonical(allowed), _now(), binding_id))

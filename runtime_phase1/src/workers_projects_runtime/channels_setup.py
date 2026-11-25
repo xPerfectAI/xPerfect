@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import teams_admin
+from . import expert_pictures
 from .experts import ExpertError
 
 TEAMS_CLI_PACKAGE = "@microsoft/teams.cli@3.1.0"
@@ -477,7 +478,39 @@ class TeamsSetup:
             people.append(me)
         self.channels.update(tenant, owner, binding_id, people=people,
                              state="connected" if settings["mode"] == "socket" else None)
+        # The Expert's own picture becomes the app's colour icon; a failure is said on the card, never fatal.
+        try:
+            self.apply_picture(tenant, owner, binding_id)
+        except Exception:
+            pass
         return settings, created
+
+    def apply_picture(self, tenant: str, owner: str, binding_id: str) -> dict:
+        """The Expert's picture as its Teams app's colour icon, with the tool's own `app update`. Once per picture;
+        a failure is kept for the card and never retried by itself."""
+        binding = self.channels._binding(binding_id, tenant, owner)
+        settings = json.loads(binding["settings_json"] or "{}")
+        app_id = str(settings.get("teams_app_id") or "")
+        data = expert_pictures.load(binding["lineage_id"])
+        if not app_id or data is None:
+            return {"applied": False, "reason": "no_app" if not app_id else "no_picture"}
+        digest = expert_pictures.digest(data)
+        if settings.get("picture_digest") == digest:
+            return {"applied": True, "unchanged": True}
+        path = _private(_state_dir() / "tmp") / f"picture-{binding_id}.png"
+        path.write_bytes(data)
+        path.chmod(0o600)
+        try:
+            self._run("app", "update", app_id, "--color-icon", str(path), timeout=120)
+            settings.update({"picture_digest": digest, "picture_error": ""})
+            result = {"applied": True}
+        except ExpertError as exc:
+            settings.update({"picture_digest": "", "picture_error": str(exc)[:300]})
+            result = {"applied": False, "error": str(exc)[:300]}
+        finally:
+            path.unlink(missing_ok=True)
+        self.channels.record_setup(tenant, owner, binding_id, settings)
+        return result
 
     # ------------------------------------------------------------------ the administrator's route
     def _start_admin(self, tenant: str, owner: str, binding_id: str) -> dict:

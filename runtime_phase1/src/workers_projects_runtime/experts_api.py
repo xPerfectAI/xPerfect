@@ -1,6 +1,7 @@
 """Owner routes for Experts, their Chat and Ask-me-first decisions."""
 from __future__ import annotations
 
+import base64
 from typing import Any, Callable
 
 from fastapi import HTTPException, Request
@@ -9,6 +10,7 @@ from pydantic import Field, ValidationError
 from .coordinator import CoordinatorConflict, CoordinatorScopeError, StrictModel
 from .channels import DeliveryResult, InboundMessage, PackageHeartbeat
 from .experts import ExpertError, ExpertSpec
+from . import expert_pictures
 
 
 class ExpertCreateInput(StrictModel):
@@ -142,6 +144,12 @@ class ChannelAddedInput(StrictModel):
     added: bool
 
 
+class ExpertPictureInput(StrictModel):
+    # A 192 by 192 PNG, base64; checked again by the service. remove: forget it (Teams keeps the icon it has).
+    png_base64: str = Field(default="", max_length=420_000)
+    remove: bool = False
+
+
 class ChannelDetailsInput(StrictModel):
     # The Teams app's public details, as Teams shows them on the app's page; checked again by the service.
     developer: str = Field(max_length=200)
@@ -172,6 +180,34 @@ def install_channel_routes(app, channels, principal: Callable[[Request], tuple[A
     def owned(binding_id: str, request: Request) -> None:
         tenant, user = owner(request)
         invoke(channels._binding, binding_id, tenant, user)
+
+    @app.get("/v1/experts/{expert_id}/picture")
+    def read_picture(expert_id: str, request: Request):
+        template = invoke(channels.experts.resolve, *owner(request), expert_id)
+        data = expert_pictures.load(template["lineage_id"])
+        return {"picture": expert_pictures.data_url(data) if data else None}
+
+    @app.put("/v1/experts/{expert_id}/picture")
+    def write_picture(expert_id: str, payload: ExpertPictureInput, request: Request):
+        tenant, user = owner(request)
+        template = invoke(channels.experts.resolve, tenant, user, expert_id)
+        if payload.remove:
+            expert_pictures.remove(template["lineage_id"])
+            return {"picture": None, "teams": []}
+        try:
+            data = base64.b64decode(payload.png_base64, validate=True)
+        except (ValueError, TypeError):
+            data = b""
+        problem = expert_pictures.problem(data) if data else "Send the picture as a PNG."
+        if problem:
+            raise HTTPException(422, {"code": "expert_picture_invalid", "message": problem})
+        expert_pictures.save(template["lineage_id"], data)
+        teams = []
+        for binding in channels.list(tenant, user, expert_id):
+            if binding["kind"] == "teams" and binding["app"].get("app_id"):
+                teams.append({"binding_id": binding["binding_id"],
+                              **invoke(channels.setup.apply_picture, tenant, user, binding["binding_id"])})
+        return {"picture": expert_pictures.data_url(data), "teams": teams}
 
     @app.get("/v1/experts/{expert_id}/channels")
     def list_channels(expert_id: str, request: Request):

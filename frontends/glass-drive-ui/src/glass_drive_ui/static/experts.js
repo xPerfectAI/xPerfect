@@ -183,21 +183,57 @@ function expertFields(body, spec, accounts, speeds) {
 }
 
 /** New expert and Edit expert share one dialog. Save makes a new version. */
+const PICTURE_SIZE = 192;
+/** Any image, cut to a centred square and drawn at 192 by 192 (the size Teams wants for an app's colour icon). */
+export async function squarePng(file, size = PICTURE_SIZE) {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement('canvas'); canvas.width = size; canvas.height = size;
+  canvas.getContext('2d').drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
+  return canvas.toDataURL('image/png');
+}
+/** An Expert's picture: kept in this install's state, not in its versions; Teams shows it as its app icon. */
+function pictureField(item, request, signal) {
+  const field = node('div', 'personal-library-field expert-field'); field.append(node('span', '', 'Picture'));
+  const row = node('div', 'expert-picture');
+  const preview = node('img', 'expert-picture-preview'); preview.alt = ''; preview.width = 64; preview.height = 64; preview.hidden = true;
+  const empty = node('span', 'expert-picture-empty', 'None');
+  const input = node('input', 'expert-picture-input'); input.type = 'file'; input.accept = 'image/png,image/jpeg,image/webp';
+  const choose = node('button', 'secondary-button', 'Choose a picture'); choose.type = 'button'; choose.onclick = () => input.click();
+  const remove = node('button', 'secondary-button', 'Remove'); remove.type = 'button'; remove.hidden = true;
+  let change = null;
+  const show = (url) => { preview.src = url || ''; preview.hidden = !url; empty.hidden = !!url; remove.hidden = !url; };
+  if (item) request('/api/experts/' + encodeURIComponent(item.template_id) + '/picture', { signal }).then(r => show(r?.picture || '')).catch(() => {});
+  input.onchange = async () => {
+    const file = input.files?.[0]; if (!file) return;
+    const url = await squarePng(file); change = { png_base64: url.slice(url.indexOf(',') + 1) }; show(url);
+  };
+  remove.onclick = () => { change = { remove: true }; input.value = ''; show(''); };
+  const controls = node('div', 'expert-picture-controls'); controls.append(choose, remove, input);
+  row.append(preview, empty, controls);
+  field.append(row, node('small', 'expert-hint', 'Teams shows it as the app icon. Kept on this computer, not in its versions.'));
+  return { field, changed: () => !!change, body: () => change };
+}
+
 export async function openExpertForm({ item = null, request = libraryRequest, signal, onSaved, accounts = [] } = {}) {
   let current = null;
   if (item) { try { current = await request('/api/experts/' + encodeURIComponent(item.template_id), { signal }); } catch { current = null; } }
-  let name, description, read;
+  let name, description, read, picture;
   const dialog = libraryModal(item ? 'Edit expert' : 'New expert', { action: 'Save', signal, onSave: async ({ signal: saveSignal }) => {
     const expert = read();
     const body = { name: name.value.trim(), description: description.value.trim(), expert, personal_library_refs: dialog.libraryRefs ? dialog.libraryRefs() : [] };
     const saved = item
       ? await request('/api/experts/' + encodeURIComponent(item.template_id), { method: 'PATCH', signal: saveSignal, body: { ...body, expected_catalog_revision: (current || item).catalog_revision } })
       : await request('/api/experts', { method: 'POST', signal: saveSignal, body });
+    if (picture.changed() && saved?.template_id) {
+      await request('/api/experts/' + encodeURIComponent(saved.template_id) + '/picture', { method: 'PUT', signal: saveSignal, body: picture.body() });
+    }
     onSaved?.(saved);
   } });
   name = node('input'); name.required = true; name.maxLength = 160; name.value = item?.name || '';
   description = node('textarea'); description.rows = 2; description.maxLength = 1000; description.value = current?.description ?? item?.description ?? '';
-  dialog.body.append(labelled('Expert name', name), labelled('What does this expert do?', description));
+  picture = pictureField(item, request, signal);
+  dialog.body.append(labelled('Expert name', name), labelled('What does this expert do?', description), picture.field);
   const speeds = request('/api/experts-talk-speeds', { signal }).then(r => r.items || []).catch(() => []);
   read = expertFields(dialog.body, current?.expert, accounts, speeds);
   // Knowledge and Skills come from My Library; an exact saved version stays with the Expert.
@@ -416,6 +452,8 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         if (!channel.app.scopes && channel.app.app_id) card.append(node('p', 'expert-hint', 'This app was made before xPerfect narrowed new apps to personal chats, so Teams may still offer it in teams and group chats; it answers only in personal chats. Narrowing it takes a new version of the app; for an app in your organisation’s Teams apps, an administrator adds that version there.'));
         if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(node('p', 'expert-hint', 'Teams still offers this app in teams and group chats; it answers only in personal chats. Narrowing it takes a new version of the app; for an app in your organisation’s Teams apps, an administrator adds that version there.'));
         if (channel.app.account) card.append(node('p', 'expert-hint', `Made with ${channel.app.account}${channel.app.tenant_id ? ` · organisation ID ${channel.app.tenant_id}` : ''}.`));
+        if (channel.app.picture_digest) card.append(node('p', 'expert-hint', `Teams shows ${name}'s picture as its app icon.`));
+        else if (channel.app.picture_error) card.append(node('p', 'expert-notice', `${name}'s picture is not in Teams yet: ${channel.app.picture_error}`));
         const catalogue = channel.app.catalogue;
         if (channel.first_message) card.append(node('p', 'expert-hint', `Test in Teams opens your chat with ${name}. If another chat opens, send nothing there.`));
         else if (catalogue === 'installed') card.append(node('p', 'expert-hint', `${name} is in your organisation's Teams apps and installed for you. Write in its own chat, named ${name}: it is ready once that message arrives. Open in Teams goes straight to it.`));

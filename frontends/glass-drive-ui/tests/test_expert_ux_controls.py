@@ -429,3 +429,15 @@ def test_channels_show_marks_of_xperfects_own_and_an_installs_brand_mark_only_be
              " { teams: '/brand-assets/channel-teams.svg' });\n"
              "brandAssets = null; assert.deepEqual(await loadBrandAssets(async () => { throw new Error('offline'); }), {});\n"
              "brandAssets = null; assert.deepEqual(await loadBrandAssets(async () => ({ ok: false })), {});\n")
+
+
+def test_an_expert_has_a_picture_that_teams_shows_as_its_app_icon():
+    source = (STATIC / 'experts.js').read_text()
+    assert "const PICTURE_SIZE = 192;" in source and "canvas.toDataURL('image/png')" in source
+    # Cut to a centred square in the browser; sent after the Expert is saved, so a new Expert gets it too.
+    assert "drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size)" in source
+    assert "if (picture.changed() && saved?.template_id) {" in source
+    assert "+ '/picture', { method: 'PUT', signal: saveSignal, body: picture.body() }" in source
+    assert "Teams shows it as the app icon. Kept on this computer, not in its versions." in source
+    assert "`Teams shows ${name}'s picture as its app icon.`" in source
+    assert "`${name}'s picture is not in Teams yet: ${channel.app.picture_error}`" in source

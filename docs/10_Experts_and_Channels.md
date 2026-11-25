@@ -115,6 +115,12 @@ or a server for a wall.
   later capabilities; Teams file requests need a certificate, federated credential or managed
   identity (Microsoft, 20 November 2026).
 
+An Expert may have a picture (Edit → Picture: any image, cut to a centred square at 192 by 192 in
+the browser). It is kept in the install's state, not in the Expert's versions, and becomes its Teams
+app's colour icon when the app is made and whenever the picture changes (the CLI's
+`app update --color-icon`; the same picture is never sent twice). A refusal is shown on the card and
+not retried by itself. Removing the picture leaves the icon Teams already has.
+
 #### What Microsoft and Teams ask, and what xPerfect does
 
 Found in the first connection to a real company tenant (24 November 2026). Each wall is said before

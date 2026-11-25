@@ -3013,3 +3013,93 @@ def test_a_refused_publish_for_an_app_made_the_usual_way_leaves_its_card_as_it_w
     card = shown["channel"]["app"]
     assert "catalogue" not in card and card["install_link"] == "https://teams.invalid/developer-copy"
     assert rig.creations() == 0
+
+
+def _png(size=192, colour=(16, 128, 240)):
+    """A plain PNG of one colour, made with the standard library only."""
+    import struct
+    import zlib
+    raw = b"".join(b"\x00" + bytes(colour) * size for _ in range(size))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _b64(data):
+    import base64
+    return base64.b64encode(data).decode()
+
+
+def test_an_experts_picture_is_a_192_png_kept_in_the_installs_own_state(app, tmp_path, monkeypatch):
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path / "state"))
+    expert = create_expert(client)
+    url = f"/v1/experts/{expert['template_id']}/picture"
+    assert client.get(url).json() == {"picture": None}
+    for body, words in ((_b64(b"not a picture"), "PNG"), (_b64(_png(64)), "192 by 192"), ("%%%", "PNG")):
+        refused = client.put(url, json={"png_base64": body})
+        assert refused.status_code == 422 and words in refused.json()["detail"]["message"], words
+    saved = client.put(url, json={"png_base64": _b64(_png())})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["picture"].startswith("data:image/png;base64,") and saved.json()["teams"] == []
+    folder = tmp_path / "state" / "data" / "expert-pictures"
+    assert [path.name for path in folder.iterdir()] == [f"{expert['lineage_id']}.png"]
+    assert folder.stat().st_mode & 0o777 == 0o700 and (folder / f"{expert['lineage_id']}.png").stat().st_mode & 0o777 == 0o600
+    assert client.get(url).json()["picture"] == saved.json()["picture"]
+    assert client.put(url, json={"remove": True}).json() == {"picture": None, "teams": []}
+    assert client.get(url).json() == {"picture": None}
+
+
+def test_an_experts_picture_becomes_its_teams_app_icon_once_per_picture(app, tmp_path, monkeypatch):
+    application, client = app
+    monkeypatch.setenv("XPERFECT_STATE_DIR", str(tmp_path / "state"))
+    expert = create_expert(client)
+    url = f"/v1/experts/{expert['template_id']}/picture"
+    client.put(url, json={"png_base64": _b64(_png())})
+    binding_id = client.post(f"/v1/experts/{expert['template_id']}/channels", json={"kind": "teams"}).json()["binding_id"]
+    owner = scalar(application, "SELECT owner_id FROM channel_bindings WHERE binding_id=?", binding_id)
+    setup = application.state.channels.setup
+    calls, refuse = [], []
+
+    def teams_cli(*args, timeout=300):
+        calls.append(args)
+        if args[0] == "status":
+            return {"loggedIn": True, "tenantId": "tenant-synthetic", "userObjectId": "person-synthetic-a",
+                    "username": "Synthetic Owner", "tdp": {"connected": True, "sideloading": {"tenant": True, "user": True}}}
+        if "--color-icon" in args:
+            with open(args[args.index("--color-icon") + 1], "rb") as handle:
+                assert handle.read(8) == b"\x89PNG\r\n\x1a\n"
+            if refuse:
+                raise ExpertError("Microsoft Teams setup stopped: synthetic refusal", code="channel_setup_failed")
+        return {"botId": "bot-synthetic", "teamsAppId": "app-synthetic", "socketMode": True,
+                "installLink": "https://teams.invalid/install"}
+
+    monkeypatch.setattr(setup, "_run", teams_cli)
+    monkeypatch.setattr(setup, "ensure_package", lambda binding_id, **kwargs: "started")
+    monkeypatch.setattr(setup, "_in_background", lambda target, *args: None)
+    setup._create("local", owner, binding_id)
+
+    def icons():
+        return [args for args in calls if "--color-icon" in args]
+
+    # Made, narrowed to personal chats, then given the Expert's picture as its colour icon.
+    assert len(icons()) == 1 and icons()[0][:3] == ("app", "update", "app-synthetic")
+    card = client.get(f"/v1/experts/{expert['template_id']}/channels").json()["items"][0]
+    assert card["app"]["picture_digest"] and not card["app"].get("picture_error")
+    assert not list((tmp_path / "state" / "tmp").glob("picture-*"))  # the tool's copy is gone
+    # The same picture again asks Teams nothing; a new one is applied once.
+    client.put(url, json={"png_base64": _b64(_png())})
+    assert len(icons()) == 1
+    changed = client.put(url, json={"png_base64": _b64(_png(colour=(200, 40, 40)))}).json()
+    assert len(icons()) == 2 and changed["teams"] == [{"binding_id": binding_id, "applied": True}]
+    # A refusal is kept for the card and never retried by itself.
+    refuse.append(True)
+    refused = client.put(url, json={"png_base64": _b64(_png(colour=(40, 200, 40)))}).json()
+    assert refused["teams"][0]["applied"] is False and "synthetic refusal" in refused["teams"][0]["error"]
+    card = client.get(f"/v1/experts/{expert['template_id']}/channels").json()["items"][0]
+    assert "synthetic refusal" in card["app"]["picture_error"] and not card["app"]["picture_digest"]
+    assert len(icons()) == 3
+    setup.reconcile_once()
+    assert len(icons()) == 3

@@ -332,6 +332,7 @@ running install.
 | Teams administrator's press, tool now another account | After Teams refused the app for your account, sign the Teams tool in as another account, then press Add <Expert> to my organisation's Teams apps. | The card names both accounts and says nothing was made; no Microsoft sign-in starts. |
 | Teams administrator's press, refused at publishing | In an organisation that consented for everyone, press it as a person who is not an administrator. | The card says the app is made and waits for the catalogue; pressing again as an administrator goes on from there and never makes a second app. |
 | Teams app details | On the card, open Details Teams shows for this app; enter an http:// link, then four proper details; Save. | The http:// link is refused with Microsoft's rule and nothing is sent; the proper ones are saved and Teams' install window shows them instead of "Developer" and example.com. |
+| Picture | Edit → Picture: choose a photo; Save; connect Teams (or have it connected). | A round preview; the card says Teams shows the picture; Teams' app icon is the picture. The same picture again asks Teams nothing; a refusal stays on the card. |
 | Teams message | Message the Expert from your own Teams account. | One reply in the same chat; typing shows while it works. |
 | Not listed | A person who is not listed writes. | No answer; the person waits under Waiting to be allowed. |
 | Same message twice | The channel delivers a message twice. | One turn, one reply. |
