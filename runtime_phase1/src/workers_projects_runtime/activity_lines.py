@@ -80,11 +80,11 @@ def _decode(value: str) -> str:
 
 
 def cut(text: str, limit: int = PREVIEW_LIMIT) -> str:
-    """Spaces folded, at most `limit` characters ending on a whole word where one is near, then an ellipsis."""
+    """Spaces folded, at most `limit` characters with its ellipsis, ending on a whole word where one is near."""
     words = " ".join(str(text or "").split())
     if len(words) <= limit:
         return words
-    short = words[:limit]
+    short = words[:limit - 1]  # one is kept for the ellipsis
     space = short.rfind(" ")
     if space >= limit * 2 // 3:
         short = short[:space]
@@ -441,10 +441,14 @@ class ActivityLines:
             if job["state"] in {"done", "failed", "stopped", "withdrawn"}:
                 steps.append({"at": job["updated_at"], "step": "job", "state": job["state"], "order": 6})
         for place, source in goal_places:
-            for run in self._runs(conn, "r.run_id IN (SELECT run_id FROM coordinator_goals WHERE conversation_id=? "
-                                        "AND run_id<>'' AND (?='' OR source_turn_id=?))", (place, source, source)):
+            helpers = self._runs(conn, "r.run_id IN (SELECT run_id FROM coordinator_goals WHERE conversation_id=? "
+                                       "AND run_id<>'' AND (?='' OR source_turn_id=?))", (place, source, source))
+            for run in helpers:
                 steps.append({"at": run["at"], "step": "worker", "ai": run["profile"], "model": run["model"],
                               "state": run["state"], "order": 7})
+            # A helper's own steps, folded under Details as the others are; at the same moment, after its Worker row.
+            for step in self._events(conn, helpers, row["at"]):
+                steps.append({**step, "order": 8})
         return steps
 
     def _run_trail(self, conn: Any, run_id: str) -> list[dict]:
