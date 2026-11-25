@@ -583,7 +583,7 @@ class ChannelService:
                     (row["conversation_id"], row["turn_id"])).fetchone() is not None
                 if spoke:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped",
-                                          error="The hand-off's words were sent instead")
+                                          error="The message that the job started went out instead")
             if spoke:
                 outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": "hand-off words sent"})
                 continue

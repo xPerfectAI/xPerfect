@@ -49,7 +49,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Image caption:** Run Project shows each saved expert's own picture, or the stack mark when it has none.
 
 - **Benefit:** The whole setup on one page, with one scroll.
-- **Benefit:** Choose any model your install has for each role, not one fixed list, and say which Worker you prefer.
+- **Benefit:** Choose the model for each role from your install's catalog, not a fixed list: Claude and Codex by exact model, Grok on its usual one; a model tied to one connected account is not offered. Say which Worker you prefer.
 
 - **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run Project's Edit and "+" open it. Knowledge and Skills use Run Project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
 - **Added:** The AI team as one table: each AI is one line for its usual model, its other models (newest first, from the install's catalog) open under it, and the three roles are columns, each said in a few words. A click anywhere in a cell chooses it; the table works from the keyboard as one control. An AI that is not set up on this computer says so, with a Connect button.

@@ -268,3 +268,38 @@ def test_a_brief_that_had_made_two_of_its_three_goals_keeps_two(tmp_path, monkey
         assert job.counts() == (2, 2, 2)
     finally:
         job.close()
+
+
+def _given_with_the_turn(job):
+    """A client gave one goal with the turn (POST .../turns with goals, or POST .../goals), well before its run."""
+    job.core.accept_goals("local", "owner", job.cid, "job-brief", [Goal(id="given", text="Given with the turn")])
+    with job.store._connect() as conn:
+        conn.execute("UPDATE coordinator_goals SET created_at='2000-01-01T00:00:00+00:00' WHERE goal_id='given'")
+
+
+def test_goals_given_with_the_turn_leave_its_first_attempt_free_to_make_its_own(tmp_path, monkeypatch):
+    """Goals that came with the turn were not made by an earlier attempt: the first attempt makes and starts its
+    three. (Before, it got back the given goal only and its own were silently dropped.)"""
+    job = _Job(tmp_path, monkeypatch)
+    try:
+        _given_with_the_turn(job)
+        job.tool_calls(job.attempt(1), _GOALS)
+        assert job.counts() == (4, 3, 3)
+    finally:
+        job.close()
+
+
+@pytest.mark.parametrize("path", ["fenced_paused", "reconciled_ready"])
+def test_with_given_goals_a_restart_before_its_own_still_makes_them_and_one_after_adds_none(tmp_path, monkeypatch, path):
+    job = _Job(tmp_path, monkeypatch)
+    try:
+        _given_with_the_turn(job)
+        job.attempt(1)  # the restart came before the brief made any goal of its own
+        job.restart(path)
+        job.tool_calls(job.attempt(2), _GOALS)
+        assert job.counts() == (4, 3, 3)
+        job.restart(path)  # and again, now after it made them: named anew, nothing new is made or started
+        job.tool_calls(job.attempt(3), _again(_GOALS))
+        assert job.counts() == (4, 3, 3)
+    finally:
+        job.close()

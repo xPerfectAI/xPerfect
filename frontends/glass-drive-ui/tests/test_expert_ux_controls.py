@@ -543,3 +543,67 @@ def test_the_ai_team_table_says_what_each_role_is_and_works_as_one_control():
         assert f"'{key}'" in page, key
     # A choice rebuilds the table without losing keyboard focus.
     assert "if (focused) [...four.box.querySelectorAll('[aria-label]')].find(el => el.getAttribute('aria-label') === focused)?.focus();" in page
+
+
+def test_saving_keeps_the_coordinators_effort_and_a_new_ai_drops_the_old_ais_account():
+    page = (STATIC / 'experts-page.js').read_text()
+    helpers = [re.search(r"export function " + name + r"\(.*?\n\}\n", page, re.S) for name in ('chooseRole', 'readTeam')]
+    assert all(helpers), 'chooseRole, readTeam'
+    run_node("import assert from 'node:assert/strict';\n" + ''.join(h.group(0).replace('export ', '') for h in helpers) + """
+const providers = {'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai']};
+const accounts = [{account_id: 'acct-claude', provider: 'Anthropic'}, {account_id: 'acct-codex', provider: 'openai'}];
+const map = {accounts, providers};
+const saved = () => ({talk: {profile: 'claude-code', model: 'claude-code:haiku'}, coordinate: {profile: 'claude-code', model: 'claude-code:opus'},
+  coordinatorEffort: {profile: 'claude-code', model: 'claude-code:opus', effort: 'xhigh'}, work: ['claude-code'], preferred: '', replies: 'low',
+  account: {talk: '', coordinate: 'acct-claude'}, backup: {talk: 'codex-cli', coordinate: ''}});
+// Saving keeps a stored coordinator effort the page does not show.
+let state = saved();
+assert.equal(readTeam(state).coordinate.effort, 'xhigh');
+// Another coordinator may not offer it: it goes back to that AI's own; the saved choice brings it back.
+chooseRole(state, 'coordinate', 'codex-cli', '', map); assert.equal(readTeam(state).coordinate.effort, '');
+chooseRole(state, 'coordinate', 'claude-code', 'claude-code:haiku', map); assert.equal(readTeam(state).coordinate.effort, '');
+chooseRole(state, 'coordinate', 'claude-code', 'claude-code:opus', map); assert.equal(readTeam(state).coordinate.effort, 'xhigh');
+// A draft kept before this rule (no saved effort in it) saves the AI's own effort, as before.
+assert.equal(readTeam({...saved(), coordinatorEffort: undefined}).coordinate.effort, '');
+// The same AI on another model keeps its account; another AI drops it, so Codex is never saved with a Claude account.
+state = saved();
+chooseRole(state, 'coordinate', 'claude-code', 'claude-code:haiku', map); assert.equal(state.account.coordinate, 'acct-claude');
+chooseRole(state, 'coordinate', 'codex-cli', 'codex-cli:gpt-6-sol', map); assert.equal(readTeam(state).coordinate.account_id, '');
+// An account the install's map gives to the new AI too stays; with no account data yet, it cannot be shown to, and goes.
+state = saved(); chooseRole(state, 'coordinate', 'codex-cli', '', {accounts, providers: {...providers, 'codex-cli': ['anthropic']}});
+assert.equal(state.account.coordinate, 'acct-claude');
+state = saved(); chooseRole(state, 'coordinate', 'codex-cli', ''); assert.equal(state.account.coordinate, '');
+// A backup that is the new AI itself goes; the talking role follows the same rule.
+state = {...saved(), account: {talk: 'acct-claude', coordinate: ''}};
+chooseRole(state, 'talk', 'codex-cli', '', map);
+assert.deepEqual([state.talk, state.backup.talk, state.account.talk], [{profile: 'codex-cli', model: ''}, '', '']);
+""")
+    # The table's two radios and the sandbox switch all choose through it, with the install's own account map.
+    for call in ("chooseRole(state, 'talk', ai.profile, line.id, accountMap())", "chooseRole(state, 'coordinate', ai.profile, line.id, accountMap())",
+                 "chooseRole(state, role, 'claude-code', '', accountMap())"):
+        assert call in page, call
+    assert 'state.talk = {' not in page and 'state.coordinate = {' not in page and "state[role] = { profile: 'claude-code'" not in page
+
+
+def test_what_workers_need_is_asked_again_when_the_page_is_shown_again():
+    page = (STATIC / 'experts-page.js').read_text()
+    reader = re.search(r"export function optionsReader\(request\) \{.*?\n\}\n", page, re.S)
+    assert reader, 'optionsReader'
+    run_node("import assert from 'node:assert/strict';\n" + reader.group(0).replace('export ', '') + """
+const answers = [{items: [{profile: 'codex-cli', worker_account: 'none'}], workers_need_account: {host: true}},
+                 {items: [{profile: 'codex-cli', worker_account: 'one'}], workers_need_account: {host: true}}];
+let asked = 0;
+const read = optionsReader(path => { assert.equal(path, '/api/expert-ai-options'); asked += 1;
+  return asked <= 2 ? Promise.resolve(answers[asked - 1]) : Promise.reject(new Error('synthetic outage')); });
+assert.equal((await read()).items[0].worker_account, 'none');
+// The owner connected an account meanwhile: the next showing has the runtime's new answer.
+assert.equal((await read()).items[0].worker_account, 'one');
+// An answer that fails keeps the last one; with none yet, the page says the list is unavailable.
+assert.deepEqual(await read(), {items: answers[1].items, need: {host: true}});
+assert.equal(asked, 3);
+assert.equal(await optionsReader(() => Promise.reject(new Error('synthetic outage')))(), null);
+""")
+    # Coming back to the page re-enters show() with the same expert: there it asks again and redraws the table.
+    back = page.split('async function show(')[1].split('if (dirty && !force)')[0]
+    assert 'void loadOptions().then(answer => { if (mine !== token || !state || !answer) return; state.offered = answer.items; state.need = answer.need; renderTeam(); });' in back
+    assert 'return readOptions();' in page and 'const readOptions = optionsReader(request);' in page

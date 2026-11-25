@@ -434,3 +434,63 @@ def test_a_trail_says_how_a_run_started_and_ended_and_why_a_message_was_not_sent
     trail = client.get(f"/v1/activity/lines/{item['line_id']}").json()["trail"]
     assert (trail[0]["step"], trail[0]["by"], trail[0]["ai"]) == ("started", "you", "codex-cli")
     assert (trail[-1]["step"], trail[-1]["state"], trail[-1]["at"]) == ("finished", "completed", "2026-11-20T11:05:00+00:00")
+
+
+def test_a_helper_run_shows_its_own_steps_in_the_trail_under_its_worker_and_no_words(app):
+    """A message whose turn, and whose job, gave helper Workers goals: each helper run is a Worker row in the
+    message's trail with its own steps (folded under Details on the page), and never a line of its own."""
+    application, client = app
+    expert = create_expert(client)
+    channel = connected_channel(client, expert)
+    accepted = inbound(application, client, channel, "act-1", "Synthetic request", "2026-11-20T10:00:00+00:00")
+    cid, tid = accepted["conversation_id"], accepted["turn_id"]
+    owner = owner_of(application)
+    store = application.state.experts.store
+
+    def helper(name, at, steps):
+        worker, run = worker_run(application, owner, name, "Synthetic helper goal", at)
+        for event, when in [("run.queued", at), *steps]:
+            store.add_event(run["project_id"], worker["worker_id"], run["run_id"], event, "SYNTHETIC-HELPER-WORDS")
+            sql(application, "UPDATE events SET created_at=? WHERE run_id=? AND event_type=?", when, run["run_id"], event)
+        return worker, run
+
+    # The message's own turn gave one helper a goal; the job it handed off gave another one.
+    own_worker, own_run = helper("Synthetic Turn Helper", "2026-11-20T10:00:30+00:00",
+                                 [("run.completed", "2026-11-20T10:00:50+00:00")])
+    sql(application, "INSERT INTO coordinator_goals(conversation_id,goal_id,source_turn_id,text,worker_id,run_id,created_at) "
+                     "VALUES(?,?,?,?,?,?,?)", cid, "goal-turn", tid, "Synthetic goal", own_worker["worker_id"],
+        own_run["run_id"], "2026-11-20T10:00:30+00:00")
+    plain_chat(application, owner, "Synthetic brief", "2026-11-20T10:01:00+00:00", cid="conv-job", tid="job-brief")
+    sql(application, "INSERT INTO expert_jobs(job_id,tenant_id,owner_id,lineage_id,speaker_conversation_id,source_turn_id,"
+                     "idempotency_key,goal,state,job_conversation_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "job-h", "local", owner, expert["lineage_id"], cid, tid, "k-h", "Synthetic job", "done", "conv-job",
+        "2026-11-20T10:01:00+00:00", "2026-11-20T10:05:00+00:00")
+    job_worker, job_run = helper("Synthetic Job Helper", "2026-11-20T10:02:00+00:00",
+                                 [("run.started", "2026-11-20T10:02:05+00:00"), ("run.completed", "2026-11-20T10:04:00+00:00")])
+    sql(application, "INSERT INTO coordinator_goals(conversation_id,goal_id,source_turn_id,text,worker_id,run_id,created_at) "
+                     "VALUES(?,?,?,?,?,?,?)", "conv-job", "goal-job", "job-brief", "Synthetic goal", job_worker["worker_id"],
+        job_run["run_id"], "2026-11-20T10:02:00+00:00")
+
+    item = next(i for i in lines(client)["items"] if i["kind"] == "message")
+    assert not [i for i in lines(client)["items"] if i["kind"] == "run"]  # neither helper run is a line of its own
+    detail = client.get(f"/v1/activity/lines/{item['line_id']}").json()
+    trail = detail["trail"]
+    for run, events in ((own_run, ["run.queued", "run.completed"]), (job_run, ["run.queued", "run.started", "run.completed"])):
+        assert [(s["event_type"], s["ai"]) for s in trail if s["step"] == "event" and s.get("run") == run["run_id"]] == [
+            (event, "codex-cli") for event in events]
+    # Its Worker row first, then its steps (the page folds them under Details), in time with the job's own steps.
+    order = [(s["step"], s.get("state") or s.get("event_type")) for s in trail if s["step"] in {"worker", "event", "job"}]
+    assert order == [("worker", "completed"), ("event", "run.queued"), ("event", "run.completed"), ("job", "started"),
+                     ("worker", "completed"), ("event", "run.queued"), ("event", "run.started"), ("event", "run.completed"),
+                     ("job", "done")]
+    assert "SYNTHETIC-HELPER-WORDS" not in json.dumps(detail)
+
+
+def test_the_cut_keeps_its_limit_with_the_ellipsis_and_ends_on_a_whole_word():
+    from workers_projects_runtime.activity_lines import NAME_LIMIT, PREVIEW_LIMIT, cut
+    for limit in (PREVIEW_LIMIT, NAME_LIMIT):
+        assert cut("x" * limit, limit) == "x" * limit  # what fits is kept whole
+        for text in ("x" * (limit + 1), "y" * 500, " ".join(["synthetic"] * 60), "a" * (limit - 1) + " bcd"):
+            short = cut(text, limit)
+            assert short.endswith("…") and len(short) <= limit, (limit, len(short))
+    assert cut(" ".join(["synthetic"] * 60)) == " ".join(["synthetic"] * 13) + "…"  # a whole word, then the ellipsis

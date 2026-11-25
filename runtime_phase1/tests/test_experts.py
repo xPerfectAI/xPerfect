@@ -3128,6 +3128,9 @@ def test_the_hand_offs_words_leave_when_the_job_starts_and_the_turns_own_text_do
     rig.channels.reconcile_once()
     assert rig.claim() == []
     assert scalar(application, "SELECT state FROM channel_deliveries WHERE kind='reply'") == "dropped"
+    # The reason Activity shows for the reply, in plain words.
+    assert scalar(application, "SELECT error FROM channel_deliveries WHERE kind='reply'") == (
+        "The message that the job started went out instead")
     again = rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job", idempotency_key="k1",
                                  source_turn_id=rig.accepted["turn_id"], tell="On it again")
     assert again["job_id"] == result["job_id"]  # a retried key: the same job, nothing sent twice

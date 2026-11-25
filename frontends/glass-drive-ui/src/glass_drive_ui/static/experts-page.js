@@ -1,6 +1,6 @@
 /* The Experts page: an Expert's whole setup on one page, in Run project's style. Saving makes a new version. */
 import { libraryRequest, openLibraryPicker } from './personal-library.js?v=20261024polish1';
-import { AIS, ASK, DEFAULT_EXPERT, aiMark, expertSaved, openChannels, openExpertChat, squarePng } from './experts.js?v=20261125activity9';
+import { AIS, ASK, DEFAULT_EXPERT, aiMark, expertSaved, openChannels, openExpertChat, squarePng } from './experts.js?v=20261125review1';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const ICONS = {
@@ -89,14 +89,42 @@ export function workerAccountLine({ name, workerAccount = 'unknown', need = null
   return null;
 }
 
+/** One role's new AI and model, from the table or the sandbox switch. A backup that is the new AI itself goes, and so
+ *  does an account chosen for the old AI, unless the install's own map makes it an account of the new AI too. */
+export function chooseRole(state, role, profile, model, { accounts = [], providers = {} } = {}) {
+  const before = state[role].profile;
+  state[role] = { profile, model };
+  if (state.backup[role] === profile) state.backup[role] = '';
+  const id = state.account[role];
+  if (id && profile !== before) {
+    const account = accounts.find(a => a.account_id === id);
+    if (!account || !(providers[profile] || []).includes(String(account.provider || '').toLowerCase())) state.account[role] = '';
+  }
+}
+
+/** The runtime's answer about the AIs, their models and what their Workers need. It is asked again each time the page
+ *  is shown (an account connected meanwhile changes it); an answer that fails keeps the last one. */
+export function optionsReader(request) {
+  let last = null;
+  return () => {
+    const previous = last;
+    last = request('/api/expert-ai-options').then(r => ({ items: r.items || [], need: r.workers_need_account || null })).catch(() => previous);
+    return last;
+  };
+}
+
 /** The Expert's settings as the runtime saves them, from what the page shows. */
 export function readTeam(state) {
   const work = state.work.filter(Boolean);
   if (!work.length) throw new Error('Choose at least one AI that may work.');
   const backup = role => { const v = state.backup[role]; if (!v) return null; return { profile: v, account_id: '' }; };
+  // The page does not show the coordinator's effort: a saved one stays while the coordinator is the AI and model it
+  // was saved with. Another one may not offer it, so a new choice goes back to that AI's own effort.
+  const saved = state.coordinatorEffort;
+  const effort = saved && saved.profile === state.coordinate.profile && saved.model === state.coordinate.model ? saved.effort || '' : '';
   const team = {
     talk: { profile: state.talk.profile, account_id: state.account.talk, backup: backup('talk'), effort: state.replies, model: state.talk.model },
-    coordinate: { profile: state.coordinate.profile, account_id: state.account.coordinate, backup: backup('coordinate'), effort: '', model: state.coordinate.model },
+    coordinate: { profile: state.coordinate.profile, account_id: state.account.coordinate, backup: backup('coordinate'), effort, model: state.coordinate.model },
     work,
   };
   if (state.preferred && work.includes(state.preferred)) team.preferred = state.preferred;
@@ -115,20 +143,21 @@ export function mountExpertsPage({ root, getData = () => null, request = library
   const body = node('div', 'experts-body');
   form.append(strip, unsaved, status, body); root.append(copy, form);
 
-  let experts = []; let current = null; let spec = null; let options = null; let speeds = {}; let library = [];
+  let experts = []; let current = null; let spec = null; let speeds = {}; let library = [];
   let state = null; let dirty = false; let token = 0; let pictureChange = null; let pictureUrl = ''; let accountsOpen = false; const openAis = new Set(); let lastGridControl = '';
   const say = text => { status.textContent = text || ''; };
+  const readOptions = optionsReader(request);
+  const accountMap = () => ({ accounts: getData()?.provider_accounts || [], providers: getData()?.profile_account_providers || {} });
 
   async function loadList() {
     const response = await request('/api/workspace-templates?state=active');
     experts = response.items || [];
   }
   async function loadOptions() {
-    if (!options) options = request('/api/expert-ai-options').then(r => ({ items: r.items || [], need: r.workers_need_account || null })).catch(() => null);
     if (!Object.keys(speeds).length) {
       request('/api/experts-talk-speeds').then(r => { speeds = Object.fromEntries((r.items || []).map(item => [item.model, item])); if (state) renderTeam(); }).catch(() => {});
     }
-    return options;
+    return readOptions();
   }
   function renderStrip() {
     strip.replaceChildren();
@@ -194,7 +223,13 @@ export function mountExpertsPage({ root, getData = () => null, request = library
   /** Show an Expert ('' keeps what is on the page, or the first one; 'new' is a blank one). Unsaved changes are
    *  kept when you only come back to the tab, and never dropped without your yes. */
   async function show(arg = '', { force = false } = {}) {
-    if (state && !force && (arg === '' || arg === shownId())) { pin(shownId()); renderStrip(); renderTeam(); return; }
+    if (state && !force && (arg === '' || arg === shownId())) {
+      pin(shownId()); renderStrip(); renderTeam();
+      // Back on the page (from Connections, say): what its Workers need is asked again and drawn when it is here.
+      const mine = token;
+      void loadOptions().then(answer => { if (mine !== token || !state || !answer) return; state.offered = answer.items; state.need = answer.need; renderTeam(); });
+      return;
+    }
     if (dirty && !force) { askBeforeLeaving(arg); return; }
     if (arg) pin(arg);
     const mine = ++token; dirty = false; pictureChange = null; say(''); unsaved.hidden = true;
@@ -217,6 +252,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       refs: (current?.personal_library_refs || []).map(ref => ({ item_id: ref.item_id, version_id: ref.version_id })),
       talk: { profile: spec.team.talk.profile, model: spec.team.talk.model || '' },
       coordinate: { profile: spec.team.coordinate.profile, model: spec.team.coordinate.model || '' },
+      coordinatorEffort: { profile: spec.team.coordinate.profile, model: spec.team.coordinate.model || '', effort: spec.team.coordinate.effort || '' },
       work: [...spec.team.work], preferred: spec.team.preferred, replies: spec.team.talk.effort || '',
       account: { talk: spec.team.talk.account_id || '', coordinate: spec.team.coordinate.account_id || '' },
       backup: { talk: spec.team.talk.backup?.profile || '', coordinate: spec.team.coordinate.backup?.profile || '' },
@@ -364,7 +400,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       state.place = value; changed(); explain();
       if (value === 'sandboxed') {
         // Nothing of the Expert works on this computer itself: Claude talks and coordinates, with no backup.
-        for (const role of ['talk', 'coordinate']) if (state[role].profile !== 'claude-code') state[role] = { profile: 'claude-code', model: '' };
+        for (const role of ['talk', 'coordinate']) if (state[role].profile !== 'claude-code') chooseRole(state, role, 'claude-code', '', accountMap());
         state.backup = { talk: '', coordinate: '' };
       }
       renderTeam();
@@ -440,7 +476,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
         const radio = node('input'); radio.type = 'radio'; radio.name = talkName; radio.checked = on;
         radio.disabled = (unavailable && !on) || (sandboxed && ai.profile !== 'claude-code');
         radio.setAttribute('aria-label', `${ai.name} ${line.name} talks to people`);
-        radio.onchange = () => { state.talk = { profile: ai.profile, model: line.id }; if (state.backup.talk === ai.profile) state.backup.talk = ''; changed(); renderTeam(); };
+        radio.onchange = () => { chooseRole(state, 'talk', ai.profile, line.id, accountMap()); changed(); renderTeam(); };
         talkCell.append(radio);
         if (measured) talkCell.append(node('small', 'experts-time', `about ${measured.median_s} s`));
       } else {
@@ -452,7 +488,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       const radio = node('input'); radio.type = 'radio'; radio.name = coordinateName; radio.checked = on;
       radio.disabled = (unavailable && !on) || (sandboxed && ai.profile !== 'claude-code');
       radio.setAttribute('aria-label', `${ai.name} ${line.name} coordinates`);
-      radio.onchange = () => { state.coordinate = { profile: ai.profile, model: line.id }; if (state.backup.coordinate === ai.profile) state.backup.coordinate = ''; changed(); renderTeam(); };
+      radio.onchange = () => { chooseRole(state, 'coordinate', ai.profile, line.id, accountMap()); changed(); renderTeam(); };
       coordinateCell.append(radio);
       // Workers: any number; with several, one may be Preferred.
       const workCell = node('td', 'experts-work');
