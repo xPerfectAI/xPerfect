@@ -2130,6 +2130,7 @@ async function main() {
     syncExpertControls();
   };
   let activeView = 'project';
+  let expertsPage = null;
   const workerAccountSummaryNode = document.getElementById('worker-account-summary');
   let hivePollTimer = 0;
   let catalogSearchTimer = 0;
@@ -2521,8 +2522,18 @@ async function main() {
     }, ACTIVE_TILE_REFRESH_MS);
   }
 
+  // The Experts page loads when it is first opened; `#experts/<id>` names the Expert it shows.
+  function openExpertsView(arg) {
+    expertsPage ||= import('./experts-page.js?v=20261125page1').then(({ mountExpertsPage }) => mountExpertsPage({
+      root: document.getElementById('experts-view'), getData: () => bootstrap }));
+    expertsPage.then(page => page.show(arg)).catch(() => {});
+  }
+
   function setActiveView(view, { updateHash = true } = {}) {
-    activeView = viewRegistry.has(view) ? view : 'project';
+    const [name, ...rest] = String(view || '').split('/');
+    let viewArg = '';
+    try { viewArg = name === 'experts' ? decodeURIComponent(rest.join('/')) : ''; } catch { viewArg = ''; }
+    activeView = viewRegistry.has(name) ? name : 'project';
     frame.dataset.activeView = activeView;
     for (const [name, panel] of viewRegistry.entries()) {
       if (panel) panel.hidden = name !== activeView;
@@ -2547,6 +2558,7 @@ async function main() {
         if (statusNode) statusNode.textContent = error.message;
       });
     }
+    if (activeView === 'experts') openExpertsView(viewArg);
     if (updateHash) {
       const nextUrl = `${window.location.pathname}${window.location.search}${activeView === 'project' ? '' : `#${activeView}`}`;
       window.history.replaceState(null, '', nextUrl);
@@ -2563,7 +2575,7 @@ async function main() {
   });
   initializeControlPlane({ withAuth, postJson, patchJson, deleteJson, responseMessage, setView: setActiveView });
   // Requests from Experts sit on top of Activity, with a count and a pop-up.
-  import('./experts.js?v=20261125experts21').then(({ initNeedsYou }) => initNeedsYou({ mount: document.getElementById('activity-list'), tab: document.getElementById('activity-tab') })).catch(() => {});
+  import('./experts.js?v=20261125page1').then(({ initNeedsYou }) => initNeedsYou({ mount: document.getElementById('activity-list'), tab: document.getElementById('activity-tab') })).catch(() => {});
 
   // Restore the selected surface before network startup, through the same registry.
   setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });

@@ -10,8 +10,9 @@
     <link rel="stylesheet" href="/static/styles.css?v=20261024polish1" />
       <link rel="stylesheet" href="/static/personal-library.css?v=20261024polish1">
       <link rel="stylesheet" href="/static/expert-picker.css?v=20261025visual1">
-      <link rel="stylesheet" href="/static/experts.css?v=20261125experts21">
-      <link rel="stylesheet" href="/static/needs-you.css?v=20261125experts21">
+      <link rel="stylesheet" href="/static/experts.css?v=20261125page1">
+      <link rel="stylesheet" href="/static/needs-you.css?v=20261125page1">
+      <link rel="stylesheet" href="/static/experts-page.css?v=20261125page1">
 </head>
   <body class="launch-body">
     <main class="launch-shell">
@@ -20,6 +21,7 @@
           <a class="brand-mark" href="/" aria-label="xPerfect home">xPerfect</a>
           <nav class="view-tabs" aria-label="Main">
             <a id="project-tab" class="view-tab" data-view-tab="project" aria-controls="project-view" aria-current="page" href="/#project">Run Project</a>
+            <a id="experts-tab" class="view-tab" data-view-tab="experts" aria-controls="experts-view" href="/#experts">Experts</a>
             <a class="view-tab" href="/conversation">Chat</a>
             <a id="workspaces-tab" class="view-tab" data-view-tab="workspaces" aria-controls="workspace-view" href="/#workspaces">Workspaces</a>
             <a id="connections-tab" class="view-tab" data-view-tab="connections" aria-controls="connections-view" href="/#connections">Connections</a>
@@ -261,6 +263,7 @@
             </details>
           </form>
         </section>
+        <section id="experts-view" class="project-view experts-view" aria-labelledby="experts-tab" hidden></section>
         <section id="workspace-view" class="workspace-hive" aria-labelledby="workspaces-tab" hidden>
           <div class="workspace-hive-head">
             <div>

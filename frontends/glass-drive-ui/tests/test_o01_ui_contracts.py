@@ -249,7 +249,7 @@ def test_workspace_summaries_read_as_formatted_text_and_stay_safe():
 
 def test_shared_navigation_keeps_the_existing_panel_registry_and_native_link_order():
     import re
-    expected = ['Run Project', 'Chat', 'Workspaces', 'Connections', 'Library', 'Schedules', 'Activity']
+    expected = ['Run Project', 'Experts', 'Chat', 'Workspaces', 'Connections', 'Library', 'Schedules', 'Activity']
     for page in ['index.html', 'conversation.html']:
         html = (STATIC / page).read_text()
         nav = html.split('class="view-tabs"', 1)[1].split('</nav>', 1)[0]

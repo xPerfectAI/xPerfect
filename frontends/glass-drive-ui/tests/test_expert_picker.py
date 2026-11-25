@@ -409,8 +409,9 @@ const attachActionMenu=()=>{},walk=e=>[e,...e.children.flatMap(walk)];
 const memory=new Map();global.sessionStorage={getItem:k=>memory.get(k)||null,setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)};
 global.document={createElement:tag=>new Element(tag)};
 let save;const libraryModal=(title,options)=>{save=options.onSave;return {body:new Element('div')};};
-// Edit opens the Expert form; it saves, then calls back as the real form does.
-const openExpertForm=options=>{save=async()=>options.onSaved?.();};
+// Edit opens the Experts page; its save announces the new version of that lineage, as the real page does.
+global.window=new EventTarget();
+const openExpertPage=item=>{save=async()=>window.dispatchEvent(new CustomEvent('xperfect:expert-saved',{detail:{...item,template_id:'wst_next',version:(item.version||1)+1}}));};
 ''' + source + r'''
 (async()=>{
  const old={template_id:'wst_old',lineage_id:'same-lineage',version:1,name:'Earlier setup',profile:'claude-code',catalog_state:'active',catalog_revision:2};
