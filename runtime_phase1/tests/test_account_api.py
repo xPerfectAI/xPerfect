@@ -48,8 +48,14 @@ def _healthy_capability_producers() -> dict[str, object]:
             "state": "healthy",
             "healthy": True,
             "usedPercent": 50.0,
-            "availableBytes": 50,
+            "availableBytes": 50 * 1024**3,
             "thresholdPercent": 90.0,
+        },
+        "nativeStorage": {
+            "version": 1,
+            "healthy": True,
+            "availableBytes": 50 * 1024**3,
+            "requiredBytes": 4096 * 1024**2,
         },
         "promptLayers": {
             "contractVersion": 1,
