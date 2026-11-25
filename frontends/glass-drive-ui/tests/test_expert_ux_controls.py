@@ -441,3 +441,9 @@ def test_an_expert_has_a_picture_that_teams_shows_as_its_app_icon():
     assert "Teams shows it as the app icon. Kept on this computer, not in its versions." in source
     assert "`Teams shows ${name}'s picture as its app icon.`" in source
     assert "`${name}'s picture is not in Teams yet: ${channel.app.picture_error}`" in source
+
+
+def test_the_page_forwards_an_experts_picture_to_the_runtime():
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '@app.get("/api/experts/{expert_id}/picture")' in server and '@app.put("/api/experts/{expert_id}/picture")' in server
+    assert '_expert_forward(request, "PUT", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture", payload)' in server

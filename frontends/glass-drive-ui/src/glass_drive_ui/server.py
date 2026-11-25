@@ -3808,6 +3808,14 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def expert_jobs(request: Request, expert_id: str):
         return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/jobs")
 
+    @app.get("/api/experts/{expert_id}/picture")
+    def expert_picture(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture")
+
+    @app.put("/api/experts/{expert_id}/picture")
+    def expert_picture_set(request: Request, expert_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "PUT", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture", payload)
+
     @app.get("/api/experts/{expert_id}/channels")
     def expert_channels(request: Request, expert_id: str):
         return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/channels")
