@@ -221,6 +221,16 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
     can be replaced only by addresses on the same computer (`XPERFECT_MICROSOFT_LOGIN_URL`,
     `XPERFECT_MICROSOFT_GRAPH_URL`).
 
+15. **A signed-in browser can still be asked for the password.** The code sign-in is a fresh sign-in in that
+    browser: in some organisations Microsoft asks for the account's password even though the browser already
+    holds a session (in another, it asked only for a phone approval). Only the person types it; the code works
+    from any device, a phone included, for about 15 minutes, and Connect makes a new one when it runs out.
+16. **Microsoft's Teams tool keeps one sign-in for the whole computer.** It acts as the first account in its
+    cache, and signing out removes every account. So **Use another Microsoft account** for a second organisation
+    signs out the first organisation's sign-in: that Expert's Teams app keeps answering (each channel package
+    uses its own app secret), but its setup actions (the app's details, its picture) need that organisation's
+    sign-in again. One sign-in per organisation is a later capability.
+
 ## Nothing happens twice
 
 - A job that has started is never started again by itself; it resumes or is reported.
@@ -258,5 +268,6 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
 - A Teams app is created for any organisation's sign-in (the CLI's default); creating it for one
   organisation (`--sign-in-audience myOrg`) waits until a fresh connection proves it with socket mode.
 - A blocked Connect's re-check lives in memory: after a runtime restart, Connect is pressed again.
+- One Teams-tool sign-in serves the whole computer: Experts of two organisations on one computer share it (item 16).
 - Requests, approvals and outgoing messages carry text only: a file an Expert produces cannot yet be
   shown for approval or sent through Teams, and a message that is only a file is not read.
