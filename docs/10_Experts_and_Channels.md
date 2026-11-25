@@ -26,6 +26,11 @@ current; every save makes a new version. The `expert` key in its content holds:
 | `ask_me_first` | `always`, `auto` (default) or `off`. |
 | `workspace` | Where it works: this computer, where its Workers run with full access, or a sandboxed workspace, where its Workers run in containers and reach only that workspace. Saving any other level is refused; narrower permissions on this computer are a later capability. |
 
+The Workers it may use (`team.work`) decide which Workers the job's coordinator can start. Each Worker
+needs a connected, ready account of its AI; without one the runtime refuses it. On this computer the
+coordinator still has its own AI's tools, so it can do the work itself when no Worker can start; in a
+sandboxed workspace its own tools are off.
+
 Knowledge and Skills stay in My Library and are referenced by exact version. An empty account
 means this computer's own sign-in for that AI. Worker runs may share this computer's existing
 Claude sign-in, up to the host's per-account limit (`WPR_HOST_ACCOUNT_ACTIVE_LIMIT`, 4 by default;
