@@ -354,7 +354,9 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       const group = node('tbody', 'experts-team-group');
       const title = node('tr', 'experts-team-ai'); const th = node('th', '', ''); th.colSpan = 4; th.scope = 'rowgroup';
       th.append(aiMark(ai.profile), node('span', '', ai.name)); title.append(th); group.append(title);
-      const lines = [{ id: '', name: 'Its usual model', status: 'available', reason: '' }, ...ai.models];
+      // "Its usual model" names the model it is today, when the install says which.
+      const usualName = ai.models.find(m => m.id === ai.usual)?.name;
+      const lines = [{ id: '', name: usualName ? `Its usual model · ${usualName}` : 'Its usual model', status: 'available', reason: '' }, ...ai.models];
       for (const line of lines) {
         const tr = node('tr'); const label = node('th', 'experts-col-model', line.name); label.scope = 'row';
         if (line.status === 'saved') label.append(node('small', 'field-help', ' · saved'));

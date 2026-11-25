@@ -2524,7 +2524,7 @@ async function main() {
 
   // The Experts page loads when it is first opened; `#experts/<id>` names the Expert it shows.
   function openExpertsView(arg) {
-    expertsPage ||= import('./experts-page.js?v=20261125page1').then(({ mountExpertsPage }) => mountExpertsPage({
+    expertsPage ||= import('./experts-page.js?v=20261125page2').then(({ mountExpertsPage }) => mountExpertsPage({
       root: document.getElementById('experts-view'), getData: () => bootstrap }));
     expertsPage.then(page => page.show(arg)).catch(() => {});
   }

@@ -19,13 +19,15 @@
 .experts-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .experts-version { color: var(--muted); font-size: var(--font-help); margin-right: 4px; }
 
-.experts-identity { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 24px; align-items: start; }
+.experts-identity { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 24px; align-items: start; }
 .experts-picture { display: grid; justify-items: center; gap: 10px; text-align: center; }
 .experts-picture-face { display: grid; place-items: center; width: 112px; height: 112px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; overflow: hidden; background: var(--accent-soft); color: var(--muted); cursor: pointer; }
 .experts-picture-face:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .experts-picture-face img { width: 100%; height: 100%; object-fit: cover; }
 .experts-picture-empty { font-size: var(--font-help); }
 .experts-picture-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.experts-picture-buttons button { white-space: nowrap; }
+.experts-section .secondary-button { display: inline-flex; align-items: center; gap: 8px; }
 .experts-words { display: grid; gap: 16px; min-width: 0; }
 .experts-instructions { width: 100%; min-height: 140px; overflow: hidden; resize: none; line-height: 1.55; }
 
