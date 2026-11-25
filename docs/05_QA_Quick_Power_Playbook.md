@@ -315,6 +315,7 @@ running install.
 | Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
 | Second question | Ask something else while the job runs. | Answered at once; the job continues. |
 | Hand-off words | On a channel, ask in one message for real work and a quick question (for example "start a job to write a short note, and also: what is 17 times 3?"). | One message as soon as the job starts, saying it started and answering the question; nothing else from that turn; the result arrives later, once. On Always ask the card shows "Will tell the person" with those words, and they leave only after Approve. |
+| Stopped reply waits | On Auto, a channel message the AI provider's safety check stops while the Expert answers (seen with a request for private files). | The reply waits under Needs you with the reason "The AI provider's safety check stopped part of this reply" and the person's words; the person hears it is being checked; on Off it is sent as it is. |
 | Edit | Change the instructions; ask again. | The next reply follows the new text; a running job finishes with the old. |
 | Teams connect | Manage → Channels → Add Teams → Connect; complete Microsoft's sign-in. | The app is created in socket mode; you are the first allowed person; Install in Teams appears. |
 | Teams told up front | Press Connect. | Before the sign-in: open Microsoft's page where the work account is signed in (any browser or a phone), a phone approval may come, the code lasts about 15 minutes. |

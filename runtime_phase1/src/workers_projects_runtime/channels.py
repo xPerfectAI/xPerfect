@@ -526,7 +526,7 @@ class ChannelService:
             conn.execute("UPDATE channel_deliveries SET state='not_confirmed',error='The channel did not confirm this message' "
                          "WHERE state='sending' AND claimed_at<>'' AND claimed_at<?", (stale,))
             rows = [dict(row) for row in conn.execute(
-                "SELECT t.conversation_id,t.turn_id,t.origin,t.response_json,e.binding_id,e.lineage_id,e.tenant_id,e.owner_id "
+                "SELECT t.conversation_id,t.turn_id,t.origin,t.request_id,t.response_json,e.binding_id,e.lineage_id,e.tenant_id,e.owner_id "
                 "FROM coordinator_turns t JOIN expert_conversations e ON e.conversation_id=t.conversation_id "
                 "JOIN coordinator_conversations c ON c.conversation_id=t.conversation_id "
                 # A restored turn waits for the owner's resume; it never becomes a message by itself.
@@ -587,6 +587,10 @@ class ChannelService:
             if spoke:
                 outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": "hand-off words sent"})
                 continue
+            # A reply part of which the AI provider's own safety check stopped may have lost a request to the owner on
+            # the way (the stopped call never ran). On Auto it waits for the owner as on Always; Off sends it as it is.
+            # Decided from the typed stop in this turn's own native run, never from its words.
+            stopped = bool(row["request_id"]) and bool(self.experts.coordinator.provider.safety_stop(row["request_id"]))
             # Auto or Off sends it; Always holds it for the owner, its request and its hold written together. The
             # setting is read inside the transaction that writes the message, so a setting saved meanwhile is never
             # missed: no save can land between the read and the write.
@@ -597,13 +601,14 @@ class ChannelService:
                 review = None
                 if closed:
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped", error=closed)
-                elif mode != "always":
+                elif mode == "off" or (mode == "auto" and not stopped):
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "pending")
                 else:
                     review = self.experts._insert_review(
                         conn, speaker["tenant_id"], speaker["owner_id"], speaker, kind="reply", target_id=row["turn_id"],
-                        reason="Ask me first is set to Always ask.", payload={"text": text},
-                        source_turn_id=row["turn_id"], idempotency_key="reply:" + row["turn_id"])
+                        reason=("Ask me first is set to Always ask." if mode == "always" else
+                                "The AI provider's safety check stopped part of this reply, so it waits for you."),
+                        payload={"text": text}, source_turn_id=row["turn_id"], idempotency_key="reply:" + row["turn_id"])
                     self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "held", review["review_id"])
             if review is None and not closed:
                 outcomes.append({"turn_id": row["turn_id"], "delivery": "pending"})

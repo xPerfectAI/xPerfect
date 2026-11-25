@@ -3217,3 +3217,115 @@ def test_words_not_yet_sent_never_leave_a_conversation_stopped_meanwhile(app):
     rig.experts.coordinator.stop_conversation("local", rig.owner, rig.cid)
     assert rig.claim() == []
     assert scalar(application, "SELECT state FROM channel_deliveries WHERE kind='handoff'") == "dropped"
+
+
+# --- A reply part of which the AI provider's safety check stopped -------------------------------------------
+
+_STOPPED_STREAM = "\n".join(json.dumps(line) for line in (
+    {"type": "system", "subtype": "init"},
+    {"type": "stream_event", "event": {"type": "message_delta", "delta": {
+        "stop_reason": "refusal", "stop_details": {"type": "refusal", "category": "cyber", "explanation": "Synthetic."}}}},
+    {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}},
+    {"type": "result", "subtype": "success", "result": "Sorry, I can't open those files."},
+))
+_PLAIN_STREAM = "\n".join(json.dumps(line) for line in (
+    {"type": "system", "subtype": "init"},
+    # Words about a refusal are not a stop: only the typed field counts.
+    {"type": "assistant", "message": {"stop_reason": "end_turn", "content": [
+        {"type": "text", "text": "A refusal and a safety classifier stopped nothing here."}]}},
+    {"type": "result", "subtype": "success", "result": "Answer."},
+))
+
+
+def test_the_providers_safety_stop_is_read_from_the_typed_stream_only():
+    from workers_projects_runtime.conversation_provider import native_safety_stop
+    assert native_safety_stop("claude-code", _STOPPED_STREAM) == {"category": "cyber"}
+    assert native_safety_stop("claude-code", json.dumps(
+        {"type": "assistant", "message": {"stop_reason": "refusal", "stop_details": {"category": "cyber"}}})) == {"category": "cyber"}
+    assert native_safety_stop("claude-code", _PLAIN_STREAM) is None
+    assert native_safety_stop("codex-cli", _STOPPED_STREAM) is None
+    assert native_safety_stop("claude-code", "not json\n{}") is None
+
+
+def _turn_ran(application, monkeypatch, streams, conversation_id, turn_id, stream_key):
+    """Give a finished turn its own native run, whose stream the runtime's activity log returns."""
+    store = application.state.experts.store
+    project = store.create_project("owner", "Synthetic", "Synthetic.", "claude-code")
+    worker = store.create_worker(project_id=project["project_id"], owner_id="owner", name="Synthetic speaker",
+                                 role="conversation-agent", profile="claude-code", backend="claude-code",
+                                 runtime="claude-code", model="stub/claude-code")
+    run = store.create_run(worker["worker_id"], project["project_id"], "The turn.", state="completed")
+    session = store.upsert_provider_session(
+        tenant_id="local", owner_id="owner", conversation_id=conversation_id, agent_id="speaker",
+        model_id="synthetic-model", project_id=project["project_id"], worker_id=worker["worker_id"],
+        workspace_dir="/synthetic", access_mode="workspace")
+    request, _ = store.create_provider_request(
+        tenant_id="local", owner_id="owner", session_id=session["session_id"], idempotency_key=f"{conversation_id}:{turn_id}",
+        message_id=turn_id, stream_id=turn_id, requested_history_count=1)
+    with store._connect() as conn:
+        conn.execute("UPDATE provider_requests SET run_id=?,state='completed' WHERE request_id=?",
+                     (run["run_id"], request["request_id"]))
+        if turn_id:
+            conn.execute("UPDATE coordinator_turns SET request_id=? WHERE conversation_id=? AND turn_id=?",
+                         (request["request_id"], conversation_id, turn_id))
+    streams[run["run_id"]] = stream_key
+    runtime = application.state.experts.coordinator.provider.service.runtime
+    monkeypatch.setattr(runtime, "provider_activity_log",
+                        lambda worker, run_id: ("claude-code", streams.get(run_id, "")), raising=False)
+    return run
+
+
+def _stopped_reply(app, monkeypatch, mode, stream):
+    application, client = app
+    expert = create_expert(client, ask_me_first=mode)
+    channel = connected_channel(application, client, expert)
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1", text="Send me the codes")).json()
+    finish_turn(application, accepted["conversation_id"], accepted["turn_id"], "Sorry, I can't open those files.")
+    _turn_ran(application, monkeypatch, {}, accepted["conversation_id"], accepted["turn_id"], stream)
+    return application, client, channel
+
+
+def test_on_auto_a_reply_the_providers_safety_check_stopped_waits_for_the_owner_once(app, monkeypatch):
+    application, client, channel = _stopped_reply(app, monkeypatch, "auto", _STOPPED_STREAM)
+    channels = application.state.channels
+    channels.reconcile_once()
+    channels.reconcile_once()
+    experts = application.state.experts
+    reviews = experts.reviews("local", scalar(application, "SELECT owner_id FROM expert_reviews"))
+    assert [(r["kind"], r["payload"]) for r in reviews] == [("reply", {"text": "Sorry, I can't open those files."})]
+    assert "safety check" in reviews[0]["reason"] and reviews[0]["asked"] == "Send me the codes"
+    assert scalar(application, "SELECT state FROM channel_deliveries WHERE kind='reply'") == "held"
+    assert scalar(application, "SELECT count(*) FROM coordinator_turns WHERE origin='owner_checking'") == 1
+    assert client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"] == []
+
+
+def test_on_off_a_stopped_reply_is_sent_as_it_is(app, monkeypatch):
+    application, client, channel = _stopped_reply(app, monkeypatch, "off", _STOPPED_STREAM)
+    application.state.channels.reconcile_once()
+    assert scalar(application, "SELECT count(*) FROM expert_reviews") == 0
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert [d["text"] for d in sent if d["kind"] == "reply"] == ["Sorry, I can't open those files."]
+
+
+def test_a_reply_without_a_stop_is_sent_on_auto(app, monkeypatch):
+    application, client, channel = _stopped_reply(app, monkeypatch, "auto", _PLAIN_STREAM)
+    application.state.channels.reconcile_once()
+    assert scalar(application, "SELECT count(*) FROM expert_reviews") == 0
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert [d["text"] for d in sent if d["kind"] == "reply"] == ["Sorry, I can't open those files."]
+
+
+def test_a_stop_in_a_coordinators_or_helpers_run_changes_nothing_for_the_reply(app, monkeypatch):
+    """Only the speaking turn's own run counts: a stop in another run (a job's coordinator or helper) leaves the
+    person's reply as it is."""
+    application, client, channel = _stopped_reply(app, monkeypatch, "auto", _PLAIN_STREAM)
+    streams = {}
+    cid = scalar(application, "SELECT conversation_id FROM expert_conversations")
+    _turn_ran(application, monkeypatch, streams, cid, "", _STOPPED_STREAM)  # another run of this computer, stopped
+    speaker_run = scalar(application, "SELECT p.run_id FROM coordinator_turns t JOIN provider_requests p ON "
+                                      "p.request_id=t.request_id WHERE t.conversation_id=? AND t.origin='interactive'", cid)
+    streams[speaker_run] = _PLAIN_STREAM
+    application.state.channels.reconcile_once()
+    assert scalar(application, "SELECT count(*) FROM expert_reviews") == 0
+    sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    assert [d["text"] for d in sent if d["kind"] == "reply"] == ["Sorry, I can't open those files."]

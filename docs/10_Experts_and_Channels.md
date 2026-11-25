@@ -70,7 +70,10 @@ One mechanism: what the Expert is about to send or start waits for the owner.
   the same way. No sentence is scripted.
 - **Off:** nothing waits. Instructions still apply.
 - **Auto:** each incoming message carries who, where and when; the speaking assistant decides
-  whether to call `expert_ask_owner`.
+  whether to call `expert_ask_owner`. When the AI provider's own safety check stopped part of a reply
+  on a channel (a typed stop in that turn's native run), the stopped part may have been that call:
+  the reply waits for the owner as in Always ask, and the person is told it is being checked. A
+  stop in a job's coordinator or Worker changes nothing; on Off the reply is sent as it is.
 - **Always ask:** the runtime holds two exits on channel conversations: a reply leaving to a person
   and a job starting. The owner's own Chat in xPerfect is not held: there the owner is the approver.
 - Only a signed-in owner session decides (`POST /v1/expert-reviews/{id}/decision` requires the

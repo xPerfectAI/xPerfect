@@ -3250,6 +3250,31 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
     return None
 
 
+def native_safety_stop(profile: str, stdout: str) -> dict[str, str] | None:
+    """The AI provider's own safety check stopped a response in this native run: its typed ``refusal`` stop in
+    Claude's stream, with the category it gives. Read only from the stream's fields, never from any text."""
+    if profile != "claude-code":
+        return None
+    for raw_line in str(stdout or "").splitlines():
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        stop = None
+        if event.get("type") == "stream_event" and isinstance(event.get("event"), dict):
+            inner = event["event"]
+            if inner.get("type") == "message_delta" and isinstance(inner.get("delta"), dict):
+                stop = inner["delta"]
+        elif event.get("type") == "assistant" and isinstance(event.get("message"), dict):
+            stop = event["message"]
+        if stop and stop.get("stop_reason") == "refusal":
+            details = stop.get("stop_details") if isinstance(stop.get("stop_details"), dict) else {}
+            return {"category": str(details.get("category") or "")[:40]}
+    return None
+
+
 def _native_visible_text(profile: str, stdout: str) -> str:
     """Extract only user-visible assistant text from complete native JSONL events."""
 
@@ -7140,6 +7165,20 @@ class ConversationProvider:
         contract = self._saved_completion_contract(request_record) or {}
         return _native_terminal_text(str(profile or ""), str(stdout or ""),
             contract.get("graph_control"), contract.get("delivery_control"), contract.get("response_contract"))
+
+    def safety_stop(self, request_id: str) -> dict[str, str] | None:
+        """Whether the provider's safety check stopped a response of this request's own native run."""
+        record = self.store.get_provider_request(str(request_id)) if request_id else None
+        run = self.store.get_run(str(record.get("run_id") or "")) if record and record.get("run_id") else None
+        worker = self.store.get_worker(str(run.get("worker_id") or "")) if run else None
+        collector = getattr(self.service.runtime, "provider_activity_log", None)
+        if not run or not worker or not callable(collector):
+            return None
+        try:
+            profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]))
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return native_safety_stop(str(profile or ""), str(stdout or ""))
 
     def _native_effective_model(
         self, record: dict[str, Any], run: dict[str, Any], contract: dict[str, Any],
