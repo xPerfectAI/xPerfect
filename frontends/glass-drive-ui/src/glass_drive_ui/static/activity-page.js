@@ -172,6 +172,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     const generation = ++state.generation;
     drawFilters();
     fresh.hidden = true; state.waiting = [];
+    if (!state.items.length) { empty.hidden = false; empty.replaceChildren(node('p', '', 'Loading…')); }
     try {
       const page = await read();
       if (generation !== state.generation) return;
@@ -300,7 +301,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   function goToRequest(reviewId) {
     const card = document.querySelector(`[data-review="${CSS.escape(reviewId)}"]`);
     if (!card) return;
-    card.setAttribute('tabindex', '-1'); card.scrollIntoView({ block: 'center', behavior: 'smooth' }); card.focus({ preventScroll: true });
+    card.setAttribute('tabindex', '-1'); card.scrollIntoView({ block: 'center' }); card.focus({ preventScroll: true });
   }
   function setAddress(lineId) {
     try { history.replaceState(history.state, '', lineId ? '#activity/' + lineId : '#activity'); } catch { /* an address it cannot write changes nothing */ }
