@@ -11099,8 +11099,8 @@ class Store:
                   AND retry_after != ''
                   AND failure_retryable = 1
                   AND failure_structured = 1
-                  AND failure_class = 'running_invariant_reconciled'
-                  AND last_retry_class = 'running_invariant_reconciled'
+                  AND failure_class IN ('running_invariant_reconciled', 'service_startup_fenced')
+                  AND last_retry_class = failure_class
                   AND queue_blocker_class = 'running_invariant_reconciled'
                 LIMIT 1
                 """,
@@ -11132,8 +11132,9 @@ class Store:
                           AND last_retry_class IN ('host_capacity', 'host_worker_busy')
                       )
                       OR (
-                          failure_class = 'running_invariant_reconciled'
-                          AND last_retry_class = 'running_invariant_reconciled'
+                          -- A turn the startup fence requeued after a restart is the same kind of retry.
+                          failure_class IN ('running_invariant_reconciled', 'service_startup_fenced')
+                          AND last_retry_class = failure_class
                           AND queue_blocker_class = 'running_invariant_reconciled'
                       )
                   )
