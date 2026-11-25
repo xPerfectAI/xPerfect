@@ -5170,6 +5170,31 @@ def test_provider_route_recovery_probes_require_explicit_operator_opt_in(tmp_pat
         store.close()
 
 
+def test_failure_recorded_after_a_probe_claim_keeps_its_time(tmp_path):
+    """A failure observed before a probe's claim but recorded after it never moves the probe clock back."""
+    store = Store(str(tmp_path / "provider-health-probe-order.sqlite3"))
+    failed_at = datetime(2026, 11, 12, 0, 32, tzinfo=timezone.utc)
+    route = dict(tenant_id="local", owner_id="owner-a", profile="codex-cli", runtime="codex-cli", model="gpt-6.1-sol")
+    reset_at = failed_at + timedelta(days=2)
+    first = store.record_provider_route_failure(
+        **route, failure_class="provider_rate_limited", failure_structured=True, retry_at=reset_at.isoformat(),
+        default_cooldown_s=300, run_id="run-1", now=failed_at,
+    )
+    claimed = failed_at + timedelta(hours=5)
+    assert store.claim_provider_route_probe(
+        **route, expected_last_failed_at=first["last_failed_at"], expected_generation=first["failure_generation"],
+        interval_s=900, now=claimed,
+    ) is True
+    late = store.record_provider_route_failure(
+        **route, failure_class="provider_rate_limited", failure_structured=True, retry_at=reset_at.isoformat(),
+        default_cooldown_s=300, run_id="run-2", now=claimed - timedelta(minutes=1),
+    )
+    assert late["updated_at"] == claimed.isoformat()
+    seen = dict(expected_last_failed_at=late["last_failed_at"], expected_generation=late["failure_generation"])
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=claimed + timedelta(minutes=14)) is False
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=claimed + timedelta(minutes=16)) is True
+
+
 def test_success_clears_provider_route_health(tmp_path):
     store = Store(str(tmp_path / "provider-health-success.sqlite3"))
     observed = store.record_provider_route_failure(
