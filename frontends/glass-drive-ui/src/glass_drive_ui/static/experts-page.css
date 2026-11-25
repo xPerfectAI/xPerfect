@@ -95,3 +95,4 @@
   .experts-row-label { min-width: 0; flex-basis: 100%; }
   .experts-footer .launch-actions { width: 100%; }
 }
+.experts-team > .field-help, .experts-section > .field-help, .experts-account > .field-help { display: block; }
