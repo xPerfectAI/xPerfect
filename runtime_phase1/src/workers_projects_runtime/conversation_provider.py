@@ -597,6 +597,16 @@ GLASSHIVE_MODELS: dict[str, HarnessModel] = {
         recommended_effort="low",
         context_window=200_000,
     ),
+    # Claude's middle model, measured for the same role: between Haiku's speed and Opus's judgment.
+    "claude-code:sonnet": HarnessModel(
+        id="claude-code:sonnet",
+        display_name="Claude / Sonnet",
+        harness_profile="claude-code",
+        native_model="sonnet",
+        effort_choices=CLAUDE_CODE_EFFORT_LEVELS,
+        recommended_effort="low",
+        context_window=200_000,
+    ),
     # Codex's fastest everyday model, for the same role (its Luna models answered more slowly).
     "codex-cli:gpt-6.2-sol": HarnessModel(
         id="codex-cli:gpt-6.2-sol",
