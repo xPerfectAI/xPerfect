@@ -1,7 +1,7 @@
 /* Activity: one line per message or run — which Expert or Worker, when, where, by whom, what they asked — with
    big filter buttons, a time range, status and a search, all applied by xPerfect. A line opens in place to its trail. */
 import { libraryRequest } from './personal-library.js?v=20261024polish1';
-import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity6';
+import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity7';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const STATUS = { waiting_for_you: 'Waiting for you', working: 'Working', answered: 'Answered', done: 'Done', stopped: 'Stopped', failed: 'Failed' };

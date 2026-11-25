@@ -1,5 +1,5 @@
 /* Activity: big filter buttons, one line per thing that happened, its trail opened in place. Theme tokens only. */
-#activity-list.activity-list { display: grid; gap: 18px; min-width: 0; }
+#activity-list.activity-list { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 .activity-filters { display: grid; gap: 14px; padding: 18px 20px; border-radius: var(--radius-card); background: var(--panel-strong); min-width: 0; }
 .activity-filter-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: start; gap: 12px; min-width: 0; }
 .activity-filter-label { padding-top: 14px; color: var(--muted); font-size: var(--font-help); font-weight: 600; }
@@ -28,7 +28,7 @@
 .activity-glyph svg { width: 18px; height: 18px; }
 .activity-search { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-left: 76px; }
 .activity-search input { flex: 1 1 260px; min-width: 0; min-height: 44px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); font: inherit; font-size: var(--font-label); }
-.activity-new { position: sticky; top: 12px; z-index: 5; align-self: start; justify-self: center; min-height: 40px; padding: 8px 18px; border: 0; border-radius: 999px; background: var(--segment-selected); box-shadow: inset 0 0 0 1px var(--accent), 0 1px 3px #0002; color: var(--text); font-weight: 600; cursor: pointer; }
+.activity-new { position: sticky; top: 12px; z-index: 5; align-self: center; min-height: 40px; padding: 8px 18px; border: 0; border-radius: 999px; background: var(--segment-selected); box-shadow: inset 0 0 0 1px var(--accent), 0 1px 3px #0002; color: var(--text); font-weight: 600; cursor: pointer; }
 .activity-new[hidden], .activity-empty[hidden], .activity-more[hidden], .activity-clear[hidden] { display: none; }
 .activity-lines { display: grid; gap: 4px; min-width: 0; }
 .activity-day { margin: 14px 0 4px; color: var(--muted); font-size: var(--font-help); font-weight: 650; letter-spacing: .02em; }
@@ -65,7 +65,7 @@
 .activity-step-what { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; overflow-wrap: anywhere; }
 .activity-empty { display: grid; justify-items: start; gap: 10px; padding: 18px 4px; color: var(--muted); }
 .activity-empty p { margin: 0; }
-.activity-more { justify-self: center; }
+.activity-more { align-self: center; }
 @media (max-width: 720px) {
   .activity-filters { padding: 14px; }
   .activity-filter-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
