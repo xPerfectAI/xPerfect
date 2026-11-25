@@ -22,7 +22,7 @@ computer or server.
 
 *Run Project's expert gallery, captured 25 November 2026: five starting professions and Create.*
 
-The aim: save an expert's knowledge and skills once, as an AI Worker setup you can reuse in
+The aim: save an expert's knowledge and Skills once, as an AI Worker setup you can reuse in
 xPerfect, from other AI apps and in your team's chat. The starting team below is one way to begin;
 you can create, save and adapt your own Workers.
 
@@ -59,7 +59,7 @@ schedules and results. Use xPerfect itself, connect another AI app, or build you
 Each package includes synthetic inputs, a sample job and checks you can repeat.
 [Walk through the Finance Director example](docs/workshop.md), including a follow-up and bad input.
 These are starting points, not professional credentials or certification. Their current native
-Skill path uses **Claude Code on the host**, with review for the actual Worker. Optional tools
+Skill path uses **Claude Code on the host**, with a review of each Worker's abilities. Optional tools
 keep their own setup and account requirements; choosing an expert does not authorize them.
 
 ![Actual Finance Director delivery in Watch, with an openable PDF and source-linked findings](docs/assets/screens/finance-delivery.jpg)
@@ -69,7 +69,7 @@ calculations, then [check them against their sources](docs/workshop.md#inspect-t
 
 ## Let people message your expert
 
-Set up an expert on the **Experts** page: what it does, its picture, its identity instructions,
+Set up an expert on the **Experts** page: what it does, its picture, its instructions,
 its knowledge and Skills, and the AI team that talks, coordinates and works. Connect it to
 Microsoft Teams and list the people who may message it. It answers short questions at once and
 hands bigger work to Workers in the background; the result arrives once, in the same chat.
@@ -78,10 +78,11 @@ hands bigger work to Workers in the background; the result arrives once, in the 
 
 *The top of the Experts page: the row of saved experts, and what the Finance Director does.*
 
-With **Ask me first** set to Always ask, every answer and every job the expert prepares waits
-under **Needs you** until you approve it. Two short messages go out without approval, both written
-with every tool off: a line telling the person it is checking with you, and, if you reject, its
-reply saying it cannot help.
+With **Ask me first** set to Always ask, every answer and every job the expert prepares for a
+person on a channel waits under **Needs you** until you approve it; your own Chat with it is never
+held. Three short messages go out without approval, each written with every tool off: a line
+telling the person it is checking with you; its reply after you reject a request; and, if you
+switch to Off while a request waits, a line saying it cannot do this now.
 
 **Activity** shows who asked what, on which channel and when, and narrows the list by expert or
 saved Worker, time, status or words.
@@ -156,7 +157,7 @@ Use the browser, your own code or another AI application:
 Requires macOS or Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/),
 and an installed AI tool: [Codex](https://developers.openai.com/codex/cli/),
 [Claude Code](https://code.claude.com/docs/en/setup) or [Grok](https://github.com/xai-org/grok-build).
-The bundled experts currently use Claude Code; the other existing Worker choices remain available.
+The bundled experts currently use Claude Code; Codex and Grok remain available for your own Workers.
 
 [Download the source](https://github.com/xPerfectAI/xPerfect/archive/refs/heads/main.zip),
 open a terminal in its folder, then run:
@@ -229,9 +230,9 @@ local-only inference. [Security](SECURITY.md) · [Capabilities](docs/capability-
   Credentials, browser sign-ins and native chat history are not copied. An unavailable or
   incompatible account needs a new selection. [Copy behavior](docs/capability-matrix.md).
 - **Experts on channels:** Microsoft Teams personal chats, proven on a local install in one
-  organisation. A copy on a server and a second real person are not yet proven; files, group
+  organization. A copy on a server and a second real person are not yet proven; files, group
   chats, Slack and approving from inside Teams are later capabilities. On this computer an
-  expert's Workers have full access, so its instructions and Ask me first guide its behaviour;
+  expert's Workers have full access, so its instructions and Ask me first guide its behavior;
   they are not a security boundary.
 - **Shared workspaces:** require a configured Linux host; use a separate workspace on a Mac.
   This limit is separate from supported local Chat. Chat offers only the routes the actual

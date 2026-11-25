@@ -18,8 +18,9 @@ with its own changelog entry. The Finance captures
 retain their actual 24 October scope. Do not retake an unchanged result merely to change its date.
 
 `docs/user-guide/assets/` holds byte-identical publication mirrors of the files the guide uses
-(`expert-team.jpg`, `expert-gallery.jpg`, `finance-delivery.jpg`, `finance-report.png`,
-`expert-versions.jpg`, `experts-page.jpg` and `activity-filters.jpg`) so the portable
+(`expert-gallery.jpg`, `finance-delivery.jpg`, `finance-report.png`, `expert-versions.jpg`,
+`experts-page.jpg` and `activity-filters.jpg`; its copy of `expert-team.jpg` is no longer shown and is
+kept for history) so the portable
 guide and its existing same-origin website publication work. These files remain the
 canonical image source; update mirrors by exact copy, not by separate editing.
 
@@ -47,7 +48,7 @@ stored rows, without an AI run, to show each status.
 | `experts-page.jpg` | The Experts page: the row of experts with their pictures, and what the Finance Director does. | README, guide, `docs/10`, changelog |
 | `experts-ai-team.jpg` | The AI team table: who talks, who coordinates, the Workers and the Preferred one. | `docs/10` |
 | `teams-channel-card.jpg` | The Teams card in an expert's Channels window, with the people who may message it; its Connected badge reflects the stand-in. | `docs/10`, changelog |
-| `needs-you-request.jpg` | A request under Needs you: who asked, where, their words and the reply that waits. | `docs/10`, changelog |
+| `needs-you-request.jpg` | A request the expert raised itself under Needs you: who asked, where, their words, its own reason and the reply that waits. | `docs/10`, changelog |
 | `activity-filters.jpg` | Activity's filters and lines in several statuses. | README, guide, `docs/07`, changelog |
 | `activity-line-opened.jpg` | One line opened with its recorded steps: the message, the job and what was sent back, with the engine steps folded under Details. | `docs/07`, changelog |
 | `run-project-my-experts.jpg` | Run Project's My experts with each expert's own picture. | changelog |

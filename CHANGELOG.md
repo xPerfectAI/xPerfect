@@ -78,15 +78,15 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 ![The Finance Director's Channels window: Teams connected, with the people who may message it.](docs/assets/screens/teams-channel-card.jpg)
 > **Image caption:** The Teams card of a staged synthetic expert, 25 November 2026. Its Connected badge reflects a local stand-in for Microsoft's service.
 
-![Needs you with one request: who asked, on which channel, their words and the reply that waits.](docs/assets/screens/needs-you-request.jpg)
-> **Image caption:** A real reply held on Always ask until the owner decides, in the same staged example.
+![Needs you with a request the expert raised itself: who asked, where, their words, its own reason and the reply that waits.](docs/assets/screens/needs-you-request.jpg)
+> **Image caption:** A request the expert raised itself on Always ask, with its own reason, in the same staged example.
 
 - **Benefit:** Reach an expert from a Teams personal chat. Only the people you list get an answer.
 - **Benefit:** Stay in control: see exactly what the expert would send or start, approve or reject it, and change its instructions for the next message.
 
 - **Added:** Experts people can talk to. Create and Edit hold the instructions, Knowledge and Skills from My Library, the AI team (who talks, who coordinates, who may work, with optional backups) and where it works. Every save is a new version. The speaking assistant reads the newest instructions at each turn; a running job keeps what it started with.
 - **Added:** A speaking assistant that never holds work. It answers short questions at once and hands anything bigger to a background coordinator, which runs Workers; the result is told once in the same conversation, also after a restart. New experts talk on Claude Haiku at low effort; Opus and Sonnet stay selectable, and the form shows each model's measured time.
-- **Added:** Ask me first, one setting: Always ask, Auto or Off. A request shows who asked, where, their words, the reason and exactly what would be sent or started. Approve releases exactly that; a changed or stopped request cannot be released by an old approval, and only a signed-in owner session decides. Requests wait under Needs you, with a count, a pop-up and an optional browser notification.
+- **Added:** Ask me first, one setting: Always ask, Auto or Off. A request shows who asked, where, their words, the reason and exactly what would be sent or started. Approve releases exactly that; a changed or stopped request cannot be released by an old approval, and only a signed-in owner session decides. Three short messages go out without approval, each written with every tool off: the line that the expert is checking with you, its reply after a Reject, and, if you switch to Off while a request waits, a line that it cannot do this now. Requests wait under Needs you, with a count, a pop-up and an optional browser notification.
 - **Added:** Channels, starting with Microsoft Teams personal chats, as an optional package beside core (`integrations/teams`). On a local install it uses Teams socket mode, so nothing on the computer is exposed. Each message is accepted once, every reply leaves through an outbox, and a send with no known outcome is shown as not confirmed and never resent by itself.
 - **Added:** Connect from the expert's Channels card, with Microsoft's sign-in code shown in the dialog. It reads Microsoft's custom-app report before creating anything, names the switch that blocks the app, offers a note for the administrator and checks again by itself. With a sign-in client configured, an administrator can add the app to the organisation's catalogue with one press.
 - **Added:** A durable Stop for a whole coordinator conversation (`POST /v1/coordinator/conversations/{id}/stop`). A finished Worker run wakes its conversation at once. Codex-format Skill folders load in Claude Code Workers.
@@ -108,7 +108,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Topics:** Experts, Work control, Connections, Deployment, Reliability
 
-![The current expert gallery with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
+![The expert gallery in October 2026, with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
 > **Image caption:** Expert gallery, captured 25 October 2026: five packaged AI Workers and Create.
 
 ![Choose an exact saved Finance Director version from the Versions dialog.](docs/assets/screens/expert-versions.jpg)

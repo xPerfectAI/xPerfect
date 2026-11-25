@@ -47,9 +47,9 @@ those Workers on this computer's sign-in; a connected account cannot serve it an
 ## The Experts page
 
 The **Experts** tab, right after Run Project, shows one Expert's whole setup on one page in Run
-project's style; Run Project's Edit and the "+" card in My experts open it. From the top:
+Project's style; Run Project's Edit and the "+" card in My experts open it. From the top:
 
-- your experts as a row (each with its picture), and **New expert**;
+- your Experts as a row (each with its picture), and **New expert**;
 - **What Does This Expert Do?**: the picture (Teams shows it as the app icon; kept on this computer, not
   in its versions), the description and the name; a saved one shows its version, **Chat** and **Channels**;
 - **Identity Instructions**, in one box that grows with its text;
@@ -108,13 +108,16 @@ measured on that install.*
 
 ## Ask me first
 
-One mechanism: the reply or job the Expert prepares waits for the owner. Two short lines go out without
-approval, both written with every native tool off: on Always ask the line telling the person it is
-checking, and after a Reject the Expert's own reply.
+One mechanism: the reply or job the Expert prepares for a person on a channel waits for the owner; the
+owner's own Chat is never held. Three short lines go out without approval, each written with every
+native tool off: on Always ask the line telling the person it is checking; after a Reject the Expert's
+own reply; and, when the owner switches to Off while a request waits, a line that it cannot do this
+now (the request is withdrawn).
 
-![Needs you with one request: who asked, on which channel, their words and the reply that waits](assets/screens/needs-you-request.jpg)
+![Needs you with a request the Expert raised itself: who asked, where, their words, its own reason and the reply that waits](assets/screens/needs-you-request.jpg)
 
-*A real reply held on Always ask, in the staged synthetic example, 25 November 2026.*
+*A request the Expert raised itself on Always ask, with its own reason, in the staged synthetic example,
+25 November 2026.*
 
 - A request shows exactly what waits: a reply with its text, or a job with its goal, plus who
   asked, where, when, and the Expert's reason.
@@ -171,7 +174,7 @@ or a server for a wall.
 
 ![The Finance Director's Channels window: Teams connected, with the people who may message it](assets/screens/teams-channel-card.jpg)
 
-*The Teams card of a staged synthetic expert, 25 November 2026. Its Connected badge reflects a local
+*The Teams card of a staged synthetic Expert, 25 November 2026. Its Connected badge reflects a local
 stand-in for Microsoft's service, not a Microsoft connection, and its people were added directly, so
 the owner is not listed.*
 
