@@ -30,6 +30,7 @@
 .experts-picture-empty { font-size: var(--font-help); }
 .experts-picture-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
 .experts-picture-buttons button { white-space: nowrap; }
+.experts-picture-line { grid-column: 1 / -1; margin: -8px 0 0; }
 .experts-section .secondary-button { display: inline-flex; align-items: center; gap: 8px; }
 .experts-words { display: grid; gap: 16px; min-width: 0; }
 .experts-instructions { width: 100%; min-height: 140px; overflow: hidden; resize: none; line-height: 1.55; }
@@ -42,7 +43,9 @@
 .experts-team-fit { width: 100%; }
 .experts-team-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .experts-team-table th, .experts-team-table td { padding: 7px 6px; text-align: center; vertical-align: middle; font-weight: 400; }
-.experts-team-table thead th { padding-bottom: 10px; color: var(--muted); font-size: var(--font-help); font-weight: 600; line-height: 1.3; }
+.experts-team-table thead th { padding-bottom: 10px; color: var(--text); font-size: var(--font-help); font-weight: 650; line-height: 1.3; vertical-align: bottom; }
+.experts-col-line { display: block; margin-top: 2px; color: var(--muted); font-size: .72rem; font-weight: 400; }
+.experts-team-table tbody td:has(input:not(:disabled)) { cursor: pointer; }
 .experts-team-table .experts-col-model { width: 40%; text-align: left; padding-left: 0; overflow-wrap: anywhere; }
 .experts-team-table tbody th.experts-col-model { font-size: var(--font-label); color: var(--text); }
 .experts-team-ai > * { border-top: 1px solid var(--line); padding-top: 12px; padding-bottom: 10px; }

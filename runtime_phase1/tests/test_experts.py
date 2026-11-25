@@ -3479,6 +3479,13 @@ def test_the_page_lists_each_ais_exact_models_from_the_install_with_its_usual_on
         ids = {model["id"] for model in items["codex-cli"]["models"]}
         assert "codex-cli:gpt-6.2-sol" in ids and len(ids) > 1, "every catalog model, not one"
         assert "codex-cli:native-default" not in ids, "the usual model is its own choice"
+    from workers_projects_runtime.experts import _release
+    for item in items.values():
+        # Newest first within each AI; a model named without a version comes after the versioned ones.
+        releases = [_release(GLASSHIVE_MODELS[model["id"]].native_model) for model in item["models"]]
+        assert releases == sorted(releases, reverse=True), item["profile"]
+    assert _release("gpt-6.2-sol") > _release("gpt-6.1-sol") > _release("gpt-6-sol") > _release("gpt-5.6-terra") > _release("gpt-5.4")
+    assert _release("claude-opus-5-5") > _release("claude-opus-5") > _release("opus") == ()
     if "grok-build" in items:
         assert items["grok-build"]["models"] == [], "Grok runs the model chosen for it in Connections"
 

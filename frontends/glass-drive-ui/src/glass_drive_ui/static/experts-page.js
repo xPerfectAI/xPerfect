@@ -72,6 +72,15 @@ export function teamRows(options, spec) {
   });
 }
 
+/** An AI whose tool is not on this computer and that has no connected account: the page says so, with the way to
+ *  connect it. Unknown (no data yet) is never shown as missing. */
+export function notSetUp(profile, data) {
+  const option = (data?.new_workspace_options || []).find(o => o.profile === profile);
+  const providers = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] }[profile] || [];
+  const connected = (data?.provider_accounts || []).some(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()));
+  return Boolean(data) && option?.host_cli_installed === false && !connected;
+}
+
 /** The Expert's settings as the runtime saves them, from what the page shows. */
 export function readTeam(state) {
   const work = state.work.filter(Boolean);
@@ -99,7 +108,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
   form.append(strip, unsaved, status, body); root.append(copy, form);
 
   let experts = []; let current = null; let spec = null; let options = null; let speeds = {}; let library = [];
-  let state = null; let dirty = false; let token = 0; let pictureChange = null; let pictureUrl = ''; let accountsOpen = false; const openAis = new Set();
+  let state = null; let dirty = false; let token = 0; let pictureChange = null; let pictureUrl = ''; let accountsOpen = false; const openAis = new Set(); let lastGridControl = '';
   const say = text => { status.textContent = text || ''; };
 
   async function loadList() {
@@ -251,7 +260,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     };
     remove.onclick = () => { pictureChange = { remove: true }; input.value = ''; pictureUrl = ''; changed(); renderPicture(); };
     const pictureButtons = node('div', 'experts-picture-buttons'); pictureButtons.append(choose, remove, input);
-    picture.append(face, pictureButtons, help('Teams shows it as the app icon. Kept on this computer, not in its versions.'));
+    picture.append(face, pictureButtons);
     renderPicture();
     const words = node('div', 'experts-words');
     const name = node('input'); name.type = 'text'; name.required = true; name.maxLength = 160; name.value = state.name; name.placeholder = 'For example: Research partner';
@@ -262,7 +271,8 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     // The section's title asks the question; its box answers it (as "What's the Job?" on Run project).
     const does = node('label', 'project-field'); does.append(node('span', 'sr-only', 'What does this expert do?'), description);
     words.append(does, field('Expert name', name));
-    identity.append(picture, words); one.box.append(identity);
+    const pictureLine = help('Teams shows it as the app icon. Kept on this computer, not in its versions.'); pictureLine.classList.add('experts-picture-line');
+    identity.append(picture, words, pictureLine); one.box.append(identity);
 
     // 2. Identity instructions: one box that grows with its words; it never scrolls on its own.
     const two = section('identity', 'Identity Instructions');
@@ -307,7 +317,12 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const table = node('div', 'experts-team');
     const below = node('div', 'experts-team-below');
     four.box.append(table, below);
-    renderTeam = () => { renderTable(table); renderBelow(below); };
+    renderTeam = () => {
+      // A choice rebuilds the table; the control that had focus keeps it.
+      const focused = four.box.contains(document.activeElement) ? document.activeElement.getAttribute('aria-label') : '';
+      renderTable(table); renderBelow(below);
+      if (focused) [...four.box.querySelectorAll('[aria-label]')].find(el => el.getAttribute('aria-label') === focused)?.focus();
+    };
     renderTeam();
 
     // 5. Ask me first, as it is.
@@ -381,14 +396,14 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const sandboxed = state.place === 'sandboxed';
     const grid = node('table', 'experts-team-table');
     const head = node('thead'); const headRow = node('tr');
-    for (const [text, cls] of [['AI and model', 'experts-col-model'], ['Talks to people', ''], ['Coordinates', ''], ['Workers', '']]) {
-      const th = node('th', cls, text); th.scope = 'col'; headRow.append(th);
+    // Each role says once, in plain words, what it is.
+    for (const [text, line, cls] of [['AI and model', '', 'experts-col-model'], ['Talks to people', 'Answers at once', ''],
+      ['Coordinates', 'Plans and hands out the work', ''], ['Workers', 'Do the work, several at once', '']]) {
+      const th = node('th', cls, text); th.scope = 'col'; if (line) th.append(node('small', 'experts-col-line', line)); headRow.append(th);
     }
     head.append(headRow); grid.append(head);
     const talkName = nextId('experts-talk'); const coordinateName = nextId('experts-coordinate');
     const several = state.work.length > 1;
-    const installed = Object.fromEntries((getData()?.new_workspace_options || []).map(o => [o.profile, o.host_cli_installed]));
-    const ready = getData()?.provider_accounts || [];
     // The three choices where one model meets the three roles.
     const cells = (ai, line) => {
       const unavailable = line.status === 'unavailable';
@@ -451,6 +466,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       th.append(who, node('small', 'experts-ai-usual', usualName ? `Its usual model · ${usualName}` : 'Its usual model'));
       if (ai.models.length && !inUse) {
         const more = node('button', 'experts-more'); more.type = 'button'; more.setAttribute('aria-expanded', String(open));
+        more.setAttribute('aria-label', `${ai.name}: ${open ? 'fewer' : 'more'} models`);
         more.textContent = open ? 'Fewer models' : `${ai.models.length} more models`;
         more.onclick = () => { if (openAis.has(ai.profile)) openAis.delete(ai.profile); else openAis.add(ai.profile); renderTeam(); };
         th.append(more);
@@ -464,10 +480,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
           tr.append(label, ...cells(ai, line)); group.append(tr);
         }
       }
-      // An AI whose tool is not on this computer and that has no connected account says so, with the way to connect.
-      const providers = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] }[ai.profile] || [];
-      const connected = ready.some(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()));
-      if (installed[ai.profile] === false && !connected) {
+      if (notSetUp(ai.profile, getData())) {
         const tr = node('tr', 'experts-team-missing'); const td = node('td'); td.colSpan = 4;
         const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';
         td.append(node('span', '', `${ai.name} is not set up on this computer yet.`), link); tr.append(td); group.append(tr);
@@ -477,7 +490,43 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const scroller = node('div', 'experts-team-fit'); scroller.append(grid);
     table.replaceChildren(scroller);
     if (!state.offered) table.append(help('The list of models is unavailable right now. Your saved choices are kept; reload to try again.'));
-    table.append(help('Time to a finished reply, measured on this computer. Workers run in parallel on the job.'));
+    table.append(help('Times are to a finished reply, measured on this computer.'));
+    gridKeys(grid);
+  }
+
+  /** The table works as one control: one stop for Tab, arrows move between choices, Space or Enter picks; a click
+   *  anywhere in a cell picks that cell's choice. */
+  function gridKeys(grid) {
+    const rows = [...grid.querySelectorAll('tbody tr')].filter(tr => tr.querySelector('input, button'));
+    const controls = tr => [...tr.querySelectorAll('input:not(:disabled), button:not(:disabled)')];
+    const all = rows.flatMap(controls);
+    let active = all.find(c => c.getAttribute('aria-label') === lastGridControl) || all.find(c => c.checked) || all[0];
+    const rove = next => { for (const c of all) c.tabIndex = c === next ? 0 : -1; active = next; lastGridControl = next?.getAttribute('aria-label') || ''; };
+    rove(active);
+    grid.addEventListener('focusin', event => { if (all.includes(event.target)) rove(event.target); });
+    grid.addEventListener('click', event => {
+      const cell = event.target.closest('td'); if (!cell || event.target.closest('input, button, a')) return;
+      cell.querySelector('input:not(:disabled)')?.click();
+    });
+    grid.addEventListener('keydown', event => {
+      const control = event.target; const tr = control.closest('tr'); const r = rows.indexOf(tr); if (r < 0 || !all.includes(control)) return;
+      const list = controls(tr); const i = list.indexOf(control);
+      const column = [...tr.children].indexOf(control.closest('th, td'));
+      let next = null;
+      if (event.key === 'ArrowRight') next = list[i + 1];
+      else if (event.key === 'ArrowLeft') next = list[i - 1];
+      else if (event.key === 'Home') next = list[0];
+      else if (event.key === 'End') next = list.at(-1);
+      else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        for (let k = r + step; k >= 0 && k < rows.length && !next; k += step) {
+          const there = controls(rows[k]);
+          next = there.find(c => [...rows[k].children].indexOf(c.closest('th, td')) === column) || null;
+        }
+      } else if (event.key === 'Enter' && control.matches('input')) { event.preventDefault(); control.click(); return; }
+      else return;
+      event.preventDefault(); if (next) next.focus();
+    });
   }
 
   // Under the table: how quickly it replies, and the accounts each role signs in with.

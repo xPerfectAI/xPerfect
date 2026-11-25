@@ -481,3 +481,48 @@ def test_the_owners_card_shows_the_words_a_held_job_would_send():
     # On Always ask the hand-off's words are part of what the owner approves: they are on the card.
     source = (STATIC / 'experts.js').read_text()
     assert "if (item.kind === 'job' && item.payload.tell) card.append(node('p', 'needs-you-what', `Will tell the person: ${item.payload.tell}`));" in source
+
+
+def test_an_ai_not_set_up_on_this_computer_says_so_with_the_way_to_connect_it():
+    page = (STATIC / 'experts-page.js').read_text()
+    helper = re.search(r"export function notSetUp\(profile, data\) \{.*?\n\}\n", page, re.S)
+    assert helper, 'notSetUp'
+    run_node("import assert from 'node:assert/strict';\n" + helper.group(0).replace('export ', '') +
+             "const data = (installed, accounts = []) => ({new_workspace_options: [{profile: 'codex-cli', host_cli_installed: installed}], provider_accounts: accounts});\n"
+             "assert.equal(notSetUp('codex-cli', data(false)), true, 'no tool here and no account: say so');\n"
+             "assert.equal(notSetUp('codex-cli', data(true)), false, 'its tool is on this computer');\n"
+             "assert.equal(notSetUp('codex-cli', data(false, [{provider: 'openai', status: 'ready'}])), false, 'a connected account is enough');\n"
+             "assert.equal(notSetUp('codex-cli', data(false, [{provider: 'openai', status: 'error'}])), true, 'an account that is not ready is not enough');\n"
+             "assert.equal(notSetUp('codex-cli', data(null)), false, 'unknown is never shown as missing');\n"
+             "assert.equal(notSetUp('codex-cli', null), false, 'before the page has its data');\n")
+    # The line names the AI and its button goes where AIs are connected; nothing is hidden or left dead.
+    assert "td.append(node('span', '', `${ai.name} is not set up on this computer yet.`), link)" in page
+    assert "const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';" in page
+
+
+def test_unsaved_changes_are_kept_until_saved_or_discarded_and_asked_about_in_the_page():
+    page = (STATIC / 'experts-page.js').read_text()
+    assert 'confirm(' not in page and 'alert(' not in page, 'no browser dialog'
+    # Choosing another expert with changes asks in the page: keep editing, or discard and go.
+    assert "unsaved.replaceChildren(node('span', '', `Your changes to ${label} are not saved.`));" in page
+    assert "'Keep editing'" in page and "if (dirty && !force) { askBeforeLeaving(arg); return; }" in page
+    # Kept in this tab, per owner and expert, without the install's model list; a reload brings them back.
+    assert "return owner ? `xperfect.expert-draft:${owner}:${id}` : '';" in page
+    assert "const { offered, ...kept } = state;" in page
+    assert "Your unsaved changes are back. " in page
+    # Saving or discarding forgets them.
+    assert page.count('dropDraft()') >= 3
+
+
+def test_the_ai_team_table_says_what_each_role_is_and_works_as_one_control():
+    page = (STATIC / 'experts-page.js').read_text()
+    for words in ("['Talks to people', 'Answers at once', '']", "['Coordinates', 'Plans and hands out the work', '']",
+                  "['Workers', 'Do the work, several at once', '']"):
+        assert words in page, words
+    # A click anywhere in a cell picks its choice; arrows move through the table; one Tab stop.
+    assert "cell.querySelector('input:not(:disabled)')?.click();" in page
+    assert "for (const c of all) c.tabIndex = c === next ? 0 : -1;" in page
+    for key in ('ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'):
+        assert f"'{key}'" in page, key
+    # A choice rebuilds the table without losing keyboard focus.
+    assert "if (focused) [...four.box.querySelectorAll('[aria-label]')].find(el => el.getAttribute('aria-label') === focused)?.focus();" in page

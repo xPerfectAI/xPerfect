@@ -90,6 +90,17 @@ class ExpertRole(StrictModel):
     model: str = Field(default="", max_length=200)
 
 
+def _release(native_model: str) -> tuple[int, ...]:
+    """A model's release from its own name ("gpt-6.2-sol" → (6, 2); "claude-opus-5-5" → (5, 5)); () when unnamed."""
+    digits: list[int] = []
+    for part in native_model.replace(".", "-").split("-"):
+        if part.isdigit():
+            digits.append(int(part))
+        elif digits:
+            break
+    return tuple(digits)
+
+
 def worker_profile(entry: str) -> str:
     """The AI of one allowed Worker: an AI on its usual model ("codex-cli"), or one exact model of it
     ("codex-cli:gpt-6.2-sol")."""
@@ -1296,6 +1307,9 @@ class ExpertService:
                 continue
             models = [model for model in harness.get("models", [])
                       if profile != "grok-build" and model.get("id") in GLASSHIVE_MODELS]
+            # Newest first within each AI (the catalog's own order carries no meaning); a model named without a
+            # version follows the versioned ones, in the catalog's order.
+            models.sort(key=lambda model: _release(GLASSHIVE_MODELS[model["id"]].native_model), reverse=True)
             try:
                 usual = configured_coordinator(self.service, self.coordinator.provider, tenant, owner, profile).model
             except Exception:  # an AI without a usable configured model still lists its exact ones
