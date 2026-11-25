@@ -625,8 +625,7 @@ class ExpertService:
                 routes.append(route.model_copy(update={"id": entry, "bootstrap_bundle": bundle, **placement, **exact}))
         instructions = spec.instructions.strip()
         # Said to the coordinator, who still decides: the owner's preferred Worker, by its route id.
-        preferred = (f"\n\nThe owner's preferred helper for this Expert is the route `{spec.team.preferred}`. "
-                     "Use it for helper work unless another configured route clearly serves the job better."
+        preferred = ("\n\n" + _prompt("expert-job-preferred.md").strip().replace("{route}", spec.team.preferred)
                      if spec.team.preferred else "")
         return config.model_copy(update={
             "routes": routes, "expert": binding,

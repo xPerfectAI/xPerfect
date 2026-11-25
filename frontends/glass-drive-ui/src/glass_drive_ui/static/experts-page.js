@@ -163,13 +163,14 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     draftTimer = setTimeout(() => {
       const key = draftKey(shownId()); if (!key || !state || !dirty) return;
       const { offered, ...kept } = state;
-      try { sessionStorage.setItem(key, JSON.stringify({ base: current?.template_id || '', state: kept })); } catch { /* The page itself still holds the changes. */ }
+      const picture = pictureChange ? { change: pictureChange, url: pictureUrl } : null;
+      try { sessionStorage.setItem(key, JSON.stringify({ base: current?.template_id || '', state: kept, picture })); } catch { /* The page itself still holds the changes. */ }
     }, 250);
   }
   function dropDraft(id = shownId()) { clearTimeout(draftTimer); const key = draftKey(id); try { if (key) sessionStorage.removeItem(key); } catch { /* Nothing kept. */ } }
   function readDraft(id) {
     const key = draftKey(id); if (!key) return null;
-    try { const kept = JSON.parse(sessionStorage.getItem(key) || 'null'); return kept && kept.base === (id === 'new' ? '' : id) ? kept.state : null; } catch { return null; }
+    try { const kept = JSON.parse(sessionStorage.getItem(key) || 'null'); return kept && kept.base === (id === 'new' ? '' : id) ? kept : null; } catch { return null; }
   }
   /** One line in the page, never a browser dialog: keep editing, or discard and go where you asked. */
   function askBeforeLeaving(next) {
@@ -216,14 +217,15 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     };
     const kept = readDraft(shownId());
     if (kept) {
-      Object.assign(state, kept); dirty = true;
+      Object.assign(state, kept.state); dirty = true;
+      if (kept.picture?.change) pictureChange = kept.picture.change;
       const back = node('span', '', 'Your unsaved changes are back. ');
       const discard = node('button', 'quiet-button compact-button', 'Discard them'); discard.type = 'button';
       discard.onclick = () => { dropDraft(); dirty = false; void show(shownId(), { force: true }); };
       status.replaceChildren(back, discard);
     }
-    pictureUrl = current ? pictures.get(current.lineage_id) || '' : '';
-    if (current && !pictureUrl) request('/api/experts/' + encodeURIComponent(current.template_id) + '/picture').then(r => {
+    pictureUrl = kept?.picture?.change ? (kept.picture.url || '') : current ? pictures.get(current.lineage_id) || '' : '';
+    if (current && !pictureUrl && !pictureChange) request('/api/experts/' + encodeURIComponent(current.template_id) + '/picture').then(r => {
       if (mine === token && typeof r?.picture === 'string' && r.picture.startsWith('data:image/png;base64,') && !pictureChange) { pictureUrl = r.picture; renderPicture(); }
     }).catch(() => {});
     pin(shownId()); renderStrip(); render();
@@ -471,7 +473,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       th.append(who, node('small', 'experts-ai-usual', usualName ? `Its usual model · ${usualName}` : 'Its usual model'));
       if (ai.models.length && !inUse) {
         const more = node('button', 'experts-more'); more.type = 'button'; more.setAttribute('aria-expanded', String(open));
-        more.setAttribute('aria-label', `${ai.name}: ${open ? 'fewer' : 'more'} models`);
+        more.setAttribute('aria-label', `${ai.name}: its other models`);
         more.textContent = open ? 'Fewer models' : `${ai.models.length} more models`;
         more.onclick = () => { if (openAis.has(ai.profile)) openAis.delete(ai.profile); else openAis.add(ai.profile); renderTeam(); };
         th.append(more);
