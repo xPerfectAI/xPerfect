@@ -19,6 +19,7 @@ const CLOCK = '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>';
 const FIRST_BUTTONS = 12;
 const PAGE = 30;
 const LOOK_EVERY_MS = 20000;
+const LOOK_PAGES = 10;
 
 export function eventLabel(type) {
   const value = String(type || 'workspace.activity');
@@ -73,10 +74,33 @@ export function personWords(item) {
   return item.person?.name || 'Someone';
 }
 
+/** The quiet look's read: from the top, page after page, until a page holds a line already shown (any of them: a
+ *  filter can drop the top one), or after `pages` pages. */
+export async function readNewer(read, known, pages = LOOK_PAGES) {
+  const items = []; let cursor = ''; let subjects = null;
+  for (let count = 0; count < pages; count += 1) {
+    const page = await read(cursor);
+    if (!count) subjects = page.subjects || null;
+    items.push(...(page.items || [])); cursor = page.next_cursor || '';
+    if (!cursor || (page.items || []).some(item => known.has(item.line_id))) break;
+  }
+  return { items, subjects, cursor, met: items.some(item => known.has(item.line_id)) };
+}
+
+/** What that read adds. Down to a shown line: the lines above it go on top, and Show more goes on where it was.
+ *  Otherwise (more arrived than it read, or nothing was shown) the lines read start the list again with their own
+ *  Show more, so no line is left out of reach. */
+export function newerLines(found, known) {
+  if (!found.met) return { newer: found.items, restart: { items: found.items, cursor: found.cursor } };
+  const newer = [];
+  for (const item of found.items) { if (known.has(item.line_id)) break; newer.push(item); }
+  return { newer, restart: null };
+}
+
 export function initActivityPage({ mount, request = libraryRequest, view = null, now = () => new Date() } = {}) {
   if (!mount) return null;
   const state = { who: new Set(), time: 'all', statuses: new Set(), q: '', items: [], cursor: '', subjects: null,
-                  showAll: false, open: new Set(), loading: null, generation: 0, waiting: [] };
+                  showAll: false, open: new Set(), loading: null, generation: 0, waiting: [], restart: null, addressed: null };
   const pictures = new Map();
   let brand = {};
   loadBrandAssets().then(value => { brand = value || {}; }).catch(() => {});
@@ -98,9 +122,11 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   filters.append(whoRow, timeRow, statusRow, searchRow);
   const fresh = node('button', 'activity-new'); fresh.type = 'button'; fresh.hidden = true;
   const list = node('div', 'activity-lines');
+  // A line opened by its own address that is not on the loaded page: shown above the list until the list reaches it.
+  const addressed = node('div', 'activity-lines activity-addressed'); addressed.hidden = true;
   const empty = node('div', 'activity-empty'); empty.hidden = true; empty.setAttribute('role', 'status');
   const more = node('button', 'secondary-button activity-more', 'Show more'); more.type = 'button'; more.hidden = true;
-  mount.replaceChildren(filters, fresh, list, empty, more);
+  mount.replaceChildren(filters, fresh, addressed, list, empty, more);
 
   const chip = (label, pressed, onClick, face = null, key = label) => {
     const button = node('button', 'activity-chip'); button.type = 'button'; button.dataset.key = key;
@@ -176,7 +202,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   async function reload() {
     const generation = ++state.generation;
     drawFilters();
-    fresh.hidden = true; state.waiting = [];
+    fresh.hidden = true; state.waiting = []; state.restart = null; state.addressed = null;
     if (!state.items.length) { empty.hidden = false; empty.replaceChildren(node('p', '', 'Loading…')); }
     try {
       const page = await read();
@@ -187,18 +213,20 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     } catch {
       if (generation !== state.generation) return;
       state.items = []; state.cursor = '';
-      list.replaceChildren(); more.hidden = true;
+      list.replaceChildren(); addressed.replaceChildren(); addressed.hidden = true; more.hidden = true;
       empty.hidden = false; empty.replaceChildren(node('p', '', 'Activity is temporarily unavailable—refresh to retry'));
     }
   }
   more.addEventListener('click', async () => {
     if (!state.cursor) return;
+    const generation = state.generation;
     more.disabled = true;
     try {
       const page = await read(state.cursor);
+      if (generation !== state.generation) return;  // the list changed meanwhile (other filters): this page was of the old one
       state.items = [...state.items, ...(page.items || [])]; state.cursor = page.next_cursor || '';
       drawLines();
-    } catch { more.textContent = 'Could not load more—try again'; } finally { more.disabled = false; }
+    } catch { if (generation === state.generation) more.textContent = 'Could not load more—try again'; } finally { more.disabled = false; }
   });
 
   // ---------------------------------------------------------------- lines
@@ -241,6 +269,9 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     return line;
   }
   function drawLines() {
+    if (state.addressed && state.items.some(item => item.line_id === state.addressed.line_id)) state.addressed = null;
+    addressed.hidden = !state.addressed;
+    addressed.replaceChildren(...(state.addressed ? [node('h3', 'activity-day', dayLabel(state.addressed.at, now())), lineFor(state.addressed)] : []));
     const parts = []; let day = '';
     for (const item of state.items) {
       const label = dayLabel(item.at, now());
@@ -324,32 +355,45 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   function setAddress(lineId) {
     try { history.replaceState(history.state, '', lineId ? '#activity/' + lineId : '#activity'); } catch { /* an address it cannot write changes nothing */ }
   }
-  function openFromAddress() {
+  let addressing = '';
+  async function openFromAddress() {
     const match = /^#activity\/([A-Za-z0-9_-]+)$/.exec(location.hash || '');
     if (!match || state.open.has(match[1])) return;
     const line = list.querySelector(`[data-line="${match[1]}"]`);
-    if (line) { line.querySelector('.activity-line-main')?.click(); line.scrollIntoView({ block: 'center' }); }
+    if (line) { line.querySelector('.activity-line-main')?.click(); line.scrollIntoView({ block: 'center' }); return; }
+    // Not on the loaded page (an older line): its own read finds it, once, and it opens above the list.
+    if (addressing === match[1]) return;
+    addressing = match[1]; const generation = state.generation;
+    try {
+      const detail = await request('/api/activity/lines/' + encodeURIComponent(match[1]));
+      if (generation !== state.generation || location.hash !== match[0] || !detail?.line) return;
+      state.addressed = detail.line; state.open.add(match[1]); drawLines();
+      addressed.querySelector('.activity-line')?.scrollIntoView({ block: 'center' });
+    } catch { /* not found, or not this owner's: the address opens nothing */ } finally { addressing = ''; }
   }
 
   // ---------------------------------------------------------------- newer lines, quietly
   const atTop = () => list.getBoundingClientRect().top >= -8;
-  function addNewer(items) {
-    state.items = [...items, ...state.items.filter(item => !items.some(n => n.line_id === item.line_id))];
-    state.waiting = []; fresh.hidden = true; drawLines();
+  function addNewer(items, restart = null) {
+    if (restart) { state.generation += 1; state.items = [...restart.items]; state.cursor = restart.cursor; }
+    else state.items = [...items, ...state.items.filter(item => !items.some(n => n.line_id === item.line_id))];
+    state.waiting = []; state.restart = null; fresh.hidden = true; drawLines();
   }
-  fresh.addEventListener('click', () => { addNewer(state.waiting); fresh.classList.remove('is-floating'); list.scrollIntoView({ block: 'start' }); });
+  fresh.addEventListener('click', () => { addNewer(state.waiting, state.restart); fresh.classList.remove('is-floating'); list.scrollIntoView({ block: 'start' }); });
   // While he reads further down, the line floats at the top of the window, so he sees it without losing his place.
   const float = () => { if (!fresh.hidden) fresh.classList.toggle('is-floating', list.getBoundingClientRect().top < 12); };
   window.addEventListener('scroll', float, { passive: true });
   async function look() {
     if (document.visibilityState !== 'visible' || (view && view.hidden) || state.loading) return;
     const generation = state.generation;
-    state.loading = read().catch(() => null);
-    const page = await state.loading; state.loading = null;
-    if (!page || generation !== state.generation) return;
     const known = new Map(state.items.map(item => [item.line_id, item]));
+    // Another list meanwhile (other filters): its pages are not read on for this one.
+    const current = cursor => { if (generation !== state.generation) throw new Error('another list'); return read(cursor); };
+    state.loading = readNewer(current, known).catch(() => null);
+    const found = await state.loading; state.loading = null;
+    if (!found || generation !== state.generation) return;
     // What he is reading never moves: a known line only changes its status in place.
-    for (const item of page.items || []) {
+    for (const item of found.items) {
       const old = known.get(item.line_id);
       if (old && old.status !== item.status) {
         old.status = item.status; if (item.review_id) old.review_id = item.review_id; else delete old.review_id;
@@ -359,13 +403,11 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
         if (had) fresher.querySelector('.activity-line-main')?.focus();
       }
     }
-    const top = state.items[0];
-    const newer = [];
-    for (const item of page.items || []) { if (top && item.line_id === top.line_id) break; if (!known.has(item.line_id)) newer.push(item); }
+    const { newer, restart } = newerLines(found, known);
     if (!newer.length) return;
-    if (page.subjects) { state.subjects = page.subjects; drawFilters(); }
-    if (atTop()) { addNewer(newer); return; }
-    state.waiting = newer; fresh.hidden = false; fresh.textContent = `${newer.length} new`; float();
+    if (found.subjects) { state.subjects = found.subjects; drawFilters(); }
+    if (atTop()) { addNewer(newer, restart); return; }
+    state.waiting = newer; state.restart = restart; fresh.hidden = false; fresh.textContent = `${newer.length} new`; float();
   }
   const timer = setInterval(look, LOOK_EVERY_MS);
 
