@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/xPerfectAI/xPerfect/security/advisories/new
+    about: Report it privately. Do not put exploit details in a public issue.
+  - name: Read the documentation
+    url: https://github.com/xPerfectAI/xPerfect#documentation
+    about: The quickstart, user guide and capability guide answer many setup questions.

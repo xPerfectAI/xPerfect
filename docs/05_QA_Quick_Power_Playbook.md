@@ -1,6 +1,6 @@
 # xPerfect: Quick Power QA Playbook
 
-Use this playbook to rapidly test whether xPerfect is behaving like a real powerful workstation-sandbox runtime instead of a toy demo.
+Use this playbook to check that xPerfect works end to end as a workstation and sandbox runtime on real tasks.
 
 Follow the [batch delivery and QA rule](00_Key_Principles.md#7-think-and-plan-then-complete-the-work).
 Select affected cases under the agreed QA scope; this catalog is not an automatic full-suite gate.
@@ -310,7 +310,7 @@ running install.
 **Observed on 25 November 2026 (the Experts page).** In the real page of a test install, as a user: a new
 expert made on the Experts page with a picture, identity instructions, a Library note chosen through Run
 project's chooser and two Workers (Claude's usual model and Claude Sonnet, Sonnet starred); saved, reloaded,
-edited and saved again (version 2); its picture on Run project's card; Edit and "+" on Run project opening the
+edited and saved again (version 2); its picture on Run Project's card; Edit and "+" on Run Project opening the
 page; one real message in its Chat; Ask me first on Always ask from the page (the request under Needs you,
 Approve releasing exactly the shown reply); a Codex model chosen to coordinate and an account chosen, saved and
 reloaded; Sandboxed forcing Claude; unsaved changes kept across a reload; the keyboard over the whole form; one
@@ -326,7 +326,7 @@ on a connected Codex account, a sandboxed job; the not-set-up line is covered by
 
 | Path | User check | Expected result |
 |---|---|---|
-| New expert | Experts → New expert (or Run project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run project's card shows its picture. |
+| New expert | Experts → New expert (or Run Project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run Project's card shows its picture. |
 | Experts page fits | Open Experts at 1280×720, 1440×900 and a phone width, in both themes. | One scroll for the whole page: nothing inside scrolls on its own, nothing scrolls sideways; every control readable in both themes. |
 | Every model the install has | Experts → AI Team; open each AI's models. | Each AI is one line for its usual model; its other models open under it, newest first, all of the install's catalog for that AI (Grok: its usual model only). A model saved exactly stays chosen even if the list no longer names it. |
 | Preferred Worker | Tick two Workers, one of them an exact model; star it; ask for three small helper jobs. | Each job's coordinator is told the preferred route; report how many of the three helpers ran on the starred model, from each run's recorded model (the coordinator still decides). |
@@ -399,7 +399,7 @@ real data (none on that install at the time; covered by the deterministic tests)
 | Who | Choose two Experts and a saved Worker. | Only their lines; the chosen buttons carry the accent ring and a check; All clears them. |
 | When, words, status | Choose Today, type words from a message, choose Done. | Only matching lines, under day headings. |
 | Status | A message whose job finished; a reply replaced by the job's own message; a reply that could not be sent. | Done; Done, not Stopped; Failed. |
-| Trail | Open a line. | It opens in place as a story: the message, the job with Open the job, the Worker and its model, what was sent back; one Details line per run; a reload keeps it open. |
+| Trail | Open a line. | It opens in place with its recorded steps: the message, the job with Open the job, the Worker and its model, what was sent back; one Details line per run; a reload keeps it open. |
 | Waiting for you | Choose Waiting for you; press Decide on a line further down than three. | Needs you opens all its requests and that card is focused, in view. |
 | Needs you backlog | More than three requests wait. | The newest three, then Show all N; the tab counts all. With three or fewer, as before. |
 | Newer lines | Read further down; a new message arrives. | Within 20 seconds one N new line at the top of the window; nothing moves until it is pressed, then the new lines are on top. |

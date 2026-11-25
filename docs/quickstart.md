@@ -100,6 +100,23 @@ Removing a saved Library item does not remove the workspace's copy. See
 Follow the [schedule guide](../runtime_phase1/README.md#generic-worker-and-webhook-schedules) for the
 full setup, delivery check and eight useful examples, including Slack reminders, n8n, Make and your own app.
 
+### Let people message an expert
+
+In **Experts**, choose or create an expert, then **Channels → Add Teams**. Sign in on Microsoft's
+own page with the code shown (if the code runs out, **Connect** offers a new one). You become the
+first person allowed to message it; add the others under **People who may message it**. Press
+**Install in Teams**, add the app, and send it a first message in its own chat, named after the
+expert: the channel is ready once that message arrives. If Teams says **Permissions needed**, your
+Teams administrator must turn on **Upload custom apps** for you; the Channels window names the
+switch and offers a note to send.
+
+With **Ask me first** set to Always ask, every answer and every job the expert prepares for a
+person on a channel waits under **Needs you** until you approve it; your own Chat with it is never
+held. Three short messages go out without approval, each written with every tool off: a line
+telling the person it is checking with you; its reply after you reject a request; and, if you
+switch to Off while a request waits, a line saying it cannot do this now. **Activity** shows each message, who sent it and its status.
+[Experts on channels](10_Experts_and_Channels.md) has the full setup and its current limits.
+
 ### Manage experts and workspaces
 
 | You want to… | Do this |

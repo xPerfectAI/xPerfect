@@ -14,35 +14,47 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 > **Summary:** Activity shows one line for each message or run: which expert or Worker, on which channel, by whom, a short preview of what they asked, a plain status and the time. Big buttons narrow it by expert, Worker, time and status, and a search box finds words.
 >
-> **Example:** Choose two experts and Waiting for you: each line has Decide, which takes you to its request. Open a line to read its story in place: the message, the job, the Worker that did it and on which model, and what was sent back.
+> **Example:** Choose two experts and Waiting for you: each line has Decide, which takes you to its request. Open a line to see its recorded steps in place: the message arriving, the job, the Worker that did it and on which model, and what happened to each reply; Open chat shows the words.
 >
 > **Topics:** Activity, Experts, Work control
 
+![Activity with three experts, lines in several statuses and the filters above them.](docs/assets/screens/activity-filters.jpg)
+> **Image caption:** Activity in a staged synthetic example, 25 November 2026: Who, When and Status buttons, a search box and lines under Today.
+
+![A line opened in place: Maya Chen's message, the job with Open the job, and what was sent back.](docs/assets/screens/activity-line-opened.jpg)
+> **Image caption:** One line opened with its recorded steps; it comes from a real run in the same staged example.
+
 - **Benefit:** See at a glance who asked what, where and when, instead of rows of low-level events.
-- **Benefit:** Narrow a long history in one or two presses; xPerfect does the filtering and paging itself.
+- **Benefit:** Narrow even a long history in one or two presses.
 
 - **Added:** Who, When and Status buttons and a search box over the words, the person and the names. Lines under day headings, with Show more for older ones.
 - **Added:** Plain status words from what really happened: Waiting for you, Working, Answered, Done, Stopped, Failed. A message that started a job takes the job's state.
-- **Added:** A line opens in place as a story, with each run's own steps folded under Details, and keeps its own address. Newer lines wait in one "N new" line while you read further down, so nothing moves under you.
+- **Added:** A line opens in place to show its recorded steps, with each run's own engine steps folded under Details, and keeps its own address. Newer lines wait in one "N new" line while you read further down, so nothing moves under you.
 - **Added:** A read for the signed-in owner only, `POST /v1/activity/lines` and `GET /v1/activity/lines/{line}`; the preview is cut on the server and never logged. `GET /v1/activity` and the MCP tool `workspace_activity` are unchanged.
 - **Changed:** With more than three requests waiting, Needs you shows the newest three and one line Show all N that opens the rest in place, so Activity's own lines stay in reach. The count on the tab, the pop-up, each card and each decision are unchanged.
 - **Changed:** The old event rows are gone from the page; their words are kept under each line's Details.
 
 ## 2026-11-25 — An Experts page you can read at a glance
 
-> **Summary:** Set up an expert on its own page, in the same style as Run project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
+> **Summary:** Set up an expert on its own page, in the same style as Run Project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
 >
-> **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run project now shows the expert's own picture on its card.
+> **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run Project now shows the expert's own picture on its card.
 >
 > **Topics:** Experts, Models, Work control
 
-- **Benefit:** One page, one scroll: no pop-up with scroll bars inside each other, at any width and in both themes.
+![The Experts page with three saved experts and the Finance Director's setup.](docs/assets/screens/experts-page.jpg)
+> **Image caption:** The Experts page in a staged synthetic example, 25 November 2026.
+
+![Run Project's My experts, each card with its expert's own picture.](docs/assets/screens/run-project-my-experts.jpg)
+> **Image caption:** Run Project shows each saved expert's own picture, or the stack mark when it has none.
+
+- **Benefit:** The whole setup on one page, with one scroll.
 - **Benefit:** Choose any model your install has for each role, not one fixed list, and say which Worker you prefer.
 
-- **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run project's Edit and "+" open it. Knowledge and Skills use Run project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
+- **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run Project's Edit and "+" open it. Knowledge and Skills use Run Project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
 - **Added:** The AI team as one table: each AI is one line for its usual model, its other models (newest first, from the install's catalog) open under it, and the three roles are columns, each said in a few words. A click anywhere in a cell chooses it; the table works from the keyboard as one control. An AI that is not set up on this computer says so, with a Connect button.
 - **Added:** Workers by exact model, and a Preferred Worker. Each allowed Worker is an AI on its usual model or one exact model of Claude or Codex; the preferred one comes first and the job's coordinator is told. The coordinator's model can be chosen too. Experts saved before keep their setup and their routes exactly.
-- **Changed:** Run project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
+- **Changed:** Run Project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
 
 ## 2026-11-25 — Prepare work while the host is busy; keep a second account working
 
@@ -63,12 +75,18 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Topics:** Experts, Channels, Microsoft Teams, Work control, Reliability
 
+![The Finance Director's Channels window: Teams connected, with the people who may message it.](docs/assets/screens/teams-channel-card.jpg)
+> **Image caption:** The Teams card of a staged synthetic expert, 25 November 2026. Its Connected badge reflects a local stand-in for Microsoft's service.
+
+![Needs you with a request the expert raised itself: who asked, where, their words, its own reason and the reply that waits.](docs/assets/screens/needs-you-request.jpg)
+> **Image caption:** A request the expert raised itself on Always ask, with its own reason, in the same staged example.
+
 - **Benefit:** Reach an expert from a Teams personal chat. Only the people you list get an answer.
 - **Benefit:** Stay in control: see exactly what the expert would send or start, approve or reject it, and change its instructions for the next message.
 
 - **Added:** Experts people can talk to. Create and Edit hold the instructions, Knowledge and Skills from My Library, the AI team (who talks, who coordinates, who may work, with optional backups) and where it works. Every save is a new version. The speaking assistant reads the newest instructions at each turn; a running job keeps what it started with.
 - **Added:** A speaking assistant that never holds work. It answers short questions at once and hands anything bigger to a background coordinator, which runs Workers; the result is told once in the same conversation, also after a restart. New experts talk on Claude Haiku at low effort; Opus and Sonnet stay selectable, and the form shows each model's measured time.
-- **Added:** Ask me first, one setting: Always ask, Auto or Off. A request shows who asked, where, their words, the reason and exactly what would be sent or started. Approve releases exactly that; a changed or stopped request cannot be released by an old approval, and only a signed-in owner session decides. Requests wait under Needs you, with a count, a pop-up and an optional browser notification.
+- **Added:** Ask me first, one setting: Always ask, Auto or Off. A request shows who asked, where, their words, the reason and exactly what would be sent or started. Approve releases exactly that; a changed or stopped request cannot be released by an old approval, and only a signed-in owner session decides. Three short messages go out without approval, each written with every tool off: the line that the expert is checking with you, its reply after a Reject, and, if you switch to Off while a request waits, a line that it cannot do this now. Requests wait under Needs you, with a count, a pop-up and an optional browser notification.
 - **Added:** Channels, starting with Microsoft Teams personal chats, as an optional package beside core (`integrations/teams`). On a local install it uses Teams socket mode, so nothing on the computer is exposed. Each message is accepted once, every reply leaves through an outbox, and a send with no known outcome is shown as not confirmed and never resent by itself.
 - **Added:** Connect from the expert's Channels card, with Microsoft's sign-in code shown in the dialog. It reads Microsoft's custom-app report before creating anything, names the switch that blocks the app, offers a note for the administrator and checks again by itself. With a sign-in client configured, an administrator can add the app to the organisation's catalogue with one press.
 - **Added:** A durable Stop for a whole coordinator conversation (`POST /v1/coordinator/conversations/{id}/stop`). A finished Worker run wakes its conversation at once. Codex-format Skill folders load in Claude Code Workers.
@@ -79,7 +97,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Added:** Each person an expert serves gets their own job folder on this computer, made at their first job; the owner's own Chat has its own. The job's coordinator and its Workers on this computer work in it. With full access a job can still read other folders, so this keeps people's work apart by default; a sandboxed workspace is the wall.
 - **Added:** Each AI's own mark beside the AI choices, and channel marks of xPerfect's own; an install may show a brand's own mark from its `brand-assets` folder, beside the plain-text name. An expert's own picture becomes its Teams app's colour icon.
 
-- **Proven:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite fails only where the base release fails.
+- **Proven:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite shows no new failures against the base release.
 - **Not yet:** A deployed copy on a server, a second real person, files and group chats, Slack and approving from inside Teams. On this computer an expert's Workers have full access, so its instructions and Ask me first are behaviour, not a wall. Apart from this computer's own Claude sign-in, an account runs one Worker of its AI at a time. See [Experts on channels](docs/10_Experts_and_Channels.md) and the [QA playbook](docs/05_QA_Quick_Power_Playbook.md#11-experts-on-channels).
 
 ## 2026-10-25 — Keep your best experts. Stay in control.
@@ -90,7 +108,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Topics:** Experts, Work control, Connections, Deployment, Reliability
 
-![The current expert gallery with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
+![The expert gallery in October 2026, with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
 > **Image caption:** Expert gallery, captured 25 October 2026: five packaged AI Workers and Create.
 
 ![Choose an exact saved Finance Director version from the Versions dialog.](docs/assets/screens/expert-versions.jpg)

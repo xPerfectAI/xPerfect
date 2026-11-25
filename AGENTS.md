@@ -20,6 +20,7 @@ Keep core changes client-neutral; client-specific semantics and adapters belong 
 - Attribute project work to `AdrienBeyk` using the project’s public GitHub noreply identity.
   Do not add AI-tool authors, co-author trailers or generated-by credits to commits or PRs.
   Keep third-party license and copyright notices intact.
+  Outside contributors commit under their own identity, and nobody credits an AI tool as author or co-author.
 
 - Keep prompts and evidence public-safe. Never place credentials, private user data, raw exports,
   private paths, or owner-machine state in tracked fixtures, logs, docs, or reviewer handoffs.

@@ -29,6 +29,7 @@
 <span>05</span>Schedule work</a>
 <a href="#reuse">
 <span>06</span>Reuse your expert</a>
+<a class="secondary" href="#teams">Experts in Teams</a>
 <a href="#compare"><span>07</span>Compare the landscape</a>
 <a class="secondary" href="#proof">Current evidence</a>
 <a href="#help">Troubleshooting</a>
@@ -55,6 +56,7 @@
 <a href="#teach">04 · Files & skills</a>
 <a href="#schedule">05 · Schedule work</a>
 <a href="#reuse">06 · Reuse your expert</a>
+<a href="#teams">Experts in Teams</a>
 <a href="#compare">07 · Compare the landscape</a>
 <a href="#proof">Current limits</a>
 <a href="#help">Troubleshooting</a>
@@ -156,7 +158,7 @@
 <li><b>Check who's doing it and where.</b> Use a Ready Claude Code account on this host and a new <b>My own workspace</b>. Select <b>Run Project</b>; review included native abilities when asked.</li>
 <li><b>Open the actual report and editable calculations.</b> Watch shows progress, guidance and file actions. Inspect the result, then reload the same worker rather than starting over.</li>
 </ol>
-<figure><img src="assets/expert-team.jpg" alt="Actual five-profession expert picker with included knowledge and abilities" loading="lazy"><figcaption>Current professional starter gallery, captured 25 October 2026, including the Create card. The starter Skill route is Claude Code on the host.</figcaption></figure>
+<figure><img src="assets/expert-gallery.jpg" alt="Run Project's expert gallery: five starting professions, each with its artwork, and Create" loading="lazy"><figcaption>The professional starter gallery in Run Project, captured 25 November 2026, including the Create card. The starter Skill route is Claude Code on the host.</figcaption></figure>
 <div class="prompt"><span>USEFUL WORK, NOT A CONNECTIVITY TRICK</span><p>The Finance example asks for a board review, editable calculations, a variance bridge and a cash scenario. Its source includes an unexplained cash difference; a useful result must keep that uncertainty visible.</p></div>
 <figure><img src="assets/finance-delivery.jpg" alt="Actual Finance Director report and downloadable files in Watch" loading="lazy"><figcaption>Real native work with the public synthetic inputs, recorded 24 October. <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md#inspect-the-result">Inspect the sources and expected figures</a>.</figcaption></figure>
 </div>
@@ -171,11 +173,11 @@
 <ol class="steps">
 <li><b>Give it the relevant material.</b> Use Background Context for text/files when starting; an existing worker's <b>Library → Files</b> retains its ordinary workspace files.</li>
 <li><b>Reuse what already works.</b> Choose exact saved knowledge, Skills or bundles from <b>My Library</b>. <b>Added here</b> shows the selected material for this worker.</li>
-<li><b>Review native abilities for this worker.</b> A source link or saved Skill is not proof a plugin is installed. Use the native setup and actual-target review when asked; optional services retain their own accounts and permissions.</li>
+<li><b>Review native abilities for this worker.</b> A source link or saved Skill is not proof a plugin is installed. Review the abilities for this Worker when asked; optional services retain their own accounts and permissions.</li>
 <li><b>Inspect the delivered work.</b> Open/download the report and editable files. Use <b>Keep for reuse</b> on an exact captured result; use the separate current-file action when only present workspace bytes are available.</li>
 </ol>
-<p>Company onboarding material stays in your private selection; it does not become part of a public starter. A Library bundle is reusable material, not another type of worker or a new orchestration framework.</p>
-<details><summary>A small connectivity check before the professional example</summary><p>The earlier stock fixture checks native Skill loading and file transport. It is not the flagship professional demonstration.</p><p><a href="assets/SKILL.md" download>Download Skill</a> · <a href="assets/onboarding-proof.zip" download>ZIP</a> · <a href="assets/stock.csv" download>Data</a></p><p>Ask the worker to install the Skill through its harness's normal supported setup and use the supplied data. Confirm the actual output and reuse it; do not replace native tool behavior with a custom phrase router.</p></details>
+<p>Company onboarding material stays in your private selection; it does not become part of a public starter. A Library bundle groups saved material for reuse.</p>
+<details><summary>A small connectivity check before the professional example</summary><p>This optional example checks that a Worker can load a Skill and read a CSV file.</p><p><a href="assets/SKILL.md" download>Download Skill</a> · <a href="assets/onboarding-proof.zip" download>ZIP</a> · <a href="assets/stock.csv" download>Data</a></p><p>Ask the worker to install the Skill through its harness's normal supported setup and use the supplied data. Confirm the actual output and reuse it; do not replace native tool behavior with a custom phrase router.</p></details>
 <div class="note">The five <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md">professional examples</a> include public synthetic inputs and acceptance checks. Actual native runs, report/workbook downloads and retained same-worker work are recorded; they are not professional certification or a guarantee that every model answer is correct.</div>
 </section>
 <section id="schedule">
@@ -203,6 +205,14 @@
 <p>The client discovers the actual tools. Save the worker/workspace ID rather than inventing a new endpoint for each expert.</p>
 </article>
 </div>
+<article class="soft" id="teams">
+<h3>In Microsoft Teams</h3>
+<p>In <b>Experts</b>, choose an expert, then <b>Channels → Add Teams</b>. Sign in on Microsoft's own page with the code shown; you become the first person allowed to message it, and you add the others. Press <b>Install in Teams</b> and send it a first message in its own chat: the channel is ready once that message arrives. If Teams says <b>Permissions needed</b>, your Teams administrator must turn on <b>Upload custom apps</b> for you.</p>
+<p>People write to it in a Teams personal chat; it answers short questions at once, hands bigger work to Workers, and the result arrives once in the same chat.</p>
+<p>Set <b>Ask me first</b> to <b>Always ask</b> and every answer and every job it prepares for a person on a channel waits under <b>Needs you</b> until you approve it; your own Chat with it is never held. Three short messages go out without approval, each written with every tool off: a line telling the person it is checking with you; its reply after you reject a request; and, if you switch to Off while a request waits, a line saying it cannot do this now. <b>Activity</b> shows who asked what, on which channel and when. <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/10_Experts_and_Channels.md">Setup and current limits</a>.</p>
+</article>
+<figure><img src="assets/experts-page.jpg" alt="The Experts page with three saved experts and the Finance Director's setup" loading="lazy"><figcaption>The top of the Experts page: the row of saved experts, and what the Finance Director does. A staged synthetic example, 25 November 2026.</figcaption></figure>
+<figure><img src="assets/activity-filters.jpg" alt="Activity with three experts, lines in several statuses and the filters above them" loading="lazy"><figcaption>Activity: the filters, and lines in five statuses under Today. Same staged example.</figcaption></figure>
 <details>
 <summary>Manage experts and workspaces</summary>
 <ol class="steps">
@@ -221,7 +231,7 @@ Install this existing skill in your controlling client’s normal skill folder: 
 </details>
 <details>
 <summary>Build it into a product: MCP / API</summary>
-<p>Use the existing control plane: create a saved expert with <code>workspace_launch</code> and <code>favorite=true</code>, then find, message, copy, schedule or retrieve its files. Put ordinary files and native skill folders inside its workspace. Local Docker MCP uses the private bearer key; host stdio uses the current OS identity. Hosted clients use the service’s registered human sign-in.</p>
+<p>Use the existing control plane: create and pin a reusable Worker workspace with <code>workspace_launch</code> and <code>favorite=true</code>, then find, message, copy, schedule or retrieve its files. Put ordinary files and native skill folders inside its workspace. Local Docker MCP uses the private bearer key; host stdio uses the current OS identity. Hosted clients use the service’s registered human sign-in.</p>
 <div class="tool-grid">
 <code>workspace_list</code>
 <code>workspace_launch</code>
@@ -234,7 +244,7 @@ Install this existing skill in your controlling client’s normal skill folder: 
 </div>
 <p>The direct local API is separate from the UI: by default <code>127.0.0.1:8766</code>. Use its private API token in the Authorization header, never a URL. Docker packages keep that runtime API private; use their exposed authenticated MCP.</p>
 <p>
-A saved expert launch (<code>favorite=true</code>) works from a plain connected MCP client. Only a fresh one-off launch without <code>favorite</code> requires an integrated host’s trusted source identity. Use <code>reuse_existing_workspace=true</code> for the same expert by exact name. See the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/developer.md">API and client examples</a>.</p>
+A pinned launch (<code>favorite=true</code>) works from a plain connected MCP client. Only a fresh one-off launch without <code>favorite</code> requires an integrated host’s trusted source identity. Use <code>reuse_existing_workspace=true</code> for the same expert by exact name. See the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/developer.md">API and client examples</a>.</p>
 </details>
 </section>
 <!-- comparison:generated:start -->
@@ -257,10 +267,11 @@ A saved expert launch (<code>favorite=true</code>) works from a plain connected 
 <tr><td>Open results</td><td>Watch and Chat delivered exact authorized files. A saved native coordinator reply reopened its current workspace file after upgrade without rerunning the model. Current workspace bytes and captured immutable results remain distinct.</td></tr>
 <tr><td>API and MCP</td><td>Fresh Codex/Claude clients executed their actual copied setup, discovered work and used the same records. HTTP/MCP create, copy, status, guidance, Library, results and refusal paths have scoped proof; native account sign-in is a separate connection.</td></tr>
 <tr><td>Native models</td><td>Actual Codex GPT6.1 Sol, Claude Opus5.5 and Grok4.7 native work is recorded, including real permission recovery and file delivery. Exact supported selections remain explicit. A native result does not establish Direct Grok API Chat or every API-key route.</td></tr>
+<tr><td>Experts in Teams</td><td>Recorded 24 November 2026. In one real organisation, with its owner as the only listed person: messages and replies in a Teams personal chat, a background job told once, and an Ask me first request decided in the page. A copy on a server and a second real person are not yet proven.</td></tr>
 <tr><td>Schedules and recovery</td><td>Real due work and signed webhook delivery retain separate evidence. Repeated held-run retries now wait without executing the held child; unrelated work can continue. Stop/Close and restart preserve their exact recorded state rather than claiming unfinished work succeeded.</td></tr>
 </tbody></table>
 <figure><img src="assets/finance-report.png" alt="First page of the actual synthetic Finance report, including its unresolved cash difference" loading="lazy"><figcaption>Actual downloaded report from the public synthetic Finance inputs, recorded 24 October. Review the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/workshop.md#inspect-the-result">expected figures and source material</a>, not merely the filename.</figcaption></figure>
-<p><b>Scoped acceptance:</b> an isolated trusted TLS/XFS/OIDC two-member path and one native Codex API-key setup-to-result path have recorded proof. Internet/cloud account onboarding, other native API-key providers, GPT-6.1 API access and Windows host startup remain unverified. See the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md">capability guide</a>.</p></div>
+<p><b>Scoped acceptance:</b> a test server with two users, secure sign-in and per-person storage limits, and one native Codex API-key path from setup to result, have recorded proof. Internet/cloud account onboarding, other native API-key providers, GPT-6.1 API access and Windows host startup remain unverified. See the <a href="https://github.com/xPerfectAI/xPerfect/blob/main/docs/capability-matrix.md">capability guide</a>.</p></div>
 <div class="note">Illustrations use synthetic material. Earlier screenshots or fixtures remain dated examples; no raw prompts, personal account data, customer material or runtime volumes are published.</div>
 </section>
 <section id="help">

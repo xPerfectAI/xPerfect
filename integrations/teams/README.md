@@ -7,8 +7,8 @@ routes. It never decides what a message means. Requirements and limits:
 
 ## How an owner connects it
 
-In xPerfect: **My experts → Manage → Channels → Add Teams → Connect**. Complete Microsoft's sign-in
-on Microsoft's page with the code shown. xPerfect then creates a Teams-managed bot with the pinned
+In xPerfect: **Experts** → choose the expert → **Channels → Add Teams**. Sign in on Microsoft's own
+page with the code shown (if the code runs out, **Connect** offers a new one). xPerfect then creates a Teams-managed bot with the pinned
 Teams developer CLI (`@microsoft/teams.cli` 3.1.0), keeps the app secret in a private file in its
 state folder, adds you as the first person who may write, and starts this package. Use **Install in
 Teams**, add the app, and send it a message in its own chat, named after the Expert. The channel is

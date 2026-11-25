@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define a separate, minimal, modern operator UI for xPerfect that does not alter the existing runtime UI and does not mix frontend concerns into xPerfect core runtime code.
+Define a separate, minimal operator UI for xPerfect that does not alter the existing runtime UI and does not mix frontend concerns into xPerfect core runtime code.
 
 ## Visual Thesis
 
@@ -1359,11 +1359,11 @@ updating a provider's display brand must not silently rename those accounts or c
 The **Experts** tab, right after Run Project, holds an Expert's whole setup on one page in Run
 project's style; **＋ Create** in My experts opens it blank and Manage's **Edit** opens it with that
 Expert. From the top: the picture and what it does, the name, identity instructions, Knowledge and
-Skills through Run project's chooser, the AI team as one table (each AI one line for its usual model,
+Skills through Run Project's chooser, the AI team as one table (each AI one line for its usual model,
 its other models under it; who talks, who coordinates, which Workers may work, with a Preferred one;
 accounts and backups folded under Accounts), Ask me first as one three-way choice with a one-line
 meaning, and where it works with one plain line about full access on this computer. The page is one
-scroll. Save makes a new version. Run project's cards show each Expert's own picture. Manage adds **Chat** (the owner's own conversation with the Expert) and
+scroll. Save makes a new version. Run Project's cards show each Expert's own picture. Manage adds **Chat** (the owner's own conversation with the Expert) and
 **Channels** (Add Teams, Connect with Microsoft's sign-in code shown in the dialog, people who may
 write, people waiting, Install and Test in Teams, Turn off). Activity shows **Needs you** first, with
 a count on the tab, a pop-up on any page and an optional browser notification. With more than three
@@ -1382,6 +1382,8 @@ name, never on a button. Whether a brand's terms allow that use is the owner's t
 
 Activity says who asked what, where and when, newest first, with **Needs you** and **Recent** on top as
 above. Each line is one thing that happened, never one low-level event:
+
+![Activity with three experts, lines in several statuses and the filters above them](assets/screens/activity-filters.jpg)
 
 - a message to an Expert, on a channel or in the owner's Chat: the Expert's picture (or the stack
   mark) and name, the channel with its mark, the person by name ("You" in the owner's own Chat,
@@ -1402,14 +1404,19 @@ several at once; the chosen ones carry the accent ring and a check), **When** (l
 or Worker's name. **Clear filters** resets them. xPerfect applies every filter and pages the list itself;
 **Show more** reads further back. Lines sit under day headings (Today, Yesterday, the date).
 
-A line opens **in place** to its trail, which reads as a story: the message, the request and its
-decision, the job (with **Open the job**), the Worker and its model, and what was sent back (sent;
-replaced by a newer message, so not sent; waiting to be sent; held until you decide; the channel did
-not confirm it arrived; not sent, with the runtime's reason). Each run's own engine steps fold under
-one **Details** line; nothing is dropped. The opened line has its own address (`#activity/<line>`), and
-**Open chat** or **Open workspace** stays on every line. While the tab is shown the page looks for newer
-lines every 20 seconds: they go on top when you are at the top, otherwise one **N new** line waits at
-the top of the window; nothing you are reading moves. One scroll for the whole page at any width.
+A line opens **in place** to its trail of recorded steps: when the message came, the request
+and its decision, the job (with **Open the job**), the Worker and its model, and what happened to each
+reply (sent; replaced by a newer message, so not sent; waiting to be sent; held until you decide; the
+channel did not confirm it arrived; not sent, with the runtime's reason). Each run's own engine steps
+fold under one **Details** line; nothing is dropped. The trail holds steps and outcomes, not the words
+of a reply: **Open chat** shows the conversation, and **Open chat** or **Open workspace** stays on every
+line. The opened line has its own address (`#activity/<line>`). While the tab is shown the page looks
+for newer lines every 20 seconds: they go on top when you are at the top, otherwise one **N new** line
+waits at the top of the window; nothing you are reading moves. One scroll for the whole page at any width.
+
+![A line opened in place: Maya Chen's message, the job with Open the job, and what was sent back](assets/screens/activity-line-opened.jpg)
+
+*A staged synthetic example on a local install, 25 November 2026; the opened line is a real run.*
 
 The page reads `POST /v1/activity/lines` (filters in the body, so a searched phrase never sits in an
 address) and `GET /v1/activity/lines/{line}` for a trail, for the signed-in owner only: signed links
