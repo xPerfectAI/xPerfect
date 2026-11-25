@@ -1,6 +1,6 @@
 /* The Experts page: an Expert's whole setup on one page, in Run project's style. Saving makes a new version. */
 import { libraryRequest, openLibraryPicker } from './personal-library.js?v=20261024polish1';
-import { AIS, ASK, DEFAULT_EXPERT, aiMark, expertSaved, openChannels, openExpertChat, squarePng } from './experts.js?v=20261125page1';
+import { AIS, ASK, DEFAULT_EXPERT, aiMark, expertSaved, openChannels, openExpertChat, squarePng } from './experts.js?v=20261125activity5';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const ICONS = {

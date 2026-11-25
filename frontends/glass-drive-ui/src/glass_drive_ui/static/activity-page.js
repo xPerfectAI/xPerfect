@@ -1,7 +1,7 @@
 /* Activity: one line per message or run — which Expert or Worker, when, where, by whom, what they asked — with
    big filter buttons, a time range, status and a search, all applied by xPerfect. A line opens in place to its trail. */
 import { libraryRequest } from './personal-library.js?v=20261024polish1';
-import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125page1';
+import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity5';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const STATUS = { waiting_for_you: 'Waiting for you', working: 'Working', answered: 'Answered', done: 'Done', stopped: 'Stopped', failed: 'Failed' };
@@ -140,6 +140,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
       chip('All', state.who.size === 0, () => { state.who.clear(); reload(); }),
       ...shown.map(([key, label, face]) => chip(label, state.who.has(key), () => { state.who.has(key) ? state.who.delete(key) : state.who.add(key); reload(); }, face)),
     );
+    whoChips.querySelectorAll('.activity-chip').forEach(button => button.classList.add('activity-chip-who'));
     if (buttons.length > FIRST_BUTTONS && !state.showAll) {
       const all = node('button', 'quiet-button', `Show all ${buttons.length}`); all.type = 'button';
       all.addEventListener('click', () => { state.showAll = true; drawFilters(); });
@@ -255,23 +256,28 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   }
 
   // ---------------------------------------------------------------- one line opened in place
+  const SENT = { reply: 'Reply', approved: 'Approved reply', checking: 'Note that the reply is being checked',
+    decision: 'Answer after your decision', handoff: 'Message about the job' };
+  const DID = { completed: 'done', failed: 'failed', cancelled: 'stopped', interrupted: 'stopped' };
   function stepWords(step, item) {
     const channel = CHANNELS[item.channel?.kind] || 'the channel';
     const ai = AI_NAMES[step.ai] || step.ai || '';
     switch (step.step) {
-      case 'received': return item.kind === 'run' ? 'Work asked' : item.person?.you ? `You wrote in ${channel}` : `Message from ${personWords(item)} on ${channel}`;
+      case 'received': return item.person?.you ? `You wrote in ${channel}` : `Message from ${personWords(item)} on ${channel}`;
+      case 'started': return `${step.by === 'schedule' ? 'Started by a schedule' : 'Started by you'}${ai ? ` on ${ai}` : ''}${step.model ? ` (${step.model})` : ''}`;
+      case 'finished': return { completed: 'Finished', failed: 'Failed', cancelled: 'Stopped' }[step.state] || 'Ended';
       case 'event': return eventLabel(step.event_type) + (ai ? ` · ${ai}` : '');
-      case 'run': return `${ai || 'Worker'}: ${step.labels.map(l => (l.count > 1 ? `${l.label} ×${l.count}` : l.label)).join(' · ')}`;
-      case 'scheduled': return 'Started by a schedule';
       case 'asked_you': return step.what === 'job' ? 'Asks you first: the job waits for you' : 'Asks you first: the reply waits for you';
       case 'decided': return { approved: 'You approved', rejected: 'You said no', withdrawn: 'The request was withdrawn' }[step.state] || 'Decided';
       case 'delivery': {
-        const what = step.what === 'handoff' ? 'Message about the job' : 'Reply';
-        return { sent: `${what} sent to ${channel}`, held: `${what} held until you decide`, pending: `${what} being sent`, sending: `${what} being sent`,
-          not_confirmed: `${channel} did not confirm it arrived`, failed: `${what} not delivered`, dropped: `${what} not sent` }[step.state] || what;
+        const what = SENT[step.what] || 'Message';
+        if (step.state === 'dropped') return step.reason ? `${what} not sent: ${step.reason.replace(/\.$/, '')}` : `${what} replaced by a newer message, so not sent`;
+        return { sent: `${what} sent to ${channel}`, pending: `${what} waiting to be sent to ${channel}`, sending: `${what} waiting to be sent to ${channel}`,
+          held: `${what} held until you decide`, not_confirmed: `${what}: ${channel} did not confirm it arrived`,
+          failed: `${what} could not be sent to ${channel}` }[step.state] || what;
       }
       case 'job': return { started: 'Job started', done: 'Job done', failed: 'Job failed', stopped: 'Job stopped', withdrawn: 'Job stopped' }[step.state] || 'Job';
-      case 'worker': return `Worker: ${[ai, step.model].filter(Boolean).join(' · ')} · ${{ completed: 'done', failed: 'failed', cancelled: 'stopped', interrupted: 'stopped' }[step.state] || 'working'}`;
+      case 'worker': return `Worker ${ai || ''}${step.model ? ` (${step.model})` : ''}: ${DID[step.state] || 'working'}`;
       default: return '';
     }
   }
@@ -284,9 +290,14 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     try {
       const detail = await request('/api/activity/lines/' + encodeURIComponent(item.line_id));
       trail.replaceChildren(...groupRuns(detail.trail || []).map(step => {
-        const entry = node('li', 'activity-step');
+        const entry = node('li', step.step === 'run' ? 'activity-step activity-step-details' : 'activity-step');
         const at = node('time', 'activity-step-time', clock(step.at, true)); at.dateTime = step.at || '';
-        const what = node('span', 'activity-step-what'); what.append(node('span', '', stepWords(step, item)));
+        const what = node('span', 'activity-step-what');
+        if (step.step === 'run') {
+          const details = node('details'); const summary = node('summary', '', `Details · ${AI_NAMES[step.ai] || step.ai || 'Worker'}`);
+          details.append(summary, node('span', 'activity-step-engine', step.labels.map(l => (l.count > 1 ? `${l.label} ×${l.count}` : l.label)).join(' · ')));
+          what.append(details);
+        } else what.append(node('span', '', stepWords(step, item)));
         entry.append(at, what);
         if (step.step === 'asked_you' && step.state === 'pending' && step.review_id) {
           const go = node('button', 'quiet-button', 'Go to it'); go.type = 'button'; go.addEventListener('click', () => goToRequest(step.review_id)); what.append(go);
@@ -300,7 +311,10 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     } catch { trail.replaceChildren(node('li', 'activity-step activity-muted', 'The details could not be loaded—try again.')); }
   }
   function goToRequest(reviewId) {
-    const card = document.querySelector(`[data-review="${CSS.escape(reviewId)}"]`);
+    const find = () => document.querySelector(`[data-review="${CSS.escape(reviewId)}"]`);
+    // Needs you shows its newest three; an older request opens the rest first.
+    if (!find()) document.querySelector('.needs-you-more')?.click();
+    const card = find();
     if (!card) return;
     card.setAttribute('tabindex', '-1'); card.scrollIntoView({ block: 'center' }); card.focus({ preventScroll: true });
   }

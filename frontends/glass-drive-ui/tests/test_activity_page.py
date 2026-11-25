@@ -89,3 +89,14 @@ def test_open_chat_only_from_a_proven_conversation_and_times_in_the_viewers_own_
     app = (STATIC / 'app.js').read_text()
     assert "import { renderActivity } from './activity-page.js?v=" in app and 'renderActivity();' in app
     assert 'export function renderActivity' not in (STATIC / 'control-plane.js').read_text()
+
+
+def test_needs_you_shows_its_newest_three_and_opens_the_rest_in_place():
+    experts = (STATIC / 'experts.js').read_text()
+    assert 'const FIRST_CARDS = 3; let showAll = false;' in experts
+    assert 'for (const item of showAll ? items : items.slice(0, FIRST_CARDS)) {' in experts
+    assert "if (!showAll && items.length > FIRST_CARDS) {" in experts and '`Show all ${items.length}`' in experts
+    # The count on the tab still counts every waiting request.
+    assert 'badge.textContent = String(items.length)' in experts
+    # A line's Decide opens the rest first when its request is not among the three.
+    assert "if (!find()) document.querySelector('.needs-you-more')?.click();" in SOURCE
