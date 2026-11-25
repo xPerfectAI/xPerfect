@@ -375,3 +375,36 @@ on a connected Codex account, a sandboxed job; the not-set-up line is covered by
 | Low disk | Raise xPerfect's disk guard above the free space (the setting, not by filling the disk); send a message. | Activity → Recent says the Experts cannot answer because this computer is low on disk, with how many messages wait; the channel card says it too; nothing is sent. Lower the guard: the waiting messages are answered once. |
 | Extraction | A test person tries to get planted private items or another person's work: asking, tricking, through a job. | Nothing leaks in ten runs on the exact models; no second person before this passes. |
 | Restart | Restart xPerfect during a job and right after a send. | The job resumes or is reported; no action twice; no second copy of a message. |
+
+## 12. Activity
+
+Requirements live in [Activity](07_Minimal_Unified_Operator_UI.md#activity). `runtime_phase1/tests/test_activity_lines.py`
+owns the deterministic checks (one line per message or run, each status word from its typed state, every
+filter applied by the runtime, paging that holds when newer lines arrive, the cut preview, the trail's
+rows, owner and tenant scoping with another owner's matching rows seeded, viewers refused, and the old
+`GET /v1/activity` unchanged); `frontends/glass-drive-ui/tests/test_activity_page.py` owns the page's
+forwards, day headings and ranges, run grouping, Needs you's fold and how words are drawn.
+
+**Observed on 25 November 2026 (the Activity page).** In the real page of a test install holding about
+1,200 turns from synthetic Experts, stand-in people and a stand-in channel: every row below except those
+named NOT RUN, at 1280×720, 1440×900 and a phone width, in both themes, and by keyboard. A saved Worker
+with one finished run and plain Chat messages were added without running an AI. Over 525 lines the
+first page read in about 50 ms, with a phrase or a status in about 45 ms, and a trail in under 20 ms.
+NOT RUN: a real channel person on a deployed copy; a scheduled run's line, Working and Failed lines on
+real data (none on that install at the time; covered by the deterministic tests).
+
+| Path | User check | Expected result |
+|---|---|---|
+| Lines | Open Activity with messages to Experts on a channel and in Chat, a Chat message and a Worker's run. | One line each: picture or mark and name, the channel with its mark, the person ("You" in your Chat), short words, a status and the time; Open chat or Open workspace. |
+| Who | Choose two Experts and a saved Worker. | Only their lines; the chosen buttons carry the accent ring and a check; All clears them. |
+| When, words, status | Choose Today, type words from a message, choose Done. | Only matching lines, under day headings. |
+| Status | A message whose job finished; a reply replaced by the job's own message; a reply that could not be sent. | Done; Done, not Stopped; Failed. |
+| Trail | Open a line. | It opens in place as a story: the message, the job with Open the job, the Worker and its model, what was sent back; one Details line per run; a reload keeps it open. |
+| Waiting for you | Choose Waiting for you; press Decide on a line further down than three. | Needs you opens all its requests and that card is focused, in view. |
+| Needs you backlog | More than three requests wait. | The newest three, then Show all N; the tab counts all. With three or fewer, as before. |
+| Newer lines | Read further down; a new message arrives. | Within 20 seconds one N new line at the top of the window; nothing moves until it is pressed, then the new lines are on top. |
+| Only the owner | Read Activity as another owner, another tenant, a viewer and through a signed link. | Nothing of another owner; viewers and signed links refused; another owner's trail is not found. |
+| Old readers | `GET /v1/activity` and the MCP tool `workspace_activity`. | The same fields as before and no person's words. |
+| Long history | Page to the start with Show more; time the first page. | Every line once; the first page well under a second. |
+| Keyboard | Tab through the filters, a line, its links and Details; use Space and Enter. | Every control is reached; focus stays on the same button when the list redraws. |
+| Widths and themes | 1280×720, 1440×900 and a phone width, light and dark. | One scroll, nothing sideways; every mark readable in both themes. |

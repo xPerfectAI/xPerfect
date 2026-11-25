@@ -123,7 +123,9 @@ One mechanism: what the Expert is about to send or start waits for the owner.
   page's `human:confirm` assertion, on a local install too). A runtime token, a Worker's run
   authority or the Expert cannot approve. Waiting never approves.
 - Requests appear on Activity under **Needs you**, with a count on the tab, a pop-up on any page
-  and a browser notification when allowed.
+  and a browser notification when allowed. With more than three waiting, Needs you shows the newest
+  three and one line **Show all N** that opens the rest in place; the count, the pop-up, each card and
+  each decision are unchanged. Each Activity line that waits for the owner leads to its card.
 
 ### What this protects, plainly
 

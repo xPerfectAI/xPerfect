@@ -10,6 +10,24 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
+## 2026-11-25 — An Activity page that says who asked what, where and when
+
+> **Summary:** Activity shows one line for each message or run: which expert or Worker, on which channel, by whom, a short preview of what they asked, a plain status and the time. Big buttons narrow it by expert, Worker, time and status, and a search box finds words.
+>
+> **Example:** Choose two experts and Waiting for you: each line has Decide, which takes you to its request. Open a line to read its story in place: the message, the job, the Worker that did it and on which model, and what was sent back.
+>
+> **Topics:** Activity, Experts, Work control
+
+- **Benefit:** See at a glance who asked what, where and when, instead of rows of low-level events.
+- **Benefit:** Narrow a long history in one or two presses; xPerfect does the filtering and paging itself.
+
+- **Added:** Who, When and Status buttons and a search box over the words, the person and the names. Lines under day headings, with Show more for older ones.
+- **Added:** Plain status words from what really happened: Waiting for you, Working, Answered, Done, Stopped, Failed. A message that started a job takes the job's state.
+- **Added:** A line opens in place as a story, with each run's own steps folded under Details, and keeps its own address. Newer lines wait in one "N new" line while you read further down, so nothing moves under you.
+- **Added:** A read for the signed-in owner only, `POST /v1/activity/lines` and `GET /v1/activity/lines/{line}`; the preview is cut on the server and never logged. `GET /v1/activity` and the MCP tool `workspace_activity` are unchanged.
+- **Changed:** With more than three requests waiting, Needs you shows the newest three and one line Show all N that opens the rest in place, so Activity's own lines stay in reach. The count on the tab, the pop-up, each card and each decision are unchanged.
+- **Changed:** The old event rows are gone from the page; their words are kept under each line's Details.
+
 ## 2026-11-25 — An Experts page you can read at a glance
 
 > **Summary:** Set up an expert on its own page, in the same style as Run project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
