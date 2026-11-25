@@ -292,7 +292,10 @@ session directly. The typed v1 capacity dimensions are separate: 2 active conver
 CLI profile/family lane, 3 active missions per CLI profile/family lane, 4 active missions per
 account, and 12 active missions per tenant by default. Manual host missions share a conservative
 mutation lease: model-supplied repository names or bootstrap fields cannot buy independent access.
-Host resource headroom is a separate measured vector.
+Host resource headroom is a separate measured vector. Preparing an idle host worker
+(`start_synchronously: false`) starts no compute, so it is accepted while those slots or that lease
+are held; each of its runs still takes its own lease, and a manual run the mutation lease, when it is
+assigned and launched.
 
 Standalone Chat's Queen can run independent helpers within that capacity. The exception belongs
 only to the authenticated owner's current accepted goal and exact worker/run (including a saved

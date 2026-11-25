@@ -6412,6 +6412,50 @@ def test_model_authored_mutation_scopes_cannot_bypass_conservative_serialization
     assert unscoped_first
 
 
+@pytest.mark.parametrize(("slots", "held_by"), [("3", "mutation_scope"), ("1", "family_lane")])
+def test_a_prepared_host_worker_is_accepted_while_a_manual_run_holds_the_host(tmp_path, monkeypatch, slots, held_by):
+    """Preparing an idle host worker starts no compute, so it is accepted while a manual mission's run holds the
+    host: its one-at-a-time fence (several slots), or its lane's only slot. A worker started at once keeps the
+    conservative refusal, and the prepared worker's own manual run still waits for its lease."""
+    monkeypatch.setenv("WPR_HOST_MISSION_SLOTS_PER_CLI", slots)
+
+    class HostRuntime(StubRuntime):
+        preflight_uses_cli_subprocess = True  # (the host CLIs' preflight takes a durable capacity claim)
+
+    store = Store(str(tmp_path / "prepared.sqlite3"))
+    service = WorkersProjectsService(store, HostRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = store.create_project("owner-a", "Prepared", "Accept work while the host is held", "claude-code")
+
+    def worker(name: str, **kwargs) -> dict:
+        return service.create_worker(project_id=project["project_id"], owner_id="owner-a", name=name, role="worker",
+                                     profile="claude-code", backend="", execution_mode="host", **kwargs)
+
+    try:
+        holder = worker("Manual mission")
+        held_run = store.create_run(holder["worker_id"], project["project_id"], "Synthetic manual work")
+        held_run = store.claim_next_queued_run(holder["worker_id"]) or held_run
+        store.update_worker_state(holder["worker_id"], "running")
+        assert service._acquire_host_run_lease(store.get_worker(holder["worker_id"]), held_run)["mutation_scope"]
+
+        with pytest.raises(HostCapacityError) as refused:
+            worker("Started at once")
+        assert refused.value.capacity_class == held_by
+
+        prepared = worker("Prepared", start_synchronously=False)
+        assert prepared["state"] == "paused"
+        run = service.assign_run(prepared["worker_id"], "Synthetic later work", start_processor=False)
+        assert run["state"] == "queued"
+        with pytest.raises(HostCapacityError) as waiting:
+            service._acquire_host_run_lease(store.get_worker(prepared["worker_id"]), run)
+        assert waiting.value.capacity_class == held_by
+
+        service._release_host_run_lease(held_run["run_id"], reason="run_terminal")
+        assert service._acquire_host_run_lease(store.get_worker(prepared["worker_id"]), run)
+    finally:
+        service.shutdown()
+
+
 @pytest.mark.parametrize(
     ("failure_class", "error"),
     [

@@ -9675,11 +9675,13 @@ class WorkersProjectsService:
         resource_memory_bytes = _configured_worker_resource_memory_bytes(
             clean_resource_class
         )
-        # Preparing a linked host conversation workspace starts no compute. Reuse the
-        # durable queue when native slots are occupied; launch still holds its lease.
+        # Preparing a host workspace starts no compute: a linked conversation worker's, or an
+        # idle mission worker's whose runs come later. Reuse the durable queue when native slots
+        # or the manual-mission fence are occupied; each run still takes its own lease (and a
+        # manual run its fence) when it is assigned and launched.
         preflight = (
             self._queued_runtime_preflight
-            if clean_trusted_lane == "conversation" and execution_mode == "host" and not start_synchronously
+            if execution_mode == "host" and not start_synchronously
             else self._reserved_runtime_preflight
         )
         preflight(
