@@ -307,6 +307,18 @@ copy on a server, a second real person, Approve through Teams, files and group c
 administrator's press on Microsoft's real pages, and Skills in a Codex Worker or a container on a
 running install.
 
+**Observed on 25 November 2026 (the Experts page).** In the real page of a test install, as a user: a new
+expert made on the Experts page with a picture, identity instructions, a Library note chosen through Run
+project's chooser and two Workers (Claude's usual model and Claude Sonnet, Sonnet starred); saved, reloaded,
+edited and saved again (version 2); its picture on Run project's card; Edit and "+" on Run project opening the
+page; one real message in its Chat; Ask me first on Always ask from the page (the request under Needs you,
+Approve releasing exactly the shown reply); a Codex model chosen to coordinate and an account chosen, saved and
+reloaded; Sandboxed forcing Claude; unsaved changes kept across a reload; the keyboard over the whole form; one
+scroll at 1280×720, 1440×900 and 390 wide, in both themes. Preferred: in three small helper jobs with Sonnet
+starred, all three helpers ran on Sonnet; with the star moved to Claude's usual model, both of two ran on
+Opus (each from the helper's own recorded model). NOT RUN on a live job: a Codex Worker on an exact model, a
+chosen coordinator model, a sandboxed job; the not-set-up line is covered by the deterministic tests only.
+
 | Path | User check | Expected result |
 |---|---|---|
 | New expert | Experts → New expert (or Run project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run project's card shows its picture. |
