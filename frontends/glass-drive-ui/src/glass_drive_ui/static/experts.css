@@ -49,3 +49,13 @@
 .expert-notice-alert { color: var(--text, inherit); }
 .expert-notice-alert strong { color: var(--danger, var(--text, inherit)); }
 .expert-ask input[type="radio"], .expert-check input[type="checkbox"], .expert-library input[type="checkbox"] { width: auto; flex: none; margin: 0; }
+/* AI choices carry each AI's own mark (the Worker pages' marks); channels carry marks of xPerfect's own. */
+.expert-ai-pick{display:flex;align-items:center;gap:8px;min-width:0}
+.expert-ai-pick select{flex:1 1 auto;min-width:0}
+.provider-mark.expert-ai-mark{width:18px;height:18px;flex:0 0 18px}
+.expert-channel-title{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.channel-mark{display:inline-flex;flex:0 0 auto;width:20px;height:20px;color:currentColor}
+.channel-mark svg{width:100%;height:100%;display:block}
+.channel-brand-mark{object-fit:contain}
+button .channel-mark{width:16px;height:16px;margin-right:7px;vertical-align:-3px}
+.expert-trademark{font-size:.72rem}

@@ -1367,6 +1367,13 @@ a count on the tab, a pop-up on any page and an optional browser notification. A
 asked, where, their words, the reason and exactly what will be sent or started; Approve and Reject
 act from the signed-in page only. Requirements: [Experts on channels](10_Experts_and_Channels.md).
 
+The AI choices show each AI's own mark, the same images the Worker pages use, legible in both themes.
+Channels show marks of xPerfect's own: the repository ships no channel brand's logo. An install may
+show a brand's own mark: put `channel-teams.svg` or `.png` (or `channel-slack.…`) in its
+`brand-assets` folder, at `XPERFECT_BRAND_ASSETS_DIR` (a local install's `<state>/brand-assets`). The
+page serves only those names, at most 500 KB each, and shows the file unaltered beside the plain-text
+name, never on a button. Whether a brand's terms allow that use is the owner's to check.
+
 ### Manage experts and retained work without a second object model
 
 **Run Project → My experts** keeps the same expert cards and approved artwork. Available, Archived

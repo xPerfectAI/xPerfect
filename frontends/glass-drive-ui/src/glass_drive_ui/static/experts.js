@@ -4,6 +4,45 @@ import { libraryRequest, libraryModal } from './personal-library.js?v=20261024po
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const AIS = [['claude-code', 'Claude'], ['codex-cli', 'Codex'], ['grok-build', 'Grok']];
 const PROVIDER = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] };
+const MARK_VERSION = '20261024vector1';
+/** The AI's own mark, as the Worker pages already show it; theme.css keeps it legible in the dark theme. */
+export function aiMark(profile) {
+  const name = PROVIDER[profile]?.[0] || '';
+  const img = node('img', 'provider-mark expert-ai-mark'); img.alt = ''; img.width = 18; img.height = 18;
+  if (name) { img.dataset.provider = name; img.src = `/static/provider-${name}.svg?v=${MARK_VERSION}`; } else img.hidden = true;
+  return img;
+}
+/** A choice of AI with its mark beside it, kept in step with the choice. */
+function withMark(choice) {
+  const pick = node('span', 'expert-ai-pick'); let mark = aiMark(choice.value); pick.append(mark, choice);
+  choice.addEventListener('change', () => { const next = aiMark(choice.value); mark.replaceWith(next); mark = next; });
+  return pick;
+}
+// Channel marks of xPerfect's own: no third-party logo ships in this repository.
+const GLYPHS = {
+  teams: '<path d="M6 7.5h7a2.5 2.5 0 0 1 2.5 2.5v4a2.5 2.5 0 0 1-2.5 2.5H9.2L6 19v-2.5a2.5 2.5 0 0 1-2.5-2.5v-4A2.5 2.5 0 0 1 6 7.5z"/>'
+       + '<path d="M9 7.5V7a2.5 2.5 0 0 1 2.5-2.5h7A2.5 2.5 0 0 1 21 7v4a2.5 2.5 0 0 1-2.5 2.5H18v2.3l-2.5-2.3"/>',
+  slack: '<rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/><path d="M10.4 7.5 9.3 16.5M14.7 7.5l-1.1 9M7.6 10.4h9.3M7.1 13.6h9.3"/>',
+};
+export const CHANNEL_NAMES = { teams: 'Microsoft Teams', slack: 'Slack' };
+/** A channel's mark: the neutral one, or the brand's own mark an owner placed in this install's state (brand-assets),
+ *  shown unaltered beside the plain-text name and never on a button. */
+export function channelMark(kind, brand = {}) {
+  if (brand[kind]) {
+    const img = node('img', 'channel-mark channel-brand-mark'); img.src = brand[kind]; img.alt = ''; img.width = 20; img.height = 20;
+    return img;
+  }
+  const mark = node('span', 'channel-mark'); mark.setAttribute('aria-hidden', 'true');
+  mark.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${GLYPHS[kind] || GLYPHS.teams}</svg>`;
+  return mark;
+}
+let brandAssets = null;
+/** The marks an owner placed in this install's own state, if any (served by this page: the content policy stays). */
+export function loadBrandAssets(get = (url) => fetch(url, { credentials: 'same-origin' })) {
+  if (!brandAssets) brandAssets = Promise.resolve().then(() => get('/brand-assets.json'))
+    .then(r => (r && r.ok ? r.json() : {})).then(j => (j && j.channels) || {}).catch(() => ({}));
+  return brandAssets;
+}
 const ASK = {
   always: ['Always ask', 'You approve every reply to another person and every job before it happens.'],
   auto: ['Auto', 'It asks you when a request is unusual or outside its role. Otherwise it carries on.'],
@@ -68,12 +107,12 @@ function expertFields(body, spec, accounts, speeds) {
   const work = new Map();
   for (const [value, text] of AIS) {
     const box = node('input'); box.type = 'checkbox'; box.value = value; box.checked = s.team.work.includes(value);
-    const l = node('label', 'expert-check'); l.append(box, node('span', '', text)); workers.append(l); work.set(value, box);
+    const l = node('label', 'expert-check'); l.append(box, aiMark(value), node('span', '', text)); workers.append(l); work.set(value, box);
   }
-  team.append(labelled('Talks to people', talk, 'Answers at once and hands work to the coordinator.'),
+  team.append(labelled('Talks to people', withMark(talk), 'Answers at once and hands work to the coordinator.'),
               labelled('Model', talkModel, 'Time to a finished reply, measured on this computer.'),
               labelled('Replies', replies),
-              labelled('Coordinates the work', coordinate),
+              labelled('Coordinates the work', withMark(coordinate)),
               labelled('May work', workers, 'Workers run in parallel on the job.'));
   const accountsBox = node('details', 'expert-accounts'); accountsBox.append(node('summary', '', 'Accounts'));
   const roleAccounts = {};
@@ -346,19 +385,21 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
     }
     status.textContent = ''; void load();
   }
-  function render(channels, kind) {
+  function render(channels, kind, brand = {}) {
     list.replaceChildren();
     const teams = channels.find(c => c.kind === 'teams');
     if (!teams) {
-      const add = node('button', 'primary-button', 'Add Teams'); add.type = 'button';
+      const add = node('button', 'primary-button', 'Add Teams'); add.type = 'button'; add.prepend(channelMark('teams'));
       add.onclick = async () => { const created = await request(path, { method: 'POST', body: { kind: 'teams' } }); await load(); await connect(created); };
-      const slack = node('button', 'secondary-button', 'Slack · next'); slack.type = 'button'; slack.disabled = true;
+      const slack = node('button', 'secondary-button', 'Slack · next'); slack.type = 'button'; slack.disabled = true; slack.prepend(channelMark('slack'));
       list.append(add, slack); return;
     }
     for (const channel of channels) {
       const card = node('section', 'expert-channel'); card.dataset.binding = channel.binding_id;
       const head = node('div', 'expert-channel-head');
-      head.append(node('strong', '', channel.label), node('span', 'expert-pill', channelState(channel))); card.append(head);
+      const title = node('span', 'expert-channel-title');
+      title.append(channelMark(channel.kind, brand), node('strong', '', CHANNEL_NAMES[channel.kind] || channel.label));
+      head.append(title, node('span', 'expert-pill', channelState(channel))); card.append(head);
       if (channel.low_disk) card.append(node('p', 'expert-notice expert-notice-alert', 'Cannot answer right now: this computer is low on disk. Messages wait and are answered when space returns.'));
       if (channel.refusal && channel.state === 'connected') card.append(node('p', 'expert-notice expert-notice-alert', `Microsoft refused the Teams connection (“${channel.refusal}”). It is tried again by itself every few minutes.`));
       const connectBox = node('div', 'expert-connect'); card.append(connectBox);
@@ -404,14 +445,16 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
         }
       }
       if (channel.unconfirmed_messages) people.append(node('p', 'expert-hint', `${channel.unconfirmed_messages} message(s) may not have arrived. They are not resent by themselves.`));
-      card.append(people); list.append(card);
+      card.append(people);
+      if (brand[channel.kind] && channel.kind === 'teams') card.append(node('p', 'expert-hint expert-trademark', 'Microsoft Teams is a trademark of the Microsoft group of companies.'));
+      list.append(card);
     }
     // Until Microsoft's socket holds, look again shortly, so the pill moves on by itself.
     // Never while the person is typing or has the details open: a re-load rebuilds the cards.
     const later = () => { if (list.querySelector('details[open]') || list.contains(document.activeElement)) again = setTimeout(later, 3000); else void load(); };
     clearTimeout(again); if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(later, 3000);
   }
-  async function load() { try { render((await request(path)).items || [], await place); } catch (error) { status.textContent = error.message; } }
+  async function load() { try { render((await request(path)).items || [], await place, await loadBrandAssets()); } catch (error) { status.textContent = error.message; } }
   void load();
   return dialog;
 }

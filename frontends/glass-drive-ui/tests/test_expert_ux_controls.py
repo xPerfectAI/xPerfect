@@ -398,3 +398,34 @@ def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_
         assert words in source, words
     server = (STATIC.parent / 'server.py').read_text()
     assert '"as_admin": bool(payload.get("as_admin"))}' in server
+
+
+def test_the_ai_choices_show_each_ais_own_mark_from_the_worker_pages():
+    source = (STATIC / 'experts.js').read_text()
+    assert "labelled('Talks to people', withMark(talk)" in source
+    assert "labelled('Coordinates the work', withMark(coordinate))" in source
+    assert "l.append(box, aiMark(value), node('span', '', text))" in source
+    # The same images the Worker pages use; theme.css keeps them legible in the dark theme.
+    assert "img.src = `/static/provider-${name}.svg?v=${MARK_VERSION}`" in source
+    for name in ('claude', 'codex', 'grok'):
+        assert (STATIC / f'provider-{name}.svg').exists(), name
+    assert '.provider-mark.expert-ai-mark{width:18px;height:18px' in (STATIC / 'experts.css').read_text()
+
+
+def test_channels_show_marks_of_xperfects_own_and_an_installs_brand_mark_only_beside_the_name():
+    source = (STATIC / 'experts.js').read_text()
+    # Buttons always carry the neutral mark, never a brand's own.
+    assert "add.prepend(channelMark('teams'))" in source and "slack.prepend(channelMark('slack'))" in source
+    # The card's title: the mark beside the plain-text name; a brand's mark only when this install placed one.
+    assert "title.append(channelMark(channel.kind, brand), node('strong', '', CHANNEL_NAMES[channel.kind] || channel.label))" in source
+    assert "export const CHANNEL_NAMES = { teams: 'Microsoft Teams', slack: 'Slack' };" in source
+    assert "Microsoft Teams is a trademark of the Microsoft group of companies." in source
+    # No third-party channel logo ships in the repository.
+    assert not [p.name for p in STATIC.rglob('*') if re.search(r'(teams|slack)', p.name, re.I) and p.suffix in ('.svg', '.png')]
+    loader = re.search(r"let brandAssets = null;\n.*?\n}\n", source, re.S)
+    assert loader, 'loader'
+    run_node("import assert from 'node:assert/strict';\n" + loader.group(0).replace('export ', '') + "\n"
+             "assert.deepEqual(await loadBrandAssets(async () => ({ ok: true, json: async () => ({ channels: { teams: '/brand-assets/channel-teams.svg' } }) })),"
+             " { teams: '/brand-assets/channel-teams.svg' });\n"
+             "brandAssets = null; assert.deepEqual(await loadBrandAssets(async () => { throw new Error('offline'); }), {});\n"
+             "brandAssets = null; assert.deepEqual(await loadBrandAssets(async () => ({ ok: false })), {});\n")

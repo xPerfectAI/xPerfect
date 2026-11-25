@@ -58,6 +58,34 @@ from .signed_links import (
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Marks an owner may place in this install's own state (XPERFECT_BRAND_ASSETS_DIR); the repository ships neutral marks.
+BRAND_ASSET_TYPES = {"channel-teams.svg": "image/svg+xml", "channel-teams.png": "image/png",
+                     "channel-slack.svg": "image/svg+xml", "channel-slack.png": "image/png"}
+BRAND_ASSET_MAX_BYTES = 512_000
+
+
+def _brand_asset_path(name: str) -> Path | None:
+    raw = str(os.environ.get("XPERFECT_BRAND_ASSETS_DIR") or "").strip()
+    if not raw or name not in BRAND_ASSET_TYPES:
+        return None
+    path = Path(raw) / name
+    try:
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= BRAND_ASSET_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def brand_assets_present() -> dict[str, str]:
+    """Each channel kind with an owner-placed mark, SVG before PNG."""
+    found: dict[str, str] = {}
+    for kind in ("teams", "slack"):
+        for suffix in ("svg", "png"):
+            if _brand_asset_path(f"channel-{kind}.{suffix}"):
+                found[kind] = f"/brand-assets/channel-{kind}.{suffix}"
+                break
+    return found
 SAFE_WORKER_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # Runtime opaque refs accept 12-96 characters total; account view refs use the
 # structural ``ghr_`` namespace within that bounded alphabet.
@@ -2961,6 +2989,23 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     @app.get("/favicon.ico")
     def favicon() -> FileResponse:
         return FileResponse(STATIC_DIR / "favicon.svg")
+
+    @app.get("/brand-assets.json")
+    def brand_assets_manifest() -> JSONResponse:
+        response = JSONResponse({"channels": brand_assets_present()})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/brand-assets/{name}")
+    def brand_asset(name: str) -> FileResponse:
+        path = _brand_asset_path(name)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        response = FileResponse(path, media_type=BRAND_ASSET_TYPES[name])
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+        return response
 
     @app.get("/api/bootstrap")
     def bootstrap(request: Request) -> dict[str, Any]:

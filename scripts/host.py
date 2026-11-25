@@ -244,6 +244,8 @@ def role_environment(state: Path, config: dict, env: dict, role: str) -> dict:
             "XPERFECT_LOCAL_MCP_COMMAND": json.dumps([sys.executable, str(ROOT / "xperfect"), "mcp", "--state-dir", str(state)]),
             "XPERFECT_LOCAL_MCP_URL": f"http://127.0.0.1:{config['ports']['mcp']}/mcp",
             "XPERFECT_LOCAL_CHECKOUT": str(ROOT),
+            # Marks an owner may place for this install only; the page serves them itself.
+            "XPERFECT_BRAND_ASSETS_DIR": str(state / "brand-assets"),
             "GLASSHIVE_INTERNAL_ASSERTION_PRIVATE_KEY_FILE": str(key),
             "GLASSHIVE_INTERNAL_ASSERTION_KEY_ID": json.loads(jwks.read_text())["keys"][0]["kid"],
             "GLASSHIVE_INTERNAL_ASSERTION_TTL_SECONDS": "30",
