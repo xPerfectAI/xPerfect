@@ -1,6 +1,7 @@
 /* A starting team uses the same worker templates, Library and launch owner. */
 import { libraryRequest, libraryModal, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
+import { openExpertForm, openExpertChat, openChannels } from './experts.js?v=20261125experts21';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
 // Presentation belongs to stable public catalog IDs, never a person's name or job text.
@@ -60,6 +61,13 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
     input.value = value || ''; if (!multiline) { input.required = true; input.maxLength = 160; } else input.maxLength = 1000;
     wrapper.append(input); body.append(wrapper); return input;
   }
+  // Editing, archiving or removing a lineage invalidates an older selected version of it.
+  function clearIfSelected(item) {
+    if (selected?.kind === 'template'
+        && (selected.id === item.template_id || (item.lineage_id && selected.lineage_id === item.lineage_id))) {
+      selected = null; remember(); onChoose?.(null);
+    }
+  }
   function manage(item, action) {
     const token = epoch, path = '/api/workspace-templates/' + encodeURIComponent(item.template_id);
     const body = { expected_catalog_revision: item.catalog_revision };
@@ -76,10 +84,7 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
         else await request(path + (action === 'remove' ? '' : '/state'), { method: action === 'remove' ? 'DELETE' : 'POST', signal,
           body: { ...body, state: action === 'archive' ? 'archived' : 'active', confirm: action === 'remove' } });
         if (!fresh(token)) return;
-        if (action !== 'duplicate' && selected?.kind === 'template'
-            && (selected.id === item.template_id || (item.lineage_id && selected.lineage_id === item.lineage_id))) {
-          selected = null; remember(); onChoose?.(null);
-        }
+        if (action !== 'duplicate') clearIfSelected(item);
         await loadTemplates(); tell(action === 'remove' ? 'Expert removed. Find it under Removed to restore it. Existing workers and saved versions are kept.' : 'Expert saved. Existing workers keep their original setup.');
       } });
     if (action === 'edit' || action === 'duplicate') name = field(dialog.body, 'Expert name', action === 'duplicate' ? item.name + ' copy' : item.name);
@@ -174,19 +179,29 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
       if (item.kind === 'template') {
         const menu = node('details', 'expert-details'); const opener = node('summary', '', 'Manage'); const actions = node('div', 'expert-actions');
         menu.append(opener, actions); attachActionMenu(menu, opener, actions, { menu: false });
-        const operations = catalogState === 'active' ? ['edit', 'duplicate', 'archive', 'remove'] : ['restore', ...(catalogState === 'archived' ? ['remove'] : [])];
+        const operations = catalogState === 'active' ? ['chat', 'channels', 'edit', 'duplicate', 'archive', 'remove'] : ['restore', ...(catalogState === 'archived' ? ['remove'] : [])];
         for (const action of operations) {
-          const button = node('button', 'secondary-button', { edit: 'Edit', duplicate: 'Copy', archive: 'Archive', remove: 'Remove', restore: 'Restore' }[action]);
-          button.type = 'button'; button.onclick = () => { menu.open = false; manage(item, action); }; actions.append(button);
+          const button = node('button', 'secondary-button', { chat: 'Chat', channels: 'Channels', edit: 'Edit', duplicate: 'Copy', archive: 'Archive', remove: 'Remove', restore: 'Restore' }[action]);
+          button.type = 'button'; button.onclick = () => { menu.open = false; expertAction(item, action); }; actions.append(button);
         }
         const versions = node('button', 'secondary-button', 'Versions'); versions.type = 'button'; versions.onclick = () => { menu.open = false; void history(item); }; actions.append(versions); card.append(menu);
       }
       return card;
     }));
     if (view === 'starters' || catalogState === 'active') grid.append(own);
-    if (!options.length) grid.append(node('p', 'expert-empty', loading ? 'Loading experts…' : view === 'templates' ? 'No saved experts yet. Save a worker as an expert from Workspaces.' : 'No experts to show. Use Create to set up your own worker.'));
+    if (!options.length) grid.append(node('p', 'expert-empty', loading ? 'Loading experts…' : view === 'templates' ? 'No saved experts yet. Use Create to make one, or save a worker as an expert from Workspaces.' : 'No experts to show. Use Create to set up your own worker.'));
   }
-  own.onclick = () => choose(null, { custom: true });
+  // In My experts, Create makes a new Expert with the same form as Edit; elsewhere it keeps the custom worker setup.
+  own.onclick = () => (view === 'templates'
+    ? openExpertForm({ request, signal: lifetime.signal, accounts: getData?.()?.provider_accounts || [], onSaved: () => { tell('Expert saved.'); void loadTemplates(); } })
+    : choose(null, { custom: true }));
+  function expertAction(item, action) {
+    const done = message => { tell(message); void loadTemplates(); };
+    if (action === 'chat') { openExpertChat(item, { request }).catch(error => tell(error.message)); return; }
+    if (action === 'channels') { openChannels(item, { request, signal: lifetime.signal }); return; }
+    if (action === 'edit') { openExpertForm({ item, request, signal: lifetime.signal, accounts: getData?.()?.provider_accounts || [], onSaved: () => { clearIfSelected(item); done('Expert saved. Its next message follows the new version.'); } }); return; }
+    manage(item, action);
+  }
   ready.onclick = () => { view = 'starters'; render(); };
   saved.onclick = () => { view = 'templates'; render(); void loadTemplates(); };
   async function update(data) {

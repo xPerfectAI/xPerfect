@@ -38,6 +38,13 @@ README and documentation owners (`03`, `04` and `07`); this contract links to th
 - Extend a native mechanism only when it serves an independent client through the same contract.
   Do not introduce a client registry, cognitive SDK, second scheduler or second policy engine.
 
+## Experts reached through channels
+
+Experts may be reached through optional channel packages beside core, such as Microsoft Teams.
+Core holds only generic parts: the Expert's settings on its saved version, sender data on a turn,
+the owner-review holds and the outbox. Core never imports a channel. See
+[Experts on channels](10_Experts_and_Channels.md).
+
 ## Component owners and approved extension
 
 The source has four layers: control plane, worker runtime, execution substrate and client adapters.

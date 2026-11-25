@@ -336,7 +336,8 @@ class WorkerConfiguration:
         return row[0] if row else 1
 
     def _native_input_home(self, worker):
-        placement_reader = getattr(self.performance_runtime, "native_workspace_placement", None)
+        # The performance runtime is optional, as everywhere else in this class.
+        placement_reader = getattr(getattr(self, "performance_runtime", None), "native_workspace_placement", None)
         try:
             placement = placement_reader(worker) if callable(placement_reader) else None
         except (OSError, RuntimeError, ValueError):

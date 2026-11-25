@@ -2562,6 +2562,8 @@ async function main() {
     }).catch(() => {});
   });
   initializeControlPlane({ withAuth, postJson, patchJson, deleteJson, responseMessage, setView: setActiveView });
+  // Requests from Experts sit on top of Activity, with a count and a pop-up.
+  import('./experts.js?v=20261125experts21').then(({ initNeedsYou }) => initNeedsYou({ mount: document.getElementById('activity-list'), tab: document.getElementById('activity-tab') })).catch(() => {});
 
   // Restore the selected surface before network startup, through the same registry.
   setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });

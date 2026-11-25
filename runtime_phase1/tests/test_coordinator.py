@@ -1387,6 +1387,181 @@ def test_native_projection_reuses_peer_binder_when_discovery_is_off(coordinator,
         monkeypatch.setattr(native_transport, '_hub', None)
 
 
+def test_a_message_arriving_while_another_turn_runs_waits_and_starts_after_it(coordinator):
+    """A person's message that lands while a result turn is being answered is queued, never refused."""
+    from fastapi import HTTPException
+    cid = create(coordinator)
+    started = []
+
+    def start(payload, **kwargs):
+        with coordinator.store._connect() as conn:
+            busy = conn.execute("SELECT 1 FROM coordinator_turns WHERE conversation_id=? AND request_id<>'' "
+                                "AND response_json='' AND blocker=''", (cid,)).fetchone()
+        if busy:  # what the native provider answers while its conversation is active
+            raise HTTPException(status_code=409, detail="The native conversation is active; retry the selected branch after it finishes")
+        started.append(payload.metadata.message_id)
+        return {'request_id': f'request-{len(started)}', 'state': 'running'}
+
+    coordinator.provider.start = start
+    coordinator.accept_turn('local', 'owner', cid, 'results-first', 'job results')
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET origin='worker_results' WHERE conversation_id=? AND turn_id='results-first'", (cid,))
+    assert coordinator.start_turn('local', 'owner', cid, 'results-first')['state'] == 'running'
+    coordinator.accept_turn('local', 'owner', cid, 'person', 'Please start another job.')
+    assert coordinator.start_turn('local', 'owner', cid, 'person') == {'turn_id': 'person', 'state': 'queued'}
+    assert started == ['results-first']
+    with coordinator.store._connect() as conn:
+        waiting = conn.execute("SELECT request_id,blocker FROM coordinator_turns WHERE conversation_id=? AND turn_id='person'", (cid,)).fetchone()
+        assert tuple(waiting) == ('', '')  # still ready for the background pass
+        conn.execute("UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=? AND turn_id='results-first'", (cid,))
+    assert coordinator.start_turn('local', 'owner', cid, 'person')['state'] == 'running'
+    assert started == ['results-first', 'person']
+
+
+def test_a_busy_native_conversation_is_retried_never_left_blocked(coordinator):
+    """The provider can see a running turn a moment before the coordinator records it; its busy
+    answer is a wait with a retry time, and the turn starts once it is ready again."""
+    from fastapi import HTTPException
+    from workers_projects_runtime.coordinator import _READY_TURN, now
+    cid = create(coordinator)
+    answers = []
+
+    def start(payload, **kwargs):
+        if not answers:
+            answers.append('busy')
+            raise HTTPException(status_code=409, detail={"code": "conversation_session_authority_conflict",
+                                                         "message": "The native conversation is active; retry the selected branch after it finishes"})
+        answers.append('started')
+        return {'request_id': 'request-1', 'state': 'running'}
+
+    coordinator.provider.start = start
+    coordinator.accept_turn('local', 'owner', cid, 'person', 'Please start a job.')
+    blocked = coordinator.start_turn('local', 'owner', cid, 'person')
+    assert blocked == {'turn_id': 'person', 'state': 'blocked', 'blocker': 'conversation_session_authority_conflict'}
+    with coordinator.store._connect() as conn:
+        row = conn.execute("SELECT retry_after_at,retry_attempts FROM coordinator_turns WHERE conversation_id=? AND turn_id='person'", (cid,)).fetchone()
+        assert row['retry_after_at'] and row['retry_attempts'] == 1
+        conn.execute("UPDATE coordinator_turns SET retry_after_at='2000-01-01T00:00:00+00:00' WHERE conversation_id=? AND turn_id='person'", (cid,))
+        ready = conn.execute(f"SELECT turn_id FROM coordinator_turns WHERE conversation_id=:cid AND ({_READY_TURN})",
+                             {'cid': cid, 'now': now()}).fetchall()
+    assert [r['turn_id'] for r in ready] == ['person']
+    assert coordinator.start_turn('local', 'owner', cid, 'person')['state'] == 'running'
+    assert answers == ['busy', 'started']
+
+
+def test_a_newer_message_never_overtakes_an_older_one_still_waiting_to_start(coordinator):
+    """Review 2, finding 10: B waits while A runs; A settles; C arrives before the background pass
+    starts B. C must wait behind B, so the person's messages are answered in order."""
+    started = []
+
+    def start(payload, **kwargs):
+        started.append(payload.metadata.message_id)
+        return {'request_id': 'request-' + payload.metadata.message_id, 'state': 'running'}
+
+    coordinator.provider.start = start
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'a', 'First message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'a')['state'] == 'running'
+    coordinator.accept_turn('local', 'owner', cid, 'b', 'Second message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'b')['state'] == 'queued'
+    with coordinator.store._connect() as conn:  # A settles; the background pass has not run yet
+        conn.execute("UPDATE coordinator_turns SET response_json='{\"choices\":[]}' WHERE conversation_id=? AND turn_id='a'", (cid,))
+    coordinator.accept_turn('local', 'owner', cid, 'c', 'Third message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'c')['state'] == 'queued'
+    assert coordinator.start_turn('local', 'owner', cid, 'b')['state'] == 'running'
+    assert started == ['a', 'b']
+
+
+def test_a_message_that_cannot_be_prepared_never_holds_back_the_messages_after_it(coordinator, monkeypatch):
+    """With messages answered in order, one whose preparation fails before it reaches the provider must be
+    refused for good (its blocker recorded), not left ready forever with every later message behind it."""
+    started = []
+
+    def start(payload, **kwargs):
+        started.append(payload.metadata.message_id)
+        return {'request_id': 'request-' + payload.metadata.message_id, 'state': 'running'}
+
+    coordinator.provider.start = start
+    cid = create(coordinator)
+    real_scope = coordinator._conversation_scope
+    failing = {'first'}
+
+    def scope(conversation):
+        import inspect
+        frame = inspect.currentframe().f_back
+        if frame and frame.f_locals.get('turn_id') in failing:
+            raise ValueError('synthetic preparation failure')
+        return real_scope(conversation)
+
+    monkeypatch.setattr(coordinator, '_conversation_scope', scope)
+    coordinator.accept_turn('local', 'owner', cid, 'first', 'First message.')
+    with pytest.raises(ValueError):
+        coordinator.start_turn('local', 'owner', cid, 'first')
+    with coordinator.store._connect() as conn:
+        assert conn.execute("SELECT blocker FROM coordinator_turns WHERE conversation_id=? AND turn_id='first'",
+                            (cid,)).fetchone()[0] == 'ValueError'
+    coordinator.accept_turn('local', 'owner', cid, 'second', 'Second message.')
+    assert coordinator.start_turn('local', 'owner', cid, 'second')['state'] == 'running'
+    assert started == ['second']
+
+
+def test_a_result_turn_keeps_retrying_a_busy_conversation_so_its_results_are_told(coordinator):
+    """Review 2, finding 9: seven busy refusals cleared the retry time and stranded a result turn whose
+    results were already given to it. A result turn now retries every temporary refusal, with a capped wait."""
+    from fastapi import HTTPException
+    from workers_projects_runtime.coordinator import _READY_TURN, canonical, now
+    cid = create(coordinator)
+
+    def busy(payload, **kwargs):
+        raise HTTPException(status_code=409, detail={"code": "conversation_session_authority_conflict",
+                                                     "message": "The native conversation is active"})
+
+    coordinator.provider.start = busy
+    with coordinator.store._connect() as conn:
+        conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
+                     (cid, 'result_available', 'run-a', canonical({'goal_id': 'a', 'run_id': 'run-a', 'state': 'completed'}), now()))
+    turn = coordinator.queue_result_turn('local', 'owner', cid)
+    for attempt in range(1, 10):
+        assert coordinator.start_turn('local', 'owner', cid, turn)['state'] == 'blocked'
+        with coordinator.store._connect() as conn:
+            row = conn.execute("SELECT retry_after_at,retry_attempts FROM coordinator_turns WHERE conversation_id=? AND turn_id=?",
+                               (cid, turn)).fetchone()
+            assert row['retry_after_at'], f"stranded after {attempt} refusals"
+            conn.execute("UPDATE coordinator_turns SET retry_after_at='2000-01-01T00:00:00+00:00' WHERE conversation_id=? AND turn_id=?",
+                         (cid, turn))
+            ready = conn.execute(f"SELECT turn_id FROM coordinator_turns WHERE conversation_id=:cid AND ({_READY_TURN})",
+                                 {'cid': cid, 'now': now()}).fetchall()
+        assert [r['turn_id'] for r in ready] == [turn]
+
+
+def test_a_message_refused_for_good_does_not_silence_later_results(coordinator):
+    """One message refused before it started (a blocker that is not retried) must not hold back every
+    later result; a message still waiting to retry does hold them back."""
+    from workers_projects_runtime.coordinator import canonical, now
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'refused', 'Please start a job.')
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET blocker='provider_auth_missing' WHERE conversation_id=? AND turn_id='refused'", (cid,))
+        conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
+                     (cid, 'result_available', 'run-a', canonical({'goal_id': 'a', 'run_id': 'run-a', 'state': 'completed'}), now()))
+    turn = coordinator.queue_result_turn('local', 'owner', cid)
+    assert turn and turn.startswith('results-')
+    # A message that will run again (a retryable blocker with its retry time) still comes first.
+    cid2 = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid2, 'waiting', 'Please start a job.')
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET blocker='conversation_session_authority_conflict',retry_after_at=?,retry_attempts=1 "
+                     "WHERE conversation_id=? AND turn_id='waiting'", (now(), cid2))
+        conn.execute("INSERT INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)",
+                     (cid2, 'result_available', 'run-b', canonical({'goal_id': 'b', 'run_id': 'run-b', 'state': 'completed'}), now()))
+    assert coordinator.queue_result_turn('local', 'owner', cid2) is None
+    # Retried without a limit (review 3, the retry rule): a retry time an earlier version cleared after its
+    # sixth attempt still runs again, so later results still wait behind it.
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET retry_after_at='',retry_attempts=0 WHERE conversation_id=? AND turn_id='waiting'", (cid2,))
+    assert coordinator.queue_result_turn('local', 'owner', cid2) is None
+
+
 def test_result_wake_batches_once_and_yields_to_interactive(coordinator):
     from workers_projects_runtime.coordinator import canonical, now
     cid = create(coordinator)
@@ -2608,3 +2783,198 @@ def test_chat_turn_admission_keeps_one_durable_output_stream_identity(coordinato
     assert len(received) == 2
     assert all(item.stream_id == item.message_id == 'turn-files' for item in received)
     assert received[0].idempotency_key == received[1].idempotency_key
+
+
+@pytest.fixture
+def coordinator_backlog(coordinator):
+    template = create(coordinator)
+    with coordinator.store._connect() as conn:
+        conn.executemany(
+            "INSERT INTO coordinator_conversations "
+            "(conversation_id,tenant_id,owner_id,config_json,prompt_json,created_at,scope_json) "
+            "SELECT ?,tenant_id,owner_id,config_json,prompt_json,created_at,scope_json "
+            "FROM coordinator_conversations WHERE conversation_id=?",
+            [(f"conversation-{i:03d}", template) for i in range(404)],
+        )
+        conn.execute("DELETE FROM coordinator_conversations WHERE conversation_id=?", (template,))
+        conn.execute(
+            "INSERT INTO coordinator_turns (conversation_id,turn_id,message,response_json,created_at) "
+            "SELECT conversation_id,'finished','Synthetic completed turn','{}',created_at FROM coordinator_conversations"
+        )
+    coordinator._reconcile_after = "conversation-300"
+    return coordinator, "conversation-167"
+
+
+def _save_wake_event(core, conversation_id):
+    with core.store._connect() as conn:
+        conn.execute(
+            "INSERT INTO coordinator_events (conversation_id,kind,identity,payload_json,created_at) "
+            "VALUES (?,'result_available','synthetic-run','{}','2026-01-01T00:00:00+00:00')",
+            (conversation_id,),
+        )
+
+
+def _result_turn_ids(core, conversation_id):
+    with core.store._connect() as conn:
+        return [row[0] for row in conn.execute(
+            "SELECT turn_id FROM coordinator_turns WHERE conversation_id=? AND origin='worker_results'",
+            (conversation_id,),
+        )]
+
+
+def test_result_event_at_position_168_wakes_in_one_tick(coordinator_backlog):
+    core, cid = coordinator_backlog
+    _save_wake_event(core, cid)
+    core.reconcile_once()
+    result_ids = _result_turn_ids(core, cid)
+    assert len(result_ids) == 1
+    core.reconcile_once()
+    assert _result_turn_ids(core, cid) == result_ids
+
+
+def test_priority_preserves_the_round_robin_and_skips_finished_history(coordinator_backlog, monkeypatch):
+    core, cid = coordinator_backlog
+    recovered = []
+    cold = ["conversation-350", "conversation-001"]
+    with core.store._connect() as conn:
+        conn.executemany(
+            "INSERT INTO coordinator_goals (conversation_id,goal_id,source_turn_id,text,dispatch_json,created_at) "
+            "VALUES (?,'recover','finished','Recover dispatch','{}','2026-01-01T00:00:00+00:00')",
+            [(item,) for item in cold],
+        )
+    monkeypatch.setattr(core, "recover_dispatches", lambda _tenant, _owner, item: recovered.append(item))
+    _save_wake_event(core, cid)
+    # Keep a foreground turn pending so priority has work through the wraparound.
+    core.accept_turn("local", "owner", cid, "foreground", "An accepted foreground turn")
+    monkeypatch.setattr(core, "start_turn", lambda *_: {})
+    for _ in range(3):
+        core.reconcile_once()
+    assert recovered[0] == cid
+    assert [item for item in recovered if item != cid] == cold
+
+
+def test_priority_respects_foreground_turn(coordinator_backlog):
+    core, cid = coordinator_backlog
+    _save_wake_event(core, cid)
+    core.accept_turn("local", "owner", cid, "foreground", "An accepted foreground turn")
+    core.reconcile_once()
+    assert not _result_turn_ids(core, cid)
+    assert core.snapshot("local", "owner", cid)["turns"][-1]["blocker"] == "ConnectionError"
+    with core.store._connect() as conn:
+        conn.execute(
+            "UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=? AND turn_id='foreground'",
+            (cid,),
+        )
+    core.reconcile_once()
+    assert len(_result_turn_ids(core, cid)) == 1
+
+
+def test_priority_respects_restore_hold(coordinator_backlog):
+    core, cid = coordinator_backlog
+    _save_wake_event(core, cid)
+    core.accept_turn("local", "owner", cid, "foreground", "An accepted foreground turn")
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_conversations SET restore_hold=1 WHERE conversation_id=?", (cid,))
+        conn.execute("UPDATE coordinator_turns SET restore_hold=1 WHERE conversation_id=? AND turn_id='foreground'", (cid,))
+    core.reconcile_once()
+    assert not _result_turn_ids(core, cid)
+    assert core.snapshot("local", "owner", cid)["turns"][-1]["blocker"] == ""
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET response_json='{}',restore_hold=0 WHERE conversation_id=?", (cid,))
+        conn.execute("UPDATE coordinator_conversations SET restore_hold=0 WHERE conversation_id=?", (cid,))
+    core.reconcile_once()
+    assert len(_result_turn_ids(core, cid)) == 1
+
+
+def test_terminal_worker_run_records_the_result_and_wakes_existing_scheduler(coordinator_backlog):
+    core, cid = coordinator_backlog
+    core.accept_turn("local", "owner", cid, "source", "Synthetic work", [Goal(id="goal", text="Synthetic goal")])
+    project = core.snapshot("local", "owner", cid)["scope"]["project_id"]
+    worker = core.store.create_worker(
+        project, "owner", "Worker", "Worker", "codex-cli", "codex-cli",
+        "codex-cli", "exact-worker-model", execution_mode="host",
+    )
+    run = core.store.create_run(worker["worker_id"], project, "Synthetic request")
+    with core.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET response_json='{}' WHERE conversation_id=?", (cid,))
+        conn.execute(
+            "UPDATE coordinator_goals SET worker_id=?,run_id=? WHERE conversation_id=? AND goal_id='goal'",
+            (worker["worker_id"], run["run_id"], cid),
+        )
+    service = object.__new__(WorkersProjectsService)
+    service.store = core.store
+    service.coordinator = core
+    service.files = SimpleNamespace(artifact_worker=lambda worker: worker)
+    service.run_notifications = SimpleNamespace(notify=lambda _run: None)
+    service._provider_request_reconciler = None
+    service._scheduler_wake_event = Event()
+    service._run_local_bundles_lock = Lock()
+    service._run_local_bundles = {}
+    assert service._finalize_run_if_state(run["run_id"], "queued", "completed", "42")
+    assert service._scheduler_wake_event.is_set()
+    with core.store._connect() as conn:
+        assert conn.execute(
+            "SELECT identity FROM coordinator_events WHERE conversation_id=? AND delivered_turn_id=''",
+            (cid,),
+        ).fetchone()[0] == run["run_id"]
+    core.reconcile_once()
+    assert len(_result_turn_ids(core, cid)) == 1
+
+
+def test_sweep_still_refreshes_application_conversations(coordinator_backlog, monkeypatch):
+    # refresh() is the only driver of an Application's progress and results, so the
+    # prioritised sweep keeps visiting it even while its only live work is a running Worker.
+    core, _ = coordinator_backlog
+    with core.store._connect() as conn:
+        conn.execute(
+            "UPDATE coordinator_conversations SET application_ref='synthetic-application' "
+            "WHERE conversation_id='conversation-350'"
+        )
+    refreshed = []
+    monkeypatch.setattr(core, "refresh", lambda _tenant, _owner, item, *_args, **_kwargs: refreshed.append(item))
+    core.reconcile_once()
+    assert refreshed == ["conversation-350"]
+
+
+@pytest.mark.parametrize('temporary_code', ['host_capacity', 'provider_account_busy'])
+def test_an_ordinary_message_refused_as_busy_keeps_retrying_and_is_never_dropped(coordinator, temporary_code):
+    # Review 3, the retry rule: an ordinary message refused as busy is retried like a result turn, its wait
+    # capped at a minute; it is never dropped because it waited too long, also when an earlier version had
+    # already cleared its retry time.
+    from datetime import datetime, timedelta, timezone
+
+    class CapacityError(RuntimeError):
+        code = temporary_code
+
+    class BusyProvider(Provider):
+        calls = 0
+
+        def start(self, payload, **kwargs):
+            self.calls += 1
+            if self.calls <= 10:
+                raise CapacityError('private capacity detail')
+            return {'request_id': 'accepted-after-ten-refusals', 'state': 'queued'}
+
+    provider = BusyProvider()
+    coordinator.provider = provider
+    cid = create(coordinator)
+    coordinator.accept_turn('local', 'owner', cid, 'turn', 'Exact ordinary message')
+    assert coordinator.start_turn('local', 'owner', cid, 'turn')['blocker'] == temporary_code
+    for attempt in range(9):
+        saved = coordinator.snapshot('local', 'owner', cid)['turns'][0]
+        assert saved['request_id'] == '' and saved['retry_after_at']
+        wait = datetime.fromisoformat(saved['retry_after_at']) - datetime.now(timezone.utc)
+        assert wait <= timedelta(seconds=61)
+        due = '2026-09-23T00:00:00+00:00' if attempt != 4 else ''  # '' : cleared by an earlier version
+        with coordinator.store._connect() as conn:
+            conn.execute("UPDATE coordinator_turns SET retry_after_at=? WHERE conversation_id=? AND turn_id=?",
+                         (due, cid, 'turn'))
+        coordinator.reconcile_once()
+    assert provider.calls == 10
+    with coordinator.store._connect() as conn:
+        conn.execute("UPDATE coordinator_turns SET retry_after_at=? WHERE conversation_id=? AND turn_id=?",
+                     ('2026-09-23T00:00:00+00:00', cid, 'turn'))
+    assert coordinator.reconcile_once() == [
+        {'turn_id': 'turn', 'request_id': 'accepted-after-ten-refusals', 'state': 'queued'}
+    ]
+    assert coordinator.snapshot('local', 'owner', cid)['turns'][0]['message'] == 'Exact ordinary message'

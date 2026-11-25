@@ -1082,16 +1082,29 @@ class ControlPlaneStore:
                         raise ControlPlaneConflict(
                             "Provider account work is starting or running"
                         )
-            active = conn.execute(
-                """
-                SELECT lease_id FROM provider_account_leases
-                WHERE account_id = ? AND released_at IS NULL AND (expires_at > ? OR ?)
-                ORDER BY acquired_at DESC LIMIT 1
-                """,
-                (account_id, timestamp, str(account["secret_locator"]).startswith("native-home://current-claude/")),
-            ).fetchone()
-            if active is not None:
-                raise ControlPlaneConflict("Provider account is already in use")
+            from .account_capacity import is_current_native_locator, is_run_lane, room_for_another_run
+            current_native = is_current_native_locator(account["secret_locator"])
+            if current_native and is_run_lane(normalized_lane):
+                # The existing Claude sign-in copies no credential: Worker runs may share it up to the
+                # per-account limit. Any other unreleased use (setup, verify, disconnect, a held run's
+                # recovery) still keeps it for itself, expired or not.
+                held = conn.execute(
+                    "SELECT lane FROM provider_account_leases WHERE account_id = ? AND released_at IS NULL",
+                    (account_id,),
+                ).fetchall()
+                if not room_for_another_run(row["lane"] for row in held):
+                    raise ControlPlaneConflict("Provider account is already in use")
+            else:
+                active = conn.execute(
+                    """
+                    SELECT lease_id FROM provider_account_leases
+                    WHERE account_id = ? AND released_at IS NULL AND (expires_at > ? OR ?)
+                    ORDER BY acquired_at DESC LIMIT 1
+                    """,
+                    (account_id, timestamp, current_native),
+                ).fetchone()
+                if active is not None:
+                    raise ControlPlaneConflict("Provider account is already in use")
             if str(account["status"] or "").strip().lower() not in normalized_statuses:
                 raise ControlPlaneConflict("Provider account is not ready for mission use")
             if normalized_recovery is not None and str(account["recovery_code"] or "") != normalized_recovery:
@@ -1249,6 +1262,34 @@ class ControlPlaneStore:
                 (account_id, timestamp),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def provider_lease(self, lease_id: str) -> dict[str, Any] | None:
+        """One lease by its id, released or not."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM provider_account_leases WHERE lease_id = ?", (lease_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def blocking_provider_account_lease(
+        self, account_id: str, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """The current lease that would make a new Worker run of this account wait, if any.
+
+        Like ``active_provider_account_lease``, except that an existing Claude sign-in with room
+        for another Worker run is not blocked by the runs already sharing it.
+        """
+        lease = self.active_provider_account_lease(account_id, now=now)
+        if lease is None:
+            return None
+        from .account_capacity import current_native_account, room_for_another_run
+        with self._connect() as conn:
+            if current_native_account(conn, account_id):
+                held = conn.execute(
+                    "SELECT lane FROM provider_account_leases WHERE account_id = ? AND released_at IS NULL",
+                    (account_id,),
+                ).fetchall()
+                if room_for_another_run(row["lane"] for row in held):
+                    return None
+        return lease
 
     def unreleased_interactive_provider_leases(self) -> list[dict[str, Any]]:
         """Return setup leases that require credential-container cleanup after restart."""

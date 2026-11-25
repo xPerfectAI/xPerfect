@@ -58,6 +58,34 @@ from .signed_links import (
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Marks an owner may place in this install's own state (XPERFECT_BRAND_ASSETS_DIR); the repository ships neutral marks.
+BRAND_ASSET_TYPES = {"channel-teams.svg": "image/svg+xml", "channel-teams.png": "image/png",
+                     "channel-slack.svg": "image/svg+xml", "channel-slack.png": "image/png"}
+BRAND_ASSET_MAX_BYTES = 512_000
+
+
+def _brand_asset_path(name: str) -> Path | None:
+    raw = str(os.environ.get("XPERFECT_BRAND_ASSETS_DIR") or "").strip()
+    if not raw or name not in BRAND_ASSET_TYPES:
+        return None
+    path = Path(raw) / name
+    try:
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= BRAND_ASSET_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def brand_assets_present() -> dict[str, str]:
+    """Each channel kind with an owner-placed mark, SVG before PNG."""
+    found: dict[str, str] = {}
+    for kind in ("teams", "slack"):
+        for suffix in ("svg", "png"):
+            if _brand_asset_path(f"channel-{kind}.{suffix}"):
+                found[kind] = f"/brand-assets/channel-{kind}.{suffix}"
+                break
+    return found
 SAFE_WORKER_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # Runtime opaque refs accept 12-96 characters total; account view refs use the
 # structural ``ghr_`` namespace within that bounded alphabet.
@@ -2962,6 +2990,23 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def favicon() -> FileResponse:
         return FileResponse(STATIC_DIR / "favicon.svg")
 
+    @app.get("/brand-assets.json")
+    def brand_assets_manifest() -> JSONResponse:
+        response = JSONResponse({"channels": brand_assets_present()})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/brand-assets/{name}")
+    def brand_asset(name: str) -> FileResponse:
+        path = _brand_asset_path(name)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        response = FileResponse(path, media_type=BRAND_ASSET_TYPES[name])
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+        return response
+
     @app.get("/api/bootstrap")
     def bootstrap(request: Request) -> dict[str, Any]:
         active_client = _client_for_request(request)
@@ -3732,6 +3777,97 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
             ) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="Workspace template save failed") from exc
+
+    # Experts that people can talk to: settings, the owner's Chat, Needs you and channels.
+    def _expert_forward(request, method, path, body=None, *, human_confirmation=False):
+        try:
+            return _client_for_request(request, human_confirmation=human_confirmation)._request(
+                method, path, **({"json_body": body} if body is not None else {}))
+        except httpx.HTTPStatusError as exc:
+            raise _runtime_http_exception(exc, "xPerfect could not complete this Expert change. Your changes are kept.") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Could not reach xPerfect. Your changes are kept; try again.") from exc
+
+    @app.post("/api/experts", status_code=201)
+    def expert_create(request: Request, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/experts", payload)
+
+    @app.get("/api/experts/{expert_id}")
+    def expert_read(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id"))
+
+    @app.patch("/api/experts/{expert_id}")
+    def expert_update(request: Request, expert_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "PATCH", "/v1/experts/" + _recurring_path_id(expert_id, "expert id"), payload)
+
+    @app.post("/api/experts/{expert_id}/chat")
+    def expert_chat(request: Request, expert_id: str):
+        return _expert_forward(request, "POST", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/chat", {})
+
+    @app.get("/api/experts/{expert_id}/jobs")
+    def expert_jobs(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/jobs")
+
+    @app.get("/api/experts/{expert_id}/picture")
+    def expert_picture(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture")
+
+    @app.put("/api/experts/{expert_id}/picture")
+    def expert_picture_set(request: Request, expert_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "PUT", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture", payload)
+
+    @app.get("/api/experts/{expert_id}/channels")
+    def expert_channels(request: Request, expert_id: str):
+        return _expert_forward(request, "GET", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/channels")
+
+    @app.post("/api/experts/{expert_id}/channels", status_code=201)
+    def expert_channel_add(request: Request, expert_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/channels", payload)
+
+    @app.patch("/api/channels/{binding_id}")
+    def channel_update(request: Request, binding_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "PATCH", "/v1/channels/" + _recurring_path_id(binding_id, "channel id"), payload)
+
+    @app.post("/api/channels/{binding_id}/connect")
+    def channel_connect(request: Request, binding_id: str, payload: dict = Body(default={})):
+        # The account the Connect button named (pressing it is the yes), signing in with another account, or an
+        # administrator's one press while Teams refuses the app.
+        choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account")),
+                  "as_admin": bool(payload.get("as_admin"))}
+        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect", choice)
+
+    @app.get("/api/channels/{binding_id}/connect")
+    def channel_connect_status(request: Request, binding_id: str):
+        return _expert_forward(request, "GET", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/connect")
+
+    @app.post("/api/channels/{binding_id}/added-by-admin")
+    def channel_added_by_admin(request: Request, binding_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/added-by-admin",
+                               {"added": bool(payload.get("added"))})
+
+    @app.post("/api/channels/{binding_id}/details")
+    def channel_details(request: Request, binding_id: str, payload: dict = Body(...)):
+        return _expert_forward(request, "POST", "/v1/channels/" + _recurring_path_id(binding_id, "channel id") + "/details", payload)
+
+    @app.get("/api/experts-talk-speeds")
+    def experts_talk_speeds(request: Request):
+        return _expert_forward(request, "GET", "/v1/experts-talk-speeds")
+
+    @app.get("/api/expert-notices")
+    def expert_notices(request: Request):
+        return _expert_forward(request, "GET", "/v1/expert-notices")
+
+    @app.get("/api/expert-reviews")
+    def expert_reviews(request: Request, state: str = "pending"):
+        if state not in {"pending", "approved", "rejected", "withdrawn", "all"}:
+            raise HTTPException(status_code=422, detail="Unknown request state")
+        return _expert_forward(request, "GET", "/v1/expert-reviews?state=" + state)
+
+    @app.post("/api/expert-reviews/{review_id}/decision")
+    def expert_review_decision(request: Request, review_id: str, payload: dict = Body(...)):
+        # Only this signed-in browser session can decide; the runtime checks the signed person.
+        return _expert_forward(request, "POST", "/v1/expert-reviews/" + _recurring_path_id(review_id, "request id") + "/decision",
+                               payload, human_confirmation=True)
 
     @app.post("/api/workspace-templates/{template_id}/instantiate", status_code=201)
     def instantiate_workspace_template(

@@ -81,8 +81,10 @@ def bind_current_account(binder, worker, *, account, selection, runtime_name, ru
     def assert_lease():
         if closing or confirmed_stop or lease is None:
             raise ControlPlaneError('Current native account lease has ended')
-        active = binder.store.active_provider_account_lease(selection.account_id)
-        if (active is None or active['lease_id'] != lease['lease_id']
+        # This run's own lease, exactly: other Worker runs may share the sign-in with leases of their own.
+        active = binder.store.provider_lease(lease['lease_id'])
+        if (active is None or active['released_at'] is not None
+                or active['account_id'] != selection.account_id
                 or active['tenant_id'] != tenant or active['owner_id'] != owner
                 or active['worker_id'] != worker_id or active['run_id'] != run_id):
             raise ControlPlaneError('Current native account lease is no longer valid')

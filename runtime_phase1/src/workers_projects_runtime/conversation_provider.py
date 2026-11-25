@@ -587,6 +587,36 @@ GLASSHIVE_MODELS: dict[str, HarnessModel] = {
         recommended_effort="max",
         context_window=200_000,
     ),
+    # The fastest Claude model, for roles where first words matter (an Expert's speaking assistant).
+    "claude-code:haiku": HarnessModel(
+        id="claude-code:haiku",
+        display_name="Claude / Haiku",
+        harness_profile="claude-code",
+        native_model="haiku",
+        effort_choices=CLAUDE_CODE_EFFORT_LEVELS,
+        recommended_effort="low",
+        context_window=200_000,
+    ),
+    # Claude's middle model, measured for the same role: between Haiku's speed and Opus's judgment.
+    "claude-code:sonnet": HarnessModel(
+        id="claude-code:sonnet",
+        display_name="Claude / Sonnet",
+        harness_profile="claude-code",
+        native_model="sonnet",
+        effort_choices=CLAUDE_CODE_EFFORT_LEVELS,
+        recommended_effort="low",
+        context_window=200_000,
+    ),
+    # Codex's fastest everyday model, for the same role (its Luna models answered more slowly).
+    "codex-cli:gpt-6.2-sol": HarnessModel(
+        id="codex-cli:gpt-6.2-sol",
+        display_name="Codex / GPT-6.2 Sol",
+        harness_profile="codex-cli",
+        native_model="gpt-6.2-sol",
+        effort_choices=("low", "medium", "high", "xhigh", "max", "ultra"),
+        recommended_effort="low",
+        context_window=475_000,
+    ),
     "codex-cli:native-default": HarnessModel(
         id="codex-cli:native-default",
         display_name="Codex / Native default",
@@ -3220,6 +3250,31 @@ def _native_terminal_text(profile: str, stdout: str, graph_control: Any = None,
     return None
 
 
+def native_safety_stop(profile: str, stdout: str) -> dict[str, str] | None:
+    """The AI provider's own safety check stopped a response in this native run: its typed ``refusal`` stop in
+    Claude's stream, with the category it gives. Read only from the stream's fields, never from any text."""
+    if profile != "claude-code":
+        return None
+    for raw_line in str(stdout or "").splitlines():
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        stop = None
+        if event.get("type") == "stream_event" and isinstance(event.get("event"), dict):
+            inner = event["event"]
+            if inner.get("type") == "message_delta" and isinstance(inner.get("delta"), dict):
+                stop = inner["delta"]
+        elif event.get("type") == "assistant" and isinstance(event.get("message"), dict):
+            stop = event["message"]
+        if stop and stop.get("stop_reason") == "refusal":
+            details = stop.get("stop_details") if isinstance(stop.get("stop_details"), dict) else {}
+            return {"category": str(details.get("category") or "")[:40]}
+    return None
+
+
 def _native_visible_text(profile: str, stdout: str) -> str:
     """Extract only user-visible assistant text from complete native JSONL events."""
 
@@ -4451,10 +4506,20 @@ class ConversationProvider:
             raise HTTPException(status_code=400, detail="Retained native conversations require a supported coordination-only persistent route")
         if not native_tools and not reuse_process:
             incoming_env[GLASSHIVE_PROVIDER_SESSION_MODE_ENV] = "stateless"
+        # An Expert's speaking Queen keeps her session and her own tools, with every
+        # built-in file, shell and web tool off.
+        coordination_only = (isinstance(incoming_capabilities, dict)
+                             and incoming_capabilities.get("coordination_only") is True)
+        if coordination_only and not native_tools:
+            raise HTTPException(status_code=400, detail="A coordination-only turn keeps its own tool server")
+        # Only Claude Code can switch off its built-in tools while keeping its own tool server.
+        # Another speaking harness (a Codex Queen, or a backup) keeps its tools; that difference is shown.
+        coordination_only = coordination_only and model.harness_profile == "claude-code"
         provider_capabilities = {
             "self_delegation": False,
             "native_tools": native_tools,
             **({"conversation_process_reuse": True} if reuse_process else {}),
+            **({"coordination_only": True} if coordination_only else {}),
         }
         private_contract = _private_machine_state_response_contract(payload.metadata)
         if private_machine_state_output_schema(private_contract) is not None:
@@ -7100,6 +7165,20 @@ class ConversationProvider:
         contract = self._saved_completion_contract(request_record) or {}
         return _native_terminal_text(str(profile or ""), str(stdout or ""),
             contract.get("graph_control"), contract.get("delivery_control"), contract.get("response_contract"))
+
+    def safety_stop(self, request_id: str) -> dict[str, str] | None:
+        """Whether the provider's safety check stopped a response of this request's own native run."""
+        record = self.store.get_provider_request(str(request_id)) if request_id else None
+        run = self.store.get_run(str(record.get("run_id") or "")) if record and record.get("run_id") else None
+        worker = self.store.get_worker(str(run.get("worker_id") or "")) if run else None
+        collector = getattr(self.service.runtime, "provider_activity_log", None)
+        if not run or not worker or not callable(collector):
+            return None
+        try:
+            profile, stdout = collector(_provider_log_worker(worker, run), str(run["run_id"]))
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return native_safety_stop(str(profile or ""), str(stdout or ""))
 
     def _native_effective_model(
         self, record: dict[str, Any], run: dict[str, Any], contract: dict[str, Any],

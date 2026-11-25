@@ -619,3 +619,180 @@ def test_stop_ends_a_child_orphaned_in_the_fork_gap_and_the_account_is_then_reco
             try:os.killpg(child_pid,signal.SIGKILL)
             except (ProcessLookupError,PermissionError):pass
         if supervisor.poll() is None:supervisor.kill();supervisor.wait()
+
+
+# Worker runs may share the existing Claude sign-in, up to the per-account limit.
+from contextlib import ExitStack
+
+
+def _run(binder, worker, run_id, stack, stops=None):
+    return stack.enter_context(binder.bind(worker | {'worker_id': f'worker-{run_id}'}, runtime_name='claude-code',
+        run_id=run_id, timeout_sec=1, abort_binding=lambda w: (stops if stops is not None else []).append(w['_active_run_id'])))
+
+
+def test_worker_runs_share_the_existing_sign_in_up_to_the_account_limit(host, monkeypatch):
+    monkeypatch.setenv('WPR_HOST_ACCOUNT_ACTIVE_LIMIT', '3')
+    account, worker = connect(host); binder = host[1]
+    stops = []
+    with ExitStack() as stack:
+        bound = [_run(binder, worker, f'run-{n}', stack, stops) for n in range(3)]
+        for each in bound:  # every run still proves its own lease while the others hold theirs
+            env = {}
+            apply_bound_provider_account_environment(each, env, runtime_name='claude-code')
+            assert env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] == ''
+        with pytest.raises(ControlPlaneConflict, match='already in use'):
+            with binder.bind(worker | {'worker_id': 'worker-run-3'}, runtime_name='claude-code', run_id='run-3',
+                             timeout_sec=1, abort_binding=lambda _: None):
+                pass
+    assert sorted(stops) == ['run-0', 'run-1', 'run-2']
+    assert binder.store.active_provider_account_lease(account['account_id']) is None
+
+
+def test_a_limit_of_one_keeps_the_sign_in_to_one_run(host, monkeypatch):
+    monkeypatch.setenv('WPR_HOST_ACCOUNT_ACTIVE_LIMIT', '1')
+    account, worker = connect(host); binder = host[1]
+    with ExitStack() as stack:
+        _run(binder, worker, 'first', stack)
+        with pytest.raises(ControlPlaneConflict, match='already in use'):
+            _run(binder, worker, 'second', stack)
+
+
+def test_shared_runs_still_keep_verify_and_disconnect_out_until_all_have_ended(host):
+    account, worker = connect(host); manager, binder, _, _ = host
+    ids = {'account_id': account['account_id'], 'tenant_id': 'local', 'owner_id': 'owner'}
+    with ExitStack() as stack:
+        _run(binder, worker, 'a', stack); _run(binder, worker, 'b', stack)
+        with pytest.raises(ControlPlaneConflict):
+            manager.verify(**ids)
+        with pytest.raises(ControlPlaneConflict):
+            manager.disconnect(**ids)
+    assert manager.verify(**ids)['status'] == 'ready'
+
+
+def test_a_run_cannot_join_while_any_other_use_holds_the_sign_in(host):
+    account, worker = connect(host); binder = host[1]
+    lease = binder.store.acquire_provider_lease(account_id=account['account_id'], tenant_id='local', owner_id='owner',
+        lane='claude-code:current-native:verify', worker_id='current-native-connect', run_id='verify', ttl_seconds=30,
+        allowed_statuses=('ready',), required_recovery_code='')
+    try:
+        with pytest.raises(ControlPlaneConflict, match='already in use'):
+            with binder.bind(worker, runtime_name='claude-code', run_id='run', timeout_sec=1, abort_binding=lambda _: None):
+                pass
+    finally:
+        binder.store.release_provider_lease(lease_id=lease['lease_id'], tenant_id='local', owner_id='owner')
+
+
+def test_each_shared_run_checks_its_own_lease_not_the_newest(host):
+    account, worker = connect(host); binder = host[1]
+    with ExitStack() as stack:
+        first = _run(binder, worker, 'first', stack)
+        second = _run(binder, worker, 'second', stack)
+        # Before this change a run asserted "the newest lease of the account is mine": the first run failed here.
+        apply_bound_provider_account_environment(first, {}, runtime_name='claude-code')
+        own = first['_glasshive_current_native_account']['lease_id']
+        with binder.store._connect() as conn:
+            conn.execute('UPDATE provider_account_leases SET released_at = 1 WHERE lease_id = ?', (own,))
+        with pytest.raises(ControlPlaneError, match='no longer valid'):
+            apply_bound_provider_account_environment(first, {}, runtime_name='claude-code')
+        apply_bound_provider_account_environment(second, {}, runtime_name='claude-code')
+        with binder.store._connect() as conn:  # put it back so the binding's own release succeeds
+            conn.execute('UPDATE provider_account_leases SET released_at = NULL WHERE lease_id = ?', (own,))
+
+
+def test_a_held_run_keeps_new_runs_out_of_a_shared_sign_in(host):
+    from workers_projects_runtime.openclaw_runtime import ProviderAuthenticationMissingError
+    account, worker = connect(host); binder = host[1]
+    def uncertain(_): raise RuntimeError('synthetic uncertain stop')
+    with pytest.raises(RuntimeError):
+        with binder.bind(worker, runtime_name='claude-code', run_id='held', timeout_sec=1, abort_binding=uncertain):
+            pass
+    with pytest.raises(ProviderAuthenticationMissingError):
+        with binder.bind(worker | {'worker_id': 'other'}, runtime_name='claude-code', run_id='next', timeout_sec=1,
+                         abort_binding=lambda _: None):
+            pass
+
+
+def test_shared_runs_are_not_queue_pressure_until_the_sign_in_is_full(host, monkeypatch):
+    from workers_projects_runtime.mission_provider_accounts import other_live_provider_lease
+    monkeypatch.setenv('WPR_HOST_ACCOUNT_ACTIVE_LIMIT', '2')
+    account, worker = connect(host); binder = host[1]
+    args = {'account_id': account['account_id'], 'tenant_id': 'local', 'owner_id': 'owner', 'run_id': 'waiting'}
+    with ExitStack() as stack:
+        _run(binder, worker, 'one', stack)
+        assert binder.store.blocking_provider_account_lease(account['account_id']) is None
+        assert other_live_provider_lease(binder.store, **args) is None
+        _run(binder, worker, 'two', stack)
+        assert binder.store.blocking_provider_account_lease(account['account_id']) is not None
+        assert other_live_provider_lease(binder.store, **args) is not None
+
+
+def test_run_creation_fence_admits_a_run_while_the_sign_in_has_room(host, monkeypatch):
+    from workers_projects_runtime.store import _blocking_account_lease
+    monkeypatch.setenv('WPR_HOST_ACCOUNT_ACTIVE_LIMIT', '2')
+    account, worker = connect(host); binder = host[1]
+    with ExitStack() as stack:
+        _run(binder, worker, 'one', stack)
+        with binder.store._connect() as conn:
+            assert _blocking_account_lease(conn, account['account_id'], 'another-worker', 'claude-code:mission') is None
+        _run(binder, worker, 'two', stack)
+        with binder.store._connect() as conn:
+            assert _blocking_account_lease(conn, account['account_id'], 'another-worker', 'claude-code:mission') is not None
+
+
+def test_two_runs_racing_for_the_last_slot_get_it_once(host, monkeypatch):
+    import threading
+    monkeypatch.setenv('WPR_HOST_ACCOUNT_ACTIVE_LIMIT', '2')
+    account, worker = connect(host); binder = host[1]
+    with ExitStack() as stack:
+        _run(binder, worker, 'holder', stack)
+        go, outcomes = threading.Barrier(2), []
+        def race(run_id):
+            go.wait()
+            try:
+                lease = binder.store.acquire_provider_lease(account_id=account['account_id'], tenant_id='local',
+                    owner_id='owner', lane='claude-code:current-native:mission', worker_id=f'w-{run_id}',
+                    run_id=run_id, ttl_seconds=60, required_recovery_code='')
+                outcomes.append(('won', lease['lease_id']))
+            except ControlPlaneConflict:
+                outcomes.append(('refused', run_id))
+        threads = [threading.Thread(target=race, args=(name,)) for name in ('x', 'y')]
+        [t.start() for t in threads]; [t.join(timeout=5) for t in threads]
+        assert sorted(kind for kind, _ in outcomes) == ['refused', 'won']
+        won = next(lease for kind, lease in outcomes if kind == 'won')
+        binder.store.release_provider_lease(lease_id=won, tenant_id='local', owner_id='owner')
+    assert binder.store.active_provider_account_lease(account['account_id']) is None
+
+
+def test_a_run_killed_midway_holds_the_sign_in_while_the_others_finish_then_it_is_freed(host):
+    from workers_projects_runtime.openclaw_runtime import ProviderAuthenticationMissingError
+    account, worker = connect(host); manager, binder, _, _ = host
+    ids = {'account_id': account['account_id'], 'tenant_id': 'local', 'owner_id': 'owner'}
+    def uncertain(_): raise RuntimeError('synthetic stop not confirmed')
+    with ExitStack() as stack:
+        other = _run(binder, worker, 'other', stack)
+        with pytest.raises(RuntimeError):
+            with binder.bind(worker | {'worker_id': 'killed'}, runtime_name='claude-code', run_id='killed',
+                             timeout_sec=1, abort_binding=uncertain):
+                pass
+        # The other run keeps its own lease and keeps working; nothing new starts on the held sign-in.
+        apply_bound_provider_account_environment(other, {}, runtime_name='claude-code')
+        with pytest.raises(ProviderAuthenticationMissingError):
+            with binder.bind(worker | {'worker_id': 'late'}, runtime_name='claude-code', run_id='late', timeout_sec=1,
+                             abort_binding=lambda _: None):
+                pass
+    # The other run released its own lease; only the killed run's lease stays until its stop is proven.
+    leases = binder.store.retained_current_native_leases(**ids)
+    assert [lease['run_id'] for lease in leases] == ['killed']
+    assert len(recover_retained_leases(binder.store, confirm_stopped=lambda *_: None, **ids)) == 1
+    assert binder.store.active_provider_account_lease(account['account_id']) is None
+    assert manager.verify(**ids)['status'] == 'ready'
+
+
+def test_setup_cannot_start_while_runs_share_the_sign_in(host):
+    account, worker = connect(host); binder = host[1]
+    with ExitStack() as stack:
+        _run(binder, worker, 'a', stack); _run(binder, worker, 'b', stack)
+        with pytest.raises(ControlPlaneConflict):
+            binder.store.acquire_provider_lease(account_id=account['account_id'], tenant_id='local', owner_id='owner',
+                lane='claude-code:current-native:interactive', worker_id='setup', run_id='setup', ttl_seconds=60,
+                required_recovery_code='')

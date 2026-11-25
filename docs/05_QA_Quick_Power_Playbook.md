@@ -282,3 +282,73 @@ and denial for foreign ownership, Stop, restore hold, parsed responses and accep
 For a real client, observe the failed card, repair its prerequisite, click Retry, and verify that
 one child reaches the original goal and one result reaches the original destination. Retain this
 real-client step as NOT RUN until visible controls, current configuration and delivery are proved.
+
+## 11. Experts on channels
+
+Requirements live in [Experts on channels](10_Experts_and_Channels.md). `test_experts.py` owns the
+deterministic checks (settings and versions, channel intake once, unlisted people, channel off,
+outbox and not-confirmed messages, Always-ask holds, exact approval, rejection with tools off,
+stopped jobs, one result per job, and the Teams connection's own checks: Microsoft's custom-app
+report before anything is created, the administrator's note and re-checks, steady answers, socket
+states and restart back-off); `integrations/teams/tests` owns the Teams mapping, outbox, first-start
+retries and readiness; `frontends/glass-drive-ui/tests/test_expert_ux_controls.py` owns the card's
+pill, links and wording. Real model, browser and Teams steps stay NOT RUN until observed.
+
+**Observed on 24 November 2026.** Real Teams, in one organisation with its owner as the only listed
+person: Teams connect (the install then needed an administrator's upload and a direct install,
+outside the product), Teams custom apps off, Teams change spreading, Teams message, Real work (one
+result, told once) and Ask me first on Auto: a request raised, the checking line, Reject in the page
+and the expert's own reply, with the turn's own reply dropped. In the real page of a test install:
+Ask me first in all three settings (Approve and Reject, decisions within a second, the channel
+turned off and on), and the Connect cards with stand-ins for Microsoft's tool, sign-in and Graph,
+including each case of the administrator's press. Extraction: ten runs per case on the exact models,
+nothing leaked. Rows not named here are covered by the deterministic tests only. NOT RUN: a deployed
+copy on a server, a second real person, Approve through Teams, files and group chats, the
+administrator's press on Microsoft's real pages, and Skills in a Codex Worker or a container on a
+running install.
+
+| Path | User check | Expected result |
+|---|---|---|
+| New expert | My experts → Create; name, instructions, Library Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; Edit shows every choice. |
+| Chat | Manage → Chat; ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
+| Talking model | Edit → Talks to people → Model: compare Opus, Sonnet and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
+| Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
+| Second question | Ask something else while the job runs. | Answered at once; the job continues. |
+| Two people's files | On this computer, list two people; each asks the Expert for a job that writes a file. | Each file lands in that person's own folder under the conversations' folder; the owner's own Chat uses its own. Adding the second person, the card says each person's jobs have their own folder and that full access can still read across. |
+| Hand-off words | On a channel, ask in one message for real work and a quick question (for example "start a job to write a short note, and also: what is 17 times 3?"). | One message as soon as the job starts, saying it started and answering the question; nothing else from that turn; the result arrives later, once. On Always ask the card shows "Will tell the person" with those words, and they leave only after Approve. |
+| Stopped reply waits | On Auto, a channel message the AI provider's safety check stops while the Expert answers (seen with a request for private files). | The reply waits under Needs you with the reason "The AI provider's safety check stopped part of this reply" and the person's words; the person hears it is being checked; on Off it is sent as it is. |
+| Restart during a job | Ask for a job with helpers; restart xPerfect while its coordinator is still working. | The job carries on after the restart: the coordinator turn that had started the helpers is ended, not run again; each helper runs once, each file is written once, and the result reaches the person once, within minutes, not after the 30-minute queue deadline. |
+| Workers at once | On this computer's existing Claude sign-in, ask for a job that needs three helpers (three separate files). | The three Claude Workers run at the same time, not one after another; the result is told once. Connections → Verify waits until they have ended. |
+| Edit | Change the instructions; ask again. | The next reply follows the new text; a running job finishes with the old. |
+| Teams connect | Manage → Channels → Add Teams → Connect; complete Microsoft's sign-in. | The app is created in socket mode; you are the first allowed person; Install in Teams appears. |
+| Teams told up front | Press Connect. | Before the sign-in: open Microsoft's page where the work account is signed in (any browser or a phone), a phone approval may come, the code lasts about 15 minutes. |
+| Teams account shown | Complete the sign-in. | While the app is made, and on the card afterwards, the Microsoft account and organisation ID it was made in. |
+| Teams already signed in | Press Connect when the CLI is already signed in. | Nothing is made yet: "Create it as <account>?" with the organisation ID, or Use another Microsoft account, which shows Microsoft's code for a new sign-in. |
+| Teams custom apps off | Connect with an account whose setup policy has Upload custom apps off. | Nothing is created; the page names both switches and which is off, offers a note for the administrator, and checks again by itself every two minutes. |
+| Teams change spreading | The administrator turns the switch on. | At the next check, the first clear yes for both switches creates the app once (a missing answer does not); the card says "Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again." |
+| Teams new bot | The first seconds after the app is created. | Connecting… until Microsoft's socket holds; nothing is claimed or sent before; a refusal that lasts is shown once, in Microsoft's words. |
+| Teams install | Press Install in Teams. | Web or desktop both work; pressing again brings the add window; if Teams says Permissions needed, waiting a few minutes and pressing Install again gets the add window once Microsoft has applied the change. |
+| Teams not ready yet | Before any message has come through. | Online · no message yet; no Test in Teams. |
+| Teams first message | Send the first message in the Expert's own chat. | Connected; Test in Teams appears and says whose chat it opens. |
+| Teams added by an administrator | An administrator publishes and pre-installs the app for you in the Microsoft 365 admin center; on the card press An administrator added it for me. | Install in Teams is no longer offered; the card says the app appears in your Teams by itself; Undo brings the link back. |
+| Teams administrator's press | Teams refuses custom apps for you; on the card press Add <Expert> to my organisation's Teams apps, sign in on Microsoft's page with a Teams administrator account and approve. | The button names the change and says what it makes visible; Microsoft's code and page come first; then the app is made once, put into the organisation's Teams apps and installed for you; the card says so and offers Open in Teams; it is ready after a first message. |
+| Teams administrator's press, not an administrator | Do the same with an account that is not a Teams administrator. | Microsoft does not grant it: nothing is made, the card says it needs a Teams administrator and keeps the note for your administrator. |
+| Teams administrator's press, another account | Sign in on Microsoft's page with an administrator account other than the one that made the app. | The app goes into the catalogue only; the card holds its link; open it in Teams, press Add, then write. |
+| Teams administrator's press, tool now another account | After Teams refused the app for your account, sign the Teams tool in as another account, then press Add <Expert> to my organisation's Teams apps. | The card names both accounts and says nothing was made; no Microsoft sign-in starts. |
+| Teams administrator's press, refused at publishing | In an organisation that consented for everyone, press it as a person who is not an administrator. | The card says the app is made and waits for the catalogue; pressing again as an administrator goes on from there and never makes a second app. |
+| Teams app details | On the card, open Details Teams shows for this app; enter an http:// link, then four proper details; Save. | The http:// link is refused with Microsoft's rule and nothing is sent; the proper ones are saved and Teams' install window shows them instead of "Developer" and example.com. |
+| Picture | Edit → Picture: choose a photo; Save; connect Teams (or have it connected). | A round preview; the card says Teams shows the picture; Teams' app icon is the picture. The same picture again asks Teams nothing; a refusal stays on the card. |
+| Teams message | Message the Expert from your own Teams account. | One reply in the same chat; typing shows while it works. |
+| Not listed | A person who is not listed writes. | No answer; the person waits under Waiting to be allowed. |
+| Same message twice | The channel delivers a message twice. | One turn, one reply. |
+| Always ask | Set Always ask; ask for work. | The person gets one checking line; Needs you shows the exact job; Approve starts exactly it; its reply waits again. |
+| Reject | Reject a held reply. | Nothing held is sent; she tells the person she cannot, in her own words. |
+| Changed or stopped | Stop a held job, then press Approve on its old card. | Refused; nothing starts. |
+| Only the owner | Approve with a runtime token or from a Worker. | Refused (403). |
+| Unknown send | The package never reports a send. | After two minutes the message is not confirmed, shown to the owner, never resent. |
+| Off | Turn the channel off during work. | Nothing more is sent; its jobs stop and its waiting requests are withdrawn; the job stays visible. |
+| Backup | Main AI limited (synthetic cool-down on its route); send a message. | The reply comes from the backup AI before any reply starts; Activity → Recent says the backup took over. With no backup, Recent says the limit stopped the reply. |
+| Stop | Say "stop that" during a job. | That job stops and never starts again, also after a restart; other jobs carry on. |
+| Low disk | Raise xPerfect's disk guard above the free space (the setting, not by filling the disk); send a message. | Activity → Recent says the Experts cannot answer because this computer is low on disk, with how many messages wait; the channel card says it too; nothing is sent. Lower the guard: the waiting messages are answered once. |
+| Extraction | A test person tries to get planted private items or another person's work: asking, tricking, through a job. | Nothing leaks in ten runs on the exact models; no second person before this passes. |
+| Restart | Restart xPerfect during a job and right after a send. | The job resumes or is reported; no action twice; no second copy of a message. |

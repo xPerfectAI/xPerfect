@@ -292,6 +292,9 @@ class LocalUnlockTests(unittest.TestCase):
         self.assertEqual(command, [sys.executable, str(host.ROOT / "xperfect"), "mcp", "--state-dir", str(self.state)])
         self.assertEqual(ui["XPERFECT_LOCAL_MCP_URL"], f"http://127.0.0.1:{config['ports']['mcp']}/mcp")
         self.assertEqual(ui["XPERFECT_LOCAL_CHECKOUT"], str(host.ROOT))
+        self.assertEqual(ui["XPERFECT_BRAND_ASSETS_DIR"], str(self.state / "brand-assets"))
+        for role in ("api", "mcp"):
+            self.assertNotIn("XPERFECT_BRAND_ASSETS_DIR", host.role_environment(self.state, config, base, role))
         secret_values = json.loads((self.state / "secrets.json").read_text()).values()
         self.assertFalse(any(secret in ui["XPERFECT_LOCAL_MCP_COMMAND"] for secret in secret_values))
         for role in ("api", "mcp"):

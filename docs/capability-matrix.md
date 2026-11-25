@@ -129,6 +129,16 @@ choices. The 100-active-expert limit counts lineages; revision does not consume 
 or Remove frees one. Restore checks capacity. See the [runtime contract](03_Bootstrap_Auth_and_Identity_Projection.md#saved-expert-and-workspace-catalog-lifecycle)
 and [API/MCP contract](04_MCP_Publication_and_Client_Compatibility.md#catalog-crud-through-the-same-owner).
 
+### Experts on channels
+
+People an owner lists can message a saved expert in Microsoft Teams personal chats, through the
+optional `integrations/teams` package. Its speaking assistant answers and hands work to a background
+coordinator; Ask me first can hold what it sends or starts for the owner. Text only: files, group
+chats, Slack and approving from inside Teams are later capabilities. On this computer the expert's
+Workers have full access, so its instructions and Ask me first are behaviour, not a wall; a
+sandboxed workspace keeps Workers in containers and is covered by tests only so far. A deployed copy
+is not yet proven. See [Experts on channels](10_Experts_and_Channels.md).
+
 ## What xPerfect adds
 
 xPerfect brings professional expert setups, versioned company knowledge, native AI tools,

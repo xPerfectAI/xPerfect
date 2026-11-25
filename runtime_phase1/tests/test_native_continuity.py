@@ -2150,3 +2150,56 @@ def test_native_continuity_does_not_restore_the_sources_library_mutation_lock(tm
     with pytest.raises(ValueError, match='source mutation lock'):
         prepare_restored_state(snapshot, tmp_path / 'restored')
     source.close()
+
+
+def _expert_tables(store):
+    from workers_projects_runtime.channels import ensure_channels_schema
+    from workers_projects_runtime.experts import ensure_experts_schema
+
+    with store._connect() as connection:
+        ensure_experts_schema(connection)
+    with store._connect() as connection:
+        ensure_channels_schema(connection)
+
+
+@pytest.mark.parametrize("damage", ["none", "partial"])
+def test_native_schema_reviews_expert_and_channel_owners(tmp_path, damage):
+    from workers_projects_runtime.coordinator import CoordinatorService
+    from workers_projects_runtime.native_continuity import _require_schema
+
+    database = tmp_path / "runtime.sqlite"
+    store = Store(str(database))
+    ControlPlaneStore(str(database))
+    CoordinatorService(store, object(), object())
+    _expert_tables(store)
+    store.close()
+    with sqlite3.connect(database) as connection:
+        if damage == "partial":
+            connection.execute("DROP TABLE channel_unknown_people")
+            with pytest.raises(ValueError, match="partial optional schema"):
+                _require_schema(connection)
+        else:
+            _require_schema(connection)
+
+
+def test_native_restore_never_sends_an_outbox_message_again(tmp_path):
+    from workers_projects_runtime.coordinator import CoordinatorService
+    from workers_projects_runtime.native_continuity import capture_state, prepare_restored_state
+
+    database, source, _, _ = source_state(tmp_path)
+    CoordinatorService(source, object(), object())
+    _expert_tables(source)
+    with source._connect() as connection:
+        connection.executemany(
+            "INSERT INTO channel_deliveries (delivery_id,binding_id,conversation_id,turn_id,kind,text,state,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [(f"delivery-{state}", "binding", "conversation", f"turn-{state}", "reply", "Synthetic reply", state,
+              "2026-01-01T00:00:00+00:00") for state in ("pending", "sending", "sent", "held")],
+        )
+    snapshot = tmp_path / "snapshot"
+    capture_state(database, snapshot)
+    prepare_restored_state(snapshot, tmp_path / "destination")
+    with sqlite3.connect(snapshot / "runtime.sqlite") as connection:
+        states = dict(connection.execute("SELECT delivery_id, state FROM channel_deliveries"))
+    assert states == {"delivery-pending": "not_confirmed", "delivery-sending": "not_confirmed",
+                      "delivery-sent": "sent", "delivery-held": "held"}

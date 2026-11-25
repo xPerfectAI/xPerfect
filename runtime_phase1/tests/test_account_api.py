@@ -48,8 +48,14 @@ def _healthy_capability_producers() -> dict[str, object]:
             "state": "healthy",
             "healthy": True,
             "usedPercent": 50.0,
-            "availableBytes": 50,
+            "availableBytes": 50 * 1024**3,
             "thresholdPercent": 90.0,
+        },
+        "nativeStorage": {
+            "version": 1,
+            "healthy": True,
+            "availableBytes": 50 * 1024**3,
+            "requiredBytes": 4096 * 1024**2,
         },
         "promptLayers": {
             "contractVersion": 1,
@@ -294,7 +300,9 @@ def account_client(tmp_path, monkeypatch, background_consumers_disabled):
     monkeypatch.setattr(
         service_module.shutil,
         "disk_usage",
-        lambda _path: service_module.shutil._ntuple_diskusage(100, 50, 50),
+        # A disk in real sizes, half used: Native admission keeps a byte reserve (4 GiB by default) and
+        # fails closed below it, so a disk of a hundred bytes is no longer a healthy host.
+        lambda _path: service_module.shutil._ntuple_diskusage(100 * 1024**3, 50 * 1024**3, 50 * 1024**3),
     )
     monkeypatch.setattr(
         service_module,

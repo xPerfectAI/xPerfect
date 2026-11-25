@@ -19968,6 +19968,7 @@ class WorkersProjectsService:
             ("provider liveness", self.process_provider_liveness_once),
             ("unfinished projections", self.settle_unfinished_projections_once),
             ("conversation coordinator", lambda: self.coordinator.reconcile_once() if getattr(self, "coordinator", None) is not None else None),
+            ("experts", lambda: self.experts.reconcile_once() if getattr(self, "experts", None) is not None else None),
         ):
             if self._shutdown_event.is_set():
                 return
@@ -22537,6 +22538,16 @@ class WorkersProjectsService:
                     "GlassHive terminal provider request reconciliation faulted safely",
                     extra={"error_code": "transient_dependency"},
                 )
+        coordinator = getattr(self, "coordinator", None)
+        if finalized is not None and coordinator is not None and (
+            state in TERMINAL_RUN_STATES or state == "interrupted"
+        ):
+            try:
+                if coordinator.record_run_result(finalized["worker_id"], str(run_id)):
+                    self._scheduler_wake_event.set()
+            except Exception:
+                logger.error("GlassHive could not wake coordinator for terminal run",
+                             extra={"error_code": "transient_dependency"})
         return finalized
 
     def reconcile_terminal_artifact_observations(self, *, limit: int = 100) -> int:

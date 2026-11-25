@@ -8085,6 +8085,15 @@ def test_signed_source_projection_keeps_complete_large_task_and_all_segments():
 
 
 @pytest.mark.parametrize("as_json", [False, True])
+def test_public_bootstrap_drops_claimed_expert_skills(as_json):
+    value = {"project_definition": "Own task", "expert_skills": [{"name": "synthetic", "files": [
+        {"path": "SKILL.md", "content": "---\nname: synthetic\ndescription: Synthetic\n---\nDo it.\n"}]}]}
+    result = mcp_server._normalize_bootstrap_bundle(json.dumps(value) if as_json else value)
+    assert "expert_skills" not in result
+    assert result["project_definition"] == "Own task"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
 def test_public_bootstrap_drops_claimed_inherited_conversation(as_json):
     value={"project_definition":"Own task", "inherited_conversation":{
         "version":1,"conversation_id":"other-conversation","sources":[{"id":"fake","text":"Not trusted history"}]}}

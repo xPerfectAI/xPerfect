@@ -850,6 +850,16 @@ owner proves termination and commits the cancellation; recovery retains that own
 is interrupted. A real completed result can still win. Other runs and generations keep their own
 terminal authority.
 
+`POST /v1/coordinator/conversations/{id}/stop` stops a whole conversation durably. One committed
+fence (`stop_scope`) means queued turns, dispatches, actions and result wake-ups cannot start
+again, also after a restart: reconcile re-drives the Stop until every run it cancelled has ended,
+then records it as `stopped`. It cancels the conversation's goal and follow-up runs and the
+schedules those runs created (recorded by their source run); owner-created schedules and other
+work on a shared Worker stay. Results and receipts stay readable; a late result is kept and wakes
+nothing. The response is `stopping` with `confirmation_pending: true` until then; repeating the
+call is the recovery. Workers stay open. An Application's conversation is stopped through its
+Application.
+
 A native host Pause uses the same exact-run control owner as an explicit run Pause. A queued
 run can be durably paused before launch. If a run is starting and its exact process identity
 is not confirmed yet, the API returns retryable `409 runtime_control_not_ready`: no control

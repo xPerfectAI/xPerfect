@@ -1841,3 +1841,18 @@ def test_workspace_capability_revoke_restores_prior_bundle_and_preserves_later_c
         assert json.loads(conn.execute(
             "SELECT bootstrap_bundle_json FROM workers WHERE worker_id = 'wrk_public_safe'"
         ).fetchone()[0]) == {"user_change": True}
+
+
+def test_accounts_with_their_own_credentials_stay_one_run_at_a_time(tmp_path, monkeypatch):
+    """Only the existing Claude sign-in may be shared by Worker runs; a named account stays exclusive."""
+    monkeypatch.setenv('WPR_HOST_ACCOUNT_ACTIVE_LIMIT', '4')
+    store = ControlPlaneStore(str(tmp_path / "control.db"))
+    account = store.create_provider_account(tenant_id="tenant-a", owner_id="user-a", provider="codex",
+        label="Codex A", auth_method="subscription", platform_support="supported",
+        secret_locator="native-home://codex-account-a", status="ready")
+    store.acquire_provider_lease(account_id=account["account_id"], tenant_id="tenant-a", owner_id="user-a",
+        lane="codex-cli:mission", worker_id="w1", run_id="r1", ttl_seconds=60)
+    with pytest.raises(ControlPlaneConflict, match="already in use"):
+        store.acquire_provider_lease(account_id=account["account_id"], tenant_id="tenant-a", owner_id="user-a",
+            lane="codex-cli:mission", worker_id="w2", run_id="r2", ttl_seconds=60)
+    assert store.blocking_provider_account_lease(account["account_id"]) is not None

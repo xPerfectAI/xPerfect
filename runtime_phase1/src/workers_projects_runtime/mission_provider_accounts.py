@@ -36,8 +36,12 @@ def other_live_provider_lease(
     store: ControlPlaneStore, *, account_id: str, tenant_id: str,
     owner_id: str, run_id: str,
 ) -> dict | None:
-    """A live foreign lease is queue pressure; expired cleanup stays recovery."""
-    lease = store.active_provider_account_lease(account_id)
+    """A live foreign lease is queue pressure; expired cleanup stays recovery.
+
+    Runs already sharing an existing Claude sign-in that still has room are not pressure."""
+    # A store that only knows the exclusive lookup keeps its old meaning.
+    lookup = getattr(store, "blocking_provider_account_lease", None) or store.active_provider_account_lease
+    lease = lookup(account_id)
     if (lease and str(lease.get("tenant_id") or "") == tenant_id
             and str(lease.get("owner_id") or "") == owner_id
             and str(lease.get("run_id") or "") != run_id

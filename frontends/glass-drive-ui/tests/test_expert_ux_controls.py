@@ -19,6 +19,75 @@ def run_node(code):
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_who_talks_offers_each_ais_faster_model_beside_its_usual_one():
+    source = (STATIC / 'experts.js').read_text()
+    models = re.search(r"const MODELS = (\{.*?\});", source, re.S)
+    options = re.search(r"export function modelOptions\(profile, keep = ''\) \{.*?\n\}", source, re.S)
+    assert models and options, 'talking models'
+    run_node("import assert from 'node:assert/strict';\nconst MODELS = " + models.group(1) + ";\n"
+             + options.group(0).replace("export ", "") + "\n"
+             "assert.deepEqual(MODELS['claude-code'].map(m => m[0]), ['', 'claude-code:opus', 'claude-code:sonnet', 'claude-code:haiku']);\n"
+             "assert.deepEqual(MODELS['codex-cli'].map(m => m[2]), ['codex-cli:native-default', 'codex-cli:gpt-6.2-sol']);\n"
+             "for (const list of Object.values(MODELS)) assert.equal(list[0][0], '');\n"
+             # Review 2, finding 14: a model saved exactly stays exactly as saved when the Expert is edited.
+             "const kept = (profile, keep) => modelOptions(profile, keep).some(([value]) => value === keep);\n"
+             "assert.ok(kept('claude-code', 'claude-code:opus'));\n"
+             "assert.ok(kept('claude-code', 'claude-code:sonnet-5-5'));\n"
+             # The usual model, Opus, Sonnet and Haiku; a model of another AI is never added to Claude's list.
+             "assert.equal(modelOptions('claude-code', 'codex-cli:gpt-6.2-sol').length, 4);\n"
+             "assert.equal(modelOptions('claude-code', '').length, 4);\n")
+    # New Experts talk on the faster model; Opus stays one choice away.
+    assert "talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: 'claude-code:haiku' }" in source
+
+
+def test_needs_you_pops_up_on_every_page_including_the_worker_viewers():
+    stamp = re.search(r"experts\.js\?v=(\w+)", (STATIC / 'needs-you.js').read_text()).group(1)
+    for page in ('conversation.html', 'watch.html', 'desktop.html', 'terminal.html'):
+        html = (STATIC / page).read_text()
+        assert f'src="/static/needs-you.js?v={stamp}"' in html, page
+        assert f'href="/static/needs-you.css?v={stamp}"' in html, page
+    assert f'href="/static/needs-you.css?v={stamp}"' in (STATIC / 'index.html').read_text()
+    # One stamp for every import of the Experts files: a page that still names an older one would keep the old code.
+    for path in sorted(STATIC.glob('*')):
+        if path.suffix in {'.js', '.html'}:
+            for found in re.findall(r"(?:experts|needs-you)\.(?:js|css)\?v=(\w+)", path.read_text()):
+                assert found == stamp, (path.name, found)
+    # One owner for the pop-up's look, readable on pages without the main theme.
+    assert 'needs-you-toast' not in (STATIC / 'experts.css').read_text()
+    toast = (STATIC / 'needs-you.css').read_text()
+    for token in ('var(--overlay-surface,', 'var(--text,', 'var(--line-strong,', 'prefers-color-scheme:light'):
+        assert token in toast, token
+
+
+def test_shared_folder_note_shows_once_a_second_person_could_join():
+    source = (STATIC / 'experts.js').read_text()
+    note = re.search(r"^export function sharedFolderNote\(.*?^}", source, re.M | re.S)
+    assert note, 'sharedFolderNote'
+    assert 'sharedFolderNote(kind, channel.people.length, channel.people_waiting.length)' in source
+    run_node("import assert from 'node:assert/strict';\n" + note.group(0).replace('export ', '') + """
+assert.equal(sharedFolderNote('host', 1, 0), '');
+assert.equal(sharedFolderNote('host', 0, 1), '');
+assert.match(sharedFolderNote('host', 1, 1), /own folder/);
+assert.match(sharedFolderNote('host', 1, 1), /can still read another person/);
+assert.match(sharedFolderNote('host', 2, 0), /sandboxed workspace/);
+assert.equal(sharedFolderNote('sandboxed', 3, 2), '');
+""")
+
+
+def test_the_chat_page_shows_the_reply_while_it_is_written():
+    source = (STATIC / 'conversation.js').read_text()
+    assert "} else if (turn.partial_reply && !turn.blocker) {" in source
+    assert "messages.push(assistantMessage(turn.partial_reply, true));" in source
+    run_node("import assert from 'node:assert/strict';\n"
+             "const markdown={render:t=>t};\nfunction node(tag,text,cls){return {tag,cls,innerHTML:''};}\n"
+             + function('assistantMessage', source) + """
+assert.equal(assistantMessage('Hello', true).cls, 'message assistant writing');
+assert.equal(assistantMessage('Hello').cls, 'message assistant');
+""")
+    page = (STATIC / 'conversation.html').read_text()
+    assert 'conversation.js?v=20261124stream1' in page and 'conversation.css?v=20261124stream1' in page
+
+
 def test_connection_details_explain_the_account_without_exposing_protocol_ids():
     source = (STATIC / 'control-plane.js').read_text()
     run_node("import assert from 'node:assert/strict';\n"
@@ -202,3 +271,192 @@ syncWorkspaceUI({value:'new:codex-cli'},{},button,help);
 assert.equal(label.textContent,'Run Project');assert.equal(button.children[0],icon);assert.equal(help.textContent,'Exact help');
 const legacy={textContent:''};syncWorkspaceUI({value:''},{},legacy,help);assert.equal(legacy.textContent,'Run Project');
 """)
+
+
+def test_a_teams_channel_says_connecting_until_microsofts_socket_holds():
+    # The first real test: a new bot was refused for its first seconds. The pill says so, the page looks again
+    # by itself until the socket holds, and a lasting refusal is said once on the card.
+    source = (STATIC / 'experts.js').read_text()
+    state = re.search(r"^export function channelState\(.*?^}", source, re.M | re.S)
+    assert state, 'channelState'
+    assert "node('span', 'expert-pill', channelState(channel))" in source
+    assert "if (channels.some(c => c.state === 'connected' && c.connecting)) again = setTimeout(later, 3000);" in source
+    assert "list.querySelector('details[open]') || list.contains(document.activeElement)" in source  # not mid-typing
+    assert "if (channel.refusal && channel.state === 'connected') card.append(" in source  # never on an Off card
+    # Teams does not allow the app yet: the line, a note for the administrator, and the page follows the
+    # runtime's own re-check.
+    assert "if (step.step === 'blocked' || step.step === 'admin_waiting') {" in source
+    assert "Copy a note for your administrator" in source
+    assert "timer = setTimeout(() => poll(channel), 10000); return;" in source
+    run_node("import assert from 'node:assert/strict';\n" + state.group(0).replace('export ', '') + """
+assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: true}), 'Connected');
+assert.equal(channelState({state: 'connected', online: true, connecting: false, first_message: false}), 'Online · no message yet');
+assert.equal(channelState({state: 'connected', online: false, connecting: true}), 'Connecting…');
+assert.equal(channelState({state: 'connected', online: false, connecting: false}), 'Connected · offline');
+assert.equal(channelState({state: 'off', online: true, connecting: false}), 'Off');
+assert.equal(channelState({state: 'setup', online: false, connecting: false}), 'Not connected');
+""")
+
+
+def test_test_in_teams_waits_until_a_first_message_came_through():
+    # The first real test: before the app was installed, "Test in Teams" (a chat opened by the bot's id) opened an
+    # existing chat with another person. It is offered only once a first message has come through, and the page
+    # says whose chat it should open.
+    source = (STATIC / 'experts.js').read_text()
+    links = re.search(r"^export function teamsLinks\(.*?^}", source, re.M | re.S)
+    assert links, 'teamsLinks'
+    assert "for (const link of teamsLinks(channel))" in source and source.count("l/chat/0/0") == 1
+    assert "Test in Teams opens your chat with ${name}. If another chat opens, send nothing there." in source
+    assert "Press Test in Teams and send it a message" not in source
+    run_node("import assert from 'node:assert/strict';\n" + links.group(0).replace('export ', '') + """
+const app = {app_id: 'bot-synthetic', install_link: 'https://teams.invalid/install'};
+const labels = channel => teamsLinks(channel).map(link => link.label);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app}), ['Install in Teams']);
+assert.deepEqual(labels({state: 'connected', online: false, first_message: false, app}), ['Install in Teams']);
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app}), ['Test in Teams']);  // installed: no Install
+assert.deepEqual(labels({state: 'connected', online: true, first_message: true, app: {app_id: 'bot-synthetic'}}), ['Test in Teams']);
+// Hurdle 15: once an administrator added the app, the developer copy's install link is a dead end: not offered.
+assert.deepEqual(labels({state: 'connected', online: true, first_message: false, app: {...app, added_by_admin: 'yes'}}), []);
+// The administrator's route: the catalogue's own link opens the app, ready to add; never the blocked developer copy.
+const listed = {...app, catalogue: 'listed', install_link: 'https://teams.microsoft.com/l/app/catalogue-synthetic?tenantId=t'};
+assert.deepEqual(teamsLinks({state: 'connected', first_message: false, app: listed}), [{label: 'Open in Teams', href: listed.install_link, style: 'secondary-button'}]);
+assert.deepEqual(labels({state: 'connected', first_message: false, app: {...listed, catalogue: 'installed'}}), ['Open in Teams']);
+assert.deepEqual(labels({state: 'connected', first_message: false, app: {...app, catalogue: 'pending'}}), []);
+assert.deepEqual(labels({state: 'connected', first_message: true, app: listed}), ['Test in Teams']);
+""")
+
+
+def test_the_person_is_told_up_front_what_microsoft_and_teams_will_ask():
+    # The first real test's hurdles 1, 2, 4, 5 and 7: where to open the sign-in, a phone approval, Teams asking web or
+    # desktop, a change still spreading, and which account and organisation the app was made in.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("where your work account is signed in (any browser, or your phone)",
+                  "Microsoft may ask you to approve on your phone.", "The code lasts about 15 minutes.",
+                  "Creating your Teams app with ${step.account}…", "Made with ${channel.app.account}",
+                  "Teams may ask web or desktop, either works", "press Install in Teams again",
+                  "Microsoft may still be applying this. If Teams says Permissions needed, wait a few minutes and press Install again."):
+        assert words in source, words
+
+
+def test_the_owner_sets_the_teams_apps_public_details():
+    # Hurdle 10: the install window showed "Developer" and example.com. The card offers the four details Teams shows,
+    # and the page's server forwards them to the runtime, which checks and applies them.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function appDetails(channel)", "'Details Teams shows for this app'", "card.append(appDetails(channel));",
+                  "'/details', { method: 'POST'", "Microsoft needs all four; the links start with https://.",
+                  "input.maxLength = 32"):
+        assert words in source, words
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '@app.post("/api/channels/{binding_id}/details")' in server
+    assert '+ "/details", payload)' in server
+    assert '.expert-details[open]{display:grid;gap:8px}' in (STATIC / 'experts.css').read_text()
+
+
+def test_an_already_signed_in_connect_names_the_account_on_its_one_press():
+    # Hurdle 11: the Connect button itself names the account ("Connect Teams as …"), its press is the yes, and a small
+    # "Use another Microsoft account" sits beside it; no second dialog.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("async function nameConnect(channel, go, box)", "`Connect Teams as ${who.account}`",
+                  "'Use another Microsoft account'", "connect(channel, { as_account: go.dataset.account || '' })",
+                  "connect(channel, { other_account: true })", "void nameConnect(channel, go, connectBox);"):
+        assert words in source, words
+    assert "step.step === 'confirm'" not in source  # no second dialog
+    server = (STATIC.parent / 'server.py').read_text()
+    assert 'choice = {"as_account": str(payload.get("as_account") or "")[:320], "other_account": bool(payload.get("other_account")),' in server
+    assert '.expert-other-account{' in (STATIC / 'experts.css').read_text()
+
+
+
+def test_a_teams_app_still_offered_beyond_personal_chats_says_so():
+    # Hurdle 14: if narrowing the app to personal chats failed, the card says it plainly.
+    source = (STATIC / 'experts.js').read_text()
+    assert "if (channel.app.scopes && channel.app.scopes !== 'personal') card.append(" in source
+    assert "Teams still offers this app in teams and group chats; it answers only in personal chats." in source
+
+
+def test_the_owner_can_say_an_administrator_added_the_app():
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function adminButton(channel, added)", "'An administrator added it for me'", "'Undo: show Install in Teams again'",
+                  "it appears in your Teams by itself (Apps, Built for your org; this can take a few hours)",
+                  "'/added-by-admin', { method: 'POST', body: { added } }"):
+        assert words in source, words
+    assert '@app.post("/api/channels/{binding_id}/added-by-admin")' in (STATIC.parent / 'server.py').read_text()
+
+
+def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_press():
+    # While Teams refuses custom apps for the person, the card offers one press for a Teams administrator: the button
+    # names the change, the hint says what it makes visible and how to undo it, Microsoft's own page is the yes, and
+    # the page follows the setup until the app is in the organisation's Teams apps.
+    source = (STATIC / 'experts.js').read_text()
+    for words in ("function adminRoute(channel, primary)", "`Add ${name} to my organisation's Teams apps`",
+                  "connect(channel, { as_admin: true })", "where people may find it as your organisation's settings allow",
+                  "only the people listed here get an answer", "An administrator can delete it again in the Teams admin center.",
+                  "if (step.step === 'admin_sign_in') {", "sign in with a Teams administrator account of this organisation",
+                  "approving it there is the yes", "if (step.step === 'adding') {", "if (step.admin) box.append(...adminRoute(channel, true));",
+                  "if (catalogue === 'pending') {", "if (channel.admin_route) card.append(...adminRoute(channel, false));",
+                  "is in your organisation's Teams apps and installed for you",
+                  "Teams shows the details of the version there",
+                  "One press for a Teams administrator is not available on this xPerfect yet",
+                  "For the Teams app made with ${step.account}",
+                  "“Read and write to all app catalogs”, “Manage user's installed Teams apps” and “Sign in and read user profile”",
+                  "If an administrator added this app to your organisation’s Teams apps, Teams shows the details of the version there",
+                  "Narrowing it takes a new version of the app",
+                  "This app was made before xPerfect narrowed new apps to personal chats"):
+        assert words in source, words
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '"as_admin": bool(payload.get("as_admin"))}' in server
+
+
+def test_the_ai_choices_show_each_ais_own_mark_from_the_worker_pages():
+    source = (STATIC / 'experts.js').read_text()
+    assert "labelled('Talks to people', withMark(talk)" in source
+    assert "labelled('Coordinates the work', withMark(coordinate))" in source
+    assert "l.append(box, aiMark(value), node('span', '', text))" in source
+    # The same images the Worker pages use; theme.css keeps them legible in the dark theme.
+    assert "img.src = `/static/provider-${name}.svg?v=${MARK_VERSION}`" in source
+    for name in ('claude', 'codex', 'grok'):
+        assert (STATIC / f'provider-{name}.svg').exists(), name
+    assert '.provider-mark.expert-ai-mark{width:18px;height:18px' in (STATIC / 'experts.css').read_text()
+
+
+def test_channels_show_marks_of_xperfects_own_and_an_installs_brand_mark_only_beside_the_name():
+    source = (STATIC / 'experts.js').read_text()
+    # Buttons always carry the neutral mark, never a brand's own.
+    assert "add.prepend(channelMark('teams'))" in source and "slack.prepend(channelMark('slack'))" in source
+    # The card's title: the mark beside the plain-text name; a brand's mark only when this install placed one.
+    assert "title.append(channelMark(channel.kind, brand), node('strong', '', CHANNEL_NAMES[channel.kind] || channel.label))" in source
+    assert "export const CHANNEL_NAMES = { teams: 'Microsoft Teams', slack: 'Slack' };" in source
+    assert "Microsoft Teams is a trademark of the Microsoft group of companies." in source
+    # No third-party channel logo ships in the repository.
+    assert not [p.name for p in STATIC.rglob('*') if re.search(r'(teams|slack)', p.name, re.I) and p.suffix in ('.svg', '.png')]
+    loader = re.search(r"let brandAssets = null;\n.*?\n}\n", source, re.S)
+    assert loader, 'loader'
+    run_node("import assert from 'node:assert/strict';\n" + loader.group(0).replace('export ', '') + "\n"
+             "assert.deepEqual(await loadBrandAssets(async () => ({ ok: true, json: async () => ({ channels: { teams: '/brand-assets/channel-teams.svg' } }) })),"
+             " { teams: '/brand-assets/channel-teams.svg' });\n"
+             "brandAssets = null; assert.deepEqual(await loadBrandAssets(async () => { throw new Error('offline'); }), {});\n"
+             "brandAssets = null; assert.deepEqual(await loadBrandAssets(async () => ({ ok: false })), {});\n")
+
+
+def test_an_expert_has_a_picture_that_teams_shows_as_its_app_icon():
+    source = (STATIC / 'experts.js').read_text()
+    assert "const PICTURE_SIZE = 192;" in source and "canvas.toDataURL('image/png')" in source
+    # Cut to a centred square in the browser; sent after the Expert is saved, so a new Expert gets it too.
+    assert "drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size)" in source
+    assert "if (picture.changed() && saved?.template_id) {" in source
+    assert "+ '/picture', { method: 'PUT', signal: saveSignal, body: picture.body() }" in source
+    assert "Teams shows it as the app icon. Kept on this computer, not in its versions." in source
+    assert "`Teams shows ${name}'s picture as its app icon.`" in source
+    assert "`${name}'s picture is not in Teams yet: ${channel.app.picture_error}`" in source
+
+
+def test_the_page_forwards_an_experts_picture_to_the_runtime():
+    server = (STATIC.parent / 'server.py').read_text()
+    assert '@app.get("/api/experts/{expert_id}/picture")' in server and '@app.put("/api/experts/{expert_id}/picture")' in server
+    assert '_expert_forward(request, "PUT", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture", payload)' in server
+
+
+def test_the_owners_card_shows_the_words_a_held_job_would_send():
+    # On Always ask the hand-off's words are part of what the owner approves: they are on the card.
+    source = (STATIC / 'experts.js').read_text()
+    assert "if (item.kind === 'job' && item.payload.tell) card.append(node('p', 'needs-you-what', `Will tell the person: ${item.payload.tell}`));" in source

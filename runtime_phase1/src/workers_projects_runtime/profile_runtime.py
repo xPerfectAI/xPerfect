@@ -1430,6 +1430,174 @@ def _host_native_web_access() -> str:
     return mode
 
 
+def _codex_skill_metadata(path: Path) -> bool:
+    """Codex's documented skill layout keeps its display metadata in ``agents/openai.yaml``.
+
+    Claude Code loads only ``agents/*.md`` from a plugin root as sub-agents, so this one
+    exact file adds no Claude authority. Every other ``agents/`` entry stays refused.
+    """
+    return path.parts == ("agents", "openai.yaml")
+
+
+# Documented native plugin defaults, not names inferred from skill text. These locations can add
+# authority or displace the single root skill, so a text Skill may not carry them.
+_CLAUDE_PLUGIN_COMPONENTS = frozenset({".claude-plugin", "skills", "commands", "agents", "hooks",
+                                       ".mcp.json", ".lsp.json", "output-styles", "workflows",
+                                       "themes", "monitors", "bin", "settings.json"})
+_EXPERT_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+
+
+def _expert_skill_files(skill: object) -> tuple[str, dict[Path, bytes]]:
+    """One Skill chosen on an Expert: its folder name and exact text files, or an error."""
+    name = str(skill.get("name") or "") if isinstance(skill, dict) else ""
+    if not _EXPERT_SKILL_NAME.fullmatch(name):
+        raise RuntimeErrorBase("An Expert's Skill has an invalid name")
+    files: dict[Path, bytes] = {}
+    for entry in skill.get("files") or []:
+        relative = Path(str((entry or {}).get("path") or "")) if isinstance(entry, dict) else Path()
+        if (not relative.parts or relative.is_absolute() or ".." in relative.parts
+                or not isinstance(entry.get("content"), str)):
+            raise RuntimeErrorBase("An Expert's Skill files must be text inside its folder")
+        files[relative] = entry["content"].encode("utf-8")
+    if Path("SKILL.md") not in files:
+        raise RuntimeErrorBase("An Expert's Skill needs its SKILL.md")
+    if any(path.parts[0].casefold() in _CLAUDE_PLUGIN_COMPONENTS and not _codex_skill_metadata(path)
+           for path in files):
+        raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
+    return name, files
+
+
+def _write_expert_skill(target: Path, files: dict[Path, bytes]) -> None:
+    for relative, content in files.items():
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(content)
+        path.chmod(0o600)
+
+
+def _remove_skill_entry(folder: int, name: str) -> None:
+    """Remove one entry of a Skills folder through its descriptor: a folder is removed without
+    following any link inside it, and a link or file in its place is unlinked, never followed."""
+    try:
+        metadata = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        shutil.rmtree(name, dir_fd=folder)
+    else:
+        os.unlink(name, dir_fd=folder)
+
+
+def _placed_skill_matches(folder: int, name: str, placed: dict[str, str]) -> bool:
+    """Whether the entry ``name`` of a Skills folder holds only files the runtime placed there, each with
+    exactly the content it placed (an interrupted placement holds some of them). A link, another kind of
+    entry, a file it did not place or a changed file makes the folder someone else's."""
+    try:
+        top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+    except FileNotFoundError:
+        return False
+    except OSError:  # a link or a file where the folder was
+        return False
+
+    def holds_only_placed(directory: int, prefix: str) -> bool:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                relative = prefix + entry.name
+                if entry.is_symlink():
+                    return False
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                    try:
+                        if not holds_only_placed(child, relative + "/"):
+                            return False
+                    finally:
+                        os.close(child)
+                elif entry.is_file(follow_symlinks=False) and relative in placed:
+                    with os.fdopen(os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory), "rb") as handle:
+                        if hashlib.sha256(handle.read()).hexdigest() != placed[relative]:
+                            return False
+                else:
+                    return False
+        return True
+
+    try:
+        return holds_only_placed(top, "")
+    finally:
+        os.close(top)
+
+
+def _place_expert_skills(home: Path, root: Path, declared: object, *, record: Path | None = None) -> list[str]:
+    """Place an Expert's chosen Skills under ``home/root``, a folder its Worker can write to.
+
+    Every write opens its path through no-follow descriptors and replaces the file whole, so a link
+    planted in the home can neither redirect a write nor change an outside file. With no ``record``
+    the Skills folder belongs to the runtime alone and is replaced whole at each launch. With one (a
+    file in the runtime's own state) the folder is shared with the Worker, and a full-access Worker on
+    this computer can reach the record as its owner can. So the runtime removes only what it can prove
+    it placed: a recorded folder holding nothing but the files it recorded, each with the content it
+    recorded. Anything else stays, and a chosen name already in use is refused."""
+    from .bootstrap import _read_private_native_file, _sandbox_parent_descriptor, _write_private_native_file
+
+    if declared is None:
+        declared = []
+    if not isinstance(declared, list):
+        raise RuntimeErrorBase("An Expert's Skills must be a list")
+    chosen = [_expert_skill_files(skill) for skill in declared]
+    names = [name for name, _files in chosen]
+    placing = {name: {relative.as_posix(): hashlib.sha256(content).hexdigest() for relative, content in files.items()}
+               for name, files in chosen}
+    try:
+        if record is None:
+            if not chosen and not os.path.lexists(home / root):
+                return []
+            with _sandbox_parent_descriptor(home, root) as (parent, folder_name):
+                _remove_skill_entry(parent, folder_name)
+        else:
+            raw: object = {}
+            if os.path.lexists(record):
+                try:
+                    raw = json.loads(_read_private_native_file(record.parent, Path(record.name)) or "{}")
+                except ValueError:
+                    raw = {}
+            earlier: dict[str, dict[str, str] | None] = {}
+            if isinstance(raw, dict) and isinstance(raw.get("placed"), dict):
+                earlier = {str(name): {str(path): str(sha) for path, sha in files.items()}
+                           for name, files in raw["placed"].items()
+                           if _EXPERT_SKILL_NAME.fullmatch(str(name)) and isinstance(files, dict)}
+            elif isinstance(raw, list):  # an earlier version recorded names only: proven by content below
+                earlier = {str(name): None for name in raw if _EXPERT_SKILL_NAME.fullmatch(str(name))}
+            if not chosen and not earlier:
+                return []
+            kept: dict[str, dict[str, str]] = {}
+            with _sandbox_parent_descriptor(home, root / ".expert-skills-check") as (folder, _name):
+                for name, placed in earlier.items():
+                    proof = placed if placed is not None else placing.get(name)
+                    if proof is not None and _placed_skill_matches(folder, name, proof):
+                        _remove_skill_entry(folder, name)
+                    elif placed is not None:
+                        try:  # still there, unproven: removed once it holds only what was placed
+                            os.stat(name, dir_fd=folder, follow_symlinks=False)
+                            kept[name] = placed
+                        except FileNotFoundError:
+                            pass
+                for name in names:
+                    try:
+                        os.stat(name, dir_fd=folder, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    raise RuntimeErrorBase("An Expert's Skill name is already used in this Worker's Skills")
+            # What is placed is recorded before its files, so an interrupted placement is removed next time.
+            _write_private_native_file(record.parent, Path(record.name),
+                                       json.dumps({"placed": {**kept, **placing}}, sort_keys=True).encode("utf-8"),
+                                       mode=0o600)
+        for name, files in chosen:
+            for relative, content in files.items():
+                _write_private_native_file(home, root / name / relative, content, mode=0o600)
+    except OSError as exc:  # a link planted above the Skills folder, or the home is unavailable
+        raise RuntimeErrorBase("An Expert's Skills could not be placed safely in this Worker's home") from exc
+    return names
+
+
 def host_claude_skill_policy_reason(bundle: dict, *, execution_mode: str = "host") -> str | None:
     """The same native skill policy governs admission receipts and actual launch."""
     if execution_mode != "host":
@@ -9187,6 +9355,11 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def _build_command(self, worker: dict, instruction: str, info: RuntimeInfo) -> tuple[list[str], dict[str, str]]:
         worker.pop("_glasshive_native_authority_commands", None)
+        # The Skills chosen on an Expert, placed from outside in this container's own HOME/.agents/skills,
+        # where Codex loads Skills natively; what was placed is recorded in the runtime's own state.
+        _place_expert_skills(self._home_dir(str(worker["worker_id"])), Path(".agents/skills"),
+                             bootstrap_bundle_for(worker).get("expert_skills"),
+                             record=self._state_dir(str(worker["worker_id"])) / "expert-skills-codex.json")
         native_authority = self._materialize_direct_worker_native_authority(worker)
         existing_session = (
             None
@@ -9933,6 +10106,11 @@ class ClaudeCodeRuntime(BaseCliWorkerRuntime):
             if native_authority is not None:
                 command[command.index("--append-system-prompt-file") + 1] = native_authority
         command = _with_claude_code_owner_denies(self._with_owner_route_settings(worker, command))
+        # The Skills chosen on an Expert travel as a typed list. Each is placed in this container's
+        # own home from outside it and loaded as one native plug-in folder, on a fresh or resumed start.
+        for name in _place_expert_skills(self._home_dir(str(worker["worker_id"])), Path(".glasshive/expert-skills"),
+                                         bootstrap_bundle_for(worker).get("expert_skills")):
+            command.extend(["--plugin-dir", f"{self.sandbox.home_mount}/.glasshive/expert-skills/{name}"])
         if session_key and not session_key.startswith("claude-worker:"):
             resume_command = [*command, "--resume", session_key]
             if native_authority is not None:
@@ -12528,6 +12706,14 @@ raise SystemExit(exit_code)
             target_codex_home / "plugins" / "cache",
         )
 
+    def _project_host_codex_expert_skills(self, target_codex_home: Path, bundle: dict, *, record: Path) -> None:
+        """The Skills an owner chose for an Expert, as real folders in this Worker's own
+        HOME/.agents/skills (which Codex reads natively). Never inside CODEX_HOME/skills, whose
+        entries link to the owner's own Skills. What was placed is recorded in ``record``, in the
+        runtime's own state; only those names are ever removed."""
+        _place_expert_skills(target_codex_home.parent, Path(".agents/skills"), bundle.get("expert_skills"),
+                             record=record)
+
     def _host_codex_skill_alias(self, target_codex_home: Path, *, create=False) -> Path | None:
         home = target_codex_home.parent
         for directory in (home, home / ".agents", home / ".agents" / "skills"):
@@ -13041,6 +13227,9 @@ raise SystemExit(exit_code)
                 codex_target.chmod(0o600)
                 if not _native_tools_disabled(bundle):
                     self._project_host_codex_capability_roots(codex_home)
+                    self._project_host_codex_expert_skills(
+                        codex_home, bundle,
+                        record=self._state_dir(str(worker["worker_id"])) / "expert-skills-codex.json")
                 else:
                     self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
@@ -13071,6 +13260,9 @@ raise SystemExit(exit_code)
                 config_path.chmod(0o600)
                 if not _native_tools_disabled(bundle):
                     self._project_host_codex_capability_roots(codex_home)
+                    self._project_host_codex_expert_skills(
+                        codex_home, bundle,
+                        record=self._state_dir(str(worker["worker_id"])) / "expert-skills-codex.json")
                 else:
                     self._remove_host_codex_skill_alias(codex_home)
             if native_current_account_allowed(worker):
@@ -17157,6 +17349,18 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             body, message_id=identity, timeout=0)
     binary_env_var = "WPR_CLAUDE_CODE_BIN"
 
+    def _expert_skill_plugin_directories(self, worker: dict, bundle: dict) -> list[Path]:
+        """The Skills an owner chose for an Expert, written fresh into this Worker's own folder.
+
+        They travel in the launch bundle as a typed list (never as workspace files, which a
+        dispatched Worker may not carry under .claude/), and each becomes one native plug-in
+        folder: SKILL.md at its root, text only, none of the native plug-in parts above. The
+        folder belongs to the runtime and is replaced whole, through no-follow descriptors.
+        """
+        home = self._home_dir(str(worker["worker_id"]))
+        root = Path(".glasshive/expert-skills")
+        return [home / root / name for name in _place_expert_skills(home, root, bundle.get("expert_skills"))]
+
     def _declared_skill_plugin_directories(self, bundle: dict, workspace: Path) -> list[Path]:
         """Select exact approved text folders through Claude's native root-skill layout.
 
@@ -17186,16 +17390,13 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 raise RuntimeErrorBase("Claude native skill files contain conflicting declarations")
             files[relative] = content
 
-        # Documented native plugin defaults, not names inferred from skill text.
-        # These locations can add authority or displace the single root skill.
-        components = {".claude-plugin", "skills", "commands", "agents", "hooks",
-                      ".mcp.json", ".lsp.json", "output-styles", "workflows",
-                      "themes", "monitors", "bin", "settings.json"}
+        components = _CLAUDE_PLUGIN_COMPONENTS
         selected = []
         for root, files in sorted(groups.items()):
             if Path("SKILL.md") not in files:
                 continue
-            if any(path.parts[0].casefold() in components for path in files):
+            if any(path.parts[0].casefold() in components and not _codex_skill_metadata(path)
+                   for path in files):
                 raise RuntimeErrorBase("Claude text skills cannot contain native plugin components")
             expected = set(files)
             expected_dirs = {parent for path in files for parent in path.parents}
@@ -17484,7 +17685,11 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             )
         if self._conversation_mode_from_worker(worker):
             permission_mode = "dontAsk" if read_only else "bypassPermissions" if access_mode == "full" else "acceptEdits"
-        if restricted:
+        # An Expert's speaking Queen keeps her session and her own tool server; every
+        # built-in file, shell, web and browser tool is off and nothing else is allowed.
+        coordination_only = (not restricted and self._conversation_mode_from_worker(worker)
+                             and (bundle.get("provider_capabilities") or {}).get("coordination_only") is True)
+        if restricted or coordination_only:
             permission_mode = "dontAsk"
         elif native_web_locked and not read_only:
             permission_mode = "acceptEdits"
@@ -17508,6 +17713,8 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             ])
             if not broker:
                 command.append("--safe-mode")
+        elif coordination_only:
+            command.extend(["--tools", "", "--setting-sources", "", "--disable-slash-commands"])
         elif read_only:
             tools = ["Read", "Glob", "Grep"]
             if not native_web_locked:
@@ -17524,7 +17731,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         settings: dict[str, object] = (
             {"autoMemoryEnabled": False, "disableAllHooks": True,
              "permissions": {"defaultMode": "dontAsk"}}
-            if restricted else json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
+            if restricted or coordination_only else json.loads(json.dumps(bundle.get("claude_settings_local") or {}))
         )
         if restricted and broker:
             # Explicit signed MCP authority is separate from disabled native action tools.
@@ -17541,7 +17748,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
                 raise RuntimeErrorBase("Claude Code read-only permissions are invalid")
             allowed = permissions.get("allow") if isinstance(permissions.get("allow"), list) else []
             permissions.update(defaultMode="dontAsk", allow=[*allowed, *tools])
-        if self._conversation_mode_from_worker(worker) and not restricted:
+        if self._conversation_mode_from_worker(worker) and not restricted and not coordination_only:
             auto_memory = _host_claude_conversation_auto_memory()
             if auto_memory is not None:
                 settings["autoMemoryEnabled"] = auto_memory
@@ -17649,7 +17856,7 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
             )
         if native_web_locked:
             command.extend(["--disallowedTools", "WebSearch", "WebFetch"])
-        if restricted or native_web_locked or access_mode != "full":
+        if restricted or coordination_only or native_web_locked or access_mode != "full":
             command.insert(2, "--no-chrome")
         elif self._chrome_enabled():
             command.insert(2, "--chrome")
@@ -17759,7 +17966,8 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
         if selectors is not None:
             command = apply_claude_context(command, selectors)
         if host_claude_skill_policy_reason(bundle) is None:
-            skills = self._declared_skill_plugin_directories(bundle, Path(str(info.workspace_dir)))
+            skills = [*self._declared_skill_plugin_directories(bundle, Path(str(info.workspace_dir))),
+                      *self._expert_skill_plugin_directories(worker, bundle)]
             if skills:
                 if not self._help_supports("--plugin-dir"):
                     raise RuntimeDependencyMissingError(
