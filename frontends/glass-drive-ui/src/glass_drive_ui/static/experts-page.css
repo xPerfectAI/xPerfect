@@ -85,10 +85,12 @@
 
 @media (max-width: 640px) {
   .experts-identity { grid-template-columns: 1fr; gap: 16px; }
-  .experts-team-table .experts-col-model { width: 34%; }
+  .experts-team-table .experts-col-model { width: 30%; }
   .experts-team-table th, .experts-team-table td { padding-inline: 2px; }
   .experts-star span { display: none; }
-  .experts-team-table thead th { font-size: .68rem; overflow-wrap: anywhere; }
+  .experts-team-table thead th { font-size: .62rem; overflow-wrap: normal; word-break: normal; }
+  .experts-col-line { font-size: .62rem; }
+  .experts-time { white-space: nowrap; font-size: .64rem; }
   .experts-star { left: calc(50% + 10px); }
   .experts-row-label { min-width: 0; flex-basis: 100%; }
   .experts-footer .launch-actions { width: 100%; }
