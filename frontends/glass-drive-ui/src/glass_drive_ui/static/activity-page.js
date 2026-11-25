@@ -84,7 +84,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   filters.append(whoRow, timeRow, statusRow, searchRow);
   const fresh = node('button', 'activity-new'); fresh.type = 'button'; fresh.hidden = true;
   const list = node('div', 'activity-lines');
-  const empty = node('div', 'activity-empty'); empty.hidden = true;
+  const empty = node('div', 'activity-empty'); empty.hidden = true; empty.setAttribute('role', 'status');
   const more = node('button', 'secondary-button activity-more', 'Show more'); more.type = 'button'; more.hidden = true;
   mount.replaceChildren(filters, fresh, list, empty, more);
 
@@ -332,4 +332,20 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
 
   reload();
   return { reload, look, stop: () => clearInterval(timer), state };
+}
+
+let page = null;
+let watching = null;
+/** The page's regular refresh: the first time Activity is shown it draws its lines from xPerfect's own read; after
+ *  that it only looks for newer ones, so nothing he is reading moves. The bootstrap's events are not drawn. */
+export function renderActivity() {
+  const view = document.getElementById('activity-view');
+  const mount = document.getElementById('activity-list');
+  if (!view || !mount) return;
+  const show = () => { if (view.hidden) return; if (page) page.look(); else page = initActivityPage({ mount, view }); };
+  if (!watching) {
+    watching = new MutationObserver(show);
+    watching.observe(view, { attributes: true, attributeFilter: ['hidden'] });
+  }
+  show();
 }

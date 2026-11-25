@@ -3226,51 +3226,6 @@ async function submitProviderAccount(event) {
   }
 }
 
-export function renderActivity(events = [], availability = 'ready') {
-  const list = document.getElementById('activity-list');
-  if (!list) return;
-  if (availability !== 'ready') {
-    list.replaceChildren(emptyList('Activity is temporarily unavailable—refresh to retry'));
-    return;
-  }
-  const ordered = [...events].sort((left, right) => String(right.created_at || right.last_activity_at || right.updated_at || '').localeCompare(String(left.created_at || left.last_activity_at || left.updated_at || '')));
-  if (!ordered.length) {
-    list.replaceChildren(emptyList('No workspace activity yet'));
-    return;
-  }
-  list.replaceChildren(...ordered.slice(0, 40).map((event) => {
-    const eventType = String(event.event_type || event.state || 'workspace.activity');
-    const activityLabels = {
-      'worker.created': 'Workspace created',
-      'worker.ready': 'Workspace ready',
-      'worker.metadata_updated': 'Workspace details updated',
-      'worker.metadata.updated': 'Workspace details updated',
-      'worker.duplicated': 'Workspace duplicated',
-      'run.queued': 'Work queued',
-      'run.started': 'Work started',
-      'run.completed': 'Work completed',
-      'run.failed': 'Work needs attention',
-    };
-    const fallbackLabel = eventType.replaceAll('.', ' ').replaceAll('_', ' ');
-    const eventLabel = activityLabels[eventType] || fallbackLabel.charAt(0).toUpperCase() + fallbackLabel.slice(1);
-    const conversationId = typeof event.conversation_id === 'string' ? event.conversation_id : '';
-    const row = node('article', 'activity-row');
-    const copy = node('div', 'connection-copy');
-    copy.append(
-      node('strong', '', conversationId ? 'Chat' : String(event.workspace_name || event.name || event.title || 'Workspace')),
-      node('span', '', `${eventLabel} · ${formatDateTime(event.created_at || event.updated_at || event.last_activity_at)}`),
-    );
-    row.append(copy);
-    if (conversationId || event.worker_id) {
-      const open = node('a', 'quiet-button', conversationId ? 'Open chat' : 'Open workspace');
-      open.href = conversationId ? `/conversation?id=${encodeURIComponent(conversationId)}`
-        : `/watch/${encodeURIComponent(event.worker_id)}`;
-      row.append(open);
-    }
-    return row;
-  }));
-}
-
 export async function refreshControlPlane() {
   if (!api) return;
   await loadControlPlane();

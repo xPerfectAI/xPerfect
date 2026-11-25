@@ -71,3 +71,16 @@ def test_a_persons_words_are_only_ever_text_and_the_phrase_never_enters_an_addre
     assert 'state.q' not in SOURCE.split('function setAddress')[1].split('function openFromAddress')[0]
     # The address keeps only the opened line's id.
     assert "'#activity/' + lineId" in SOURCE
+
+
+def test_open_chat_only_from_a_proven_conversation_and_times_in_the_viewers_own_zone():
+    # The rules of the renderer this page replaces: a chat link only from the conversation the runtime proved,
+    # otherwise the workspace; times drawn in the viewer's own zone.
+    assert "if (item.open?.conversation_id) { const a = node('a', 'quiet-button', 'Open chat'); a.href = '/conversation?id=' + encodeURIComponent(item.open.conversation_id);" in SOURCE
+    assert "else if (item.open?.worker_id) { const a = node('a', 'quiet-button', 'Open workspace'); a.href = '/watch/' + encodeURIComponent(item.open.worker_id);" in SOURCE
+    assert 'toLocaleTimeString(undefined' in SOURCE and 'toLocaleDateString(undefined' in SOURCE
+    assert "'Activity is temporarily unavailable—refresh to retry'" in SOURCE and "'No activity yet'" in SOURCE
+    # The page's regular refresh never redraws old rows over the page: it only mounts it or looks for newer lines.
+    app = (STATIC / 'app.js').read_text()
+    assert "import { renderActivity } from './activity-page.js?v=" in app and 'renderActivity();' in app
+    assert 'export function renderActivity' not in (STATIC / 'control-plane.js').read_text()
