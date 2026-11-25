@@ -311,7 +311,7 @@ running install.
 |---|---|---|
 | New expert | My experts → Create; name, instructions, Library Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; Edit shows every choice. |
 | Chat | Manage → Chat; ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
-| Talking model | Edit → Talks to people → Model: compare Opus and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
+| Talking model | Edit → Talks to people → Model: compare Opus, Sonnet and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
 | Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
 | Second question | Ask something else while the job runs. | Answered at once; the job continues. |
 | Hand-off words | On a channel, ask in one message for real work and a quick question (for example "start a job to write a short note, and also: what is 17 times 3?"). | One message as soon as the job starts, saying it started and answering the question; nothing else from that turn; the result arrives later, once. On Always ask the card shows "Will tell the person" with those words, and they leave only after Approve. |

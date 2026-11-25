@@ -57,7 +57,7 @@ export const DEFAULT_EXPERT = {
 
 // Which model talks: '' is the deployment's usual model; every other option saves that exact model.
 export const MODELS = { 'claude-code': [['', 'Its usual model', 'claude-code:opus'], ['claude-code:opus', 'Opus', 'claude-code:opus'],
-                                        ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
+                                        ['claude-code:sonnet', 'Sonnet', 'claude-code:sonnet'], ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
                         'codex-cli': [['', 'Its usual model', 'codex-cli:native-default'],
                                       ['codex-cli:gpt-6.2-sol', 'GPT-6.2 Sol', 'codex-cli:gpt-6.2-sol']] };
 
