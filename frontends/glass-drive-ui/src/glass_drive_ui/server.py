@@ -3873,6 +3873,25 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
         return _expert_forward(request, "POST", "/v1/expert-reviews/" + _recurring_path_id(review_id, "request id") + "/decision",
                                payload, human_confirmation=True)
 
+    def _activity_forward(request, method, path, body=None):
+        # The filters travel in the body, so a phrase searched for never sits in an address.
+        try:
+            return _client_for_request(request)._request(method, path, **({"json_body": body} if body is not None else {}))
+        except httpx.HTTPStatusError as exc:
+            raise _runtime_http_exception(exc, "Activity is temporarily unavailable. Refresh to retry.") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Could not reach xPerfect. Refresh to retry.") from exc
+
+    @app.post("/api/activity/lines")
+    def activity_lines(request: Request, payload: dict = Body(...)):
+        return _activity_forward(request, "POST", "/v1/activity/lines", payload)
+
+    @app.get("/api/activity/lines/{line_id}")
+    def activity_line(request: Request, line_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,2048}", line_id or ""):
+            raise HTTPException(status_code=404, detail="Activity line not found")
+        return _activity_forward(request, "GET", "/v1/activity/lines/" + line_id)
+
     @app.post("/api/workspace-templates/{template_id}/instantiate", status_code=201)
     def instantiate_workspace_template(
         request: Request,
