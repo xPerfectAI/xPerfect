@@ -32,7 +32,8 @@ function glyph(paths) {
   mark.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
   return mark;
 }
-function xperfectMark() { const img = node('img', 'activity-brand'); img.src = '/static/brand-symbol.svg'; img.alt = ''; img.width = 18; img.height = 18; return img; }
+// xPerfect's own mark, drawn in the text colour as the header draws it, so both themes can read it.
+function xperfectMark() { const mark = node('span', 'activity-brand'); mark.setAttribute('aria-hidden', 'true'); return mark; }
 
 /** Day headings in the viewer's own time: Today, Yesterday, then the date. */
 export function dayLabel(at, now = new Date()) {

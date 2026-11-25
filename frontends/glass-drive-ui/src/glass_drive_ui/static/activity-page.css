@@ -14,6 +14,8 @@
 .activity-face > * { grid-area: 1 / 1; }
 .activity-face img { width: 100%; height: 100%; object-fit: cover; }
 .activity-face.activity-face-ai img { width: 20px; height: 20px; object-fit: contain; }
+.activity-brand { display: inline-block; flex: 0 0 auto; width: 18px; height: 14px; background: currentColor; mask: url('/static/brand-symbol.svg?v=20261024polish1') center / contain no-repeat; -webkit-mask: url('/static/brand-symbol.svg?v=20261024polish1') center / contain no-repeat; }
+.activity-face .activity-brand { width: 20px; height: 16px; }
 .activity-glyph { display: inline-grid; place-items: center; }
 .activity-glyph svg { width: 18px; height: 18px; }
 .activity-search { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-left: 76px; }
@@ -32,6 +34,7 @@
 .activity-channel { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
 .activity-channel .channel-mark svg, .activity-channel .activity-glyph svg { width: 16px; height: 16px; }
 .activity-channel img { width: 16px; height: 16px; }
+.activity-channel .activity-brand { width: 16px; height: 12px; }
 .activity-person { color: var(--muted); }
 .activity-person::before { content: "·"; margin-inline-end: 8px; }
 .activity-line-words { overflow: hidden; color: var(--text); font-size: var(--font-label); text-overflow: ellipsis; white-space: nowrap; }
