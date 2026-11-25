@@ -21,11 +21,11 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 ![Activity with three experts, lines in several statuses and the filters above them.](docs/assets/screens/activity-filters.jpg)
 > **Image caption:** Activity in a staged synthetic example, 25 November 2026: Who, When and Status buttons, a search box and lines under Today.
 
-![A line opened in place: Maya Chen's message, the job with Open the job, and each reply sent to Teams.](docs/assets/screens/activity-line-opened.jpg)
+![A line opened in place: Maya Chen's message, the job with Open the job, and what was sent back.](docs/assets/screens/activity-line-opened.jpg)
 > **Image caption:** One line opened as a story; it comes from a real run in the same staged example.
 
 - **Benefit:** See at a glance who asked what, where and when, instead of rows of low-level events.
-- **Benefit:** Narrow a long history in one or two presses; xPerfect does the filtering and paging itself.
+- **Benefit:** Narrow even a long history in one or two presses.
 
 - **Added:** Who, When and Status buttons and a search box over the words, the person and the names. Lines under day headings, with Show more for older ones.
 - **Added:** Plain status words from what really happened: Waiting for you, Working, Answered, Done, Stopped, Failed. A message that started a job takes the job's state.
@@ -36,9 +36,9 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 ## 2026-11-25 — An Experts page you can read at a glance
 
-> **Summary:** Set up an expert on its own page, in the same style as Run project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
+> **Summary:** Set up an expert on its own page, in the same style as Run Project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
 >
-> **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run project now shows the expert's own picture on its card.
+> **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run Project now shows the expert's own picture on its card.
 >
 > **Topics:** Experts, Models, Work control
 
@@ -48,13 +48,13 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 ![Run Project's My experts, each card with its expert's own picture.](docs/assets/screens/run-project-my-experts.jpg)
 > **Image caption:** Run Project shows each saved expert's own picture, or the stack mark when it has none.
 
-- **Benefit:** One page, one scroll: no pop-up with scroll bars inside each other, at any width and in both themes.
+- **Benefit:** The whole setup on one page, with one scroll.
 - **Benefit:** Choose any model your install has for each role, not one fixed list, and say which Worker you prefer.
 
-- **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run project's Edit and "+" open it. Knowledge and Skills use Run project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
+- **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run Project's Edit and "+" open it. Knowledge and Skills use Run Project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
 - **Added:** The AI team as one table: each AI is one line for its usual model, its other models (newest first, from the install's catalog) open under it, and the three roles are columns, each said in a few words. A click anywhere in a cell chooses it; the table works from the keyboard as one control. An AI that is not set up on this computer says so, with a Connect button.
 - **Added:** Workers by exact model, and a Preferred Worker. Each allowed Worker is an AI on its usual model or one exact model of Claude or Codex; the preferred one comes first and the job's coordinator is told. The coordinator's model can be chosen too. Experts saved before keep their setup and their routes exactly.
-- **Changed:** Run project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
+- **Changed:** Run Project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
 
 ## 2026-11-25 — Prepare work while the host is busy; keep a second account working
 
@@ -76,7 +76,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Topics:** Experts, Channels, Microsoft Teams, Work control, Reliability
 
 ![The Finance Director's Channels window: Teams connected, with the people who may message it.](docs/assets/screens/teams-channel-card.jpg)
-> **Image caption:** The Teams card of a staged synthetic expert, 25 November 2026; its link was a local stand-in for Microsoft's service.
+> **Image caption:** The Teams card of a staged synthetic expert, 25 November 2026. Its Connected badge reflects a local stand-in for Microsoft's service.
 
 ![Needs you with one request: who asked, on which channel, their words and the reply that waits.](docs/assets/screens/needs-you-request.jpg)
 > **Image caption:** A real reply held on Always ask until the owner decides, in the same staged example.
@@ -97,7 +97,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Added:** Each person an expert serves gets their own job folder on this computer, made at their first job; the owner's own Chat has its own. The job's coordinator and its Workers on this computer work in it. With full access a job can still read other folders, so this keeps people's work apart by default; a sandboxed workspace is the wall.
 - **Added:** Each AI's own mark beside the AI choices, and channel marks of xPerfect's own; an install may show a brand's own mark from its `brand-assets` folder, beside the plain-text name. An expert's own picture becomes its Teams app's colour icon.
 
-- **Proven:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite fails only where the base release fails.
+- **Proven:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite shows no new failures against the base release.
 - **Not yet:** A deployed copy on a server, a second real person, files and group chats, Slack and approving from inside Teams. On this computer an expert's Workers have full access, so its instructions and Ask me first are behaviour, not a wall. Apart from this computer's own Claude sign-in, an account runs one Worker of its AI at a time. See [Experts on channels](docs/10_Experts_and_Channels.md) and the [QA playbook](docs/05_QA_Quick_Power_Playbook.md#11-experts-on-channels).
 
 ## 2026-10-25 — Keep your best experts. Stay in control.
@@ -109,7 +109,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Topics:** Experts, Work control, Connections, Deployment, Reliability
 
 ![The current expert gallery with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
-> **Image caption:** Expert gallery with five packaged AI Workers and Create, retaken 25 November 2026 when the Experts tab joined the bar; the October capture is in the repository's history.
+> **Image caption:** Expert gallery, captured 25 October 2026: five packaged AI Workers and Create.
 
 ![Choose an exact saved Finance Director version from the Versions dialog.](docs/assets/screens/expert-versions.jpg)
 > **Image caption:** Actual Versions dialog with a synthetic Finance Director setup, 25 October 2026.

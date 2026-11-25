@@ -19,7 +19,7 @@ current; every save makes a new version. The `expert` key in its content holds:
 | Setting | Meaning |
 |---|---|
 | `instructions` | Who it is, what it does for people, what it must never share (the page calls them its **identity instructions**). The speaking assistant reads the newest text when each turn starts. A running job keeps the text it started with. |
-| `team.talk` | The AI that talks to people (Claude or Codex), its model (its usual model, or any model the install's catalog has for that AI), its account, its effort and an optional backup. The page shows each model's median time to a finished reply on this computer. New Experts talk on Claude Haiku at low effort, so short replies come in about 3 seconds; a saved Expert keeps the model it was saved with, even one the list no longer names. |
+| `team.talk` | The AI that talks to people (Claude or Codex), its model (its usual model, or any model the install's catalog has for that AI), its account, its effort and an optional backup. The page shows each model's median time to a finished reply on this computer. New Experts talk on Claude Haiku at low effort; a saved Expert keeps the model it was saved with, even one the list no longer names. |
 | `team.coordinate` | The AI that runs each job, its model (its usual one unless chosen), its account and an optional backup. A chosen model runs at the AI's configured effort when that model offers it, otherwise at the model's recommended effort. |
 | `team.work` | The Workers that may work on a job, in parallel. Each entry is an AI on its usual model (`codex-cli`) or one exact model of Claude or Codex from the catalog (`codex-cli:gpt-6.2-sol`); each becomes its own Worker route, named by the entry. Grok works on the model chosen for it in Connections. |
 | `team.preferred` | Optional: one of `team.work`, the Worker the owner prefers. Its route comes first and the job's coordinator is told, in these words (the runtime prompt `prompts/expert-job-preferred.md`): "The owner's preferred helper for this Expert is the route `<entry>`. Use it for helper work unless another configured route clearly serves the job better." The coordinator still decides. Without it nothing is added, and an Expert saved before keeps its stored form and its routes byte for byte. |
@@ -42,18 +42,18 @@ Claude Code sessions share one sign-in. Setup, Verify and Disconnect still need 
 a run whose stop was not confirmed keeps new runs out until it is recovered. Every other account,
 whose credentials are placed in a run's own home, is leased to one Worker run at a time. A job also
 runs in parallel across the AI types it may use. The speaking assistant's replies are not held by
-those Workers on this computer's sign-in; a connected account cannot serve her and Workers together.
+those Workers on this computer's sign-in; a connected account cannot serve it and Workers together.
 
 ## The Experts page
 
 The **Experts** tab, right after Run Project, shows one Expert's whole setup on one page in Run
-project's style; Run project's Edit and the "+" card in My experts open it. From the top:
+project's style; Run Project's Edit and the "+" card in My experts open it. From the top:
 
 - your experts as a row (each with its picture), and **New expert**;
 - **What Does This Expert Do?**: the picture (Teams shows it as the app icon; kept on this computer, not
   in its versions), the description and the name; a saved one shows its version, **Chat** and **Channels**;
 - **Identity Instructions**, in one box that grows with its text;
-- **Knowledge and Skills**, chosen with Run project's own searchable chooser;
+- **Knowledge and Skills**, chosen with Run Project's own searchable chooser;
 - **AI Team**: one table. Each AI is one line for its usual model; its other models (newest first, from
   the install's catalog) open under it and stay open while one of them is chosen. The columns are the
   three roles, each said in a few words: **Talks to people**, **Coordinates** and **Workers** (any number;
@@ -71,14 +71,15 @@ project's style; Run project's Edit and the "+" card in My experts open it. From
 Nothing on the page scrolls on its own: the page is the one scroll, at every width. Unsaved changes,
 the instructions text included, are kept in the browser tab's own storage (session storage: only that
 tab, gone when it closes), so a reload brings them back until they are saved or discarded; choosing another
-Expert with unsaved changes asks in the page, never in a browser dialog. Run project shows each
+Expert with unsaved changes asks in the page, never in a browser dialog. Run Project shows each
 saved Expert's own picture on its card.
 
 ![The Experts page with three saved experts and the Finance Director's setup](assets/screens/experts-page.jpg)
 
-![The AI team table: Claude talks and coordinates, two Claude Workers with Sonnet as the Preferred one](assets/screens/experts-ai-team.jpg)
+![The AI team table for Claude: Haiku talks, Claude's usual model coordinates, Opus 5.5 and Sonnet may work, Sonnet is Preferred](assets/screens/experts-ai-team.jpg)
 
-*A staged synthetic example on a local install, 25 November 2026.*
+*A staged synthetic example on a local install, 25 November 2026. The time under Haiku is its median
+measured on that install.*
 
 ## Three roles
 
@@ -91,10 +92,10 @@ saved Expert's own picture on its card.
 - **Each hand-off is a job**: one background coordinator conversation with the coordinator's AI,
   routes for the allowed Workers, the Expert's Library, its instructions and its access level. The
   job's final answer is written once as a result event on the speaking assistant's conversation,
-  and the existing result wake starts her next turn.
+  and the existing result wake starts its next turn.
 - **The hand-off's first words.** On a channel the speaking assistant gives `tell` with a hand-off:
-  her whole reply to the person now (that the job started, and the answer to everything else in
-  the message that she can give at once). They become one outbox message (kind `handoff`) in the same
+  its whole reply to the person now (that the job started, and the answer to everything else in
+  the message that it can give at once). They become one outbox message (kind `handoff`) in the same
   transaction that marks the job running, so the person hears them after one model step instead of
   two. The turn's own later text is then dropped; if the turn's text reached the outbox first, the
   words are dropped instead, so the person gets one of the two, never both. A job that never starts
@@ -118,7 +119,7 @@ One mechanism: what the Expert is about to send or start waits for the owner.
 - Approve releases that and nothing else: the runtime sends the reply that was shown, word for
   word, or starts the job that was shown.
 - A changed or stopped job withdraws its request; an old approval then releases nothing.
-- Reject is told to the speaking assistant in a turn with every native tool off; she writes her
+- Reject is told to the speaking assistant in a turn with every native tool off; it writes its
   own reply, which goes out directly. The "checking with my owner" line in Always ask is written
   the same way. No sentence is scripted.
 - **Off:** nothing waits. Instructions still apply.
@@ -168,8 +169,9 @@ or a server for a wall.
 
 ![The Finance Director's Channels window: Teams connected, with the people who may message it](assets/screens/teams-channel-card.jpg)
 
-*The Teams card of a staged synthetic expert, 25 November 2026. Its link was a local stand-in for
-Microsoft's service, so the card shows the page, not a Microsoft connection.*
+*The Teams card of a staged synthetic expert, 25 November 2026. Its Connected badge reflects a local
+stand-in for Microsoft's service, not a Microsoft connection, and its people were added directly, so
+the owner is not listed.*
 
 `integrations/teams` uses Microsoft's Teams SDK for Python (`microsoft-teams-apps` 2.2.1).
 
@@ -177,7 +179,8 @@ Microsoft's service, so the card shows the page, not a Microsoft connection.*
   computer is reachable from the internet and no tunnel is needed. Socket mode is marked
   experimental in the SDK and Microsoft recommends HTTP for production.
 - **On a server** the package serves Teams' HTTP endpoint with `--http-port`.
-- **Connect** on the Expert's Channels wraps the pinned Teams developer CLI (`@microsoft/teams.cli`
+- **Add Teams** on the Expert's **Channels** (Experts → the Expert → Channels; **Connect** when the code
+  runs out) wraps the pinned Teams developer CLI (`@microsoft/teams.cli`
   3.1.0): the owner completes Microsoft's sign-in on Microsoft's own page with the code shown;
   the CLI creates a Teams-managed bot in socket mode and writes its secret to a private file in the
   state folder; the signed-in owner becomes the first allowed person; one package process runs per
@@ -187,7 +190,7 @@ Microsoft's service, so the card shows the page, not a Microsoft connection.*
   later capabilities; Teams file requests need a certificate, federated credential or managed
   identity (Microsoft, 20 November 2026).
 
-An Expert may have a picture (Edit → Picture: any image, cut to a centred square at 192 by 192 in
+An Expert may have a picture (**Choose a picture** under What Does This Expert Do?: any image, cut to a centred square at 192 by 192 in
 the browser). It is kept in the install's state, not in the Expert's versions, and becomes its Teams
 app's colour icon when the app is made and whenever the picture changes (the CLI's
 `app update --color-icon`; the same picture is never sent twice). A refusal is shown on the card and

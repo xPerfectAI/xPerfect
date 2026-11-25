@@ -55,7 +55,7 @@ model, including a Watch follow-up after quota recovery, a downloaded file, and 
 reload. This does not verify other native providers' API-key paths or GPT-6.1 API access.
 Check that the selected account supports the exact model and has available quota.
 
-**Run project** starts on a worker whose account is ready; check its **Worker** and **Account**, enter your goal, and start. Verify a real completed
+**Run Project** starts on a worker whose account is ready; check its **Worker** and **Account**, enter your goal, and start. Verify a real completed
 result before relying on that route. **Verify** checks an existing Claude sign-in without copying credentials or signing out the native app. If the account says the exact native process was not confirmed stopped, wait until that workspace's run has ended, then select **Verify** again. **More → Test connection** checks a ready account
 again. **More → Sign in again** refreshes a ready supported subscription through its normal native
 sign-in. If an account stops working, **Reconnect** (subscription) or **Reconnect & test** (API key)

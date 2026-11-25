@@ -310,7 +310,7 @@ running install.
 **Observed on 25 November 2026 (the Experts page).** In the real page of a test install, as a user: a new
 expert made on the Experts page with a picture, identity instructions, a Library note chosen through Run
 project's chooser and two Workers (Claude's usual model and Claude Sonnet, Sonnet starred); saved, reloaded,
-edited and saved again (version 2); its picture on Run project's card; Edit and "+" on Run project opening the
+edited and saved again (version 2); its picture on Run Project's card; Edit and "+" on Run Project opening the
 page; one real message in its Chat; Ask me first on Always ask from the page (the request under Needs you,
 Approve releasing exactly the shown reply); a Codex model chosen to coordinate and an account chosen, saved and
 reloaded; Sandboxed forcing Claude; unsaved changes kept across a reload; the keyboard over the whole form; one
@@ -326,7 +326,7 @@ on a connected Codex account, a sandboxed job; the not-set-up line is covered by
 
 | Path | User check | Expected result |
 |---|---|---|
-| New expert | Experts → New expert (or Run project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run project's card shows its picture. |
+| New expert | Experts → New expert (or Run Project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run Project's card shows its picture. |
 | Experts page fits | Open Experts at 1280×720, 1440×900 and a phone width, in both themes. | One scroll for the whole page: nothing inside scrolls on its own, nothing scrolls sideways; every control readable in both themes. |
 | Every model the install has | Experts → AI Team; open each AI's models. | Each AI is one line for its usual model; its other models open under it, newest first, all of the install's catalog for that AI (Grok: its usual model only). A model saved exactly stays chosen even if the list no longer names it. |
 | Preferred Worker | Tick two Workers, one of them an exact model; star it; ask for three small helper jobs. | Each job's coordinator is told the preferred route; report how many of the three helpers ran on the starred model, from each run's recorded model (the coordinator still decides). |

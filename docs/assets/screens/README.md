@@ -7,16 +7,19 @@ README, quickstart, workshop and visual guide; keep those pages on the same imag
 
 | Asset | What it shows | Capture scope |
 | --- | --- | --- |
-| `expert-team.jpg` | The five professional starting workers and the Create card in Run Project, with the Experts tab in the bar. | Actual expert gallery, 25 November 2026, main `2081409`, dark appearance, 1160 pixels wide at twice the density. |
+| `expert-team.jpg` | The five professional starting workers and the Create card with current profession artwork. | Actual expert gallery, 25 October 2026, public main runtime. Kept for the 25 October changelog entry. |
+| `expert-gallery.jpg` | The same gallery in Run Project, with the Experts tab in the bar. | Actual expert gallery, 25 November 2026, main `2081409`, light appearance, 1280 pixels wide at twice the density. |
 | `finance-delivery.jpg` | The Finance Director's delivered report and file controls in Watch. | Actual native Claude Code work with the bundled synthetic Finance inputs, 24 October 2026. |
 | `finance-report.png` | Page one of the actual downloaded Finance report. | Rendered from that synthetic report; not a UI mock or a claim that every generated report is correct. |
 
-The gallery was refreshed when its artwork and Create control changed, and again on 25 November
-2026 when the Experts tab joined the bar. The Finance captures
+The gallery was refreshed when its artwork and Create control changed. On 25 November 2026, when
+the Experts tab joined the bar, it was taken again as `expert-gallery.jpg`; the October file stays
+with its own changelog entry. The Finance captures
 retain their actual 24 October scope. Do not retake an unchanged result merely to change its date.
 
 `docs/user-guide/assets/` holds byte-identical publication mirrors of the files the guide uses
-(these three, `expert-versions.jpg`, `experts-page.jpg` and `activity-filters.jpg`) so the portable
+(`expert-team.jpg`, `expert-gallery.jpg`, `finance-delivery.jpg`, `finance-report.png`,
+`expert-versions.jpg`, `experts-page.jpg` and `activity-filters.jpg`) so the portable
 guide and its existing same-origin website publication work. These files remain the
 canonical image source; update mirrors by exact copy, not by separate editing.
 
@@ -43,10 +46,10 @@ stored rows, without an AI run, to show each status.
 | --- | --- | --- |
 | `experts-page.jpg` | The Experts page: the row of experts with their pictures, and what the Finance Director does. | README, guide, `docs/10`, changelog |
 | `experts-ai-team.jpg` | The AI team table: who talks, who coordinates, the Workers and the Preferred one. | `docs/10` |
-| `teams-channel-card.jpg` | The Teams card in an expert's Channels window, with the people who may message it. | `docs/10`, changelog |
+| `teams-channel-card.jpg` | The Teams card in an expert's Channels window, with the people who may message it; its Connected badge reflects the stand-in. | `docs/10`, changelog |
 | `needs-you-request.jpg` | A request under Needs you: who asked, where, their words and the reply that waits. | `docs/10`, changelog |
 | `activity-filters.jpg` | Activity's filters and lines in several statuses. | README, guide, `docs/07`, changelog |
-| `activity-line-opened.jpg` | One line opened as a story: the message, the job and each reply sent to Teams, with the engine steps folded under Details. | `docs/07`, changelog |
+| `activity-line-opened.jpg` | One line opened as a story: the message, the job and what was sent back, with the engine steps folded under Details. | `docs/07`, changelog |
 | `run-project-my-experts.jpg` | Run Project's My experts with each expert's own picture. | changelog |
 
 ## Retired walkthrough captures

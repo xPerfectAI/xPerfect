@@ -51,7 +51,7 @@ preview and existing same-origin website publication work without changing the s
 these mirrors only by copying the reviewed canonical files; do not edit a second image source.
 The gallery shows the 25 November UI; the Experts page and Activity pictures come from a staged
 synthetic example of the same date; the Finance report/delivery retain their real 24 October
-synthetic-work scope. Dated result illustrations are not a new provider acceptance run. Unused older UI/QA captures are removed from publication. The stock/Skill fixtures remain
+synthetic-work scope. The dates show when each picture was taken. Unused older UI/QA captures are removed from publication. The stock/Skill fixtures remain
 clearly marked connectivity examples, separate from the professional demonstration.
 
 No raw sessions, prompts, private accounts, customer material, logs or local runtime state are

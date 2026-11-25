@@ -1359,11 +1359,11 @@ updating a provider's display brand must not silently rename those accounts or c
 The **Experts** tab, right after Run Project, holds an Expert's whole setup on one page in Run
 project's style; **＋ Create** in My experts opens it blank and Manage's **Edit** opens it with that
 Expert. From the top: the picture and what it does, the name, identity instructions, Knowledge and
-Skills through Run project's chooser, the AI team as one table (each AI one line for its usual model,
+Skills through Run Project's chooser, the AI team as one table (each AI one line for its usual model,
 its other models under it; who talks, who coordinates, which Workers may work, with a Preferred one;
 accounts and backups folded under Accounts), Ask me first as one three-way choice with a one-line
 meaning, and where it works with one plain line about full access on this computer. The page is one
-scroll. Save makes a new version. Run project's cards show each Expert's own picture. Manage adds **Chat** (the owner's own conversation with the Expert) and
+scroll. Save makes a new version. Run Project's cards show each Expert's own picture. Manage adds **Chat** (the owner's own conversation with the Expert) and
 **Channels** (Add Teams, Connect with Microsoft's sign-in code shown in the dialog, people who may
 write, people waiting, Install and Test in Teams, Turn off). Activity shows **Needs you** first, with
 a count on the tab, a pop-up on any page and an optional browser notification. With more than three
@@ -1413,7 +1413,7 @@ one **Details** line; nothing is dropped. The opened line has its own address (`
 lines every 20 seconds: they go on top when you are at the top, otherwise one **N new** line waits at
 the top of the window; nothing you are reading moves. One scroll for the whole page at any width.
 
-![A line opened in place: Maya Chen's message, the job with Open the job, and each reply sent to Teams](assets/screens/activity-line-opened.jpg)
+![A line opened in place: Maya Chen's message, the job with Open the job, and what was sent back](assets/screens/activity-line-opened.jpg)
 
 *A staged synthetic example on a local install, 25 November 2026; the opened line is a real run.*
 

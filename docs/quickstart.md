@@ -102,11 +102,17 @@ full setup, delivery check and eight useful examples, including Slack reminders,
 
 ### Let people message an expert
 
-Open **Experts**, choose or create an expert, then **Channels → Add Teams**, and sign in with the
-code Microsoft shows. List the people who may message it in Teams. With **Ask me first** set to
-Always ask, each reply or job waits for your approval under **Needs you**; **Activity** shows each
-message, who sent it and its status. [Experts on channels](10_Experts_and_Channels.md) has the
-setup and its current limits.
+In **Experts**, choose or create an expert, then **Channels → Add Teams**. Sign in on Microsoft's
+own page with the code shown (if the code runs out, **Connect** offers a new one). You become the
+first person allowed to message it; add the others under **People who may message it**. Press
+**Install in Teams**, add the app, and send it a first message in its own chat, named after the
+expert: the channel is ready once that message arrives. If Teams says **Permissions needed**, your
+Teams administrator must turn on **Upload custom apps** for you; the Channels window names the
+switch and offers a note to send.
+
+With **Ask me first** set to Always ask, its answers and jobs wait for your approval under **Needs
+you**, and the person is told it is checking with you; **Activity** shows each message, who sent it and its status. [Experts on
+channels](10_Experts_and_Channels.md) has the full setup and its current limits.
 
 ### Manage experts and workspaces
 

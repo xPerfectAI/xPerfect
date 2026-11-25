@@ -41,10 +41,11 @@ The repository is organized as follows:
 - `deployment/linux/`
   - the packaged Linux service, its images, upgrade and restore
 - `skills/` and `plugins/`
-  - the `connect-glasshive` skill for native clients, and its Codex and Claude Code plugin form
+  - the `connect-glasshive` Skill for native clients, and its Codex and Claude Code plugin form
+    (GlassHive is xPerfect's former name)
 - `tests/`
-  - package, upgrade and restore tests; component tests live in `runtime_phase1/tests` and
-    `frontends/glass-drive-ui/tests`
+  - package, upgrade and restore tests; component tests live in `runtime_phase1/tests`,
+    `frontends/glass-drive-ui/tests` and each `integrations/*/tests` (commands in `CONTRIBUTING.md`)
 - `.github/`
   - workflows, code owners, issue forms and the pull request template
 
