@@ -226,6 +226,7 @@ const { shown, more, addressed } = open(mount); await settle();
 // Read by its own address and opened above the list; the list itself is untouched.
 assert.equal(shown.state.addressed.line_id, 'L35');
 assert.equal(addressed.hidden, false);
+assert.equal(addressed.querySelector('.activity-day').textContent, 'From your link · Today');  // apart from the list's own days
 assert.equal(addressed.querySelector('[data-line="L35"]').querySelector('.activity-line-main').getAttribute('aria-expanded'), 'true');
 assert.equal(shown.state.items.length, 30); assert.equal(ids(shown.state.items).includes('L35'), false);
 // Show more reaches it: it is drawn once, in its place, still open.

@@ -271,7 +271,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   function drawLines() {
     if (state.addressed && state.items.some(item => item.line_id === state.addressed.line_id)) state.addressed = null;
     addressed.hidden = !state.addressed;
-    addressed.replaceChildren(...(state.addressed ? [node('h3', 'activity-day', dayLabel(state.addressed.at, now())), lineFor(state.addressed)] : []));
+    addressed.replaceChildren(...(state.addressed ? [node('h3', 'activity-day', `From your link · ${dayLabel(state.addressed.at, now())}`), lineFor(state.addressed)] : []));
     const parts = []; let day = '';
     for (const item of state.items) {
       const label = dayLabel(item.at, now());
