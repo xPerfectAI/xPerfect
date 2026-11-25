@@ -4767,6 +4767,9 @@ def create_app(
     service.channels = ChannelService(store, service.experts)
     app.state.channels = service.channels
     install_channel_routes(app, service.channels, _current_principal)
+    # Activity's lines: one per message or run, for the signed-in owner. `GET /v1/activity` stays as it is.
+    from .activity_lines import install_activity_line_routes
+    install_activity_line_routes(app, store, _current_principal)
     expert_mcp = native_expert_server(
         service.experts, service.peers,
         os.environ.get("GLASSHIVE_PEER_RUNTIME_BASE_URL", "http://127.0.0.1:8766").rstrip("/") + "/v1/native/expert/",
