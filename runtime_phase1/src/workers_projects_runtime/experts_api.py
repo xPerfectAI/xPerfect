@@ -93,6 +93,11 @@ def install_expert_routes(app, experts, principal: Callable[[Request], tuple[Any
         tenant, user = owner(request)
         return {"items": experts.talk_speeds(tenant, user)}
 
+    @app.get("/v1/expert-ai-options")
+    def ai_options(request: Request):
+        tenant, user = owner(request)
+        return invoke(experts.ai_options, tenant, user)
+
     @app.get("/v1/expert-notices")
     def list_notices(request: Request):
         tenant, user = owner(request)

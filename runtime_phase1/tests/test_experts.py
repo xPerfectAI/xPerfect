@@ -3394,3 +3394,104 @@ def test_the_owners_own_chat_and_a_sandboxed_expert(app, tmp_path, monkeypatch):
     sandboxed_template = experts.resolve("local", owner, sandboxed["template_id"])
     assert experts._person_folder({"speaker_conversation_id": "synthetic-owner-chat",
                                    "lineage_id": sandboxed_template["lineage_id"]}, sandboxed_template) == ""
+
+
+# ---------------------------------------------------------------- the Experts page: Workers by model, Preferred
+
+def _catalog_models(monkeypatch, provider):
+    """Exact models as the catalog describes them: the AI from the id, its own effort levels."""
+    def model(model_id, **kwargs):
+        profile, _, native = str(model_id).partition(":")
+        if profile not in {"claude-code", "codex-cli"} or native in {"", "unknown-model"}:
+            raise KeyError(model_id)
+        return SimpleNamespace(id=model_id, harness_profile=profile, native_model=native, connection_id="",
+                               effort_choices=("low", "medium"), recommended_effort="medium")
+    monkeypatch.setattr(provider, "_model", model)
+
+
+def test_an_expert_saved_before_workers_by_model_keeps_its_routes_and_stored_form(app):
+    application, client = app
+    experts = application.state.experts
+    created = create_expert(client)
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created["template_id"])
+    template = experts.resolve("local", owner, created["template_id"])
+    assert "preferred" not in template["content"]["expert"]["team"], "no preference: the stored form is as before"
+    assert "preferred" not in client.get(f"/v1/experts/{created['template_id']}").json()["expert"]["team"]
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job",
+                                                                         access="full"))
+    # One route per AI, named by the AI, on the AI's own configured model, in the saved order: as before.
+    assert [(route.id, route.profile, route.model, route.effort) for route in config.routes] == [
+        ("claude-code", "claude-code", "synthetic-model", "high"), ("codex-cli", "codex-cli", "synthetic-model", "high")]
+    assert "preferred helper" not in config.developer_instructions
+
+
+def test_workers_may_be_exact_models_and_the_preferred_one_comes_first_and_is_told(app, monkeypatch):
+    application, client = app
+    experts = application.state.experts
+    _catalog_models(monkeypatch, experts.coordinator.provider)
+    team = {**SPEC["team"], "work": ["claude-code", "codex-cli:gpt-6.2-sol"], "preferred": "codex-cli:gpt-6.2-sol"}
+    created = create_expert(client, team=team)
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", created["template_id"])
+    template = experts.resolve("local", owner, created["template_id"])
+    assert template["content"]["expert"]["team"]["preferred"] == "codex-cli:gpt-6.2-sol"
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job",
+                                                                         access="full"))
+    # The exact model is its own Worker route, first because it is preferred; its effort is one that model offers.
+    assert [(route.id, route.profile, route.model, route.effort) for route in config.routes] == [
+        ("codex-cli:gpt-6.2-sol", "codex-cli", "codex-cli:gpt-6.2-sol", "medium"),
+        ("claude-code", "claude-code", "synthetic-model", "high")]
+    assert "The owner's preferred helper for this Expert is the route `codex-cli:gpt-6.2-sol`." in config.developer_instructions
+    assert config.developer_instructions.endswith(SPEC["instructions"]), "the owner's instructions still close the job's"
+    # The template's own worker profile is the first Worker's AI, not a model id.
+    assert template["content"]["worker"]["profile"] == "claude-code"
+
+
+@pytest.mark.parametrize("team, refusal", [
+    ({"work": ["claude-code"], "preferred": "codex-cli"}, 422),          # preferred is not one of its Workers
+    ({"work": ["grok-build:grok-4.7"]}, 422),                           # Grok's model is chosen in Connections
+    ({"work": ["openclaw"]}, 422),                                      # not an AI an Expert can use
+    ({"work": ["codex-cli:unknown-model"]}, 422),                       # not in the catalog
+])
+def test_a_worker_or_preference_the_runtime_cannot_honour_is_refused(app, monkeypatch, team, refusal):
+    application, client = app
+    _catalog_models(monkeypatch, application.state.experts.coordinator.provider)
+    response = client.post("/v1/experts", json={"name": "Synthetic Expert", "description": "Synthetic.",
+                                                "expert": {**SPEC, "team": {**SPEC["team"], **team}}})
+    assert response.status_code == refusal, response.text
+
+
+def test_the_page_lists_each_ais_exact_models_from_the_install_with_its_usual_one(app, monkeypatch):
+    application, client = app
+    from workers_projects_runtime import coordinator_config
+    from workers_projects_runtime.conversation_provider import GLASSHIVE_MODELS
+    monkeypatch.setattr(coordinator_config, "configured_coordinator",
+                        lambda service, provider, tenant, owner, profile: SimpleNamespace(model=f"{profile}:usual-synthetic"))
+    response = client.get("/v1/expert-ai-options")
+    assert response.status_code == 200, response.text
+    items = {item["profile"]: item for item in response.json()["items"]}
+    if not items:
+        pytest.skip("this runtime build offers no AI adapters")
+    for profile, item in items.items():
+        assert profile in {"claude-code", "codex-cli", "grok-build"}
+        assert item["usual"] == f"{profile}:usual-synthetic"
+        assert all(model["id"] in GLASSHIVE_MODELS and model["label"] for model in item["models"])
+    if "codex-cli" in items:
+        ids = {model["id"] for model in items["codex-cli"]["models"]}
+        assert "codex-cli:gpt-6.2-sol" in ids and len(ids) > 1, "every catalog model, not one"
+        assert "codex-cli:native-default" not in ids, "the usual model is its own choice"
+    if "grok-build" in items:
+        assert items["grok-build"]["models"] == [], "Grok runs the model chosen for it in Connections"
+
+
+def test_a_chosen_model_runs_at_an_effort_it_offers(app, monkeypatch):
+    application, _client = app
+    experts = application.state.experts
+    _catalog_models(monkeypatch, experts.coordinator.provider)
+    from workers_projects_runtime import coordinator_config
+    monkeypatch.setattr(coordinator_config, "configured_coordinator", lambda *args, **kwargs: CoordinatorConfig(
+        model="codex-cli:configured", effort="ultra",
+        routes=[Route(id="default", profile="codex-cli", model="codex-cli:configured", effort="ultra", execution_mode="host")]))
+    chosen = experts._default_role_config("local", "owner", ExpertRole(profile="codex-cli", model="codex-cli:gpt-6-sol"))
+    assert (chosen.model, chosen.effort) == ("codex-cli:gpt-6-sol", "medium")
+    usual = experts._default_role_config("local", "owner", ExpertRole(profile="codex-cli"))
+    assert (usual.model, usual.effort) == ("codex-cli:configured", "ultra"), "no model chosen: exactly as configured"
