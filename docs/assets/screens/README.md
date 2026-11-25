@@ -49,7 +49,7 @@ stored rows, without an AI run, to show each status.
 | `teams-channel-card.jpg` | The Teams card in an expert's Channels window, with the people who may message it; its Connected badge reflects the stand-in. | `docs/10`, changelog |
 | `needs-you-request.jpg` | A request under Needs you: who asked, where, their words and the reply that waits. | `docs/10`, changelog |
 | `activity-filters.jpg` | Activity's filters and lines in several statuses. | README, guide, `docs/07`, changelog |
-| `activity-line-opened.jpg` | One line opened as a story: the message, the job and what was sent back, with the engine steps folded under Details. | `docs/07`, changelog |
+| `activity-line-opened.jpg` | One line opened with its recorded steps: the message, the job and what was sent back, with the engine steps folded under Details. | `docs/07`, changelog |
 | `run-project-my-experts.jpg` | Run Project's My experts with each expert's own picture. | changelog |
 
 ## Retired walkthrough captures

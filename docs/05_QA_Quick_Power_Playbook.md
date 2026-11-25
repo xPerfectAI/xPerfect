@@ -399,7 +399,7 @@ real data (none on that install at the time; covered by the deterministic tests)
 | Who | Choose two Experts and a saved Worker. | Only their lines; the chosen buttons carry the accent ring and a check; All clears them. |
 | When, words, status | Choose Today, type words from a message, choose Done. | Only matching lines, under day headings. |
 | Status | A message whose job finished; a reply replaced by the job's own message; a reply that could not be sent. | Done; Done, not Stopped; Failed. |
-| Trail | Open a line. | It opens in place as a story: the message, the job with Open the job, the Worker and its model, what was sent back; one Details line per run; a reload keeps it open. |
+| Trail | Open a line. | It opens in place with its recorded steps: the message, the job with Open the job, the Worker and its model, what was sent back; one Details line per run; a reload keeps it open. |
 | Waiting for you | Choose Waiting for you; press Decide on a line further down than three. | Needs you opens all its requests and that card is focused, in view. |
 | Needs you backlog | More than three requests wait. | The newest three, then Show all N; the tab counts all. With three or fewer, as before. |
 | Newer lines | Read further down; a new message arrives. | Within 20 seconds one N new line at the top of the window; nothing moves until it is pressed, then the new lines are on top. |

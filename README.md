@@ -22,9 +22,9 @@ computer or server.
 
 *Run Project's expert gallery, captured 25 November 2026: five starting professions and Create.*
 
-Our vision: turn experts' knowledge and skills into reusable AI counterparts that can work
-across your channels and tools. The starting team below is one way to begin; you can create,
-save and adapt your own Workers.
+The aim: save an expert's knowledge and skills once, as an AI Worker setup you can reuse in
+xPerfect, from other AI apps and in your team's chat. The starting team below is one way to begin;
+you can create, save and adapt your own Workers.
 
 ## From a job to a result
 
