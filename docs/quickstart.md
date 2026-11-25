@@ -104,7 +104,7 @@ full setup, delivery check and eight useful examples, including Slack reminders,
 
 | You want to… | Do this |
 | --- | --- |
-| Improve a saved expert | In **Run Project → My experts**, open its **Manage → Edit**. Save a new version. Existing workers keep their original setup. **Versions** lets you inspect earlier setups. |
+| Improve a saved expert | Open **Experts** and choose it (or, in **Run Project → My experts**, **Manage → Edit**). Save a new version. Existing workers keep their original setup. **Versions** in **Manage** lets you inspect earlier setups. |
 | Make another expert | Choose **Manage → Copy**. Give the separate expert its own name. |
 | Put an expert aside | Choose **Archive**, or confirm **Remove**. Select **Archived** or **Removed**, then **Restore**, to make it available again. |
 | Remove a workspace from your list | In **Workspaces**, choose its **More → Remove** and read the confirmation. Removal stops current and scheduled work; files, results and history remain saved. |

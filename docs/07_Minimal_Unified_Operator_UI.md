@@ -9,7 +9,7 @@ Define a separate, minimal, modern operator UI for xPerfect that does not alter 
 Use the established [xPerfect website](https://www.xperfect.ai/) identity: graphite, pearl and
 restrained taupe, with a quiet gradient behind readable working surfaces. Light and dark use
 separate surface, text, border and semantic state colours. Keep the same visual language across
-Run Project, Chat, Workspaces, Connections, Library, Schedules, Activity, sign-in and Watch chrome.
+Run Project, Experts, Chat, Workspaces, Connections, Library, Schedules, Activity, sign-in and Watch chrome.
 The native desktop and terminal retain their own appearance.
 
 ### UI design principles
@@ -1356,11 +1356,14 @@ updating a provider's display brand must not silently rename those accounts or c
 
 ### Experts people can talk to
 
-In **My experts**, the **＋ Create** card opens the same dialog as **Edit**: name, what it does,
-instructions, Knowledge and Skills from My Library, the AI team (who talks, who coordinates, who may
-work; accounts and backups folded under Accounts), Ask me first as one three-way choice with a
-one-line meaning, and where it works with one plain line about full access on this computer. Save
-makes a new version. Manage adds **Chat** (the owner's own conversation with the Expert) and
+The **Experts** tab, right after Run Project, holds an Expert's whole setup on one page in Run
+project's style; **＋ Create** in My experts opens it blank and Manage's **Edit** opens it with that
+Expert. From the top: the picture and what it does, the name, identity instructions, Knowledge and
+Skills through Run project's chooser, the AI team as one table (each AI one line for its usual model,
+its other models under it; who talks, who coordinates, which Workers may work, with a Preferred one;
+accounts and backups folded under Accounts), Ask me first as one three-way choice with a one-line
+meaning, and where it works with one plain line about full access on this computer. The page is one
+scroll. Save makes a new version. Run project's cards show each Expert's own picture. Manage adds **Chat** (the owner's own conversation with the Expert) and
 **Channels** (Add Teams, Connect with Microsoft's sign-in code shown in the dialog, people who may
 write, people waiting, Install and Test in Teams, Turn off). Activity shows **Needs you** first, with
 a count on the tab, a pop-up on any page and an optional browser notification. A request shows who

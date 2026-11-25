@@ -18,12 +18,20 @@ current; every save makes a new version. The `expert` key in its content holds:
 
 | Setting | Meaning |
 |---|---|
-| `instructions` | Who it is, what it does for people, what it must never share. The speaking assistant reads the newest text when each turn starts. A running job keeps the text it started with. |
-| `team.talk` | The AI that talks to people (Claude or Codex), its model (for Claude: Opus, Sonnet or the faster Haiku), its account, its effort and an optional backup. The form shows each model's median time to a finished reply on this computer. New Experts talk on Claude Haiku at low effort, so short replies come in about 3 seconds; Opus stays selectable, and a saved Expert keeps the model it was saved with. |
-| `team.coordinate` | The AI that runs each job, its account and an optional backup. |
-| `team.work` | The AIs that may work on a job, in parallel. |
+| `instructions` | Who it is, what it does for people, what it must never share (the page calls them its **identity instructions**). The speaking assistant reads the newest text when each turn starts. A running job keeps the text it started with. |
+| `team.talk` | The AI that talks to people (Claude or Codex), its model (its usual model, or any model the install's catalog has for that AI), its account, its effort and an optional backup. The page shows each model's median time to a finished reply on this computer. New Experts talk on Claude Haiku at low effort, so short replies come in about 3 seconds; a saved Expert keeps the model it was saved with, even one the list no longer names. |
+| `team.coordinate` | The AI that runs each job, its model (its usual one unless chosen), its account and an optional backup. A chosen model runs at the AI's configured effort when that model offers it, otherwise at the model's recommended effort. |
+| `team.work` | The Workers that may work on a job, in parallel. Each entry is an AI on its usual model (`codex-cli`) or one exact model of Claude or Codex from the catalog (`codex-cli:gpt-6.2-sol`); each becomes its own Worker route, named by the entry. Grok works on the model chosen for it in Connections. |
+| `team.preferred` | Optional: one of `team.work`, the Worker the owner prefers. Its route comes first and the job's coordinator is told, in these words (the runtime prompt `prompts/expert-job-preferred.md`): "The owner's preferred helper for this Expert is the route `<entry>`. Use it for helper work unless another configured route clearly serves the job better." The coordinator still decides. Without it nothing is added, and an Expert saved before keeps its stored form and its routes byte for byte. |
 | `ask_me_first` | `always`, `auto` (default) or `off`. |
 | `workspace` | Where it works: this computer, where its Workers run with full access, or a sandboxed workspace, where its Workers run in containers and reach only that workspace. Saving any other level is refused; narrower permissions on this computer are a later capability. |
+
+The Workers it may use (`team.work`) decide which Workers the job's coordinator can start. On this
+computer (and everywhere on a packaged server install) a Worker runs on one connected, ready account of
+its AI: the account chosen for that AI's role, else the default one, else the only one; with none, or
+several and no default, the runtime refuses it. A sandboxed Worker on a local install is not held to
+this. On this computer the coordinator still has its own AI's tools, so it can do the work itself when
+no Worker can start; in a sandboxed workspace its own tools are off.
 
 Knowledge and Skills stay in My Library and are referenced by exact version. An empty account
 means this computer's own sign-in for that AI. Worker runs may share this computer's existing
@@ -35,6 +43,36 @@ a run whose stop was not confirmed keeps new runs out until it is recovered. Eve
 whose credentials are placed in a run's own home, is leased to one Worker run at a time. A job also
 runs in parallel across the AI types it may use. The speaking assistant's replies are not held by
 those Workers on this computer's sign-in; a connected account cannot serve her and Workers together.
+
+## The Experts page
+
+The **Experts** tab, right after Run Project, shows one Expert's whole setup on one page in Run
+project's style; Run project's Edit and the "+" card in My experts open it. From the top:
+
+- your experts as a row (each with its picture), and **New expert**;
+- **What Does This Expert Do?**: the picture (Teams shows it as the app icon; kept on this computer, not
+  in its versions), the description and the name; a saved one shows its version, **Chat** and **Channels**;
+- **Identity Instructions**, in one box that grows with its text;
+- **Knowledge and Skills**, chosen with Run project's own searchable chooser;
+- **AI Team**: one table. Each AI is one line for its usual model; its other models (newest first, from
+  the install's catalog) open under it and stay open while one of them is chosen. The columns are the
+  three roles, each said in a few words: **Talks to people**, **Coordinates** and **Workers** (any number;
+  with several, a star marks the **Preferred** one). A click anywhere in a cell chooses it; the table is
+  one keyboard stop with arrow keys between choices. An AI whose tool is not on this computer and that has
+  no connected account says so, with a button to connect it. Where the runtime needs a connected account for
+  Workers (see the paragraph under the settings table), the page asks it, for the place the Expert works
+  in: an AI with no ready account says its Workers need one, and one with several and no default says to
+  choose one; each line has a button to Connections, and Workers the runtime would refuse cannot be ticked
+  (a saved one stays and can be unticked). Under the table: **Replies** (Quick or
+  Usual) and **Accounts** (which sign-in each role uses, and who takes over at a limit);
+- **Ask Me First**, then **Where It Works** and what it may do there;
+- **Save** (a new version) and **Discard changes**.
+
+Nothing on the page scrolls on its own: the page is the one scroll, at every width. Unsaved changes,
+the instructions text included, are kept in the browser tab's own storage (session storage: only that
+tab, gone when it closes), so a reload brings them back until they are saved or discarded; choosing another
+Expert with unsaved changes asks in the page, never in a browser dialog. Run project shows each
+saved Expert's own picture on its card.
 
 ## Three roles
 

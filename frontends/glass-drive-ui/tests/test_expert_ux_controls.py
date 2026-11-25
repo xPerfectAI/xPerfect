@@ -19,25 +19,44 @@ def run_node(code):
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_who_talks_offers_each_ais_faster_model_beside_its_usual_one():
-    source = (STATIC / 'experts.js').read_text()
-    models = re.search(r"const MODELS = (\{.*?\});", source, re.S)
-    options = re.search(r"export function modelOptions\(profile, keep = ''\) \{.*?\n\}", source, re.S)
-    assert models and options, 'talking models'
-    run_node("import assert from 'node:assert/strict';\nconst MODELS = " + models.group(1) + ";\n"
-             + options.group(0).replace("export ", "") + "\n"
-             "assert.deepEqual(MODELS['claude-code'].map(m => m[0]), ['', 'claude-code:opus', 'claude-code:sonnet', 'claude-code:haiku']);\n"
-             "assert.deepEqual(MODELS['codex-cli'].map(m => m[2]), ['codex-cli:native-default', 'codex-cli:gpt-6.2-sol']);\n"
-             "for (const list of Object.values(MODELS)) assert.equal(list[0][0], '');\n"
-             # Review 2, finding 14: a model saved exactly stays exactly as saved when the Expert is edited.
-             "const kept = (profile, keep) => modelOptions(profile, keep).some(([value]) => value === keep);\n"
-             "assert.ok(kept('claude-code', 'claude-code:opus'));\n"
-             "assert.ok(kept('claude-code', 'claude-code:sonnet-5-5'));\n"
-             # The usual model, Opus, Sonnet and Haiku; a model of another AI is never added to Claude's list.
-             "assert.equal(modelOptions('claude-code', 'codex-cli:gpt-6.2-sol').length, 4);\n"
-             "assert.equal(modelOptions('claude-code', '').length, 4);\n")
-    # New Experts talk on the faster model; Opus stays one choice away.
-    assert "talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: 'claude-code:haiku' }" in source
+def test_the_ai_team_offers_every_model_the_install_has_and_keeps_a_saved_one():
+    page = (STATIC / 'experts-page.js').read_text()
+    # No model list of the page's own: the models come from the install's catalog.
+    assert 'const MODELS' not in page and 'const MODELS' not in (STATIC / 'experts.js').read_text()
+    assert "request('/api/expert-ai-options')" in page
+    rows = re.search(r"export function modelName\(option\) \{.*?\n\}\n", page, re.S)
+    team = re.search(r"export function teamRows\(options, spec\) \{.*?\n\}\n", page, re.S)
+    read = re.search(r"export function readTeam\(state\) \{.*?\n\}\n", page, re.S)
+    assert rows and team and read, 'team helpers'
+    run_node("import assert from 'node:assert/strict';\n"
+             "const AIS = [['claude-code', 'Claude'], ['codex-cli', 'Codex'], ['grok-build', 'Grok']];\n"
+             + rows.group(0).replace('export ', '') + team.group(0).replace('export ', '') + read.group(0).replace('export ', '') +
+             "const options = [{profile: 'codex-cli', usual: 'codex-cli:native-default', models: ["
+             "{id: 'codex-cli:gpt-6.2-sol', label: 'Codex / GPT-6.2 Sol', status: 'available'},"
+             "{id: 'codex-cli:gpt-6-sol', label: 'Codex / GPT-6 Sol', status: 'available'}]},"
+             "{profile: 'claude-code', usual: 'claude-code:opus', models: [{id: 'claude-code:haiku', label: 'Claude / Haiku', status: 'available'}]}];\n"
+             "const spec = {team: {talk: {profile: 'claude-code', model: 'claude-code:sonnet-5-5'}, coordinate: {profile: 'codex-cli', model: ''},"
+             " work: ['claude-code', 'codex-cli:gpt-6-sol']}};\n"
+             "const rows = teamRows(options, spec);\n"
+             "assert.deepEqual(rows.map(r => r.profile), ['claude-code', 'codex-cli', 'grok-build']);\n"
+             # Every model the install has, by its own name under its AI; the usual one stays its own choice.
+             "assert.deepEqual(rows[1].models.map(m => m.name), ['GPT-6.2 Sol', 'GPT-6 Sol']);\n"
+             "assert.equal(rows[1].usual, 'codex-cli:native-default');\n"
+             # A model saved exactly stays as saved, under its own AI only.
+             "assert.deepEqual(rows[0].models.map(m => [m.id, m.status]), [['claude-code:haiku', 'available'], ['claude-code:sonnet-5-5', 'saved']]);\n"
+             "assert.equal(rows[1].models.some(m => m.id === 'claude-code:sonnet-5-5'), false);\n"
+             "assert.deepEqual(rows[2].models, []);\n"
+             # What the page saves: the chosen models, the Workers, and Preferred only when it is one of them.
+             "const state = {talk: {profile: 'claude-code', model: 'claude-code:haiku'}, coordinate: {profile: 'codex-cli', model: ''},"
+             " work: ['claude-code', 'codex-cli:gpt-6-sol'], preferred: 'codex-cli:gpt-6-sol', replies: 'low',"
+             " account: {talk: '', coordinate: ''}, backup: {talk: 'codex-cli', coordinate: ''}};\n"
+             "const saved = readTeam(state);\n"
+             "assert.deepEqual(saved.talk, {profile: 'claude-code', account_id: '', backup: {profile: 'codex-cli', account_id: ''}, effort: 'low', model: 'claude-code:haiku'});\n"
+             "assert.deepEqual(saved.work, ['claude-code', 'codex-cli:gpt-6-sol']); assert.equal(saved.preferred, 'codex-cli:gpt-6-sol');\n"
+             "assert.equal('preferred' in readTeam({...state, preferred: 'grok-build'}), false);\n"
+             "assert.throws(() => readTeam({...state, work: []}), /at least one AI/);\n")
+    # New Experts still talk on the faster model; the others are one choice away.
+    assert "talk: { profile: 'claude-code', account_id: '', backup: null, effort: 'low', model: 'claude-code:haiku' }" in (STATIC / 'experts.js').read_text()
 
 
 def test_needs_you_pops_up_on_every_page_including_the_worker_viewers():
@@ -408,10 +427,11 @@ def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_
 
 
 def test_the_ai_choices_show_each_ais_own_mark_from_the_worker_pages():
+    page = (STATIC / 'experts-page.js').read_text()
+    # Each AI heads its group of models with its own mark and name; each role's account row carries it too.
+    assert "who.append(aiMark(ai.profile), node('strong', '', ai.name))" in page
+    assert "who.append(aiMark(profile), node('strong', '', `${title} · ${AI_NAME[profile] || profile}`))" in page
     source = (STATIC / 'experts.js').read_text()
-    assert "labelled('Talks to people', withMark(talk)" in source
-    assert "labelled('Coordinates the work', withMark(coordinate))" in source
-    assert "l.append(box, aiMark(value), node('span', '', text))" in source
     # The same images the Worker pages use; theme.css keeps them legible in the dark theme.
     assert "img.src = `/static/provider-${name}.svg?v=${MARK_VERSION}`" in source
     for name in ('claude', 'codex', 'grok'):
@@ -440,12 +460,13 @@ def test_channels_show_marks_of_xperfects_own_and_an_installs_brand_mark_only_be
 
 def test_an_expert_has_a_picture_that_teams_shows_as_its_app_icon():
     source = (STATIC / 'experts.js').read_text()
+    page = (STATIC / 'experts-page.js').read_text()
     assert "const PICTURE_SIZE = 192;" in source and "canvas.toDataURL('image/png')" in source
     # Cut to a centred square in the browser; sent after the Expert is saved, so a new Expert gets it too.
     assert "drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size)" in source
-    assert "if (picture.changed() && saved?.template_id) {" in source
-    assert "+ '/picture', { method: 'PUT', signal: saveSignal, body: picture.body() }" in source
-    assert "Teams shows it as the app icon. Kept on this computer, not in its versions." in source
+    assert "if (pictureChange && saved?.template_id) {" in page
+    assert "+ '/picture', { method: 'PUT', body: pictureChange });" in page
+    assert "Teams shows it as the app icon. Kept on this computer, not in its versions." in page
     assert "`Teams shows ${name}'s picture as its app icon.`" in source
     assert "`${name}'s picture is not in Teams yet: ${channel.app.picture_error}`" in source
 
@@ -460,3 +481,65 @@ def test_the_owners_card_shows_the_words_a_held_job_would_send():
     # On Always ask the hand-off's words are part of what the owner approves: they are on the card.
     source = (STATIC / 'experts.js').read_text()
     assert "if (item.kind === 'job' && item.payload.tell) card.append(node('p', 'needs-you-what', `Will tell the person: ${item.payload.tell}`));" in source
+
+
+def test_an_ai_not_set_up_on_this_computer_says_so_with_the_way_to_connect_it():
+    page = (STATIC / 'experts-page.js').read_text()
+    helper = re.search(r"export function workerAccountLine\(\{.*?\n\}\n", page, re.S)
+    assert helper, 'workerAccountLine'
+    run_node("import assert from 'node:assert/strict';\n" + helper.group(0).replace('export ', '') +
+             "const local = {host: true, sandboxed: false};\n"
+             "const line = (o) => workerAccountLine({name: 'Codex', place: 'host', need: local, ...o});\n"
+             # No account ready: say so where the runtime needs one, and block new Workers there.
+             "assert.deepEqual(line({workerAccount: 'none'}), {text: 'Codex Workers need a connected Codex account.', action: 'Connect Codex', blocks: true});\n"
+             # Sandboxed on a local install: the runtime does not apply the rule, so nothing is said or blocked.
+             "assert.equal(line({workerAccount: 'none', place: 'sandboxed'}), null);\n"
+             # On a packaged install it applies everywhere.
+             "assert.equal(line({workerAccount: 'none', place: 'sandboxed', need: {host: true, sandboxed: true}}).blocks, true);\n"
+             # Exactly one (the default or the only one): fine. Several with no default: choose one.
+             "assert.equal(line({workerAccount: 'one'}), null);\n"
+             "assert.match(line({workerAccount: 'several'}).text, /mark one as the default in Connections/);\n"
+             "assert.match(line({workerAccount: 'several', inRole: true}).text, /choose it under Accounts/);\n"
+             # An account chosen for that AI's role is what its Workers use.
+             "assert.equal(line({workerAccount: 'none', roleAccount: 'acct-1'}), null);\n"
+             # The tool missing on this computer and no account: not set up; unknown is never a problem.
+             "assert.equal(line({workerAccount: 'none', cliInstalled: false}).text, 'Codex is not set up on this computer yet.');\n"
+             "assert.equal(line({workerAccount: 'unknown'}), null); assert.equal(line({workerAccount: 'none', need: null}), null);\n")
+    # The answer comes from the runtime's read, for the place the expert is set to; no provider table of the page's own.
+    assert "need: r.workers_need_account || null" in page and "workerAccount: offered?.worker_account || 'unknown'" in page
+    assert "need: state.need, place: state.place" in page
+    assert "'codex-cli': ['codex', 'openai']" not in page
+    assert "box.disabled = (unavailable || Boolean(accountLines[ai.profile]?.blocks)) && !ticked;" in page
+    assert "const link = node('a', 'secondary-button compact-button', line.action); link.href = '/#connections';" in page
+    # Opened before the account data has loaded, the page draws the team again once it is there.
+    assert "if (!getData()) { const wait = (tries = 0) => setTimeout(() => { if (mine !== token) return; if (getData()) renderTeam();" in page
+
+
+def test_unsaved_changes_are_kept_until_saved_or_discarded_and_asked_about_in_the_page():
+    page = (STATIC / 'experts-page.js').read_text()
+    assert 'confirm(' not in page and 'alert(' not in page, 'no browser dialog'
+    # Choosing another expert with changes asks in the page: keep editing, or discard and go.
+    assert "unsaved.replaceChildren(node('span', '', `Your changes to ${label} are not saved.`));" in page
+    assert "'Keep editing'" in page and "if (dirty && !force) { askBeforeLeaving(arg); return; }" in page
+    # Kept in this tab, per expert (a new one per owner), without the install's model list; a reload brings them back,
+    # also before the page's account data has loaded.
+    assert "if (id && id !== 'new') return `xperfect.expert-draft:${id}`;" in page
+    assert "return owner ? `xperfect.expert-draft:${owner}:new` : '';" in page
+    assert "const { offered, need, ...kept } = state;" in page
+    assert "Your unsaved changes are back. " in page
+    # Saving or discarding forgets them.
+    assert page.count('dropDraft()') >= 3
+
+
+def test_the_ai_team_table_says_what_each_role_is_and_works_as_one_control():
+    page = (STATIC / 'experts-page.js').read_text()
+    for words in ("['Talks to people', 'Answers at once', '']", "['Coordinates', 'Plans and hands out the work', '']",
+                  "['Workers', 'Do the work, several at once', '']"):
+        assert words in page, words
+    # A click anywhere in a cell picks its choice; arrows move through the table; one Tab stop.
+    assert "cell.querySelector('input:not(:disabled)')?.click();" in page
+    assert "for (const c of all) c.tabIndex = c === next ? 0 : -1;" in page
+    for key in ('ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'):
+        assert f"'{key}'" in page, key
+    # A choice rebuilds the table without losing keyboard focus.
+    assert "if (focused) [...four.box.querySelectorAll('[aria-label]')].find(el => el.getAttribute('aria-label') === focused)?.focus();" in page

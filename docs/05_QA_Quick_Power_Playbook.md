@@ -307,11 +307,34 @@ copy on a server, a second real person, Approve through Teams, files and group c
 administrator's press on Microsoft's real pages, and Skills in a Codex Worker or a container on a
 running install.
 
+**Observed on 25 November 2026 (the Experts page).** In the real page of a test install, as a user: a new
+expert made on the Experts page with a picture, identity instructions, a Library note chosen through Run
+project's chooser and two Workers (Claude's usual model and Claude Sonnet, Sonnet starred); saved, reloaded,
+edited and saved again (version 2); its picture on Run project's card; Edit and "+" on Run project opening the
+page; one real message in its Chat; Ask me first on Always ask from the page (the request under Needs you,
+Approve releasing exactly the shown reply); a Codex model chosen to coordinate and an account chosen, saved and
+reloaded; Sandboxed forcing Claude; unsaved changes kept across a reload; the keyboard over the whole form; one
+scroll at 1280×720, 1440×900 and 390 wide, in both themes. Preferred: in three small helper jobs with Sonnet
+starred, all three helpers ran on Sonnet; with the star moved to Claude's usual model, both of two ran on
+Opus (each from the helper's own recorded model). Live, from each run's own record: an expert talking on
+Codex GPT-6.2 Sol answered in its Chat on `gpt-6.2-sol`; a job coordinated on a chosen Claude Sonnet ran its
+coordinator on `claude-sonnet-5-5`. A helper on an exact Codex model was refused by the runtime because no
+Codex account is connected on that install ("Choose a ready account for this worker"; the same rule holds for
+Codex's usual model): the page now says that an AI's Workers need a connected account, with Connect, and does
+not offer them until one is ready. The coordinator then did the work with its own AI. NOT RUN: a Codex Worker
+on a connected Codex account, a sandboxed job; the not-set-up line is covered by the deterministic tests only.
+
 | Path | User check | Expected result |
 |---|---|---|
-| New expert | My experts → Create; name, instructions, Library Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; Edit shows every choice. |
-| Chat | Manage → Chat; ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
-| Talking model | Edit → Talks to people → Model: compare Opus, Sonnet and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
+| New expert | Experts → New expert (or Run project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run project's card shows its picture. |
+| Experts page fits | Open Experts at 1280×720, 1440×900 and a phone width, in both themes. | One scroll for the whole page: nothing inside scrolls on its own, nothing scrolls sideways; every control readable in both themes. |
+| Every model the install has | Experts → AI Team; open each AI's models. | Each AI is one line for its usual model; its other models open under it, newest first, all of the install's catalog for that AI (Grok: its usual model only). A model saved exactly stays chosen even if the list no longer names it. |
+| Preferred Worker | Tick two Workers, one of them an exact model; star it; ask for three small helper jobs. | Each job's coordinator is told the preferred route; report how many of the three helpers ran on the starred model, from each run's recorded model (the coordinator still decides). |
+| Not set up | An AI whose tool is not on this computer and that has no connected account; for an Expert on this computer, an AI with no ready account, and one with several ready and no default; then the same Expert set to a sandboxed workspace. | The first says it is not set up on this computer yet; the second that its Workers need a connected account; the third to choose one; each with a button to Connections, and Workers the runtime would refuse cannot be ticked. In the sandboxed workspace of a local install the account lines go away. |
+| Unsaved changes | Change something; choose another expert; then reload. | One line in the page: Keep editing or Discard them (no browser dialog); after a reload the changes are back until saved or discarded. |
+| Keyboard | Tab to the AI Team table; use the arrows, Space and Enter. | One Tab stop for the table; arrows move between choices; Space or Enter picks; focus stays on the choice after it is picked. |
+| Chat | Experts → Chat (or Manage → Chat); ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
+| Talking model | Experts → AI Team → Talks to people: compare Opus, Sonnet and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
 | Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
 | Second question | Ask something else while the job runs. | Answered at once; the job continues. |
 | Two people's files | On this computer, list two people; each asks the Expert for a job that writes a file. | Each file lands in that person's own folder under the conversations' folder; the owner's own Chat uses its own. Adding the second person, the card says each person's jobs have their own folder and that full access can still read across. |

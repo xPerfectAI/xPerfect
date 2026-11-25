@@ -10,6 +10,22 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
+## 2026-11-25 — An Experts page you can read at a glance
+
+> **Summary:** Set up an expert on its own page, in the same style as Run project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
+>
+> **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run project now shows the expert's own picture on its card.
+>
+> **Topics:** Experts, Models, Work control
+
+- **Benefit:** One page, one scroll: no pop-up with scroll bars inside each other, at any width and in both themes.
+- **Benefit:** Choose any model your install has for each role, not one fixed list, and say which Worker you prefer.
+
+- **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run project's Edit and "+" open it. Knowledge and Skills use Run project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
+- **Added:** The AI team as one table: each AI is one line for its usual model, its other models (newest first, from the install's catalog) open under it, and the three roles are columns, each said in a few words. A click anywhere in a cell chooses it; the table works from the keyboard as one control. An AI that is not set up on this computer says so, with a Connect button.
+- **Added:** Workers by exact model, and a Preferred Worker. Each allowed Worker is an AI on its usual model or one exact model of Claude or Codex; the preferred one comes first and the job's coordinator is told. The coordinator's model can be chosen too. Experts saved before keep their setup and their routes exactly.
+- **Changed:** Run project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
+
 ## 2026-11-25 — Prepare work while the host is busy; keep a second account working
 
 > **Summary:** A prepared, idle host Worker is accepted while the computer's work slots are full, and a usage limit on one provider account no longer holds Workers on another account.

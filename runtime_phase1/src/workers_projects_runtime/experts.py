@@ -90,14 +90,40 @@ class ExpertRole(StrictModel):
     model: str = Field(default="", max_length=200)
 
 
+def _release(native_model: str) -> tuple[int, ...]:
+    """A model's release from its own name ("gpt-6.2-sol" → (6, 2); "claude-opus-5-5" → (5, 5)); () when unnamed."""
+    digits: list[int] = []
+    for part in native_model.replace(".", "-").split("-"):
+        if part.isdigit():
+            digits.append(int(part))
+        elif digits:
+            break
+    return tuple(digits)
+
+
+def worker_profile(entry: str) -> str:
+    """The AI of one allowed Worker: an AI on its usual model ("codex-cli"), or one exact model of it
+    ("codex-cli:gpt-6.2-sol")."""
+    return entry.split(":", 1)[0]
+
+
 class ExpertTeam(StrictModel):
     talk: ExpertRole
     coordinate: ExpertRole
-    work: list[Literal["claude-code", "codex-cli", "grok-build"]] = Field(min_length=1, max_length=3)
+    # The Workers it may use: an AI on its usual model, or an exact model of that AI from xPerfect's catalog.
+    work: list[str] = Field(min_length=1, max_length=16)
+    # The Worker its coordinator should use first; empty: no preference (the coordinator chooses freely).
+    preferred: str = Field(default="", max_length=200)
 
     def model_post_init(self, __context: Any) -> None:
         if len(set(self.work)) != len(self.work):
-            raise ValueError("Each AI may be listed once")
+            raise ValueError("Each AI or model may be listed once")
+        for entry in self.work:
+            profile, _, model = entry.partition(":")
+            if profile not in PROFILES or (model and (profile == "grok-build" or len(entry) > 200)):
+                raise ValueError("Choose Workers among Claude, Codex and Grok, or a model of Claude or Codex")
+        if self.preferred and self.preferred not in self.work:
+            raise ValueError("The preferred Worker must be one of the Workers it may use")
         if self.talk.profile not in {"claude-code", "codex-cli"}:
             raise ValueError("Choose Claude or Codex to talk; Grok can coordinate and work")
 
@@ -112,6 +138,14 @@ class ExpertSpec(StrictModel):
     team: ExpertTeam
     ask_me_first: Literal["auto", "always", "off"] = "auto"
     workspace: ExpertWorkspace = Field(default_factory=ExpertWorkspace)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        # An Expert saved before Preferred existed, or without one, keeps its stored form byte-exact.
+        dumped = super().model_dump(*args, **kwargs)
+        team = dumped.get("team")
+        if isinstance(team, dict) and not team.get("preferred"):
+            team.pop("preferred", None)
+        return dumped
 
 
 def default_spec(profile: str = "claude-code") -> ExpertSpec:
@@ -291,7 +325,7 @@ class ExpertService:
 
     def _content(self, name: str, description: str, spec: ExpertSpec, base: dict | None = None) -> dict:
         content = json.loads(json.dumps(base or {}))
-        work = spec.team.work[0]
+        work = worker_profile(spec.team.work[0])
         execution_mode = "host" if spec.workspace.kind == "host" else "docker"
         content.setdefault("schema_version", 1)
         content["project"] = {**content.get("project", {}), "title": name[:200], "goal": description[:1000]}
@@ -310,6 +344,17 @@ class ExpertService:
         refusal = _access_refusal(spec)
         if refusal:
             raise ExpertError(refusal, code="expert_access_unsupported", status=422)
+        for entry in spec.team.work:
+            if ":" not in entry:
+                continue
+            try:
+                chosen = self.coordinator.provider._model(entry, tenant_id=tenant, owner_id=owner)
+            except Exception:
+                chosen = None
+            if (chosen is None or chosen.harness_profile != worker_profile(entry) or not chosen.native_model
+                    or getattr(chosen, "connection_id", "")):
+                raise ExpertError("That Worker model is not offered for this AI.", code="expert_model_unavailable",
+                                  status=422)
         roles = [spec.team.talk, spec.team.coordinate]
         for role in roles:
             if role.model:
@@ -455,6 +500,14 @@ class ExpertService:
         config = configured_coordinator(self.service, self.coordinator.provider, tenant, owner, role.profile)
         if role.model:  # the role's own model; Workers keep the AI's configured one
             config = config.model_copy(update={"model": role.model})
+            # The AI's configured effort where that model offers it; otherwise the model's recommended one.
+            try:
+                chosen = self.coordinator.provider._model(role.model, tenant_id=tenant, owner_id=owner)
+            except Exception:
+                chosen = None
+            choices = tuple(getattr(chosen, "effort_choices", ()) or ())
+            if chosen is not None and choices and config.effort not in choices:
+                config = config.model_copy(update={"effort": chosen.recommended_effort})
         config = self._with_effort(tenant, owner, config, role.effort)
         if not role.account_id:
             return config
@@ -548,11 +601,17 @@ class ExpertService:
             config = config.model_copy(update={"bootstrap_bundle": {**config.bootstrap_bundle,
                                                                     "expert_skills": for_coordinator}})
         routes: list[Route] = []
-        for profile in spec.team.work:
+        # The preferred Worker comes first; the others keep their saved order.
+        entries = sorted(spec.team.work, key=lambda entry: entry != spec.team.preferred) if spec.team.preferred \
+            else list(spec.team.work)
+        for entry in entries:
+            profile = worker_profile(entry)
             role = (spec.team.coordinate if profile == spec.team.coordinate.profile
                     else spec.team.talk if profile == spec.team.talk.profile else ExpertRole(profile=profile))
             work = self._role_config(tenant, owner, ExpertRole(profile=profile, account_id=role.account_id))
             placement = {"execution_mode": "docker"} if spec.workspace.kind == "sandboxed" else {}
+            # An exact model runs as its own Worker, at the AI's effort when that model offers it.
+            exact = self._worker_model(tenant, owner, entry, work.routes[0].effort) if ":" in entry and work.routes else {}
             for route in work.routes[:1]:
                 if binding.workspace_dir and route.execution_mode == "host":
                     route = route.model_copy(update={"workspace_root": binding.workspace_dir})
@@ -563,12 +622,23 @@ class ExpertService:
                 chosen = [{"name": skill["name"], "files": skill["files"]} for skill in skills if profile in skill["profiles"]]
                 if chosen:
                     bundle["expert_skills"] = chosen
-                routes.append(route.model_copy(update={"id": profile, "bootstrap_bundle": bundle, **placement}))
+                routes.append(route.model_copy(update={"id": entry, "bootstrap_bundle": bundle, **placement, **exact}))
         instructions = spec.instructions.strip()
+        # Said to the coordinator, who still decides: the owner's preferred Worker, by its route id.
+        preferred = ("\n\n" + _prompt("expert-job-preferred.md").strip().replace("{route}", spec.team.preferred)
+                     if spec.team.preferred else "")
         return config.model_copy(update={
             "routes": routes, "expert": binding,
-            "developer_instructions": (_prompt("expert-job.md") + ("\n\n" + instructions if instructions else "")),
+            "developer_instructions": (_prompt("expert-job.md") + preferred
+                                       + ("\n\n" + instructions if instructions else "")),
         })
+
+    def _worker_model(self, tenant: str, owner: str, entry: str, effort: str) -> dict:
+        """The route fields for a Worker on one exact model: that model, and the AI's effort when the model
+        offers it, otherwise the model's recommended effort."""
+        model = self.coordinator.provider._model(entry, tenant_id=tenant, owner_id=owner)
+        choices = tuple(getattr(model, "effort_choices", ()) or ())
+        return {"model": model.id, "effort": effort if effort in choices else model.recommended_effort}
 
     def _person_folder(self, job: dict, template: dict) -> str:
         """The folder this job works in on this computer: one per person the Expert serves, made at that person's
@@ -904,7 +974,7 @@ class ExpertService:
         # A Skill that travels with this job natively (to its coordinator or Workers) is applied: it is
         # not offered again as Library material waiting for review.
         spec = self.spec(template)
-        team = {spec.team.coordinate.profile, *spec.team.work}
+        team = {spec.team.coordinate.profile, *map(worker_profile, spec.team.work)}
         native = {(skill["item_id"], skill["version_id"]) for skill in self._expert_skills(tenant, owner, template)
                   if team & set(skill["profiles"])}
         refs = [ref for ref in refs if (ref.get("item_id"), ref.get("version_id")) not in native]
@@ -1220,6 +1290,49 @@ class ExpertService:
                                              payload={"text": reply}, source_turn_id=source_turn_id,
                                              idempotency_key=idempotency_key)
         return {"review_id": review["review_id"], "state": review["state"]}
+
+    def ai_options(self, tenant: str, owner: str) -> dict:
+        """The AIs and exact models an Expert's team can use, as Run project's Allowed AI lists them, with the model
+        each AI uses when none is chosen (its usual one). Models bound to one connection are left to that account."""
+        from .control_plane import PROFILE_ACCOUNT_PROVIDERS
+        from .conversation_provider import GLASSHIVE_MODELS
+        from .coordinator_config import configured_coordinator
+        from .execution_profile import packaged_linux
+        from .service import standalone_coordinator_host_enabled
+        policy = getattr(self.service, "allowed_ai_policy", None)
+        harnesses = (policy.options(scope_id="experts", tenant_id=tenant, owner_id=owner).get("harnesses", [])
+                     if policy is not None else [])
+        # Where a helper Worker must run on one connected, ready account of its AI: the same two conditions the
+        # coordinator applies when it starts one (a packaged install everywhere; a local one on this computer).
+        contained = packaged_linux()
+        need = {"host": contained or standalone_coordinator_host_enabled(), "sandboxed": contained}
+        store = getattr(self.service, "control_plane_store", None)
+        accounts = store.list_provider_accounts(tenant_id=tenant, owner_id=owner) if store is not None else None
+        items = []
+        for harness in harnesses:
+            profile = harness.get("profile")
+            if profile not in PROFILES:
+                continue
+            models = [model for model in harness.get("models", [])
+                      if profile != "grok-build" and model.get("id") in GLASSHIVE_MODELS]
+            # Newest first within each AI (the catalog's own order carries no meaning); a model named without a
+            # version follows the versioned ones, in the catalog's order.
+            models.sort(key=lambda model: _release(GLASSHIVE_MODELS[model["id"]].native_model), reverse=True)
+            try:
+                usual = configured_coordinator(self.service, self.coordinator.provider, tenant, owner, profile).model
+            except Exception:  # an AI without a usable configured model still lists its exact ones
+                usual = ""
+            # What the coordinator would find when no account is chosen for this AI's role: none ready, exactly one
+            # (the default, or the only one) or several with no single default (it refuses none and several).
+            worker_account = "unknown"
+            if accounts is not None:
+                providers = PROFILE_ACCOUNT_PROVIDERS.get(profile, set())
+                ready = [a for a in accounts if a.get("provider") in providers and a.get("status") == "ready"]
+                choices = [a for a in ready if a.get("is_default")] or ready
+                worker_account = "none" if not choices else "one" if len(choices) == 1 else "several"
+            items.append({"profile": profile, "label": harness.get("label") or profile, "usual": usual,
+                          "models": models, "worker_account": worker_account})
+        return {"items": items, "workers_need_account": need}
 
     def talk_speeds(self, tenant: str, owner: str, per_model: int = 30) -> list[dict]:
         """Median time to a finished reply per talking model, from this computer's recent replies."""

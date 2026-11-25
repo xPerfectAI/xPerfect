@@ -3853,6 +3853,10 @@ def create_app(runtime_client: RuntimeClient | None = None) -> FastAPI:
     def experts_talk_speeds(request: Request):
         return _expert_forward(request, "GET", "/v1/experts-talk-speeds")
 
+    @app.get("/api/expert-ai-options")
+    def expert_ai_options(request: Request):
+        return _expert_forward(request, "GET", "/v1/expert-ai-options")
+
     @app.get("/api/expert-notices")
     def expert_notices(request: Request):
         return _expert_forward(request, "GET", "/v1/expert-notices")

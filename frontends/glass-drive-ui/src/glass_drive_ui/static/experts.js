@@ -1,8 +1,8 @@
-/* Experts people can talk to: one form for New and Edit, Channels with Connect, and Needs you. */
+/* Experts people can talk to: shared parts of the Experts page, Channels with Connect, and Needs you. */
 import { libraryRequest, libraryModal } from './personal-library.js?v=20261024polish1';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
-const AIS = [['claude-code', 'Claude'], ['codex-cli', 'Codex'], ['grok-build', 'Grok']];
+export const AIS = [['claude-code', 'Claude'], ['codex-cli', 'Codex'], ['grok-build', 'Grok']];
 const PROVIDER = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] };
 const MARK_VERSION = '20261024vector1';
 /** The AI's own mark, as the Worker pages already show it; theme.css keeps it legible in the dark theme. */
@@ -11,12 +11,6 @@ export function aiMark(profile) {
   const img = node('img', 'provider-mark expert-ai-mark'); img.alt = ''; img.width = 18; img.height = 18;
   if (name) { img.dataset.provider = name; img.src = `/static/provider-${name}.svg?v=${MARK_VERSION}`; } else img.hidden = true;
   return img;
-}
-/** A choice of AI with its mark beside it, kept in step with the choice. */
-function withMark(choice) {
-  const pick = node('span', 'expert-ai-pick'); let mark = aiMark(choice.value); pick.append(mark, choice);
-  choice.addEventListener('change', () => { const next = aiMark(choice.value); mark.replaceWith(next); mark = next; });
-  return pick;
 }
 // Channel marks of xPerfect's own: no third-party logo ships in this repository.
 const GLYPHS = {
@@ -43,7 +37,7 @@ export function loadBrandAssets(get = (url) => fetch(url, { credentials: 'same-o
     .then(r => (r && r.ok ? r.json() : {})).then(j => (j && j.channels) || {}).catch(() => ({}));
   return brandAssets;
 }
-const ASK = {
+export const ASK = {
   always: ['Always ask', 'You approve every reply to another person and every job before it happens.'],
   auto: ['Auto', 'It asks you when a request is unusual or outside its role. Otherwise it carries on.'],
   off: ['Off', 'Nobody is asked. Its instructions still apply.'],
@@ -55,134 +49,11 @@ export const DEFAULT_EXPERT = {
           work: ['claude-code', 'codex-cli'] },
 };
 
-// Which model talks: '' is the deployment's usual model; every other option saves that exact model.
-export const MODELS = { 'claude-code': [['', 'Its usual model', 'claude-code:opus'], ['claude-code:opus', 'Opus', 'claude-code:opus'],
-                                        ['claude-code:sonnet', 'Sonnet', 'claude-code:sonnet'], ['claude-code:haiku', 'Haiku', 'claude-code:haiku']],
-                        'codex-cli': [['', 'Its usual model', 'codex-cli:native-default'],
-                                      ['codex-cli:gpt-6.2-sol', 'GPT-6.2 Sol', 'codex-cli:gpt-6.2-sol']] };
-
-/** The talking model choices; a model saved exactly stays selected as saved, also one the list does not name. */
-export function modelOptions(profile, keep = '') {
-  const options = MODELS[profile] || [['', 'Its usual model', '']];
-  const unnamed = keep && keep.startsWith(profile + ':') && !options.some(([value]) => value === keep);
-  return unnamed ? [...options, [keep, keep.slice(profile.length + 1), keep]] : options;
-}
-
 function labelled(text, control, hint = '') {
   const wrapper = node('label', 'personal-library-field expert-field'); wrapper.append(node('span', '', text), control);
   if (hint) wrapper.append(node('small', 'expert-hint', hint));
   return wrapper;
 }
-function select(options, value) {
-  const s = node('select'); for (const [v, t] of options) { const o = node('option', '', t); o.value = v; s.append(o); } s.value = value; return s;
-}
-function accountOptions(accounts, profile) {
-  const providers = PROVIDER[profile] || [];
-  return [['', 'This computer’s sign-in'], ...accounts.filter(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()))
-    .map(a => [a.account_id, a.label || a.provider])];
-}
-
-/** The Expert's own settings, added to the existing name and description fields. */
-function expertFields(body, spec, accounts, speeds) {
-  const s = JSON.parse(JSON.stringify(spec || DEFAULT_EXPERT));
-  const instructions = node('textarea'); instructions.rows = 6; instructions.maxLength = 32768; instructions.value = s.instructions || '';
-  instructions.placeholder = 'Who it is, what it does for people, and what it must never share.';
-  body.append(labelled('Instructions', instructions, 'It reads these at every message. You can change them at any time.'));
-
-  const team = node('fieldset', 'expert-team'); team.append(node('legend', '', 'AI team'));
-  const talk = select(AIS.slice(0, 2), s.team.talk.profile);
-  // Which model talks; each option shows its median time to a finished reply on this computer.
-  const talkModel = node('select'); let measured = {};
-  const fillModels = (keep) => {
-    const options = modelOptions(talk.value, keep);
-    talkModel.replaceChildren(...options.map(([value, text, id]) => {
-      const o = node('option', '', measured[id] ? `${text} · about ${measured[id].median_s} s here` : text); o.value = value; return o; }));
-    talkModel.value = options.some(([value]) => value === keep) ? keep : '';
-  };
-  fillModels(s.team.talk.model || '');
-  speeds?.then(items => { measured = Object.fromEntries((items || []).map(item => [item.model, item])); fillModels(talkModel.value); });
-  const replies = select([['low', 'Quick'], ['', 'Usual']], s.team.talk.effort || '');
-  const coordinate = select(AIS, s.team.coordinate.profile);
-  const workers = node('div', 'expert-workers');
-  const work = new Map();
-  for (const [value, text] of AIS) {
-    const box = node('input'); box.type = 'checkbox'; box.value = value; box.checked = s.team.work.includes(value);
-    const l = node('label', 'expert-check'); l.append(box, aiMark(value), node('span', '', text)); workers.append(l); work.set(value, box);
-  }
-  team.append(labelled('Talks to people', withMark(talk), 'Answers at once and hands work to the coordinator.'),
-              labelled('Model', talkModel, 'Time to a finished reply, measured on this computer.'),
-              labelled('Replies', replies),
-              labelled('Coordinates the work', withMark(coordinate)),
-              labelled('May work', workers, 'Workers run in parallel on the job.'));
-  const accountsBox = node('details', 'expert-accounts'); accountsBox.append(node('summary', '', 'Accounts'));
-  const roleAccounts = {};
-  const fill = (box, options, value) => {
-    box.replaceChildren(...options.map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; }));
-    box.value = options.some(([v]) => v === value) ? value : '';
-  };
-  // A backup is another AI on this computer's sign-in; it takes only work that has not started.
-  const backupOptions = profile => [['', 'No backup'], ...AIS.filter(([p]) => p !== profile).map(([p, t]) => [`${p}|`, t])];
-  for (const [role, title, picker] of [['talk', 'Talks', talk], ['coordinate', 'Coordinates', coordinate]]) {
-    const main = select(accountOptions(accounts, s.team[role].profile), s.team[role].account_id || '');
-    const backup = select(backupOptions(s.team[role].profile),
-      s.team[role].backup ? `${s.team[role].backup.profile}|${s.team[role].backup.account_id || ''}` : '');
-    roleAccounts[role] = { main, backup };
-    accountsBox.append(labelled(`${title}: main`, main), labelled(`${title}: backup`, backup, 'Used only for work that has not started.'));
-    const sync = () => { backup.disabled = Boolean(main.value); if (main.value) backup.value = ''; };
-    main.onchange = sync; sync();
-    picker.onchange = () => { fill(main, accountOptions(accounts, picker.value), main.value); fill(backup, backupOptions(picker.value), backup.value); sync(); };
-  }
-  accountsBox.append(node('p', 'expert-hint', 'A backup works on this computer’s sign-in for now; a second account of the same AI comes later. One sign-in runs one Worker of its AI at a time, so tick several AI types for parallel work. API keys stay optional.'));
-  team.append(accountsBox); body.append(team);
-
-  const ask = node('fieldset', 'expert-ask'); ask.append(node('legend', '', 'Ask me first'));
-  const askHint = node('small', 'expert-hint');
-  const askRow = node('div', 'expert-segment'); let askValue = s.ask_me_first;
-  const group = 'expert-ask-' + Math.random().toString(36).slice(2);
-  for (const [value, [text]] of Object.entries(ASK)) {
-    const radio = node('input'); radio.type = 'radio'; radio.name = group; radio.value = value; radio.checked = value === askValue;
-    radio.onchange = () => { askValue = value; askHint.textContent = ASK[value][1]; };
-    const l = node('label', 'expert-segment-option'); l.append(radio, node('span', '', text)); askRow.append(l);
-  }
-  askHint.textContent = ASK[askValue][1]; ask.append(askRow, askHint); body.append(ask);
-
-  const place = select([['host', 'This computer'], ['sandboxed', 'Sandboxed workspace']], s.workspace.kind);
-  // Only what its Workers really run at: full access on this computer, the workspace in a sandbox.
-  const levels = { host: [['full', 'Full access']], sandboxed: [['workspace', 'Its workspace only']] };
-  const access = select(levels[place.value] || levels.host, '');
-  const placeHint = node('small', 'expert-hint');
-  const explain = () => {
-    const options = levels[place.value] || levels.host;
-    access.replaceChildren(...options.map(([v, t]) => { const o = node('option', '', t); o.value = v; return o; }));
-    access.value = options[0][0]; access.disabled = options.length === 1;
-    placeHint.textContent = place.value === 'host'
-      ? 'It can read and change what you can on this computer. Your instructions and Ask me first are the guard, not a wall. Narrower permissions on this computer come later.'
-      : 'It works in its own sandboxed workspace and its Workers reach only that workspace. Claude talks and coordinates there with its own tools off, so all the work happens inside the sandbox. This needs containers on the computer or server running xPerfect.';
-    if (place.value === 'sandboxed') {
-      // Nothing of the Expert works on this computer itself: Claude talks and coordinates, with no backup.
-      for (const [role, picker] of [['talk', talk], ['coordinate', coordinate]]) {
-        if (picker.value !== 'claude-code') { picker.value = 'claude-code'; picker.onchange?.(); }
-        if (roleAccounts[role]) roleAccounts[role].backup.value = '';
-      }
-    }
-  };
-  place.onchange = explain; explain();
-  const where = node('div', 'expert-where'); where.append(labelled('Where it works', place), labelled('What it may do', access), placeHint); body.append(where);
-  const pickedAccount = talk.onchange; talk.onchange = () => { pickedAccount?.(); fillModels(talkModel.value); };
-
-  return () => {
-    const allowed = [...work].filter(([, box]) => box.checked).map(([value]) => value);
-    if (!allowed.length) throw new Error('Choose at least one AI that may work.');
-    const backupOf = role => { const v = roleAccounts[role].backup.value; if (!v) return null; const [profile, account_id] = v.split('|'); return { profile, account_id }; };
-    return { instructions: instructions.value.trim(), ask_me_first: askValue,
-      workspace: { kind: place.value, access: access.value },
-      team: { talk: { profile: talk.value, account_id: roleAccounts.talk.main.value, backup: backupOf('talk'), effort: replies.value, model: talkModel.value },
-              coordinate: { profile: coordinate.value, account_id: roleAccounts.coordinate.main.value, backup: backupOf('coordinate'), effort: '' },
-              work: allowed } };
-  };
-}
-
-/** New expert and Edit expert share one dialog. Save makes a new version. */
 const PICTURE_SIZE = 192;
 /** Any image, cut to a centred square and drawn at 192 by 192 (the size Teams wants for an app's colour icon). */
 export async function squarePng(file, size = PICTURE_SIZE) {
@@ -192,71 +63,13 @@ export async function squarePng(file, size = PICTURE_SIZE) {
   canvas.getContext('2d').drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
   return canvas.toDataURL('image/png');
 }
-/** An Expert's picture: kept in this install's state, not in its versions; Teams shows it as its app icon. */
-function pictureField(item, request, signal) {
-  const field = node('div', 'personal-library-field expert-field'); field.append(node('span', '', 'Picture'));
-  const row = node('div', 'expert-picture');
-  const preview = node('img', 'expert-picture-preview'); preview.alt = ''; preview.width = 64; preview.height = 64; preview.hidden = true;
-  const empty = node('span', 'expert-picture-empty', 'None');
-  const input = node('input', 'expert-picture-input'); input.type = 'file'; input.accept = 'image/png,image/jpeg,image/webp';
-  const choose = node('button', 'secondary-button', 'Choose a picture'); choose.type = 'button'; choose.onclick = () => input.click();
-  const remove = node('button', 'secondary-button', 'Remove'); remove.type = 'button'; remove.hidden = true;
-  let change = null;
-  const show = (url) => { preview.src = url || ''; preview.hidden = !url; empty.hidden = !!url; remove.hidden = !url; };
-  if (item) request('/api/experts/' + encodeURIComponent(item.template_id) + '/picture', { signal }).then(r => show(r?.picture || '')).catch(() => {});
-  input.onchange = async () => {
-    const file = input.files?.[0]; if (!file) return;
-    const url = await squarePng(file); change = { png_base64: url.slice(url.indexOf(',') + 1) }; show(url);
-  };
-  remove.onclick = () => { change = { remove: true }; input.value = ''; show(''); };
-  const controls = node('div', 'expert-picture-controls'); controls.append(choose, remove, input);
-  row.append(preview, empty, controls);
-  field.append(row, node('small', 'expert-hint', 'Teams shows it as the app icon. Kept on this computer, not in its versions.'));
-  return { field, changed: () => !!change, body: () => change };
+/** The Experts page shows one Expert's whole setup; Run project's Edit and Create open it there. */
+export function openExpertPage(item = null) {
+  location.hash = 'experts/' + (item ? encodeURIComponent(item.template_id) : 'new');
 }
-
-export async function openExpertForm({ item = null, request = libraryRequest, signal, onSaved, accounts = [] } = {}) {
-  let current = null;
-  if (item) { try { current = await request('/api/experts/' + encodeURIComponent(item.template_id), { signal }); } catch { current = null; } }
-  let name, description, read, picture;
-  const dialog = libraryModal(item ? 'Edit expert' : 'New expert', { action: 'Save', signal, onSave: async ({ signal: saveSignal }) => {
-    const expert = read();
-    const body = { name: name.value.trim(), description: description.value.trim(), expert, personal_library_refs: dialog.libraryRefs ? dialog.libraryRefs() : [] };
-    const saved = item
-      ? await request('/api/experts/' + encodeURIComponent(item.template_id), { method: 'PATCH', signal: saveSignal, body: { ...body, expected_catalog_revision: (current || item).catalog_revision } })
-      : await request('/api/experts', { method: 'POST', signal: saveSignal, body });
-    if (picture.changed() && saved?.template_id) {
-      await request('/api/experts/' + encodeURIComponent(saved.template_id) + '/picture', { method: 'PUT', signal: saveSignal, body: picture.body() });
-    }
-    onSaved?.(saved);
-  } });
-  name = node('input'); name.required = true; name.maxLength = 160; name.value = item?.name || '';
-  description = node('textarea'); description.rows = 2; description.maxLength = 1000; description.value = current?.description ?? item?.description ?? '';
-  picture = pictureField(item, request, signal);
-  dialog.body.append(labelled('Expert name', name), labelled('What does this expert do?', description), picture.field);
-  const speeds = request('/api/experts-talk-speeds', { signal }).then(r => r.items || []).catch(() => []);
-  read = expertFields(dialog.body, current?.expert, accounts, speeds);
-  // Knowledge and Skills come from My Library; an exact saved version stays with the Expert.
-  const chosen = new Map(((current || item)?.personal_library_refs || []).map(ref => [ref.item_id, ref]));
-  const library = node('fieldset', 'expert-team'); library.append(node('legend', '', 'Knowledge and Skills'));
-  const libraryList = node('div', 'expert-library'); library.append(libraryList, node('small', 'expert-hint', 'From My Library. Its coordinator and Workers load them natively, on every AI that can run them.'));
-  dialog.body.insertBefore(library, dialog.body.querySelector('.expert-team'));
-  try {
-    const items = ((await request('/api/personal-library', { signal })).items || []).filter(entry => entry.state !== 'archived');
-    if (!items.length) libraryList.append(node('p', 'expert-hint', 'Your Library is empty. Add knowledge or a skill folder in Library.'));
-    for (const entry of items) {
-      const box = node('input'); box.type = 'checkbox'; box.checked = chosen.has(entry.item_id);
-      box.onchange = () => { if (box.checked) chosen.set(entry.item_id, { item_id: entry.item_id, version_id: entry.version_id }); else chosen.delete(entry.item_id); };
-      const kind = entry.kind === 'skill' ? 'Skill' : entry.kind === 'note' ? 'Knowledge' : 'Reference';
-      const label = node('label', 'expert-check'); label.append(box, node('span', '', `${entry.name} · ${kind}`)); libraryList.append(label);
-    }
-  } catch { libraryList.append(node('p', 'expert-hint', 'My Library is unavailable right now. Your other choices are kept.')); }
-  const readExpert = read; read = () => readExpert();
-  dialog.libraryRefs = () => [...chosen.values()];
-  if (item) dialog.body.append(node('p', 'expert-hint', 'Saving makes a new version. Its next message follows it; running jobs finish with what they started with.'));
-  name.focus();
-  return dialog;
-}
+/** Every save is a new version: Run project hears of it, to refresh its cards and drop an older selected version. */
+export const EXPERT_SAVED = 'xperfect:expert-saved';
+export function expertSaved(saved) { window.dispatchEvent(new CustomEvent(EXPERT_SAVED, { detail: saved })); }
 
 export async function openExpertChat(item, { request = libraryRequest } = {}) {
   const chat = await request('/api/experts/' + encodeURIComponent(item.template_id) + '/chat', { method: 'POST', body: {} });
@@ -267,7 +80,7 @@ export async function openExpertChat(item, { request = libraryRequest } = {}) {
  *  folders: say so once a second person could be added. */
 export function sharedFolderNote(kind, people, waiting) {
   if (kind !== 'host' || people + waiting < 2) return '';
-  return 'Each person’s jobs work in their own folder on this computer, but with full access a job can still read another person’s folder. To keep each person’s work apart for certain, choose a sandboxed workspace in Edit.';
+  return 'Each person’s jobs work in their own folder on this computer, but with full access a job can still read another person’s folder. To keep each person’s work apart for certain, choose a sandboxed workspace on the Experts page.';
 }
 
 /** A Teams card's links. "Test in Teams" opens a chat by the bot's id; before the app is installed and a first message
