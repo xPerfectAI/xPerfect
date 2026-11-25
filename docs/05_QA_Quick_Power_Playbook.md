@@ -294,6 +294,19 @@ states and restart back-off); `integrations/teams/tests` owns the Teams mapping,
 retries and readiness; `frontends/glass-drive-ui/tests/test_expert_ux_controls.py` owns the card's
 pill, links and wording. Real model, browser and Teams steps stay NOT RUN until observed.
 
+**Observed on 24 November 2026.** Real Teams, in one organisation with its owner as the only listed
+person: Teams connect (the install then needed an administrator's upload and a direct install,
+outside the product), Teams custom apps off, Teams change spreading, Teams message, Real work (one
+result, told once) and Ask me first on Auto: a request raised, the checking line, Reject in the page
+and the expert's own reply, with the turn's own reply dropped. In the real page of a test install:
+Ask me first in all three settings (Approve and Reject, decisions within a second, the channel
+turned off and on), and the Connect cards with stand-ins for Microsoft's tool, sign-in and Graph,
+including each case of the administrator's press. Extraction: ten runs per case on the exact models,
+nothing leaked. Rows not named here are covered by the deterministic tests only. NOT RUN: a deployed
+copy on a server, a second real person, Approve through Teams, files and group chats, the
+administrator's press on Microsoft's real pages, and Skills in a Codex Worker or a container on a
+running install.
+
 | Path | User check | Expected result |
 |---|---|---|
 | New expert | My experts → Create; name, instructions, Library Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; Edit shows every choice. |

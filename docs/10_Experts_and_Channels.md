@@ -235,7 +235,9 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
 
 ## Known limits
 
-- Skills run only in a Claude Code Worker on this computer with full access.
+- Skills reach Claude Code and Codex Workers on this computer and Workers in a sandboxed workspace.
+  On a running install only Claude Code Workers on this computer have been seen using them; the
+  Codex and container paths are covered by tests only.
 - A conversation's AI and account are fixed when it starts; instructions, effort and Ask me first
   follow the newest version at each turn.
 - One sign-in runs one Worker of its AI at a time; parallel Workers need several AI types or accounts.

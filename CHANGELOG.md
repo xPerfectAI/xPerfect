@@ -10,6 +10,27 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
+## 2026-11-24 — Your expert, where your team already works
+
+> **Summary:** Give an expert your instructions and an AI team, then let the people you choose message it in Microsoft Teams. It answers at once, hands real work to Workers in the background and can ask you first before it sends or starts anything.
+>
+> **Example:** Create an expert that works the way you do, connect it to Teams and send it a question from your own Teams account. Ask for a report and keep talking while the job runs; the result arrives once, in the same chat. Set Ask me first to Always ask and approve its reply from Needs you.
+>
+> **Topics:** Experts, Channels, Microsoft Teams, Work control, Reliability
+
+- **Benefit:** Reach an expert from a Teams personal chat. Only the people you list get an answer.
+- **Benefit:** Stay in control: see exactly what the expert would send or start, approve or reject it, and change its instructions for the next message.
+
+- **Added:** Experts people can talk to. Create and Edit hold the instructions, Knowledge and Skills from My Library, the AI team (who talks, who coordinates, who may work, with optional backups) and where it works. Every save is a new version. The speaking assistant reads the newest instructions at each turn; a running job keeps what it started with.
+- **Added:** A speaking assistant that never holds work. It answers short questions at once and hands anything bigger to a background coordinator, which runs Workers; the result is told once in the same conversation, also after a restart. New experts talk on Claude Haiku at low effort, and the form shows each model's measured time.
+- **Added:** Ask me first, one setting: Always ask, Auto or Off. A request shows who asked, where, their words, the reason and exactly what would be sent or started. Approve releases exactly that; a changed or stopped request cannot be released by an old approval, and only a signed-in owner session decides. Requests wait under Needs you, with a count, a pop-up and an optional browser notification.
+- **Added:** Channels, starting with Microsoft Teams personal chats, as an optional package beside core (`integrations/teams`). On a local install it uses Teams socket mode, so nothing on the computer is exposed. Each message is accepted once, every reply leaves through an outbox, and a send with no known outcome is shown as not confirmed and never resent by itself.
+- **Added:** Connect from the expert's Channels card, with Microsoft's sign-in code shown in the dialog. It reads Microsoft's custom-app report before creating anything, names the switch that blocks the app, offers a note for the administrator and checks again by itself. With a sign-in client configured, an administrator can add the app to the organisation's catalogue with one press.
+- **Added:** A durable Stop for a whole coordinator conversation (`POST /v1/coordinator/conversations/{id}/stop`). A finished Worker run wakes its conversation at once. Codex-format Skill folders load in Claude Code Workers.
+
+- **Proven:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite fails only where the base release fails.
+- **Not yet:** A deployed copy on a server, a second real person, files and group chats, Slack and approving from inside Teams. On this computer an expert's Workers have full access, so its instructions and Ask me first are behaviour, not a wall. One sign-in runs one Worker of its AI at a time. See [Experts on channels](docs/10_Experts_and_Channels.md) and the [QA playbook](docs/05_QA_Quick_Power_Playbook.md#11-experts-on-channels).
+
 ## 2026-10-25 — Keep your best experts. Stay in control.
 
 > **Summary:** Save a successful worker as a reusable expert, refine its setup and return to the exact version you need. New work controls, clearer usage and recoverable desktops make ongoing work easier to manage.

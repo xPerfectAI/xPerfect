@@ -755,7 +755,7 @@ def test_off_holds_nothing(app):
 
 
 def test_the_owners_own_chat_asks_in_the_chat_never_in_needs_you(app):
-    # In his own Chat the owner is the one asking; a check goes in the reply, not to Needs you.
+    # In their own Chat the owner is the one asking; a check goes in the reply, not to Needs you.
     application, client = app
     expert = create_expert(client)  # Auto
     experts = application.state.experts
