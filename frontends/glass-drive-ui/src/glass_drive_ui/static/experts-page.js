@@ -229,6 +229,8 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       if (mine === token && typeof r?.picture === 'string' && r.picture.startsWith('data:image/png;base64,') && !pictureChange) { pictureUrl = r.picture; renderPicture(); }
     }).catch(() => {});
     pin(shownId()); renderStrip(); render();
+    // Opened from elsewhere (Run project's Edit or +), the page starts at its top, not where the last page was scrolled.
+    if (!force && root.getBoundingClientRect().top < 0) window.scrollTo({ top: 0 });
   }
 
   const changed = () => { dirty = true; keepDraft(); };
