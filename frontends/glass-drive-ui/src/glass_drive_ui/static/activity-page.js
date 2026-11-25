@@ -1,7 +1,7 @@
 /* Activity: one line per message or run — which Expert or Worker, when, where, by whom, what they asked — with
    big filter buttons, a time range, status and a search, all applied by xPerfect. A line opens in place to its trail. */
 import { libraryRequest } from './personal-library.js?v=20261024polish1';
-import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity8';
+import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity9';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const STATUS = { waiting_for_you: 'Waiting for you', working: 'Working', answered: 'Answered', done: 'Done', stopped: 'Stopped', failed: 'Failed' };
@@ -102,8 +102,8 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   const more = node('button', 'secondary-button activity-more', 'Show more'); more.type = 'button'; more.hidden = true;
   mount.replaceChildren(filters, fresh, list, empty, more);
 
-  const chip = (label, pressed, onClick, face = null) => {
-    const button = node('button', 'activity-chip'); button.type = 'button';
+  const chip = (label, pressed, onClick, face = null, key = label) => {
+    const button = node('button', 'activity-chip'); button.type = 'button'; button.dataset.key = key;
     button.setAttribute('aria-pressed', String(Boolean(pressed)));
     if (face) button.append(face);
     button.append(node('span', 'activity-chip-name', label));
@@ -129,6 +129,8 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
   const faceFor = subject => (subject.type === 'expert' ? expertFace(subject) : subject.type === 'chat' ? chatFace() : workerFace(subject.ai));
 
   function drawFilters() {
+    // A redraw keeps the keyboard where it was: the same button keeps the focus.
+    const focused = filters.contains(document.activeElement) ? document.activeElement.dataset.key : '';
     const subjects = state.subjects || { experts: [], workers: [], chat: false };
     const buttons = [
       ...subjects.experts.map(s => ['x:' + s.id, s.name || 'Expert', expertFace({ ...s, type: 'expert' })]),
@@ -137,8 +139,8 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     ];
     const shown = state.showAll ? buttons : buttons.slice(0, FIRST_BUTTONS);
     whoChips.replaceChildren(
-      chip('All', state.who.size === 0, () => { state.who.clear(); reload(); }),
-      ...shown.map(([key, label, face]) => chip(label, state.who.has(key), () => { state.who.has(key) ? state.who.delete(key) : state.who.add(key); reload(); }, face)),
+      chip('All', state.who.size === 0, () => { state.who.clear(); reload(); }, null, 'who:all'),
+      ...shown.map(([key, label, face]) => chip(label, state.who.has(key), () => { state.who.has(key) ? state.who.delete(key) : state.who.add(key); reload(); }, face, key)),
     );
     whoChips.querySelectorAll('.activity-chip').forEach(button => button.classList.add('activity-chip-who'));
     if (buttons.length > FIRST_BUTTONS && !state.showAll) {
@@ -146,17 +148,18 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
       all.addEventListener('click', () => { state.showAll = true; drawFilters(); });
       whoChips.append(all);
     }
-    timeChips.replaceChildren(...TIMES.map(([key, label]) => chip(label, state.time === key, () => { state.time = key; reload(); })));
+    timeChips.replaceChildren(...TIMES.map(([key, label]) => chip(label, state.time === key, () => { state.time = key; reload(); }, null, 'time:' + key)));
     statusChips.replaceChildren(...Object.entries(STATUS).map(([key, label]) => {
-      const button = chip(label, state.statuses.has(key), () => { state.statuses.has(key) ? state.statuses.delete(key) : state.statuses.add(key); reload(); });
+      const button = chip(label, state.statuses.has(key), () => { state.statuses.has(key) ? state.statuses.delete(key) : state.statuses.add(key); reload(); }, null, 'status:' + key);
       button.dataset.status = key; return button;
     }));
     clear.hidden = !filtered();
+    if (focused) [...filters.querySelectorAll('.activity-chip')].find(b => b.dataset.key === focused)?.focus();
   }
   const filtered = () => Boolean(state.who.size || state.time !== 'all' || state.statuses.size || state.q);
   let typing = 0;
   search.addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(() => { state.q = search.value.trim(); reload(); }, 300); });
-  clear.addEventListener('click', () => { state.who.clear(); state.time = 'all'; state.statuses.clear(); state.q = ''; search.value = ''; reload(); });
+  clear.addEventListener('click', () => { state.who.clear(); state.time = 'all'; state.statuses.clear(); state.q = ''; search.value = ''; reload(); whoChips.querySelector('.activity-chip')?.focus(); });
 
   // ---------------------------------------------------------------- the read
   function body(cursor = '') {
@@ -351,7 +354,9 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
       if (old && old.status !== item.status) {
         old.status = item.status; if (item.review_id) old.review_id = item.review_id; else delete old.review_id;
         const line = list.querySelector(`[data-line="${item.line_id}"]`);
-        const fresher = lineFor(old); if (line) line.replaceWith(fresher);
+        const fresher = lineFor(old); const had = line?.contains(document.activeElement);
+        if (line) line.replaceWith(fresher);
+        if (had) fresher.querySelector('.activity-line-main')?.focus();
       }
     }
     const top = state.items[0];
