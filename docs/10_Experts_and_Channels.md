@@ -26,8 +26,13 @@ current; every save makes a new version. The `expert` key in its content holds:
 | `workspace` | Where it works: this computer, where its Workers run with full access, or a sandboxed workspace, where its Workers run in containers and reach only that workspace. Saving any other level is refused; narrower permissions on this computer are a later capability. |
 
 Knowledge and Skills stay in My Library and are referenced by exact version. An empty account
-means this computer's own sign-in for that AI. Every account, this computer's sign-in included,
-is leased to one Worker run at a time: Workers of the same AI on one sign-in take turns, and a job
+means this computer's own sign-in for that AI. Worker runs may share this computer's existing
+Claude sign-in, up to the host's per-account limit (`WPR_HOST_ACCOUNT_ACTIVE_LIMIT`, 4 by default;
+Workers of one AI are also capped at 3 at once by `WPR_HOST_MISSION_SLOTS_PER_CLI`): it copies no
+credential, and each run uses the owner's own sign-in with a private config folder, the way several
+Claude Code sessions share one sign-in. Setup, Verify and Disconnect still need it to themselves, and
+a run whose stop was not confirmed keeps new runs out until it is recovered. Every other account,
+whose credentials are placed in a run's own home, is leased to one Worker run at a time. A job also
 runs in parallel across the AI types it may use. The speaking assistant's replies are not held by
 those Workers on this computer's sign-in; a connected account cannot serve her and Workers together.
 
@@ -268,7 +273,10 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
   Codex and container paths are covered by tests only.
 - A conversation's AI and account are fixed when it starts; instructions, effort and Ask me first
   follow the newest version at each turn.
-- One sign-in runs one Worker of its AI at a time; parallel Workers need several AI types or accounts.
+- This computer's existing Claude sign-in runs up to the per-account limit of Workers at once; any
+  other account runs one Worker at a time, so parallel Workers there need several AI types or accounts.
+  On one computer the host's Worker slots per AI tool come first (`WPR_HOST_MISSION_SLOTS_PER_CLI`,
+  3 by default): one sign-in then runs at most 3 Workers at once in all, whichever person's jobs they serve.
 - A backup on a second account of the same AI is a later capability. It needs the armed fallback to
   carry an account and cool-downs kept per account; on macOS a named second Claude account also
   needs local named-account support.

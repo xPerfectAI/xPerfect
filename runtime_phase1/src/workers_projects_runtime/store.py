@@ -148,6 +148,27 @@ def _canonical_origin_scope(
     return clean, encoded
 
 
+
+def _blocking_account_lease(conn, account_id: str, worker_id: str, mission_lane: str):
+    """The other live lease that keeps a new run of this account from being created, if any.
+
+    Worker runs may share an existing Claude sign-in up to the per-account limit; any other live use of an
+    account, or a full one, blocks as before."""
+    rows = conn.execute(
+        """
+        SELECT lane, worker_id FROM provider_account_leases
+        WHERE account_id = ? AND released_at IS NULL AND expires_at > ?
+          AND NOT (worker_id = ? AND lane = ?)
+        """,
+        (account_id, time.time(), worker_id, mission_lane),
+    ).fetchall()
+    if not rows:
+        return None
+    from .account_capacity import current_native_account, room_for_another_run
+    if current_native_account(conn, account_id) and room_for_another_run(row["lane"] for row in rows):
+        return None
+    return rows[0]
+
 class ProviderAccountBusyStoreError(ValueError):
     """A run reservation lost the race with interactive provider-account use."""
 
@@ -8892,15 +8913,7 @@ class Store:
                 )
             if provider_account_fence is not None:
                 account_id, mission_lane, allow_mission_fallback = provider_account_fence
-                active_lease = conn.execute(
-                    """
-                    SELECT lane, worker_id FROM provider_account_leases
-                    WHERE account_id = ? AND released_at IS NULL AND expires_at > ?
-                      AND NOT (worker_id = ? AND lane = ?)
-                    LIMIT 1
-                    """,
-                    (account_id, time.time(), worker_id, mission_lane),
-                ).fetchone()
+                active_lease = _blocking_account_lease(conn, account_id, worker_id, mission_lane)
                 if active_lease is not None:
                     interactive = str(active_lease["lane"] or "").endswith(":interactive")
                     if interactive or not allow_mission_fallback:
@@ -9137,20 +9150,9 @@ class Store:
                     )
                 if provider_account_fence is not None:
                     account_id, mission_lane, allow_mission_fallback = provider_account_fence
-                    active_lease = conn.execute(
-                        """
-                        SELECT lane, worker_id FROM provider_account_leases
-                        WHERE account_id = ? AND released_at IS NULL AND expires_at > ?
-                          AND NOT (worker_id = ? AND lane = ?)
-                        LIMIT 1
-                        """,
-                        (
-                            account_id,
-                            time.time(),
-                            str(schedule["worker_id"]),
-                            mission_lane,
-                        ),
-                    ).fetchone()
+                    active_lease = _blocking_account_lease(
+                        conn, account_id, str(schedule["worker_id"]), mission_lane
+                    )
                     if active_lease is not None:
                         interactive = str(active_lease["lane"] or "").endswith(":interactive")
                         if interactive or not allow_mission_fallback:

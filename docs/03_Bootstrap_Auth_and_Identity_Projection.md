@@ -305,15 +305,20 @@ durable binding; reuse does not bypass that first preflight. Stopped or held goa
 foreign or stale bindings, historical result access and later manual work receive no exception.
 No client-specific execution flag or full-access setting is needed. This changes mutation admission
 only: it grants neither additional native permissions nor exclusive control of the shared desktop.
-Existing account credential leases remain exclusive, so jobs using one selected account may queue
-even when profile, tenant and machine capacity remain available. Slot counts are ceilings, not a
+Account credential leases remain exclusive for accounts whose credentials are projected or copied
+into a run, so jobs using one such account may queue even when profile, tenant and machine capacity
+remain available. The one exception is the explicit **Existing Claude sign-in** of a single-user
+local host: it copies no credential, so its Worker runs (mission lanes) may hold leases at the same
+time up to the account limit (`WPR_HOST_ACCOUNT_ACTIVE_LIMIT`). Each run asserts its own lease; any
+other unreleased use of that account (setup, verify, disconnect, a held run's recovery) still keeps
+it alone. Slot counts are ceilings, not a
 promise that every account can run that many jobs at once.
 
 A reused single-user worker without an explicit account selection keeps its existing native
 authentication route, including an OS sign-in where already allowed. That legacy route has no
 selected-account credential lease, so its Queen-owned runs may overlap within native/provider
 limits. This is different from selecting an **Existing Claude sign-in** connection: that registered
-current-native account still holds its exclusive lease. Reuse does not itself require a new account
+current-native account holds a lease per run, shared by Worker runs only up to the account limit. Reuse does not itself require a new account
 selection or enable ambient credentials in enterprise mode.
 
 A continuity hold preserves an accepted child's run. The existing queue releases its startup
