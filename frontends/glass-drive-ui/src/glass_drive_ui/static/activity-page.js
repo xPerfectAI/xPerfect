@@ -1,7 +1,7 @@
 /* Activity: one line per message or run — which Expert or Worker, when, where, by whom, what they asked — with
    big filter buttons, a time range, status and a search, all applied by xPerfect. A line opens in place to its trail. */
 import { libraryRequest } from './personal-library.js?v=20261024polish1';
-import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity7';
+import { aiMark, channelMark, loadBrandAssets } from './experts.js?v=20261125activity8';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 const STATUS = { waiting_for_you: 'Waiting for you', working: 'Working', answered: 'Answered', done: 'Done', stopped: 'Stopped', failed: 'Failed' };
@@ -334,7 +334,10 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     state.items = [...items, ...state.items.filter(item => !items.some(n => n.line_id === item.line_id))];
     state.waiting = []; fresh.hidden = true; drawLines();
   }
-  fresh.addEventListener('click', () => { addNewer(state.waiting); list.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
+  fresh.addEventListener('click', () => { addNewer(state.waiting); fresh.classList.remove('is-floating'); list.scrollIntoView({ block: 'start' }); });
+  // While he reads further down, the line floats at the top of the window, so he sees it without losing his place.
+  const float = () => { if (!fresh.hidden) fresh.classList.toggle('is-floating', list.getBoundingClientRect().top < 12); };
+  window.addEventListener('scroll', float, { passive: true });
   async function look() {
     if (document.visibilityState !== 'visible' || (view && view.hidden) || state.loading) return;
     const generation = state.generation;
@@ -357,7 +360,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     if (!newer.length) return;
     if (page.subjects) { state.subjects = page.subjects; drawFilters(); }
     if (atTop()) { addNewer(newer); return; }
-    state.waiting = newer; fresh.hidden = false; fresh.textContent = `${newer.length} new`;
+    state.waiting = newer; fresh.hidden = false; fresh.textContent = `${newer.length} new`; float();
   }
   const timer = setInterval(look, LOOK_EVERY_MS);
 

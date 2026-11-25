@@ -28,7 +28,8 @@
 .activity-glyph svg { width: 18px; height: 18px; }
 .activity-search { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-left: 76px; }
 .activity-search input { flex: 1 1 260px; min-width: 0; min-height: 44px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); font: inherit; font-size: var(--font-label); }
-.activity-new { position: sticky; top: 12px; z-index: 5; align-self: center; min-height: 40px; padding: 8px 18px; border: 0; border-radius: 999px; background: var(--segment-selected); box-shadow: inset 0 0 0 1px var(--accent), 0 1px 3px #0002; color: var(--text); font-weight: 600; cursor: pointer; }
+.activity-new { align-self: center; min-height: 40px; padding: 8px 18px; border: 0; border-radius: 999px; background: var(--segment-selected); box-shadow: inset 0 0 0 1px var(--accent), 0 1px 3px #0002; color: var(--text); font-weight: 600; cursor: pointer; }
+.activity-new.is-floating { position: fixed; top: 16px; left: 50%; z-index: 20; transform: translateX(-50%); }
 .activity-new[hidden], .activity-empty[hidden], .activity-more[hidden], .activity-clear[hidden] { display: none; }
 .activity-lines { display: grid; gap: 4px; min-width: 0; }
 .activity-day { margin: 14px 0 4px; color: var(--muted); font-size: var(--font-help); font-weight: 650; letter-spacing: .02em; }

@@ -1,7 +1,7 @@
 /* A starting team uses the same worker templates, Library and launch owner. */
 import { libraryRequest, libraryModal, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
-import { openExpertPage, openExpertChat, openChannels } from './experts.js?v=20261125activity7';
+import { openExpertPage, openExpertChat, openChannels } from './experts.js?v=20261125activity8';
 
 const node = (tag, cls = '', text = '') => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
 // Presentation belongs to stable public catalog IDs, never a person's name or job text.
