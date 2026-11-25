@@ -184,6 +184,8 @@ STATES = {
     "handed_off_then_done": ([("turn", "failed"), ("job", "done")], "done"),
     "handed_off_still_running": ([("turn", "failed"), ("job", "running")], "working"),
     "job_done_reply_failed": ([("job", "done"), ("delivery", "failed")], "failed"),
+    "job_done_reply_replaced": ([("job", "done"), ("delivery", "dropped")], "done"),
+    "reply_replaced_by_a_later_one": ([("delivery", "dropped"), ("delivery", "sent:checking")], "answered"),
 }
 
 
@@ -208,9 +210,10 @@ def test_each_status_word_comes_from_the_typed_state(app, case):
                              "VALUES(?,?,?,?,?,?,?,?,?,?,?)", f"job-{index}", "local", owner, expert["lineage_id"], cid, tid,
                 f"k{index}", "Synthetic job", state, "2026-11-20T10:01:00+00:00", "2026-11-20T10:05:00+00:00")
         else:
+            state, _, kind = state.partition(":")
             sql(application, "INSERT INTO channel_deliveries(delivery_id,binding_id,conversation_id,turn_id,kind,text,"
-                             "state,created_at) VALUES(?,?,?,?,'reply','Synthetic answer',?,?)", f"dl-{index}",
-                channel["binding_id"], cid, tid, state, "2026-11-20T10:01:00+00:00")
+                             "state,created_at) VALUES(?,?,?,?,?,'Synthetic answer',?,?)", f"dl-{index}",
+                channel["binding_id"], cid, tid, kind or "reply", state, "2026-11-20T10:01:00+00:00")
     item = lines(client)["items"][0]
     assert item["status"] == STATES[case][1]
     assert (item.get("review_id") == "rev-0") == (STATES[case][1] == "waiting_for_you")

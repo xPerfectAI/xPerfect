@@ -128,8 +128,11 @@ class ActivityLines:
               MAX(state IN ('stopped','withdrawn')) AS stopped, MAX(state IN ('held','starting','running')) AS working,
               MAX(state='done') AS done
               FROM expert_jobs WHERE tenant_id=:tenant AND owner_id=:owner AND source_turn_id<>'' GROUP BY 1,2)""",
+            # A dropped message is a stop only when nothing else went out for that message: the runtime also drops
+            # a reply that a later message replaced.
             """dlv AS (SELECT d.conversation_id AS cid, d.turn_id AS tid, MAX(d.state='failed') AS failed,
-              MAX(d.state='dropped') AS dropped FROM channel_deliveries d JOIN channel_bindings b ON b.binding_id=d.binding_id
+              MAX(d.state='dropped') AND NOT MAX(d.state IN ('held','pending','sending','sent','not_confirmed')) AS dropped
+              FROM channel_deliveries d JOIN channel_bindings b ON b.binding_id=d.binding_id
               WHERE b.tenant_id=:tenant AND b.owner_id=:owner GROUP BY 1,2)""",
         ]
         if workers:
@@ -164,11 +167,12 @@ class ActivityLines:
                 CASE
                   WHEN COALESCE(r.pending,0) THEN 'waiting_for_you'
                   -- A message that started a job is about that job: its state decides, whatever the turn that
-                  -- handed it off did next, unless what was sent back to the person failed or was dropped.
+                  -- handed it off did next, unless what was sent back to the person failed. (A reply dropped
+                  -- because the job's own message took its place is not a stop.)
                   WHEN j.cid IS NOT NULL THEN CASE
                     WHEN j.working THEN 'working'
                     WHEN j.failed OR COALESCE(d.failed,0) THEN 'failed'
-                    WHEN j.stopped OR COALESCE(d.dropped,0) THEN 'stopped'
+                    WHEN j.stopped THEN 'stopped'
                     ELSE 'done' END
                   WHEN (t.response_json='' AND t.restore_hold=0 AND t.blocker NOT IN ('cancelled',{_WAITING_BLOCKERS}))
                        OR COALESCE(d.failed,0) THEN 'failed'
