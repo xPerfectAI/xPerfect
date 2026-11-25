@@ -26,10 +26,12 @@ current; every save makes a new version. The `expert` key in its content holds:
 | `ask_me_first` | `always`, `auto` (default) or `off`. |
 | `workspace` | Where it works: this computer, where its Workers run with full access, or a sandboxed workspace, where its Workers run in containers and reach only that workspace. Saving any other level is refused; narrower permissions on this computer are a later capability. |
 
-The Workers it may use (`team.work`) decide which Workers the job's coordinator can start. Each Worker
-needs a connected, ready account of its AI; without one the runtime refuses it. On this computer the
-coordinator still has its own AI's tools, so it can do the work itself when no Worker can start; in a
-sandboxed workspace its own tools are off.
+The Workers it may use (`team.work`) decide which Workers the job's coordinator can start. On this
+computer (and everywhere on a packaged server install) a Worker runs on one connected, ready account of
+its AI: the account chosen for that AI's role, else the default one, else the only one; with none, or
+several and no default, the runtime refuses it. A sandboxed Worker on a local install is not held to
+this. On this computer the coordinator still has its own AI's tools, so it can do the work itself when
+no Worker can start; in a sandboxed workspace its own tools are off.
 
 Knowledge and Skills stay in My Library and are referenced by exact version. An empty account
 means this computer's own sign-in for that AI. Worker runs may share this computer's existing
@@ -57,9 +59,11 @@ project's style; Run project's Edit and the "+" card in My experts open it. From
   three roles, each said in a few words: **Talks to people**, **Coordinates** and **Workers** (any number;
   with several, a star marks the **Preferred** one). A click anywhere in a cell chooses it; the table is
   one keyboard stop with arrow keys between choices. An AI whose tool is not on this computer and that has
-  no connected account says so, with a button to connect it. Workers run on a connected, ready account of
-  their AI (talking and coordinating can use this computer's own sign-in), so an AI without one says that
-  its Workers need it, with the same button, and its Workers cannot be ticked. Under the table: **Replies** (Quick or
+  no connected account says so, with a button to connect it. Where the runtime needs a connected account for
+  Workers (see the paragraph under the settings table), the page asks it, for the place the Expert works
+  in: an AI with no ready account says its Workers need one, and one with several and no default says to
+  choose one; each line has a button to Connections, and Workers the runtime would refuse cannot be ticked
+  (a saved one stays and can be unticked). Under the table: **Replies** (Quick or
   Usual) and **Accounts** (which sign-in each role uses, and who takes over at a limit);
 - **Ask Me First**, then **Where It Works** and what it may do there;
 - **Save** (a new version) and **Discard changes**.

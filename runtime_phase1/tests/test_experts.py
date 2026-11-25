@@ -3502,3 +3502,37 @@ def test_a_chosen_model_runs_at_an_effort_it_offers(app, monkeypatch):
     assert (chosen.model, chosen.effort) == ("codex-cli:gpt-6-sol", "medium")
     usual = experts._default_role_config("local", "owner", ExpertRole(profile="codex-cli"))
     assert (usual.model, usual.effort) == ("codex-cli:configured", "ultra"), "no model chosen: exactly as configured"
+
+
+@pytest.mark.parametrize("packaged, local_host, need", [
+    (False, True, {"host": True, "sandboxed": False}),    # a local install: Workers on this computer need an account
+    (True, False, {"host": True, "sandboxed": True}),     # a packaged install: everywhere
+    (False, False, {"host": False, "sandboxed": False}),  # neither: the rule does not apply
+])
+def test_the_page_is_told_where_and_whether_a_worker_needs_a_connected_account(app, monkeypatch, packaged, local_host, need):
+    application, client = app
+    from workers_projects_runtime import coordinator_config, execution_profile, service as service_module
+    monkeypatch.setattr(coordinator_config, "configured_coordinator",
+                        lambda service, provider, tenant, owner, profile: SimpleNamespace(model=f"{profile}:usual"))
+    monkeypatch.setattr(execution_profile, "packaged_linux", lambda: packaged)
+    monkeypatch.setattr(service_module, "standalone_coordinator_host_enabled", lambda: local_host)
+    store = application.state.experts.service.control_plane_store
+    account = lambda n, provider, status, default: {"account_id": f"acct-synthetic-{n}", "label": f"Synthetic {n}",
+                                                    "provider": provider, "status": status, "is_default": default,
+                                                    "auth_method": "subscription"}
+    accounts = [account(1, "claude", "ready", False),     # Claude: exactly one
+                account(2, "xai", "ready", False),        # Grok: two, no default
+                account(3, "grok", "ready", False),
+                account(4, "openai", "error", True)]      # Codex: none ready
+    monkeypatch.setattr(store, "list_provider_accounts", lambda **kwargs: accounts)
+    response = client.get("/v1/expert-ai-options")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["workers_need_account"] == need
+    found = {item["profile"]: item["worker_account"] for item in body["items"]}
+    expected = {"claude-code": "one", "codex-cli": "none", "grok-build": "several"}
+    assert found == {profile: expected[profile] for profile in found}
+    # A default among several is the one the coordinator takes.
+    accounts[1]["is_default"] = True
+    found = {item["profile"]: item["worker_account"] for item in client.get("/v1/expert-ai-options").json()["items"]}
+    assert found.get("grok-build", "one") == "one"

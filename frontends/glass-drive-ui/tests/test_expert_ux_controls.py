@@ -485,32 +485,34 @@ def test_the_owners_card_shows_the_words_a_held_job_would_send():
 
 def test_an_ai_not_set_up_on_this_computer_says_so_with_the_way_to_connect_it():
     page = (STATIC / 'experts-page.js').read_text()
-    helper = re.search(r"export function notSetUp\(profile, data\) \{.*?\n\}\n", page, re.S)
-    assert helper, 'notSetUp'
+    helper = re.search(r"export function workerAccountLine\(\{.*?\n\}\n", page, re.S)
+    assert helper, 'workerAccountLine'
     run_node("import assert from 'node:assert/strict';\n" + helper.group(0).replace('export ', '') +
-             "const data = (installed, accounts = []) => ({new_workspace_options: [{profile: 'codex-cli', host_cli_installed: installed}], provider_accounts: accounts});\n"
-             "assert.equal(notSetUp('codex-cli', data(false)), true, 'no tool here and no account: say so');\n"
-             "assert.equal(notSetUp('codex-cli', data(true)), false, 'its tool is on this computer');\n"
-             "assert.equal(notSetUp('codex-cli', data(false, [{provider: 'openai', status: 'ready'}])), false, 'a connected account is enough');\n"
-             "assert.equal(notSetUp('codex-cli', data(false, [{provider: 'openai', status: 'error'}])), true, 'an account that is not ready is not enough');\n"
-             "assert.equal(notSetUp('codex-cli', data(null)), false, 'unknown is never shown as missing');\n"
-             "assert.equal(notSetUp('codex-cli', null), false, 'before the page has its data');\n")
-    # Workers need a connected, ready account of their AI (the runtime refuses a helper without one).
-    workers = re.search(r"export function workersNeedAccount\(profile, data\) \{.*?\n\}\n", page, re.S)
-    assert workers, 'workersNeedAccount'
-    run_node("import assert from 'node:assert/strict';\n" + workers.group(0).replace('export ', '') +
-             "assert.equal(workersNeedAccount('codex-cli', {provider_accounts: [{provider: 'claude', status: 'ready'}]}), true);\n"
-             "assert.equal(workersNeedAccount('codex-cli', {provider_accounts: [{provider: 'openai', status: 'ready'}]}), false);\n"
-             "assert.equal(workersNeedAccount('claude-code', {provider_accounts: [{provider: 'claude', status: 'ready'}]}), false);\n"
-             "assert.equal(workersNeedAccount('codex-cli', null), false, 'unknown is never shown as missing');\n")
-    # The line names the AI and its button goes where AIs are connected; a Worker that cannot run is not offered,
-    # but one already saved stays visible and can be unticked.
-    assert "`${ai.name} is not set up on this computer yet.`" in page
-    assert "`${ai.name} Workers need a connected ${ai.name} account.`" in page
-    assert "box.disabled = (unavailable || workersNeedAccount(ai.profile, getData())) && !ticked;" in page
+             "const local = {host: true, sandboxed: false};\n"
+             "const line = (o) => workerAccountLine({name: 'Codex', place: 'host', need: local, ...o});\n"
+             # No account ready: say so where the runtime needs one, and block new Workers there.
+             "assert.deepEqual(line({workerAccount: 'none'}), {text: 'Codex Workers need a connected Codex account.', action: 'Connect Codex', blocks: true});\n"
+             # Sandboxed on a local install: the runtime does not apply the rule, so nothing is said or blocked.
+             "assert.equal(line({workerAccount: 'none', place: 'sandboxed'}), null);\n"
+             # On a packaged install it applies everywhere.
+             "assert.equal(line({workerAccount: 'none', place: 'sandboxed', need: {host: true, sandboxed: true}}).blocks, true);\n"
+             # Exactly one (the default or the only one): fine. Several with no default: choose one.
+             "assert.equal(line({workerAccount: 'one'}), null);\n"
+             "assert.match(line({workerAccount: 'several'}).text, /mark one as the default in Connections/);\n"
+             "assert.match(line({workerAccount: 'several', inRole: true}).text, /choose it under Accounts/);\n"
+             # An account chosen for that AI's role is what its Workers use.
+             "assert.equal(line({workerAccount: 'none', roleAccount: 'acct-1'}), null);\n"
+             # The tool missing on this computer and no account: not set up; unknown is never a problem.
+             "assert.equal(line({workerAccount: 'none', cliInstalled: false}).text, 'Codex is not set up on this computer yet.');\n"
+             "assert.equal(line({workerAccount: 'unknown'}), null); assert.equal(line({workerAccount: 'none', need: null}), null);\n")
+    # The answer comes from the runtime's read, for the place the expert is set to; no provider table of the page's own.
+    assert "need: r.workers_need_account || null" in page and "workerAccount: offered?.worker_account || 'unknown'" in page
+    assert "need: state.need, place: state.place" in page
+    assert "'codex-cli': ['codex', 'openai']" not in page
+    assert "box.disabled = (unavailable || Boolean(accountLines[ai.profile]?.blocks)) && !ticked;" in page
+    assert "const link = node('a', 'secondary-button compact-button', line.action); link.href = '/#connections';" in page
     # Opened before the account data has loaded, the page draws the team again once it is there.
     assert "if (!getData()) { const wait = (tries = 0) => setTimeout(() => { if (mine !== token) return; if (getData()) renderTeam();" in page
-    assert "const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';" in page
 
 
 def test_unsaved_changes_are_kept_until_saved_or_discarded_and_asked_about_in_the_page():
@@ -523,7 +525,7 @@ def test_unsaved_changes_are_kept_until_saved_or_discarded_and_asked_about_in_th
     # also before the page's account data has loaded.
     assert "if (id && id !== 'new') return `xperfect.expert-draft:${id}`;" in page
     assert "return owner ? `xperfect.expert-draft:${owner}:new` : '';" in page
-    assert "const { offered, ...kept } = state;" in page
+    assert "const { offered, need, ...kept } = state;" in page
     assert "Your unsaved changes are back. " in page
     # Saving or discarding forgets them.
     assert page.count('dropDraft()') >= 3

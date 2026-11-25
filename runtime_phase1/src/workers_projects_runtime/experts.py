@@ -1294,11 +1294,20 @@ class ExpertService:
     def ai_options(self, tenant: str, owner: str) -> dict:
         """The AIs and exact models an Expert's team can use, as Run project's Allowed AI lists them, with the model
         each AI uses when none is chosen (its usual one). Models bound to one connection are left to that account."""
+        from .control_plane import PROFILE_ACCOUNT_PROVIDERS
         from .conversation_provider import GLASSHIVE_MODELS
         from .coordinator_config import configured_coordinator
+        from .execution_profile import packaged_linux
+        from .service import standalone_coordinator_host_enabled
         policy = getattr(self.service, "allowed_ai_policy", None)
         harnesses = (policy.options(scope_id="experts", tenant_id=tenant, owner_id=owner).get("harnesses", [])
                      if policy is not None else [])
+        # Where a helper Worker must run on one connected, ready account of its AI: the same two conditions the
+        # coordinator applies when it starts one (a packaged install everywhere; a local one on this computer).
+        contained = packaged_linux()
+        need = {"host": contained or standalone_coordinator_host_enabled(), "sandboxed": contained}
+        store = getattr(self.service, "control_plane_store", None)
+        accounts = store.list_provider_accounts(tenant_id=tenant, owner_id=owner) if store is not None else None
         items = []
         for harness in harnesses:
             profile = harness.get("profile")
@@ -1313,9 +1322,17 @@ class ExpertService:
                 usual = configured_coordinator(self.service, self.coordinator.provider, tenant, owner, profile).model
             except Exception:  # an AI without a usable configured model still lists its exact ones
                 usual = ""
+            # What the coordinator would find when no account is chosen for this AI's role: none ready, exactly one
+            # (the default, or the only one) or several with no single default (it refuses none and several).
+            worker_account = "unknown"
+            if accounts is not None:
+                providers = PROFILE_ACCOUNT_PROVIDERS.get(profile, set())
+                ready = [a for a in accounts if a.get("provider") in providers and a.get("status") == "ready"]
+                choices = [a for a in ready if a.get("is_default")] or ready
+                worker_account = "none" if not choices else "one" if len(choices) == 1 else "several"
             items.append({"profile": profile, "label": harness.get("label") or profile, "usual": usual,
-                          "models": models})
-        return {"items": items}
+                          "models": models, "worker_account": worker_account})
+        return {"items": items, "workers_need_account": need}
 
     def talk_speeds(self, tenant: str, owner: str, per_model: int = 30) -> list[dict]:
         """Median time to a finished reply per talking model, from this computer's recent replies."""

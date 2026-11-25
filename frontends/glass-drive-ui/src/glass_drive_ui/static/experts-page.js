@@ -68,24 +68,25 @@ export function teamRows(options, spec) {
     for (const id of saved) {
       if (id.startsWith(profile + ':') && !models.some(m => m.id === id)) models.push({ id, name: id.slice(profile.length + 1), status: 'saved', reason: 'Saved with this Expert; not in this install’s list now.' });
     }
-    return { profile, name, usual: offered?.usual || '', models };
+    return { profile, name, usual: offered?.usual || '', models, workerAccount: offered?.worker_account || 'unknown' };
   });
 }
 
-/** An AI whose tool is not on this computer and that has no connected account: the page says so, with the way to
- *  connect it. Unknown (no data yet) is never shown as missing. */
-export function notSetUp(profile, data) {
-  const option = (data?.new_workspace_options || []).find(o => o.profile === profile);
-  const providers = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] }[profile] || [];
-  const connected = (data?.provider_accounts || []).some(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()));
-  return Boolean(data) && option?.host_cli_installed === false && !connected;
-}
-
-/** Workers of an AI run on a connected, ready account of that AI (the runtime refuses a helper without one); talking
- *  and coordinating can use this computer's own sign-in. Unknown (no data yet) is never shown as missing. */
-export function workersNeedAccount(profile, data) {
-  const providers = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] }[profile] || [];
-  return Boolean(data) && !(data.provider_accounts || []).some(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()));
+/** The line under an AI about its Workers' account, from the runtime's own answer (`expert-ai-options`): whether a
+ *  Worker needs one connected, ready account where this Expert works, and what the runtime would find for that AI
+ *  (none, one, several with no default). An account chosen for that AI's role is what its Workers use. `blocks` means
+ *  the runtime would refuse a new Worker of that AI. Unknown is never shown as a problem. */
+export function workerAccountLine({ name, workerAccount = 'unknown', need = null, place = 'host', roleAccount = '', inRole = false, cliInstalled }) {
+  if (cliInstalled === false && workerAccount === 'none') {
+    return { text: `${name} is not set up on this computer yet.`, action: `Connect ${name}`, blocks: Boolean(need?.[place]) };
+  }
+  if (!need?.[place] || roleAccount) return null;
+  if (workerAccount === 'none') return { text: `${name} Workers need a connected ${name} account.`, action: `Connect ${name}`, blocks: true };
+  if (workerAccount === 'several') {
+    return { text: inRole ? `${name} Workers need one ${name} account: choose it under Accounts, or mark one as the default in Connections.`
+      : `${name} Workers need one ${name} account: mark one as the default in Connections.`, action: 'Open Connections', blocks: true };
+  }
+  return null;
 }
 
 /** The Expert's settings as the runtime saves them, from what the page shows. */
@@ -123,7 +124,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     experts = response.items || [];
   }
   async function loadOptions() {
-    if (!options) options = request('/api/expert-ai-options').then(r => r.items || []).catch(() => null);
+    if (!options) options = request('/api/expert-ai-options').then(r => ({ items: r.items || [], need: r.workers_need_account || null })).catch(() => null);
     if (!Object.keys(speeds).length) {
       request('/api/experts-talk-speeds').then(r => { speeds = Object.fromEntries((r.items || []).map(item => [item.model, item])); if (state) renderTeam(); }).catch(() => {});
     }
@@ -169,7 +170,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     clearTimeout(draftTimer);
     draftTimer = setTimeout(() => {
       const key = draftKey(shownId()); if (!key || !state || !dirty) return;
-      const { offered, ...kept } = state;
+      const { offered, need, ...kept } = state;
       const picture = pictureChange ? { change: pictureChange, url: pictureUrl } : null;
       try { sessionStorage.setItem(key, JSON.stringify({ base: current?.template_id || '', state: kept, picture })); } catch { /* The page itself still holds the changes. */ }
     }, 250);
@@ -210,7 +211,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     spec = JSON.parse(JSON.stringify(current?.expert || DEFAULT_EXPERT));
     spec.team.preferred = spec.team.preferred || '';
     try { library = ((await request('/api/personal-library')).items || []); } catch { library = []; }
-    const offered = await loadOptions(); if (mine !== token) return;
+    const answer = await loadOptions(); if (mine !== token) return;
     state = {
       name: current?.name || '', description: current?.description || '', instructions: spec.instructions || '',
       refs: (current?.personal_library_refs || []).map(ref => ({ item_id: ref.item_id, version_id: ref.version_id })),
@@ -220,7 +221,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       account: { talk: spec.team.talk.account_id || '', coordinate: spec.team.coordinate.account_id || '' },
       backup: { talk: spec.team.talk.backup?.profile || '', coordinate: spec.team.coordinate.backup?.profile || '' },
       ask: spec.ask_me_first || 'auto', place: spec.workspace?.kind === 'sandboxed' ? 'sandboxed' : 'host',
-      offered,
+      offered: answer?.items || null, need: answer?.need || null,
     };
     const kept = readDraft(shownId());
     if (kept) {
@@ -423,6 +424,12 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     head.append(headRow); grid.append(head);
     const talkName = nextId('experts-talk'); const coordinateName = nextId('experts-coordinate');
     const several = state.work.length > 1;
+    const installed = Object.fromEntries((getData()?.new_workspace_options || []).map(o => [o.profile, o.host_cli_installed]));
+    const roleAccount = profile => (state.coordinate.profile === profile ? state.account.coordinate
+      : state.talk.profile === profile ? state.account.talk : '');
+    const accountLines = Object.fromEntries(rows.map(ai => [ai.profile, workerAccountLine({
+      name: ai.name, workerAccount: ai.workerAccount, need: state.need, place: state.place, roleAccount: roleAccount(ai.profile),
+      inRole: state.coordinate.profile === ai.profile || state.talk.profile === ai.profile, cliInstalled: installed[ai.profile] })]));
     // The three choices where one model meets the three roles.
     const cells = (ai, line) => {
       const unavailable = line.status === 'unavailable';
@@ -452,7 +459,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       const entry = line.id || ai.profile;
       const ticked = state.work.includes(entry);
       const box = node('input'); box.type = 'checkbox'; box.checked = ticked;
-      box.disabled = (unavailable || workersNeedAccount(ai.profile, getData())) && !ticked;
+      box.disabled = (unavailable || Boolean(accountLines[ai.profile]?.blocks)) && !ticked;
       box.setAttribute('aria-label', `${ai.name} ${line.name} may work`);
       box.onchange = () => {
         state.work = box.checked ? [...state.work, entry] : state.work.filter(value => value !== entry);
@@ -500,12 +507,11 @@ export function mountExpertsPage({ root, getData = () => null, request = library
           tr.append(label, ...cells(ai, line)); group.append(tr);
         }
       }
-      const missing = notSetUp(ai.profile, getData()) ? `${ai.name} is not set up on this computer yet.`
-        : workersNeedAccount(ai.profile, getData()) ? `${ai.name} Workers need a connected ${ai.name} account.` : '';
-      if (missing) {
+      const line = accountLines[ai.profile];
+      if (line) {
         const tr = node('tr', 'experts-team-missing'); const td = node('td'); td.colSpan = 4;
-        const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';
-        td.append(node('span', '', missing), link); tr.append(td); group.append(tr);
+        const link = node('a', 'secondary-button compact-button', line.action); link.href = '/#connections';
+        td.append(node('span', '', line.text), link); tr.append(td); group.append(tr);
       }
       grid.append(group);
     }
@@ -565,7 +571,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       accountsOpen = accounts.open; renderBelow(below); below.querySelector('.experts-accounts > summary')?.focus();
     };
     const ready = getData()?.provider_accounts || [];
-    const PROVIDERS = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] };
+    const PROVIDERS = getData()?.profile_account_providers || {};  // the install's own map of AI to account providers
     for (const [role, title] of [['talk', 'Talks to people'], ['coordinate', 'Coordinates']]) {
       const profile = state[role].profile;
       const row = node('div', 'experts-account');
