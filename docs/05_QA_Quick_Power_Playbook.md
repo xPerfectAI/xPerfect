@@ -316,8 +316,13 @@ Approve releasing exactly the shown reply); a Codex model chosen to coordinate a
 reloaded; Sandboxed forcing Claude; unsaved changes kept across a reload; the keyboard over the whole form; one
 scroll at 1280×720, 1440×900 and 390 wide, in both themes. Preferred: in three small helper jobs with Sonnet
 starred, all three helpers ran on Sonnet; with the star moved to Claude's usual model, both of two ran on
-Opus (each from the helper's own recorded model). NOT RUN on a live job: a Codex Worker on an exact model, a
-chosen coordinator model, a sandboxed job; the not-set-up line is covered by the deterministic tests only.
+Opus (each from the helper's own recorded model). Live, from each run's own record: an expert talking on
+Codex GPT-6.2 Sol answered in its Chat on `gpt-6.2-sol`; a job coordinated on a chosen Claude Sonnet ran its
+coordinator on `claude-sonnet-5-5`. A helper on an exact Codex model was refused by the runtime because no
+Codex account is connected on that install ("Choose a ready account for this worker"; the same rule holds for
+Codex's usual model): the page now says that an AI's Workers need a connected account, with Connect, and does
+not offer them until one is ready. The coordinator then did the work with its own AI. NOT RUN: a Codex Worker
+on a connected Codex account, a sandboxed job; the not-set-up line is covered by the deterministic tests only.
 
 | Path | User check | Expected result |
 |---|---|---|
