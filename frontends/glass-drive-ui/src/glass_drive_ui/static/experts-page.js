@@ -249,7 +249,8 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     }
     const identity = node('div', 'experts-identity');
     const picture = node('div', 'experts-picture');
-    const face = node('button', 'experts-picture-face'); face.type = 'button'; face.setAttribute('aria-label', 'Choose a picture');
+    // The picture itself is a mouse target; the keyboard has the button beside it (one stop, not two).
+    const face = node('button', 'experts-picture-face'); face.type = 'button'; face.tabIndex = -1; face.setAttribute('aria-hidden', 'true');
     const input = node('input', 'expert-picture-input'); input.type = 'file'; input.accept = 'image/png,image/jpeg,image/webp'; input.hidden = true;
     const choose = node('button', 'secondary-button compact-button', 'Choose a picture'); choose.type = 'button';
     const remove = node('button', 'quiet-button compact-button', 'Remove'); remove.type = 'button';
@@ -497,6 +498,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const scroller = node('div', 'experts-team-fit'); scroller.append(grid);
     table.replaceChildren(scroller);
     if (!state.offered) table.append(help('The list of models is unavailable right now. Your saved choices are kept; reload to try again.'));
+    if (sandboxed) table.append(help('In a sandboxed workspace Claude talks to people and coordinates; any AI can still work.'));
     table.append(help('Times are to a finished reply, measured on this computer.'));
     gridKeys(grid);
   }
