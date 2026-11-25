@@ -94,11 +94,12 @@ export function mountExpertsPage({ root, getData = () => null, request = library
   const form = node('form', 'composer-form experts-form'); form.noValidate = true;
   const strip = node('div', 'experts-strip'); strip.setAttribute('role', 'group'); strip.setAttribute('aria-label', 'Your experts');
   const status = node('p', 'experts-status'); status.setAttribute('role', 'status');
+  const unsaved = node('div', 'experts-unsaved'); unsaved.setAttribute('role', 'alert'); unsaved.hidden = true;
   const body = node('div', 'experts-body');
-  form.append(strip, status, body); root.append(copy, form);
+  form.append(strip, unsaved, status, body); root.append(copy, form);
 
   let experts = []; let current = null; let spec = null; let options = null; let speeds = {}; let library = [];
-  let state = null; let dirty = false; let token = 0; let pictureChange = null; let pictureUrl = ''; let accountsOpen = false;
+  let state = null; let dirty = false; let token = 0; let pictureChange = null; let pictureUrl = ''; let accountsOpen = false; const openAis = new Set();
   const say = text => { status.textContent = text || ''; };
 
   async function loadList() {
@@ -140,14 +141,40 @@ export function mountExpertsPage({ root, getData = () => null, request = library
   const shownId = () => (current ? current.template_id : 'new');
   const pin = id => { const hash = '#experts/' + encodeURIComponent(id); if (location.hash !== hash) history.replaceState(null, '', location.pathname + location.search + hash); };
   function go(id) { void show(id); }
+  // Unsaved changes are kept in this tab (a reload brings them back) until they are saved or discarded.
+  const draftKey = id => { const owner = getData()?.draft_owner_scope || ''; return owner ? `xperfect.expert-draft:${owner}:${id}` : ''; };
+  let draftTimer = 0;
+  function keepDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => {
+      const key = draftKey(shownId()); if (!key || !state || !dirty) return;
+      const { offered, ...kept } = state;
+      try { sessionStorage.setItem(key, JSON.stringify({ base: current?.template_id || '', state: kept })); } catch { /* The page itself still holds the changes. */ }
+    }, 250);
+  }
+  function dropDraft(id = shownId()) { clearTimeout(draftTimer); const key = draftKey(id); try { if (key) sessionStorage.removeItem(key); } catch { /* Nothing kept. */ } }
+  function readDraft(id) {
+    const key = draftKey(id); if (!key) return null;
+    try { const kept = JSON.parse(sessionStorage.getItem(key) || 'null'); return kept && kept.base === (id === 'new' ? '' : id) ? kept.state : null; } catch { return null; }
+  }
+  /** One line in the page, never a browser dialog: keep editing, or discard and go where you asked. */
+  function askBeforeLeaving(next) {
+    const label = state?.name?.trim() || 'this expert';
+    unsaved.replaceChildren(node('span', '', `Your changes to ${label} are not saved.`));
+    const keep = node('button', 'secondary-button compact-button', 'Keep editing'); keep.type = 'button';
+    keep.onclick = () => { unsaved.hidden = true; pin(shownId()); };
+    const leave = node('button', 'quiet-button compact-button', 'Discard them'); leave.type = 'button';
+    leave.onclick = () => { unsaved.hidden = true; dropDraft(); dirty = false; void show(next, { force: true }); };
+    unsaved.append(keep, leave); unsaved.hidden = false; pin(shownId()); keep.focus();
+  }
 
   /** Show an Expert ('' keeps what is on the page, or the first one; 'new' is a blank one). Unsaved changes are
    *  kept when you only come back to the tab, and never dropped without your yes. */
   async function show(arg = '', { force = false } = {}) {
     if (state && !force && (arg === '' || arg === shownId())) { pin(shownId()); renderStrip(); renderTeam(); return; }
-    if (dirty && !force && !window.confirm('Leave without saving your changes to this expert?')) { pin(shownId()); return; }
+    if (dirty && !force) { askBeforeLeaving(arg); return; }
     if (arg) pin(arg);
-    const mine = ++token; dirty = false; pictureChange = null; say('');
+    const mine = ++token; dirty = false; pictureChange = null; say(''); unsaved.hidden = true;
     try { await loadList(); } catch (error) { say(`Your experts are unavailable: ${error.message}`); experts = []; }
     if (mine !== token) return;
     loadPictures();
@@ -173,6 +200,14 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       ask: spec.ask_me_first || 'auto', place: spec.workspace?.kind === 'sandboxed' ? 'sandboxed' : 'host',
       offered,
     };
+    const kept = readDraft(shownId());
+    if (kept) {
+      Object.assign(state, kept); dirty = true;
+      const back = node('span', '', 'Your unsaved changes are back. ');
+      const discard = node('button', 'quiet-button compact-button', 'Discard them'); discard.type = 'button';
+      discard.onclick = () => { dropDraft(); dirty = false; void show(shownId(), { force: true }); };
+      status.replaceChildren(back, discard);
+    }
     pictureUrl = current ? pictures.get(current.lineage_id) || '' : '';
     if (current && !pictureUrl) request('/api/experts/' + encodeURIComponent(current.template_id) + '/picture').then(r => {
       if (mine === token && typeof r?.picture === 'string' && r.picture.startsWith('data:image/png;base64,') && !pictureChange) { pictureUrl = r.picture; renderPicture(); }
@@ -180,13 +215,13 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     pin(shownId()); renderStrip(); render();
   }
 
-  const changed = () => { dirty = true; };
+  const changed = () => { dirty = true; keepDraft(); };
   let renderPicture = () => {}; let renderTeam = () => {};
 
   function render() {
     body.replaceChildren();
     // 1. What does this expert do? The picture first, then the name and the description.
-    const one = section('does', 'What does this expert do?');
+    const one = section('does', 'What Does This Expert Do?');
     if (current) {
       const tools = node('div', 'experts-tools');
       tools.append(node('span', 'experts-version', `Version ${current.version || 1}`));
@@ -224,11 +259,13 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const description = node('textarea'); description.rows = 3; description.maxLength = 1000; description.value = state.description;
     description.placeholder = 'What it does for the people who message it.';
     description.oninput = () => { state.description = description.value; changed(); };
-    words.append(field('What does this expert do?', description), field('Expert name', name));
+    // The section's title asks the question; its box answers it (as "What's the Job?" on Run project).
+    const does = node('label', 'project-field'); does.append(node('span', 'sr-only', 'What does this expert do?'), description);
+    words.append(does, field('Expert name', name));
     identity.append(picture, words); one.box.append(identity);
 
     // 2. Identity instructions: one box that grows with its words; it never scrolls on its own.
-    const two = section('identity', 'Identity instructions');
+    const two = section('identity', 'Identity Instructions');
     const instructions = node('textarea', 'experts-instructions'); instructions.maxLength = 32768; instructions.rows = 6; instructions.value = state.instructions;
     instructions.placeholder = 'Who it is, what it does for people, and what it must never share.';
     instructions.setAttribute('aria-label', 'Identity instructions');
@@ -266,7 +303,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     three.box.append(selection, chosen, help('From My Library. Its coordinator and Workers load them natively, on every AI that can run them.'));
 
     // 4. AI team: one table. A choice where a model meets a role is the whole setting.
-    const four = section('team', 'AI team');
+    const four = section('team', 'AI Team');
     const table = node('div', 'experts-team');
     const below = node('div', 'experts-team-below');
     four.box.append(table, below);
@@ -274,7 +311,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     renderTeam();
 
     // 5. Ask me first, as it is.
-    const five = section('ask', 'Ask me first');
+    const five = section('ask', 'Ask Me First');
     const askRow = node('div', 'expert-segment'); askRow.setAttribute('role', 'radiogroup'); askRow.setAttribute('aria-label', 'Ask me first');
     const askHint = node('small', 'field-help'); const group = nextId('expert-ask');
     for (const [value, [text]] of Object.entries(ASK)) {
@@ -285,7 +322,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     askHint.textContent = ASK[state.ask][1]; five.box.append(askRow, askHint);
 
     // 6. Where it works, and what it may do there.
-    const six = section('where', 'Where it works');
+    const six = section('where', 'Where It Works');
     const level = node('p', 'experts-level'); const placeHint = help('');
     const explain = () => { level.replaceChildren(node('span', '', 'What it may do: '), node('strong', '', LEVELS[state.place])); placeHint.textContent = PLACE_HINTS[state.place]; };
     six.heading.append(toggle('Where it works', PLACES, state.place, value => {
@@ -304,7 +341,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const note = help(current ? 'Saving makes a new version. Its next message follows it; running jobs finish with what they started with.' : 'Save makes this expert. Choose it on Run project, or give it a channel.');
     const error = node('p', 'experts-error'); error.setAttribute('role', 'alert'); error.hidden = true;
     const discard = node('button', 'secondary-button', 'Discard changes'); discard.type = 'button';
-    discard.onclick = () => { dirty = false; void show(shownId(), { force: true }); };
+    discard.onclick = () => { dropDraft(); dirty = false; void show(shownId(), { force: true }); };
     const save = node('button', 'primary-button', 'Save'); save.type = 'submit';
     const actions = node('div', 'launch-actions'); actions.append(discard, save);
     footer.append(note, error, actions);
@@ -329,7 +366,7 @@ export function mountExpertsPage({ root, getData = () => null, request = library
           await request('/api/experts/' + encodeURIComponent(saved.template_id) + '/picture', { method: 'PUT', body: pictureChange });
           pictures.delete(saved.lineage_id);
         }
-        dirty = false; expertSaved(saved);
+        dropDraft(); dirty = false; expertSaved(saved);
         await show(saved.template_id, { force: true });
         say(current?.version > 1 ? `Saved as version ${current.version}. Its next message follows it.` : 'Expert saved.');
       } catch (issue) {
@@ -344,72 +381,96 @@ export function mountExpertsPage({ root, getData = () => null, request = library
     const sandboxed = state.place === 'sandboxed';
     const grid = node('table', 'experts-team-table');
     const head = node('thead'); const headRow = node('tr');
-    for (const [text, cls] of [['Model', 'experts-col-model'], ['Talks to people', ''], ['Coordinates', ''], ['Workers', '']]) {
+    for (const [text, cls] of [['AI and model', 'experts-col-model'], ['Talks to people', ''], ['Coordinates', ''], ['Workers', '']]) {
       const th = node('th', cls, text); th.scope = 'col'; headRow.append(th);
     }
     head.append(headRow); grid.append(head);
     const talkName = nextId('experts-talk'); const coordinateName = nextId('experts-coordinate');
     const several = state.work.length > 1;
+    const installed = Object.fromEntries((getData()?.new_workspace_options || []).map(o => [o.profile, o.host_cli_installed]));
+    const ready = getData()?.provider_accounts || [];
+    // The three choices where one model meets the three roles.
+    const cells = (ai, line) => {
+      const unavailable = line.status === 'unavailable';
+      const measured = speeds[line.id || ai.usual];
+      const talkCell = node('td');
+      if (TALKERS.has(ai.profile)) {
+        const on = state.talk.profile === ai.profile && state.talk.model === line.id;
+        const radio = node('input'); radio.type = 'radio'; radio.name = talkName; radio.checked = on;
+        radio.disabled = (unavailable && !on) || (sandboxed && ai.profile !== 'claude-code');
+        radio.setAttribute('aria-label', `${ai.name} ${line.name} talks to people`);
+        radio.onchange = () => { state.talk = { profile: ai.profile, model: line.id }; if (state.backup.talk === ai.profile) state.backup.talk = ''; changed(); renderTeam(); };
+        talkCell.append(radio);
+        if (measured) talkCell.append(node('small', 'experts-time', `about ${measured.median_s} s`));
+      } else {
+        const none = node('span', 'experts-none', '–'); none.title = `${ai.name} can coordinate and work; it does not talk to people.`;
+        none.setAttribute('aria-label', none.title); talkCell.append(none);
+      }
+      const coordinateCell = node('td');
+      const on = state.coordinate.profile === ai.profile && state.coordinate.model === line.id;
+      const radio = node('input'); radio.type = 'radio'; radio.name = coordinateName; radio.checked = on;
+      radio.disabled = (unavailable && !on) || (sandboxed && ai.profile !== 'claude-code');
+      radio.setAttribute('aria-label', `${ai.name} ${line.name} coordinates`);
+      radio.onchange = () => { state.coordinate = { profile: ai.profile, model: line.id }; if (state.backup.coordinate === ai.profile) state.backup.coordinate = ''; changed(); renderTeam(); };
+      coordinateCell.append(radio);
+      // Workers: any number; with several, one may be Preferred.
+      const workCell = node('td', 'experts-work');
+      const entry = line.id || ai.profile;
+      const ticked = state.work.includes(entry);
+      const box = node('input'); box.type = 'checkbox'; box.checked = ticked; box.disabled = unavailable && !ticked;
+      box.setAttribute('aria-label', `${ai.name} ${line.name} may work`);
+      box.onchange = () => {
+        state.work = box.checked ? [...state.work, entry] : state.work.filter(value => value !== entry);
+        if (!state.work.includes(state.preferred)) state.preferred = '';
+        changed(); renderTeam();
+      };
+      workCell.append(box);
+      if (ticked && several) {
+        const star = node('button', 'experts-star'); star.type = 'button';
+        const first = state.preferred === entry;
+        star.setAttribute('aria-pressed', String(first));
+        star.setAttribute('aria-label', `${ai.name} ${line.name} preferred`);
+        star.title = first ? 'Preferred. Press again for no preference.' : 'Make this one preferred';
+        star.innerHTML = `<svg viewBox="0 0 24 24" fill="${first ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>`;
+        if (first) star.append(node('span', '', 'Preferred'));
+        star.onclick = () => { state.preferred = first ? '' : entry; changed(); renderTeam(); };
+        workCell.append(star);
+      }
+      return [talkCell, coordinateCell, workCell];
+    };
     for (const ai of rows) {
       const group = node('tbody', 'experts-team-group');
-      const title = node('tr', 'experts-team-ai'); const th = node('th', '', ''); th.colSpan = 4; th.scope = 'rowgroup';
-      th.append(aiMark(ai.profile), node('span', '', ai.name)); title.append(th); group.append(title);
-      // "Its usual model" names the model it is today, when the install says which.
+      // Each AI is one line, carrying the three choices for its usual model ("Its usual model" names it when the
+      // install says which); its named models open under it, and stay open while one of them is chosen.
       const usualName = ai.models.find(m => m.id === ai.usual)?.name;
-      const lines = [{ id: '', name: usualName ? `Its usual model · ${usualName}` : 'Its usual model', status: 'available', reason: '' }, ...ai.models];
-      for (const line of lines) {
-        const tr = node('tr'); const label = node('th', 'experts-col-model', line.name); label.scope = 'row';
-        if (line.status === 'saved') label.append(node('small', 'field-help', ' · saved'));
-        tr.append(label);
-        const unavailable = line.status === 'unavailable';
-        const measured = speeds[line.id || ai.usual];
-        // Talks to people: Claude or Codex only.
-        const talkCell = node('td');
-        if (TALKERS.has(ai.profile)) {
-          const on = state.talk.profile === ai.profile && state.talk.model === line.id;
-          const radio = node('input'); radio.type = 'radio'; radio.name = talkName; radio.checked = on;
-          radio.disabled = (unavailable && !on) || (sandboxed && ai.profile !== 'claude-code');
-          radio.setAttribute('aria-label', `${ai.name} ${line.name} talks to people`);
-          radio.onchange = () => { state.talk = { profile: ai.profile, model: line.id }; if (state.backup.talk === ai.profile) state.backup.talk = ''; changed(); renderTeam(); };
-          talkCell.append(radio);
-          if (measured) talkCell.append(node('small', 'experts-time', `about ${measured.median_s} s`));
-        } else {
-          const none = node('span', 'experts-none', '–'); none.title = `${ai.name} can coordinate and work; it does not talk to people.`;
-          none.setAttribute('aria-label', none.title); talkCell.append(none);
+      const inUse = ai.models.some(m => (state.talk.profile === ai.profile && state.talk.model === m.id)
+        || (state.coordinate.profile === ai.profile && state.coordinate.model === m.id) || state.work.includes(m.id));
+      const open = inUse || openAis.has(ai.profile);
+      const title = node('tr', 'experts-team-ai'); const th = node('th', 'experts-col-model'); th.scope = 'row';
+      const who = node('span', 'experts-ai-name'); who.append(aiMark(ai.profile), node('strong', '', ai.name));
+      th.append(who, node('small', 'experts-ai-usual', usualName ? `Its usual model · ${usualName}` : 'Its usual model'));
+      if (ai.models.length && !inUse) {
+        const more = node('button', 'experts-more'); more.type = 'button'; more.setAttribute('aria-expanded', String(open));
+        more.textContent = open ? 'Fewer models' : `${ai.models.length} more models`;
+        more.onclick = () => { if (openAis.has(ai.profile)) openAis.delete(ai.profile); else openAis.add(ai.profile); renderTeam(); };
+        th.append(more);
+      }
+      title.append(th, ...cells(ai, { id: '', name: 'its usual model', status: 'available', reason: '' })); group.append(title);
+      if (open) {
+        for (const line of ai.models) {
+          const tr = node('tr', 'experts-team-model'); const label = node('th', 'experts-col-model', line.name); label.scope = 'row';
+          if (line.status === 'saved') label.append(node('small', 'field-help', ' · saved'));
+          if (line.status === 'unavailable' && line.reason) tr.title = line.reason;
+          tr.append(label, ...cells(ai, line)); group.append(tr);
         }
-        // Coordinates: any AI.
-        const coordinateCell = node('td');
-        const on = state.coordinate.profile === ai.profile && state.coordinate.model === line.id;
-        const radio = node('input'); radio.type = 'radio'; radio.name = coordinateName; radio.checked = on;
-        radio.disabled = (unavailable && !on) || (sandboxed && ai.profile !== 'claude-code');
-        radio.setAttribute('aria-label', `${ai.name} ${line.name} coordinates`);
-        radio.onchange = () => { state.coordinate = { profile: ai.profile, model: line.id }; if (state.backup.coordinate === ai.profile) state.backup.coordinate = ''; changed(); renderTeam(); };
-        coordinateCell.append(radio);
-        // Workers: any number; with several, one may be Preferred.
-        const workCell = node('td', 'experts-work');
-        const entry = line.id || ai.profile;
-        const ticked = state.work.includes(entry);
-        const box = node('input'); box.type = 'checkbox'; box.checked = ticked; box.disabled = unavailable && !ticked;
-        box.setAttribute('aria-label', `${ai.name} ${line.name} may work`);
-        box.onchange = () => {
-          state.work = box.checked ? [...state.work, entry] : state.work.filter(value => value !== entry);
-          if (!state.work.includes(state.preferred)) state.preferred = '';
-          changed(); renderTeam();
-        };
-        workCell.append(box);
-        if (ticked && several) {
-          const star = node('button', 'experts-star'); star.type = 'button';
-          const first = state.preferred === entry;
-          star.setAttribute('aria-pressed', String(first));
-          star.setAttribute('aria-label', `${ai.name} ${line.name} preferred`);
-          star.title = first ? 'Preferred. Press again for no preference.' : 'Make this one preferred';
-          star.innerHTML = `<svg viewBox="0 0 24 24" fill="${first ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>`;
-          if (first) star.append(node('span', '', 'Preferred'));
-          star.onclick = () => { state.preferred = first ? '' : entry; changed(); renderTeam(); };
-          workCell.append(star);
-        }
-        if (unavailable && line.reason) tr.title = line.reason;
-        tr.append(talkCell, coordinateCell, workCell); group.append(tr);
+      }
+      // An AI whose tool is not on this computer and that has no connected account says so, with the way to connect.
+      const providers = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] }[ai.profile] || [];
+      const connected = ready.some(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()));
+      if (installed[ai.profile] === false && !connected) {
+        const tr = node('tr', 'experts-team-missing'); const td = node('td'); td.colSpan = 4;
+        const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';
+        td.append(node('span', '', `${ai.name} is not set up on this computer yet.`), link); tr.append(td); group.append(tr);
       }
       grid.append(group);
     }
@@ -443,14 +504,16 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       if (!signs.some(([v]) => v === state.account[role])) signs.push([state.account[role], 'Its saved account (not ready now)']);
       const signIn = node('div', 'experts-row'); signIn.append(node('span', 'experts-row-label', 'Signs in with'),
         toggle(`${title}: account`, signs, state.account[role], value => { state.account[role] = value; if (value) state.backup[role] = ''; changed(); renderBelow(below); }));
-      const backups = [['', 'No backup'], ...AIS.filter(([p]) => p !== profile).map(([p, t]) => [p, t])];
-      const backup = node('div', 'experts-row'); backup.append(node('span', 'experts-row-label', 'Backup'),
+      const backups = [['', 'Nobody'], ...AIS.filter(([p]) => p !== profile).map(([p, t]) => [p, t])];
+      const backup = node('div', 'experts-row'); backup.append(node('span', 'experts-row-label', `If ${AI_NAME[profile] || profile} is at its limit`),
         toggle(`${title}: backup`, backups, state.backup[role], value => { state.backup[role] = value; changed(); }));
       const locked = Boolean(state.account[role]) || state.place === 'sandboxed';
       for (const input of backup.querySelectorAll('input')) input.disabled = locked && input.value !== '';
-      row.append(who, signIn, backup); accounts.append(row);
+      row.append(who, signIn, backup);
+      if (locked) row.append(help(state.place === 'sandboxed' ? 'In a sandboxed workspace nobody takes over.' : 'Another AI takes over only with this computer’s sign-in.'));
+      accounts.append(row);
     }
-    accounts.append(help('A backup is another AI on this computer’s sign-in; it takes only work that has not started. A second account of the same AI comes later. One sign-in runs one Worker of its AI at a time, so tick several AIs for parallel work. API keys stay optional.'));
+    accounts.append(help('The one that takes over answers only work that has not started yet.'));
     below.append(replies, accounts);
   }
 

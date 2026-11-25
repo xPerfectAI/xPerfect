@@ -13,6 +13,9 @@
 .experts-pick-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .experts-status { margin: 0; min-height: 1.2em; color: var(--muted); font-size: var(--font-help); }
 .experts-status:empty { display: none; }
+.experts-unsaved { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border: 1px solid var(--line-strong); border-radius: var(--radius-control); background: var(--panel-strong); font-size: var(--font-label); }
+.experts-unsaved[hidden] { display: none; }
+.experts-unsaved > span { flex: 1 1 220px; }
 .experts-body { display: grid; gap: 22px; }
 .experts-section { display: grid; gap: 12px; min-width: 0; }
 .experts-section > .section-heading { margin-bottom: 4px; }
@@ -42,17 +45,23 @@
 .experts-team-table thead th { padding-bottom: 10px; color: var(--muted); font-size: var(--font-help); font-weight: 600; line-height: 1.3; }
 .experts-team-table .experts-col-model { width: 40%; text-align: left; padding-left: 0; overflow-wrap: anywhere; }
 .experts-team-table tbody th.experts-col-model { font-size: var(--font-label); color: var(--text); }
-.experts-team-ai th { padding: 16px 0 6px; text-align: left; border-top: 1px solid var(--line); }
-.experts-team-group:first-of-type .experts-team-ai th { border-top: 0; padding-top: 4px; }
-.experts-team-ai th > * { vertical-align: middle; }
-.experts-team-ai span { margin-left: 8px; font-size: var(--font-label); font-weight: 650; color: var(--text); }
+.experts-team-ai > * { border-top: 1px solid var(--line); padding-top: 12px; padding-bottom: 10px; }
+.experts-team-group:first-of-type .experts-team-ai > * { border-top: 0; padding-top: 4px; }
+.experts-ai-name { display: inline-flex; align-items: center; gap: 8px; font-size: var(--font-label); color: var(--text); }
+.experts-ai-name strong { font-weight: 650; }
+.experts-ai-usual { display: block; margin: 2px 0 0 26px; color: var(--muted); font-size: .76rem; }
+.experts-more { display: inline-block; margin: 4px 0 0 22px; padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: var(--accent); font-size: .76rem; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.experts-more:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.experts-team-model .experts-col-model { padding-left: 26px; }
+.experts-team-missing td { text-align: left; padding: 4px 0 10px 26px; color: var(--muted); font-size: var(--font-help); }
+.experts-team-missing .secondary-button { margin-left: 10px; text-decoration: none; }
 .experts-team-table tbody tr:not(.experts-team-ai):hover { background: var(--accent-soft); }
 .experts-team-table input[type="radio"], .experts-team-table input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); vertical-align: middle; cursor: pointer; }
 .experts-team-table input:disabled { cursor: default; opacity: .35; }
 .experts-time { display: block; margin-top: 2px; color: var(--muted); font-size: .72rem; line-height: 1.2; }
 .experts-none { color: var(--muted); }
-.experts-work { white-space: nowrap; }
-.experts-star { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 2px 4px; border: 0; border-radius: 8px; background: none; color: var(--muted); font-size: .72rem; font-weight: 600; cursor: pointer; vertical-align: middle; }
+.experts-work { position: relative; white-space: nowrap; }
+.experts-star { position: absolute; left: calc(50% + 12px); top: 50%; transform: translateY(-50%); display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border: 0; border-radius: 8px; background: none; color: var(--muted); font-size: .72rem; font-weight: 600; cursor: pointer; vertical-align: middle; }
 .experts-star svg { width: 16px; height: 16px; }
 .experts-star[aria-pressed="true"] { color: var(--accent); }
 .experts-star:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
@@ -76,6 +85,8 @@
   .experts-team-table .experts-col-model { width: 34%; }
   .experts-team-table th, .experts-team-table td { padding-inline: 2px; }
   .experts-star span { display: none; }
+  .experts-team-table thead th { font-size: .68rem; overflow-wrap: anywhere; }
+  .experts-star { left: calc(50% + 10px); }
   .experts-row-label { min-width: 0; flex-basis: 100%; }
   .experts-footer .launch-actions { width: 100%; }
 }

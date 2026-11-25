@@ -429,7 +429,7 @@ def test_an_administrator_adds_the_app_to_the_organisations_teams_apps_with_one_
 def test_the_ai_choices_show_each_ais_own_mark_from_the_worker_pages():
     page = (STATIC / 'experts-page.js').read_text()
     # Each AI heads its group of models with its own mark and name; each role's account row carries it too.
-    assert "th.append(aiMark(ai.profile), node('span', '', ai.name))" in page
+    assert "who.append(aiMark(ai.profile), node('strong', '', ai.name))" in page
     assert "who.append(aiMark(profile), node('strong', '', `${title} · ${AI_NAME[profile] || profile}`))" in page
     source = (STATIC / 'experts.js').read_text()
     # The same images the Worker pages use; theme.css keeps them legible in the dark theme.
