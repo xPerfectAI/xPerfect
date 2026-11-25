@@ -47,6 +47,11 @@ def test_needs_you_pops_up_on_every_page_including_the_worker_viewers():
         assert f'src="/static/needs-you.js?v={stamp}"' in html, page
         assert f'href="/static/needs-you.css?v={stamp}"' in html, page
     assert f'href="/static/needs-you.css?v={stamp}"' in (STATIC / 'index.html').read_text()
+    # One stamp for every import of the Experts files: a page that still names an older one would keep the old code.
+    for path in sorted(STATIC.glob('*')):
+        if path.suffix in {'.js', '.html'}:
+            for found in re.findall(r"(?:experts|needs-you)\.(?:js|css)\?v=(\w+)", path.read_text()):
+                assert found == stamp, (path.name, found)
     # One owner for the pop-up's look, readable on pages without the main theme.
     assert 'needs-you-toast' not in (STATIC / 'experts.css').read_text()
     toast = (STATIC / 'needs-you.css').read_text()
@@ -62,7 +67,8 @@ def test_shared_folder_note_shows_once_a_second_person_could_join():
     run_node("import assert from 'node:assert/strict';\n" + note.group(0).replace('export ', '') + """
 assert.equal(sharedFolderNote('host', 1, 0), '');
 assert.equal(sharedFolderNote('host', 0, 1), '');
-assert.match(sharedFolderNote('host', 1, 1), /share one work folder/);
+assert.match(sharedFolderNote('host', 1, 1), /own folder/);
+assert.match(sharedFolderNote('host', 1, 1), /can still read another person/);
 assert.match(sharedFolderNote('host', 2, 0), /sandboxed workspace/);
 assert.equal(sharedFolderNote('sandboxed', 3, 2), '');
 """)

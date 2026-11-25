@@ -263,10 +263,11 @@ export async function openExpertChat(item, { request = libraryRequest } = {}) {
   location.assign('/conversation?id=' + encodeURIComponent(chat.conversation_id));
 }
 
-/** On this computer all of an Expert's jobs share one work folder: say so once a second person could be added. */
+/** On this computer each person's jobs work in their own folder, but with full access a job can still read other
+ *  folders: say so once a second person could be added. */
 export function sharedFolderNote(kind, people, waiting) {
   if (kind !== 'host' || people + waiting < 2) return '';
-  return 'Jobs for everyone here share one work folder on this computer, so a job you approve for one person could read another person’s job files. To keep each person’s work apart, choose a sandboxed workspace in Edit.';
+  return 'Each person’s jobs work in their own folder on this computer, but with full access a job can still read another person’s folder. To keep each person’s work apart for certain, choose a sandboxed workspace in Edit.';
 }
 
 /** A Teams card's links. "Test in Teams" opens a chat by the bot's id; before the app is installed and a first message

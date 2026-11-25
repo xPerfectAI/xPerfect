@@ -52,6 +52,15 @@ class Route(StrictModel):
     connection_id: str = Field(default="", max_length=512)
     resource_class: str = "standard"
     bootstrap_bundle: dict[str, Any] = Field(default_factory=dict)
+    # A host Worker's working folder; None keeps the host's shared default.
+    workspace_root: str | None = Field(default=None, max_length=4096)
+
+    def identity(self) -> dict[str, Any]:
+        """The route as a dispatch digest sees it: an unset folder leaves it as it was before folders existed."""
+        data = self.model_dump()
+        if data.get("workspace_root") is None:
+            data.pop("workspace_root", None)
+        return data
 
 
 class CoordinatorScope(StrictModel):
@@ -91,6 +100,8 @@ class ExpertBinding(StrictModel):
     job_id: str = Field(default="", max_length=200)
     # A job keeps the Expert's chosen access level for its whole life.
     access: Literal["full", "workspace", "read_only"] | None = None
+    # A job on this computer works in the folder of the person it serves (empty: the shared default folder).
+    workspace_dir: str = Field(default="", max_length=4096)
 
 
 class CoordinatorConfig(StrictModel):
@@ -1072,7 +1083,7 @@ class CoordinatorService:
                 tenant_id=tenant, owner_id=owner, idempotency_key=f"{conversation_id}:{goal['goal_id']}",
                 request_digest=digest({
                     "dispatch": dispatch.request_payload(),
-                    "route": route.model_dump(),
+                    "route": route.identity(),
                     "goal": goal["text"],
                     "origin_scope": origin_scope,
                     **({"library_refs": selection["refs"]} if selection.get("refs") else {}),
@@ -1080,6 +1091,7 @@ class CoordinatorService:
                 origin_ref=f"{conversation_id}:{goal['goal_id']}", title=goal["goal_id"], goal=goal["text"], instruction=goal["text"] if dispatch.instruction is None else dispatch.instruction,
                 origin_surface="coordinator", worker_name=goal["goal_id"], worker_role="worker",
                 profile=route.profile, execution_mode=route.execution_mode, resource_class=route.resource_class,
+                workspace_root=route.workspace_root if route.execution_mode == "host" else None,
                 bootstrap_bundle=bundle,
                 origin_scope=origin_scope or None,
                 trusted_coordinator_model=standalone_model,
@@ -1796,8 +1808,12 @@ class CoordinatorService:
                                 "surface": "coordinator",
                                 "bootstrap_bundle": bundle,
                                 "allowed_ai_origin_scope": self._conversation_scope(conversation),
-                                **({"glasshive_options": {"access": config.expert.access}}
-                                   if config.expert is not None and config.expert.access else {}),
+                                **({"glasshive_options": {
+                                    **({"access": config.expert.access} if config.expert.access else {}),
+                                    **({"workspace": {"mode": "custom", "path": config.expert.workspace_dir}}
+                                       if config.expert.workspace_dir else {})}}
+                                   if config.expert is not None and (config.expert.access or config.expert.workspace_dir)
+                                   else {}),
                                 **({"fallback_model": fallback[0], "fallback_reasoning_effort": fallback[1]}
                                    if fallback else {}),
                             }}

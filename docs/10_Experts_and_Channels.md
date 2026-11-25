@@ -290,6 +290,11 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
   some: it gets back the goals it already has, so the same work is never started twice under new names.
   A turn interrupted after making only some of its goals keeps those; the job's next turn can still
   start more.
+- On this computer each person an Expert serves gets their own folder for its jobs
+  (`<conversations' folder>/experts/<Expert>/<person>`, made at that person's first job, mode 700; the owner's
+  own Chat has its own). The job's coordinator starts in it and its Workers on this computer work in it. With
+  full access a job can still read other folders: this keeps people's work apart by default, it is not a wall.
+  A sandboxed workspace is the wall.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.
 - A new Teams app starts with the CLI's placeholder details ("Developer", example.com links) until the
   owner sets the four under **Details Teams shows for this app** on the Channels card (Microsoft requires

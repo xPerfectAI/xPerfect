@@ -554,6 +554,8 @@ class ExpertService:
             work = self._role_config(tenant, owner, ExpertRole(profile=profile, account_id=role.account_id))
             placement = {"execution_mode": "docker"} if spec.workspace.kind == "sandboxed" else {}
             for route in work.routes[:1]:
+                if binding.workspace_dir and route.execution_mode == "host":
+                    route = route.model_copy(update={"workspace_root": binding.workspace_dir})
                 bundle = dict(route.bootstrap_bundle)
                 if owner_rules:
                     earlier = str(bundle.get("system_instructions") or "").strip()
@@ -567,6 +569,37 @@ class ExpertService:
             "routes": routes, "expert": binding,
             "developer_instructions": (_prompt("expert-job.md") + ("\n\n" + instructions if instructions else "")),
         })
+
+    def _person_folder(self, job: dict, template: dict) -> str:
+        """The folder this job works in on this computer: one per person the Expert serves, made at that person's
+        first job, inside the conversations' default folder. Chosen from the person's own conversation (typed data);
+        the owner's own Chat has its own. Sandboxed Experts keep their containers; empty means the shared folder."""
+        if self.spec(template).workspace.kind == "sandboxed":
+            return ""
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT channel,binding_id,sender_json FROM expert_conversations WHERE conversation_id=?",
+                               (job["speaker_conversation_id"],)).fetchone()
+        if row is None:
+            return ""
+        if str(row["channel"] or "chat") == "chat" and not row["binding_id"]:
+            key = "owner"
+        else:
+            try:
+                sender = json.loads(row["sender_json"] or "{}")
+            except ValueError:
+                sender = {}
+            person = json.dumps([str(row["channel"] or ""), str(sender.get("tenant") or ""), str(sender.get("id") or "")])
+            key = hashlib.sha256(person.encode()).hexdigest()[:16]
+        import os
+        from .conversation_provider import _default_workspace_dir
+        root = _default_workspace_dir()
+        allowed = [Path(value).expanduser().resolve() for value in
+                   str(os.environ.get("GLASSHIVE_PROVIDER_ALLOWED_WORKSPACE_ROOTS") or "").split(os.pathsep) if value.strip()]
+        if allowed and not any(root == base or root.is_relative_to(base) for base in allowed):
+            root = allowed[0]  # a conversation's own folder must lie inside the configured roots
+        folder = root / "experts" / str(job["lineage_id"]) / key
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return str(folder)
 
     def _expert_skills(self, tenant: str, owner: str, template: dict) -> list[dict]:
         """The Skills chosen in this Expert's Library, as exact text folders for its job's Workers.
@@ -838,7 +871,8 @@ class ExpertService:
         if not job["job_conversation_id"]:
             binding = ExpertBinding(lineage_id=job["lineage_id"], role="job",
                                     parent_conversation_id=job["speaker_conversation_id"], job_id=job_id,
-                                    access=self.spec(template).workspace.access)
+                                    access=self.spec(template).workspace.access,
+                                    workspace_dir=self._person_folder(job, template))
             created = self.coordinator.create(tenant, owner, self._job_config(tenant, owner, template, binding))
             with self.store._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")

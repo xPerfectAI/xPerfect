@@ -3329,3 +3329,68 @@ def test_a_stop_in_a_coordinators_or_helpers_run_changes_nothing_for_the_reply(a
     assert scalar(application, "SELECT count(*) FROM expert_reviews") == 0
     sent = client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
     assert [d["text"] for d in sent if d["kind"] == "reply"] == ["Sorry, I can't open those files."]
+# A folder per person: each person an Expert serves gets their own working folder for its jobs on this computer.
+PERSON_B = {"id": "person-synthetic-b", "name": "Synthetic Person B", "tenant": "tenant-synthetic"}
+
+
+def _two_people_conversations(application, client, expert):
+    channel = connected_channel(application, client, expert)
+    response = client.patch(f"/v1/channels/{channel['binding_id']}", json={"people": [PERSON, PERSON_B], "state": "connected"})
+    assert response.status_code == 200, response.text
+    first = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-a", PERSON)).json()
+    second = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-b", PERSON_B)).json()
+    return first["conversation_id"], second["conversation_id"]
+
+
+def test_each_person_an_expert_serves_gets_their_own_job_folder(app, tmp_path, monkeypatch):
+    monkeypatch.setenv("GLASSHIVE_PROVIDER_DEFAULT_WORKSPACE", str(tmp_path / "work"))
+    (tmp_path / "work").mkdir()
+    application, client = app
+    experts = application.state.experts
+    expert = create_expert(client)
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", expert["template_id"])
+    template = experts.resolve("local", owner, expert["template_id"])
+    first, second = _two_people_conversations(application, client, expert)
+    folder_a = experts._person_folder({"speaker_conversation_id": first, "lineage_id": template["lineage_id"]}, template)
+    folder_b = experts._person_folder({"speaker_conversation_id": second, "lineage_id": template["lineage_id"]}, template)
+    again = experts._person_folder({"speaker_conversation_id": first, "lineage_id": template["lineage_id"]}, template)
+    assert folder_a and folder_b and folder_a != folder_b and folder_a == again
+    for folder in (folder_a, folder_b):
+        path = tmp_path / "work" / "experts" / template["lineage_id"]
+        assert str(path) in folder and (oct(__import__("os").stat(folder).st_mode & 0o777) == "0o700")
+    # The job's Workers on this computer carry the person's folder; the job's own conversation starts in it.
+    config = experts._job_config("local", owner, template, ExpertBinding(lineage_id=template["lineage_id"], role="job",
+                                                                         workspace_dir=folder_a))
+    assert {route.workspace_root for route in config.routes if route.execution_mode == "host"} == {folder_a}
+    assert config.expert.workspace_dir == folder_a
+
+
+def test_a_route_without_a_folder_keeps_the_dispatch_digest_it_had_before_folders(app):
+    route = Route(id="default", profile="claude-code", model="synthetic-model", effort="high", execution_mode="host")
+    before = {"id": "default", "profile": "claude-code", "model": "synthetic-model", "effort": "high",
+              "execution_mode": "host", "connection_id": "", "resource_class": "standard", "bootstrap_bundle": {}}
+    assert route.identity() == before  # goals in flight across an upgrade keep their digest
+    with_folder = route.model_copy(update={"workspace_root": "/synthetic/person"})
+    assert with_folder.identity()["workspace_root"] == "/synthetic/person"
+
+
+def test_the_owners_own_chat_and_a_sandboxed_expert(app, tmp_path, monkeypatch):
+    monkeypatch.setenv("GLASSHIVE_PROVIDER_DEFAULT_WORKSPACE", str(tmp_path / "work"))
+    (tmp_path / "work").mkdir()
+    application, client = app
+    experts = application.state.experts
+    expert = create_expert(client)
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates WHERE template_id=?", expert["template_id"])
+    template = experts.resolve("local", owner, expert["template_id"])
+    with experts.store._connect() as conn:
+        conn.execute("INSERT INTO expert_conversations (conversation_id,tenant_id,owner_id,lineage_id,role,channel,created_at) "
+                     "VALUES ('synthetic-owner-chat','local',?,?,'speaker','chat','2026-11-25T00:00:00Z')",
+                     (owner, template["lineage_id"]))
+    folder = experts._person_folder({"speaker_conversation_id": "synthetic-owner-chat", "lineage_id": template["lineage_id"]},
+                                    template)
+    assert folder.endswith("/owner")
+    sandboxed = create_expert(client, workspace={"kind": "sandboxed", "access": "workspace"},
+                              team={**SPEC["team"], "coordinate": {"profile": "claude-code"}})
+    sandboxed_template = experts.resolve("local", owner, sandboxed["template_id"])
+    assert experts._person_folder({"speaker_conversation_id": "synthetic-owner-chat",
+                                   "lineage_id": sandboxed_template["lineage_id"]}, sandboxed_template) == ""
