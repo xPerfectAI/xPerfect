@@ -180,6 +180,10 @@ STATES = {
     "not_started": ([("turn", "")], "working"),
     "signed_out": ([("turn", "provider_unauthorized")], "failed"),
     "waiting_over_failed": ([("review", "pending"), ("delivery", "failed")], "waiting_for_you"),
+    # A message that handed off a job is about the job, whatever the handing-off turn did next.
+    "handed_off_then_done": ([("turn", "failed"), ("job", "done")], "done"),
+    "handed_off_still_running": ([("turn", "failed"), ("job", "running")], "working"),
+    "job_done_reply_failed": ([("job", "done"), ("delivery", "failed")], "failed"),
 }
 
 

@@ -54,6 +54,19 @@ export function rangeStart(choice, now = new Date()) {
   return '';
 }
 
+/** One row per run in a trail: its events in order, at the time of its first, a repeated one counted. */
+export function groupRuns(steps) {
+  const rows = []; const runs = new Map();
+  for (const step of steps) {
+    if (step.step !== 'event' || !step.run) { rows.push(step); continue; }
+    let row = runs.get(step.run);
+    if (!row) { row = { at: step.at, step: 'run', ai: step.ai, labels: [] }; runs.set(step.run, row); rows.push(row); }
+    const label = eventLabel(step.event_type); const last = row.labels[row.labels.length - 1];
+    if (last && last.label === label) last.count += 1; else row.labels.push({ label, count: 1 });
+  }
+  return rows;
+}
+
 export function personWords(item) {
   if (item.person?.you) return 'You';
   return item.person?.name || 'Someone';
@@ -246,6 +259,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     switch (step.step) {
       case 'received': return item.kind === 'run' ? 'Work asked' : item.person?.you ? `You wrote in ${channel}` : `Message from ${personWords(item)} on ${channel}`;
       case 'event': return eventLabel(step.event_type) + (ai ? ` · ${ai}` : '');
+      case 'run': return `${ai || 'Worker'}: ${step.labels.map(l => (l.count > 1 ? `${l.label} ×${l.count}` : l.label)).join(' · ')}`;
       case 'scheduled': return 'Started by a schedule';
       case 'asked_you': return step.what === 'job' ? 'Asks you first: the job waits for you' : 'Asks you first: the reply waits for you';
       case 'decided': return { approved: 'You approved', rejected: 'You said no', withdrawn: 'The request was withdrawn' }[step.state] || 'Decided';
@@ -267,7 +281,7 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
     trail.replaceChildren(node('li', 'activity-step activity-muted', 'Loading…'));
     try {
       const detail = await request('/api/activity/lines/' + encodeURIComponent(item.line_id));
-      trail.replaceChildren(...(detail.trail || []).map(step => {
+      trail.replaceChildren(...groupRuns(detail.trail || []).map(step => {
         const entry = node('li', 'activity-step');
         const at = node('time', 'activity-step-time', clock(step.at, true)); at.dateTime = step.at || '';
         entry.append(at, node('span', '', stepWords(step, item)));

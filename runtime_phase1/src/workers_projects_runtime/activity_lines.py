@@ -163,12 +163,18 @@ class ActivityLines:
                 CASE WHEN COALESCE(e.binding_id,'')<>'' AND NOT {has_text} THEN 1 ELSE 0 END AS framed,
                 CASE
                   WHEN COALESCE(r.pending,0) THEN 'waiting_for_you'
+                  -- A message that started a job is about that job: its state decides, whatever the turn that
+                  -- handed it off did next, unless what was sent back to the person failed or was dropped.
+                  WHEN j.cid IS NOT NULL THEN CASE
+                    WHEN j.working THEN 'working'
+                    WHEN j.failed OR COALESCE(d.failed,0) THEN 'failed'
+                    WHEN j.stopped OR COALESCE(d.dropped,0) THEN 'stopped'
+                    ELSE 'done' END
                   WHEN (t.response_json='' AND t.restore_hold=0 AND t.blocker NOT IN ('cancelled',{_WAITING_BLOCKERS}))
-                       OR COALESCE(j.failed,0) OR COALESCE(d.failed,0) THEN 'failed'
-                  WHEN (t.response_json='' AND t.blocker='cancelled') OR COALESCE(r.stopped,0) OR COALESCE(j.stopped,0)
+                       OR COALESCE(d.failed,0) THEN 'failed'
+                  WHEN (t.response_json='' AND t.blocker='cancelled') OR COALESCE(r.stopped,0)
                        OR COALESCE(d.dropped,0) THEN 'stopped'
-                  WHEN t.response_json='' OR COALESCE(j.working,0) THEN 'working'
-                  WHEN COALESCE(j.done,0) THEN 'done'
+                  WHEN t.response_json='' THEN 'working'
                   ELSE 'answered' END AS status,
                 COALESCE(r.review_id,'') AS review_id, t.conversation_id AS conversation_id, '' AS worker_id,
                 '' AS event_type
@@ -354,18 +360,19 @@ class ActivityLines:
                     "SELECT event_type, created_at FROM events WHERE worker_id=? AND run_id=? ORDER BY created_at",
                     (run["worker_id"], run["run_id"])):
                 steps.append({"at": event["created_at"], "step": "event", "event_type": event["event_type"],
-                              "ai": run["profile"], "order": 1})
+                              "ai": run["profile"], "run": run["run_id"], "order": 1})
         seen = set()
         for run in runs:
             if run["worker_id"] in seen or run["reusable"]:
                 continue
             seen.add(run["worker_id"])
             ended = max((step["at"] for step in steps), default=since)
+            # Shown with the first run of that Worker in this trail.
             for event in conn.execute(
                     "SELECT event_type, created_at FROM events WHERE worker_id=? AND COALESCE(run_id,'')='' "
                     "AND created_at>=? AND created_at<=? ORDER BY created_at", (run["worker_id"], since, ended)):
                 steps.append({"at": event["created_at"], "step": "event", "event_type": event["event_type"],
-                              "ai": run["profile"], "order": 1})
+                              "ai": run["profile"], "run": run["run_id"], "order": 1})
         return steps
 
     @staticmethod

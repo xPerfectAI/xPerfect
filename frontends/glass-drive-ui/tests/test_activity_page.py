@@ -44,7 +44,7 @@ def test_the_filters_travel_in_the_body_and_a_line_id_is_checked_before_the_runt
 def test_day_headings_time_ranges_people_and_event_words():
     events = re.search(r'^const EVENTS = \{.*?^\};', SOURCE, re.M | re.S).group(0)
     run_node("import assert from 'node:assert/strict';\n" + events + "\n"
-             + "\n".join(exported(name) for name in ('eventLabel', 'dayLabel', 'rangeStart', 'personWords')) + "\n"
+             + "\n".join(exported(name) for name in ('eventLabel', 'dayLabel', 'rangeStart', 'personWords', 'groupRuns')) + "\n"
              "const now = new Date(2026, 10, 25, 15, 0, 0);\n"
              "assert.equal(dayLabel(new Date(2026, 10, 25, 9, 0).toISOString(), now), 'Today');\n"
              "assert.equal(dayLabel(new Date(2026, 10, 24, 23, 59).toISOString(), now), 'Yesterday');\n"
@@ -59,7 +59,12 @@ def test_day_headings_time_ranges_people_and_event_words():
              "assert.equal(personWords({ person: { name: '', you: true } }), 'You');\n"
              "assert.equal(eventLabel('run.queued'), 'Work queued');\n"
              "assert.equal(eventLabel('worker.created'), 'Workspace created');\n"
-             "assert.equal(eventLabel('provider.session_started'), 'Provider session started');\n")
+             "assert.equal(eventLabel('provider.session_started'), 'Provider session started');\n"
+             "const rows = groupRuns([{at:'1',step:'received'},{at:'2',step:'event',event_type:'run.queued',ai:'codex-cli',run:'a'},"
+             "{at:'3',step:'job',state:'started'},{at:'4',step:'event',event_type:'provider.child_updated',ai:'codex-cli',run:'a'},"
+             "{at:'5',step:'event',event_type:'provider.child_updated',ai:'codex-cli',run:'a'},{at:'6',step:'event',event_type:'run.queued',ai:'claude-code',run:'b'}]);\n"
+             "assert.deepEqual(rows.map(r => r.step), ['received', 'run', 'job', 'run']);\n"
+             "assert.deepEqual(rows[1].labels, [{label: 'Work queued', count: 1}, {label: 'Provider child updated', count: 2}]);\n")
 
 
 def test_a_persons_words_are_only_ever_text_and_the_phrase_never_enters_an_address():
