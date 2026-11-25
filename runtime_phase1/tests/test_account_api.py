@@ -294,7 +294,9 @@ def account_client(tmp_path, monkeypatch, background_consumers_disabled):
     monkeypatch.setattr(
         service_module.shutil,
         "disk_usage",
-        lambda _path: service_module.shutil._ntuple_diskusage(100, 50, 50),
+        # A disk in real sizes, half used: Native admission keeps a byte reserve (4 GiB by default) and
+        # fails closed below it, so a disk of a hundred bytes is no longer a healthy host.
+        lambda _path: service_module.shutil._ntuple_diskusage(100 * 1024**3, 50 * 1024**3, 50 * 1024**3),
     )
     monkeypatch.setattr(
         service_module,

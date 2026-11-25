@@ -1212,7 +1212,7 @@ def test_registered_native_profile_prompt_is_in_live_orchestration_capability(
     monkeypatch.setattr(
         service_module.shutil,
         "disk_usage",
-        lambda _path: service_module.shutil._ntuple_diskusage(100, 50, 50),
+        lambda _path: service_module.shutil._ntuple_diskusage(100 * 1024**3, 50 * 1024**3, 50 * 1024**3),
     )
     producer_ref = producer.__glasshive_worker_prompt_producer_ref__
     assert bootstrap_module.WORKER_PROMPT_LAYER_PRODUCER_BINDINGS[producer_ref] == (
@@ -1264,7 +1264,8 @@ def test_native_host_readiness_skips_disabled_isolation_proofs_within_core_deadl
     monkeypatch.setattr(store, "list_host_mission_workers",
                         lambda: observed.append("worker_inventory") or [{"worker_id": "historical"}])
     service = WorkersProjectsService(store, HistoricalProofRuntime(), reconcile_on_startup=False)
-    monkeypatch.setattr(service, "_storage_pressure_v1", lambda: {"healthy": True})
+    # Native admission reads the probe's byte count against its reserve; a probe without one fails closed.
+    monkeypatch.setattr(service, "_storage_pressure_v1", lambda: {"healthy": True, "availableBytes": 50 * 1024**3})
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(service.orchestration_capabilities)
