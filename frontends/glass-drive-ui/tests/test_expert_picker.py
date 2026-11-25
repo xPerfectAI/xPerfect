@@ -445,3 +445,47 @@ const openExpertForm=options=>{save=async()=>options.onSaved?.();};
 '''
     result = subprocess.run(['node','-e',script],text=True,capture_output=True,timeout=15)
     assert result.returncode == 0,result.stdout+result.stderr
+
+
+def test_a_saved_expert_shows_its_own_picture_on_run_project_asked_once():
+    source = re.sub(r'^import .*;$', '', SOURCE.read_text(), flags=re.M).replace('export ', '') + "\nconst attachActionMenu = () => {};\n"
+    script = r'''
+const assert=require('node:assert/strict');
+class Element{
+ constructor(tag){this.tag=tag;this.children=[];this.attrs={};this.textContent='';this.dataset={};this.classList={toggle(){}};}
+ append(...nodes){this.children.push(...nodes);}prepend(...nodes){this.children.unshift(...nodes);}
+ replaceChildren(...nodes){this.children=nodes;}setAttribute(key,value){this.attrs[key]=String(value);}
+}
+global.document={createElement:tag=>new Element(tag)};
+const memory=new Map();global.sessionStorage={getItem:key=>memory.get(key),setItem:(key,value)=>memory.set(key,value)};
+const walk=e=>[e,...e.children.flatMap(walk)];
+''' + source + r'''
+(async()=>{
+ const withPicture={template_id:'wst_a',lineage_id:'lin_a',name:'Synthetic A',version:2,profile:'claude-code',personal_library_refs:[]};
+ const without={template_id:'wst_b',lineage_id:'lin_b',name:'Synthetic B',version:1,profile:'claude-code',personal_library_refs:[]};
+ const png='data:image/png;base64,iVBORw0KGgo=';const asked=[];
+ const request=async path=>{
+  if(path.endsWith('/picture')){asked.push(path);return {picture:path.includes('wst_a')?png:null};}
+  if(path.includes('?state=active'))return {items:[withPicture,without]};
+  return {items:[]};
+ };
+ const form=new Element('form');const picker=createExpertPicker({form,request});
+ await picker.update({draft_owner_scope:'owner-one',workspace_templates:[withPicture,without]});
+ assert.equal(asked.length,0,'the built-in Experts view asks for no saved picture');
+ walk(form).find(e=>e.textContent==='My experts').onclick();
+ for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));
+ const card=name=>walk(form).find(e=>e.className==='expert-card'&&walk(e).some(x=>x.tag==='h3'&&x.textContent===name));
+ const imageA=walk(card('Synthetic A')).find(e=>e.tag==='img');
+ assert.equal(imageA.src,png,'the picture the owner chose replaces the stack mark');
+ assert.equal(imageA.alt,'');assert.equal(imageA.width,88);
+ assert(walk(card('Synthetic A')).some(e=>e.className==='expert-avatar-fallback'),'the mark stays underneath');
+ assert.equal(walk(card('Synthetic B')).filter(e=>e.tag==='img').length,0,'no picture: the stack mark as before');
+ await picker.update({draft_owner_scope:'owner-one',workspace_templates:[withPicture,without]});
+ for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));
+ assert.deepEqual(asked.sort(),['/api/experts/wst_a/picture','/api/experts/wst_b/picture'],'asked once per Expert, not at every render');
+ await picker.update({draft_owner_scope:'owner-two',workspace_templates:[]});
+ assert.equal(walk(form).filter(e=>e.tag==='img'&&e.src===png).length,0,'another owner never sees the first owner\'s picture');
+})().catch(error=>{console.error(error);process.exit(1);});
+'''
+    result = subprocess.run(['node', '-e', script], text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr

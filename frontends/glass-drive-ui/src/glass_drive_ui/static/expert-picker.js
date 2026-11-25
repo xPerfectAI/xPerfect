@@ -44,6 +44,22 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
   let catalogState = 'active', pendingCreation = null, catalogEpoch = 0;
   const tell = text => { message.textContent = text; message.hidden = !text; };
   const fresh = token => Boolean(owner) && token === epoch;
+  // A saved Expert's own picture, asked for once per Expert (its lineage) while the page is open; a save asks again.
+  const pictures = new Map();
+  const pictureKey = item => item.lineage_id || item.template_id;
+  function loadPictures(items) {
+    if (view !== 'templates') return;
+    const token = epoch;
+    for (const item of items) {
+      const key = pictureKey(item);
+      if (!key || pictures.has(key)) continue;
+      pictures.set(key, '');
+      request('/api/experts/' + encodeURIComponent(item.template_id) + '/picture', { signal: lifetime.signal }).then(response => {
+        const url = typeof response?.picture === 'string' && response.picture.startsWith('data:image/png;base64,') ? response.picture : '';
+        if (url && fresh(token)) { pictures.set(key, url); render(); }
+      }).catch(error => { if (error?.name === 'AbortError') pictures.delete(key); });
+    }
+  }
   async function loadTemplates() {
     const token = epoch, requestEpoch = ++catalogEpoch;
     try {
@@ -153,6 +169,11 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
         image.alt = ''; image.width = 88; image.height = 88; image.loading = 'lazy'; image.decoding = 'async';
         image.onerror = () => { image.hidden = true; };
         avatar.append(image);
+      } else if (item.kind === 'template' && pictures.get(pictureKey(item))) {
+        // The picture the owner chose for this Expert, where the stack mark shows otherwise.
+        const image = node('img'); image.src = pictures.get(pictureKey(item));
+        image.alt = ''; image.width = 88; image.height = 88; image.decoding = 'async';
+        avatar.append(image);
       }
       const identity = node('div', 'expert-identity'); identity.append(node('h3', '', title));
       if (item.kind === 'template') identity.append(node('p', 'expert-name', `Version ${item.version || 1}`));
@@ -189,6 +210,7 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
       return card;
     }));
     if (view === 'starters' || catalogState === 'active') grid.append(own);
+    loadPictures(savedOptions);
     if (!options.length) grid.append(node('p', 'expert-empty', loading ? 'Loading experts…' : view === 'templates' ? 'No saved experts yet. Use Create to make one, or save a worker as an expert from Workspaces.' : 'No experts to show. Use Create to set up your own worker.'));
   }
   // In My experts, Create makes a new Expert with the same form as Edit; elsewhere it keeps the custom worker setup.
@@ -210,7 +232,7 @@ export function createExpertPicker({ form, getData, onChoose, request = libraryR
       if (catalogState === 'active') templates = data?.workspace_templates || [];
       render(); return;
     }
-    lifetime.abort(); lifetime = new AbortController(); epoch += 1; catalogEpoch += 1; owner = next;
+    lifetime.abort(); lifetime = new AbortController(); epoch += 1; catalogEpoch += 1; owner = next; pictures.clear();
     packs = []; templates = owner ? (data?.workspace_templates || []) : []; selected = null;
     view = 'starters'; loading = false; pendingCreation = null; catalogState = 'active'; startNew.hidden = true; tell('');
     section.hidden = !owner; retry.hidden = true;
