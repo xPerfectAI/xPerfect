@@ -5195,6 +5195,49 @@ def test_failure_recorded_after_a_probe_claim_keeps_its_time(tmp_path):
     assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=claimed + timedelta(minutes=16)) is True
 
 
+def test_a_limit_on_one_provider_account_never_holds_another(tmp_path):
+    """Two accounts of one provider are two routes: a limit recorded for a Worker on account A holds Workers on A
+    only, never a Worker on account B or one on the owner's own sign-in."""
+    store = Store(str(tmp_path / "provider-health-accounts.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = store.create_project("owner-a", "Accounts", "Two accounts of one provider", "codex-cli")
+
+    def worker(name: str, account: str = "", policy: str = "personal_required") -> dict:
+        return store.create_worker(
+            project_id=project["project_id"], owner_id="owner-a", name=name, role="worker",
+            profile="codex-cli", backend="codex-cli", runtime="codex-cli", model="gpt-6.1-sol",
+            execution_mode="host",
+            bootstrap_bundle=({"provider_account": {"policy": policy, "account_id": account}}
+                              if account else None),
+        )
+
+    on_a, also_a, on_b, own = worker("A", "acct_a"), worker("A too", "acct_a"), worker("B", "acct_b"), worker("own")
+    preferred = worker("Preferred A", "acct_a", policy="personal_preferred")
+    route_a = service._provider_route(on_a)
+    try:
+        assert route_a["runtime"] == "codex-cli" and route_a["profile"] == "codex-cli"
+        assert service._provider_route(also_a) == route_a
+        assert len({service._provider_route(w)["owner_id"] for w in (on_a, on_b, own)}) == 3
+        # A preferred account can fall back to the deployment route at launch, so it keeps the owner's record.
+        assert service._provider_route(preferred) == service._provider_route(own)
+        store.record_provider_route_failure(
+            **route_a, failure_class="provider_rate_limited", failure_structured=True,
+            retry_after_s=3600, default_cooldown_s=300, run_id="run-on-a",
+        )
+        assert store.get_provider_route_health(**service._provider_route(also_a)) is not None
+        assert store.get_provider_route_health(**service._provider_route(on_b)) is None
+        assert store.get_provider_route_health(**service._provider_route(own)) is None
+        # The other direction: a limit on the owner's own sign-in never holds a Worker on a named account.
+        store.record_provider_route_failure(
+            **service._provider_route(own), failure_class="provider_rate_limited", failure_structured=True,
+            retry_after_s=3600, default_cooldown_s=300, run_id="run-on-own",
+        )
+        assert store.get_provider_route_health(**service._provider_route(on_b)) is None
+    finally:
+        service.shutdown()
+
+
 def test_success_clears_provider_route_health(tmp_path):
     store = Store(str(tmp_path / "provider-health-success.sqlite3"))
     observed = store.record_provider_route_failure(

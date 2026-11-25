@@ -37,10 +37,10 @@ def _turn(tmp_path, *, message_id="message-a", fallback=FALLBACK, **metadata):
     return ChatCompletionRequest.model_validate(payload)
 
 
-def _cool(provider, store, model_id, failure_class="provider_rate_limited"):
+def _cool(provider, store, model_id, failure_class="provider_rate_limited", owner_id="owner-a"):
     model = provider._model(model_id)
     return store.record_provider_route_failure(
-        tenant_id="local", owner_id="owner-a", profile=model.harness_profile,
+        tenant_id="local", owner_id=owner_id, profile=model.harness_profile,
         runtime=provider.service._initial_runtime_label(model.harness_profile, "host"),
         model=model.native_model, failure_class=failure_class, failure_structured=True,
         default_cooldown_s=300, run_id="run-cooling", evidence_id="evidence-cooling",
@@ -178,6 +178,36 @@ def test_every_other_turn_is_admitted_on_its_primary_as_before(tmp_path, monkeyp
     admitted, skip = provider._admission_route(turn)
 
     assert admitted is turn and skip is None
+
+
+def test_a_cooldown_on_one_provider_account_decides_only_turns_on_that_account(tmp_path, monkeypatch):
+    """A turn on a named provider account reads its routes' cooling under that account, where its Worker records
+    it: only that account's cooling moves it to the fallback, and a fallback cooled on that account keeps it on
+    its primary; the owner's own sign-in and another account are separate routes both ways."""
+    provider, store = _fixture(tmp_path, monkeypatch)
+    on_account = provider.service._provider_route_owner_key("owner-a", "acct-a")
+
+    def turn(message_id, account=""):
+        bundle = {"provider_account": {"policy": "personal_required", "account_id": account}} if account else {}
+        return _turn(tmp_path, message_id=message_id, bootstrap_bundle=bundle)
+
+    _cool(provider, store, PRIMARY, owner_id=on_account)
+    admitted, skip = provider._admission_route(turn("message-a", "acct-a"))
+    assert admitted.model == FALLBACK and skip["decidedBeforeAdmission"] is True
+    for other in (turn("message-b", "acct-b"), turn("message-c")):
+        admitted, skip = provider._admission_route(other)
+        assert admitted is other and skip is None
+
+    _cool(provider, store, FALLBACK, owner_id=on_account)
+    held = turn("message-d", "acct-a")
+    assert provider._admission_route(held) == (held, None)
+
+    with store._connect() as conn:
+        conn.execute("DELETE FROM provider_route_health")
+    _cool(provider, store, PRIMARY)
+    on_a = turn("message-e", "acct-a")
+    assert provider._admission_route(on_a) == (on_a, None)
+    assert provider._admission_route(turn("message-f"))[0].model == FALLBACK
 
 
 def test_turns_in_a_row_during_a_cooldown_keep_one_fallback_session_and_worker(tmp_path, monkeypatch):

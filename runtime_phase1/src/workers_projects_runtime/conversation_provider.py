@@ -1343,6 +1343,27 @@ def _conversation_file_delivery_instructions(
     return conversation_file_delivery_instructions(delivery_roots)
 
 
+def _selected_foreground_account_id(bundle: dict[str, Any], origin_scope: Any, model: HarnessModel) -> str:
+    """The one provider account a turn on this model selects, or "" for none; conflicting ones are refused."""
+    origin_connection = (
+        str(origin_scope.get("connection_id") or "").strip()
+        if isinstance(origin_scope, dict) else ""
+    )
+    existing = bundle.get("provider_account")
+    explicit_account = (
+        str(existing.get("account_id") or "").strip()
+        if isinstance(existing, dict) else ""
+    )
+    configured_connection = str(bundle.get("connection_id") or "").strip()
+    selected_ids = {value for value in (origin_connection, explicit_account, configured_connection, model.connection_id) if value}
+    if len(selected_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Selected foreground provider account conflicts with the route",
+        )
+    return selected_ids.pop() if selected_ids else ""
+
+
 def _merge_developer_instructions(*parts: str) -> str:
     merged: list[str] = []
     seen: set[str] = set()
@@ -4586,24 +4607,8 @@ class ConversationProvider:
                 raise HTTPException(status_code=400, detail="Invalid native service tier")
             bundle["service_tier"] = "priority" if tier == "fast" else tier
         origin_scope = payload.metadata.allowed_ai_origin_scope
-        origin_connection = (
-            str(origin_scope.get("connection_id") or "").strip()
-            if isinstance(origin_scope, dict) else ""
-        )
-        existing = bundle.get("provider_account")
-        explicit_account = (
-            str(existing.get("account_id") or "").strip()
-            if isinstance(existing, dict) else ""
-        )
-        configured_connection = str(bundle.get("connection_id") or "").strip()
-        selected_ids = {value for value in (origin_connection, explicit_account, configured_connection, model.connection_id) if value}
-        if len(selected_ids) > 1:
-            raise HTTPException(
-                status_code=409,
-                detail="Selected foreground provider account conflicts with the route",
-            )
-        if selected_ids:
-            connection_id = selected_ids.pop()
+        connection_id = _selected_foreground_account_id(bundle, origin_scope, model)
+        if connection_id:
             # A configured ID is not account authority. Resolve it through the
             # authenticated owner's account store before any native start.
             control_plane = getattr(self.service, "control_plane_store", None)
@@ -6039,21 +6044,32 @@ class ConversationProvider:
             if str(contract.get("model") or "") == fallback_model.id:
                 return fallback_payload, None
             return payload, None
+        try:
+            # Each route cools under the account its turn would run on, as its Worker records it.
+            primary_account = _selected_foreground_account_id(
+                dict(metadata.bootstrap_bundle or {}), origin_scope, model
+            )
+            fallback_account = _selected_foreground_account_id(
+                dict(fallback_payload.metadata.bootstrap_bundle or {}), origin_scope, fallback_model
+            )
+        except HTTPException:
+            # A conflicting account selection is refused by the ordinary start path.
+            return payload, None
 
-        def open_cooldown(candidate: HarnessModel) -> dict[str, Any] | None:
+        def open_cooldown(candidate: HarnessModel, account_id: str) -> dict[str, Any] | None:
             return self.store.get_provider_route_health(
                 tenant_id=tenant_id,
-                owner_id=str(metadata.owner_id or ""),
+                owner_id=self.service._provider_route_owner_key(metadata.owner_id, account_id),
                 profile=candidate.harness_profile,
                 runtime=self.service._initial_runtime_label(candidate.harness_profile, "host"),
                 model=candidate.native_model,
             )
 
-        health = open_cooldown(model)
+        health = open_cooldown(model, primary_account)
         if (
             not health
             or str(health.get("failure_class") or "") not in _PRESELECTABLE_ROUTE_FAILURES
-            or open_cooldown(fallback_model)
+            or open_cooldown(fallback_model, fallback_account)
         ):
             return payload, None
         return fallback_payload, {

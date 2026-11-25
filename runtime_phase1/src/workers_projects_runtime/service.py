@@ -7009,12 +7009,37 @@ class WorkersProjectsService:
             interval_s=max(60.0, interval),
         )
 
+    @staticmethod
+    def _provider_route_owner_key(owner_id: object, account_id: object = "") -> str:
+        """Whose cooling record a route is: the owner's, or one named provider account's of that owner."""
+        owner = str(owner_id or "").strip()
+        account = str(account_id or "").strip()
+        return f"{owner}#account:{account}" if owner and account else owner
+
+    def _provider_route_owner(self, worker: dict) -> str:
+        """A Worker that must run on one named provider account keeps its cooling record under that account.
+
+        A limit on one account (its own sign-in, its own plan) then never holds another account of the
+        same provider, nor the owner's own sign-in. A preferred account may fall back to the deployment
+        route at launch, so it keeps the owner's record, as do unbound Workers.
+        """
+        try:
+            selection = mission_provider_account_selection(worker)
+        except RuntimeErrorBase:
+            selection = None
+        account = (
+            selection.account_id
+            if selection is not None and selection.policy == "personal_required"
+            else ""
+        )
+        return self._provider_route_owner_key(worker.get("owner_id"), account)
+
     def _provider_route(self, worker: dict) -> dict[str, str]:
         profile = str(worker.get("profile") or "").strip()
         execution_mode = str(worker.get("execution_mode") or "docker").strip()
         return {
             "tenant_id": str(worker.get("tenant_id") or "local").strip() or "local",
-            "owner_id": str(worker.get("owner_id") or "").strip(),
+            "owner_id": self._provider_route_owner(worker),
             "profile": profile,
             "runtime": (
                 self._initial_runtime_label(profile, execution_mode)
@@ -7155,7 +7180,7 @@ class WorkersProjectsService:
             {
                 "tenant_id": str(worker.get("tenant_id") or "local").strip()
                 or "local",
-                "owner_id": str(worker.get("owner_id") or "").strip(),
+                "owner_id": self._provider_route_owner(worker),
                 "profile": str(run.get("provider_route_profile") or "").strip(),
                 "runtime": str(run.get("provider_route_runtime") or "").strip(),
                 "model": str(run.get("provider_route_model") or "").strip(),
@@ -7614,9 +7639,10 @@ class WorkersProjectsService:
             fallback_runtime = self._initial_runtime_label(
                 fallback_profile, execution_mode
             )
+            # The switch keeps the Worker's account selection, so its fallback route cools under the same record.
             fallback_health = self.store.get_provider_route_health(
                 tenant_id=str(worker.get("tenant_id") or "local"),
-                owner_id=str(worker.get("owner_id") or ""),
+                owner_id=self._provider_route_owner(worker),
                 profile=fallback_profile,
                 runtime=fallback_runtime,
                 model=fallback_model,
