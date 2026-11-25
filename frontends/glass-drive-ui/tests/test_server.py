@@ -6026,7 +6026,8 @@ def test_control_plane_ui_exposes_safe_disconnect_and_capability_remove_paths():
     assert "Earlier counters have no receipt coverage" in script
     assert "Configured · provider access not yet tested" in script
     assert "/verify" in script
-    assert "Activity is temporarily unavailable" in script
+    # Activity draws its own lines now, and says so when its read fails.
+    assert "Activity is temporarily unavailable" in (Path(server_module.STATIC_DIR) / "activity-page.js").read_text(encoding="utf-8")
     assert "Reconnect the affected account, then try again." in script
     app_script = (Path(server_module.STATIC_DIR) / "app.js").read_text(encoding="utf-8")
     assert "empty lists do not mean your data was removed" in app_script

@@ -143,8 +143,8 @@ their own controls.
 Before the first message, the Chat composer stays in normal flow so a long draft cannot cover
 the project and assistant choices. Once messages exist it retains its sticky position. The
 borderless message field uses one rounded focus indicator on its composer; other controls keep
-their own focus indicators. Activity labels use consistent sentence case, including unfamiliar
-event types, without changing the events or their order.
+their own focus indicators. Activity's event labels (under a line's Details) use consistent sentence
+case, including unfamiliar event types, without changing the events or their order.
 
 Native selects retain the browser picker and keyboard behavior. The shared theme owns one
 inset chevron and enough room for the selected value; consumer styles use background-color so
@@ -1366,7 +1366,8 @@ meaning, and where it works with one plain line about full access on this comput
 scroll. Save makes a new version. Run project's cards show each Expert's own picture. Manage adds **Chat** (the owner's own conversation with the Expert) and
 **Channels** (Add Teams, Connect with Microsoft's sign-in code shown in the dialog, people who may
 write, people waiting, Install and Test in Teams, Turn off). Activity shows **Needs you** first, with
-a count on the tab, a pop-up on any page and an optional browser notification. A request shows who
+a count on the tab, a pop-up on any page and an optional browser notification. With more than three
+waiting it shows the newest three, then one line **Show all N** that opens the rest in place. A request shows who
 asked, where, their words, the reason and exactly what will be sent or started; Approve and Reject
 act from the signed-in page only. Requirements: [Experts on channels](10_Experts_and_Channels.md).
 
@@ -1376,6 +1377,45 @@ show a brand's own mark: put `channel-teams.svg` or `.png` (or `channel-slack.â€
 `brand-assets` folder, at `XPERFECT_BRAND_ASSETS_DIR` (a local install's `<state>/brand-assets`). The
 page serves only those names, at most 500 KB each, and shows the file unaltered beside the plain-text
 name, never on a button. Whether a brand's terms allow that use is the owner's to check.
+
+### Activity
+
+Activity says who asked what, where and when, newest first, with **Needs you** and **Recent** on top as
+above. Each line is one thing that happened, never one low-level event:
+
+- a message to an Expert, on a channel or in the owner's Chat: the Expert's picture (or the stack
+  mark) and name, the channel with its mark, the person by name ("You" in the owner's own Chat,
+  "Someone" without a name), a short preview of their words ("(no text)" without any), a status and
+  the time;
+- a message in Chat with no Expert; a Worker's run (its AI's mark, "xPerfect" or "Schedule" as where
+  it was started, the instruction as its words); and a change to one of the owner's saved Workers
+  (Workspace created, details updated and the like).
+
+The **status** is a plain word from the runtime's typed state: **Waiting for you** (a request under
+Needs you; the line's **Decide** goes to it, opening the rest of Needs you when needed), **Working**,
+**Answered**, **Done**, **Stopped** and **Failed**. A message that started a job takes the job's state; a
+reply the runtime replaced by another message is not a stop.
+
+**Filters** are big buttons in the page's own style: **Who** (each Expert, each saved Worker and Chat;
+several at once; the chosen ones carry the accent ring and a check), **When** (last hour, today, 7 days,
+30 days, all time), **Status**, and one search box over the words, the person's name and the Expert's
+or Worker's name. **Clear filters** resets them. xPerfect applies every filter and pages the list itself;
+**Show more** reads further back. Lines sit under day headings (Today, Yesterday, the date).
+
+A line opens **in place** to its trail, which reads as a story: the message, the request and its
+decision, the job (with **Open the job**), the Worker and its model, and what was sent back (sent;
+replaced by a newer message, so not sent; waiting to be sent; held until you decide; the channel did
+not confirm it arrived; not sent, with the runtime's reason). Each run's own engine steps fold under
+one **Details** line; nothing is dropped. The opened line has its own address (`#activity/<line>`), and
+**Open chat** or **Open workspace** stays on every line. While the tab is shown the page looks for newer
+lines every 20 seconds: they go on top when you are at the top, otherwise one **N new** line waits at
+the top of the window; nothing you are reading moves. One scroll for the whole page at any width.
+
+The page reads `POST /v1/activity/lines` (filters in the body, so a searched phrase never sits in an
+address) and `GET /v1/activity/lines/{line}` for a trail, for the signed-in owner only: signed links
+and viewers are refused, and another owner's or tenant's lines are never read. The preview is cut on
+the server to 140 characters and never logged. `GET /v1/activity` and the MCP tool
+`workspace_activity` are unchanged and carry no person's words.
 
 ### Manage experts and retained work without a second object model
 

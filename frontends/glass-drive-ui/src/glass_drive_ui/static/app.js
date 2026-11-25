@@ -1,13 +1,14 @@
 import { attachActionMenu } from './action-menu.js?v=20261024polish1';
 import { readAuthCookie } from './auth-cookies.js?v=20261024cookies1';
-import { createExpertPicker } from './expert-picker.js?v=20261125page1';
+import { createExpertPicker } from './expert-picker.js?v=20261125activity9';
 import { createLibraryBrowser, createLibrarySelection, libraryModal, libraryRequest, libraryWorkerTarget, reviewLibraryUse } from './personal-library.js?v=20261024polish1';
 import { renderAccountIdentity } from './account-menu.js?v=20261024polish1';
 import { mountWorkerOnboarding, workerChoiceLabel, hostAccountLabel, workerTypeOption } from './worker-onboarding.js?v=20261024polish1';
 import { createLaunchDraft } from './launch-draft.js?v=20261024polish1';
 import { openWorkspaceMembers } from './workspace-members.js?v=20261024polish1';
 import { attachNativeControls, canGuideNativeTurn, selectConnectedClaudeAccount } from './native-controls.js?v=20261024polish1';
-import { initializeControlPlane, refreshControlPlane, renderActivity, persistCapabilityReview } from './control-plane.js?v=20261024polish1';
+import { initializeControlPlane, refreshControlPlane, persistCapabilityReview } from './control-plane.js?v=20261125activity9';
+import { renderActivity } from './activity-page.js?v=20261125activity9';
 import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20261024polish1';
 import { workspaceDeliveryModel } from './delivery-presenter.js?v=20261024polish1';
 import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20261024polish1';
@@ -2435,10 +2436,8 @@ async function main() {
       await refreshWorkspaceCatalog();
     }
     if (generation !== bootstrapGeneration) return currentBootstrapResult();
-    renderActivity(
-      bootstrap.activity || bootstrap.existing_workspaces || [],
-      bootstrap.bootstrap_sections?.activity || 'ready',
-    );
+    // Activity reads its own lines; a refresh only asks it to look for newer ones while it is shown.
+    renderActivity();
     const degradedSections = Object.entries(bootstrap.bootstrap_sections || {})
       .filter(([, value]) => value !== 'ready')
       .map(([name]) => name.replaceAll('_', ' '));
@@ -2524,7 +2523,7 @@ async function main() {
 
   // The Experts page loads when it is first opened; `#experts/<id>` names the Expert it shows.
   function openExpertsView(arg) {
-    expertsPage ||= import('./experts-page.js?v=20261125page11').then(({ mountExpertsPage }) => mountExpertsPage({
+    expertsPage ||= import('./experts-page.js?v=20261125activity9').then(({ mountExpertsPage }) => mountExpertsPage({
       root: document.getElementById('experts-view'), getData: () => bootstrap }));
     expertsPage.then(page => page.show(arg)).catch(() => {});
   }
@@ -2575,7 +2574,7 @@ async function main() {
   });
   initializeControlPlane({ withAuth, postJson, patchJson, deleteJson, responseMessage, setView: setActiveView });
   // Requests from Experts sit on top of Activity, with a count and a pop-up.
-  import('./experts.js?v=20261125page1').then(({ initNeedsYou }) => initNeedsYou({ mount: document.getElementById('activity-list'), tab: document.getElementById('activity-tab') })).catch(() => {});
+  import('./experts.js?v=20261125activity9').then(({ initNeedsYou }) => initNeedsYou({ mount: document.getElementById('activity-list'), tab: document.getElementById('activity-tab') })).catch(() => {});
 
   // Restore the selected surface before network startup, through the same registry.
   setActiveView(window.location.hash.replace(/^#/, '') || 'project', { updateHash: false });

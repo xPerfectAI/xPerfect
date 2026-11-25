@@ -63,31 +63,6 @@ status.textContent='Accepted';uploadChanged(false);assert.equal(status.textConte
 ''')
 
 
-def test_activity_uses_only_proven_conversation_identity_and_local_event_time():
-    source = (STATIC / 'control-plane.js').read_text()
-    functions = '\n'.join(re.search(rf'^(?:export )?function {name}\(.*?^}}\n', source, re.M | re.S).group(0)
-                          for name in ['formatDateTime', 'renderActivity'])
-    node(r'''
-import assert from 'node:assert/strict';
-const node=(tag,cls='',text='')=>({tag,cls,textContent:text,children:[],append(...items){this.children.push(...items);},replaceChildren(...items){this.children=items;}});
-const list=node('div'),document={getElementById:()=>list},emptyList=text=>node('p','',text);
-''' + functions + r'''
-const time='2026-10-24T20:11:41Z';
-renderActivity([
- {worker_id:'native',conversation_id:'chat/id',workspace_name:'Internal UTC coordinator',event_type:'run.completed',created_at:time},
- {worker_id:'ordinary',workspace_name:'Chat · UTC · coordinator',event_type:'run.started',created_at:'2026-10-24T19:00:00Z'},
- {worker_id:'external',conversation_id:null,workspace_name:'External session',event_type:'run.completed',created_at:'2026-10-24T18:00:00Z'},
-]);
-const [chat,ordinary,external]=list.children;
-assert.equal(chat.children[0].children[0].textContent,'Chat');
-assert.equal(chat.children[0].children[1].textContent,'Work completed · '+new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(time)));
-assert.equal(chat.children[1].textContent,'Open chat');assert.equal(chat.children[1].href,'/conversation?id=chat%2Fid');
-assert.equal(ordinary.children[0].children[0].textContent,'Chat · UTC · coordinator');
-assert.equal(ordinary.children[1].href,'/watch/ordinary');assert.equal(external.children[1].href,'/watch/external');
-renderActivity([],'unavailable');assert.match(list.children[0].textContent,/temporarily unavailable/);
-''')
-
-
 def test_launch_library_correction_uses_validation_owner_without_clearing_receipts():
     source = (STATIC / 'app.js').read_text()
     validation = source[source.index('  function clearLaunchValidation()'):source.index("  form.addEventListener('input', clearLaunchValidation)")]

@@ -34,6 +34,7 @@
 .needs-you-head h2{margin:0;font-size:1.05rem}
 .needs-you-card{border-top:1px solid var(--line);padding-top:12px;display:grid;gap:6px;min-width:0}
 .needs-you-card p{margin:0;line-height:1.5;overflow-wrap:anywhere}
+.needs-you-more{justify-self:start}
 .needs-you-from{font-size:.8rem;color:var(--muted)}
 .needs-you-what{font-weight:600}
 .needs-you-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:4px}

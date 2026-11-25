@@ -789,6 +789,8 @@ The MCP control plane is additive: `workspace_list`, `workspace_rename`, `worksp
 `workspace_capability_prepare` share the same user-scoped runtime resources as the UI. A capability
 proposal returns a browser confirmation URL. Only an authenticated human session with CSRF and
 `human:confirm` scope can consume its time-bounded single-use token; the model cannot self-approve.
+`workspace_activity` keeps reading `GET /v1/activity` unchanged: the Activity page's lines, which
+carry a person's words, have no MCP tool.
 
 `workspace_duplicate` requires an 8-128 character `idempotency_key`. Clients must reuse that key for
 retries of the same source/name request; the runtime durably returns the original project/workspace,

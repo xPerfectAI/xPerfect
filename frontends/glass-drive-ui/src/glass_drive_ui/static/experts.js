@@ -314,6 +314,8 @@ export function openChannels(item, { request = libraryRequest, signal } = {}) {
 /** Needs you: requests from Experts, on top of Activity, with a count and a pop-up on any page. */
 export function initNeedsYou({ request = libraryRequest, mount = null, tab = null } = {}) {
   const seen = new Set(); let first = true; let items = [];
+  // With a backlog, the newest three show and the rest open in place, so Activity's own lines stay in reach.
+  const FIRST_CARDS = 3; let showAll = false;
   let section = null;
   if (mount) {
     section = node('section', 'needs-you'); section.hidden = true; section.setAttribute('aria-label', 'Needs you');
@@ -337,7 +339,7 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       const allow = node('button', 'secondary-button', 'Notify me'); allow.type = 'button'; allow.onclick = () => Notification.requestPermission().then(render); head.append(allow);
     }
     section.append(head);
-    for (const item of items) {
+    for (const item of showAll ? items : items.slice(0, FIRST_CARDS)) {
       const card = node('article', 'needs-you-card'); card.dataset.review = item.review_id;
       card.append(node('p', 'needs-you-from', `${item.from.name || 'Someone'} · ${item.channel || 'Chat'} · ${age(item.created_at)} · ${item.expert}`));
       if (item.asked) card.append(node('p', 'needs-you-asked', `Asked: “${item.asked}”`));
@@ -354,6 +356,11 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       const actions = node('div', 'needs-you-actions'); actions.append(note, approve, reject);
       const error = node('p', 'needs-you-error'); error.hidden = true; error.setAttribute('role', 'alert');
       card.append(actions, error); section.append(card);
+    }
+    if (!showAll && items.length > FIRST_CARDS) {
+      const more = node('button', 'secondary-button needs-you-more', `Show all ${items.length}`); more.type = 'button';
+      more.onclick = () => { showAll = true; render(); section.querySelectorAll('.needs-you-card')[FIRST_CARDS]?.querySelector('input')?.focus(); };
+      section.append(more);
     }
   }
   function announce(item) {
