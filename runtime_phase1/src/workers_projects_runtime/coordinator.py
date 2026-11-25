@@ -2123,8 +2123,17 @@ class CoordinatorService:
                                    (str(principal.get("attempt_id") or ""), str(principal["run_id"]))).fetchone()
             if attempt is None or not attempt["claimed_at"]:
                 return False
-            began = datetime.fromisoformat(str(attempt["claimed_at"]).replace("Z", "+00:00"))
-            return any(datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00")) < began
+            def at(value: Any) -> datetime:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+            began = at(attempt["claimed_at"])
+            # Only goals made since this turn's first attempt (of any run of any request for it: a retry and a
+            # backup count) are an earlier attempt's. Goals given with the turn come before it and do not count.
+            first = min([began, *(at(row[0]) for row in conn.execute(
+                "SELECT a.claimed_at FROM run_attempts a JOIN provider_requests p ON p.run_id=a.run_id "
+                "JOIN provider_sessions s ON s.session_id=p.session_id WHERE s.conversation_id=? AND p.message_id=? "
+                "AND a.claimed_at<>''", (conversation_id, turn_id)))])
+            return any(first <= at(row["created_at"]) < began
                        for row in conn.execute("SELECT created_at FROM coordinator_goals WHERE conversation_id=? "
                                                "AND source_turn_id=?", (conversation_id, turn_id)))
 
