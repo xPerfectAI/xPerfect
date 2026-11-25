@@ -10,6 +10,17 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
+## 2026-11-25 — Prepare work while the host is busy; keep a second account working
+
+> **Summary:** A prepared, idle host Worker is accepted while the computer's work slots are full, and a usage limit on one provider account no longer holds Workers on another account.
+>
+> **Example:** Prepare a Worker for later while a long job runs; it waits for its turn instead of being refused. With two accounts connected for the same AI, Workers on the second keep going when the first reaches its limit.
+>
+> **Topics:** Work control, Connections, Reliability
+
+- **Improved:** Preparing a host Worker that does not start at once (`start_synchronously: false`) is accepted while host slots or the manual-mission lease are held. It starts nothing; each run still takes its own lease when it is assigned and launched. A Worker started at once keeps the same refusal.
+- **Fixed:** A Worker that must run on a named provider account keeps its cooling record under that account, everywhere it is read: before admission, on a pinned route, for the configured fallback and for a conversation turn. Limits recorded earlier under the owner keep holding the owner's own Workers until they expire.
+
 ## 2026-11-24 — Your expert, where your team already works
 
 > **Summary:** Give an expert your instructions and an AI team, then let the people you choose message it in Microsoft Teams. It answers at once, hands real work to Workers in the background and can ask you first before it sends or starts anything.

@@ -23458,7 +23458,7 @@ class Store:
                         ELSE excluded.cooldown_source
                     END,
                     last_run_id = excluded.last_run_id,
-                    updated_at = excluded.updated_at
+                    updated_at = MAX(provider_route_health.updated_at, excluded.updated_at)
                 WHERE excluded.last_failed_at >= provider_route_health.last_failed_at
                 """,
                 data,

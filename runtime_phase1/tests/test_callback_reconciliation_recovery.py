@@ -449,6 +449,7 @@ def _scheduled_provider_worker(
     fallback_profile: str = "",
     fallback_model: str = "",
     fallback_effort: str = "",
+    account_id: str = "",
 ) -> dict:
     project = store.create_project(
         owner_id,
@@ -481,6 +482,8 @@ def _scheduled_provider_worker(
                 "viventium_launch_authority": authority,
             }
         )
+    if account_id:
+        bundle["provider_account"] = {"policy": "personal_required", "account_id": account_id}
     return store.create_worker(
         project_id=project["project_id"],
         owner_id=owner_id,
@@ -932,5 +935,126 @@ def test_fresh_partial_html_after_a_provider_failure_is_delivered_without_claimi
         events = {event["event_type"] for event in store.list_events(worker["worker_id"])}
         assert "run.failed" in events and "run.partial_artifact_preserved" in events
         assert "run.completed" not in events
+    finally:
+        service.shutdown()
+
+
+def _cool_route(store: Store, route: dict, *, run_id: str) -> dict:
+    health = store.record_provider_route_failure(
+        **route,
+        failure_class="provider_quota_exhausted",
+        failure_structured=True,
+        retry_at=(datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+        default_cooldown_s=300,
+        run_id=run_id,
+    )
+    assert health is not None
+    return health
+
+
+def _account_fallback_route(service: WorkersProjectsService, worker: dict, owner_id: str) -> dict:
+    return {
+        "tenant_id": "local",
+        "owner_id": owner_id,
+        "profile": "claude-code",
+        "runtime": service._initial_runtime_label("claude-code", "docker"),
+        "model": "stub/claude-code",
+    }
+
+
+def test_an_account_quota_failure_is_recorded_under_that_account_and_reads_its_fallback_there(
+    tmp_path, monkeypatch
+):
+    """A Worker bound to one provider account records its quota failure under that account, and reads its
+    fallback's cooling there too: a cooled fallback on the same account is never selected, while one cooled
+    only for the owner's own sign-in does not hold it."""
+    store = Store(str(tmp_path / "account-quota-fallback.sqlite3"))
+    owner = "scheduled-owner"
+    service = _service(store, monkeypatch)
+    account_owner = service._provider_route_owner_key(owner, "acct-a")
+    try:
+        for label, cooled_for, switches in (
+            ("same account", account_owner, False),
+            ("owner's own sign-in", owner, True),
+        ):
+            worker = _scheduled_provider_worker(
+                store, owner_id=owner, fallback_profile="claude-code", account_id="acct-a"
+            )
+            assert service._provider_route(worker)["owner_id"] == account_owner
+            _cool_route(store, _account_fallback_route(service, worker, cooled_for), run_id=f"prior {label}")
+            running = _running_run(
+                store, service, worker, instruction=f"Quota on one account, {label}.", runtime_family="codex-cli"
+            )
+            recovered = _structured_provider_quota_failure()
+            service.runtime.trust_provider_failure(worker, running, recovered)
+            service._apply_recovered_run(worker, running, recovered)
+
+            primary = store.get_provider_route_health(**service._provider_route(worker))
+            assert primary is not None and primary["last_run_id"] == str(running["run_id"])
+            owner_primary = store.get_provider_route_health(**{**service._provider_route(worker), "owner_id": owner})
+            assert owner_primary is None or owner_primary["last_run_id"] != str(running["run_id"])
+            durable = store.get_run(str(running["run_id"]))
+            assert durable is not None
+            if switches:
+                assert durable["provider_route_decision"] == "fallback_selected"
+                assert store.get_worker(str(worker["worker_id"]))["profile"] == "claude-code"
+            else:
+                assert durable["provider_route_decision"] == "fallback_unavailable"
+                assert store.get_worker(str(worker["worker_id"]))["profile"] == "codex-cli"
+            # A finished check must not leave a cooled primary that holds the next case's Worker.
+            with store._connect() as conn:
+                conn.execute("DELETE FROM provider_route_health")
+    finally:
+        service.shutdown()
+
+
+def test_a_cooled_account_route_holds_only_that_account_before_admission(tmp_path, monkeypatch):
+    """Before admission, a run reads its route's cooling under the account it must run on: a cooled route on
+    another account or on the owner's own sign-in never holds it, and its own account's cooling does, also
+    when the run's route is pinned. A cooled fallback on its account is not selected; it waits instead."""
+    store = Store(str(tmp_path / "account-route-before-admission.sqlite3"))
+    owner = "scheduled-owner"
+    service = _service(store, monkeypatch)
+    account_owner = service._provider_route_owner_key(owner, "acct-a")
+
+    def claimed_run(worker: dict, *, locked: bool = False) -> dict:
+        store.create_run(worker["worker_id"], worker["project_id"], "Synthetic account work")
+        claimed = store.claim_next_queued_run(worker["worker_id"], executor_id=service.executor_id)
+        assert claimed is not None
+        if locked:
+            route = service._provider_route(worker)
+            claimed = store.update_run(
+                claimed["run_id"], provider_route_profile=route["profile"],
+                provider_route_runtime=route["runtime"], provider_route_model=route["model"],
+                provider_route_decision="primary_selected", provider_liveness_route_locked=1,
+            ) or claimed
+        return claimed
+
+    def clear() -> None:
+        with store._connect() as conn:
+            conn.execute("DELETE FROM provider_route_health")
+
+    try:
+        for locked in (False, True):
+            worker = _scheduled_provider_worker(store, owner_id=owner, account_id="acct-a")
+            primary = service._provider_route(worker)
+            for other in (owner, service._provider_route_owner_key(owner, "acct-b")):
+                _cool_route(store, {**primary, "owner_id": other}, run_id="other route")
+            run = claimed_run(worker, locked=locked)
+            assert service._handle_unhealthy_provider_route(worker, run) is False
+            _cool_route(store, primary, run_id="same account")
+            assert service._handle_unhealthy_provider_route(worker, store.get_run(run["run_id"])) is True
+            assert store.get_run(run["run_id"])["provider_route_decision"] == "waiting_primary_health"
+            clear()
+
+        worker = _scheduled_provider_worker(
+            store, owner_id=owner, fallback_profile="claude-code", account_id="acct-a"
+        )
+        _cool_route(store, service._provider_route(worker), run_id="same account")
+        _cool_route(store, _account_fallback_route(service, worker, account_owner), run_id="fallback on account")
+        run = claimed_run(worker)
+        assert service._handle_unhealthy_provider_route(worker, run) is True
+        assert store.get_run(run["run_id"])["provider_route_decision"] == "waiting_primary_health"
+        assert store.get_worker(worker["worker_id"])["profile"] == "codex-cli"
     finally:
         service.shutdown()

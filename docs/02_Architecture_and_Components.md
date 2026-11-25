@@ -287,7 +287,10 @@ path. A repeated route failure without an exact provider retry time doubles the 
 a one-hour ceiling, or the configured base delay when that is longer. A completed run on that
 route resets the recent failure streak.
 An exact provider retry time remains authoritative. Typed tenant, owner, profile, runtime and model
-scope own route health; prompt text does not select a route.
+scope own route health; prompt text does not select a route. A Worker or turn that must run on a
+named provider account (`personal_required`) keeps its route health under that account of the owner,
+so a limit on one account never holds another account or the owner's own sign-in; a preferred
+account, which may fall back to the deployment route, keeps the owner's scope.
 
 The authenticated OpenAI-compatible `/v1/models` route publishes model IDs, effort choices,
 capabilities and native replay-budget declarations without starting a harness or probing sign-in.

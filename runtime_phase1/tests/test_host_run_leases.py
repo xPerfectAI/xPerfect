@@ -5170,6 +5170,74 @@ def test_provider_route_recovery_probes_require_explicit_operator_opt_in(tmp_pat
         store.close()
 
 
+def test_failure_recorded_after_a_probe_claim_keeps_its_time(tmp_path):
+    """A failure observed before a probe's claim but recorded after it never moves the probe clock back."""
+    store = Store(str(tmp_path / "provider-health-probe-order.sqlite3"))
+    failed_at = datetime(2026, 11, 12, 0, 32, tzinfo=timezone.utc)
+    route = dict(tenant_id="local", owner_id="owner-a", profile="codex-cli", runtime="codex-cli", model="gpt-6.1-sol")
+    reset_at = failed_at + timedelta(days=2)
+    first = store.record_provider_route_failure(
+        **route, failure_class="provider_rate_limited", failure_structured=True, retry_at=reset_at.isoformat(),
+        default_cooldown_s=300, run_id="run-1", now=failed_at,
+    )
+    claimed = failed_at + timedelta(hours=5)
+    assert store.claim_provider_route_probe(
+        **route, expected_last_failed_at=first["last_failed_at"], expected_generation=first["failure_generation"],
+        interval_s=900, now=claimed,
+    ) is True
+    late = store.record_provider_route_failure(
+        **route, failure_class="provider_rate_limited", failure_structured=True, retry_at=reset_at.isoformat(),
+        default_cooldown_s=300, run_id="run-2", now=claimed - timedelta(minutes=1),
+    )
+    assert late["updated_at"] == claimed.isoformat()
+    seen = dict(expected_last_failed_at=late["last_failed_at"], expected_generation=late["failure_generation"])
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=claimed + timedelta(minutes=14)) is False
+    assert store.claim_provider_route_probe(**route, **seen, interval_s=900, now=claimed + timedelta(minutes=16)) is True
+
+
+def test_a_limit_on_one_provider_account_never_holds_another(tmp_path):
+    """Two accounts of one provider are two routes: a limit recorded for a Worker on account A holds Workers on A
+    only, never a Worker on account B or one on the owner's own sign-in."""
+    store = Store(str(tmp_path / "provider-health-accounts.sqlite3"))
+    service = WorkersProjectsService(store, StubRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = store.create_project("owner-a", "Accounts", "Two accounts of one provider", "codex-cli")
+
+    def worker(name: str, account: str = "", policy: str = "personal_required") -> dict:
+        return store.create_worker(
+            project_id=project["project_id"], owner_id="owner-a", name=name, role="worker",
+            profile="codex-cli", backend="codex-cli", runtime="codex-cli", model="gpt-6.1-sol",
+            execution_mode="host",
+            bootstrap_bundle=({"provider_account": {"policy": policy, "account_id": account}}
+                              if account else None),
+        )
+
+    on_a, also_a, on_b, own = worker("A", "acct_a"), worker("A too", "acct_a"), worker("B", "acct_b"), worker("own")
+    preferred = worker("Preferred A", "acct_a", policy="personal_preferred")
+    route_a = service._provider_route(on_a)
+    try:
+        assert route_a["runtime"] == "codex-cli" and route_a["profile"] == "codex-cli"
+        assert service._provider_route(also_a) == route_a
+        assert len({service._provider_route(w)["owner_id"] for w in (on_a, on_b, own)}) == 3
+        # A preferred account can fall back to the deployment route at launch, so it keeps the owner's record.
+        assert service._provider_route(preferred) == service._provider_route(own)
+        store.record_provider_route_failure(
+            **route_a, failure_class="provider_rate_limited", failure_structured=True,
+            retry_after_s=3600, default_cooldown_s=300, run_id="run-on-a",
+        )
+        assert store.get_provider_route_health(**service._provider_route(also_a)) is not None
+        assert store.get_provider_route_health(**service._provider_route(on_b)) is None
+        assert store.get_provider_route_health(**service._provider_route(own)) is None
+        # The other direction: a limit on the owner's own sign-in never holds a Worker on a named account.
+        store.record_provider_route_failure(
+            **service._provider_route(own), failure_class="provider_rate_limited", failure_structured=True,
+            retry_after_s=3600, default_cooldown_s=300, run_id="run-on-own",
+        )
+        assert store.get_provider_route_health(**service._provider_route(on_b)) is None
+    finally:
+        service.shutdown()
+
+
 def test_success_clears_provider_route_health(tmp_path):
     store = Store(str(tmp_path / "provider-health-success.sqlite3"))
     observed = store.record_provider_route_failure(
@@ -6410,6 +6478,50 @@ def test_model_authored_mutation_scopes_cannot_bypass_conservative_serialization
     # not buy a separate mutation lane.
     assert first == second == unscoped_first == unscoped_second == forged_explicit
     assert unscoped_first
+
+
+@pytest.mark.parametrize(("slots", "held_by"), [("3", "mutation_scope"), ("1", "family_lane")])
+def test_a_prepared_host_worker_is_accepted_while_a_manual_run_holds_the_host(tmp_path, monkeypatch, slots, held_by):
+    """Preparing an idle host worker starts no compute, so it is accepted while a manual mission's run holds the
+    host: its one-at-a-time fence (several slots), or its lane's only slot. A worker started at once keeps the
+    conservative refusal, and the prepared worker's own manual run still waits for its lease."""
+    monkeypatch.setenv("WPR_HOST_MISSION_SLOTS_PER_CLI", slots)
+
+    class HostRuntime(StubRuntime):
+        preflight_uses_cli_subprocess = True  # (the host CLIs' preflight takes a durable capacity claim)
+
+    store = Store(str(tmp_path / "prepared.sqlite3"))
+    service = WorkersProjectsService(store, HostRuntime(), reconcile_on_startup=False,
+                                     start_background_consumers=False)
+    project = store.create_project("owner-a", "Prepared", "Accept work while the host is held", "claude-code")
+
+    def worker(name: str, **kwargs) -> dict:
+        return service.create_worker(project_id=project["project_id"], owner_id="owner-a", name=name, role="worker",
+                                     profile="claude-code", backend="", execution_mode="host", **kwargs)
+
+    try:
+        holder = worker("Manual mission")
+        held_run = store.create_run(holder["worker_id"], project["project_id"], "Synthetic manual work")
+        held_run = store.claim_next_queued_run(holder["worker_id"]) or held_run
+        store.update_worker_state(holder["worker_id"], "running")
+        assert service._acquire_host_run_lease(store.get_worker(holder["worker_id"]), held_run)["mutation_scope"]
+
+        with pytest.raises(HostCapacityError) as refused:
+            worker("Started at once")
+        assert refused.value.capacity_class == held_by
+
+        prepared = worker("Prepared", start_synchronously=False)
+        assert prepared["state"] == "paused"
+        run = service.assign_run(prepared["worker_id"], "Synthetic later work", start_processor=False)
+        assert run["state"] == "queued"
+        with pytest.raises(HostCapacityError) as waiting:
+            service._acquire_host_run_lease(store.get_worker(prepared["worker_id"]), run)
+        assert waiting.value.capacity_class == held_by
+
+        service._release_host_run_lease(held_run["run_id"], reason="run_terminal")
+        assert service._acquire_host_run_lease(store.get_worker(prepared["worker_id"]), run)
+    finally:
+        service.shutdown()
 
 
 @pytest.mark.parametrize(
