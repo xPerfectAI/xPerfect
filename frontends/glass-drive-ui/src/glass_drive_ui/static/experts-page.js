@@ -236,6 +236,8 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       if (mine === token && typeof r?.picture === 'string' && r.picture.startsWith('data:image/png;base64,') && !pictureChange) { pictureUrl = r.picture; renderPicture(); }
     }).catch(() => {});
     pin(shownId()); renderStrip(); render();
+    // Opened before the page's account data has loaded: draw the AI team again once it is there.
+    if (!getData()) { const wait = (tries = 0) => setTimeout(() => { if (mine !== token) return; if (getData()) renderTeam(); else if (tries < 60) wait(tries + 1); }, 250); wait(); }
     // Opened from elsewhere (Run project's Edit or +), the page starts at its top, not where the last page was scrolled.
     if (!force && root.getBoundingClientRect().top < 0) window.scrollTo({ top: 0 });
   }

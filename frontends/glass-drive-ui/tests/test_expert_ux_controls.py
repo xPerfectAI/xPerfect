@@ -508,6 +508,8 @@ def test_an_ai_not_set_up_on_this_computer_says_so_with_the_way_to_connect_it():
     assert "`${ai.name} is not set up on this computer yet.`" in page
     assert "`${ai.name} Workers need a connected ${ai.name} account.`" in page
     assert "box.disabled = (unavailable || workersNeedAccount(ai.profile, getData())) && !ticked;" in page
+    # Opened before the account data has loaded, the page draws the team again once it is there.
+    assert "if (!getData()) { const wait = (tries = 0) => setTimeout(() => { if (mine !== token) return; if (getData()) renderTeam();" in page
     assert "const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';" in page
 
 
