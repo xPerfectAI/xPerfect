@@ -3350,6 +3350,13 @@ class ProfiledWorkerRuntime:
             stdout += "\n" + reader(worker, run_id, instruction_sha256=instruction_sha256)
         return profile, stdout
 
+    def provider_commentary_log(self, worker: dict, run_id: str, *, instruction_sha256: str) -> tuple[str, str]:
+        """Read only complete, declared public commentary from an owned native turn."""
+        runtime = self._runtime_for_worker(worker)
+        reader = getattr(runtime, "provider_rollout_commentary_log", None)
+        return str(worker.get("profile") or ""), (reader(worker, run_id,
+            instruction_sha256=instruction_sha256) if callable(reader) else "")
+
     def provider_activity_log(self, worker: dict, run_id: str) -> tuple[str, str]:
         """Return the private native JSONL log used for provider activity normalization."""
 
@@ -9351,7 +9358,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
 
 
-    def _codex_run_rollout_path(self, worker: dict, run_id: str) -> Path | None:
+    def _codex_run_rollout_path(self, worker: dict, run_id: str, *, stdout_path: Path | None = None) -> Path | None:
         """Resolve the session emitted by this exact run's owned stdout."""
         clean_run_id = str(run_id or "").strip()
         if (
@@ -9361,7 +9368,7 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
             or clean_run_id in {".", ".."}
         ):
             raise ValueError("invalid run id")
-        stdout_path = self._run_root(str(worker["worker_id"]), clean_run_id) / "stdout.log"
+        stdout_path = stdout_path or self._run_root(str(worker["worker_id"]), clean_run_id) / "stdout.log"
         if not stdout_path.is_file():
             return None
         thread_id = ""
@@ -9401,34 +9408,115 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
 
     def provider_rollout_tool_log(self, worker: dict, run_id: str, *, instruction_sha256: str) -> str:
         """Join native tool output to the exact admitted input and native turn."""
-        path = self._codex_run_rollout_path(worker, run_id)
-        unavailable = json.dumps({"type": "glasshive.tool_evidence_unavailable"})
+        return self._provider_rollout_log(worker, run_id, instruction_sha256=instruction_sha256)
+
+    def provider_rollout_commentary_log(self, worker: dict, run_id: str, *, instruction_sha256: str) -> str:
+        attempt = str(worker.get("_provider_activity_attempt_id") or "")
+        if not attempt:
+            return ""
+        transcript = self._attempt_transcript(str(worker["worker_id"]), run_id, attempt)
+        if transcript is None:
+            return ""
+        result = self._provider_rollout_log(worker, run_id, instruction_sha256=instruction_sha256,
+                                            commentary_transcript=transcript)
+        return result if self._attempt_transcript(str(worker["worker_id"]), run_id, attempt) == transcript else ""
+
+    def _provider_rollout_input_matches(self, worker: dict, run_id: str, instruction: str, digest: str) -> bool:
+        def admitted(value, input_index_path=""):
+            def original(text):
+                if hashlib.sha256(text.encode("utf-8")).hexdigest() == digest:
+                    return True
+                if not input_index_path:
+                    return False
+                from .upload_projection import runtime_instruction_for_run
+                run_worker = {"_run_input_manifest_path": input_index_path}
+                probe = secrets.token_hex(32)
+                rendered = runtime_instruction_for_run(run_worker, probe)
+                if rendered.count(probe) != 1:
+                    return False
+                prefix, _, suffix = rendered.partition(probe)
+                if (not text.startswith(prefix) or not text.endswith(suffix)
+                        or len(text) < len(prefix) + len(suffix)):
+                    return False
+                body = text[len(prefix):len(text)-len(suffix) if suffix else None]
+                return (hashlib.sha256(body.encode("utf-8")).hexdigest() == digest
+                        and runtime_instruction_for_run(run_worker, body) == text)
+            if original(value):
+                return True
+            def unique_object(pairs):
+                result = {}
+                for key, item in pairs:
+                    if key in result:
+                        raise ValueError("Duplicate contextual instruction field")
+                    result[key] = item
+                return result
+            try:
+                envelope = json.loads(value, object_pairs_hook=unique_object)
+                fields = {"instruction", "context", "context_manifest"}
+                if isinstance(envelope, dict) and "context_contract" in envelope:
+                    from .worker_context_mcp import context_tool_manifest
+                    if envelope["context_contract"] != context_tool_manifest()["inherited_context_contract"]:
+                        return False
+                    fields.add("context_contract")
+                return (isinstance(envelope, dict) and set(envelope) == fields
+                    and isinstance(envelope["instruction"], str) and isinstance(envelope["context"], list)
+                    and isinstance(envelope["context_manifest"], dict)
+                    and original(envelope["instruction"]))
+            except (TypeError, ValueError):
+                return False
+        if admitted(instruction):
+            return True
+        producer = getattr(self, "_host_mission_instruction", None)
+        if not callable(producer):
+            return False
+        try:
+            scope_path = self._run_root(str(worker["worker_id"]), run_id) / "native-image-scope.json"
+            raw_scope = scope_path.read_text()
+            scope = json.loads(raw_scope)
+            if (not isinstance(scope, dict) or not worker.get("owner_id")
+                    or not worker.get("_provider_activity_attempt_id")
+                    or any(scope.get(key) != value for key, value in {
+                        "run_id": run_id, "worker_id": worker["worker_id"],
+                        "owner_id": worker["owner_id"], "attempt_id": worker["_provider_activity_attempt_id"],
+                    }.items()) or scope.get("file_output_transport") != "artifact_sha256"
+                    or not isinstance(scope.get("workspace_dir"), str)
+                    or not Path(scope["workspace_dir"]).is_absolute()):
+                return False
+            scoped_worker = {**worker, "workspace_dir": scope["workspace_dir"]}
+            def render(value):
+                return self._command_stdin_text(scoped_worker, producer(scoped_worker, value, scope), None)
+            # Derive the inverse from the same registered producer, never a marker/suffix inventory.
+            probe = secrets.token_hex(32)
+            rendered = render(probe)
+            if not isinstance(rendered, str) or rendered.count(probe) != 1:
+                return False
+            prefix, _, suffix = rendered.partition(probe)
+            if (not instruction.startswith(prefix) or not instruction.endswith(suffix)
+                    or len(instruction) < len(prefix) + len(suffix)):
+                return False
+            body = instruction[len(prefix):len(instruction)-len(suffix) if suffix else None]
+            from .upload_projection import run_input_manifest_path
+            return (admitted(body, run_input_manifest_path(run_id))
+                    and render(body) == instruction and scope_path.read_text() == raw_scope)
+        except (OSError, RuntimeError, KeyError, TypeError, ValueError):
+            return False
+
+    def _provider_rollout_log(self, worker: dict, run_id: str, *, instruction_sha256: str,
+                              commentary_transcript: tuple[Path, str] | None = None) -> str:
+        commentary = commentary_transcript is not None
+        path = (self._codex_run_rollout_path(worker, run_id, stdout_path=commentary_transcript[0])
+                if commentary else self._codex_run_rollout_path(worker, run_id))
+        unavailable = "" if commentary else json.dumps({"type": "glasshive.tool_evidence_unavailable"})
         if path is None:
             return unavailable
-        instruction_path = self._run_root(str(worker["worker_id"]), run_id) / "instruction.stdin"
+        instruction_path = ((commentary_transcript[0].parent if commentary else
+                             self._run_root(str(worker["worker_id"]), run_id)) / "instruction.stdin")
         try:
             instruction = instruction_path.read_text()
             if not instruction:
                 return unavailable
-            if hashlib.sha256(instruction.encode("utf-8")).hexdigest() != instruction_sha256:
-                # Worker context wraps the admitted instruction before native dispatch.
-                # Validate only that existing publisher shape; retain the whole native input.
-                def unique_object(pairs):
-                    result = {}
-                    for key, value in pairs:
-                        if key in result:
-                            raise ValueError("Duplicate contextual instruction field")
-                        result[key] = value
-                    return result
-                envelope = json.loads(instruction, object_pairs_hook=unique_object)
-                if (not isinstance(envelope, dict)
-                        or set(envelope) != {"instruction", "context", "context_manifest"}
-                        or not isinstance(envelope["instruction"], str)
-                        or not isinstance(envelope["context"], list)
-                        or not isinstance(envelope["context_manifest"], dict)
-                        or hashlib.sha256(envelope["instruction"].encode("utf-8")).hexdigest()
-                        != instruction_sha256):
-                    return unavailable
+            if not self._provider_rollout_input_matches(worker, run_id, instruction, instruction_sha256):
+                return unavailable
             fingerprint = (path.stat().st_size, path.stat().st_mtime_ns)
             # Select by native turn identity plus exact input bytes, never by timing,
             # prose/tool-name matching, or the newest turn in a reused session.
@@ -9437,7 +9525,9 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
             current = ""
             retained_bytes = 0
             with path.open() as handle:
-                for line in handle:
+                for native_item_index, line in enumerate(handle):
+                    if commentary and not line.endswith("\n"):
+                        continue
                     try:
                         event = json.loads(line)
                     except ValueError:
@@ -9463,13 +9553,21 @@ class CodexCliRuntime(BaseCliWorkerRuntime):
                             return unavailable
                         if matches == 1:
                             matched.add(current)
-                    if current in matched and payload.get("type") in {
+                    is_commentary = (payload.get("type") == "message" and payload.get("role") == "assistant"
+                        and payload.get("phase") == "commentary" and isinstance(content, list) and bool(content)
+                        and all(isinstance(part, dict) and part.get("type") == "output_text"
+                                and isinstance(part.get("text"), str) for part in content))
+                    if current in matched and (is_commentary if commentary else payload.get("type") in {
                         "custom_tool_call", "custom_tool_call_output", "function_call", "function_call_output"
-                    }:
+                    }):
                         retained_bytes += len(line.encode("utf-8"))
                         if retained_bytes > 8 * 1024 * 1024:
                             return unavailable
-                        turns[current].append({"type": "response_item", "payload": payload})
+                        item = {"type": "response_item", "payload": payload}
+                        if commentary:
+                            item.update(native_turn_id=current, native_item_id=str(payload.get("id") or
+                                "rollout-item-" + str(native_item_index)))
+                        turns[current].append(item)
             if len(matched) != 1 or fingerprint != (path.stat().st_size, path.stat().st_mtime_ns):
                 return unavailable
             if instruction_path.read_text() != instruction:
@@ -17149,6 +17247,11 @@ class HostClaudeCodeRuntime(HostNativeCliMixin, ClaudeCodeRuntime):
     def _conversation_output_schema(self, worker: dict) -> dict[str, object] | None:
         schema = super()._conversation_output_schema(worker)
         if not schema:
+            return None
+        from .claude_conversation import text_delivery
+        if text_delivery(self._bootstrap_bundle_for_worker(worker)):
+            # A retained live call speaks authored text as it streams. Forcing the
+            # structured tool makes the model write the same reply a second time.
             return None
         # Claude Code rejects the canonical 2020-12 declaration while accepting
         # the same constraints in an unqualified schema.

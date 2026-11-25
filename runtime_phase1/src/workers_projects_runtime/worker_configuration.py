@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import tomllib
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -17,7 +18,9 @@ from .bootstrap import (
     _strip_codex_mcp_server_blocks,
     _source_path_from_entry,
     resolve_authorized_bootstrap_source_path,
+    native_input_file_projection,
 )
+from .deliverables import is_protected_artifact_path
 from . import native_transport
 from .failure_classification import FailureClassification
 from .models import CLOSED_WORKER_STATES
@@ -332,8 +335,25 @@ class WorkerConfiguration:
         ).fetchone()
         return row[0] if row else 1
 
-    def sources(self, worker):
+    def _native_input_home(self, worker):
+        placement_reader = getattr(self.performance_runtime, "native_workspace_placement", None)
+        try:
+            placement = placement_reader(worker) if callable(placement_reader) else None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not isinstance(placement, dict) or placement.get("host_native") is not True:
+            return None
+        home = Path(str(placement.get("home_dir") or ""))
+        workspace = Path(str(placement.get("workspace_dir") or ""))
+        if (not home.is_absolute() or not workspace.is_absolute()
+                or not is_protected_artifact_path(workspace)
+                or is_protected_artifact_path(home / ".tmp")):
+            return None
+        return home
+
+    def sources(self, worker, *, materialize_inputs=False, admitted_inputs=None):
         bundle = bootstrap_bundle_for(worker)
+        native_input_home = self._native_input_home(worker) if bundle.get("files") else None
         selected_library = bundle.get("library_selection")
         selected_uploads = selected_library.get("upload_ids", []) if isinstance(selected_library, dict) else []
         if not isinstance(selected_uploads, list) or any(not isinstance(value, str) for value in selected_uploads):
@@ -361,22 +381,34 @@ class WorkerConfiguration:
                 continue
             unavailable = False
             text = entry.get("content")
+            data = None
+            original_source = {"kind": "inline"}
+            if isinstance(text, str):
+                data = text.encode("utf-8")
+                if (str(entry.get("encoding") or "").strip().lower() == "base64"
+                        or "content_base64" in entry):
+                    try:
+                        data = base64.b64decode(
+                            str(entry.get("content_base64") or text or ""), validate=True
+                        )
+                    except ValueError:
+                        data = None
             if not isinstance(text, str):
                 try:
                     if isinstance(entry.get("content_base64"), str):
-                        text = base64.b64decode(
+                        data = base64.b64decode(
                             entry["content_base64"], validate=True
-                        ).decode("utf-8")
+                        )
                     else:
                         source = _source_path_from_entry(entry)
                         if source is not None:
-                            text = (
-                                resolve_authorized_bootstrap_source_path(
-                                    entry, source, worker
-                                )
-                                .read_bytes()
-                                .decode("utf-8")
+                            source = resolve_authorized_bootstrap_source_path(
+                                entry, source, worker
                             )
+                            data = source.read_bytes()
+                            original_source = {"kind": "authorized_file", "path": str(source)}
+                    if data is not None:
+                        text = data.decode("utf-8")
                 except UnicodeDecodeError:
                     # Binary files retain their existing native Files path; do not invent a
                     # text extraction or describe a filename as model-readable content.
@@ -384,6 +416,7 @@ class WorkerConfiguration:
                 except (OSError, PermissionError, ValueError):
                     text = ""
                     unavailable = True
+                    data = None
             if isinstance(text, str):
                 result.append(
                     {
@@ -398,6 +431,44 @@ class WorkerConfiguration:
                            or entry.get("managed_upload_id") in library_upload_ids else {}),
                     }
                 )
+            if data is not None and str(entry.get("scope") or "workspace") == "workspace":
+                # This is verified input provenance, not permission to publish the file.
+                # Keep binary inputs out of text content while exposing their existing source.
+                native_input = None
+                file_id = str(entry.get("file_id") or "")
+                input_path = str(entry.get("path") or "")
+                admitted = (admitted_inputs or {}).get((file_id, input_path))
+                if admitted is not None:
+                    if ((admitted.get("sha256") is not None
+                         and admitted["sha256"] != hashlib.sha256(data).hexdigest())
+                            or (admitted.get("size_bytes") is not None
+                                and admitted["size_bytes"] != len(data))):
+                        raise ConfigurationError("context_input_changed")
+                if (native_input_home is not None and file_id and input_path
+                        and not (original_source["kind"] == "authorized_file"
+                                 and is_protected_artifact_path(Path(original_source["path"])))):
+                    native_input = native_input_file_projection(
+                        native_input_home, input_path, data,
+                        materialize=materialize_inputs and admitted is not None,
+                    )
+                result.append({
+                    "id": f"bootstrap:file:{index}:provenance",
+                    "label": str(entry.get("path") or "File") + " source",
+                    "kind": "file_provenance",
+                    "text": _json({
+                        "version": 1,
+                        "scope": "workspace",
+                        "materialized_path": str(entry.get("path") or ""),
+                        "original_source": original_source,
+                        "bytes": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        **({"native_input": {"root": "managed_tmp", "path": str(native_input)}}
+                           if native_input is not None else {}),
+                    }),
+                    "status": "available",
+                    **({"native_input_path": str(native_input), "input_file_id": file_id,
+                        "workspace_input_path": input_path} if native_input is not None else {}),
+                })
         if self.source_resolver:
             result.extend(self.source_resolver(worker))
         ids = set()
@@ -419,8 +490,8 @@ class WorkerConfiguration:
             for key in ("id", "label", "kind", "sha256", "chars", "status")
         } | ({"packing": "lookup"} if source.get("packing") == "lookup" else {})
 
-    def _effective(self, worker, config):
-        sources = self.sources(worker)
+    def _effective(self, worker, config, *, materialize_inputs=False, admitted_inputs=None):
+        sources = self.sources(worker, materialize_inputs=materialize_inputs, admitted_inputs=admitted_inputs)
         bundle = bootstrap_bundle_for(worker)
         profile = str(worker.get("profile") or "").strip()
         servers = configured_connections(bundle, profile=profile)
@@ -634,12 +705,34 @@ class WorkerConfiguration:
             raise ConfigurationError("configuration_changed")
         projected["_sandbox_setup"] = setup
         source_worker = _run_context_worker(dict(fresh), run)
-        sources, selected, _, effective = self._effective(source_worker, config)
+        runtime_bundle = bootstrap_bundle_for(worker)
+        input_manifest_path = str(worker.get("_run_input_manifest_path") or "")
+        input_manifest = next((entry for entry in runtime_bundle.get("files", [])
+            if isinstance(entry, dict) and entry.get("scope", "workspace") == "workspace"
+            and entry.get("path") == input_manifest_path and isinstance(entry.get("content"), str)), None)
+        admitted_index = json.loads(input_manifest["content"]) if input_manifest else {}
+        admitted_inputs = {(str(entry.get("source_file_id") or ""), str(entry.get("path") or "")): entry
+            for entry in admitted_index.get("files", []) if isinstance(entry, dict)
+            and entry.get("available") is not False and entry.get("source_file_id")}
+        sources, selected, _, effective = self._effective(
+            source_worker, config, materialize_inputs=True, admitted_inputs=admitted_inputs,
+        )
         # The route belongs to the transport; its binder refuses a run that needs one.
         blocking = [i for i in effective["issues"] if i["code"] != CONTEXT_ROUTE_ISSUE]
         if blocking:
             raise configuration_needs_attention(blocking)
         bundle = json.loads(_json(bootstrap_bundle_for(worker)))
+        native_inputs = {(source["input_file_id"], source["workspace_input_path"]): source["native_input_path"]
+            for source in sources if source.get("native_input_path")}
+        if input_manifest and native_inputs:
+            for entry in admitted_index.get("files", []):
+                key = (str(entry.get("source_file_id") or ""), str(entry.get("path") or ""))
+                if entry.get("available") is not False and key in native_inputs:
+                    entry["path"] = native_inputs[key]
+            for entry in bundle.get("files", []):
+                if (isinstance(entry, dict) and entry.get("scope", "workspace") == "workspace"
+                        and entry.get("path") == input_manifest_path):
+                    entry["content"] = _json(admitted_index)
         # Derived execution settings have one owner: this worker's saved config.
         # Both conversation/provider-session and ordinary workers use this path.
         bundle["runtime_performance"] = config.performance.model_dump()

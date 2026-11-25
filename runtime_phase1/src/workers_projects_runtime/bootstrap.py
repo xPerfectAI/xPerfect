@@ -1711,6 +1711,27 @@ def _write_private_native_file(root: Path, relative: Path, content: bytes, *, mo
                 pass
 
 
+def native_input_file_projection(
+    home_dir: Path, input_path: str, data: bytes, *, materialize: bool = False,
+) -> Path | None:
+    """Reuse private native storage for an already-authorized admitted input."""
+    from .deliverables import is_protected_artifact_path, verified_native_file
+
+    relative = _safe_relative_path(input_path)
+    digest = hashlib.sha256(data).hexdigest()
+    target = Path(".tmp/uploads") / digest / relative.name
+    if is_protected_artifact_path(home_dir / target):
+        return None
+    try:
+        verified_native_file(home_dir, target, digest, len(data))
+    except (OSError, ValueError):
+        if not materialize:
+            return None
+        _write_private_native_file(home_dir, target, data)
+        verified_native_file(home_dir, target, digest, len(data))
+    return home_dir / target
+
+
 def _write_clean_room_env_file(
     root: Path,
     relative: Path,

@@ -335,7 +335,7 @@ class CoordinatorService:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_coordinator_application_ref ON coordinator_conversations(tenant_id,owner_id,application_ref) WHERE application_ref<>''")
             conn.execute("DROP TRIGGER IF EXISTS callback_coordinator_snapshot_immutable")
             conn.execute("""CREATE TRIGGER callback_coordinator_snapshot_immutable
-                BEFORE UPDATE ON callback_outbox WHEN OLD.event_type IN ('coordinator.turn_due','coordinator.dispatch_due','coordinator.result_ready','coordinator.action_due','coordinator.turn_result_ready') AND (
+                BEFORE UPDATE ON callback_outbox WHEN OLD.event_type IN ('coordinator.turn_due','coordinator.dispatch_due','coordinator.result_ready','coordinator.action_due','coordinator.turn_result_ready','coordinator.progress_ready') AND (
                   OLD.owner_id IS NOT NEW.owner_id OR OLD.destination_id IS NOT NEW.destination_id OR
                   OLD.payload_json IS NOT NEW.payload_json OR OLD.expires_at IS NOT NEW.expires_at)
                 BEGIN SELECT RAISE(ABORT,'coordinator delivery snapshot is immutable'); END""")
@@ -1846,9 +1846,10 @@ class CoordinatorService:
                         receipt = {"goal_id": goal["goal_id"], "run_id": run_id, "state": run["state"]}
                         conn.execute("INSERT OR IGNORE INTO coordinator_events(conversation_id,kind,identity,payload_json,created_at) VALUES(?,?,?,?,?)", (conversation_id, "result_available", run_id, canonical(receipt), now()))
         if CoordinatorConfig.model_validate_json(conversation["config_json"]).application:
-            from .coordinator_application import queue_self_results, queue_turn_results
+            from .coordinator_application import queue_progress, queue_self_results, queue_turn_results
             queue_self_results(self, conversation)
             queue_turn_results(self, conversation)
+            queue_progress(self, conversation)
         return self.snapshot(tenant, owner, conversation_id, include_history)
 
     def native_identity(self, principal: dict) -> tuple[str, str, str]:
@@ -2296,8 +2297,16 @@ class CoordinatorService:
 
     @staticmethod
     def _goal_summary(goal: dict) -> dict:
+        # Admission diagnostics and partial output are not terminal results.
+        # Even a nonempty terminal result is evidence, not proof of task success.
+        has_result = (
+            goal.get("state") in {"completed", "failed", "cancelled", "interrupted"}
+            and int(goal.get("result_revision") or 0) > 0
+            and bool(str(goal.get("output_text") or "").strip()
+                     or str(goal.get("error_text") or "").strip())
+        )
         return {**{k: v for k, v in goal.items() if k not in {"output_text", "error_text"}},
-                "has_result": bool(goal.get("output_text") or goal.get("error_text"))}
+                "has_result": has_result}
 
     @staticmethod
     def _owned_goal_result_run(conn: Any, tenant: str, owner: str, conversation_id: str,

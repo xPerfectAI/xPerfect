@@ -158,6 +158,12 @@ The focused deterministic owners below live under `runtime_phase1/tests/`:
 | Lost conversation authority | `test_stateless_restart_preservation.py` | No bearer persists; exact retry keeps instructions; stateless siblings progress while persistent/control/lease fences hold. |
 | Interrupted retry projection | `test_restart_retry_preservation.py` | Durable Pause and a concurrent active generation survive retry reconciliation. |
 | Rebound session cleanup | `test_conversation_provider_recovery.py` | Deadline and historical-result recovery use the original run's worker; later work remains unchanged. |
+| Forfeited invocation retry | `test_forfeited_invocation_retry.py` | Proven executor loss fails the unrecoverable turn once without claiming prior effects are safe to repeat or minting retry actions; live or reattached authority, Pause and control fences win; a fresh sibling can proceed. |
+| Conversation capacity | `test_conversation_lane_live_reserve.py`, `test_native_capacity_turn_result.py` | Background turns preserve live capacity; Native byte reserves cover database and runtime filesystems without weakening isolated-runtime percentage policy. |
+| Route recovery | `test_admission_route_cooldown.py`, `test_provider_route_cooldown_backoff.py` | Only an armed healthy fallback bypasses a known quota/rate cooldown; duplicates keep their accepted route, public metadata cannot forge requested-model provenance, and exact provider retry time wins. |
+| Live-call framing | `test_claude_live_call_text_delivery.py` | Retained Claude speech streams through the public parts owner; silent tool replies, nested output and terminal ownership remain distinct. |
+| Public progress | `test_coordinator_public_progress.py`, `test_host_mission_public_progress.py`, `test_indexed_mission_public_progress.py` | Complete public commentary binds to one current input, run and attempt; stale or forged progress has no result authority. |
+| Input provenance | `test_worker_configuration.py`, `test_callback_run_input.py` | Authorized text/binary origins retain exact bytes and scope; protected originals stay local, rejected origins stay hidden, continuation evidence remains separate from guidance. |
 
 These tests include simulated failures, database races and local child processes. They prove their
 listed contracts, not installed native-provider parity, response-time targets or channel delivery.

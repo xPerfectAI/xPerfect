@@ -6246,15 +6246,30 @@ def test_core_source_history_is_whole_even_outside_recent_turn_window():
     assert instruction.index(source) < instruction.index("<viventium_current_accepted_turn_v1>")
 
 
-def test_core_source_larger_than_native_budget_fails_without_partial_admission():
+@pytest.mark.parametrize("direct", [False, True])
+def test_complete_protected_source_reaches_native_owner_or_direct_capacity_guard(direct):
+    from dataclasses import replace
     from fastapi import HTTPException
     from workers_projects_runtime.conversation_provider import _admit_conversation_history
-    with pytest.raises(HTTPException) as error:
-        _admit_conversation_history(
-            [ChatMessage(role="user", content="Protected " * 300000), ChatMessage(role="assistant", content="Accepted."), ChatMessage(role="user", content="Continue.")],
-            start_at=0, turn_context="", model=next(iter(GLASSHIVE_MODELS.values())), protected_indices={0, 1},
-        )
-    assert error.value.status_code == 413
+    model = next(iter(GLASSHIVE_MODELS.values()))
+    if direct:
+        model = replace(model, harness_profile="direct-openai")
+    source = "Protected " * 300000 + "Final condition."
+    messages = [ChatMessage(role="user", content=source),
+                ChatMessage(role="assistant", content="Accepted."),
+                ChatMessage(role="user", content="Continue.")]
+    if direct:
+        with pytest.raises(HTTPException) as error:
+            _admit_conversation_history(messages, start_at=0, turn_context="",
+                model=model, protected_indices={0, 1})
+        assert error.value.status_code == 413
+        return
+    instruction, decision, _ = _admit_conversation_history(messages, start_at=0,
+        turn_context="", model=model, protected_indices={0, 1})
+    assert source in instruction
+    assert {0, 1, 2}.issubset(decision["admitted_message_indices"])
+    assert decision["context_budget_owner"] == "native_harness"
+    assert decision["instruction_bytes"] > decision["budget_bytes"]
 
 
 def test_core_message_carrier_preserves_sources_across_selected_sibling_branches(tmp_path, monkeypatch):
@@ -6653,6 +6668,8 @@ class BlockingFamilyStopRuntime(StubRuntime):
 
 @pytest.mark.parametrize("first_scope", [("external_user", "interactive"), ("system", "scheduler"), ("worker", "callback")])
 def test_trusted_authoring_scopes_overlap_without_replacing_native_sessions(tmp_path, monkeypatch, first_scope):
+    # Scope isolation is independent of the default share reserved for live turns.
+    monkeypatch.setenv("WPR_HOST_CONVERSATION_SLOTS_PER_CLI", "4")
     runtime = BlockingFamilyStopRuntime()
     entered = []
     both_entered = threading.Event()
@@ -10838,7 +10855,7 @@ def test_replay_uses_native_model_capacity_without_a_fixed_application_ceiling(m
         harness_profile='synthetic', native_model='synthetic', effort_choices=('high',),
         recommended_effort='high', context_window=1000000)
     budget = provider._conversation_replay_budget_bytes(model, observed_chars_per_token=4.0)
-    assert budget == 2000000
+    assert budget == (1000000 - 32768) * 4
     text = 'source ' * 110000 + '\nKeep this final condition.'
     instruction, decision, _ = provider._admit_conversation_history(
         [provider.ChatMessage(role='user', content=text)], start_at=0,
@@ -10862,14 +10879,14 @@ def test_complete_review_source_and_discovery_share_model_headroom(monkeypatch):
     assert decision["omitted_message_count"] == 0
     assert decision["instruction_bytes"] > 192 * 1024
     assert decision["instruction_bytes"] <= decision["budget_bytes"]
-    assert model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"] == 237500
+    assert model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"] == 442232
 
 
 @pytest.mark.parametrize("model_id,expected", [
-    ("codex-cli:gpt-6.1-sol", 237500),
-    ("claude-code:claude-opus-5-5", 500000),
-    ("grok-build:grok-4.7", 250000),
-    ("grok-build:grok-4.7-build-fast", 250000),
+    ("codex-cli:gpt-6.1-sol", 442232),
+    ("claude-code:claude-opus-5-5", 967232),
+    ("grok-build:grok-4.7", 467232),
+    ("grok-build:grok-4.7-build-fast", 467232),
 ])
 def test_native_catalog_selected_route_floor_keeps_operator_cap(monkeypatch, model_id, expected):
     import workers_projects_runtime.conversation_provider as provider
@@ -10893,20 +10910,24 @@ def test_native_catalog_allows_intact_long_carrier_but_not_a_smaller_observed_se
     instruction, decision, _ = provider._admit_conversation_history(
         [message], start_at=0, turn_context=context, model=model, observed_chars_per_token=1.0)
     floor = model.api_payload(readiness={})["native_history_admission_v1"]["replay_budget_floor_bytes"]
-    assert 192 * 1024 < decision["instruction_bytes"] <= floor == 237500
+    assert 192 * 1024 < decision["instruction_bytes"] <= floor == 442232
     assert context in instruction and source in instruction
     assert message.content == source
     assert decision["omitted_message_count"] == 0
-    # Discovery describes the catalog/config limit. Native session observation is final.
-    with pytest.raises(HTTPException) as rejected:
-        provider._admit_conversation_history([message], start_at=0, turn_context=context,
-            model=model, observed_chars_per_token=1.0, context_window=200000)
-    assert rejected.value.status_code == 413
+    # Native context observations are sizing evidence. The harness admits its complete source.
+    instruction, decision, _ = provider._admit_conversation_history(
+        [message], start_at=0, turn_context=context,
+        model=model, observed_chars_per_token=1.0, context_window=200000)
+    assert decision["instruction_bytes"] > decision["budget_bytes"]
+    assert decision["context_budget_owner"] == "native_harness"
+    assert context in instruction and source in instruction
+    assert decision["omitted_message_count"] == 0
+
 
 
 @pytest.mark.parametrize("configured,window,source_bytes", [
-    ("196608", 475000, 218000), (None, 32768, 20000),
-    (None, 475000, 238000), ("524288", 475000, 238000),
+    ("196608", 475000, 218000), (None, 32768, 30000),
+    (None, 475000, 450000), ("524288", 475000, 450000),
 ])
 def test_complete_review_source_still_honors_config_and_effective_model_limit(
     monkeypatch, configured, window, source_bytes,
@@ -10917,7 +10938,7 @@ def test_complete_review_source_still_honors_config_and_effective_model_limit(
         monkeypatch.setenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", configured)
     else:
         monkeypatch.delenv("GLASSHIVE_CONVERSATION_REPLAY_MAX_BYTES", raising=False)
-    model = provider.HarnessModel(id="synthetic", display_name="Synthetic", harness_profile="synthetic",
+    model = provider.HarnessModel(id="synthetic", display_name="Synthetic", harness_profile="direct-openai",
         native_model="synthetic", effort_choices=("high",), recommended_effort="high", context_window=window)
     with pytest.raises(HTTPException) as rejected:
         provider._admit_conversation_history(
@@ -10966,7 +10987,7 @@ def test_native_pressure_uses_only_current_model_epoch_observed_window(change):
     assert window == result["effective_context_window_tokens"]
     assert observed == (change in (None, "larger"))
     assert provider._conversation_replay_budget_bytes(model, observed_chars_per_token=1.0,
-        context_window=window) <= window * .5
+        context_window=window) == window - provider._conversation_output_reserve_tokens(model)
 
 
 def test_native_window_receipt_obeys_existing_request_order_epoch_and_model_fences(tmp_path, monkeypatch):
