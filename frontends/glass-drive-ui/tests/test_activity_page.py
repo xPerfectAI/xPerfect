@@ -150,7 +150,7 @@ const make = (prefix, count, status = () => 'answered') => Array.from({ length: 
   line_id: prefix + (i + 1), kind: 'message', at: new Date(NOW.getTime() - (tick++) * 1000).toISOString(), status: status(i),
   subject: { type: 'expert', name: 'Synthetic Expert' }, channel: { kind: 'teams' }, person: { name: 'Synthetic Person', you: false },
   preview: 'Synthetic words', open: {} }));
-const runtime = { lines: [], hold: null, reads: 0 };
+const runtime = { lines: [], hold: null, reads: 0, trails: {} };
 async function request(path, options = {}) {
   if (path === '/api/activity/lines') {
     const { cursor, limit, statuses } = options.body; runtime.reads += 1;
@@ -163,7 +163,7 @@ async function request(path, options = {}) {
   }
   const line = runtime.lines.find(item => '/api/activity/lines/' + item.line_id === path);
   if (!line) throw Object.assign(new Error('Activity line not found'), { status: 404 });
-  return { line: { ...line }, trail: [] };
+  return { line: { ...line }, trail: runtime.trails[line.line_id] || [] };
 }
 const settle = async () => { for (let i = 0; i < 30; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
 const open = mount => {
@@ -238,3 +238,40 @@ location.hash = '#activity/L99';
 const other = open(new El('div')); await settle();
 assert.equal(other.shown.state.addressed, null); assert.equal(other.shown.state.items.length, 30);
 """)
+
+
+def test_why_a_reply_was_not_sent_reads_on_in_plain_words_after_the_colon():
+    run_node(PAGE_HARNESS + """
+runtime.lines = make('L', 2);
+runtime.trails.L1 = [
+  { at: runtime.lines[0].at, step: 'delivery', what: 'reply', state: 'dropped', reason: 'The message that the job started went out instead' },
+  { at: runtime.lines[0].at, step: 'delivery', what: 'decision', state: 'dropped', reason: 'This conversation was stopped.' }];
+location.hash = '';
+const mount = new El('div');
+open(mount); await settle();
+mount.querySelector('[data-line="L1"]').querySelector('.activity-line-main').click(); await settle();
+const words = mount.querySelector('[data-line="L1"]').querySelector('.activity-trail').children.map(step => step.textContent);
+assert.ok(words.some(text => text.endsWith('Reply not sent: the message that the job started went out instead')), words);
+assert.ok(words.some(text => text.endsWith('Answer after your decision not sent: this conversation was stopped')), words);
+""")
+
+
+def test_a_worker_waiting_for_its_own_input_leads_to_its_workspace():
+    # Checked, not a fault: a Worker run that waits for native input has no request to decide, and its line carries
+    # Open workspace, where that input is given.
+    run_node(PAGE_HARNESS + """
+runtime.lines = [{ ...make('R', 1)[0], kind: 'run', status: 'waiting_for_you', subject: { type: 'worker', name: 'Synthetic Worker', ai: 'codex-cli' },
+                   channel: { kind: 'xperfect' }, person: { name: '', you: true }, open: { worker_id: 'worker-synthetic' } }];
+location.hash = '';
+const mount = new El('div');
+open(mount); await settle();
+const line = mount.querySelector('[data-line="R1"]');
+assert.equal(line.querySelector('.activity-status').textContent, 'Waiting for you');
+const actions = line.querySelector('.activity-line-actions').children;
+assert.deepEqual(actions.map(a => [a.tagName, a.textContent, a.href]), [['A', 'Open workspace', '/watch/worker-synthetic']]);
+""")
+
+
+def test_the_chat_pages_link_names_the_run_project_tab_as_the_tab_does():
+    page = (STATIC / 'conversation.html').read_text()
+    assert 'href="/" hidden>Run Project</a>' in page and '>Run project</a>' not in page

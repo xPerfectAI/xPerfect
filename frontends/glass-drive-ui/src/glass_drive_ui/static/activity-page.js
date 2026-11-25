@@ -305,7 +305,9 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
       case 'decided': return { approved: 'You approved', rejected: 'You said no', withdrawn: 'The request was withdrawn' }[step.state] || 'Decided';
       case 'delivery': {
         const what = SENT[step.what] || 'Message';
-        if (step.state === 'dropped') return step.reason ? `${what} not sent: ${step.reason.replace(/\.$/, '')}` : `${what} replaced by a newer message, so not sent`;
+        // The runtime's reason is its own sentence; after the colon it reads on in lower case.
+        const why = (step.reason || '').replace(/\.$/, '');
+        if (step.state === 'dropped') return why ? `${what} not sent: ${why.charAt(0).toLowerCase()}${why.slice(1)}` : `${what} replaced by a newer message, so not sent`;
         return { sent: `${what} sent to ${channel}`, pending: `${what} waiting to be sent to ${channel}`, sending: `${what} waiting to be sent to ${channel}`,
           held: `${what} held until you decide`, not_confirmed: `${what}: ${channel} did not confirm it arrived`,
           failed: `${what} could not be sent to ${channel}` }[step.state] || what;
