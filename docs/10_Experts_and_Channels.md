@@ -44,8 +44,8 @@ those Workers on this computer's sign-in; a connected account cannot serve her a
   job's final answer is written once as a result event on the speaking assistant's conversation,
   and the existing result wake starts her next turn.
 - **The hand-off's first words.** On a channel the speaking assistant gives `tell` with a hand-off:
-  the short words for the person now (that the job started, and the answer to anything else they
-  asked that she can give at once). They become one outbox message (kind `handoff`) in the same
+  her whole reply to the person now (that the job started, and the answer to everything else in
+  the message that she can give at once). They become one outbox message (kind `handoff`) in the same
   transaction that marks the job running, so the person hears them after one model step instead of
   two. The turn's own later text is then dropped; if the turn's text reached the outbox first, the
   words are dropped instead, so the person gets one of the two, never both. A job that never starts
