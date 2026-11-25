@@ -81,6 +81,10 @@ saved Expert's own picture on its card.
 *A staged synthetic example on a local install, 25 November 2026. The time under Haiku is its median
 measured on that install.*
 
+![Run Project's My experts, each card with its Expert's own picture](assets/screens/run-project-my-experts.jpg)
+
+*Run Project shows each saved Expert's own picture, or the stack mark when it has none.*
+
 ## Three roles
 
 - **The speaking assistant** has one conversation per person and per channel thread. With Claude

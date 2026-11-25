@@ -48,8 +48,10 @@ and why. Documentation-only changes need accurate links and examples, not unrela
 
 Describe the problem, resulting behavior and validation. Link the owning requirement or issue when
 one exists. Update affected documentation, and add a dated entry to `CHANGELOG.md` for a change a
-user can see. Include only public-safe evidence. Do not commit credentials, real customer data,
-private prompts, machine paths or generated runtime state.
+user can see, following the rules at the top of that file: the website reads it, and a test checks
+it. There is one entry per date; if today already has one, add to it. Include only public-safe
+evidence. Do not commit credentials, real customer data, private prompts, machine paths or
+generated runtime state.
 
 Commit under your own identity. Do not credit an AI tool as author or co-author, and add no
 generated-by line, in commits or in the pull request. The

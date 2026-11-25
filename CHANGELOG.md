@@ -1,5 +1,27 @@
 # Changelog
 
+<!--
+How to add to this file. The website's changelog page reads it, and the test
+frontends/glass-drive-ui/tests/test_changelog_feed.py holds it to these rules.
+
+- One entry per date, newest first: "## YYYY-MM-DD — Title" (an em dash with a space on each
+  side; the title at most 160 characters). If today already has an entry, add to it.
+- Inside an entry every non-empty line is one of these, each on one line:
+  - "> **Summary:** ..." and "> **Example:** ...", once each, at most 700 characters;
+  - "> **Topics:** ...", once, with no repeats, chosen from: Experts, Library, Work control,
+    Results, Scheduling, Connections, Integrations, Deployment, Reliability, Website;
+  - a picture "![alt text](docs/assets/screens/<name>.jpg)": the name in lower-case letters,
+    digits and hyphens, jpg, png or webp, alt text at most 240 characters; at most two per
+    entry, each followed by at most one "> **Image caption:** ..." of at most 700 characters;
+  - "- **Benefit:** ...", at most three per entry, at most 400 characters each;
+  - "- **Added:**", "- **Improved:**", "- **Fixed:**", "- **Preserved:**" or "- **Established:**",
+    at most 1,400 characters each, and at least one per entry. No other label;
+  - a lone ">" between quoted lines.
+- A limit or something not yet done goes into the item it belongs to, in words that do not read
+  as shipped, for example "Not yet established: ...".
+- The whole file stays under 100,000 characters and 200 entries.
+-->
+
 From GlassHive's first retained source snapshot to xPerfect today. These are dated development
 milestones, not versioned release announcements. Related fixes are grouped by their benefit to
 users and builders; internal merges, test-only changes and dependency housekeeping are omitted.
@@ -10,62 +32,38 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 
 [Visual user guide](https://www.xperfect.ai/docs/) · [Website changelog](https://www.xperfect.ai/changelog/)
 
-## 2026-11-25 — An Activity page that says who asked what, where and when
+## 2026-11-25 — Set up an expert on one page. See who asked what, where and when.
 
-> **Summary:** Activity shows one line for each message or run: which expert or Worker, on which channel, by whom, a short preview of what they asked, a plain status and the time. Big buttons narrow it by expert, Worker, time and status, and a search box finds words.
+> **Summary:** Set up an expert on its own page in Run Project's style: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from the models in your install's catalog. Activity shows one line for each message or run: which expert or Worker, on which channel, by whom, a short preview of what they asked, a plain status and the time. A prepared, idle host Worker is accepted while the computer's work slots are full, and a usage limit on one provider account no longer holds Workers on another account.
 >
-> **Example:** Choose two experts and Waiting for you: each line has Decide, which takes you to its request. Open a line to see its recorded steps in place: the message arriving, the job, the Worker that did it and on which model, and what happened to each reply; Open chat shows the words.
+> **Example:** Open Experts, choose an expert, tick two Workers, one of them a newer model, star it as Preferred and save; the next job's coordinator is told to use it first. In Activity, choose two experts and Waiting for you: each line has Decide, which takes you to its request. Prepare a Worker for later while a long job runs; it waits for its turn instead of being refused.
 >
-> **Topics:** Activity, Experts, Work control
+> **Topics:** Experts, Work control, Connections, Reliability
+
+![The top of the Experts page: three saved experts, and what the Finance Director does.](docs/assets/screens/experts-page.jpg)
+> **Image caption:** The top of the Experts page in a staged synthetic example, 25 November 2026.
 
 ![Activity with three experts, lines in several statuses and the filters above them.](docs/assets/screens/activity-filters.jpg)
 > **Image caption:** Activity in a staged synthetic example, 25 November 2026: Who, When and Status buttons, a search box and lines under Today.
 
-![A line opened in place: Maya Chen's message, the job with Open the job, and what was sent back.](docs/assets/screens/activity-line-opened.jpg)
-> **Image caption:** One line opened with its recorded steps; it comes from a real run in the same staged example.
-
-- **Benefit:** See at a glance who asked what, where and when, instead of rows of low-level events.
-- **Benefit:** Narrow even a long history in one or two presses.
-
-- **Added:** Who, When and Status buttons and a search box over the words, the person and the names. Lines under day headings, with Show more for older ones.
-- **Added:** Plain status words from what really happened: Waiting for you, Working, Answered, Done, Stopped, Failed. A message that started a job takes the job's state.
-- **Added:** A line opens in place to show its recorded steps, with each run's own engine steps folded under Details, and keeps its own address. Newer lines wait in one "N new" line while you read further down, so nothing moves under you.
-- **Added:** A read for the signed-in owner only, `POST /v1/activity/lines` and `GET /v1/activity/lines/{line}`; the preview is cut on the server and never logged. `GET /v1/activity` and the MCP tool `workspace_activity` are unchanged.
-- **Changed:** With more than three requests waiting, Needs you shows the newest three and one line Show all N that opens the rest in place, so Activity's own lines stay in reach. The count on the tab, the pop-up, each card and each decision are unchanged.
-- **Changed:** The old event rows are gone from the page; their words are kept under each line's Details.
-
-## 2026-11-25 — An Experts page you can read at a glance
-
-> **Summary:** Set up an expert on its own page, in the same style as Run Project: what it does and its picture first, then its identity instructions, its knowledge, and an AI team you choose by mark and name from every model your install has.
->
-> **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run Project now shows the expert's own picture on its card.
->
-> **Topics:** Experts, Models, Work control
-
-![The Experts page with three saved experts and the Finance Director's setup.](docs/assets/screens/experts-page.jpg)
-> **Image caption:** The Experts page in a staged synthetic example, 25 November 2026.
-
-![Run Project's My experts, each card with its expert's own picture.](docs/assets/screens/run-project-my-experts.jpg)
-> **Image caption:** Run Project shows each saved expert's own picture, or the stack mark when it has none.
-
-- **Benefit:** The whole setup on one page, with one scroll.
+- **Benefit:** The whole setup of an expert on one page, with one scroll.
 - **Benefit:** Choose the model for each role from your install's catalog, not a fixed list: Claude and Codex by exact model, Grok on its usual one; a model tied to one connected account is not offered. Say which Worker you prefer.
+- **Benefit:** See at a glance who asked what, where and when, instead of rows of low-level events, and narrow even a long history in one or two presses.
 
 - **Added:** The Experts tab after Run Project. It replaces the Create and Edit pop-up; Run Project's Edit and "+" open it. Knowledge and Skills use Run Project's searchable chooser. Unsaved changes stay until you save or discard them, and choosing another expert asks in the page.
 - **Added:** The AI team as one table: each AI is one line for its usual model, its other models (newest first, from the install's catalog) open under it, and the three roles are columns, each said in a few words. A click anywhere in a cell chooses it; the table works from the keyboard as one control. An AI that is not set up on this computer says so, with a Connect button.
 - **Added:** Workers by exact model, and a Preferred Worker. Each allowed Worker is an AI on its usual model or one exact model of Claude or Codex; the preferred one comes first and the job's coordinator is told. The coordinator's model can be chosen too. Experts saved before keep their setup and their routes exactly.
-- **Changed:** Run Project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
+- **Improved:** Run Project shows each saved expert's own picture where the stack mark was. Accounts use plain words: which sign-in each role uses, and who takes over at a limit.
 
-## 2026-11-25 — Prepare work while the host is busy; keep a second account working
-
-> **Summary:** A prepared, idle host Worker is accepted while the computer's work slots are full, and a usage limit on one provider account no longer holds Workers on another account.
->
-> **Example:** Prepare a Worker for later while a long job runs; it waits for its turn instead of being refused. With two accounts connected for the same AI, Workers on the second keep going when the first reaches its limit.
->
-> **Topics:** Work control, Connections, Reliability
+- **Added:** Activity: Who, When and Status buttons and a search box over the words, the person and the names. Lines under day headings, with Show more for older ones.
+- **Added:** Plain status words from what really happened: Waiting for you, Working, Answered, Done, Stopped, Failed. A message that started a job takes the job's state.
+- **Added:** A line opens in place to show its recorded steps, with each run's own engine steps folded under Details, and keeps its own address. Newer lines wait in one "N new" line while you read further down, so nothing moves under you. Open a line to see the message arriving, the job, the Worker that did it and on which model, and what happened to each reply; Open chat shows the words.
+- **Added:** A read for the signed-in owner only, `POST /v1/activity/lines` and `GET /v1/activity/lines/{line}`; the preview is cut on the server and never logged. `GET /v1/activity` and the MCP tool `workspace_activity` are unchanged.
+- **Improved:** With more than three requests waiting, Needs you shows the newest three and one line Show all N that opens the rest in place, so Activity's own lines stay in reach. The count on the tab, the pop-up, each card and each decision are unchanged.
+- **Improved:** The old event rows are gone from the page; their words are kept under each line's Details.
 
 - **Improved:** Preparing a host Worker that does not start at once (`start_synchronously: false`) is accepted while host slots or the manual-mission lease are held. It starts nothing; each run still takes its own lease when it is assigned and launched. A Worker started at once keeps the same refusal.
-- **Fixed:** A Worker that must run on a named provider account keeps its cooling record under that account, everywhere it is read: before admission, on a pinned route, for the configured fallback and for a conversation turn. Limits recorded earlier under the owner keep holding the owner's own Workers until they expire.
+- **Fixed:** A Worker that must run on a named provider account keeps its cooling record under that account, everywhere it is read: before admission, on a pinned route, for the configured fallback and for a conversation turn. Limits recorded earlier under the owner keep holding the owner's own Workers until they expire. With two accounts connected for the same AI, Workers on the second keep going when the first reaches its limit.
 
 ## 2026-11-24 — Your expert, where your team already works
 
@@ -73,7 +71,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Example:** Create an expert that works the way you do, connect it to Teams and send it a question from your own Teams account. Ask for a report and keep talking while the job runs; the result arrives once, in the same chat. Set Ask me first to Always ask and approve its reply from Needs you.
 >
-> **Topics:** Experts, Channels, Microsoft Teams, Work control, Reliability
+> **Topics:** Experts, Integrations, Work control, Reliability
 
 ![The Finance Director's Channels window: Teams connected, with the people who may message it.](docs/assets/screens/teams-channel-card.jpg)
 > **Image caption:** The Teams card of a staged synthetic expert, 25 November 2026. Its Connected badge reflects a local stand-in for Microsoft's service.
@@ -97,8 +95,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 - **Added:** Each person an expert serves gets their own job folder on this computer, made at their first job; the owner's own Chat has its own. The job's coordinator and its Workers on this computer work in it. With full access a job can still read other folders, so this keeps people's work apart by default; a sandboxed workspace is the wall.
 - **Added:** Each AI's own mark beside the AI choices, and channel marks of xPerfect's own; an install may show a brand's own mark from its `brand-assets` folder, beside the plain-text name. An expert's own picture becomes its Teams app's colour icon.
 
-- **Proven:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite shows no new failures against the base release.
-- **Not yet:** A deployed copy on a server, a second real person, files and group chats, Slack and approving from inside Teams. On this computer an expert's Workers have full access, so its instructions and Ask me first are behaviour, not a wall. Apart from this computer's own Claude sign-in, an account runs one Worker of its AI at a time. See [Experts on channels](docs/10_Experts_and_Channels.md) and the [QA playbook](docs/05_QA_Quick_Power_Playbook.md#11-experts-on-channels).
+- **Established:** In one real organisation, with its owner as the only listed person: messages and replies in Teams, a background job told once, and Ask me first raising a request, the owner's Reject in the page and the expert's own reply. In the page, every Ask me first path. On the exact models, extraction attempts leaked nothing. The existing test suite shows no new failures against the base release. Not yet established: a deployed copy on a server, a second real person, files and group chats, Slack and approving from inside Teams. On this computer an expert's Workers have full access, so its instructions and Ask me first are behaviour, not a wall. Apart from this computer's own Claude sign-in, an account runs one Worker of its AI at a time. The limits are kept in Experts on channels (docs/10) and the QA playbook (docs/05).
 
 ## 2026-10-25 — Keep your best experts. Stay in control.
 
