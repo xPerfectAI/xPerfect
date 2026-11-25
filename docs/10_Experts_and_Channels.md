@@ -52,13 +52,16 @@ project's style; Run project's Edit and the "+" card in My experts open it. From
   three roles, each said in a few words: **Talks to people**, **Coordinates** and **Workers** (any number;
   with several, a star marks the **Preferred** one). A click anywhere in a cell chooses it; the table is
   one keyboard stop with arrow keys between choices. An AI whose tool is not on this computer and that has
-  no connected account says so, with a button to connect it. Under the table: **Replies** (Quick or
+  no connected account says so, with a button to connect it. Workers run on a connected, ready account of
+  their AI (talking and coordinating can use this computer's own sign-in), so an AI without one says that
+  its Workers need it, with the same button, and its Workers cannot be ticked. Under the table: **Replies** (Quick or
   Usual) and **Accounts** (which sign-in each role uses, and who takes over at a limit);
 - **Ask Me First**, then **Where It Works** and what it may do there;
 - **Save** (a new version) and **Discard changes**.
 
-Nothing on the page scrolls on its own: the page is the one scroll, at every width. Unsaved changes
-are kept in the tab (a reload brings them back) until they are saved or discarded; choosing another
+Nothing on the page scrolls on its own: the page is the one scroll, at every width. Unsaved changes,
+the instructions text included, are kept in the browser tab's own storage (session storage: only that
+tab, gone when it closes), so a reload brings them back until they are saved or discarded; choosing another
 Expert with unsaved changes asks in the page, never in a browser dialog. Run project shows each
 saved Expert's own picture on its card.
 

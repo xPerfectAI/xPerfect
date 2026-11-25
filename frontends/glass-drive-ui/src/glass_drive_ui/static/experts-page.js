@@ -81,6 +81,13 @@ export function notSetUp(profile, data) {
   return Boolean(data) && option?.host_cli_installed === false && !connected;
 }
 
+/** Workers of an AI run on a connected, ready account of that AI (the runtime refuses a helper without one); talking
+ *  and coordinating can use this computer's own sign-in. Unknown (no data yet) is never shown as missing. */
+export function workersNeedAccount(profile, data) {
+  const providers = { 'claude-code': ['claude', 'anthropic'], 'codex-cli': ['codex', 'openai'], 'grok-build': ['grok', 'xai'] }[profile] || [];
+  return Boolean(data) && !(data.provider_accounts || []).some(a => a.status === 'ready' && providers.includes(String(a.provider || '').toLowerCase()));
+}
+
 /** The Expert's settings as the runtime saves them, from what the page shows. */
 export function readTeam(state) {
   const work = state.work.filter(Boolean);
@@ -442,7 +449,8 @@ export function mountExpertsPage({ root, getData = () => null, request = library
       const workCell = node('td', 'experts-work');
       const entry = line.id || ai.profile;
       const ticked = state.work.includes(entry);
-      const box = node('input'); box.type = 'checkbox'; box.checked = ticked; box.disabled = unavailable && !ticked;
+      const box = node('input'); box.type = 'checkbox'; box.checked = ticked;
+      box.disabled = (unavailable || workersNeedAccount(ai.profile, getData())) && !ticked;
       box.setAttribute('aria-label', `${ai.name} ${line.name} may work`);
       box.onchange = () => {
         state.work = box.checked ? [...state.work, entry] : state.work.filter(value => value !== entry);
@@ -490,10 +498,12 @@ export function mountExpertsPage({ root, getData = () => null, request = library
           tr.append(label, ...cells(ai, line)); group.append(tr);
         }
       }
-      if (notSetUp(ai.profile, getData())) {
+      const missing = notSetUp(ai.profile, getData()) ? `${ai.name} is not set up on this computer yet.`
+        : workersNeedAccount(ai.profile, getData()) ? `${ai.name} Workers need a connected ${ai.name} account.` : '';
+      if (missing) {
         const tr = node('tr', 'experts-team-missing'); const td = node('td'); td.colSpan = 4;
         const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';
-        td.append(node('span', '', `${ai.name} is not set up on this computer yet.`), link); tr.append(td); group.append(tr);
+        td.append(node('span', '', missing), link); tr.append(td); group.append(tr);
       }
       grid.append(group);
     }

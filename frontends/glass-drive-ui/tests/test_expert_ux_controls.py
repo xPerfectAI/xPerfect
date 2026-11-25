@@ -495,8 +495,19 @@ def test_an_ai_not_set_up_on_this_computer_says_so_with_the_way_to_connect_it():
              "assert.equal(notSetUp('codex-cli', data(false, [{provider: 'openai', status: 'error'}])), true, 'an account that is not ready is not enough');\n"
              "assert.equal(notSetUp('codex-cli', data(null)), false, 'unknown is never shown as missing');\n"
              "assert.equal(notSetUp('codex-cli', null), false, 'before the page has its data');\n")
-    # The line names the AI and its button goes where AIs are connected; nothing is hidden or left dead.
-    assert "td.append(node('span', '', `${ai.name} is not set up on this computer yet.`), link)" in page
+    # Workers need a connected, ready account of their AI (the runtime refuses a helper without one).
+    workers = re.search(r"export function workersNeedAccount\(profile, data\) \{.*?\n\}\n", page, re.S)
+    assert workers, 'workersNeedAccount'
+    run_node("import assert from 'node:assert/strict';\n" + workers.group(0).replace('export ', '') +
+             "assert.equal(workersNeedAccount('codex-cli', {provider_accounts: [{provider: 'claude', status: 'ready'}]}), true);\n"
+             "assert.equal(workersNeedAccount('codex-cli', {provider_accounts: [{provider: 'openai', status: 'ready'}]}), false);\n"
+             "assert.equal(workersNeedAccount('claude-code', {provider_accounts: [{provider: 'claude', status: 'ready'}]}), false);\n"
+             "assert.equal(workersNeedAccount('codex-cli', null), false, 'unknown is never shown as missing');\n")
+    # The line names the AI and its button goes where AIs are connected; a Worker that cannot run is not offered,
+    # but one already saved stays visible and can be unticked.
+    assert "`${ai.name} is not set up on this computer yet.`" in page
+    assert "`${ai.name} Workers need a connected ${ai.name} account.`" in page
+    assert "box.disabled = (unavailable || workersNeedAccount(ai.profile, getData())) && !ticked;" in page
     assert "const link = node('a', 'secondary-button compact-button', `Connect ${ai.name}`); link.href = '/#connections';" in page
 
 
