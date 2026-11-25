@@ -7,8 +7,8 @@ import { mountWorkerOnboarding, workerChoiceLabel, hostAccountLabel, workerTypeO
 import { createLaunchDraft } from './launch-draft.js?v=20261024polish1';
 import { openWorkspaceMembers } from './workspace-members.js?v=20261024polish1';
 import { attachNativeControls, canGuideNativeTurn, selectConnectedClaudeAccount } from './native-controls.js?v=20261024polish1';
-import { initializeControlPlane, refreshControlPlane, persistCapabilityReview } from './control-plane.js?v=20261125activity1';
-import { renderActivity } from './activity-page.js?v=20261125activity1';
+import { initializeControlPlane, refreshControlPlane, persistCapabilityReview } from './control-plane.js?v=20261125activity2';
+import { renderActivity } from './activity-page.js?v=20261125activity2';
 import { credentialPolicyTransition, preferredProviderAccountId, shouldResumeOnWorkspaceOpen, workerAccountSummary, workspaceLifecycleControl, workspaceSetupAction } from './launch-policy.js?v=20261024polish1';
 import { workspaceDeliveryModel } from './delivery-presenter.js?v=20261024polish1';
 import { compareWorkspacePriority, previewWorkerIds, shouldHydrateWorkspaceDelivery } from './workspace-overview.js?v=20261024polish1';

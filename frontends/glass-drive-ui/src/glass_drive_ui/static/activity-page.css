@@ -46,8 +46,9 @@
 .activity-line-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .activity-trail { grid-column: 1 / -1; display: grid; gap: 8px; margin: 2px 0 8px 54px; padding: 0; list-style: none; }
 .activity-trail[hidden] { display: none; }
-.activity-step { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: var(--font-label); }
-.activity-step-time { flex: 0 0 auto; min-width: 92px; color: var(--muted); font-size: var(--font-help); font-variant-numeric: tabular-nums; }
+.activity-step { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: baseline; gap: 14px; font-size: var(--font-label); }
+.activity-step-time { color: var(--muted); font-size: var(--font-help); font-variant-numeric: tabular-nums; }
+.activity-step-what { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; overflow-wrap: anywhere; }
 .activity-empty { display: grid; justify-items: start; gap: 10px; padding: 18px 4px; color: var(--muted); }
 .activity-empty p { margin: 0; }
 .activity-more { justify-self: center; }
@@ -63,4 +64,5 @@
   .activity-line-actions { justify-content: stretch; padding-left: 54px; }
   .activity-line-actions > * { flex: 1 1 auto; justify-content: center; text-align: center; }
   .activity-trail { margin-left: 8px; }
+  .activity-step { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }

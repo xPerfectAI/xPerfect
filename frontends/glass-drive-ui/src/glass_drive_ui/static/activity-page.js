@@ -284,12 +284,13 @@ export function initActivityPage({ mount, request = libraryRequest, view = null,
       trail.replaceChildren(...groupRuns(detail.trail || []).map(step => {
         const entry = node('li', 'activity-step');
         const at = node('time', 'activity-step-time', clock(step.at, true)); at.dateTime = step.at || '';
-        entry.append(at, node('span', '', stepWords(step, item)));
+        const what = node('span', 'activity-step-what'); what.append(node('span', '', stepWords(step, item)));
+        entry.append(at, what);
         if (step.step === 'asked_you' && step.state === 'pending' && step.review_id) {
-          const go = node('button', 'quiet-button', 'Go to it'); go.type = 'button'; go.addEventListener('click', () => goToRequest(step.review_id)); entry.append(go);
+          const go = node('button', 'quiet-button', 'Go to it'); go.type = 'button'; go.addEventListener('click', () => goToRequest(step.review_id)); what.append(go);
         }
         if (step.step === 'job' && step.conversation_id) {
-          const a = node('a', 'quiet-button', 'Open the job'); a.href = '/conversation?id=' + encodeURIComponent(step.conversation_id); entry.append(a);
+          const a = node('a', 'quiet-button', 'Open the job'); a.href = '/conversation?id=' + encodeURIComponent(step.conversation_id); what.append(a);
         }
         return entry;
       }));
