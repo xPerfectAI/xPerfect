@@ -16,18 +16,37 @@ For documentation ownership, names and maintenance, follow the
 The repository is organized as follows:
 
 - `README.md`
-  - project entry point
+  - project entry point; `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` and
+    `SECURITY.md` beside it
+- `xperfect`
+  - the launcher (`./xperfect start`, `doctor`, `stop`, `restart`); `scripts/host.py` runs a
+    local install, `scripts/render-capability-comparison.py` renders the comparison
 - `docs/`
-  - current source-of-truth product docs
+  - current source-of-truth product docs; `docs/user-guide/` is the visual guide's source and
+    `docs/assets/` its images
 - `contracts/`
   - API and example payloads
 - `runtime_phase1/`
   - current standalone runtime implementation
 - `frontends/`
   - separate frontend/operator surfaces
+- `integrations/teams/`
+  - the optional Microsoft Teams channel package for Experts; it talks to xPerfect only through
+    the channel routes
 - `integrations/evidence-kit/`
   - optional, standard-library examples for immutable intake, evaluation, evidence
     export and verified delivery; not imported by the runtime
+- `integrations/livekit/`
+  - a reference voice integration
+- `deployment/linux/`
+  - the packaged Linux service, its images, upgrade and restore
+- `skills/` and `plugins/`
+  - the `connect-glasshive` skill for native clients, and its Codex and Claude Code plugin form
+- `tests/`
+  - package, upgrade and restore tests; component tests live in `runtime_phase1/tests` and
+    `frontends/glass-drive-ui/tests`
+- `.github/`
+  - workflows, code owners, issue forms and the pull request template
 
 ## Boundary Rules
 

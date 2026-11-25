@@ -100,6 +100,14 @@ Removing a saved Library item does not remove the workspace's copy. See
 Follow the [schedule guide](../runtime_phase1/README.md#generic-worker-and-webhook-schedules) for the
 full setup, delivery check and eight useful examples, including Slack reminders, n8n, Make and your own app.
 
+### Let people message an expert
+
+Open **Experts**, choose or create an expert, then **Channels → Add Teams**, and sign in with the
+code Microsoft shows. List the people who may message it in Teams. With **Ask me first** set to
+Always ask, each reply or job waits for your approval under **Needs you**; **Activity** shows each
+message, who sent it and its status. [Experts on channels](10_Experts_and_Channels.md) has the
+setup and its current limits.
+
 ### Manage experts and workspaces
 
 | You want to… | Do this |

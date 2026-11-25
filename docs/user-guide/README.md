@@ -45,12 +45,13 @@ The recommended five-profession example uses the supported host Claude Code Skil
 Docker remains an alternative for its offered native worker routes; the guide does not claim
 that every professional starter or Skill works on every deployment.
 
-The expert/Finance illustrations are byte-identical publication mirrors of the canonical files
+The expert, Activity and Finance illustrations are byte-identical publication mirrors of the canonical files
 under `docs/assets/screens/`. The local copies under this guide's `assets/` make its portable
 preview and existing same-origin website publication work without changing the site CSP. Update
 these mirrors only by copying the reviewed canonical files; do not edit a second image source.
-The gallery shows the current 25 October UI; the Finance report/delivery retain their real
-24 October synthetic-work scope. Dated result illustrations are not a new provider acceptance run. Unused older UI/QA captures are removed from publication. The stock/Skill fixtures remain
+The gallery shows the 25 November UI; the Experts page and Activity pictures come from a staged
+synthetic example of the same date; the Finance report/delivery retain their real 24 October
+synthetic-work scope. Dated result illustrations are not a new provider acceptance run. Unused older UI/QA captures are removed from publication. The stock/Skill fixtures remain
 clearly marked connectivity examples, separate from the professional demonstration.
 
 No raw sessions, prompts, private accounts, customer material, logs or local runtime state are

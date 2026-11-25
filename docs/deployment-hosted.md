@@ -6,7 +6,7 @@ The hosted profile runs the same three containers as the local package — runti
 
 **Direct browser proof.** A fresh sign-in on the retained hosted-mode test server also completed a Codex expert from an uploaded native skill and CSV, then a follow-up with the same account; the result survived a real browser reload. This was a local Linux VM in hosted mode, not an Internet cloud deployment.
 
-**Still partial.** The Internet/cloud novice journey and external Codex/Claude setup through Connections remain unverified; that setup is currently unavailable. A worker writing past a person's storage limit has not been verified. The diagnostic expert was preserved; this result does not establish new cloud, automatic client setup or quota-overrun success. Users start with the [hosted browser steps](quickstart.md#on-a-hosted-server); server operators follow this page.
+**Still partial.** The Internet/cloud novice journey and external Codex/Claude setup through Connections remain unverified; that setup is currently unavailable. A worker writing past a person's storage limit has not been verified. The diagnostic expert was preserved; this result does not establish new cloud, automatic client setup or quota-overrun success. Users start with the [hosted browser steps](quickstart.md#using-a-hosted-server); server operators follow this page.
 
 ## What you need
 

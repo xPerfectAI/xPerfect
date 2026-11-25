@@ -18,6 +18,12 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 >
 > **Topics:** Activity, Experts, Work control
 
+![Activity with three experts, lines in several statuses and the filters above them.](docs/assets/screens/activity-filters.jpg)
+> **Image caption:** Activity in a staged synthetic example, 25 November 2026: Who, When and Status buttons, a search box and lines under Today.
+
+![A line opened in place: Maya Chen's message, the job with Open the job, and each reply sent to Teams.](docs/assets/screens/activity-line-opened.jpg)
+> **Image caption:** One line opened as a story; it comes from a real run in the same staged example.
+
 - **Benefit:** See at a glance who asked what, where and when, instead of rows of low-level events.
 - **Benefit:** Narrow a long history in one or two presses; xPerfect does the filtering and paging itself.
 
@@ -35,6 +41,12 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Example:** Open Experts, choose an expert and tick two Workers, one of them a newer model, and star it as Preferred. Save, and the next job's coordinator is told to use it first. Run project now shows the expert's own picture on its card.
 >
 > **Topics:** Experts, Models, Work control
+
+![The Experts page with three saved experts and the Finance Director's setup.](docs/assets/screens/experts-page.jpg)
+> **Image caption:** The Experts page in a staged synthetic example, 25 November 2026.
+
+![Run Project's My experts, each card with its expert's own picture.](docs/assets/screens/run-project-my-experts.jpg)
+> **Image caption:** Run Project shows each saved expert's own picture, or the stack mark when it has none.
 
 - **Benefit:** One page, one scroll: no pop-up with scroll bars inside each other, at any width and in both themes.
 - **Benefit:** Choose any model your install has for each role, not one fixed list, and say which Worker you prefer.
@@ -62,6 +74,12 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Example:** Create an expert that works the way you do, connect it to Teams and send it a question from your own Teams account. Ask for a report and keep talking while the job runs; the result arrives once, in the same chat. Set Ask me first to Always ask and approve its reply from Needs you.
 >
 > **Topics:** Experts, Channels, Microsoft Teams, Work control, Reliability
+
+![The Finance Director's Channels window: Teams connected, with the people who may message it.](docs/assets/screens/teams-channel-card.jpg)
+> **Image caption:** The Teams card of a staged synthetic expert, 25 November 2026; its link was a local stand-in for Microsoft's service.
+
+![Needs you with one request: who asked, on which channel, their words and the reply that waits.](docs/assets/screens/needs-you-request.jpg)
+> **Image caption:** A real reply held on Always ask until the owner decides, in the same staged example.
 
 - **Benefit:** Reach an expert from a Teams personal chat. Only the people you list get an answer.
 - **Benefit:** Stay in control: see exactly what the expert would send or start, approve or reject it, and change its instructions for the next message.
@@ -91,7 +109,7 @@ xPerfect is licensed under [Apache 2.0](LICENSE); this does not change GlassHive
 > **Topics:** Experts, Work control, Connections, Deployment, Reliability
 
 ![The current expert gallery with five illustrated starting professions and Create.](docs/assets/screens/expert-team.jpg)
-> **Image caption:** Expert gallery, captured 25 October 2026: five packaged AI Workers and Create.
+> **Image caption:** Expert gallery with five packaged AI Workers and Create, retaken 25 November 2026 when the Experts tab joined the bar; the October capture is in the repository's history.
 
 ![Choose an exact saved Finance Director version from the Versions dialog.](docs/assets/screens/expert-versions.jpg)
 > **Image caption:** Actual Versions dialog with a synthetic Finance Director setup, 25 October 2026.

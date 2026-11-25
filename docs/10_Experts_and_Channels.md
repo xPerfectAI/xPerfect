@@ -74,6 +74,12 @@ tab, gone when it closes), so a reload brings them back until they are saved or 
 Expert with unsaved changes asks in the page, never in a browser dialog. Run project shows each
 saved Expert's own picture on its card.
 
+![The Experts page with three saved experts and the Finance Director's setup](assets/screens/experts-page.jpg)
+
+![The AI team table: Claude talks and coordinates, two Claude Workers with Sonnet as the Preferred one](assets/screens/experts-ai-team.jpg)
+
+*A staged synthetic example on a local install, 25 November 2026.*
+
 ## Three roles
 
 - **The speaking assistant** has one conversation per person and per channel thread. With Claude
@@ -102,6 +108,10 @@ saved Expert's own picture on its card.
 ## Ask me first
 
 One mechanism: what the Expert is about to send or start waits for the owner.
+
+![Needs you with one request: who asked, on which channel, their words and the reply that waits](assets/screens/needs-you-request.jpg)
+
+*A real reply held on Always ask, in the staged synthetic example, 25 November 2026.*
 
 - A request shows exactly what waits: a reply with its text, or a job with its goal, plus who
   asked, where, when, and the Expert's reason.
@@ -155,6 +165,11 @@ or a server for a wall.
   `/v1/channels/{id}/package`, `/heartbeat`, `/inbound`, `/deliveries/claim`, `/deliveries/{delivery}`.
 
 ### Microsoft Teams
+
+![The Finance Director's Channels window: Teams connected, with the people who may message it](assets/screens/teams-channel-card.jpg)
+
+*The Teams card of a staged synthetic expert, 25 November 2026. Its link was a local stand-in for
+Microsoft's service, so the card shows the page, not a Microsoft connection.*
 
 `integrations/teams` uses Microsoft's Teams SDK for Python (`microsoft-teams-apps` 2.2.1).
 

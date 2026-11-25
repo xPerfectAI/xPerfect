@@ -4,7 +4,7 @@
 
 ## Vision
 
-xPerfect is a standalone runtime for powerful AI workers that can be resumed, watched, interrupted, and steered in real time.
+xPerfect is a standalone runtime for AI workers that can be resumed, watched, interrupted and steered while they work.
 
 ### Packaged first use
 

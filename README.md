@@ -16,8 +16,9 @@ and Grok, keeping each worker's files, progress and results together on your com
 [Compare the landscape](https://www.xperfect.ai/docs/compare.html) · [Webhooks](runtime_phase1/README.md#generic-worker-and-webhook-schedules)
 
 Our vision: turn experts' knowledge and skills into reusable AI counterparts that can work
-across your channels and tools. The starting team below is one way to begin; you can create,
-save and adapt your own workers.
+across your channels and tools. The first channel is Microsoft Teams: the people you choose
+message your expert there, and you can approve what it sends first. The starting team below is
+one way to begin; you can create, save and adapt your own workers.
 
 ## From a job to a result
 
@@ -32,7 +33,7 @@ Starting from one creates a new worker. Reusing an existing worker continues its
 
 ![Choose from five professional AI Workers, with their included knowledge and abilities](docs/assets/screens/expert-team.jpg)
 
-*Current expert picker, captured 25 October 2026: five starting professions and the Create card.*
+*The expert picker in Run Project, captured 25 November 2026: five starting professions and Create.*
 
 ## What xPerfect adds
 
@@ -54,7 +55,7 @@ schedules and results. Use xPerfect itself, connect another AI app, or build you
 | [Growth Marketer](runtime_phase1/src/workers_projects_runtime/starter_packs/growth-marketer/README.md) | Prepare a launch from a brand brief and channel evidence. | Campaign and copy drafts with a measurement plan. |
 | [Finance Director](runtime_phase1/src/workers_projects_runtime/starter_packs/finance-director/README.md) | Explain financial performance and cash changes. | A board brief and editable budget/cash calculations. |
 
-Each package includes synthetic inputs, a meaningful job and checks you can repeat.
+Each package includes synthetic inputs, a sample job and checks you can repeat.
 [Walk through the Finance Director example](docs/workshop.md), including a follow-up and bad input.
 These are starting points, not professional credentials or certification. Their current native
 skill path uses **Claude Code on the host**, with review for the actual worker. Optional tools
@@ -64,6 +65,24 @@ keep their own setup and account requirements; choosing an expert does not autho
 
 *Actual native work using the public synthetic Finance example. Open the report and editable
 calculations, then [check them against their sources](docs/workshop.md#inspect-the-result).*
+
+## Let people message your expert
+
+Set up an expert on the **Experts** page: what it does, its picture, its identity instructions,
+its knowledge and Skills, and the AI team that talks, coordinates and works. Connect it to
+Microsoft Teams and list the people who may message it. It answers short questions at once and
+hands bigger work to Workers in the background; the result arrives once, in the same chat.
+
+![The Experts page with three saved experts and the Finance Director's setup](docs/assets/screens/experts-page.jpg)
+
+With **Ask me first** set to Always ask, nothing is sent or started until you approve it under
+**Needs you**. **Activity** shows who asked what, on which channel and when, and narrows the list
+by expert, Worker, time, status or words.
+
+![Activity with three experts, lines in several statuses and the filters above them](docs/assets/screens/activity-filters.jpg)
+
+*A staged synthetic example on a local install, captured 25 November 2026.* Setup, Ask me first
+and current limits: [Experts on channels](docs/10_Experts_and_Channels.md).
 
 ## Keep what works
 
@@ -102,9 +121,10 @@ It uses the same public APIs and run records; client rules stay outside xPerfect
 
 ### Manage your experts and saved work
 
-- **Workspaces → More → Save as expert** keeps a worker’s setup for another job. In
-  **Run Project → My experts → Manage**, use **Edit** to save a new version, **Copy** for a
-  separate expert, or **Versions** to inspect an earlier setup. Existing workers keep their setup.
+- **Workspaces → More → Save as expert** keeps a worker’s setup for another job. Open
+  **Experts** to change a saved expert; each save is a new version. In **Run Project → My experts
+  → Manage**, **Copy** makes a separate expert and **Versions** shows an earlier setup. Existing
+  workers keep their setup.
 - **Archive** puts an expert aside. **Remove** hides it after confirmation. Find it under
   **Archived** or **Removed** and choose **Restore** when you need it again.
 - **Workspaces → More → Remove** stops that worker’s current and scheduled work, then hides its
@@ -200,6 +220,11 @@ local-only inference. [Security](SECURITY.md) · [Capabilities](docs/capability-
 - **Worker copies:** a copy can retain a Ready, compatible account selected by the same owner.
   Credentials, browser sign-ins and native chat history are not copied. An unavailable or
   incompatible account needs a new selection. [Copy behavior](docs/capability-matrix.md).
+- **Experts on channels:** Microsoft Teams personal chats, proven on a local install in one
+  organisation. A copy on a server and a second real person are not yet proven; files, group
+  chats, Slack and approving from inside Teams are later capabilities. On this computer an
+  expert's Workers have full access, so its instructions and Ask me first guide its behaviour;
+  they are not a security boundary.
 - **Shared workspaces:** require a configured Linux host; use a separate workspace on a Mac.
   This limit is separate from supported local Chat. Chat offers only the routes the actual
   deployment and installed tools can use. [Current support](docs/capability-matrix.md).
@@ -215,8 +240,9 @@ accounts or calling incomplete work finished.
 - [Quickstart](docs/quickstart.md) · [Complete examples](docs/workshop.md)
 - [Deployment and recovery](docs/deployment.md) · [Account setup](docs/host-setup.md)
 - [Developer walkthrough](docs/developer.md) · [LiveKit reference](integrations/livekit/README.md)
+- [Experts on channels](docs/10_Experts_and_Channels.md) · [Activity and Needs you](docs/07_Minimal_Unified_Operator_UI.md#activity)
 - [Capability guide](docs/capability-matrix.md) · [Changelog](CHANGELOG.md)
-- [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+- [Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [Security](SECURITY.md)
 
 <details>
 <summary>Technical contracts</summary>

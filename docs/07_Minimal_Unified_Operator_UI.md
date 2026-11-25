@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define a separate, minimal, modern operator UI for xPerfect that does not alter the existing runtime UI and does not mix frontend concerns into xPerfect core runtime code.
+Define a separate, minimal operator UI for xPerfect that does not alter the existing runtime UI and does not mix frontend concerns into xPerfect core runtime code.
 
 ## Visual Thesis
 
@@ -1383,6 +1383,8 @@ name, never on a button. Whether a brand's terms allow that use is the owner's t
 Activity says who asked what, where and when, newest first, with **Needs you** and **Recent** on top as
 above. Each line is one thing that happened, never one low-level event:
 
+![Activity with three experts, lines in several statuses and the filters above them](assets/screens/activity-filters.jpg)
+
 - a message to an Expert, on a channel or in the owner's Chat: the Expert's picture (or the stack
   mark) and name, the channel with its mark, the person by name ("You" in the owner's own Chat,
   "Someone" without a name), a short preview of their words ("(no text)" without any), a status and
@@ -1410,6 +1412,10 @@ one **Details** line; nothing is dropped. The opened line has its own address (`
 **Open chat** or **Open workspace** stays on every line. While the tab is shown the page looks for newer
 lines every 20 seconds: they go on top when you are at the top, otherwise one **N new** line waits at
 the top of the window; nothing you are reading moves. One scroll for the whole page at any width.
+
+![A line opened in place: Maya Chen's message, the job with Open the job, and each reply sent to Teams](assets/screens/activity-line-opened.jpg)
+
+*A staged synthetic example on a local install, 25 November 2026; the opened line is a real run.*
 
 The page reads `POST /v1/activity/lines` (filters in the body, so a searched phrase never sits in an
 address) and `GET /v1/activity/lines/{line}` for a trail, for the signed-in owner only: signed links
