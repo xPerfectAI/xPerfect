@@ -2093,7 +2093,24 @@ class CoordinatorService:
                 or request["session_id"] != session["session_id"]
                 or not request.get("message_id")):
             raise CoordinatorScopeError("Current accepted conversation turn is unavailable")
+        # A turn run again (a later attempt or run of the same request, after a restart or a lost process) that
+        # already made goals before this attempt began adds none: a replay could name the same work anew under
+        # new ids. It gets back the goals it already has. Read from typed records only: the live attempt, the
+        # turn, and the goals of that turn.
+        if self._goals_made_before_attempt(conversation_id, request["message_id"], principal):
+            return self.snapshot(tenant, owner, conversation_id)
         return self.accept_goals(tenant, owner, conversation_id, request["message_id"], goals)
+
+    def _goals_made_before_attempt(self, conversation_id: str, turn_id: str, principal: dict) -> bool:
+        with self.store._connect() as conn:
+            attempt = conn.execute("SELECT claimed_at FROM run_attempts WHERE attempt_id=? AND run_id=?",
+                                   (str(principal.get("attempt_id") or ""), str(principal["run_id"]))).fetchone()
+            if attempt is None or not attempt["claimed_at"]:
+                return False
+            began = datetime.fromisoformat(str(attempt["claimed_at"]).replace("Z", "+00:00"))
+            return any(datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00")) < began
+                       for row in conn.execute("SELECT created_at FROM coordinator_goals WHERE conversation_id=? "
+                                               "AND source_turn_id=?", (conversation_id, turn_id)))
 
     def stop_conversation(self, tenant: str, owner: str, conversation_id: str) -> dict:
         """Durably fence a whole conversation and cancel the work it started.

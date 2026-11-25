@@ -278,6 +278,10 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
   Always ask that reply waits for the owner; on Off it is sent as it is, written by that other model.
   The switch ends with that turn: xPerfect passes the Expert's model on every turn, and a later turn that
   resumes the same session (which keeps the CLI's record of the switch) runs on the Expert's model again.
+- A coordinator turn run again after a restart or a lost process cannot add goals once it has made
+  some: it gets back the goals it already has, so the same work is never started twice under new names.
+  A turn interrupted after making only some of its goals keeps those; the job's next turn can still
+  start more.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.
 - A new Teams app starts with the CLI's placeholder details ("Developer", example.com links) until the
   owner sets the four under **Details Teams shows for this app** on the Channels card (Microsoft requires
