@@ -447,3 +447,9 @@ def test_the_page_forwards_an_experts_picture_to_the_runtime():
     server = (STATIC.parent / 'server.py').read_text()
     assert '@app.get("/api/experts/{expert_id}/picture")' in server and '@app.put("/api/experts/{expert_id}/picture")' in server
     assert '_expert_forward(request, "PUT", "/v1/experts/" + _recurring_path_id(expert_id, "expert id") + "/picture", payload)' in server
+
+
+def test_the_owners_card_shows_the_words_a_held_job_would_send():
+    # On Always ask the hand-off's words are part of what the owner approves: they are on the card.
+    source = (STATIC / 'experts.js').read_text()
+    assert "if (item.kind === 'job' && item.payload.tell) card.append(node('p', 'needs-you-what', `Will tell the person: ${item.payload.tell}`));" in source

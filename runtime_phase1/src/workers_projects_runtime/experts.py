@@ -699,10 +699,16 @@ class ExpertService:
                               code="expert_channel_closed")
 
     def hand_off(self, tenant: str, owner: str, conversation_id: str, *, goal: str, context: str = "",
-                 idempotency_key: str, source_turn_id: str = "") -> dict:
+                 idempotency_key: str, source_turn_id: str = "", tell: str = "") -> dict:
+        """Start one job. tell: the words for the person on a channel, sent the moment the job runs (after an
+        approval on Always ask, shown on the owner's card), so the person hears them after one model step; the
+        turn's own later text is then not sent. The owner's own Chat has no outbox: words there are not used."""
         speaker = self.speaker(tenant, owner, conversation_id)
         self._assert_channel_open(speaker)
         goal, context = str(goal or "").strip(), str(context or "").strip()
+        on_channel = speaker["channel"] != "chat" and bool(speaker.get("binding_id"))
+        given = str(tell or "").strip()[:2000]
+        tell = given if on_channel else ""
         if not goal:
             raise ExpertError("Describe the job to hand off", status=422)
         with self.store._connect() as conn:
@@ -730,14 +736,28 @@ class ExpertService:
                 (job_id, tenant, owner, speaker["lineage_id"], conversation_id, source_turn_id, idempotency_key,
                  goal, context, "held" if hold else "starting", template["template_id"], _now(), _now()))
             if hold:  # the held job and its request are written together: never one without the other
+                # The words wait with the job: on the owner's card and under the digest the Approve must match.
                 review = self._insert_review(conn, tenant, owner, speaker, kind="job", target_id=job_id,
                                              reason="Ask me first is set to Always ask.",
-                                             payload={"goal": goal, "context": context},
+                                             payload={"goal": goal, "context": context, **({"tell": tell} if tell else {})},
                                              source_turn_id=source_turn_id, idempotency_key="job:" + job_id)
                 conn.execute("UPDATE expert_jobs SET review_id=? WHERE job_id=?", (review["review_id"], job_id))
         if hold:
-            return {**self._job_view(self._job(job_id)), "held_for_owner": True}
-        return self._job_view(self._start_job(job_id))
+            held = {**self._job_view(self._job(job_id)), "held_for_owner": True}
+            return {**held, "note": "Your owner reviews this job and your words before anything starts or is sent; "
+                                    "the person is told you are checking."} if tell else held
+        view = self._job_view(self._start_job(job_id, tell=tell))
+        if not given:
+            return view
+        if not on_channel:
+            return {**view, "note": "This is your owner's own Chat: write your reply to your owner as usual."}
+        told = self._words_written(conversation_id, job_id)
+        # The model learns per call whether its words left, so its later text is what the person gets otherwise.
+        return {**view, "told": told,
+                "note": ("The person was told your words. Nothing you write after this call is sent to them, so do "
+                         "not repeat it; end your turn." if told else
+                         "Your words were not sent (the job has not started yet); write your reply to the person "
+                         "as usual.")}
 
     def _job(self, job_id: str) -> dict:
         with self.store._connect() as conn:
@@ -760,7 +780,30 @@ class ExpertService:
                                (conversation_id, turn_id)).fetchone()
         return str(row["message"]) if row and row["origin"] == "interactive" else ""
 
-    def _start_job(self, job_id: str) -> dict:
+    def _words_written(self, conversation_id: str, job_id: str) -> bool:
+        with self.store._connect() as conn:
+            return conn.execute("SELECT 1 FROM channel_deliveries WHERE conversation_id=? AND turn_id=? AND kind='handoff'",
+                                (conversation_id, "handoff-" + job_id)).fetchone() is not None
+
+    def _write_words(self, conn: Any, speaker: dict, job: dict, tell: str) -> None:
+        """Inside the transaction that marks the job running: the hand-off's words (given now on Auto, or held
+        with the approved request on Always) become one outgoing message, unless the turn that handed off has
+        already put its own text out: then that text was the person's answer, and the words are not sent."""
+        if self.deliveries is None or speaker["channel"] == "chat" or not speaker.get("binding_id"):
+            return
+        words = str(tell or "").strip()
+        if not words and job.get("review_id"):
+            row = conn.execute("SELECT payload_json FROM expert_reviews WHERE review_id=?", (job["review_id"],)).fetchone()
+            words = str(json.loads(row["payload_json"] or "{}").get("tell") or "").strip() if row else ""
+        if not words:
+            return
+        own = conn.execute("SELECT state FROM channel_deliveries WHERE conversation_id=? AND turn_id=? AND kind='reply'",
+                           (job["speaker_conversation_id"], job["source_turn_id"])).fetchone()
+        if own is not None and own["state"] != "dropped":
+            return
+        self.deliveries._insert_delivery(conn, speaker, "handoff-" + job["job_id"], "handoff", words, "pending")
+
+    def _start_job(self, job_id: str, *, tell: str = "") -> dict:
         """Prepare and start a released job (state "starting"; an approval releases a held one first). Two
         callers may enter at once (an approval and maintenance): the one that marks it running starts it, the
         other finds it running and does nothing. A job closed meanwhile never starts."""
@@ -847,6 +890,7 @@ class ExpertService:
                 outcome = "fence"
             else:
                 conn.execute("UPDATE expert_jobs SET state='running',updated_at=? WHERE job_id=?", (_now(), job_id))
+                self._write_words(conn, speaker, job, tell)
                 outcome = "start"
         if outcome == "fence":
             self._fence_job(self._job(job_id))

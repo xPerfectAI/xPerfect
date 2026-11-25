@@ -531,6 +531,7 @@ export function initNeedsYou({ request = libraryRequest, mount = null, tab = nul
       const what = item.kind === 'reply' ? `Will send: ${item.payload.text}` : `Will start a job: ${item.payload.goal}`;
       card.append(node('p', 'needs-you-what', what));
       if (item.kind === 'job' && item.payload.context) card.append(node('p', 'expert-hint', item.payload.context));
+      if (item.kind === 'job' && item.payload.tell) card.append(node('p', 'needs-you-what', `Will tell the person: ${item.payload.tell}`));
       const note = node('input'); note.placeholder = 'Note for the expert (optional)'; note.maxLength = 2000;
       const approve = node('button', 'primary-button', 'Approve'); approve.type = 'button';
       const reject = node('button', 'secondary-button', 'Reject'); reject.type = 'button';

@@ -3103,3 +3103,117 @@ def test_an_experts_picture_becomes_its_teams_app_icon_once_per_picture(app, tmp
     assert len(icons()) == 3
     setup.reconcile_once()
     assert len(icons()) == 3
+
+
+# ---------------------------------------------------------------- the first words of a hand-off
+def handoff_rig(application, client, **expert):
+    channel = connected_channel(application, client, create_expert(client, **expert))
+    accepted = client.post(f"/v1/channels/{channel['binding_id']}/inbound", json=message("act-1")).json()
+    owner = scalar(application, "SELECT owner_id FROM expert_conversations")
+    claim = lambda: client.post(f"/v1/channels/{channel['binding_id']}/deliveries/claim").json()["items"]
+    return SimpleNamespace(channel=channel, accepted=accepted, cid=accepted["conversation_id"], owner=owner, claim=claim,
+                           experts=application.state.experts, channels=application.state.channels)
+
+
+def test_the_hand_offs_words_leave_when_the_job_starts_and_the_turns_own_text_does_not(app):
+    # The slowest reply a person felt (12.2 s on real Teams): two model steps before any word. The hand-off now
+    # carries the words for the person; they leave the moment the job runs, and the turn's later text is not sent.
+    application, client = app
+    rig = handoff_rig(application, client)
+    result = rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job", idempotency_key="k1",
+                                  source_turn_id=rig.accepted["turn_id"], tell="On it: a helper is writing the file.")
+    assert result["told"] is True and "end your turn" in result["note"]
+    assert [(item["kind"], item["text"]) for item in rig.claim()] == [("handoff", "On it: a helper is writing the file.")]
+    finish_turn(application, rig.cid, rig.accepted["turn_id"], "SYNTHETIC-LATER-TEXT")
+    rig.channels.reconcile_once()
+    assert rig.claim() == []
+    assert scalar(application, "SELECT state FROM channel_deliveries WHERE kind='reply'") == "dropped"
+    again = rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job", idempotency_key="k1",
+                                 source_turn_id=rig.accepted["turn_id"], tell="On it again")
+    assert again["job_id"] == result["job_id"]  # a retried key: the same job, nothing sent twice
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE kind='handoff'") == 1
+
+
+def test_on_always_ask_the_words_wait_with_the_job_on_the_owners_card_and_leave_after_the_approval(app):
+    application, client = app
+    rig = handoff_rig(application, client, ask_me_first="always")
+    result = rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic held job", idempotency_key="k1",
+                                  source_turn_id=rig.accepted["turn_id"], tell="A helper will start once my owner agrees.")
+    assert result["held_for_owner"] is True and "your words" in result["note"]
+    [review] = rig.experts.reviews("local", rig.owner)
+    assert review["kind"] == "job" and review["payload"]["tell"] == "A helper will start once my owner agrees."
+    finish_turn(application, rig.cid, rig.accepted["turn_id"], "SYNTHETIC-HELD-TURN-TEXT")
+    rig.channels.reconcile_once()
+    assert all(item["kind"] != "handoff" for item in rig.claim())  # nothing leaves before the owner's yes
+    rig.experts.decide("local", rig.owner, review["review_id"], decision="approve", expected_digest=review["payload_digest"])
+    sent = rig.claim()
+    assert ("handoff", "A helper will start once my owner agrees.") in [(item["kind"], item["text"]) for item in sent]
+    assert not any("SYNTHETIC-HELD-TURN-TEXT" in item["text"] for item in sent)
+
+
+def test_a_rejected_job_never_sends_its_words(app):
+    application, client = app
+    rig = handoff_rig(application, client, ask_me_first="always")
+    rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic held job", idempotency_key="k1",
+                         source_turn_id=rig.accepted["turn_id"], tell="SYNTHETIC-WORDS")
+    [review] = rig.experts.reviews("local", rig.owner)
+    rig.experts.decide("local", rig.owner, review["review_id"], decision="reject", expected_digest=review["payload_digest"])
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries WHERE kind='handoff'") == 0
+    assert not any("SYNTHETIC-WORDS" in item["text"] for item in rig.claim())
+
+
+def test_when_the_turns_own_text_is_already_out_the_words_are_not_sent(app):
+    # The other order: the turn's own reply was written before the job ran. It was the person's answer, so the
+    # words stay unsent and the model is told to write its reply as usual. Never both.
+    application, client = app
+    rig = handoff_rig(application, client)
+    finish_turn(application, rig.cid, rig.accepted["turn_id"], "SYNTHETIC-OWN-TEXT")
+    rig.channels.reconcile_once()
+    result = rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job", idempotency_key="k1",
+                                  source_turn_id=rig.accepted["turn_id"], tell="SYNTHETIC-WORDS")
+    assert result["told"] is False and "as usual" in result["note"]
+    assert [item["text"] for item in rig.claim()] == ["SYNTHETIC-OWN-TEXT"]
+
+
+def test_two_hand_offs_in_one_turn_each_send_their_words_and_the_turns_text_is_dropped(app):
+    application, client = app
+    rig = handoff_rig(application, client)
+    for key, words in (("k1", "SYNTHETIC-FIRST"), ("k2", "SYNTHETIC-SECOND")):
+        rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job " + key, idempotency_key=key,
+                             source_turn_id=rig.accepted["turn_id"], tell=words)
+    finish_turn(application, rig.cid, rig.accepted["turn_id"], "SYNTHETIC-LATER-TEXT")
+    rig.channels.reconcile_once()
+    assert sorted(item["text"] for item in rig.claim()) == ["SYNTHETIC-FIRST", "SYNTHETIC-SECOND"]
+
+
+def test_without_words_a_hand_off_behaves_as_before(app):
+    application, client = app
+    rig = handoff_rig(application, client)
+    result = rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job", idempotency_key="k1",
+                                  source_turn_id=rig.accepted["turn_id"])
+    assert "told" not in result and "note" not in result
+    finish_turn(application, rig.cid, rig.accepted["turn_id"], "SYNTHETIC-OWN-TEXT")
+    rig.channels.reconcile_once()
+    assert [(item["kind"], item["text"]) for item in rig.claim()] == [("reply", "SYNTHETIC-OWN-TEXT")]
+
+
+def test_the_owners_own_chat_has_no_outbox_so_words_are_not_used(app):
+    application, client = app
+    expert = create_expert(client)
+    experts = application.state.experts
+    owner = scalar(application, "SELECT owner_id FROM workspace_templates LIMIT 1")
+    chat = experts.queen("local", owner, expert["template_id"], channel="chat", thread_key="owner", sender={"name": "Owner"})
+    result = experts.hand_off("local", owner, chat["conversation_id"], goal="Synthetic job", idempotency_key="k1",
+                              tell="SYNTHETIC-WORDS")
+    assert "owner's own Chat" in result["note"] and "told" not in result
+    assert scalar(application, "SELECT count(*) FROM channel_deliveries") == 0
+
+
+def test_words_not_yet_sent_never_leave_a_conversation_stopped_meanwhile(app):
+    application, client = app
+    rig = handoff_rig(application, client)
+    rig.experts.hand_off("local", rig.owner, rig.cid, goal="Synthetic job", idempotency_key="k1",
+                         source_turn_id=rig.accepted["turn_id"], tell="SYNTHETIC-WORDS")
+    rig.experts.coordinator.stop_conversation("local", rig.owner, rig.cid)
+    assert rig.claim() == []
+    assert scalar(application, "SELECT state FROM channel_deliveries WHERE kind='handoff'") == "dropped"

@@ -572,6 +572,21 @@ class ChannelService:
                 else:
                     outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped"})
                 continue
+            # A turn whose hand-off already told the person (its words left when the job started) sends nothing
+            # more: the words spoke for it. Read and written in one write transaction with the job's start.
+            with self.store._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                spoke = conn.execute(
+                    "SELECT 1 FROM expert_jobs j JOIN channel_deliveries d ON d.conversation_id=j.speaker_conversation_id "
+                    "AND d.turn_id='handoff-' || j.job_id AND d.kind='handoff' "
+                    "WHERE j.speaker_conversation_id=? AND j.source_turn_id=? LIMIT 1",
+                    (row["conversation_id"], row["turn_id"])).fetchone() is not None
+                if spoke:
+                    self._insert_delivery(conn, speaker, row["turn_id"], "reply", text, "dropped",
+                                          error="The hand-off's words were sent instead")
+            if spoke:
+                outcomes.append({"turn_id": row["turn_id"], "delivery": "dropped", "error": "hand-off words sent"})
+                continue
             # Auto or Off sends it; Always holds it for the owner, its request and its hold written together. The
             # setting is read inside the transaction that writes the message, so a setting saved meanwhile is never
             # missed: no save can land between the read and the write.
