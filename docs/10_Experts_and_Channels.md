@@ -99,7 +99,10 @@ measured on that install.*
   transaction that marks the job running, so the person hears them after one model step instead of
   two. The turn's own later text is then dropped; if the turn's text reached the outbox first, the
   words are dropped instead, so the person gets one of the two, never both. A job that never starts
-  sends no words. On Always ask the words are part of what the owner approves: they are shown on
+  sends no words. Known limit: on Auto the words are kept only in memory until the job is marked
+  running. If the runtime stops in that moment, or preparing the job fails and maintenance starts it
+  later, the job still runs and its result arrives, but these first words are not sent.
+  On Always ask the words are part of what the owner approves: they are shown on
   the card and leave only when the approved job starts. Without `tell` nothing changes. The owner's
   own Chat has no outbox and is not affected.
 - **Workers** are dispatched by that coordinator with the existing tools and run in parallel within
@@ -352,7 +355,8 @@ of these requirements before the person meets it, and does the steps Microsoft l
 - A coordinator turn run again after a restart or a lost process cannot add goals once it has made
   some: it gets back the goals it already has, so the same work is never started twice under new names.
   A turn interrupted after making only some of its goals keeps those; the job's next turn can still
-  start more.
+  start more. Goals given with the turn itself, before its first run, are not counted as its own; a
+  goal a client adds after that run began is, because their times cannot tell the two apart.
 - On this computer each person an Expert serves gets their own folder for its jobs
   (`<conversations' folder>/experts/<Expert>/<person>`, made at that person's first job, mode 700; the owner's
   own Chat has its own). The job's coordinator starts in it and its Workers on this computer work in it. With

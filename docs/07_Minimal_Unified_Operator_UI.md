@@ -1394,7 +1394,8 @@ above. Each line is one thing that happened, never one low-level event:
   (Workspace created, details updated and the like).
 
 The **status** is a plain word from the runtime's typed state: **Waiting for you** (a request under
-Needs you; the line's **Decide** goes to it, opening the rest of Needs you when needed), **Working**,
+Needs you; the line's **Decide** goes to it, opening the rest of Needs you when needed; a Worker that
+waits for its own input has no request, and its line's **Open workspace** is where you answer it), **Working**,
 **Answered**, **Done**, **Stopped** and **Failed**. A message that started a job takes the job's state; a
 reply the runtime replaced by another message is not a stop.
 
