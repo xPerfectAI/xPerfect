@@ -506,8 +506,10 @@ def test_unsaved_changes_are_kept_until_saved_or_discarded_and_asked_about_in_th
     # Choosing another expert with changes asks in the page: keep editing, or discard and go.
     assert "unsaved.replaceChildren(node('span', '', `Your changes to ${label} are not saved.`));" in page
     assert "'Keep editing'" in page and "if (dirty && !force) { askBeforeLeaving(arg); return; }" in page
-    # Kept in this tab, per owner and expert, without the install's model list; a reload brings them back.
-    assert "return owner ? `xperfect.expert-draft:${owner}:${id}` : '';" in page
+    # Kept in this tab, per expert (a new one per owner), without the install's model list; a reload brings them back,
+    # also before the page's account data has loaded.
+    assert "if (id && id !== 'new') return `xperfect.expert-draft:${id}`;" in page
+    assert "return owner ? `xperfect.expert-draft:${owner}:new` : '';" in page
     assert "const { offered, ...kept } = state;" in page
     assert "Your unsaved changes are back. " in page
     # Saving or discarding forgets them.

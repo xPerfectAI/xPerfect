@@ -151,7 +151,12 @@ export function mountExpertsPage({ root, getData = () => null, request = library
   const pin = id => { const hash = '#experts/' + encodeURIComponent(id); if (location.hash !== hash) history.replaceState(null, '', location.pathname + location.search + hash); };
   function go(id) { void show(id); }
   // Unsaved changes are kept in this tab (a reload brings them back) until they are saved or discarded.
-  const draftKey = id => { const owner = getData()?.draft_owner_scope || ''; return owner ? `xperfect.expert-draft:${owner}:${id}` : ''; };
+  // A saved expert's draft is keyed by its own id (only its owner can open it), so a reload finds it before the
+  // account data has loaded; a new expert's draft needs the owner.
+  const draftKey = id => {
+    if (id && id !== 'new') return `xperfect.expert-draft:${id}`;
+    const owner = getData()?.draft_owner_scope || ''; return owner ? `xperfect.expert-draft:${owner}:new` : '';
+  };
   let draftTimer = 0;
   function keepDraft() {
     clearTimeout(draftTimer);
