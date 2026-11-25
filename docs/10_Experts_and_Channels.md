@@ -43,6 +43,15 @@ those Workers on this computer's sign-in; a connected account cannot serve her a
   routes for the allowed Workers, the Expert's Library, its instructions and its access level. The
   job's final answer is written once as a result event on the speaking assistant's conversation,
   and the existing result wake starts her next turn.
+- **The hand-off's first words.** On a channel the speaking assistant gives `tell` with a hand-off:
+  the short words for the person now (that the job started, and the answer to anything else they
+  asked that she can give at once). They become one outbox message (kind `handoff`) in the same
+  transaction that marks the job running, so the person hears them after one model step instead of
+  two. The turn's own later text is then dropped; if the turn's text reached the outbox first, the
+  words are dropped instead, so the person gets one of the two, never both. A job that never starts
+  sends no words. On Always ask the words are part of what the owner approves: they are shown on
+  the card and leave only when the approved job starts. Without `tell` nothing changes. The owner's
+  own Chat has no outbox and is not affected.
 - **Workers** are dispatched by that coordinator with the existing tools and run in parallel within
   the host's capacity. Each Worker carries the owner's instructions as its standing instructions,
   fixed when the job starts, whatever the coordinator writes in a dispatch. Coordinator-dispatched Workers are exempt from the manual one-project fence.
