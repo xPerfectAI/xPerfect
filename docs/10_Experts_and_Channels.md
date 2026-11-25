@@ -272,6 +272,11 @@ the person meets it, and xPerfect clears what Microsoft lets it clear.
 - A backup on a second account of the same AI is a later capability. It needs the armed fallback to
   carry an account and cool-downs kept per account; on macOS a named second Claude account also
   needs local named-account support.
+- When the AI provider's safety check stops a reply twice in one turn, Claude Code itself switches that
+  session to another model and writes the rest with it (seen: Opus 4.8 for an Expert set to Opus 5.5),
+  and says so in a typed `model_refusal_fallback` event. xPerfect does not ask for this. On Auto and
+  Always ask that reply waits for the owner; on Off it is sent as it is, written by that other model.
+  Whether a later turn of the same session stays on the other model is not yet checked.
 - Slack, files in Teams, group chats and approving from inside Teams are later capabilities.
 - A new Teams app starts with the CLI's placeholder details ("Developer", example.com links) until the
   owner sets the four under **Details Teams shows for this app** on the Channels card (Microsoft requires
