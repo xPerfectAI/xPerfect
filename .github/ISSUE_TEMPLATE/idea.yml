@@ -1,0 +1,31 @@
+name: Idea
+description: Suggest a feature or an improvement.
+title: "Idea: "
+body:
+  - type: markdown
+    attributes:
+      value: Describe the problem first. A clear problem is easier to judge than a finished design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: The outcome you want
+      description: What would be different for you once this exists.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: An example
+      description: A real situation where you would use it, with synthetic data.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you use instead today
+      description: Optional. A workaround or another product you use for this.

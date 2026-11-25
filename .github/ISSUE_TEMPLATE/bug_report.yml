@@ -1,0 +1,64 @@
+name: Bug report
+description: Something in xPerfect does not work as the documentation says.
+title: "Bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic data only. Remove credentials, tokens, signed links, customer information and personal paths.
+        For a security problem, use [private reporting](https://github.com/xPerfectAI/xPerfect/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, including the exact message or status the page or API showed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened, with a link to the doc that says so if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest steps that show the problem.
+      placeholder: |
+        1. Open Run Project and choose Finance Director.
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How you run xPerfect
+      options:
+        - Local, with ./xperfect start
+        - Local, with ./xperfect start --docker
+        - Hosted server
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: The commit or download date you run, even if it is old.
+      placeholder: "for example 2081409"
+    validations:
+      required: true
+  - type: input
+    id: ai-tool
+    attributes:
+      label: AI tool and model
+      description: The AI tool and model the Worker or expert used, if the problem involves one.
+      placeholder: "for example Claude Code, Haiku"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output of ./xperfect doctor or relevant log lines
+      description: Optional. Remove anything private first.
+      render: text
