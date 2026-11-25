@@ -309,9 +309,15 @@ running install.
 
 | Path | User check | Expected result |
 |---|---|---|
-| New expert | My experts → Create; name, instructions, Library Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; Edit shows every choice. |
-| Chat | Manage → Chat; ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
-| Talking model | Edit → Talks to people → Model: compare Opus, Sonnet and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
+| New expert | Experts → New expert (or Run project → My experts → +); picture, what it does, name, identity instructions, Knowledge and Skills, AI team, Ask me first, where it works; Save. | Saved as version 1; reloading the page shows every choice; Run project's card shows its picture. |
+| Experts page fits | Open Experts at 1280×720, 1440×900 and a phone width, in both themes. | One scroll for the whole page: nothing inside scrolls on its own, nothing scrolls sideways; every control readable in both themes. |
+| Every model the install has | Experts → AI Team; open each AI's models. | Each AI is one line for its usual model; its other models open under it, newest first, all of the install's catalog for that AI (Grok: its usual model only). A model saved exactly stays chosen even if the list no longer names it. |
+| Preferred Worker | Tick two Workers, one of them an exact model; star it; ask for three small helper jobs. | Each job's coordinator is told the preferred route; report how many of the three helpers ran on the starred model, from each run's recorded model (the coordinator still decides). |
+| Not set up | An AI whose tool is not on this computer and that has no connected account. | Its line says it is not set up on this computer yet, with a Connect button to Connections; nothing is hidden. |
+| Unsaved changes | Change something; choose another expert; then reload. | One line in the page: Keep editing or Discard them (no browser dialog); after a reload the changes are back until saved or discarded. |
+| Keyboard | Tab to the AI Team table; use the arrows, Space and Enter. | One Tab stop for the table; arrows move between choices; Space or Enter picks; focus stays on the choice after it is picked. |
+| Chat | Experts → Chat (or Manage → Chat); ask a question. | A short answer in role, first words within about 5 seconds at low effort. |
+| Talking model | Experts → AI Team → Talks to people: compare Opus, Sonnet and Haiku; send ten short questions to each, idle and while a job runs. | Each option shows its median time to a finished reply on this computer; the faster model raises the same forbidden requests to you and none of the normal ones. |
 | Real work | Ask for work that needs files or Skills. | She says she is on it; the job's result arrives later in the same chat, once. |
 | Second question | Ask something else while the job runs. | Answered at once; the job continues. |
 | Two people's files | On this computer, list two people; each asks the Expert for a job that writes a file. | Each file lands in that person's own folder under the conversations' folder; the owner's own Chat uses its own. Adding the second person, the card says each person's jobs have their own folder and that full access can still read across. |

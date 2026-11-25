@@ -9,7 +9,7 @@ Define a separate, minimal, modern operator UI for xPerfect that does not alter 
 Use the established [xPerfect website](https://www.xperfect.ai/) identity: graphite, pearl and
 restrained taupe, with a quiet gradient behind readable working surfaces. Light and dark use
 separate surface, text, border and semantic state colours. Keep the same visual language across
-Run Project, Chat, Workspaces, Connections, Library, Schedules, Activity, sign-in and Watch chrome.
+Run Project, Experts, Chat, Workspaces, Connections, Library, Schedules, Activity, sign-in and Watch chrome.
 The native desktop and terminal retain their own appearance.
 
 ### UI design principles
