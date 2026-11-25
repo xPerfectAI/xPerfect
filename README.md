@@ -7,8 +7,8 @@
 
 **Build an AI team that knows your work.**
 
-Choose a professional AI Worker, give it a job and the knowledge and tools it needs, and get
-results you can open, inspect and use. An **expert** is a reusable Worker setup: its
+xPerfect is a self-hosted app you use in the browser. Choose a professional AI Worker, give it a
+job and the knowledge and tools it needs, and get results you can open, inspect and use. An **expert** is a reusable Worker setup: its
 instructions, knowledge and abilities. Start from one of five professions or save your own, and
 let the people you choose message it in Microsoft Teams. xPerfect runs native AI tools such as
 Codex, Claude Code and Grok, keeping each Worker's files, progress and results together on your
@@ -78,9 +78,13 @@ hands bigger work to Workers in the background; the result arrives once, in the 
 
 *The top of the Experts page: the row of saved experts, and what the Finance Director does.*
 
-With **Ask me first** set to Always ask, its answers and jobs wait for your approval under
-**Needs you**, and the person is told it is checking with you. **Activity** shows who asked what, on which channel and when, and narrows the list
-by expert or saved Worker, time, status or words.
+With **Ask me first** set to Always ask, every answer and every job the expert prepares waits
+under **Needs you** until you approve it. Two short messages go out without approval, both written
+with every tool off: a line telling the person it is checking with you, and, if you reject, its
+reply saying it cannot help.
+
+**Activity** shows who asked what, on which channel and when, and narrows the list by expert or
+saved Worker, time, status or words.
 
 ![Activity with three experts, lines in several statuses and the filters above them](docs/assets/screens/activity-filters.jpg)
 

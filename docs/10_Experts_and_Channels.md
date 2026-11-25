@@ -8,8 +8,8 @@ or starts. This document owns the requirements; the [QA playbook](05_QA_Quick_Po
 owns the acceptance cases.
 
 Follow the [key principles](00_Key_Principles.md). Models own judgment: what to answer, what to hand
-off and when to ask the owner. The runtime owns identity, holds, delivery and recovery. Nothing
-matches words.
+off and when to ask the owner. The runtime owns identity, holds, delivery and recovery. It uses
+no keyword rules to interpret requests.
 
 ## What an Expert is
 
@@ -108,7 +108,9 @@ measured on that install.*
 
 ## Ask me first
 
-One mechanism: what the Expert is about to send or start waits for the owner.
+One mechanism: the reply or job the Expert prepares waits for the owner. Two short lines go out without
+approval, both written with every native tool off: on Always ask the line telling the person it is
+checking, and after a Reject the Expert's own reply.
 
 ![Needs you with one request: who asked, on which channel, their words and the reply that waits](assets/screens/needs-you-request.jpg)
 
@@ -198,8 +200,8 @@ not retried by itself. Removing the picture leaves the icon Teams already has.
 
 #### What Microsoft and Teams ask, and what xPerfect does
 
-Found in the first connection to a real company tenant (24 November 2026). Each wall is said before
-the person meets it, and xPerfect clears what Microsoft lets it clear.
+Found in the first connection to a real company tenant (24 November 2026). The page explains each
+of these requirements before the person meets it, and does the steps Microsoft lets it do.
 
 1. **The work account is signed in elsewhere.** The sign-in shows a code to enter on Microsoft's own
    page, which works from any browser or a phone; the page says so.

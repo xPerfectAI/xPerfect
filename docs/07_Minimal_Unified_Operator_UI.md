@@ -1396,7 +1396,8 @@ above. Each line is one thing that happened, never one low-level event:
 The **status** is a plain word from the runtime's typed state: **Waiting for you** (a request under
 Needs you; the line's **Decide** goes to it, opening the rest of Needs you when needed), **Working**,
 **Answered**, **Done**, **Stopped** and **Failed**. A message that started a job takes the job's state; a
-reply the runtime replaced by another message is not a stop.
+reply the runtime replaced by another message is not a stop. A Worker that waits for input also reads
+**Waiting for you**; it has no request, so its line offers **Open workspace** instead of **Decide**.
 
 **Filters** are big buttons in the page's own style: **Who** (each Expert, each saved Worker and Chat;
 several at once; the chosen ones carry the accent ring and a check), **When** (last hour, today, 7 days,
@@ -1404,12 +1405,14 @@ several at once; the chosen ones carry the accent ring and a check), **When** (l
 or Worker's name. **Clear filters** resets them. xPerfect applies every filter and pages the list itself;
 **Show more** reads further back. Lines sit under day headings (Today, Yesterday, the date).
 
-A line opens **in place** to its trail, which reads as a story: the message, the request and its
-decision, the job (with **Open the job**), the Worker and its model, and what was sent back (sent;
-replaced by a newer message, so not sent; waiting to be sent; held until you decide; the channel did
-not confirm it arrived; not sent, with the runtime's reason). Each run's own engine steps fold under
-one **Details** line; nothing is dropped. The opened line has its own address (`#activity/<line>`), and
-**Open chat** or **Open workspace** stays on every line. While the tab is shown the page looks for newer
+A line opens **in place** to its trail, a story of recorded steps: when the message came, the request
+and its decision, the job (with **Open the job**), the Worker and its model, and what happened to each
+reply (sent; replaced by a newer message, so not sent; waiting to be sent; held until you decide; the
+channel did not confirm it arrived; not sent, with the runtime's reason). Each run's own engine steps
+fold under one **Details** line; nothing is dropped. The trail holds steps and outcomes, not the words
+of a reply: **Open chat** shows the conversation, and **Open chat** or **Open workspace** stays on every
+line. The opened line has its own address (`#activity/<line>`), which reopens it while that line is
+on the page; an older line needs **Show more** first. While the tab is shown the page looks for newer
 lines every 20 seconds: they go on top when you are at the top, otherwise one **N new** line waits at
 the top of the window; nothing you are reading moves. One scroll for the whole page at any width.
 

@@ -110,9 +110,11 @@ expert: the channel is ready once that message arrives. If Teams says **Permissi
 Teams administrator must turn on **Upload custom apps** for you; the Channels window names the
 switch and offers a note to send.
 
-With **Ask me first** set to Always ask, its answers and jobs wait for your approval under **Needs
-you**, and the person is told it is checking with you; **Activity** shows each message, who sent it and its status. [Experts on
-channels](10_Experts_and_Channels.md) has the full setup and its current limits.
+With **Ask me first** set to Always ask, every answer and every job the expert prepares waits
+under **Needs you** until you approve it. Two short messages go out without approval, both written
+with every tool off: a line telling the person it is checking with you, and, if you reject, its
+reply saying it cannot help. **Activity** shows each message, who sent it and its status.
+[Experts on channels](10_Experts_and_Channels.md) has the full setup and its current limits.
 
 ### Manage experts and workspaces
 
