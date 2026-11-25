@@ -410,3 +410,27 @@ def test_another_owner_or_tenant_sees_nothing_and_a_viewer_is_refused(tmp_path, 
         assert client.get(f"/v1/activity/lines/{item['line_id']}", headers=other).status_code == 404
     assert client.post("/v1/activity/lines", json={}, headers=viewer).status_code == 403
     assert client.post("/v1/activity/lines", json={}).status_code == 401
+
+
+def test_a_trail_says_how_a_run_started_and_ended_and_why_a_message_was_not_sent(app):
+    application, client = app
+    expert = create_expert(client)
+    channel = connected_channel(client, expert)
+    accepted = inbound(application, client, channel, "act-1", "Synthetic question", "2026-11-20T10:00:00+00:00")
+    cid, tid = accepted["conversation_id"], accepted["turn_id"]
+    for index, (kind, state, error) in enumerate((("reply", "dropped", ""), ("checking", "sent", ""),
+                                                  ("decision", "dropped", "The conversation was stopped"))):
+        sql(application, "INSERT INTO channel_deliveries(delivery_id,binding_id,conversation_id,turn_id,kind,text,state,error,"
+                         "created_at) VALUES(?,?,?,?,?,'Synthetic answer',?,?,?)", f"dl-{index}", channel["binding_id"], cid,
+            tid, kind, state, error, f"2026-11-20T10:0{index + 1}:00+00:00")
+    line = lines(client)["items"][0]
+    sent = [(s["what"], s["state"], s.get("reason")) for s in client.get(f"/v1/activity/lines/{line['line_id']}").json()["trail"]
+            if s["step"] == "delivery"]
+    assert sent == [("reply", "dropped", ""), ("checking", "sent", None), ("decision", "dropped", "The conversation was stopped")]
+    owner = owner_of(application)
+    worker, run = worker_run(application, owner, "Synthetic Saved", "Synthetic weekly summary", "2026-11-20T11:00:00+00:00")
+    sql(application, "UPDATE runs SET ended_at='2026-11-20T11:05:00+00:00' WHERE run_id=?", run["run_id"])
+    item = next(i for i in lines(client)["items"] if i["kind"] == "run")
+    trail = client.get(f"/v1/activity/lines/{item['line_id']}").json()["trail"]
+    assert (trail[0]["step"], trail[0]["by"], trail[0]["ai"]) == ("started", "you", "codex-cli")
+    assert (trail[-1]["step"], trail[-1]["state"], trail[-1]["at"]) == ("finished", "completed", "2026-11-20T11:05:00+00:00")

@@ -383,7 +383,7 @@ class ActivityLines:
     def _runs(conn: Any, where: str, args: tuple) -> list[dict]:
         return [dict(row) for row in conn.execute(
             f"SELECT r.run_id, r.state, COALESCE(NULLIF(r.first_queued_at,''), r.queued_at) AS at, w.worker_id, "
-            f"w.profile, w.model, (CASE WHEN {_REUSABLE} THEN 1 ELSE 0 END) AS reusable "
+            f"w.profile, w.model, r.ended_at, (CASE WHEN {_REUSABLE} THEN 1 ELSE 0 END) AS reusable "
             f"FROM runs r JOIN workers w ON w.worker_id=r.worker_id WHERE {where}", args)]
 
     def _conversation_runs(self, conn: Any, tenant: str, owner: str, cid: str, turns: list[str]) -> list[dict]:
@@ -418,10 +418,15 @@ class ActivityLines:
             "AND owner_id=? AND speaker_conversation_id=? AND source_turn_id=? ORDER BY created_at", (tenant, owner, cid, tid))]
         sent = turns + ["handoff-" + job["job_id"] for job in jobs]
         for delivery in conn.execute(
-                f"SELECT kind, state, created_at, finished_at FROM channel_deliveries WHERE conversation_id=? "
+                f"SELECT kind, state, error, created_at, finished_at FROM channel_deliveries WHERE conversation_id=? "
                 f"AND turn_id IN ({','.join('?' * len(sent))}) ORDER BY created_at", (cid, *sent)):
-            steps.append({"at": delivery["finished_at"] or delivery["created_at"], "step": "delivery",
-                          "what": delivery["kind"], "state": delivery["state"], "order": 4})
+            step = {"at": delivery["finished_at"] or delivery["created_at"], "step": "delivery",
+                    "what": delivery["kind"], "state": delivery["state"], "order": 4}
+            if delivery["state"] == "dropped":
+                # The runtime's own sentence for why it was not sent; none means another message took its place
+                # (the note that it is being checked, the approved reply, or the job's own message).
+                step["reason"] = delivery["error"] or ""
+            steps.append(step)
         goal_places = [(cid, tid)]
         for job in jobs:
             started = {"at": job["created_at"], "step": "job", "state": "started", "order": 5}
@@ -444,9 +449,15 @@ class ActivityLines:
 
     def _run_trail(self, conn: Any, run_id: str) -> list[dict]:
         runs = self._runs(conn, "r.run_id=?", (run_id,))
-        steps = self._events(conn, runs, runs[0]["at"] if runs else "")
-        if conn.execute("SELECT 1 FROM scheduled_runs WHERE queued_run_id=?", (run_id,)).fetchone():
-            steps.append({"at": runs[0]["at"] if runs else "", "step": "scheduled", "order": 0})
+        if not runs:
+            return []
+        run = runs[0]
+        scheduled = conn.execute("SELECT 1 FROM scheduled_runs WHERE queued_run_id=?", (run_id,)).fetchone()
+        steps = [{"at": run["at"], "step": "started", "by": "schedule" if scheduled else "you", "ai": run["profile"],
+                  "model": run["model"], "order": 0}]
+        steps += self._events(conn, runs, run["at"])
+        if run["state"] in {"completed", "failed", "cancelled"} and run["ended_at"]:
+            steps.append({"at": run["ended_at"], "step": "finished", "state": run["state"], "order": 9})
         return steps
 
 
